@@ -4,8 +4,16 @@ Read-only. The ergonomic counterpart to `find` (which returns excerpts) —
 when Claude finds a page via `find` and wants to read/cite/build on it,
 `get` returns the full frontmatter + body.
 
-Path is vault-relative. The leading `Knowledge Base/` and trailing `.md`
-are both optional (tolerated either way).
+Path is vault-relative. Reads anywhere under the vault root:
+- `Knowledge Base/...` — the compiled KB layer
+- `Cognitive Core/...`, `Domains/...`, `Prompt Bank/...`, `Products/...`,
+  `Personal Context/...` — Hugo's hand-authored curated material that
+  compiled notes link to. Read-only by KB skill convention; `get` honors
+  that by only reading.
+
+The trailing `.md` is optional. Bare-name shortcuts (`Notes/Insights/foo`)
+auto-prepend `Knowledge Base/` if the literal path doesn't exist — back-
+compat with how this tool worked before the broadening.
 """
 
 from __future__ import annotations
@@ -15,7 +23,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import find as find_module
-from .vault import kb_root
 
 
 log = logging.getLogger(__name__)
@@ -47,21 +54,33 @@ class GetError(Exception):
 
 
 def get_page(vault_root: Path, *, path: str) -> GetResult:
-    """Read a file in the Knowledge Base.
+    """Read any markdown file under the vault root.
 
-    Accepts `"Knowledge Base/Notes/Insights/foo.md"`, `"Notes/Insights/foo.md"`,
-    or the same with the `.md` stripped.
+    Accepts any vault-relative path. Examples:
+    - `Knowledge Base/Notes/Insights/foo.md`
+    - `Notes/Insights/foo` (auto-prepends `Knowledge Base/`, auto-adds `.md`)
+    - `Cognitive Core/Strategy.md`
+    - `Domains/AI Systems & Architecture.md`
     """
     if not path or not path.strip():
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
     rel = path.strip().replace("\\", "/").lstrip("/")
-    if not rel.startswith("Knowledge Base/"):
-        rel = "Knowledge Base/" + rel
     if not rel.endswith(".md"):
         rel = rel + ".md"
 
     candidate = vault_root / rel
+
+    # Back-compat shortcut: if the literal path doesn't exist but the same
+    # path under Knowledge Base/ does, use that. Lets callers write
+    # `Notes/Insights/foo` without the leading prefix.
+    if not candidate.exists() and not rel.startswith("Knowledge Base/"):
+        kb_rel = "Knowledge Base/" + rel
+        kb_candidate = vault_root / kb_rel
+        if kb_candidate.exists():
+            candidate = kb_candidate
+            rel = kb_rel
+
     # Path-escape guard: resolved path must be under vault_root.
     try:
         resolved = candidate.resolve()
@@ -70,18 +89,6 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
         raise GetError(
             code="INVALID_PATH",
             reason=f"path escapes vault or is unreadable: {e}",
-        ) from None
-
-    # And must be under Knowledge Base/ specifically (no peeking at sibling trees).
-    try:
-        resolved.relative_to(kb_root(vault_root).resolve())
-    except ValueError:
-        raise GetError(
-            code="INVALID_PATH",
-            reason=(
-                f"path {path!r} resolves outside Knowledge Base/. "
-                "Only files under Knowledge Base/ are readable."
-            ),
         ) from None
 
     if not candidate.exists() or not candidate.is_file():

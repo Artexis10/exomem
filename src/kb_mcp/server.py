@@ -31,6 +31,7 @@ from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 
 from . import add as add_module
 from . import audit as audit_module
+from . import edit as edit_module
 from . import find as find_module
 from . import get_page as get_page_module
 from . import link as link_module
@@ -361,17 +362,23 @@ def build_server(*, require_auth: bool) -> FastMCP:
 
     @mcp.tool
     def get(path: str) -> dict:
-        """Read a full vault page by path. Returns frontmatter + body + raw content.
+        """Read a full vault file by path. Returns frontmatter + body + raw content.
+
+        Reads anywhere under the vault root — not just `Knowledge Base/`.
+        This lets you cite from Hugo's curated trees (`Cognitive Core/`,
+        `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`) when
+        compiling. Those are read-only by KB skill convention; `get` honors
+        that by only reading.
 
         Use this when `find` gives you a path and you need the whole page
-        (to cite, build on, or rewrite). `find` only returns excerpts; `get`
-        returns the full file.
+        (to cite, build on, or rewrite). `find` only returns excerpts.
 
         Args:
-            path: Vault-relative path. All four shapes accepted:
+            path: Vault-relative path. Accepted shapes:
                 - `Knowledge Base/Notes/Insights/foo.md`
-                - `Notes/Insights/foo.md`
-                - either of the above without the `.md` suffix.
+                - `Cognitive Core/Strategy.md`
+                - `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if
+                  literal path doesn't resolve; auto-adds `.md`).
 
         Returns:
             {path, frontmatter, body, content}. `content` is the raw file
@@ -379,13 +386,74 @@ def build_server(*, require_auth: bool) -> FastMCP:
             markdown after the frontmatter.
 
         Errors:
-            INVALID_PATH (path escapes Knowledge Base/ or empty);
+            INVALID_PATH (path escapes vault root or empty);
             NOT_FOUND (no such file); UNREADABLE (parse failure).
         """
         try:
             result = get_page_module.get_page(vault_root, path=path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def edit(
+        path: str,
+        why: str,
+        new_body: str | None = None,
+        tags: list[str] | None = None,
+    ) -> dict:
+        """Lightweight in-place edit of a compiled page.
+
+        For tweaks — typo fixes, sentence additions, tag corrections —
+        without going through full supersession via `replace`. Use `replace`
+        for substantial rewrites; use `edit` when creating a new file +
+        superseded-link chain would be silly for what you're changing.
+
+        What changes:
+        - `new_body` (if provided) replaces the markdown body.
+        - `tags` (if provided) replaces the `tags:` frontmatter field.
+        - `updated:` is always bumped to today.
+
+        What stays:
+        - All other frontmatter fields (type, project, status, sources,
+          superseded_by, etc.). If you need to change those, use `replace`.
+
+        Refuses:
+        - Sources/ and Evidence/ paths (rule 2: append-only). Add a
+          corrective source or compile a downstream note instead.
+        - Pages already marked `status: superseded` (don't edit history;
+          supersede the active page instead).
+
+        Args:
+            path: Vault-relative path to the compiled page (same shape as
+                `get` accepts).
+            why: One-line rationale for the edit. Required — lands in the
+                log entry so the change is auditable.
+            new_body: New markdown body (everything after frontmatter).
+                Omit to keep the existing body.
+            tags: New tags list (replaces existing). Lowercase dash-
+                separated; the server normalizes. Omit to keep existing tags.
+
+        Returns:
+            {path, warnings}.
+
+        Errors:
+            INVALID_EDIT (missing required, both new_body and tags omitted,
+            path in Sources/Evidence); NOT_FOUND; ALREADY_SUPERSEDED;
+            UNREADABLE.
+        """
+        try:
+            result = edit_module.edit(
+                vault_root,
+                path=path,
+                why=why,
+                new_body=new_body,
+                tags=tags,
+            )
+        except edit_module.EditError as e:
+            raise ValueError(
+                f"{e.code}: {e.reason} (missing: {e.missing})"
+            ) from e
         return result.as_dict()
 
     @mcp.tool

@@ -6,19 +6,23 @@ Knowledge Base to **mobile claude.ai** as a remote custom connector.
 Tools surfaced (full parity with the desk-side KB skill except `schema`):
 
 - `find` — read-only search across `Knowledge Base/`, type/project/tag filtered
-- `get` — read a full page by path (frontmatter + body + raw content)
+- `get` — read a full file anywhere under the vault root (incl. `Cognitive
+  Core/`, `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`)
 - `add` — capture a raw `source` page with full SKILL.md rule-7 writes
 - `note` — create any of the six compiled page types (research-note,
   insight, failure, pattern, experiment, production-log) with rule-7
   writes + `ingested_into:` back-refs on cited sources
 - `link` — create a typed entity under `Entities/<Type>/<Name>.md`
   (person, concept, library, decision)
+- `edit` — lightweight in-place edit of a compiled page (body and/or tags,
+  bumps `updated:`). For tweaks; use `replace` for substantial rewrites.
 - `replace` — supersession: write a new page + flip the old one to
-  `status: superseded` with `superseded_by:` back-link. The modify path.
+  `status: superseded` with `superseded_by:` back-link. The modify path
+  for substantial rewrites.
 - `preserve` — capture binary or text artifact to
   `Evidence/<scope>/<category>/` (append-only)
 - `audit` — read-only graph health check (broken wikilinks, orphan
-  entities, unprocessed sources, index/log drift)
+  entities, unprocessed sources, index/log drift, tag inconsistency)
 
 Deferred to desk-side: `schema` (KB governance — intentionally non-parity).
 
@@ -300,6 +304,12 @@ compilation pass can normalize forward via downstream compiled pages.
 { "path": "Notes/Insights/progressive-disclosure-without-mode-fragmentation" }
 ```
 
+Or read from curated trees outside `Knowledge Base/`:
+
+```json
+{ "path": "Cognitive Core/Strategy.md" }
+```
+
 Returns:
 
 ```json
@@ -311,9 +321,37 @@ Returns:
 }
 ```
 
-The path accepts all four shapes: with or without the leading
-`Knowledge Base/`, with or without the `.md` suffix. Read-only; path-escape
-guarded (rejects anything outside `Knowledge Base/`).
+Reads any `.md` file under the vault root — including the read-only curated
+trees (`Cognitive Core/`, `Domains/`, `Prompt Bank/`, `Products/`,
+`Personal Context/`). The path accepts shapes with or without the leading
+`Knowledge Base/` and with or without the `.md` suffix; for shortcuts that
+don't resolve literally, the tool retries with `Knowledge Base/` prefixed.
+Path-escape guarded (rejects anything outside the vault root).
+
+### `edit`
+
+```json
+{
+  "path": "Notes/Insights/progressive-disclosure-without-mode-fragmentation",
+  "why": "fixed typo in claim section, normalized 'modes' tag",
+  "new_body": "# Progressive disclosure without mode fragmentation\n\n## Claim\n\n...\n\n## Why it holds\n\n...",
+  "tags": ["ux", "modes", "governance"]
+}
+```
+
+Lightweight in-place edit of a compiled page. Either or both of `new_body`
+and `tags` can be supplied; `why` is required and lands in `log.md` so the
+edit remains auditable. Always bumps `updated:` to today; all other
+frontmatter fields (type, project, status, sources, etc.) stay as-is.
+
+Refuses on:
+- `Sources/` and `Evidence/` paths (rule 2: append-only — add a corrective
+  source instead).
+- Pages with `type: source` (defensive).
+- Pages already marked `status: superseded` (don't edit history).
+
+Use `edit` for tweaks. Use `replace` for substantial rewrites where
+"this is a meaningfully different page" is the right framing.
 
 ### `link`
 
