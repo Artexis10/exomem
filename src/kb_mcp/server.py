@@ -989,7 +989,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
     def set_frontmatter_field(
         path: str,
         field: str,
-        value,  # any JSON-serializable scalar / list / dict
+        value: str | int | float | bool | list | dict | None,
         why: str,
         allow_curated: bool = False,
     ) -> dict:
