@@ -28,21 +28,93 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.providers.github import GitHubTokenVerifier
+from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 
 from . import add as add_module
+from . import append_to_file as append_to_file_module
 from . import audit as audit_module
+from . import create_directory as create_directory_module
+from . import create_file as create_file_module
+from . import delete_directory as delete_directory_module
+from . import delete_file as delete_file_module
 from . import edit as edit_module
 from . import find as find_module
+from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
 from . import link as link_module
+from . import list_directory as list_directory_module
+from . import list_inbound_links as list_inbound_links_module
+from . import list_trash as list_trash_module
+from . import move_file as move_file_module
 from . import note as note_module
 from . import preserve as preserve_module
+from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import schema
+from . import set_frontmatter_field as set_frontmatter_field_module
 from .vault import resolve_vault
 
 
 log = logging.getLogger(__name__)
+_call_log = logging.getLogger("kb_mcp.calls")
+
+
+class CallTraceMiddleware(Middleware):
+    """Per-call traceability: log every tool invocation with name + duration.
+
+    Service-log only (`logs/kb-mcp.log`). The durable content history lives
+    in `Knowledge Base/log.md` (writes only, KB-scoped) — this layer is
+    operational: which tool was called, when, by whom, did it succeed.
+    Reads land here too, by design, so we can answer "did the connector
+    actually invoke X?" without polluting log.md.
+
+    Payloads (args + results) deliberately NOT logged — they can be large
+    (`add(content=...)` is unbounded). Tool name + duration + outcome is
+    what's useful for traceability; deeper inspection goes through the
+    audit + the log.md content history.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next):
+        import time
+        tool_name = _extract_tool_name(context.message)
+        _call_log.info(f"event=tool_start tool={tool_name}")
+        t0 = time.perf_counter()
+        try:
+            result = await call_next(context)
+            dur = round((time.perf_counter() - t0) * 1000, 2)
+            _call_log.info(
+                f"event=tool_success tool={tool_name} duration_ms={dur}"
+            )
+            return result
+        except Exception as e:
+            dur = round((time.perf_counter() - t0) * 1000, 2)
+            # `e` may include full tracebacks if rendered as str; trim to keep
+            # the call-log line readable. Full tracebacks land in service.err.log.
+            err = type(e).__name__
+            _call_log.error(
+                f"event=tool_error tool={tool_name} duration_ms={dur} err={err}"
+            )
+            raise
+
+
+def _extract_tool_name(message) -> str:
+    """Pull the tool name out of a tools/call request payload, defensively."""
+    # FastMCP's MiddlewareContext.message for tool calls carries the request
+    # body; the actual shape varies by version. Try common access patterns
+    # and fall back to "?" so logging never raises.
+    for accessor in (
+        lambda m: m.params.name,
+        lambda m: m.name,
+        lambda m: m["params"]["name"],
+        lambda m: m["name"],
+    ):
+        try:
+            v = accessor(message)
+            if v:
+                return str(v)
+        except (AttributeError, KeyError, TypeError):
+            continue
+    return "?"
 
 
 def _server_icons() -> list[mcp.types.Icon]:
@@ -125,6 +197,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         )
 
     mcp = FastMCP("kb-mcp", auth=auth, icons=_server_icons())
+    mcp.add_middleware(CallTraceMiddleware())
 
     @mcp.tool
     def find(
@@ -133,8 +206,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
         projects: list[str] | None = None,
         tags: list[str] | None = None,
         limit: int = 15,
+        scope: str = "kb",
     ) -> list[dict]:
-        """Search the Knowledge Base. Filters are AND'd; tag/project lists are OR'd within.
+        """Search the vault. Filters are AND'd; tag/project lists are OR'd within.
 
         Args:
             query: Case-insensitive. Tokenized on whitespace; every token must
@@ -145,6 +219,15 @@ def build_server(*, require_auth: bool) -> FastMCP:
             projects: Filter to pages whose `project` or `projects:` includes any of these keys.
             tags: Filter to pages whose `tags:` includes any of these (case-insensitive).
             limit: Max hits to return. Default 15, hard cap 100.
+            scope: "kb" (default) searches only Knowledge Base/. "vault"
+                walks the whole vault including curated trees
+                (Cognitive Core/, Domains/, Prompt Bank/, Products/,
+                Personal Context/, Systems Thinking/). Use "vault" when
+                you need to discover content outside the KB —
+                free-text queries work the same; structured filters
+                won't match curated pages that lack those frontmatter
+                fields. `_Schema/`, `_trash/`, `_attachments/`, and
+                `.obsidian/` are excluded either way.
 
         Returns:
             List of {path, type, scope, title, updated, excerpt}.
@@ -156,6 +239,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             projects=projects,
             tags=tags,
             limit=limit,
+            scope=scope,
         )
         return [h.as_dict() for h in hits]
 
@@ -409,7 +493,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         new_body: str | None = None,
         tags: list[str] | None = None,
     ) -> dict:
-        """Lightweight in-place edit of a compiled page.
+        """Lightweight in-place edit of a page (body and/or tags).
 
         For tweaks — typo fixes, sentence additions, tag corrections —
         without going through full supersession via `replace`. Use `replace`
@@ -425,9 +509,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
         - All other frontmatter fields (type, project, status, sources,
           superseded_by, etc.). If you need to change those, use `replace`.
 
+        No type allowlist: any frontmatter-bearing page outside Sources/
+        Evidence is editable, regardless of `type:`. Works on novel page
+        types (`identity`, future types) without code changes.
+
         Refuses:
         - Sources/ and Evidence/ paths (rule 2: append-only). Add a
           corrective source or compile a downstream note instead.
+        - Pages without a frontmatter block (won't synthesize one).
         - Pages already marked `status: superseded` (don't edit history;
           supersede the active page instead).
 
@@ -498,9 +587,11 @@ def build_server(*, require_auth: bool) -> FastMCP:
         readers follow the chain — inbound wikilinks are NOT retargeted
         (per SKILL.md rule 6).
 
-        Use this for substantial rewrites of an existing compiled page —
-        not minor tweaks (the desk-side flow handles those better since you
-        see a live diff). Cannot supersede sources or evidence (append-only).
+        Use this for substantial rewrites of an existing page — not minor
+        tweaks (the desk-side flow handles those better since you see a
+        live diff). Cannot supersede sources or evidence (append-only).
+        No type allowlist beyond the append-only guard: novel page types
+        (`identity`, future types) can be superseded without code changes.
 
         Args:
             old_path: Vault-relative path of the page being superseded.
@@ -699,6 +790,475 @@ def build_server(*, require_auth: bool) -> FastMCP:
             raise ValueError(
                 f"{e.code}: {e.reason} (missing: {e.missing})"
             ) from e
+        return result.as_dict()
+
+    # ---------------- Tier 2: filesystem-parity escape hatches ----------------
+    #
+    # Tier 1 (above) is primary: type-routed operations that encode the KB's
+    # discipline. Tier 2 (below) covers cases that don't fit Tier 1 — new
+    # folder structures, files that aren't typed notes, surgical edits that
+    # the Tier 1 set can't express. Use Tier 1 first; fall back to Tier 2
+    # only when nothing in Tier 1 fits.
+    #
+    # Discipline preserved across both tiers:
+    # - Sources/ and Evidence/ are append-only (write via `add` / `preserve`).
+    # - Cognitive Core/, Domains/, Prompt Bank/, Products/, Personal Context/
+    #   are write-protected by default; pass `allow_curated=true` to override.
+    # - Every write logs to Knowledge Base/log.md.
+
+    @mcp.tool
+    def create_file(
+        path: str,
+        content: str,
+        frontmatter: dict | None = None,
+        overwrite: bool = False,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: write a file at an arbitrary vault path.
+
+        Escape hatch for files that don't fit Tier 1 type routing — new folder
+        structures (`Identity/`, `Templates/`), skill files, scratch. For
+        typed notes use `note`/`add`/`link`/`preserve`.
+
+        If `frontmatter` is a dict, this op prepends a YAML block built from
+        it (and auto-fills `created`/`updated` to today if not provided);
+        `content` is the body in that case. If `frontmatter` is omitted,
+        `content` is written verbatim — the caller is responsible for any
+        frontmatter already in it.
+
+        Refuses:
+        - Sources/, Evidence/ (append-only — use `add` or `preserve`).
+        - Curated trees (Cognitive Core/, Domains/, Prompt Bank/, Products/,
+          Personal Context/) unless `allow_curated=true` is passed.
+        - Existing files unless `overwrite=true`.
+
+        Args:
+            path: Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.
+                Forward or back slashes accepted. Path-escape guarded.
+            content: File body (or full file if `frontmatter` is None).
+            frontmatter: Optional dict prepended as YAML frontmatter.
+            overwrite: If true, replace existing file. Default false.
+            allow_curated: Required to write under a curated tree. Default false.
+
+        Returns: {path, warnings}.
+        Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
+                NOT_A_FILE.
+        """
+        try:
+            result = create_file_module.create_file(
+                vault_root,
+                path=path,
+                content=content,
+                frontmatter=frontmatter,
+                overwrite=overwrite,
+                allow_curated=allow_curated,
+            )
+        except create_file_module.CreateFileError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def list_directory(
+        path: str = "",
+        recursive: bool = False,
+        include_hidden: bool = False,
+    ) -> dict:
+        """Tier 2: list files and subfolders at a vault path. Read-only.
+
+        Works anywhere under vault root including curated trees (consistent
+        with `get`). For .md files, surfaces the frontmatter `type` field
+        so callers can scan typed content quickly.
+
+        Args:
+            path: Vault-relative. Empty string lists vault root. Auto-handles
+                forward/back slashes.
+            recursive: If true, walk subfolders. Default false.
+            include_hidden: If true, include dotfiles and _attachments/.
+                Default false.
+
+        Returns: {path, entries: [{name, type, path, size_bytes, updated,
+                 frontmatter_type}]}.
+
+        Errors: INVALID_PATH; NOT_FOUND; NOT_A_DIR.
+        """
+        try:
+            result = list_directory_module.list_directory(
+                vault_root,
+                path=path,
+                recursive=recursive,
+                include_hidden=include_hidden,
+            )
+        except list_directory_module.ListDirectoryError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def create_directory(
+        path: str,
+        parents: bool = True,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: create a folder at a vault path. Idempotent.
+
+        Curated trees require `allow_curated=true`. Append-only trees
+        (Sources/, Evidence/) are allowed at the directory level — those
+        subfolders auto-materialize on `add`/`preserve` writes anyway.
+
+        Args:
+            path: Vault-relative folder path.
+            parents: If true (default), create intermediate folders (mkdir -p).
+            allow_curated: Required to create folders under curated trees.
+
+        Returns: {path, created (bool), warnings}.
+        Errors: INVALID_PATH; CURATED_PROTECTED; NOT_A_DIR; MISSING_PARENT;
+                MKDIR_FAILED.
+        """
+        try:
+            result = create_directory_module.create_directory(
+                vault_root,
+                path=path,
+                parents=parents,
+                allow_curated=allow_curated,
+            )
+        except create_directory_module.CreateDirectoryError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def move_file(
+        old_path: str,
+        new_path: str,
+        update_wikilinks: bool = True,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: relocate a file, optionally rewriting inbound wikilinks.
+
+        Refuses moves out of OR into Sources/ and Evidence/ (append-only).
+        Curated trees on either end need `allow_curated=true`. Refuses to
+        overwrite existing destinations.
+
+        When `update_wikilinks=true` (default), scans the full vault for
+        `[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the
+        basename is unique vault-wide) and rewrites them to point at the
+        new location. Preserves full-form vs stripped-form per link.
+
+        Args:
+            old_path: Vault-relative source.
+            new_path: Vault-relative destination (must not exist).
+            update_wikilinks: Default true.
+            allow_curated: Required if either end is in a curated tree.
+
+        Returns: {old_path, new_path, wikilinks_updated, files_touched, warnings}.
+        Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
+                CURATED_PROTECTED.
+        """
+        try:
+            result = move_file_module.move_file(
+                vault_root,
+                old_path=old_path,
+                new_path=new_path,
+                update_wikilinks=update_wikilinks,
+                allow_curated=allow_curated,
+            )
+        except move_file_module.MoveFileError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def delete_file(
+        path: str,
+        confirm: bool,
+        force_orphan: bool = False,
+        force_superseded: bool = False,
+        allow_curated: bool = False,
+        expected_dead_inbound: list[str] | None = None,
+    ) -> dict:
+        """Tier 2: trash a file. Reversible — file moves to _trash/, not /dev/null.
+
+        Deletes are NEVER permanent at this layer. The file moves to
+        `Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
+        with a `.meta.json` sidecar capturing original path, timestamp,
+        inbound link count, and which force-flags were used. Recovery is
+        `move_file` from the trash path back. Permanent removal happens
+        desk-side via `rm Knowledge Base/_trash/...`.
+
+        Per SKILL.md rule 6, supersession via `replace` is still preferred
+        for compiled material. Use this op for scratch, mistakes outside the
+        typed-note set, and cleanup of files that genuinely shouldn't exist.
+
+        Refuses:
+        - Sources/, Evidence/ (append-only).
+        - Files already in `_trash/` (already trashed — recover via move_file).
+        - Curated trees unless `allow_curated=true`.
+        - When `confirm=false`.
+        - When `superseded_by:` is set (history) unless `force_superseded=true`.
+        - When inbound wikilinks exist (after `expected_dead_inbound` filtering)
+          unless `force_orphan=true`.
+
+        Args:
+            path: Vault-relative.
+            confirm: Must be `true` explicitly. Marks the action deliberate.
+            force_orphan: Allow trash even if inbound wikilinks exist.
+            force_superseded: Allow trash of a file in the supersession chain.
+            allow_curated: Required to trash under a curated tree.
+            expected_dead_inbound: Vault-relative paths whose inbound links
+                to this file should be ignored. Use when you're trashing
+                multiple files in one workflow (e.g. cleaning a supersession
+                chain) and don't want each step to false-positive on
+                links that will die in the same batch.
+
+        Returns: {path, trash_path, inbound_link_count, inbound_ignored_count, warnings}.
+        Errors: UNCONFIRMED; INVALID_PATH; NOT_FOUND; ALREADY_TRASHED;
+                APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
+                INBOUND_LINKS; TRASH_FAILED.
+        """
+        try:
+            result = delete_file_module.delete_file(
+                vault_root,
+                path=path,
+                confirm=confirm,
+                force_orphan=force_orphan,
+                force_superseded=force_superseded,
+                allow_curated=allow_curated,
+                expected_dead_inbound=expected_dead_inbound,
+            )
+        except delete_file_module.DeleteFileError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def delete_directory(
+        path: str,
+        confirm: bool,
+        recursive: bool = False,
+        force_orphan: bool = False,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: trash a folder (whole tree). Reversible via _trash/.
+
+        Symmetric with `create_directory`. Like `delete_file`, this NEVER
+        does a permanent delete — the folder is moved to
+        `Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>/`
+        with a `.meta.json` sidecar.
+
+        Refuses:
+        - Sources/, Evidence/ (append-only at any granularity).
+        - The `_trash/` subtree (it's already trashed).
+        - Curated trees unless `allow_curated=true`.
+        - When `confirm=false`.
+        - Non-empty directories unless `recursive=true`.
+        - When .md files in the tree have EXTERNAL inbound wikilinks
+          (i.e. from outside the doomed tree) unless `force_orphan=true`.
+
+        Args:
+            path: Vault-relative folder.
+            confirm: Must be `true` explicitly.
+            recursive: Required for non-empty directories. Acknowledges
+                you know it has contents.
+            force_orphan: Allow trash even if external inbound wikilinks
+                point into the tree.
+            allow_curated: Required under curated trees.
+
+        Returns: {path, trash_path, file_count, inbound_link_count, warnings}.
+        Errors: UNCONFIRMED; INVALID_PATH; NOT_FOUND; NOT_A_DIR;
+                ALREADY_TRASHED; APPEND_ONLY; CURATED_PROTECTED; NOT_EMPTY;
+                INBOUND_LINKS; TRASH_FAILED.
+        """
+        try:
+            result = delete_directory_module.delete_directory(
+                vault_root,
+                path=path,
+                confirm=confirm,
+                recursive=recursive,
+                force_orphan=force_orphan,
+                allow_curated=allow_curated,
+            )
+        except delete_directory_module.DeleteDirectoryError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def append_to_file(
+        path: str,
+        content: str,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: append text to an existing file.
+
+        Refuses Sources/ (immutable). Allowed on Evidence/ sidecars and
+        general vault files. Curated trees need `allow_curated=true`.
+        Ensures a single newline boundary between existing tail and new
+        content.
+
+        Args:
+            path: Vault-relative.
+            content: Text to append.
+            allow_curated: Required under curated trees.
+
+        Returns: {path, bytes_appended, warnings}.
+        Errors: INVALID_APPEND; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
+                APPEND_ONLY; CURATED_PROTECTED.
+        """
+        try:
+            result = append_to_file_module.append_to_file(
+                vault_root,
+                path=path,
+                content=content,
+                allow_curated=allow_curated,
+            )
+        except append_to_file_module.AppendError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def get_frontmatter(path: str) -> dict:
+        """Tier 2: read only the frontmatter of a file. Read-only.
+
+        Lightweight counterpart to `get` — useful when scanning many files
+        ("find all files where status: active and project: substrate")
+        without loading bodies.
+
+        Args:
+            path: Vault-relative.
+
+        Returns: {path, frontmatter (dict), has_frontmatter (bool)}.
+        Errors: INVALID_PATH; NOT_FOUND; NOT_A_FILE; UNREADABLE.
+        """
+        try:
+            result = get_frontmatter_module.get_frontmatter(
+                vault_root, path=path
+            )
+        except get_frontmatter_module.GetFrontmatterError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def set_frontmatter_field(
+        path: str,
+        field: str,
+        value: str | int | float | bool | list | dict | None,
+        why: str,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: surgical edit of one frontmatter field. Bumps `updated:`.
+
+        Lighter than `edit` (which rewrites body or tags). Use this when you
+        need to change a single field — `status`, `project`, `tenant`,
+        `superseded_by`, etc. — without touching the body. Always bumps
+        `updated:` to today.
+
+        Refuses Sources/, Evidence/. Curated trees need `allow_curated=true`.
+        `why` is required and lands in the log entry.
+
+        Args:
+            path: Vault-relative.
+            field: Frontmatter key to set. Cannot be `updated` (auto-bumped).
+            value: New value. JSON-compatible scalar, list, or dict.
+            why: One-line rationale (required — auditable).
+            allow_curated: Required under curated trees.
+
+        Returns: {path, field, old_value, new_value, warnings}.
+        Errors: INVALID_SET; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
+                APPEND_ONLY; CURATED_PROTECTED; UNREADABLE.
+        """
+        try:
+            result = set_frontmatter_field_module.set_frontmatter_field(
+                vault_root,
+                path=path,
+                field=field,
+                value=value,
+                why=why,
+                allow_curated=allow_curated,
+            )
+        except set_frontmatter_field_module.SetFrontmatterError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def list_trash(date: str | None = None) -> dict:
+        """Tier 2: enumerate recoverable trash entries. Read-only.
+
+        Walks Knowledge Base/_trash/YYYY-MM-DD/ and parses each .meta.json
+        sidecar. Returns entries most-recent-first with original path,
+        timestamp, kind (file or directory), and which force-flags fired
+        at trash time. Also surfaces drift: orphan_sidecars (sidecars with
+        no target file) and orphan_files (trashed files with no sidecar).
+        Pair with `recover_from_trash` to undo.
+
+        Args:
+            date: Optional YYYY-MM-DD filter to scope to one day.
+
+        Returns: {entries: [{trash_path, meta_path, original_path,
+                 trashed_at, kind, file_count, ...}], count,
+                 orphan_sidecars, orphan_files}.
+        """
+        result = list_trash_module.list_trash(vault_root, date=date)
+        return result.as_dict()
+
+    @mcp.tool
+    def recover_from_trash(
+        trash_path: str,
+        restore_path: str | None = None,
+        allow_curated: bool = False,
+    ) -> dict:
+        """Tier 2: undo a delete_file/delete_directory.
+
+        Reads the .meta.json sidecar to discover where the file lived
+        before being trashed, moves it back there, and cleans up the
+        sidecar. If `restore_path` is provided, uses that instead of the
+        sidecar's original location (useful when the original parent
+        directory has been removed).
+
+        Refuses to overwrite existing files at the restore destination.
+        Refuses restore into Sources/Evidence (append-only). Curated trees
+        need `allow_curated=true`.
+
+        Args:
+            trash_path: Vault-relative path to the trashed entry
+                (under `Knowledge Base/_trash/...`).
+            restore_path: Optional override; defaults to the original
+                location from the sidecar.
+            allow_curated: Required if restoring into a curated tree.
+
+        Returns: {trash_path, restored_path, kind, warnings}.
+        Errors: INVALID_PATH; NOT_FOUND; NOT_IN_TRASH; NO_RESTORE_PATH;
+                RESTORE_INTO_TRASH; APPEND_ONLY; CURATED_PROTECTED;
+                DEST_EXISTS; RECOVER_FAILED.
+        """
+        try:
+            result = recover_from_trash_module.recover_from_trash(
+                vault_root,
+                trash_path=trash_path,
+                restore_path=restore_path,
+                allow_curated=allow_curated,
+            )
+        except recover_from_trash_module.RecoverError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        return result.as_dict()
+
+    @mcp.tool
+    def list_inbound_links(target: str) -> dict:
+        """Tier 2: find files whose wikilinks resolve to `target`. Read-only.
+
+        Useful before `move_file` (preview what update_wikilinks will touch)
+        or `delete_file` (preview what would break). Matches three forms:
+        - Full path: `[[Knowledge Base/Notes/Insights/foo]]`
+        - KB-stripped: `[[Notes/Insights/foo]]`
+        - Bare basename (only when unique vault-wide): `[[foo]]`
+
+        Args:
+            target: Vault-relative path or bare basename. `.md` optional.
+
+        Returns: {target, inbound: [{path, line_number, context, raw_target}],
+                 count}.
+        Errors: INVALID_TARGET; INVALID_PATH.
+        """
+        try:
+            result = list_inbound_links_module.list_inbound_links(
+                vault_root, target=target
+            )
+        except list_inbound_links_module.ListInboundLinksError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
         return result.as_dict()
 
     return mcp

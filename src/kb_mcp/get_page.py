@@ -66,7 +66,12 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
     rel = path.strip().replace("\\", "/").lstrip("/")
-    if not rel.endswith(".md"):
+    # Only auto-append .md if the path has NO extension. Previously this
+    # appended unconditionally, which made e.g. `foo.meta.json` resolve to
+    # `foo.meta.json.md` and 404 — surfaced when trying to inspect trash
+    # sidecars via `get`.
+    last_segment = rel.rsplit("/", 1)[-1]
+    if "." not in last_segment:
         rel = rel + ".md"
 
     candidate = vault_root / rel

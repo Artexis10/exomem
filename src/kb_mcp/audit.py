@@ -36,7 +36,7 @@ WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 
 # When walking the full vault to build the wikilink-resolution set, skip these.
 VAULT_WALK_SKIP_DIRS = frozenset({
-    ".obsidian", ".git", ".trash", "_attachments", "_archive",
+    ".obsidian", ".git", ".trash", "_attachments", "_archive", "_trash",
 })
 
 # Counts row in index.md. Captures (label, optional-subcategory, count).

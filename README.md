@@ -5,6 +5,9 @@ Knowledge Base to **mobile claude.ai** as a remote custom connector.
 
 Tools surfaced (full parity with the desk-side KB skill except `schema`):
 
+**Tier 1 — type-routed (primary).** Use these whenever a Tier 1 op fits.
+The routing encodes the discipline.
+
 - `find` — read-only search across `Knowledge Base/`, type/project/tag filtered
 - `get` — read a full file anywhere under the vault root (incl. `Cognitive
   Core/`, `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`)
@@ -24,7 +27,63 @@ Tools surfaced (full parity with the desk-side KB skill except `schema`):
 - `audit` — read-only graph health check (broken wikilinks, orphan
   entities, unprocessed sources, index/log drift, tag inconsistency)
 
+**Tier 2 — filesystem-parity (escape hatches).** Use when Tier 1 can't
+express what you need: new folder structures (`Identity/`, `Templates/`),
+files outside the typed-note set, or surgical edits.
+
+- `create_file` — write a file at an arbitrary vault path, optional
+  frontmatter dict. Refuses Sources/Evidence; curated trees require
+  `allow_curated=true`.
+- `create_directory` — mkdir at any vault path (parents=true by default).
+- `list_directory` — list files+subfolders (recursive optional). Surfaces
+  the `type:` frontmatter field for `.md` entries. Read-only.
+- `move_file` — rename/relocate. Rewrites inbound wikilinks by default
+  (`[[old]]`, `[[old.md]]`, and `[[basename]]` when unique vault-wide).
+- `delete_file` — **trash** a file. Moves to `Knowledge Base/_trash/YYYY-MM-DD/`
+  with a `.meta.json` sidecar; never permanent. Recovery is `move_file`
+  back. Requires `confirm=true`; refuses on inbound links unless
+  `force_orphan=true`; refuses on superseded chain unless
+  `force_superseded=true`. `expected_dead_inbound: list[str]` lets you
+  name files whose links should be ignored (for supersession-chain
+  cleanup workflows). Append-only and curated guards still apply.
+- `delete_directory` — **trash** a folder (whole tree). Same `_trash/`
+  semantics. Requires `confirm=true`; non-empty dirs need
+  `recursive=true`; external inbound links require `force_orphan=true`.
+- `list_trash` — enumerate recoverable trash entries with original path,
+  timestamp, and force-flags used. Also surfaces drift (orphan sidecars,
+  orphan files). Read-only.
+- `recover_from_trash` — undo a delete. Reads the sidecar to find the
+  original location, moves the file/dir back, cleans up the sidecar.
+  Optional `restore_path` override for renamed/relocated recovery.
+- `append_to_file` — append text. Refuses on Sources/.
+- `get_frontmatter` — read just the frontmatter (no body). Read-only.
+- `set_frontmatter_field` — patch one frontmatter field; always bumps
+  `updated:`. Requires `why:`.
+- `list_inbound_links` — find all files whose wikilinks resolve to a
+  target. Read-only. Useful before move/delete.
+
+**Discipline preserved across BOTH tiers:** Sources/ and Evidence/ are
+append-only (no Tier 2 op writes there); curated trees (`Cognitive Core/`,
+`Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`,
+`Systems Thinking/`) refuse Tier 2 writes by default — pass
+`allow_curated=true` as a deliberate per-call acknowledgement; deletes
+are never permanent (`delete_file` / `delete_directory` move to
+`Knowledge Base/_trash/YYYY-MM-DD/`, recoverable via `move_file`);
+every write logs to `Knowledge Base/log.md`.
+
+**Two-layer traceability:**
+- `Knowledge Base/log.md` — durable content history. Writes only.
+  KB-scoped. The "what happened to the vault" record. Never
+  auto-purged.
+- `logs/kb-mcp.log` — service log. Every call (reads + writes) is
+  surfaced via a per-call middleware as `tool=<name> duration_ms=<n>
+  event=tool_success|tool_error`. Operational layer (debug "did the
+  call reach the server", spot slow ops, etc.). Rotated by NSSM.
+
 Deferred to desk-side: `schema` (KB governance — intentionally non-parity).
+
+Deferred to a future pass (Tier 3): `bulk_operations` (atomic multi-step
+writes), `rename_tag`, `find_replace_in_file`, `get_directory_tree`.
 
 ## Architecture
 

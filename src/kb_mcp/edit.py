@@ -1,4 +1,4 @@
-"""The `edit` MCP tool: lightweight in-place edit of a compiled page.
+"""The `edit` MCP tool: lightweight in-place edit of a page.
 
 For tweaks — typo fixes, sentence additions, tag corrections — without
 going through full supersession via `replace`. Heavy rewrites still
@@ -16,9 +16,14 @@ What it leaves alone:
 
 Refuses:
 - Sources/ and Evidence/ paths (rule 2: append-only).
-- Pages with `type: source` (defensive — same idea).
+- Pages without frontmatter (won't synthesize a frontmatter block).
 - Pages already marked `status: superseded` (don't edit history; supersede
   the new page instead).
+
+No type allowlist: any page outside Sources/Evidence with frontmatter is
+editable. The KB taxonomy grows over time (`identity`, future types) and
+gating editability on a closed type set creates needless friction.
+Append-only paths and supersession status are the real safety.
 
 Every edit appends a log entry naming `why` — so changes remain auditable
 even though they didn't create a new file.
@@ -38,12 +43,6 @@ from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 
 log = logging.getLogger(__name__)
-
-
-COMPILED_TYPES = frozenset({
-    "research-note", "insight", "failure", "pattern",
-    "experiment", "production-log", "entity",
-})
 
 
 @dataclass
@@ -125,16 +124,6 @@ def edit(
             reason=f"could not parse {rel_path} as markdown",
         )
 
-    page_type = parsed.frontmatter.get("type")
-    if page_type not in COMPILED_TYPES:
-        raise EditError(
-            code="INVALID_EDIT",
-            missing=["path"],
-            reason=(
-                f"type {page_type!r} is not editable in place. Editable types: "
-                f"{sorted(COMPILED_TYPES)}."
-            ),
-        )
     if parsed.frontmatter.get("status") == "superseded":
         raise EditError(
             code="ALREADY_SUPERSEDED",

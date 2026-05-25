@@ -128,6 +128,60 @@ def test_limit_respected(vault: Path) -> None:
     assert len(hits) == 2
 
 
+# ---------------- scope: kb vs vault ----------------
+
+
+def test_scope_kb_does_not_reach_curated_trees(vault: Path) -> None:
+    """Default scope is KB-only; Cognitive Core/ marker should not surface."""
+    hits = find_module.find(vault, query="cognitive-core-marker-xyz")
+    assert hits == []
+
+
+def test_scope_vault_reaches_curated_trees(vault: Path) -> None:
+    """scope='vault' walks the full vault and surfaces curated-tree content."""
+    hits = find_module.find(
+        vault, query="cognitive-core-marker-xyz", scope="vault"
+    )
+    assert len(hits) == 1
+    assert hits[0].path == "Cognitive Core/sample-curated.md"
+
+
+def test_scope_vault_excludes_schema_and_trash(vault: Path) -> None:
+    """_Schema/ and _trash/ must stay excluded even under scope='vault'."""
+    # Place a marker file under each excluded dir
+    schema_extra = vault / "Knowledge Base" / "_Schema" / "marker-vault-find.md"
+    schema_extra.write_text(
+        "---\ntags: []\n---\n# Schema marker\n\nfind-vault-skip-marker-abc\n",
+        encoding="utf-8",
+    )
+    trash_extra = vault / "Knowledge Base" / "_trash" / "2026-05-25"
+    trash_extra.mkdir(parents=True, exist_ok=True)
+    (trash_extra / "scratch.md").write_text(
+        "---\ntags: []\n---\n# Trash\n\nfind-vault-skip-marker-abc\n",
+        encoding="utf-8",
+    )
+    # find_vault_skip_marker_abc would match if either dir leaked through
+    find_module.clear_cache()
+    hits = find_module.find(
+        vault, query="find-vault-skip-marker-abc", scope="vault"
+    )
+    assert hits == []
+
+
+def test_scope_default_is_kb(vault: Path) -> None:
+    """No scope arg → behaves like scope='kb' (backward compat)."""
+    hits_default = find_module.find(vault, query="cognitive-core-marker-xyz")
+    hits_kb = find_module.find(
+        vault, query="cognitive-core-marker-xyz", scope="kb"
+    )
+    assert hits_default == hits_kb
+
+
+def test_scope_unknown_value_raises(vault: Path) -> None:
+    with pytest.raises(ValueError, match="scope must be"):
+        find_module.find(vault, query="x", scope="bogus")
+
+
 def test_results_sorted_by_updated_desc(vault: Path) -> None:
     hits = find_module.find(vault, query="")
     dates = [h.updated for h in hits if h.updated]

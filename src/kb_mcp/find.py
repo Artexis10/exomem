@@ -20,7 +20,7 @@ import yaml
 
 log = logging.getLogger(__name__)
 
-EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive"})
+EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"})
 FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
@@ -148,20 +148,42 @@ def find(
     projects: list[str] | None = None,
     tags: list[str] | None = None,
     limit: int = 15,
+    scope: str = "kb",
 ) -> list[Hit]:
-    """Search the KB. Returns up to `limit` hits, most recently updated first."""
+    """Search the vault. Returns up to `limit` hits, most recently updated first.
+
+    `scope` controls the walk root:
+    - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
+    - "vault": full vault, including curated trees (`Cognitive Core/`,
+      `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`,
+      `Systems Thinking/`). Use when you need to discover content
+      outside the KB. Existing filters still apply — curated-tree pages
+      typically lack structured frontmatter so `types`/`projects`/`tags`
+      filters won't match many of them; free-text queries work fine.
+    """
+    if scope not in ("kb", "vault"):
+        raise ValueError(
+            f"find: scope must be 'kb' or 'vault', got {scope!r}"
+        )
     if limit < 1:
         limit = 1
     limit = min(limit, 100)
     query_norm = (query or "").lower().strip()
 
-    kb = vault_root / "Knowledge Base"
-    if not kb.is_dir():
-        log.error("KB directory missing: %s", kb)
-        return []
+    if scope == "kb":
+        kb = vault_root / "Knowledge Base"
+        if not kb.is_dir():
+            log.error("KB directory missing: %s", kb)
+            return []
+        walk = _walk_md(kb)
+    else:
+        # Lazy import to avoid a circular: vault imports nothing else, but
+        # this keeps the dependency direction crisp.
+        from .vault import walk_vault_md
+        walk = walk_vault_md(vault_root)
 
     hits: list[tuple[str, Hit]] = []  # (sort_key, hit)
-    for path in _walk_md(kb):
+    for path in walk:
         page = _CACHE.get(path, vault_root)
         if page is None:
             continue

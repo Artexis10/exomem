@@ -1,4 +1,4 @@
-"""The `replace` MCP tool: supersession of an existing compiled page.
+"""The `replace` MCP tool: supersession of an existing page.
 
 Per SKILL.md rule 6, supersession is metadata-only:
 - The old page gets `status: superseded`, `superseded_by: "[[<new>]]"`, and a
@@ -6,8 +6,11 @@ Per SKILL.md rule 6, supersession is metadata-only:
 - The new page is written with `supersedes: "[[<old>]]"` in its frontmatter.
 - Inbound wikilinks STAY pointing at the old page — readers follow the chain.
 
-Only compiled pages can be superseded. Sources and Evidence are append-only
-(rule 2) and rejected with INVALID_REPLACE.
+Sources and Evidence are append-only (rule 2) and rejected with
+INVALID_REPLACE. No type allowlist beyond that: any frontmatter-bearing
+page outside append-only trees is supersedable. The KB taxonomy grows
+over time and gating supersession on a closed type set creates needless
+friction.
 
 The new page is constructed via the existing `note.note()` machinery so it
 gets full back-ref + index/log treatment for free.
@@ -28,12 +31,6 @@ from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 
 log = logging.getLogger(__name__)
-
-
-SUPERSEDABLE_TYPES = frozenset({
-    "research-note", "insight", "failure", "pattern",
-    "experiment", "production-log", "entity",
-})
 
 
 @dataclass
@@ -113,16 +110,6 @@ def replace(
             reason=f"could not parse {rel_old_with_ext} as markdown",
         )
 
-    old_type = old_parsed.frontmatter.get("type")
-    if old_type not in SUPERSEDABLE_TYPES:
-        raise ReplaceError(
-            code="INVALID_REPLACE",
-            missing=["old_path"],
-            reason=(
-                f"type {old_type!r} is not supersedable. Valid: "
-                f"{sorted(SUPERSEDABLE_TYPES)}"
-            ),
-        )
     if old_parsed.frontmatter.get("status") == "superseded":
         raise ReplaceError(
             code="ALREADY_SUPERSEDED",

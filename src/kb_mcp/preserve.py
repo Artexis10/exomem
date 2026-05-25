@@ -155,9 +155,17 @@ def preserve(
 
         writes: list[PlannedWrite] = []
 
-        # Optional sidecar
+        # Optional sidecar. For binary artifacts the convention is
+        # `<filename>.md` next to the artifact. For .md artifacts that would
+        # produce `<stem>.md.md` (cosmetic but ugly), so use `<stem>-notes.md`
+        # instead — the description belongs alongside, not as a double-ext
+        # twin of the artifact.
         if description and description.strip():
-            sidecar_path = folder / f"{filename_safe}.md"
+            if filename_safe.lower().endswith(".md"):
+                stem = filename_safe[:-3]
+                sidecar_path = folder / f"{stem}-notes.md"
+            else:
+                sidecar_path = folder / f"{filename_safe}.md"
             if sidecar_path.exists():
                 warnings.append(
                     f"sidecar {sidecar_path.name!r} already exists; skipped."
