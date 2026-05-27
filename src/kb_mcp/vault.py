@@ -441,7 +441,11 @@ def find_inbound_wikilinks(
         for lineno, line in enumerate(text.splitlines(), start=1):
             for m in _WIKILINK_PATTERN.finditer(line):
                 raw = m.group(1).strip()
-                normalized = raw.removesuffix(".md")
+                # Strip `#anchor` before comparison — anchors are intra-page
+                # jumps, not part of the file path. Without this, refs like
+                # `[[Knowledge Base/Foo#section]]` would never match
+                # `Knowledge Base/Foo`.
+                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
                 if normalized == target_full or normalized == target_stripped:
                     matches.append(InboundLink(
                         path=md_rel,

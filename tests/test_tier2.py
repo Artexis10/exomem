@@ -272,6 +272,42 @@ def test_move_file_updates_inbound_wikilinks(vault: Path) -> None:
     assert "progressive-disclosure-without-mode-fragmentation" not in referrer_text
 
 
+def test_move_file_rewrites_wikilinks_with_anchor(vault: Path) -> None:
+    """Refs like `[[Knowledge Base/Foo#section]]` should be rewritten on move.
+
+    Regression: the old `_rewrite_wikilinks` compared the raw target (including
+    `#anchor`) against the path-only `old_full`, so anchored refs were never
+    rewritten and `find_inbound_wikilinks` didn't even queue the files. Caught
+    during the 2026-05-28 KB recategorization sweep.
+    """
+    referrer_path = vault / "Knowledge Base" / "Notes" / "Insights" / "anchor-referrer.md"
+    referrer_path.write_text(
+        "---\ntype: insight\ncreated: 2026-05-28\nupdated: 2026-05-28\ntags: []\n---\n"
+        "# Anchor Referrer\n\n"
+        "See [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation#Mechanism|the mechanism]] "
+        "and [[Notes/Insights/progressive-disclosure-without-mode-fragmentation#Mechanism]] (stripped form).\n",
+        encoding="utf-8",
+    )
+    src_rel = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    dst_rel = "Knowledge Base/Notes/Insights/anchor-renamed-disclosure.md"
+    result = move_module.move_file(
+        vault, old_path=src_rel, new_path=dst_rel, today=TODAY
+    )
+    # Both refs (full + stripped form) must have been rewritten.
+    assert result.wikilinks_updated >= 2, result.as_dict()
+    text = _read(referrer_path)
+    # New target path + anchor preserved on both forms.
+    assert (
+        "[[Knowledge Base/Notes/Insights/anchor-renamed-disclosure#Mechanism|the mechanism]]"
+        in text
+    )
+    assert (
+        "[[Notes/Insights/anchor-renamed-disclosure#Mechanism]]" in text
+    )
+    # No stale references to the old slug.
+    assert "progressive-disclosure-without-mode-fragmentation" not in text
+
+
 def test_move_file_refuses_sources(vault: Path) -> None:
     with pytest.raises(move_module.MoveFileError) as exc:
         move_module.move_file(

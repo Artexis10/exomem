@@ -255,17 +255,28 @@ def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]
         nonlocal n
         target = m.group(1).strip()
         alias = m.group(2) or ""
-        target_no_ext = target.removesuffix(".md")
+        # Split off `#anchor` so refs like `[[Knowledge Base/Foo#section]]`
+        # match the path part. The anchor is preserved verbatim in the
+        # rewrite so the intra-page jump still resolves at the new location.
+        if "#" in target:
+            target_path, anchor = target.split("#", 1)
+            target_path = target_path.rstrip()
+            anchor_suffix = "#" + anchor
+        else:
+            target_path = target
+            anchor_suffix = ""
+        target_no_ext = target_path.removesuffix(".md")
         if target_no_ext == old_full or target_no_ext == old_stripped:
             n += 1
-            # Preserve whether the link was full-form or stripped-form.
-            if target.startswith("Knowledge Base/"):
-                return f"[[{new_full}{alias}]]"
-            return f"[[{new_stripped}{alias}]]"
+            # Preserve whether the link was full-form or stripped-form, and
+            # carry the anchor through unchanged.
+            if target_path.startswith("Knowledge Base/"):
+                return f"[[{new_full}{anchor_suffix}{alias}]]"
+            return f"[[{new_stripped}{anchor_suffix}{alias}]]"
         if "/" not in target_no_ext and target_no_ext == old_basename:
             n += 1
             # Basename links rewrite to the new basename (still bare-form).
-            return f"[[{new_basename}{alias}]]"
+            return f"[[{new_basename}{anchor_suffix}{alias}]]"
         return m.group(0)
 
     new_text = _WIKILINK_PATTERN.sub(repl, text)
