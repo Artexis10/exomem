@@ -1312,5 +1312,13 @@ def run(
         log.info("kb-mcp starting on stdio")
         mcp.run(transport="stdio")
     else:
+        # stateless_http=True: no per-client session-id tracking. Without this,
+        # FastMCP's streamable-http transport returns 404 "Invalid or expired
+        # session ID" whenever claude.ai's gateway sends a request with a
+        # session_id we don't recognise (every service restart wipes them;
+        # idle timeouts can also expire them). The gateway doesn't surface the
+        # 404 to the user — it just reports the tool call as failed. For our
+        # request-response tool calls (no resumable SSE streams), stateless is
+        # strictly better: no failures on restart, no session_id bookkeeping.
         log.info("kb-mcp starting on %s host=%s port=%s", transport, host, port)
-        mcp.run(transport=transport, host=host, port=port)
+        mcp.run(transport=transport, host=host, port=port, stateless_http=True)
