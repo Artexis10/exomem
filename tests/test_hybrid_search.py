@@ -234,6 +234,130 @@ def test_hit_signals_omitted_in_keyword(vault) -> None:
         assert "signals" not in h.as_dict()
 
 
+def test_prefer_compiled_reorders_above_source(vault, source_schema) -> None:
+    """Equal-scoring source vs insight should put the insight first when
+    prefer_compiled=True, and either order is acceptable when False.
+
+    Builds a probe pair: matching content on a `source` and an `insight`
+    so BM25 scores them similarly. The type-weight boost is the only
+    signal that can break the tie.
+    """
+    from kb_mcp import add as add_module
+    from kb_mcp import create_file as create_file_module
+
+    probe_body = "The distinctivetypeprobe word appears here exactly once."
+    # Source via add() (Sources/ is append-only — must use the typed writer).
+    add_module.add(
+        vault, source_schema,
+        content=probe_body,
+        source_type="article",
+        title="Probe distinctivetypeprobe source",
+        url="https://example.com/probe-source",
+    )
+    create_file_module.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/probe-distinctivetypeprobe-insight.md",
+        content=f"# Probe distinctivetypeprobe insight\n\n{probe_body}",
+        frontmatter={
+            "type": "insight",
+            "status": "active",
+            "created": "2026-05-28",
+            "updated": "2026-05-28",
+            "tags": [],
+        },
+    )
+    bm25.clear_cache()
+    find_module.clear_cache()
+
+    hits_on = find_module.find(
+        vault, query="distinctivetypeprobe", mode="hybrid",
+        prefer_compiled=True, limit=5,
+    )
+    types_on = [h.type for h in hits_on if "distinctivetypeprobe" in h.path]
+    # The insight must rank above (or equal to first occurrence of) the source.
+    assert types_on, f"probes not surfaced: {[h.path for h in hits_on]}"
+    insight_pos = next((i for i, t in enumerate(types_on) if t == "insight"), -1)
+    source_pos = next((i for i, t in enumerate(types_on) if t == "source"), -1)
+    assert insight_pos != -1 and source_pos != -1, (
+        f"both types should surface; got {types_on}"
+    )
+    assert insight_pos < source_pos, (
+        f"insight should rank above source with prefer_compiled=True; "
+        f"got order {types_on}"
+    )
+
+    hits_off = find_module.find(
+        vault, query="distinctivetypeprobe", mode="hybrid",
+        prefer_compiled=False, limit=5,
+    )
+    # With boost off, fused order is the raw RRF — we don't assert a specific
+    # order (depends on tie-breaking), only that both still surface.
+    paths_off = {h.path for h in hits_off}
+    assert any("source.md" in p for p in paths_off)
+    assert any("insight.md" in p for p in paths_off)
+
+
+def test_graph_in_degree_counts_inbound_from_seeds(vault) -> None:
+    """A page wikilinked from multiple strong matches should expose graph_in_degree.
+
+    Note: graph_in_degree is non-zero ONLY when the seed pages are matched
+    (vector OR stem-gated BM25). Builds three pages all linking to one hub
+    plus mentioning a distinctive query term — the hub then has in-degree 3.
+    """
+    from kb_mcp import create_file as create_file_module
+    hub_path = "Knowledge Base/Notes/Insights/probe-indegree-hub.md"
+    create_file_module.create_file(
+        vault,
+        path=hub_path,
+        content="# Probe in-degree hub\n\nGenuinely unrelated content.",
+        frontmatter={
+            "type": "insight", "status": "active",
+            "created": "2026-05-28", "updated": "2026-05-28", "tags": [],
+        },
+    )
+    for i in (1, 2, 3):
+        create_file_module.create_file(
+            vault,
+            path=f"Knowledge Base/Notes/Insights/probe-indegree-seed-{i}.md",
+            content=(
+                f"# Probe in-degree seed {i}\n\n"
+                f"Contains the rareindegreemarker token. "
+                f"See [[Knowledge Base/Notes/Insights/probe-indegree-hub]]."
+            ),
+            frontmatter={
+                "type": "insight", "status": "active",
+                "created": "2026-05-28", "updated": "2026-05-28", "tags": [],
+            },
+        )
+    bm25.clear_cache()
+    find_module.clear_cache()
+    find_module._RESOLVER_CACHE.clear()
+
+    hits = find_module.find(
+        vault, query="rareindegreemarker", mode="hybrid", limit=10,
+    )
+    paths_by_basename = {h.path.rsplit("/", 1)[-1]: h for h in hits}
+    # The seeds should all surface (they each contain the unique token).
+    assert all(f"probe-indegree-seed-{i}.md" in paths_by_basename for i in (1, 2, 3))
+    # And the hub should appear via graph expansion (or as a graph-in-degree
+    # mention on a primary hit).
+    hub_hit = paths_by_basename.get("probe-indegree-hub.md")
+    if hub_hit is not None:
+        # Hub came in via graph_ranking (it has no lexical match).
+        assert hub_hit.graph_hop, "hub should be tagged graph_hop=True"
+        assert hub_hit.graph_in_degree == 3, (
+            f"hub should be linked from all 3 seeds, got "
+            f"{hub_hit.graph_in_degree}"
+        )
+    # If the hub didn't make the top-10 (possible under aggressive limits),
+    # at least one of the seeds should NOT carry a graph_in_degree marker —
+    # in-degree on a primary hit only fires when other seeds link in. None do
+    # in this fixture, so seed in-degree is 0. That's a sanity check.
+    for i in (1, 2, 3):
+        seed_hit = paths_by_basename[f"probe-indegree-seed-{i}.md"]
+        assert seed_hit.graph_in_degree == 0
+
+
 def test_graph_expansion_surfaces_linked_neighbour(vault) -> None:
     """A page linked from a query match should come back with graph_hop=True.
 

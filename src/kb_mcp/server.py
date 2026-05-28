@@ -251,6 +251,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         mode: str = "hybrid",
         graph: bool = True,
         rerank: bool = False,
+        prefer_compiled: bool = True,
     ) -> list[dict]:
         """Search the vault. Filters are AND'd; tag/project lists are OR'd within.
 
@@ -292,6 +293,12 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 higher-precision ordering. Adds ~50ms/candidate; useful
                 when ambiguous queries float topically-off vector matches
                 to the top.
+            prefer_compiled: When true (default), applies a small boost to
+                compiled types (insight, pattern, failure, research-note,
+                entity) and a small penalty to raw `source` after fusion
+                AND rerank. Reflects the KB's epistemic hierarchy. Set
+                false to retrieve raw source discussion verbatim (e.g.
+                "what did I capture from Dr. X").
 
         Returns:
             List of {path, type, scope, title, updated, excerpt[, signals]}.
@@ -299,7 +306,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
             keyword mode it's a snippet anchored to the literal query
             match. `signals` (hybrid/vector only) carries per-ranker
             position: {bm25_rank?, vector_rank?, vector_score?, graph_hop?,
-            rerank_score?} — handy for debugging why a hit ranked.
+            graph_in_degree?, rerank_score?}. `graph_in_degree` is the
+            number of top-N seeds whose body wikilinks to this hit —
+            independent of graph_hop, which only fires for graph-only
+            results.
         """
         hits = find_module.find(
             vault_root,
@@ -312,6 +322,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             mode=mode,
             graph=graph,
             rerank=rerank,
+            prefer_compiled=prefer_compiled,
         )
         return [h.as_dict() for h in hits]
 

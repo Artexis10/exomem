@@ -21,6 +21,11 @@ import yaml
 log = logging.getLogger(__name__)
 
 EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"})
+# Navigation files — auto-generated summaries / activity logs. Their bodies
+# mention every recently-written page, so they false-positive on hybrid
+# queries that touch any term recently introduced into the KB. Excluded
+# from search results regardless of mode.
+_NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
@@ -114,6 +119,7 @@ class Hit:
     vector_rank: int | None = None
     vector_score: float | None = None
     graph_hop: bool = False
+    graph_in_degree: int = 0
     rerank_score: float | None = None
 
     def as_dict(self) -> dict:
@@ -134,6 +140,8 @@ class Hit:
             signals["vector_score"] = round(self.vector_score, 4)
         if self.graph_hop:
             signals["graph_hop"] = True
+        if self.graph_in_degree:
+            signals["graph_in_degree"] = self.graph_in_degree
         if self.rerank_score is not None:
             signals["rerank_score"] = round(self.rerank_score, 4)
         if signals:
@@ -177,6 +185,7 @@ def find(
     mode: str = "hybrid",
     graph: bool = True,
     rerank: bool = False,
+    prefer_compiled: bool = True,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -211,6 +220,13 @@ def find(
     (a CrossEncoder) and re-sorts by reranker score. Recovers ordering
     quality on ambiguous queries — the LLM-Wiki cases where vector floats
     a topically-off doc to the top. ~50ms / candidate on Blackwell.
+
+    `prefer_compiled`: when True (default), applies a small multiplicative
+    boost to fused/rerank scores for COMPILED page types (insight, pattern,
+    failure, research-note, entity) and a small penalty for raw `source`
+    pages. Reflects the KB's epistemic hierarchy — compiled distillations
+    are the intentional output, sources are inputs. Set False to retrieve
+    raw source discussion verbatim (e.g. "what did I capture from Dr. X").
     """
     if scope not in ("kb", "vault"):
         raise ValueError(
@@ -240,6 +256,7 @@ def find(
         query=query, query_norm=query_norm,
         types=types, projects=projects, tags=tags,
         limit=limit, scope=scope, mode=mode, graph=graph, rerank=rerank,
+        prefer_compiled=prefer_compiled,
     )
 
 
@@ -266,6 +283,8 @@ def _find_keyword(
 
     hits: list[tuple[str, Hit]] = []
     for path in walk:
+        if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
         page = _CACHE.get(path, vault_root)
         if page is None:
             continue
@@ -305,6 +324,7 @@ def _find_semantic(
     mode: str,
     graph: bool = True,
     rerank: bool = False,
+    prefer_compiled: bool = True,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
@@ -360,8 +380,10 @@ def _find_semantic(
     # from raw BM25 alone leaks neighbours of weak matches into results
     # (e.g. queries like "skip-marker-abc" where every token is common).
     graph_ranking: list[str] = []
+    graph_in_degree_by_path: dict[str, int] = {}
     if graph:
         primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
+        vector_set: set[str] = set(vector_ranking)
         graph_seeds: list[str] = []
         seen_seed: set[str] = set()
         for r in (vector_ranking, bm25_ranking):
@@ -369,7 +391,7 @@ def _find_semantic(
                 if p in seen_seed:
                     continue
                 seen_seed.add(p)
-                if p in set(vector_ranking):
+                if p in vector_set:
                     graph_seeds.append(p)
                     continue
                 # BM25-only seed: gate via stem-aware tokens-present.
@@ -387,6 +409,12 @@ def _find_semantic(
             if page is None:
                 continue
             for target_rel in _outbound_wikilink_paths(page, vault_root):
+                # Count in-degree for ALL targets — primary-ranked hubs benefit
+                # too. graph_ranking still only carries non-primary targets so
+                # RRF doesn't double-count them.
+                graph_in_degree_by_path[target_rel] = (
+                    graph_in_degree_by_path.get(target_rel, 0) + 1
+                )
                 if target_rel in primary_set or target_rel in seen_target:
                     continue
                 seen_target.add(target_rel)
@@ -410,6 +438,11 @@ def _find_semantic(
         )
 
     fused = fusion.reciprocal_rank_fusion(rankings, k=60)
+    # Apply type-weight boost before iterating fused candidates — affects the
+    # iteration order for non-rerank flows. For rerank, the boost is also
+    # applied to rerank_score below so it survives the final sort.
+    if prefer_compiled:
+        fused = _apply_type_boost(fused, vault_root)
     vector_paths: set[str] = set(vector_ranking)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
@@ -427,6 +460,8 @@ def _find_semantic(
             continue
         seen.add(rel_path)
         abs_path = vault_root / rel_path
+        if abs_path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
         page = _CACHE.get(abs_path, vault_root)
         if page is None:
             continue
@@ -464,6 +499,7 @@ def _find_semantic(
             vector_rank=vector_rank_by_path.get(rel_path),
             vector_score=vector_score_by_path.get(rel_path),
             graph_hop=is_graph_only,
+            graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
         ))
         if len(hits) >= target_n:
             break
@@ -486,6 +522,15 @@ def _find_semantic(
             scores = emb.rerank_pairs(query, passages)
             for h, s in zip(hits, scores):
                 h.rerank_score = float(s)
+            # Re-apply the type boost to rerank scores so prefer_compiled
+            # survives the post-rerank sort. This rescues compiled material
+            # that bge-reranker-base demotes — see Hugo's "thoughts on..."
+            # query case where the reranker preferred raw Source discussion
+            # over compiled Insights.
+            if prefer_compiled:
+                for h in hits:
+                    if h.rerank_score is not None:
+                        h.rerank_score *= _type_multiplier(h.type)
             hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
         except ImportError as e:
             log.warning("rerank requested but reranker unavailable: %s", e)
@@ -493,6 +538,43 @@ def _find_semantic(
             log.warning("rerank failed: %s; returning fused order", e)
 
     return hits[:limit]
+
+
+# KB epistemic hierarchy: compiled distillations are the intentional output,
+# raw sources are inputs. Surfaced via prefer_compiled=True post-RRF boost.
+# Multipliers are small — designed as tie-breakers between similar fused
+# scores, not as dominators. Tune in one place if needed.
+_COMPILED_TYPES = frozenset(
+    {"insight", "pattern", "failure", "research-note", "entity"}
+)
+_SOURCE_TYPES = frozenset({"source"})
+_COMPILED_BOOST = 1.15
+_SOURCE_PENALTY = 0.85
+
+
+def _type_multiplier(page_type: str | None) -> float:
+    if page_type in _COMPILED_TYPES:
+        return _COMPILED_BOOST
+    if page_type in _SOURCE_TYPES:
+        return _SOURCE_PENALTY
+    return 1.0
+
+
+def _apply_type_boost(
+    fused: list[tuple[str, float]], vault_root: Path
+) -> list[tuple[str, float]]:
+    """Re-sort fused `(path, score)` pairs after applying per-type multipliers.
+
+    Paths whose ParsedPage can't be loaded keep their original score (no
+    multiplier known). Stable sort by adjusted score desc, path asc.
+    """
+    adjusted: list[tuple[str, float]] = []
+    for path, score in fused:
+        page = _CACHE.get(vault_root / path, vault_root)
+        mult = _type_multiplier(page.page_type if page else None)
+        adjusted.append((path, score * mult))
+    adjusted.sort(key=lambda t: (-t[1], t[0]))
+    return adjusted
 
 
 def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
