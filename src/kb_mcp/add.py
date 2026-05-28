@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import indexes, schema
+from . import corpus_aware, indexes, schema
 from .vault import (
     PlannedWrite,
     batch_atomic_write,
@@ -96,6 +97,22 @@ def add(
     )
     if err is not None:
         raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
+
+    # Corpus-aware near-duplicate check (best-effort; warns, never blocks — the
+    # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
+    # are disabled so the fast suite and existing add() tests are unaffected.
+    dup_warnings: list[str] = []
+    if not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
+        try:
+            dup_warnings = [
+                corpus_aware.dup_warning(c)
+                for c in corpus_aware.detect_duplicates(
+                    vault_root, title=title, body=content,
+                    self_path=None, types_filter=["source"],
+                )
+            ]
+        except Exception as e:  # noqa: BLE001 — never break a capture
+            log.debug("corpus-aware dup check failed (non-fatal): %s", e)
 
     today = today or dt.date.today()
     date_iso = today.isoformat()
@@ -178,7 +195,7 @@ def add(
     ]
     writes.extend(sub_writes)
 
-    warnings: list[str] = []
+    warnings: list[str] = list(dup_warnings)
     if slug_warning:
         warnings.append(slug_warning)
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need

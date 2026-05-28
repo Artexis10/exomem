@@ -1,0 +1,76 @@
+# Golden query set for retrieval eval (scripts/eval_retrieval.py).
+#
+# SEED set — hand-authored against real vault paths so the baseline number is
+# meaningful. It is meant to GROW: scripts/derive_relevance_pairs.py proposes
+# additions mined from real (query -> cited path) usage, which Hugo confirms.
+#
+# Each entry:
+#   query:         the search string (natural language, not a title echo)
+#   expect_any_of: [vault paths] treated as binary-relevant (grade 1), OR
+#   graded:        {path: grade 0..3} for NDCG grading (3=ideal, 1=marginal)
+#
+# Paths are matched leniently: leading "Knowledge Base/" and ".md" optional,
+# case-insensitive (see _canon in eval_retrieval.py).
+
+- query: "what actually triggers defensiveness when receiving criticism"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/asymmetric-criticism-as-trigger"
+
+- query: "how should creators frame their analytics — what to make next"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/audience-as-data-frame-creator-analytics-as-what-to-make-next-not-what-already-happened"
+
+- query: "the universal binding problem in large language models"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/binding-mechanism-is-the-universal-llm-problem"
+
+- query: "migrating infrastructure from coolify to k3s, the IaC origin story"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/coolify-to-k3s-migration-the-iac-origin-story"
+
+- query: "does informal coaching feedback satisfy a formal warning precondition"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/coaching-feedback-does-not-satisfy-the-formal-warning-precondition"
+
+- query: "friendly UI labels for non-technical creators"
+  expect_any_of:
+    - "Knowledge Base/Notes/Patterns/2026-05-10-friendly-ui-labels-for-non-technical-creators"
+
+- query: "deprecation window protocol for shipping breaking changes"
+  expect_any_of:
+    - "Knowledge Base/Notes/Patterns/breaking-change-deprecation-window-protocol"
+
+- query: "should I paste multi-line shell into Claude Code or materialise a script"
+  expect_any_of:
+    - "Knowledge Base/Notes/Patterns/claude-code-scripts-not-multiline-pastes"
+
+- query: "map of AI infrastructure job opportunities for May 2026"
+  expect_any_of:
+    - "Knowledge Base/Notes/Research/Career/ai-infra-opportunity-map-may-2026-tranche-1"
+
+- query: "the operating plan for exiting Yolo via tranche 1"
+  expect_any_of:
+    - "Knowledge Base/Notes/Research/Career/primary-goal-yolo-exit-via-tranche-1-operating-plan-may-july-2026"
+
+- query: "field workflow for shooting aurora and night photography"
+  expect_any_of:
+    - "Knowledge Base/Notes/Research/Creative/aurora-night-photography-field-workflow"
+
+- query: "backup script uploaded garbage to B2 after pg_dump failed"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/backup-script-uploads-garbage-on-pg-dump-failure"
+
+- query: "why a 404 on the bare oauth protected resource broke the claude.ai connector"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/bare-oauth-protected-resource-404-breaks-claude-ai-mcp-registration"
+
+- query: "are AI coding agents just code editors"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/ai-coding-agents-are-not-code-editors"
+
+# Graded example: the live canonical career record should rank above its
+# superseded predecessor, which is still marginally relevant.
+- query: "Hugo's canonical career and skillset record"
+  graded:
+    "Knowledge Base/Notes/Research/Career/hugo-ander-kivi-canonical-career-and-skillset-record": 3
+    "Knowledge Base/Notes/Research/Career/hugo-ander-kivi-canonical-career-and-skillset-record-superseded": 1

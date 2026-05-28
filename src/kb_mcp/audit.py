@@ -22,6 +22,7 @@ existing write tools (no auto-fix).
 
 from __future__ import annotations
 
+import datetime as dt
 import logging
 import re
 from dataclasses import dataclass
@@ -66,15 +67,26 @@ class AuditFinding:
     path: str           # vault-relative path of the affected page (or "index.md")
     detail: str         # one-line human description
     proposed_fix: str | None = None
+    # Optional cluster/aging context, surfaced only when set (mirrors
+    # find.Hit.signals' omit-when-empty convention so existing findings and
+    # the test suite see no shape change). `paths` carries a multi-file group;
+    # `meta` carries structured extras like age_days / age_bucket.
+    paths: list[str] | None = None
+    meta: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out: dict = {
             "category": self.category,
             "severity": self.severity,
             "path": self.path,
             "detail": self.detail,
             "proposed_fix": self.proposed_fix,
         }
+        if self.paths:
+            out["paths"] = self.paths
+        if self.meta:
+            out["meta"] = self.meta
+        return out
 
 
 @dataclass
@@ -90,11 +102,15 @@ class AuditReport:
 
 
 def audit(
-    vault_root: Path, *, categories: list[str] | None = None
+    vault_root: Path,
+    *,
+    categories: list[str] | None = None,
+    today: dt.date | None = None,
 ) -> AuditReport:
     """Scan the KB and return a structured findings report.
 
     `categories` filters which checks to run (default: all). Read-only.
+    `today` is dependency-injectable for tests (used by unprocessed-source aging).
     """
     selected = set(categories) if categories else set(ALL_CATEGORIES)
     invalid = selected - set(ALL_CATEGORIES)
@@ -113,7 +129,7 @@ def audit(
     if "orphan_entity" in selected:
         findings.extend(_check_orphan_entities(vault_root, pages))
     if "unprocessed_source" in selected:
-        findings.extend(_check_unprocessed_sources(vault_root, pages))
+        findings.extend(_check_unprocessed_sources(vault_root, pages, today=today))
     if "index_drift" in selected:
         findings.extend(_check_index_drift(vault_root))
     if "tag_inconsistency" in selected:
@@ -317,26 +333,82 @@ def _extract_wikilinks_from_value(value) -> list[str]:
 
 
 def _check_unprocessed_sources(
-    vault_root: Path, pages: list[find_module.ParsedPage]
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
 ) -> list[AuditFinding]:
-    findings: list[AuditFinding] = []
+    """Flag sources with empty ingested_into, aged + triaged oldest-first.
+
+    Adds age signal so the backlog can be drained by priority rather than
+    treated as an undifferentiated pile: bucket fresh (<30d) / aging (30-90d) /
+    stale (>90d), bump severity to `warn` once stale, sort oldest-first, and
+    surface age in `meta` so a client can `propose_compilation` the worst rot
+    first.
+    """
+    today = today or dt.date.today()
+    rows: list[tuple[int, AuditFinding]] = []  # (age_days for sort, finding)
     for page in pages:
         if page.frontmatter.get("type") != "source":
             continue
         ingested = page.frontmatter.get("ingested_into")
-        if ingested is None or (isinstance(ingested, list) and len(ingested) == 0):
-            findings.append(AuditFinding(
+        if not (ingested is None or (isinstance(ingested, list) and len(ingested) == 0)):
+            continue
+
+        captured = _parse_fm_date(
+            page.frontmatter.get("captured") or page.frontmatter.get("created")
+        )
+        meta: dict = {}
+        age_days: int | None = None
+        if captured is not None:
+            age_days = max(0, (today - captured).days)
+            bucket = (
+                "fresh" if age_days < 30 else "aging" if age_days < 90 else "stale"
+            )
+            meta = {"age_days": age_days, "age_bucket": bucket, "captured": captured.isoformat()}
+            severity = "warn" if bucket == "stale" else "info"
+            age_phrase = f" ({age_days}d old, {bucket})"
+        else:
+            bucket = "unknown"
+            severity = "info"
+            age_phrase = " (capture date unknown)"
+
+        rows.append((
+            age_days if age_days is not None else -1,
+            AuditFinding(
                 category="unprocessed_source",
-                severity="info",
+                severity=severity,
                 path=page.rel_path,
-                detail="Source has no ingested_into entries — nothing compiled from it yet",
-                proposed_fix=(
-                    "If still relevant, compile a research-note/insight that cites this "
-                    "source (the back-ref will update automatically). Otherwise mark as "
-                    "archived or delete."
+                detail=(
+                    f"Source has no ingested_into entries — nothing compiled "
+                    f"from it yet{age_phrase}"
                 ),
-            ))
-    return findings
+                proposed_fix=(
+                    "Call `propose_compilation(sources=[this])` for a draft note "
+                    "skeleton, then compile via `note` (the back-ref updates "
+                    "automatically). Otherwise mark archived or delete."
+                ),
+                meta=meta or None,
+            ),
+        ))
+
+    # Oldest first — drain the worst rot first. Capture-unknown (-1) sinks last.
+    rows.sort(key=lambda t: t[0], reverse=True)
+    return [f for _, f in rows]
+
+
+def _parse_fm_date(value) -> dt.date | None:
+    """Coerce a frontmatter date value (yaml date, datetime, or ISO str) to date."""
+    if isinstance(value, dt.datetime):
+        return value.date()
+    if isinstance(value, dt.date):
+        return value
+    if isinstance(value, str) and value.strip():
+        try:
+            return dt.date.fromisoformat(value.strip()[:10])
+        except ValueError:
+            return None
+    return None
 
 
 # ---------------- check: index_drift ----------------

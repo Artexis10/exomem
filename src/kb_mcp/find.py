@@ -33,6 +33,32 @@ EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
 
 
+@dataclass(frozen=True)
+class RankingConfig:
+    """The tunable knobs of the hybrid ranker, in one place.
+
+    Every value here was historically a hardcoded literal scattered through
+    `_find_semantic`/`fusion`/`_type_multiplier`. Bundling them lets the
+    offline eval harness (`scripts/eval_retrieval.py`) sweep them against a
+    golden set and pick winners by NDCG/MRR instead of intuition. The
+    field defaults reproduce the pre-refactor behaviour byte-for-byte — see
+    `tests/test_ranking_config.py`, which guards that invariant.
+
+    Intentionally NOT exposed on the MCP `find` tool signature: claude.ai
+    needs no knobs API. It's an internal seam for measurement + tuning.
+    """
+
+    rrf_k: int = 60  # Cormack/Clarke/Buettcher 2009 default; fusion.py
+    compiled_boost: float = 1.15  # must equal _COMPILED_BOOST
+    source_penalty: float = 0.85  # must equal _SOURCE_PENALTY
+    candidate_multiplier: int = 5  # candidate_k = max(limit*mult, floor)
+    candidate_floor: int = 50
+    graph_seed_cap: int = 20  # per-ranker fanout cap for 1-hop expansion
+
+
+DEFAULT_RANKING = RankingConfig()
+
+
 @dataclass
 class ParsedPage:
     path: Path  # absolute
@@ -189,6 +215,7 @@ def find(
     graph: bool = True,
     rerank: bool = False,
     prefer_compiled: bool = True,
+    config: RankingConfig | None = None,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -260,6 +287,7 @@ def find(
         types=types, projects=projects, tags=tags,
         limit=limit, scope=scope, mode=mode, graph=graph, rerank=rerank,
         prefer_compiled=prefer_compiled,
+        config=config or DEFAULT_RANKING,
     )
 
 
@@ -328,13 +356,14 @@ def _find_semantic(
     graph: bool = True,
     rerank: bool = False,
     prefer_compiled: bool = True,
+    config: RankingConfig = DEFAULT_RANKING,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
     from . import bm25, embeddings, fusion
 
     # Pull more than we need so post-filter losses don't starve the result.
-    candidate_k = max(limit * 5, 50)
+    candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
 
     # ---- Vector contribution ----
     vector_ranking: list[str] = []
@@ -402,7 +431,7 @@ def _find_semantic(
         graph_seeds: list[str] = []
         seen_seed: set[str] = set()
         for r in (vector_ranking, bm25_ranking):
-            for p in r[:20]:  # cap fanout
+            for p in r[:config.graph_seed_cap]:  # cap fanout
                 if p in seen_seed:
                     continue
                 seen_seed.add(p)
@@ -454,12 +483,12 @@ def _find_semantic(
             limit=limit, scope=scope,
         )
 
-    fused = fusion.reciprocal_rank_fusion(rankings, k=60)
+    fused = fusion.reciprocal_rank_fusion(rankings, k=config.rrf_k)
     # Apply type-weight boost before iterating fused candidates — affects the
     # iteration order for non-rerank flows. For rerank, the boost is also
     # applied to rerank_score below so it survives the final sort.
     if prefer_compiled:
-        fused = _apply_type_boost(fused, vault_root)
+        fused = _apply_type_boost(fused, vault_root, config)
     vector_paths: set[str] = set(vector_ranking)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
@@ -553,7 +582,7 @@ def _find_semantic(
             if prefer_compiled:
                 for h in hits:
                     if h.rerank_score is not None:
-                        h.rerank_score *= _type_multiplier(h.type)
+                        h.rerank_score *= _type_multiplier(h.type, config)
             hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
         except ImportError as e:
             log.warning("rerank requested but reranker unavailable: %s", e)
@@ -581,16 +610,20 @@ _COMPILED_BOOST = 1.15
 _SOURCE_PENALTY = 0.85
 
 
-def _type_multiplier(page_type: str | None) -> float:
+def _type_multiplier(
+    page_type: str | None, config: RankingConfig = DEFAULT_RANKING
+) -> float:
     if page_type in _COMPILED_TYPES:
-        return _COMPILED_BOOST
+        return config.compiled_boost
     if page_type in _SOURCE_TYPES:
-        return _SOURCE_PENALTY
+        return config.source_penalty
     return 1.0
 
 
 def _apply_type_boost(
-    fused: list[tuple[str, float]], vault_root: Path
+    fused: list[tuple[str, float]],
+    vault_root: Path,
+    config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
     """Re-sort fused `(path, score)` pairs after applying per-type multipliers.
 
@@ -600,7 +633,7 @@ def _apply_type_boost(
     adjusted: list[tuple[str, float]] = []
     for path, score in fused:
         page = _CACHE.get(vault_root / path, vault_root)
-        mult = _type_multiplier(page.page_type if page else None)
+        mult = _type_multiplier(page.page_type if page else None, config)
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted

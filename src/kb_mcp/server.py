@@ -36,6 +36,8 @@ from . import add as add_module
 from . import append_to_file as append_to_file_module
 from . import audit as audit_module
 from . import audit_fix as audit_fix_module
+from . import compile_proposal as compile_proposal_module
+from . import corpus_aware as corpus_aware_module
 from . import create_directory as create_directory_module
 from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
@@ -51,11 +53,12 @@ from . import list_trash as list_trash_module
 from . import move_file as move_file_module
 from . import note as note_module
 from . import preserve as preserve_module
+from . import query_log
 from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import schema
 from . import set_frontmatter_field as set_frontmatter_field_module
-from .vault import resolve_vault
+from .vault import find_body_wikilinks, resolve_vault
 
 
 log = logging.getLogger(__name__)
@@ -379,7 +382,91 @@ def build_server(*, require_auth: bool) -> FastMCP:
             rerank=rerank,
             prefer_compiled=prefer_compiled,
         )
+        # Durable structured log → feeds the offline retrieval feedback loop.
+        # Best-effort; never affects the returned result.
+        query_log.log_find_call(
+            query=query, mode=mode, scope=scope,
+            types=types, projects=projects, tags=tags,
+            limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
+            graph=graph, hits=hits,
+        )
         return [h.as_dict() for h in hits]
+
+    @mcp.tool
+    def suggest_links(
+        path: str | None = None,
+        draft_title: str | None = None,
+        draft_body: str | None = None,
+        limit: int = 8,
+        scope: str = "kb",
+    ) -> list[dict]:
+        """Suggest existing KB pages a note should link to. Read-only.
+
+        Closes the corpus-blind-write gap: surfaces the related prior work a
+        draft (or an existing page) should connect to, so the graph gets denser
+        with every write instead of just bigger. Pure retrieval — it reuses the
+        same hybrid ranker as `find`, prefers well-connected hubs, and excludes
+        the page itself plus anything it already links. Suggestions are
+        non-binding: YOU decide which to wire in (e.g. via a follow-up `edit`).
+
+        Two call shapes:
+        - `path`: suggest links for an EXISTING page (densify it retroactively).
+          Same path conventions as `get`/`find`.
+        - `draft_title` + `draft_body`: suggest links for a note you're about to
+          create, BEFORE calling `note` — so you can cite/connect on first write.
+
+        Args:
+            path: Existing page to suggest links for. Mutually exclusive with
+                the draft_* args.
+            draft_title: Title of a not-yet-written note.
+            draft_body: Body (markdown) of a not-yet-written note. Wikilinks
+                already present in it are treated as "already linked" and excluded.
+            limit: Max suggestions (default 8).
+            scope: "kb" (default) or "vault" — same meaning as `find`.
+
+        Returns:
+            List of {path, title, type, why, excerpt}, best-first. `why`
+            explains the match (e.g. "semantic #2, 4 shared link(s) (hub)").
+            Empty list if nothing relevant or the draft/page is empty.
+
+        Errors:
+            INVALID_SUGGEST (neither path nor draft supplied); plus get-style
+            path errors (NOT_FOUND, INVALID_PATH) when `path` doesn't resolve.
+        """
+        if path:
+            try:
+                gp = get_page_module.get_page(vault_root, path=path)
+            except get_page_module.GetError as e:
+                raise ValueError(f"{e.code}: {e.reason}") from e
+            page = find_module._CACHE.get(vault_root / gp.path, vault_root)
+            if page is None:
+                raise ValueError(f"UNREADABLE: could not parse {gp.path}")
+            existing_links = set(
+                find_module._outbound_wikilink_paths(page, vault_root)
+            )
+            suggestions = corpus_aware_module.suggest_related(
+                vault_root, title=page.title, body=page.body,
+                self_path=page.rel_path, existing_links=existing_links,
+                limit=limit, scope=scope,
+            )
+        elif draft_title or draft_body:
+            body = draft_body or ""
+            existing_links = set()
+            for m in find_body_wikilinks(body):
+                inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+                if inner:
+                    existing_links.add(inner)
+            suggestions = corpus_aware_module.suggest_related(
+                vault_root, title=draft_title or "", body=body,
+                self_path=None, existing_links=existing_links,
+                limit=limit, scope=scope,
+            )
+        else:
+            raise ValueError(
+                "INVALID_SUGGEST: provide either `path` (existing page) or "
+                "`draft_title`/`draft_body` (a note you're about to write)"
+            )
+        return [s.as_dict() for s in suggestions]
 
     @mcp.tool
     def add(
@@ -426,6 +513,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             raise ValueError(
                 f"{e.code}: {e.reason} (missing: {e.missing})"
             ) from e
+        query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
         return result.as_dict()
 
     @mcp.tool
@@ -560,6 +648,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
             raise ValueError(
                 f"{e.code}: {e.reason} (missing: {e.missing})"
             ) from e
+        query_log.log_write_call(
+            tool="note", written_path=result.path, cited_sources=sources
+        )
         return result.as_dict()
 
     @mcp.tool
@@ -652,6 +743,45 @@ def build_server(*, require_auth: bool) -> FastMCP:
             rebuild_embeddings=rebuild_embeddings,
         )
         return report.as_dict()
+
+    @mcp.tool
+    def propose_compilation(
+        sources: list[str],
+        suggested_title: str | None = None,
+    ) -> dict:
+        """Draft a compiled-note scaffold from unprocessed source(s). Read-only.
+
+        The backlog-drain companion to `audit`'s `unprocessed_source` findings:
+        point it at one or more raw sources and it hands back a ready-to-fill
+        note skeleton — inferred note_type, a Question/Findings/Connections (or
+        Claim/…) outline, the `sources[]` to cite, and adjacent compiled pages to
+        link (computed via the same hybrid retrieval as `suggest_links`). It
+        does NOT write anything: you fill the prose and call `note()` with the
+        returned `suggested_sources` + `suggested_connections`.
+
+        Group sources yourself before calling — pass a set that genuinely belongs
+        in one note (the audit list is aged oldest-first to help you triage).
+
+        Args:
+            sources: Vault-relative paths/wikilinks to the source(s) to compile.
+                Same path conventions as `note.sources` (brackets and the
+                leading `Knowledge Base/` are tolerated).
+            suggested_title: Optional title override; otherwise one is derived
+                from the source titles.
+
+        Returns:
+            {suggested_note_type, suggested_title, suggested_sources,
+             suggested_connections, outline_markdown, warnings}.
+
+        Errors:
+            INVALID_PROPOSE (no sources); SOURCES_NOT_FOUND (none resolved).
+        """
+        try:
+            return compile_proposal_module.propose_compilation(
+                vault_root, sources=sources, suggested_title=suggested_title
+            )
+        except compile_proposal_module.ProposeError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
 
     @mcp.tool
     def get(path: str) -> dict:
@@ -849,6 +979,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
             raise ValueError(
                 f"{e.code}: {e.reason} (missing: {e.missing})"
             ) from e
+        query_log.log_write_call(
+            tool="replace", written_path=result.new_path, cited_sources=sources
+        )
         return result.as_dict()
 
     @mcp.tool

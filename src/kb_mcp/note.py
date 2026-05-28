@@ -30,16 +30,19 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import corpus_aware
 from . import indexes
 from . import project_keys as project_keys_module
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    find_body_wikilinks,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
@@ -107,9 +110,16 @@ STATUS_PRODUCTION = (
 class NoteResult:
     path: str  # vault-relative
     warnings: list[str]
+    # Corpus-aware "you might want to link these" hints. Non-binding — the
+    # client decides. Omitted from as_dict() when empty so existing callers
+    # (and the ~256 tests) see no shape change unless a suggestion fires.
+    suggestions: list[dict] = field(default_factory=list)
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "warnings": self.warnings}
+        out: dict = {"path": self.path, "warnings": self.warnings}
+        if self.suggestions:
+            out["suggestions"] = self.suggestions
+        return out
 
 
 @dataclass
@@ -260,6 +270,37 @@ def note(
         content, vault_root, resolver=resolver
     )
 
+    # Corpus-aware nudges — best-effort, must NEVER block or roll back the write.
+    # Computed PRE-write so the new note isn't in the sidecar yet (no self-match,
+    # no 70MB matrix reload). Skipped entirely when embeddings are disabled, so
+    # the fast test suite and existing note() tests see no behaviour change.
+    corpus_suggestions: list[dict] = []
+    dup_warnings: list[str] = []
+    if not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
+        try:
+            existing_links: set[str] = set(sources_norm)
+            for m in find_body_wikilinks(body_clean):
+                inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+                if inner:
+                    existing_links.add(inner)
+            corpus_suggestions = [
+                s.as_dict()
+                for s in corpus_aware.suggest_related(
+                    vault_root, title=title, body=body_clean,
+                    self_path=rel_note_no_ext, existing_links=existing_links,
+                    limit=6,
+                )
+            ]
+            dup_warnings = [
+                corpus_aware.dup_warning(c)
+                for c in corpus_aware.detect_duplicates(
+                    vault_root, title=title, body=body_clean,
+                    self_path=rel_note_no_ext, types_filter=[note_type],
+                )
+            ]
+        except Exception as e:  # noqa: BLE001 — nudges never break a write
+            log.debug("corpus-aware nudges failed (non-fatal): %s", e)
+
     note_md = _render_note(
         note_type=note_type,
         title=title,
@@ -287,7 +328,12 @@ def note(
 
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = [PlannedWrite(path=note_path, content=note_md)]
-    warnings: list[str] = list(autoregister_warnings) + list(source_warnings) + list(body_warnings)
+    warnings: list[str] = (
+        list(autoregister_warnings)
+        + list(source_warnings)
+        + list(body_warnings)
+        + list(dup_warnings)
+    )
     if slug_warning:
         warnings.append(slug_warning)
 
@@ -387,6 +433,7 @@ def note(
     return NoteResult(
         path=note_path.relative_to(vault_root).as_posix(),
         warnings=warnings,
+        suggestions=corpus_suggestions,
     )
 
 
