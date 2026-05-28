@@ -135,6 +135,75 @@ def _title_case_slug(key: str) -> str:
 _SLUG_RE = __import__("re").compile(r"^[a-z][a-z0-9-]{0,40}$")
 
 
+class ProjectKeyTypoError(ValueError):
+    """Raised when a new key looks like a typo of an existing registered key.
+
+    The caller's natural response is to re-call with the suggested key
+    instead — an LLM agent sees `close_match` in the error and self-corrects.
+    Hand-edit YAML if the new key really is a deliberate new concept.
+    """
+
+    def __init__(self, key: str, close_match: str, distance: int):
+        self.key = key
+        self.close_match = close_match
+        self.distance = distance
+        super().__init__(
+            f"project key {key!r} looks like a typo of existing key "
+            f"{close_match!r} (edit distance {distance}). Use the existing "
+            f"key, or hand-edit _Schema/project-keys.yaml if this is a "
+            f"deliberate new concept."
+        )
+
+
+def _levenshtein(a: str, b: str, *, max_dist: int = 3) -> int:
+    """Standard Levenshtein with an early-exit cap.
+
+    Returns `max_dist + 1` once the lower bound on remaining work exceeds
+    `max_dist` — we don't care about exact distances above the guard
+    threshold, only whether the key is "close" or not.
+    """
+    if a == b:
+        return 0
+    if abs(len(a) - len(b)) > max_dist:
+        return max_dist + 1
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i] + [0] * len(b)
+        row_min = i
+        for j, cb in enumerate(b, 1):
+            cost = 0 if ca == cb else 1
+            cur[j] = min(
+                cur[j - 1] + 1,        # insertion
+                prev[j] + 1,           # deletion
+                prev[j - 1] + cost,    # substitution
+            )
+            if cur[j] < row_min:
+                row_min = cur[j]
+        if row_min > max_dist:
+            return max_dist + 1
+        prev = cur
+    return prev[-1]
+
+
+# Distance ≤ this many edits → assume typo and block. Single-char typos
+# (substrate/subtsrate, q/Q-style mistakes) get caught; deliberately new
+# keys with 3+ edits from anything existing flow through silently.
+_TYPO_DISTANCE_THRESHOLD = 2
+
+
+def _closest_existing_key(
+    new_key: str, existing_keys: list[str]
+) -> tuple[str, int] | None:
+    """Return `(closest_key, distance)` if within the typo threshold, else None."""
+    best: tuple[str, int] | None = None
+    for existing in existing_keys:
+        d = _levenshtein(new_key, existing, max_dist=_TYPO_DISTANCE_THRESHOLD)
+        if d <= _TYPO_DISTANCE_THRESHOLD:
+            if best is None or d < best[1]:
+                best = (existing, d)
+    return best
+
+
 def register_project_key(
     vault_root: Path,
     key: str,
@@ -162,6 +231,17 @@ def register_project_key(
             f"project key {key!r} is not a valid slug "
             f"(must match {_SLUG_RE.pattern}; lowercase + dashes)"
         )
+
+    # Typo guard: catch single- or two-edit-distance mistakes BEFORE
+    # mutating the registry. An LLM agent's natural recovery is to re-call
+    # with the suggested key, so we want a hard error rather than a silent
+    # registration + warning that might get missed.
+    existing_registry = load_project_registry(vault_root)
+    close = _closest_existing_key(
+        key, list(existing_registry.project_to_folder.keys())
+    )
+    if close is not None and close[0] != key:
+        raise ProjectKeyTypoError(key, close[0], close[1])
 
     path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
     if not path.exists():

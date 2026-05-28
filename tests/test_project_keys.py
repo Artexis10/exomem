@@ -132,3 +132,67 @@ def test_note_projects_plural_auto_registers_each(vault: Path) -> None:
     msgs = " ".join(result.warnings)
     assert "vehicles" in msgs
     assert "automotive-something" in msgs
+
+
+def test_project_category_lands_in_yaml(vault: Path) -> None:
+    """`project_category` arg should propagate into the YAML on new-key registration."""
+    note_module.note(
+        vault,
+        content="# Note\n\n## Question\n\nbody",
+        note_type="research-note",
+        title="Categorised probe",
+        project="new-domain-key",
+        project_category="domain",
+        today=TODAY,
+    )
+    yaml_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    text = yaml_path.read_text(encoding="utf-8")
+    assert "new-domain-key:" in text
+    # The entry block should carry category: domain (not uncategorized).
+    snippet = text.split("new-domain-key:", 1)[1].split("\n\n", 1)[0]
+    assert "category: domain" in snippet
+
+
+def test_levenshtein_basic() -> None:
+    """Sanity check the edit-distance helper used by the typo guard."""
+    lev = project_keys_module._levenshtein
+    assert lev("substrate", "substrate") == 0
+    assert lev("substrate", "subtsrate") == 2  # adjacent swap = 2 edits
+    assert lev("q", "Q") == 1
+    assert lev("substrate", "completely-different") > 2
+
+
+def test_typo_within_distance_2_blocks_registration(vault: Path) -> None:
+    """A single- or double-char typo of an existing key should raise."""
+    # "subtsrate" → distance 2 from "substrate" (the adjacent-swap typo).
+    with pytest.raises(project_keys_module.ProjectKeyTypoError) as exc_info:
+        project_keys_module.register_project_key(vault, "subtsrate")
+    assert exc_info.value.close_match == "substrate"
+    assert exc_info.value.distance <= 2
+    # YAML wasn't created (the fallback registry was used; no mutation happened).
+    yaml_path = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    assert not yaml_path.exists()
+
+
+def test_typo_distance_3_or_more_registers_silently(vault: Path) -> None:
+    """A clearly-new key (distance 3+) goes through without challenge."""
+    key, folder, was_new = project_keys_module.register_project_key(
+        vault, "wholly-unrelated-key"
+    )
+    assert was_new
+    assert folder == "Wholly Unrelated Key"
+
+
+def test_note_surfaces_typo_as_project_key_typo_error(vault: Path) -> None:
+    """Typo via the note() entry point should raise NoteError code=PROJECT_KEY_TYPO."""
+    with pytest.raises(note_module.NoteError) as exc_info:
+        note_module.note(
+            vault,
+            content="# Note\n\n## Question\n\nbody",
+            note_type="research-note",
+            title="Typo probe",
+            project="helath",  # missing 't' — distance 1 from "health"
+            today=TODAY,
+        )
+    assert exc_info.value.code == "PROJECT_KEY_TYPO"
+    assert "health" in exc_info.value.reason  # suggestion present

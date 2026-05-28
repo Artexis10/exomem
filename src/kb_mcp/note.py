@@ -151,6 +151,7 @@ def note(
     host: str | None = None,
     editor: str | None = None,
     today: dt.date | None = None,
+    project_category: str | None = None,
 ) -> NoteResult:
     """Create a compiled note + update indexes/log + back-ref cited sources atomically.
 
@@ -183,13 +184,26 @@ def note(
                 continue
             try:
                 _, new_folder, was_new = project_keys_module.register_project_key(
-                    vault_root, cand
+                    vault_root, cand,
+                    category=project_category or "uncategorized",
                 )
                 if was_new:
+                    cat_note = (
+                        f", category: {project_category!r}"
+                        if project_category else ""
+                    )
                     autoregister_warnings.append(
                         f"Auto-registered project key {cand!r} (folder: "
-                        f"{new_folder!r})."
+                        f"{new_folder!r}{cat_note})."
                     )
+            except project_keys_module.ProjectKeyTypoError as e:
+                # Surface as a typed validation error — the agent's natural
+                # recovery is to re-call with the suggested key.
+                raise NoteError(
+                    code="PROJECT_KEY_TYPO",
+                    missing=["project" if cand == project else "projects"],
+                    reason=str(e),
+                ) from e
             except ValueError:
                 # Invalid slug — fall through to validation which will reject.
                 pass

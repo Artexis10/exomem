@@ -438,6 +438,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         published: str | None = None,
         host: str | None = None,
         editor: str | None = None,
+        project_category: str | None = None,
     ) -> dict:
         """Create a compiled note in the Knowledge Base.
 
@@ -540,6 +541,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 published=published,
                 host=host,
                 editor=editor,
+                project_category=project_category,
             )
         except note_module.NoteError as e:
             raise ValueError(
@@ -764,6 +766,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         published: str | None = None,
         host: str | None = None,
         editor: str | None = None,
+        project_category: str | None = None,
     ) -> dict:
         """Supersede an existing compiled page with a new one.
 
@@ -822,6 +825,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 published=published,
                 host=host,
                 editor=editor,
+                project_category=project_category,
             )
         except replace_module.ReplaceError as e:
             raise ValueError(
