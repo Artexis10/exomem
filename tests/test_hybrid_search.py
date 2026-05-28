@@ -297,6 +297,51 @@ def test_prefer_compiled_reorders_above_source(vault, source_schema) -> None:
     assert any("insight.md" in p for p in paths_off)
 
 
+def test_keyword_rank_populated_in_hybrid(vault) -> None:
+    """Pages that pass keyword's all-tokens-present gate should carry keyword_rank.
+
+    `EGCG` is a single-token query — every page that contains it as a
+    substring is a keyword match. Hybrid mode must surface those with
+    keyword_rank set, alongside whatever BM25/vector ranks they got.
+    """
+    bm25.clear_cache()
+    find_module.clear_cache()
+    hits = find_module.find(vault, query="EGCG", mode="hybrid", limit=10)
+    assert hits
+    with_kw = [h for h in hits if h.keyword_rank is not None]
+    assert with_kw, (
+        f"hybrid should surface keyword-matched paths with keyword_rank; "
+        f"got hits {[(h.path, h.bm25_rank, h.vector_rank, h.keyword_rank) for h in hits]}"
+    )
+    # First keyword-ranked hit's signals dict should include keyword_rank.
+    d = with_kw[0].as_dict()
+    assert "signals" in d and d["signals"].get("keyword_rank") == with_kw[0].keyword_rank
+
+
+def test_hybrid_is_strict_superset_of_keyword(vault) -> None:
+    """Recall-floor invariant: hybrid never returns fewer paths than keyword.
+
+    The motivating regression: BM25 + vector can bury a literal match under
+    thematically-noisy hits, and keyword would surface it while hybrid
+    dropped it. Adding keyword as a fourth ranker guarantees this can't
+    happen — for any query, hybrid_paths ⊇ keyword_paths.
+    """
+    queries = ["EGCG", "metabolism", "engine", "insulin", "Karpathy"]
+    for q in queries:
+        bm25.clear_cache()
+        find_module.clear_cache()
+        # Match limits so the comparison is fair (hybrid limit constrains
+        # results just like keyword's).
+        kw = find_module.find(vault, query=q, mode="keyword", limit=20)
+        hy = find_module.find(vault, query=q, mode="hybrid", limit=20)
+        kw_paths = {h.path for h in kw}
+        hy_paths = {h.path for h in hy}
+        missing = kw_paths - hy_paths
+        assert not missing, (
+            f"hybrid missing keyword matches for {q!r}: {missing}"
+        )
+
+
 def test_graph_in_degree_counts_inbound_from_seeds(vault) -> None:
     """A page wikilinked from multiple strong matches should expose graph_in_degree.
 

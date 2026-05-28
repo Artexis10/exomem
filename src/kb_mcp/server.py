@@ -80,13 +80,18 @@ class CallTraceMiddleware(Middleware):
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         import time
         tool_name = _extract_tool_name(context.message)
-        _call_log.info(f"event=tool_start tool={tool_name}")
+        # For find calls, log query + mode + scope so failure modes
+        # ("hybrid whiffed on X") are reproducible without a screenshot.
+        # Other tools log only tool name + duration — their payloads can be
+        # huge (add(content=...)) or sensitive (preserve()).
+        extras = _find_call_summary(context.message) if tool_name == "find" else ""
+        _call_log.info(f"event=tool_start tool={tool_name}{extras}")
         t0 = time.perf_counter()
         try:
             result = await call_next(context)
             dur = round((time.perf_counter() - t0) * 1000, 2)
             _call_log.info(
-                f"event=tool_success tool={tool_name} duration_ms={dur}"
+                f"event=tool_success tool={tool_name} duration_ms={dur}{extras}"
             )
             return result
         except Exception as e:
@@ -95,7 +100,7 @@ class CallTraceMiddleware(Middleware):
             # the call-log line readable. Full tracebacks land in service.err.log.
             err = type(e).__name__
             _call_log.error(
-                f"event=tool_error tool={tool_name} duration_ms={dur} err={err}"
+                f"event=tool_error tool={tool_name} duration_ms={dur} err={err}{extras}"
             )
             raise
 
@@ -118,6 +123,43 @@ def _extract_tool_name(message) -> str:
         except (AttributeError, KeyError, TypeError):
             continue
     return "?"
+
+
+def _extract_tool_args(message) -> dict:
+    """Pull the tool-call arguments out of the request payload, defensively.
+
+    Returns `{}` when the shape doesn't match (so logging never raises).
+    """
+    for accessor in (
+        lambda m: m.params.arguments,
+        lambda m: m["params"]["arguments"],
+        lambda m: m.arguments,
+    ):
+        try:
+            v = accessor(message)
+            if isinstance(v, dict):
+                return v
+        except (AttributeError, KeyError, TypeError):
+            continue
+    return {}
+
+
+def _find_call_summary(message) -> str:
+    """One-line summary of find()'s key args for the call log.
+
+    Keeps the query truncated so a long natural-language query doesn't blow
+    up log lines, but long enough that "hybrid whiffed on X" is debuggable.
+    """
+    args = _extract_tool_args(message)
+    if not args:
+        return ""
+    q = str(args.get("query", ""))
+    if len(q) > 120:
+        q = q[:117] + "..."
+    q = q.replace('"', "'")  # keep the log line single-quote-friendly
+    mode = args.get("mode", "hybrid")
+    scope = args.get("scope", "kb")
+    return f' query="{q}" mode={mode} scope={scope}'
 
 
 def _server_icons() -> list[mcp.types.Icon]:

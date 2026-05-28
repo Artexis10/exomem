@@ -120,6 +120,7 @@ class Hit:
     vector_score: float | None = None
     graph_hop: bool = False
     graph_in_degree: int = 0
+    keyword_rank: int | None = None
     rerank_score: float | None = None
 
     def as_dict(self) -> dict:
@@ -142,6 +143,8 @@ class Hit:
             signals["graph_hop"] = True
         if self.graph_in_degree:
             signals["graph_in_degree"] = self.graph_in_degree
+        if self.keyword_rank is not None:
+            signals["keyword_rank"] = self.keyword_rank
         if self.rerank_score is not None:
             signals["rerank_score"] = round(self.rerank_score, 4)
         if signals:
@@ -361,6 +364,7 @@ def _find_semantic(
         log.warning("vector search failed: %s; falling back to BM25-only", e)
 
     bm25_ranking: list[str] = []
+    keyword_ranking: list[str] = []
     if mode == "vector":
         rankings = [vector_ranking] if vector_ranking else []
     else:
@@ -372,7 +376,18 @@ def _find_semantic(
             log.warning("BM25 unavailable (%s); using vector-only", e)
         except Exception as e:
             log.warning("BM25 search failed: %s; using vector-only", e)
-        rankings = [r for r in (vector_ranking, bm25_ranking) if r]
+
+        # ---- Keyword contribution: literal all-tokens-present matches ----
+        # Walking the KB for substring matches makes hybrid a strict superset
+        # of keyword — any page keyword would surface lands in the candidate
+        # pool regardless of where BM25/vector rank it. Closes the recall
+        # hole where BM25 buries a target under thematically-noisy hits with
+        # high TF on a shared common token (e.g. "Borough Market" buried
+        # under Q marketing pages on the "market" stem).
+        keyword_ranking = _keyword_match_paths(vault_root, query_norm, scope)
+        rankings = [
+            r for r in (vector_ranking, bm25_ranking, keyword_ranking) if r
+        ]
 
     # ---- Graph expansion: 1-hop outbound wikilinks of STRONG candidates ----
     # Strong = ranked by vector (semantically gated by construction), or
@@ -425,6 +440,8 @@ def _find_semantic(
     # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
     vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
     bm25_rank_by_path = {p: i + 1 for i, p in enumerate(bm25_ranking)}
+    keyword_rank_by_path = {p: i + 1 for i, p in enumerate(keyword_ranking)}
+    keyword_set: set[str] = set(keyword_ranking)
     graph_set = set(graph_ranking)
 
     if not rankings:
@@ -468,10 +485,15 @@ def _find_semantic(
         if not _passes_filters(page, types=types, projects=projects, tags=tags):
             continue
         keyword_excerpt = _make_excerpt(page, query_norm)
-        if rel_path not in vector_paths and rel_path not in graph_set and keyword_excerpt is None:
-            # No literal match, not a graph hop, not vector-ranked. Try stem
-            # match before dropping — recovers morphology ("regulation"
-            # matching a "regulator" page).
+        if (
+            rel_path not in vector_paths
+            and rel_path not in graph_set
+            and rel_path not in keyword_set
+            and keyword_excerpt is None
+        ):
+            # No literal match, not a graph hop, not vector-ranked, not in
+            # the keyword scan. Try stem match before dropping — recovers
+            # morphology ("regulation" matching a "regulator" page).
             if not _stem_tokens_present(page, query_norm):
                 continue
             keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
@@ -500,6 +522,7 @@ def _find_semantic(
             vector_score=vector_score_by_path.get(rel_path),
             graph_hop=is_graph_only,
             graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
+            keyword_rank=keyword_rank_by_path.get(rel_path),
         ))
         if len(hits) >= target_n:
             break
@@ -575,6 +598,38 @@ def _apply_type_boost(
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
+
+
+def _keyword_match_paths(vault_root: Path, query_norm: str, scope: str) -> list[str]:
+    """Return paths that satisfy keyword mode's all-tokens-present gate.
+
+    Sorted by `updated:` desc to mirror keyword-mode's ordering, so RRF's
+    rank reflects keyword's own preference. Walks the same tree the keyword
+    flow would, honors the navigation-file filter, and skips pages that
+    can't be parsed.
+    """
+    if not query_norm:
+        return []
+    if scope == "kb":
+        kb = vault_root / "Knowledge Base"
+        if not kb.is_dir():
+            return []
+        walk = _walk_md(kb)
+    else:
+        from .vault import walk_vault_md
+        walk = walk_vault_md(vault_root)
+    matches: list[tuple[str, str]] = []  # (updated, rel_path)
+    for path in walk:
+        if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        page = _CACHE.get(path, vault_root)
+        if page is None:
+            continue
+        if _make_excerpt(page, query_norm) is None:
+            continue
+        matches.append((page.updated or "0000-00-00", page.rel_path))
+    matches.sort(reverse=True)  # most-recent first
+    return [p for _, p in matches]
 
 
 def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
