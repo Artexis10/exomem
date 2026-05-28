@@ -171,6 +171,22 @@ def build_server(*, require_auth: bool) -> FastMCP:
         "vault=%s source_types=%s", vault_root, source_schema.source_types
     )
 
+    # Preload bge-base so the first hybrid query in this process is fast
+    # (otherwise the HF-Hub HEAD redirects + tokenizer load happen on the
+    # first user-facing call — ~30s of dead air). Tests set
+    # KB_MCP_DISABLE_EMBEDDINGS to skip this entirely.
+    if not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
+        try:
+            from . import embeddings
+            log.info("preloading embedding model %s", embeddings.MODEL_NAME)
+            embeddings.get_model()
+            log.info("embedding model ready")
+        except Exception as e:  # noqa: BLE001 — preload is best-effort
+            log.warning(
+                "embedding preload failed (%s); first hybrid query will "
+                "pay the cost", e,
+            )
+
     auth = None
     if require_auth:
         base_url = os.environ.get("KB_MCP_BASE_URL", "").strip().rstrip("/")
@@ -233,6 +249,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
         limit: int = 15,
         scope: str = "kb",
         mode: str = "hybrid",
+        graph: bool = True,
+        rerank: bool = False,
     ) -> list[dict]:
         """Search the vault. Filters are AND'd; tag/project lists are OR'd within.
 
@@ -260,15 +278,28 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 embeddings via reciprocal rank fusion — best recall on
                 natural-language queries. "keyword" preserves the original
                 case-insensitive substring matching, sorted by `updated:`.
-                "vector" is vector-only (testing aid). If the embedding
-                sidecar hasn't been built yet, hybrid degrades cleanly to
-                BM25-only; run `audit_fix(rebuild_embeddings=true)` to
+                "vector" is vector-only (testing aid). BM25 corpus is
+                Snowball-stemmed so "regulation" reaches pages with
+                "regulator"; keyword mode stays strict-substring. If the
+                embedding sidecar hasn't been built yet, hybrid degrades
+                to BM25-only; run `audit_fix(rebuild_embeddings=true)` to
                 populate it.
+            graph: When true (default) and mode is hybrid/vector, outbound
+                wikilinks of top BM25/vector candidates contribute a third
+                ranking — surfaces 1-hop neighbours of strong matches.
+            rerank: When true (off by default), runs the top fused
+                candidates through bge-reranker-base (a CrossEncoder) for
+                higher-precision ordering. Adds ~50ms/candidate; useful
+                when ambiguous queries float topically-off vector matches
+                to the top.
 
         Returns:
-            List of {path, type, scope, title, updated, excerpt}. In hybrid
-            mode `excerpt` shows the best-matching chunk; in keyword mode
-            it's a snippet anchored to the literal query match.
+            List of {path, type, scope, title, updated, excerpt[, signals]}.
+            In hybrid mode `excerpt` shows the best-matching chunk; in
+            keyword mode it's a snippet anchored to the literal query
+            match. `signals` (hybrid/vector only) carries per-ranker
+            position: {bm25_rank?, vector_rank?, vector_score?, graph_hop?,
+            rerank_score?} — handy for debugging why a hit ranked.
         """
         hits = find_module.find(
             vault_root,
@@ -279,6 +310,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
             limit=limit,
             scope=scope,
             mode=mode,
+            graph=graph,
+            rerank=rerank,
         )
         return [h.as_dict() for h in hits]
 

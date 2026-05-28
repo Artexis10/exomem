@@ -16,6 +16,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "numpy>=1.26",
     "torch>=2.12",
+    "snowballstemmer>=2.2",
 ]
 
 [dependency-groups]

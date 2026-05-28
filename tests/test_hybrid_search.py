@@ -140,6 +140,163 @@ def test_bm25_search_smoke(vault) -> None:
     assert any("metabolic-literacy" in p for p, _ in hits)
 
 
+def test_bm25_corpus_is_stemmed(vault) -> None:
+    """BM25 tokenization runs Snowball — query "compounding" matches "compound"."""
+    from kb_mcp import create_file as create_file_module
+    create_file_module.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/probe-stem-compound.md",
+        content="# Probe stem compound\n\nThis page mentions the word compound exactly once and nothing else lexically tied to the query.",
+        frontmatter={
+            "type": "insight",
+            "status": "active",
+            "created": "2026-05-28",
+            "updated": "2026-05-28",
+            "tags": [],
+        },
+    )
+    bm25.clear_cache()
+    find_module.clear_cache()
+    hits = bm25.search(vault, "compounding", k=5)
+    assert any("probe-stem-compound" in p for p, _ in hits), (
+        f"stemmed corpus should let 'compounding' match a page with only "
+        f"'compound'; got {hits}"
+    )
+
+
+def test_stem_aware_gate_recovers_morphological_match(vault) -> None:
+    """A page that uses 'regulator' should be reachable via 'regulation'.
+
+    Probes the BM25-only stem-aware gate in _find_semantic. Vector results
+    are disabled (KB_MCP_DISABLE_EMBEDDINGS), so the only way this page
+    reaches the result set is via BM25 (also stemmed) + the stem-aware
+    all-tokens-present check.
+    """
+    from kb_mcp import create_file as create_file_module
+    create_file_module.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/probe-stem-regulator.md",
+        content=(
+            "# Probe stem regulator\n\n"
+            "The thyroid acts as a regulator of basal metabolism. "
+            "Without that regulator, downstream tissues drift."
+        ),
+        frontmatter={
+            "type": "insight",
+            "status": "active",
+            "created": "2026-05-28",
+            "updated": "2026-05-28",
+            "tags": [],
+        },
+    )
+    bm25.clear_cache()
+    find_module.clear_cache()
+    hits = find_module.find(vault, query="regulator metabolism", mode="hybrid", limit=10)
+    assert any("probe-stem-regulator" in h.path for h in hits), (
+        "literal substring; sanity check failed"
+    )
+    hits = find_module.find(vault, query="regulation metabolism", mode="hybrid", limit=10)
+    assert any("probe-stem-regulator" in h.path for h in hits), (
+        "morphological match via stem-aware gate failed"
+    )
+
+    # Keyword mode must stay strict — should NOT find the page on 'regulation'.
+    hits = find_module.find(vault, query="regulation metabolism", mode="keyword", limit=10)
+    assert not any("probe-stem-regulator" in h.path for h in hits), (
+        "keyword mode is supposed to be strict-substring; do not stem"
+    )
+
+
+def test_hit_signals_populated_in_hybrid(vault) -> None:
+    """Hybrid mode should tag each hit with bm25_rank / vector_rank / etc."""
+    bm25.clear_cache()
+    find_module.clear_cache()
+    hits = find_module.find(vault, query="insulin", mode="hybrid", limit=5)
+    assert hits
+    # At least one hit should carry a bm25_rank (we know BM25 finds 'insulin'
+    # on the fixture). Vector ranks may be None if embeddings disabled.
+    assert any(h.bm25_rank is not None for h in hits)
+    d = hits[0].as_dict()
+    # When signals are present, they're under "signals" key; keyword-mode
+    # hits would omit it.
+    if hits[0].bm25_rank is not None:
+        assert "signals" in d
+        assert d["signals"].get("bm25_rank") == hits[0].bm25_rank
+
+
+def test_hit_signals_omitted_in_keyword(vault) -> None:
+    """Keyword-mode hits must not carry the signals key (backward compat)."""
+    hits = find_module.find(vault, query="EGCG", mode="keyword", limit=3)
+    assert hits
+    for h in hits:
+        assert h.bm25_rank is None
+        assert h.vector_rank is None
+        assert "signals" not in h.as_dict()
+
+
+def test_graph_expansion_surfaces_linked_neighbour(vault) -> None:
+    """A page linked from a query match should come back with graph_hop=True.
+
+    Builds a tiny graph: probe-graph-anchor mentions "specific anchor token";
+    probe-graph-neighbour shares no query token but is wikilinked from
+    -anchor. Querying for "anchor" should surface -neighbour via graph hop.
+    """
+    from kb_mcp import create_file as create_file_module
+    create_file_module.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/probe-graph-neighbour.md",
+        content="# Probe graph neighbour\n\nNo lexical overlap with the query at all.",
+        frontmatter={
+            "type": "insight",
+            "status": "active",
+            "created": "2026-05-28",
+            "updated": "2026-05-28",
+            "tags": [],
+        },
+    )
+    create_file_module.create_file(
+        vault,
+        path="Knowledge Base/Notes/Insights/probe-graph-anchor.md",
+        content=(
+            "# Probe graph anchor\n\n"
+            "Specific anchor token used here for the query. See also "
+            "[[Knowledge Base/Notes/Insights/probe-graph-neighbour]]."
+        ),
+        frontmatter={
+            "type": "insight",
+            "status": "active",
+            "created": "2026-05-28",
+            "updated": "2026-05-28",
+            "tags": [],
+        },
+    )
+    bm25.clear_cache()
+    find_module.clear_cache()
+    # Drop the resolver cache so the new files are visible.
+    find_module._RESOLVER_CACHE.clear()
+    hits = find_module.find(vault, query="specific anchor token", mode="hybrid",
+                            graph=True, limit=10)
+    paths = [h.path for h in hits]
+    assert any("probe-graph-anchor" in p for p in paths), (
+        f"anchor not in {paths}"
+    )
+    neighbour_hit = next(
+        (h for h in hits if "probe-graph-neighbour" in h.path), None,
+    )
+    assert neighbour_hit is not None, (
+        f"graph expansion should surface the linked neighbour; got {paths}"
+    )
+    assert neighbour_hit.graph_hop, (
+        "neighbour should be tagged graph_hop=True (it isn't in bm25 or vector)"
+    )
+
+    # graph=False should NOT surface the neighbour.
+    hits_no_graph = find_module.find(
+        vault, query="specific anchor token", mode="hybrid", graph=False, limit=10,
+    )
+    assert not any("probe-graph-neighbour" in h.path for h in hits_no_graph)
+
+
 # ============================================================================
 # Heavy tests — load bge model. Gated by importorskip + env-var override.
 # ============================================================================
@@ -188,6 +345,33 @@ def test_writer_updates_sidecar(vault, embeddings_enabled) -> None:
     assert any("glycemic-variability" in p for p in rel_paths), (
         f"new note not embedded; sidecar rows: {rel_paths}"
     )
+
+
+def test_rerank_reorders_top_k(vault, embeddings_enabled) -> None:
+    """rerank=True should at minimum populate Hit.rerank_score.
+
+    Reranker model loads on first call (~30s). We assert reranker SCORES are
+    attached, not a specific ordering — the relative ordering depends on
+    bge-reranker-base's training, which is opaque to test for content this
+    small. Smoke-level confidence is enough.
+    """
+    from kb_mcp import audit_fix as audit_fix_module
+    audit_fix_module.audit_fix(vault, rebuild_embeddings=True)
+    hits = find_module.find(
+        vault, query="metabolic disease", mode="hybrid",
+        rerank=True, limit=5,
+    )
+    assert hits
+    # At least one hit should carry a reranker score (None means the rerank
+    # step was skipped or failed).
+    assert any(h.rerank_score is not None for h in hits), (
+        "rerank=True should populate rerank_score on at least one hit"
+    )
+    # Scores attached → they should be reflected in ordering: top hit has the
+    # max rerank_score (after filtering out None).
+    scored = [h for h in hits if h.rerank_score is not None]
+    if len(scored) > 1:
+        assert scored[0].rerank_score >= max(h.rerank_score for h in scored)
 
 
 def test_hybrid_finds_semantic_match_keyword_misses(

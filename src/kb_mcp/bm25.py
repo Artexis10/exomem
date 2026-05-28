@@ -3,12 +3,19 @@
 Cheap to rebuild for a 600-file vault (<1s), so we don't bother with
 incremental updates — on every `search()` call we scan the tree once for
 the max observed mtime and rebuild if it advanced.
+
+Tokens are stemmed with Snowball (English) so morphologically related
+words score together — "regulation" matches a page with "regulator",
+"compounding" matches "compound". The same stemmer is exposed to find.py
+for its stem-aware all-tokens-present gate.
 """
 
 from __future__ import annotations
 
 import logging
 import re
+import threading
+from functools import lru_cache
 from pathlib import Path
 
 from . import find as find_module
@@ -19,9 +26,33 @@ log = logging.getLogger(__name__)
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
+_STEMMER = None
+_STEMMER_LOCK = threading.Lock()
 
-def _tokenize(text: str) -> list[str]:
-    return _TOKEN_RE.findall(text.lower())
+
+def _get_stemmer():
+    global _STEMMER
+    if _STEMMER is None:
+        with _STEMMER_LOCK:
+            if _STEMMER is None:
+                import snowballstemmer
+                _STEMMER = snowballstemmer.stemmer("english")
+    return _STEMMER
+
+
+@lru_cache(maxsize=16384)
+def stem_word(word: str) -> str:
+    """Memoized single-word stem. Tokens repeat across documents at scale."""
+    return _get_stemmer().stemWord(word)
+
+
+def tokenize(text: str) -> list[str]:
+    """Lowercase, split on word chars, Snowball-stem each token."""
+    return [stem_word(w) for w in _TOKEN_RE.findall(text.lower())]
+
+
+# Back-compat alias for callers that still import _tokenize.
+_tokenize = tokenize
 
 
 class BM25Index:

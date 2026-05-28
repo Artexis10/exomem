@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
+RERANKER_NAME = "BAAI/bge-reranker-base"
 VECTOR_DIM = 768
 # bge documentation recommends prefixing queries (not passages) for retrieval.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
@@ -38,6 +39,8 @@ MAX_WORDS_PER_CHUNK = 350
 
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
+_RERANKER = None
+_RERANKER_LOCK = threading.Lock()
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
 
 
@@ -75,6 +78,42 @@ def get_model():
         log.info("loading embedding model %s on %s", MODEL_NAME, device)
         _MODEL = SentenceTransformer(MODEL_NAME, device=device)
     return _MODEL
+
+
+def get_reranker():
+    """Lazy singleton for the cross-encoder reranker. CUDA when available."""
+    global _RERANKER
+    if _RERANKER is not None:
+        return _RERANKER
+    with _RERANKER_LOCK:
+        if _RERANKER is not None:
+            return _RERANKER
+        import torch
+        from sentence_transformers import CrossEncoder
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log.info("loading reranker %s on %s", RERANKER_NAME, device)
+        _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
+    return _RERANKER
+
+
+def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
+    """Score `(query, passage)` pairs with bge-reranker-base. Returns float32 (N,).
+
+    Higher = more relevant. Scores are not bounded to [0, 1] — they're the
+    CrossEncoder's raw logits, useful for relative ordering only.
+    """
+    if not passages:
+        return np.zeros(0, dtype=np.float32)
+    model = get_reranker()
+    pairs = [(query, p) for p in passages]
+    scores = model.predict(
+        pairs,
+        batch_size=32,
+        convert_to_numpy=True,
+        show_progress_bar=False,
+    )
+    return scores.astype(np.float32, copy=False)
 
 
 def chunk_text(title: str, body: str) -> list[str]:

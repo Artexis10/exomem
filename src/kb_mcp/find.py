@@ -104,9 +104,20 @@ class Hit:
     title: str
     updated: str
     excerpt: str
+    # Per-mode ranking signals — populated by hybrid/vector modes only.
+    # `None` means the ranker did not surface this path in its top-K. The
+    # presence of these fields lets a caller introspect WHY a hit ranked
+    # (vector_rank=1 vs bm25_rank=1 vs graph_hop=True) without re-running
+    # the query in each mode. Always omitted from as_dict() when empty so
+    # keyword-mode callers don't see noise.
+    bm25_rank: int | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+    graph_hop: bool = False
+    rerank_score: float | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out: dict = {
             "path": self.path,
             "type": self.type,
             "scope": self.scope,
@@ -114,6 +125,20 @@ class Hit:
             "updated": self.updated,
             "excerpt": self.excerpt,
         }
+        signals: dict = {}
+        if self.bm25_rank is not None:
+            signals["bm25_rank"] = self.bm25_rank
+        if self.vector_rank is not None:
+            signals["vector_rank"] = self.vector_rank
+        if self.vector_score is not None:
+            signals["vector_score"] = round(self.vector_score, 4)
+        if self.graph_hop:
+            signals["graph_hop"] = True
+        if self.rerank_score is not None:
+            signals["rerank_score"] = round(self.rerank_score, 4)
+        if signals:
+            out["signals"] = signals
+        return out
 
 
 @dataclass
@@ -150,6 +175,8 @@ def find(
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
+    graph: bool = True,
+    rerank: bool = False,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -173,6 +200,17 @@ def find(
       for backward compatibility.
     - "vector": vector embeddings only, no BM25. Testing aid for
       isolating semantic recall.
+
+    `graph`: when True (default for hybrid/vector), the outbound wikilinks
+    of top-ranked BM25/vector candidates contribute a third ranking that
+    surfaces 1-hop neighbours of strong matches. Set False for pure
+    BM25+vector hybrid without graph expansion.
+
+    `rerank`: when True (off by default; opt-in due to model-load cost),
+    runs the top `3 * limit` fused candidates through BAAI/bge-reranker-base
+    (a CrossEncoder) and re-sorts by reranker score. Recovers ordering
+    quality on ambiguous queries — the LLM-Wiki cases where vector floats
+    a topically-off doc to the top. ~50ms / candidate on Blackwell.
     """
     if scope not in ("kb", "vault"):
         raise ValueError(
@@ -201,7 +239,7 @@ def find(
         vault_root,
         query=query, query_norm=query_norm,
         types=types, projects=projects, tags=tags,
-        limit=limit, scope=scope, mode=mode,
+        limit=limit, scope=scope, mode=mode, graph=graph, rerank=rerank,
     )
 
 
@@ -265,6 +303,8 @@ def _find_semantic(
     limit: int,
     scope: str,
     mode: str,
+    graph: bool = True,
+    rerank: bool = False,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
@@ -276,6 +316,7 @@ def _find_semantic(
     # ---- Vector contribution ----
     vector_ranking: list[str] = []
     chunk_text_by_path: dict[str, str] = {}
+    vector_score_by_path: dict[str, float] = {}
     try:
         idx = embeddings.EmbeddingIndex(vault_root)
         query_vec = embeddings.embed_texts([query], is_query=True)[0]
@@ -290,6 +331,7 @@ def _find_semantic(
             best_per_file.keys(), key=lambda p: -best_per_file[p][0]
         )[:candidate_k]
         chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
+        vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
     except ImportError as e:
         log.warning(
             "vector search unavailable (%s); falling back to BM25-only ranking",
@@ -298,11 +340,11 @@ def _find_semantic(
     except Exception as e:
         log.warning("vector search failed: %s; falling back to BM25-only", e)
 
+    bm25_ranking: list[str] = []
     if mode == "vector":
         rankings = [vector_ranking] if vector_ranking else []
     else:
         # ---- BM25 contribution ----
-        bm25_ranking: list[str] = []
         try:
             bm25_hits = bm25.search(vault_root, query, k=candidate_k, scope=scope)
             bm25_ranking = [p for p, _ in bm25_hits]
@@ -311,6 +353,51 @@ def _find_semantic(
         except Exception as e:
             log.warning("BM25 search failed: %s; using vector-only", e)
         rankings = [r for r in (vector_ranking, bm25_ranking) if r]
+
+    # ---- Graph expansion: 1-hop outbound wikilinks of STRONG candidates ----
+    # Strong = ranked by vector (semantically gated by construction), or
+    # BM25-ranked AND passing the stem-aware all-tokens-present check. Seeding
+    # from raw BM25 alone leaks neighbours of weak matches into results
+    # (e.g. queries like "skip-marker-abc" where every token is common).
+    graph_ranking: list[str] = []
+    if graph:
+        primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
+        graph_seeds: list[str] = []
+        seen_seed: set[str] = set()
+        for r in (vector_ranking, bm25_ranking):
+            for p in r[:20]:  # cap fanout
+                if p in seen_seed:
+                    continue
+                seen_seed.add(p)
+                if p in set(vector_ranking):
+                    graph_seeds.append(p)
+                    continue
+                # BM25-only seed: gate via stem-aware tokens-present.
+                page = _CACHE.get(vault_root / p, vault_root)
+                if page is None:
+                    continue
+                if (
+                    _make_excerpt(page, query_norm) is not None
+                    or _stem_tokens_present(page, query_norm)
+                ):
+                    graph_seeds.append(p)
+        seen_target: set[str] = set()
+        for seed_rel in graph_seeds:
+            page = _CACHE.get(vault_root / seed_rel, vault_root)
+            if page is None:
+                continue
+            for target_rel in _outbound_wikilink_paths(page, vault_root):
+                if target_rel in primary_set or target_rel in seen_target:
+                    continue
+                seen_target.add(target_rel)
+                graph_ranking.append(target_rel)
+        if graph_ranking:
+            rankings.append(graph_ranking)
+
+    # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
+    vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
+    bm25_rank_by_path = {p: i + 1 for i, p in enumerate(bm25_ranking)}
+    graph_set = set(graph_ranking)
 
     if not rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
@@ -331,6 +418,8 @@ def _find_semantic(
     # any single token with the query (false positives). Vector-ranked
     # candidates skip that gate by design: surfacing semantically-similar
     # files that don't contain the literal tokens is the whole point.
+    # When reranking, we over-fetch then trim post-rerank.
+    target_n = limit * 3 if rerank else limit
     hits: list[Hit] = []
     seen: set[str] = set()
     for rel_path, _score in fused:
@@ -344,11 +433,26 @@ def _find_semantic(
         if not _passes_filters(page, types=types, projects=projects, tags=tags):
             continue
         keyword_excerpt = _make_excerpt(page, query_norm)
-        if rel_path not in vector_paths and keyword_excerpt is None:
-            # BM25-only, no literal match. Drop.
-            continue
+        if rel_path not in vector_paths and rel_path not in graph_set and keyword_excerpt is None:
+            # No literal match, not a graph hop, not vector-ranked. Try stem
+            # match before dropping — recovers morphology ("regulation"
+            # matching a "regulator" page).
+            if not _stem_tokens_present(page, query_norm):
+                continue
+            keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
+        elif rel_path in graph_set and keyword_excerpt is None:
+            # Graph-hop neighbour: no all-tokens-present requirement. The
+            # rationale for surfacing is connectivity to a strong match,
+            # not lexical overlap with the query. Use leading body snippet.
+            body = page.body.strip()
+            keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
         chunk = chunk_text_by_path.get(rel_path)
         excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
+        is_graph_only = (
+            rel_path in graph_set
+            and rel_path not in vector_rank_by_path
+            and rel_path not in bm25_rank_by_path
+        )
         hits.append(Hit(
             path=page.rel_path,
             type=page.page_type,
@@ -356,10 +460,169 @@ def _find_semantic(
             title=page.title,
             updated=page.updated,
             excerpt=excerpt or "",
+            bm25_rank=bm25_rank_by_path.get(rel_path),
+            vector_rank=vector_rank_by_path.get(rel_path),
+            vector_score=vector_score_by_path.get(rel_path),
+            graph_hop=is_graph_only,
         ))
-        if len(hits) >= limit:
+        if len(hits) >= target_n:
             break
-    return hits
+
+    if rerank and hits:
+        try:
+            from . import embeddings as emb
+            # Best passage for each hit: the matched chunk when we have one,
+            # else the leading body slice.
+            passages: list[str] = []
+            for h in hits:
+                ctext = chunk_text_by_path.get(h.path)
+                if ctext:
+                    passages.append(ctext)
+                else:
+                    abs_p = vault_root / h.path
+                    pg = _CACHE.get(abs_p, vault_root)
+                    body = (pg.body if pg else "") or h.excerpt
+                    passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
+            scores = emb.rerank_pairs(query, passages)
+            for h, s in zip(hits, scores):
+                h.rerank_score = float(s)
+            hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
+        except ImportError as e:
+            log.warning("rerank requested but reranker unavailable: %s", e)
+        except Exception as e:
+            log.warning("rerank failed: %s; returning fused order", e)
+
+    return hits[:limit]
+
+
+def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
+    """Vault-relative POSIX paths (no .md) that this page's body links to.
+
+    Skips matches inside fenced code blocks and inline code (delegates to
+    vault.find_body_wikilinks). Targets are normalised through
+    `normalize_wikilink` so bare / KB-stripped / aliased forms all resolve to
+    the same canonical path. Unresolvable targets and folder-hub links
+    (trailing `/`) are dropped. `#anchor` is stripped — anchors are intra-
+    page jumps, not separate files.
+    """
+    from .vault import (
+        WikilinkResolver,
+        find_body_wikilinks,
+        normalize_wikilink,
+    )
+    # Build the resolver once per query (or once across the whole find call —
+    # see _resolver_cache below).
+    resolver = _get_query_resolver(vault_root)
+    out: list[str] = []
+    seen: set[str] = set()
+    for m in find_body_wikilinks(page.body):
+        inner = m.group(0)[2:-2]
+        target = inner.split("|", 1)[0].strip()
+        if not target or target.endswith("/"):
+            continue
+        try:
+            canonical, warning = normalize_wikilink(
+                target, vault_root, resolver=resolver, strict=False
+            )
+        except Exception:
+            continue
+        if warning:
+            continue  # unresolved — don't pollute the ranking
+        rel = canonical.split("#", 1)[0].strip()
+        if not rel:
+            continue
+        rel_with_md = rel if rel.endswith(".md") else rel + ".md"
+        # Sanity: only walk into the KB itself for graph expansion; curated
+        # trees are intentional out-of-graph references.
+        if not rel_with_md.startswith("Knowledge Base/"):
+            continue
+        if rel_with_md in seen:
+            continue
+        seen.add(rel_with_md)
+        out.append(rel_with_md)
+    return out
+
+
+_RESOLVER_CACHE: dict[Path, tuple[float, "object"]] = {}
+
+
+def _get_query_resolver(vault_root: Path):
+    """Per-process WikilinkResolver cache, invalidated when the vault changes."""
+    from .vault import WikilinkResolver, walk_vault_md
+    # Cheap freshness key: hash a count + most-recent mtime. WikilinkResolver
+    # build walks the whole vault, so we want to reuse it across queries.
+    latest = 0.0
+    count = 0
+    for p in walk_vault_md(vault_root):
+        try:
+            t = p.stat().st_mtime
+        except OSError:
+            continue
+        if t > latest:
+            latest = t
+        count += 1
+    key = (count, latest)
+    cached = _RESOLVER_CACHE.get(vault_root)
+    if cached and cached[0] == key:
+        return cached[1]
+    resolver = WikilinkResolver(vault_root)
+    _RESOLVER_CACHE[vault_root] = (key, resolver)
+    return resolver
+
+
+def _stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
+    """All-tokens-present check using Snowball stems on both sides.
+
+    Recovers morphological matches that the literal substring gate
+    misses — query "regulation" passes for a page that mentions
+    "regulator", "compounding" passes for one that mentions "compound".
+    Used only as a fallback in hybrid mode; keyword mode keeps the
+    strict substring gate (precision is the feature there).
+    """
+    if not query_norm:
+        return True
+    from . import bm25 as bm25_module
+    text_stems = set(bm25_module.tokenize(page.title + " " + page.body))
+    for tok in query_norm.split():
+        if not tok:
+            continue
+        if bm25_module.stem_word(tok) not in text_stems:
+            return False
+    return True
+
+
+def _stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
+    """Snippet anchored on the first body word whose stem matches the query.
+
+    Falls back to the leading body snippet when nothing in the body matches
+    a query stem (e.g. the match was title-only).
+    """
+    from . import bm25 as bm25_module
+    body = page.body.strip()
+    if not body:
+        return ""
+    query_stems = {bm25_module.stem_word(t) for t in query_norm.split() if t}
+    if not query_stems:
+        return _collapse(body[:EXCERPT_MAX_LEN])
+    anchor_idx = -1
+    anchor_len = 0
+    # Walk body words in order; first one whose stem is in query_stems wins.
+    for m in re.finditer(r"[A-Za-z0-9]+", body):
+        word = m.group(0)
+        if bm25_module.stem_word(word.lower()) in query_stems:
+            anchor_idx = m.start()
+            anchor_len = len(word)
+            break
+    if anchor_idx == -1:
+        return _collapse(body[:EXCERPT_MAX_LEN])
+    start = max(0, anchor_idx - EXCERPT_RADIUS)
+    end = min(len(body), anchor_idx + anchor_len + EXCERPT_RADIUS)
+    snippet = body[start:end]
+    if start > 0:
+        snippet = "…" + snippet.lstrip()
+    if end < len(body):
+        snippet = snippet.rstrip() + "…"
+    return _collapse(snippet)
 
 
 def _semantic_excerpt(
