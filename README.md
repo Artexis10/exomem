@@ -230,6 +230,16 @@ host's *own* values. The non-obvious parts:
   desktop/laptop constants in `src/kb_mcp/vault.py`); override with `KB_MCP_VAULT_PATH`
   if needed. In claude.ai, add a separate connector pointing at this host's `/mcp` URL
   (the URL usually isn't editable in place, so delete + re-add to repoint).
+- **Its own embedding stack (GPU).** Hybrid `find` needs `numpy` + `torch` in the
+  host's `.venv` — `uv sync` installs them, pulling the pinned `cu132` torch which
+  ships Blackwell `sm_120`, so any RTX 50-series laptop/desktop GPU works. **If a
+  fresh host wasn't `uv sync`'d after the semantic-search deps landed**, `find`
+  silently degrades to keyword/BM25 and the log shows the vector path failing on a
+  missing `numpy` — `uv sync` on that host fixes it. Verify the GPU path:
+  `uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"`
+  → expect `True` and `sm_120` in the list, plus the startup log line
+  `embedding model ready ... on cuda`. (Default PyPI Windows torch is CPU-only, which
+  is why the explicit CUDA index in `pyproject.toml` exists — see the comment there.)
 
 The deployments coexist — claude.ai talks to whichever host's connector you invoke,
 and only that host needs to be awake. After editing `.env`, restart the service so it
