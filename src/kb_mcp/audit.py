@@ -30,7 +30,12 @@ from pathlib import Path
 
 from . import find as find_module
 from . import indexes
-from .vault import _mask_code_spans, kb_root, parse_frontmatter
+from .vault import (
+    _mask_code_spans,
+    in_append_only_tree,
+    kb_root,
+    parse_frontmatter,
+)
 
 
 log = logging.getLogger(__name__)
@@ -248,15 +253,29 @@ def _check_broken_wikilinks(
                     vault_root / "Knowledge Base" / normalized
                 ).exists():
                     continue
+            # A broken link inside an append-only tree (Sources/, Evidence/)
+            # can't be repaired in place — the containing file is immutable.
+            # Surface it at `info` + meta.immutable so it stays out of the
+            # actionable `warn` set (you'd fix it in the source body desk-side
+            # or accept it as a stray reference in captured material).
+            immutable = in_append_only_tree(str(page.rel_path)) is not None
             findings.append(AuditFinding(
                 category="broken_wikilink",
-                severity="warn",
+                severity="info" if immutable else "warn",
                 path=str(page.rel_path),
-                detail=f"Wikilink [[{target}]] points to a file that doesn't exist",
+                detail=(
+                    f"Wikilink [[{target}]] points to a file that doesn't exist"
+                    + (" (append-only file — not repairable in place)" if immutable else "")
+                ),
                 proposed_fix=(
+                    "Append-only file (Sources/Evidence): the link can't be edited "
+                    "in place. Correct it in the source body desk-side, or accept it "
+                    "as a stray reference in captured material."
+                    if immutable else
                     "Update the link to the correct target, or remove if obsolete. "
                     "Common cause: target was renamed or moved without supersession."
                 ),
+                meta={"immutable": True} if immutable else None,
             ))
     return findings
 

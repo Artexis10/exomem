@@ -127,3 +127,46 @@ def test_audit_flags_extensionless_link_even_if_nonmd_file_exists(vault: Path) -
     report = audit_module.audit(vault, categories=["broken_wikilink"])
     bad = [f for f in report.findings if "Formal Warning" in f.detail]
     assert bad, "extension-less link to a .eml must stay flagged (Obsidian parity)"
+
+
+def test_broken_link_in_append_only_file_is_info_not_warn(vault: Path) -> None:
+    """Broken wikilinks inside append-only trees (Sources/, Evidence/) can't be
+    repaired in place, so audit surfaces them at `info` severity + meta.immutable
+    — keeping them out of the actionable (`warn`) set."""
+    src = (
+        vault / "Knowledge Base" / "Sources" / "Articles"
+        / "2026-05-31-immutable-link-src.md"
+    )
+    src.parent.mkdir(parents=True, exist_ok=True)
+    src.write_text(
+        "---\ntype: source\nstatus: active\ncreated: 2026-05-31\n"
+        "updated: 2026-05-31\ningested_into: []\n---\n\n"
+        "# Test source\n\nDangling: [[Knowledge Base/Notes/Insights/no-such-target-xyz]]\n",
+        encoding="utf-8",
+    )
+
+    report = audit_module.audit(vault, categories=["broken_wikilink"])
+    hits = [f for f in report.findings if "immutable-link-src" in f.path]
+    assert hits, "expected the source's broken link to be flagged"
+    f = hits[0]
+    assert f.severity == "info", f.as_dict()
+    assert f.meta and f.meta.get("immutable") is True, f.as_dict()
+
+
+def test_broken_link_in_editable_file_stays_warn(vault: Path) -> None:
+    """Guard: broken links in editable compiled notes remain actionable `warn`."""
+    insight = (
+        vault / "Knowledge Base" / "Notes" / "Insights"
+        / "progressive-disclosure-without-mode-fragmentation.md"
+    )
+    insight.write_text(
+        insight.read_text(encoding="utf-8")
+        + "\n\n[[Knowledge Base/Notes/Insights/no-such-target-abc]]\n",
+        encoding="utf-8",
+    )
+
+    report = audit_module.audit(vault, categories=["broken_wikilink"])
+    hits = [f for f in report.findings if "no-such-target-abc" in f.detail]
+    assert hits, "expected the broken link to be flagged"
+    assert hits[0].severity == "warn", hits[0].as_dict()
+    assert not (hits[0].meta or {}).get("immutable"), hits[0].as_dict()
