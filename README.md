@@ -133,8 +133,11 @@ existing capture-only path). Revisit if downtime bites.
 ```powershell
 cd C:\Users\hugoa\Desktop\projects\kb-mcp
 
-# 1. Install Python deps (creates .venv automatically)
-uv sync
+# 1. Install Python deps (creates .venv automatically).
+#    --extra embeddings pulls torch + sentence-transformers for HYBRID search.
+#    A bare `uv sync` is now the LEAN/keyword-only install (see SETUP-FRIEND.md);
+#    this remote/GPU deployment wants the extra.
+uv sync --extra embeddings
 
 # 2. Set up the public URL via Tailscale Funnel (you need this URL in step 3).
 # In Tailscale admin console: enable HTTPS for tailnet + enable Funnel for this node.
@@ -234,12 +237,12 @@ host's *own* values. The non-obvious parts:
   desktop/laptop constants in `src/kb_mcp/vault.py`); override with `KB_MCP_VAULT_PATH`
   if needed. In claude.ai, add a separate connector pointing at this host's `/mcp` URL
   (the URL usually isn't editable in place, so delete + re-add to repoint).
-- **Its own embedding stack (GPU).** Hybrid `find` needs `numpy` + `torch` in the
-  host's `.venv` — `uv sync` installs them, pulling the pinned `cu132` torch which
-  ships Blackwell `sm_120`, so any RTX 50-series laptop/desktop GPU works. **If a
-  fresh host wasn't `uv sync`'d after the semantic-search deps landed**, `find`
-  silently degrades to keyword/BM25 and the log shows the vector path failing on a
-  missing `numpy` — `uv sync` on that host fixes it. Verify the GPU path:
+- **Its own embedding stack (GPU).** Hybrid `find` needs `torch` + `sentence-transformers`
+  (the optional `embeddings` extra) in the host's `.venv` — `uv sync --extra embeddings`
+  installs them, pulling the pinned `cu132` torch which ships Blackwell `sm_120`, so any
+  RTX 50-series laptop/desktop GPU works. **If a host was synced without the extra**, `find`
+  silently degrades to keyword/BM25 and the log shows the vector path failing to import
+  torch — `uv sync --extra embeddings` on that host fixes it. Verify the GPU path:
   `uv run python -c "import torch; print(torch.cuda.is_available(), torch.cuda.get_arch_list())"`
   → expect `True` and `sm_120` in the list, plus the startup log line
   `embedding model ready ... on cuda`. (Default PyPI Windows torch is CPU-only, which

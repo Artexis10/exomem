@@ -12,11 +12,20 @@ dependencies = [
     "pyyaml>=6.0",
     "python-slugify>=8.0",
     "python-dotenv>=1.0",
-    "sentence-transformers>=2.7",
     "rank-bm25>=0.2.2",
     "numpy>=1.26",
-    "torch>=2.12",
     "snowballstemmer>=2.2",
+]
+
+# Hybrid semantic search (local vector embeddings). Optional so a lean install
+# — `pip install -e .` — works in keyword/BM25 mode (KB_MCP_DISABLE_EMBEDDINGS=1)
+# without the ~1-2 GB torch/CUDA download. The code soft-falls back to BM25 when
+# these aren't importable. Full hybrid (incl. Hugo's deployment):
+#   pip install -e ".[embeddings]"
+[project.optional-dependencies]
+embeddings = [
+    "sentence-transformers>=2.7",
+    "torch>=2.12",
 ]
 
 [dependency-groups]

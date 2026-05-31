@@ -27,16 +27,18 @@ git clone <repo-url> kb-mcp
 cd kb-mcp
 python -m venv .venv && . .venv/Scripts/activate   # Windows
 # (macOS/Linux: source .venv/bin/activate)
-pip install -e .
+pip install -e .                 # lean: keyword/BM25 search, no heavy deps
+# for hybrid semantic search, add the extra (~1-2 GB torch + sentence-transformers):
+# pip install -e ".[embeddings]"
 ```
 
-> **Heads-up on the install size.** `torch` + `sentence-transformers` are core
-> dependencies (they power hybrid semantic search) and pull in ~1–2 GB, with a
-> CUDA build pinned for NVIDIA GPUs. If you have an NVIDIA GPU, great. If you're
-> on a Mac / no GPU / want a light install, use **lean mode** below — search
-> falls back to keyword/BM25 and you can skip the GPU story entirely. (Making
-> the ML deps optional is a planned improvement; for now they install either
-> way, you just don't *load* them in lean mode.)
+> **Lean by default.** `pip install -e .` is the light path — search runs on
+> keyword/BM25, no torch, no GPU, works everywhere (incl. Mac / no-GPU). For
+> hybrid semantic search (better recall on natural-language queries), install
+> the extra: `pip install -e ".[embeddings]"` — that's the ~1-2 GB torch
+> download (CUDA build, best on an NVIDIA GPU; CPU works but embeds slowly).
+> Start lean; upgrade anytime by installing the extra and unsetting
+> `KB_MCP_DISABLE_EMBEDDINGS`.
 
 ---
 
@@ -111,12 +113,13 @@ export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 
 ## 4. (Choose) hybrid vs lean
 
-- **Hybrid (default)** — local vector embeddings + BM25 + graph. Best search.
-  Needs the torch deps (and ideally an NVIDIA GPU; CPU works but embedding is
-  slow). Nothing extra to set.
-- **Lean / keyword-only** — set `KB_MCP_DISABLE_EMBEDDINGS=1`. `find` uses
-  BM25 (stemmed substring + ranking). Instant, no model load, no GPU. Great to
-  start with; you can switch to hybrid later by unsetting it.
+- **Lean / keyword-only (default install)** — `pip install -e .` + set
+  `KB_MCP_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
+  Instant, no model load, no GPU, works everywhere. The easiest start.
+- **Hybrid** — install the extra (`pip install -e ".[embeddings]"`) and leave
+  `KB_MCP_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
+  of BM25 — best recall on natural-language queries. Ideally an NVIDIA GPU; CPU
+  works but embeds slowly.
 
 ---
 
