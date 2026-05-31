@@ -44,59 +44,18 @@ pip install -e .                 # lean: keyword/BM25 search, no heavy deps
 
 ## 2. Bootstrap your Knowledge Base
 
-Your vault needs a `Knowledge Base/` folder with three things to start —
-`index.md`, `log.md`, and the `_Schema/` contract. The writers create all the
-sub-folders (`Sources/`, `Notes/…`, `Entities/…`) on demand as you use them.
+One command lays down the whole structure — `index.md`, `log.md`, the `_Schema/`
+contract, and the typed `Sources/ Notes/{…} Entities/{…} Evidence/` tree — into
+your vault:
 
 ```bash
-# from your Obsidian vault root:
-mkdir -p "Knowledge Base/_Schema"
+python -m kb_mcp init --vault "/path/to/your/Obsidian"
 ```
 
-**`Knowledge Base/index.md`** — paste:
-
-```markdown
-# Knowledge Base — Index
-
-Compiled, structured layer of the vault. Governed by [[Knowledge Base/_Schema/SKILL]].
-
-## Sections
-
-- [[Knowledge Base/Sources/index|Sources]] — raw, immutable inputs
-- [[Knowledge Base/Notes/index|Notes]] — compiled material
-- [[Knowledge Base/Entities/index|Entities]] — typed nodes
-
-## Recent activity
-
-<!-- Auto-updated on every confirmed write. Most recent first. Cap: 50. -->
-
-## Counts
-
-<!-- Reconciled against disk. Run `reconcile` after setup to sync. -->
-
-- Sources: 0
-- Notes (insight): 0
-- Entities (concept): 0
-```
-
-**`Knowledge Base/log.md`** — paste (the `---` separator is load-bearing; keep it):
-
-```markdown
-# Knowledge Base — Activity Log
-
-Append-only chronological record of every confirmed write. Most recent first.
-
----
-```
-
-**`Knowledge Base/_Schema/`** — this is the contract (the discipline: page types,
-frontmatter, supersession, audit rules). Copy a starter into it:
-
-- Ask Hugo for his current `_Schema/` (recommended — it's the up-to-date one), **or**
-- use the copy in this repo at `tests/fixtures/Knowledge Base/_Schema/` as a
-  starting point.
-
-Then **adapt it to you** (see step 6) — it references Hugo's projects and paths.
+It refuses if a `Knowledge Base/` already exists, so it won't clobber anything.
+The shipped `_Schema/` is a **genericized starter contract** — adapt
+`Knowledge Base/_Schema/project-keys.yaml` to your own projects (or just start
+writing; the writer auto-registers new project keys as you go).
 
 ---
 
@@ -172,15 +131,14 @@ cp -r "/path/to/your/Obsidian/Knowledge Base/_Schema" ~/.claude/skills/knowledge
 # ln -s "/path/to/your/Obsidian/Knowledge Base/_Schema" ~/.claude/skills/knowledge-base
 ```
 
-Then **adapt the contract to your world** — `SKILL.md` references Hugo's
-projects (`q`, `endstate`, `tu`), tenants, and machine paths. Edit:
+Then **make it yours** — the shipped `SKILL.md` / `project-keys.yaml` are a
+**generic starter** (placeholder projects `personal` / `work`, no machine paths
+or real tenants). Optionally:
 
-- the **project keys** (`_Schema/project-keys.yaml` + the project-scope section)
-  to your own — though the writer auto-registers new keys as you use them, so
-  you can also just start writing and let it grow.
-- **rule 8** (the symlink section) — update the paths to your machine, or ignore
-  it if you copied rather than symlinked.
-- any **tenant / product-specific** sections that don't apply to you.
+- rename the **project keys** in `_Schema/project-keys.yaml` to your own — or
+  just start writing; the writer auto-registers new keys as you use them.
+- if you **symlinked** rather than copied, point rule 8's paths at your machine
+  (skip this if you copied).
 
 ---
 
