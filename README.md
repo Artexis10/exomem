@@ -3,6 +3,10 @@
 Self-hosted Model Context Protocol server exposing Hugo's Obsidian
 Knowledge Base to **mobile claude.ai** as a remote custom connector.
 
+> **Just want to run it locally in Claude Code over your own vault (no cloud,
+> no OAuth)?** See **[SETUP-FRIEND.md](SETUP-FRIEND.md)** — the ~20-minute local
+> path. This README covers the heavier remote/mobile deployment.
+
 Tools surfaced (full parity with the desk-side KB skill except `schema`):
 
 **Tier 1 — type-routed (primary).** Use these whenever a Tier 1 op fits.
