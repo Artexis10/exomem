@@ -204,6 +204,11 @@ Modes:
 
 Empty queries always degrade to filtered-most-recent regardless of mode — there's nothing to embed or substring-match.
 
+**Scope — the vault is bigger than the KB:**
+- `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to the whole vault** when the KB doesn't fill `limit`. So content in sibling folders (`Tracking/`, `Reference/`, `Finance/`, … and the curated trees `Cognitive Core/`, `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`) is reachable, not silently invisible. Widened hits carry `outside_kb: true` and their `path` shows the sibling folder. Outside-KB recall is BM25/keyword with a relaxed gate (the vector sidecar is KB-only), so even a terse, numbers-heavy file (a workout/finance tracker) surfaces on a partial token match.
+- `scope="vault"` always walks the whole vault. `scope="kb-only"` is the strict opt-out (KB only, never widens) — use it when you deliberately want curated KB material and nothing else.
+- **Never report a search-miss as absence.** An empty result means *"not found in what I searched,"* not *"it doesn't exist."* If the user is sure something exists and `find` returns nothing, the data may be tabular/terse or live outside the KB — try `scope="vault"`, vary the query terms, or `get` a path you suspect. Say "I didn't find it" — distinguish that from "it isn't there."
+
 Additional knobs on `find`:
 
 - **`graph=true`** (default for hybrid/vector) — outbound wikilinks of top BM25/vector hits contribute a third RRF ranking, surfacing 1-hop neighbours of strong matches even when they share no query tokens. Graph seeds are gated to "strong" matches only (vector hits or BM25 hits passing the stem-aware all-tokens check), so noisy queries don't flood results with neighbours of weak matches.

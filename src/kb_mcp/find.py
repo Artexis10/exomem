@@ -148,6 +148,11 @@ class Hit:
     graph_in_degree: int = 0
     keyword_rank: int | None = None
     rerank_score: float | None = None
+    # True when this hit came from OUTSIDE Knowledge Base/ via scope="kb"
+    # auto-widening. Lets the caller (and SKILL.md guidance) see that the
+    # search reached past the curated KB into the wider vault. Omitted from
+    # as_dict() when False so KB-scoped callers don't see noise.
+    outside_kb: bool = False
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -158,6 +163,8 @@ class Hit:
             "updated": self.updated,
             "excerpt": self.excerpt,
         }
+        if self.outside_kb:
+            out["outside_kb"] = True
         signals: dict = {}
         if self.bm25_rank is not None:
             signals["bm25_rank"] = self.bm25_rank
@@ -258,9 +265,9 @@ def find(
     are the intentional output, sources are inputs. Set False to retrieve
     raw source discussion verbatim (e.g. "what did I capture from Dr. X").
     """
-    if scope not in ("kb", "vault"):
+    if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(
-            f"find: scope must be 'kb' or 'vault', got {scope!r}"
+            f"find: scope must be 'kb', 'vault', or 'kb-only', got {scope!r}"
         )
     if mode not in ("hybrid", "keyword", "vector"):
         raise ValueError(
@@ -271,24 +278,73 @@ def find(
     limit = min(limit, 100)
     query_norm = (query or "").lower().strip()
 
+    # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
+    # same KB tree but auto-widens to the vault below when it underfills. Both
+    # map to a KB-only walk in the underlying rankers.
+    walk_scope = "vault" if scope == "vault" else "kb"
+
     # Empty queries always degrade to keyword behavior — there's no signal
     # to embed or score with, just "give me recent stuff that matches the
     # structured filters."
     if mode == "keyword" or not query_norm:
-        return _find_keyword(
+        hits = _find_keyword(
             vault_root,
             query_norm=query_norm,
             types=types, projects=projects, tags=tags,
-            limit=limit, scope=scope,
+            limit=limit, scope=walk_scope,
         )
-    return _find_semantic(
-        vault_root,
-        query=query, query_norm=query_norm,
-        types=types, projects=projects, tags=tags,
-        limit=limit, scope=scope, mode=mode, graph=graph, rerank=rerank,
-        prefer_compiled=prefer_compiled,
-        config=config or DEFAULT_RANKING,
-    )
+    else:
+        hits = _find_semantic(
+            vault_root,
+            query=query, query_norm=query_norm,
+            types=types, projects=projects, tags=tags,
+            limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
+            prefer_compiled=prefer_compiled,
+            config=config or DEFAULT_RANKING,
+        )
+
+    # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
+    # Reference/, plus curated trees) so content outside Knowledge Base/ isn't
+    # silently invisible. Only for scope="kb" (not "kb-only"/"vault") and
+    # non-empty queries (an empty query has no signal to widen on).
+    #
+    # We RESERVE a few result slots for out-of-KB hits rather than only
+    # back-filling when the KB underfills. The reason is empirical: on a real
+    # vault a bare query like "X3" finds 8+ KB files that literally mention the
+    # term, which fills `limit` — so a count- or even quality-gated back-fill
+    # never fires, and the actual out-of-KB target (e.g. `Tracking/X3 Full
+    # Reps.md`, whose title IS the query) stays hidden. Reserving guarantees
+    # such a match surfaces. The KB keeps the majority of slots (strong literal
+    # hits first, then weak graph/recency filler); the reserve never starves
+    # the KB (capped at limit-1) and is empty when nothing outside matches.
+    if scope == "kb" and query_norm:
+        seen = {h.path for h in hits}
+        outside = [
+            h for h in _find_outside_kb(
+                vault_root,
+                query=query,
+                query_norm=query_norm,
+                types=types, projects=projects, tags=tags,
+                limit=limit,
+            )
+            if h.path not in seen
+        ]
+        if outside:
+            strong: list[Hit] = []
+            weak: list[Hit] = []
+            for h in hits:
+                page = _CACHE.get(vault_root / h.path, vault_root)
+                # Word/stem-level, not substring: a bare "x3" query must not
+                # treat files that merely contain "x3" inside a longer token
+                # (a hash, "max3...", a log copy) as strong topical matches.
+                if page is not None and _stem_tokens_present(page, query_norm):
+                    strong.append(h)
+                else:
+                    weak.append(h)
+            reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
+            kb_keep = limit - reserve
+            hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+    return hits
 
 
 def _find_keyword(
@@ -592,6 +648,117 @@ def _find_semantic(
     return hits[:limit]
 
 
+def _find_outside_kb(
+    vault_root: Path,
+    *,
+    query: str,
+    query_norm: str,
+    types: list[str] | None,
+    projects: list[str] | None,
+    tags: list[str] | None,
+    limit: int,
+) -> list[Hit]:
+    """BM25/keyword recall over the vault, RESTRICTED to paths outside
+    `Knowledge Base/`. Powers scope="kb" auto-widening.
+
+    Recall is BM25-only by design (the vector sidecar is KB-scoped), with a
+    RELAXED gate: a candidate survives when at least one query stem is present,
+    not the strict all-tokens-present gate the KB path enforces. Terse,
+    frontmatter-less files (e.g. a numbers-heavy workout tracker) would
+    otherwise be filtered out by any natural-language query that includes a
+    word they don't literally contain.
+    """
+    if not query_norm or limit < 1:
+        return []
+    from . import bm25
+
+    # Over-fetch: KB files dominate the corpus, so pull a generous slice then
+    # filter to out-of-KB paths. Auto-widen only fires when the KB underfilled
+    # — i.e. the query was already rare in the KB — so the out-of-KB target
+    # won't be buried under hundreds of KB matches.
+    bm25_k = max(limit * 5, 100)
+    candidates: list[str] = []
+    try:
+        for path, _score in bm25.search(
+            vault_root, query, k=bm25_k, scope="vault"
+        ):
+            if not path.startswith("Knowledge Base/"):
+                candidates.append(path)
+    except ImportError:
+        candidates = _outside_kb_keyword_paths(vault_root, query_norm)
+    except Exception as e:  # noqa: BLE001 — widening must never break find
+        log.warning("auto-widen BM25 failed: %s; falling back to keyword", e)
+        candidates = _outside_kb_keyword_paths(vault_root, query_norm)
+
+    hits: list[Hit] = []
+    seen: set[str] = set()
+    for rel_path in candidates:
+        if rel_path in seen:
+            continue
+        seen.add(rel_path)
+        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
+            continue
+        page = _CACHE.get(vault_root / rel_path, vault_root)
+        if page is None:
+            continue
+        if not _passes_filters(page, types=types, projects=projects, tags=tags):
+            continue
+        # Relaxed gate: BM25 score>0 already implies a token match, but the
+        # keyword fallback path needs this explicit check.
+        if not _any_stem_present(page, query_norm):
+            continue
+        excerpt = _stem_anchored_excerpt(page, query_norm)
+        hits.append(Hit(
+            path=page.rel_path,
+            type=page.page_type,
+            scope=page.scope,
+            title=page.title,
+            updated=page.updated,
+            excerpt=excerpt or "",
+            outside_kb=True,
+        ))
+        if len(hits) >= limit:
+            break
+    return hits
+
+
+def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
+    """True if at least ONE query stem appears in title+body.
+
+    The relaxed counterpart to `_stem_tokens_present` (which requires ALL).
+    Tokenizes the query the SAME way BM25 tokenizes text (split on `[a-z0-9]+`,
+    then stem) so a hyphenated query like `cognitive-core-marker-xyz` matches a
+    body that contains those words split on the hyphens.
+    """
+    if not query_norm:
+        return False
+    from . import bm25 as bm25_module
+    text_stems = set(bm25_module.tokenize(page.title + " " + page.body))
+    return any(qs in text_stems for qs in bm25_module.tokenize(query_norm))
+
+
+def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
+    """BM25-unavailable fallback: walk vault .md outside Knowledge Base/, keep
+    files where >=1 query stem is present, ordered most-recent first."""
+    from .vault import walk_vault_md
+    vault_resolved = vault_root.resolve()
+    matches: list[tuple[str, str]] = []
+    for path in walk_vault_md(vault_root):
+        try:
+            rel = path.resolve().relative_to(vault_resolved).as_posix()
+        except ValueError:
+            continue
+        if rel.startswith("Knowledge Base/"):
+            continue
+        page = _CACHE.get(path, vault_root)
+        if page is None:
+            continue
+        if _any_stem_present(page, query_norm):
+            matches.append((page.updated or "0000-00-00", rel))
+    matches.sort(reverse=True)
+    return [p for _, p in matches]
+
+
 # KB epistemic hierarchy: compiled distillations are the intentional output,
 # raw sources are inputs. Surfaced via prefer_compiled=True post-RRF boost.
 # Multipliers are small — designed as tie-breakers between similar fused
@@ -823,13 +990,21 @@ def _semantic_excerpt(
 
 
 def _walk_md(root: Path):
-    """Yield every .md path under root, skipping excluded subtrees."""
+    """Yield every .md path under root, skipping excluded subtrees.
+
+    Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
+    duplicates that would otherwise pollute the index and search results.
+    """
     for child in root.iterdir():
         if child.is_dir():
             if child.name in EXCLUDED_DIR_NAMES:
                 continue
             yield from _walk_md(child)
-        elif child.is_file() and child.suffix.lower() == ".md":
+        elif (
+            child.is_file()
+            and child.suffix.lower() == ".md"
+            and ".sync-conflict-" not in child.name
+        ):
             yield child
 
 

@@ -328,15 +328,22 @@ def build_server(*, require_auth: bool) -> FastMCP:
             projects: Filter to pages whose `project` or `projects:` includes any of these keys.
             tags: Filter to pages whose `tags:` includes any of these (case-insensitive).
             limit: Max hits to return. Default 15, hard cap 100.
-            scope: "kb" (default) searches only Knowledge Base/. "vault"
-                walks the whole vault including curated trees
-                (Cognitive Core/, Domains/, Prompt Bank/, Products/,
-                Personal Context/, Systems Thinking/). Use "vault" when
-                you need to discover content outside the KB —
-                free-text queries work the same; structured filters
-                won't match curated pages that lack those frontmatter
-                fields. `_Schema/`, `_trash/`, `_attachments/`, and
-                `.obsidian/` are excluded either way.
+            scope: "kb" (default) searches Knowledge Base/ first and
+                AUTO-WIDENS to the whole vault when the KB doesn't fill
+                `limit` — so content in sibling folders (Tracking/,
+                Reference/, Finance/, ... and curated trees like
+                Cognitive Core/, Domains/, Prompt Bank/, Products/,
+                Personal Context/) is never silently invisible. Widened
+                hits carry `outside_kb: true`. "vault" always walks the
+                whole vault. "kb-only" is the strict opt-out: KB only,
+                never widens. Outside-KB recall is BM25/keyword (the
+                vector sidecar is KB-scoped), with a relaxed gate so terse
+                files (e.g. a numbers-heavy tracker) surface on a partial
+                token match. `_Schema/`, `_trash/`, `_attachments/`, and
+                `.obsidian/` are excluded under every scope. NOTE: an
+                empty result means "not found in what I searched," NOT
+                "doesn't exist" — say so, and try "vault" before
+                concluding absence.
             mode: Ranker. "hybrid" (default) fuses BM25 + local vector
                 embeddings via reciprocal rank fusion — best recall on
                 natural-language queries. "keyword" preserves the original
@@ -363,7 +370,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 "what did I capture from Dr. X").
 
         Returns:
-            List of {path, type, scope, title, updated, excerpt[, signals]}.
+            List of {path, type, scope, title, updated, excerpt[, outside_kb]
+            [, signals]}. `outside_kb: true` is present only on hits the
+            "kb" auto-widen pulled from beyond Knowledge Base/ (the `path`
+            also shows the sibling folder).
             In hybrid mode `excerpt` shows the best-matching chunk; in
             keyword mode it's a snippet anchored to the literal query
             match. `signals` (hybrid/vector only) carries per-ranker

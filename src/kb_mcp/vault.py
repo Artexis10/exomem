@@ -405,7 +405,14 @@ def walk_vault_md(vault_root: Path):
                 if child.name in VAULT_SCAN_SKIP_DIRS:
                     continue
                 yield from walk(child)
-            elif child.is_file() and child.suffix.lower() == ".md":
+            elif (
+                child.is_file()
+                and child.suffix.lower() == ".md"
+                and ".sync-conflict-" not in child.name
+            ):
+                # Skip Obsidian sync-conflict duplicates — they aren't real
+                # notes; indexing/scanning them pollutes search and wikilink
+                # resolution.
                 yield child
     yield from walk(vault_root)
 
