@@ -62,7 +62,12 @@ from . import replace as replace_module
 from . import schema
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
-from .vault import find_body_wikilinks, resolve_vault
+from .vault import (
+    VaultPathError,
+    find_body_wikilinks,
+    resolve_under_vault,
+    resolve_vault,
+)
 
 
 log = logging.getLogger(__name__)
@@ -872,7 +877,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             raise ValueError(f"{e.code}: {e.reason}") from e
 
     @mcp.tool
-    def get(path: str) -> dict:
+    def get(path: str, frontmatter_only: bool = False) -> dict:
         """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body + raw content.
 
         Reads anywhere under the vault root — not just `Knowledge Base/`.
@@ -890,6 +895,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 - `Cognitive Core/Strategy.md`
                 - `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if
                   literal path doesn't resolve; auto-adds `.md`).
+            frontmatter_only: If true, return ONLY the frontmatter (no body) —
+                cheap for scanning many files by field (folds in the former
+                `get_frontmatter` tool). Returns {path, frontmatter,
+                has_frontmatter} instead of the full page below.
 
         Returns:
             {path, frontmatter, body, content, content_hash, mtime}.
@@ -903,6 +912,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
             INVALID_PATH (path escapes vault root or empty);
             NOT_FOUND (no such file); UNREADABLE (parse failure).
         """
+        if frontmatter_only:
+            try:
+                result = get_frontmatter_module.get_frontmatter(
+                    vault_root, path=path
+                )
+            except get_frontmatter_module.GetFrontmatterError as e:
+                raise ValueError(f"{e.code}: {e.reason}") from e
+            return result.as_dict()
         try:
             result = get_page_module.get_page(vault_root, path=path)
         except get_page_module.GetError as e:
@@ -918,17 +935,33 @@ def build_server(*, require_auth: bool) -> FastMCP:
         old_string: str | None = None,
         new_string: str | None = None,
         replace_all: bool = False,
+        edits: list[dict] | None = None,
+        row_key: str | None = None,
+        take: str | None = None,
+        overwrite: bool = False,
+        field: str | None = None,
+        value: str | int | float | bool | list | dict | None = None,
+        allow_curated: bool = False,
         expected_hash: str | None = None,
         validate_only: bool = False,
     ) -> dict:
-        """Lightweight in-place edit of a page (body, tags, or a surgical snippet).
+        """Lightweight in-place edit of a page (body, tags, a surgical snippet,
+        a batch, an opinion row, or one frontmatter field).
 
         For tweaks — typo fixes, filling a row, appending one line, tag
         corrections — without going through full supersession via `replace`.
         Use `replace` for substantial rewrites; use `edit` when creating a new
         file + superseded-link chain would be silly for what you're changing.
 
-        Three (composable) modes:
+        One mode per call. Three param-selected modes fold in former tools:
+        - `edits=[...]` -> batch surgical edits in one atomic commit (was the
+          `multi_edit` tool). Each item {old_string, new_string, replace_all?}
+          applies sequentially.
+        - `row_key=...` + `take=...` -> fill a `[take: ]` opinion row by its
+          leading text without re-sending the body (was `set_take`).
+        - `field=...` + `value=...` -> patch ONE frontmatter field; pass
+          `allow_curated=true` for curated trees (was `set_frontmatter_field`).
+        Otherwise the default (composable) body/tags/surgical modes:
         - `new_body` — replace the WHOLE body. Heavyweight; you re-send
           everything after the frontmatter.
         - `tags` — replace the `tags:` frontmatter field.
@@ -977,6 +1010,16 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 differ from it).
             replace_all: Replace every occurrence instead of requiring a
                 unique match. Default False.
+            edits: Batch-surgical mode — list of {old_string, new_string,
+                replace_all?} applied sequentially in one atomic commit.
+            row_key: Take-row mode — natural leading text of the row to fill
+                (e.g. "Whiplash (2014)"). Requires `take`.
+            take: Text to write between `[take:` and `]` (take-row mode).
+            overwrite: In take-row mode, also replace an already-filled take.
+            field: Frontmatter-patch mode — the single frontmatter key to set
+                (cannot be `updated`, which is auto-bumped).
+            value: New value for `field` (scalar/list/dict).
+            allow_curated: Allow a frontmatter patch under a curated tree.
             expected_hash: Optional drift guard. Pass the `content_hash` you
                 got from `get`; the edit refuses (STALE_EDIT) if the file
                 changed on disk since, so you never clobber another writer.
@@ -986,7 +1029,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 ambiguous match silently touching more rows than intended.
 
         Returns:
-            Normally {path, warnings}. When validate_only=True:
+            Shape varies by mode (take-row -> {path, row, warnings};
+            frontmatter-patch -> {path, field, old_value, new_value, warnings};
+            batch -> {path, edits_applied, warnings}). Default mode normally
+            {path, warnings}. When validate_only=True:
             {path, validate_only, mode, match_count, matches} — `matches` is
             the line(s) around each occurrence; nothing is written.
 
@@ -998,132 +1044,51 @@ def build_server(*, require_auth: bool) -> FastMCP:
             STALE_EDIT (expected_hash mismatch — file changed since read);
             UNREADABLE.
         """
-        try:
-            result = edit_module.edit(
-                vault_root,
-                path=path,
-                why=why,
-                new_body=new_body,
-                tags=tags,
-                old_string=old_string,
-                new_string=new_string,
-                replace_all=replace_all,
-                expected_hash=expected_hash,
-                validate_only=validate_only,
-            )
-        except edit_module.EditError as e:
+        active = [n for n, on in (
+            ("edits", edits is not None),
+            ("row_key", row_key is not None),
+            ("field", field is not None),
+        ) if on]
+        if len(active) > 1:
             raise ValueError(
-                f"{e.code}: {e.reason} (missing: {e.missing})"
-            ) from e
-        return result.as_dict()
-
-    @mcp.tool
-    def multi_edit(
-        path: str,
-        why: str,
-        edits: list[dict],
-        expected_hash: str | None = None,
-        validate_only: bool = False,
-    ) -> dict:
-        """Apply several surgical edits to ONE page in a single atomic commit.
-
-        Like `edit`'s surgical mode, but batches N `{old_string, new_string}`
-        pairs into one write — one log entry, one `updated:` bump, one embedding
-        re-sync — instead of N separate `edit` calls. Use it when you're making
-        several tweaks to the same page in a turn (e.g. filling multiple rows).
-
-        Pairs apply SEQUENTIALLY: pair K matches the result of pair K-1 (same as
-        a precise multi-find-and-replace). Each pair follows `edit`'s surgical
-        rules — `old_string` must match exactly, and uniquely unless that pair
-        sets `replace_all`. If any pair fails to match (or is ambiguous), the
-        WHOLE batch is rejected and nothing is written: fix that pair and resend
-        the full list.
-
-        Args:
-            path: Vault-relative path to the page (same shape as `get`).
-            why: One-line rationale; lands in the single log entry.
-            edits: List of objects, each {old_string, new_string, replace_all?}.
-                `replace_all` defaults to false (per pair).
-            expected_hash: Optional drift guard — pass `content_hash` from
-                `get`; refuses (STALE_EDIT) if the file changed since.
-            validate_only: Preview each pair's match count against the evolving
-                body without writing.
-
-        Returns:
-            Normally {path, edits_applied, warnings}. When validate_only=True:
-            {path, validate_only, edits:[{index, match_count, replace_all}]}.
-
-        Errors:
-            INVALID_EDIT (empty/malformed edits, no-op pair, path in Sources/
-            Evidence); NOT_FOUND; STRING_NOT_FOUND / AMBIGUOUS_MATCH (a pair
-            failed — the message names which edit #); ALREADY_SUPERSEDED;
-            STALE_EDIT; UNREADABLE.
-        """
-        try:
-            result = multi_edit_module.multi_edit(
-                vault_root,
-                path=path,
-                why=why,
-                edits=edits,
-                expected_hash=expected_hash,
-                validate_only=validate_only,
+                f"INVALID_EDIT: one edit mode at a time; got {', '.join(active)}"
             )
-        except edit_module.EditError as e:
-            raise ValueError(
-                f"{e.code}: {e.reason} (missing: {e.missing})"
-            ) from e
-        return result.as_dict()
-
-    @mcp.tool
-    def set_take(
-        path: str,
-        row_key: str,
-        take: str,
-        why: str,
-        overwrite: bool = False,
-    ) -> dict:
-        """Fill a `[take: ]` opinion row by its leading text — no body re-send.
-
-        Token-cheap companion to `edit`, specialized for the film/opinion row
-        format `- <Item> — <rating> — [take: ]  <!-- ... -->`. The SERVER reads
-        the note and locates the row by `row_key` (its natural leading text,
-        e.g. "Whiplash (2014)") — you do NOT fetch the (often huge) note first
-        just to build an exact match string. Inherits `edit`'s atomicity,
-        `updated:` bump, single log entry, and embedding re-sync.
-
-        Args:
-            path: Vault-relative path to the page holding the row.
-            row_key: Natural leading text of the row's item (NOT a synthetic
-                ID). Matched case-insensitively; em-dash, en-dash and hyphen are
-                folded. Must match exactly one fillable row.
-            take: The take text to write between `[take:` and `]`.
-            why: One-line rationale; lands in log.md (auditable).
-            overwrite: If false (default), only fills an empty `[take: ]`. If
-                true, also replaces an already-filled take.
-
-        Returns:
-            {path, row, warnings} — `row` is the filled row for confirmation.
-
-        Errors:
-            ROW_NOT_FOUND (no matching fillable row — names whether a filled one
-            exists); AMBIGUOUS_ROW (row_key matches multiple rows — candidates
-            listed); plus edit's errors (INVALID_EDIT for Sources/Evidence,
-            NOT_FOUND, ALREADY_SUPERSEDED, UNREADABLE).
-        """
         try:
-            result = set_take_module.set_take(
-                vault_root,
-                path=path,
-                row_key=row_key,
-                take=take,
-                why=why,
-                overwrite=overwrite,
-            )
-        except set_take_module.SetTakeError as e:
-            raise ValueError(
-                f"{e.code}: {e.reason}"
-                + (f" (candidates: {e.candidates})" if e.candidates else "")
-            ) from e
+            if edits is not None:
+                result = multi_edit_module.multi_edit(
+                    vault_root, path=path, why=why, edits=edits,
+                    expected_hash=expected_hash, validate_only=validate_only,
+                )
+            elif row_key is not None:
+                if take is None:
+                    raise ValueError("INVALID_EDIT: row_key mode requires `take`")
+                result = set_take_module.set_take(
+                    vault_root, path=path, row_key=row_key, take=take,
+                    why=why, overwrite=overwrite,
+                )
+            elif field is not None:
+                result = set_frontmatter_field_module.set_frontmatter_field(
+                    vault_root, path=path, field=field, value=value,
+                    why=why, allow_curated=allow_curated,
+                )
+            else:
+                result = edit_module.edit(
+                    vault_root, path=path, why=why, new_body=new_body,
+                    tags=tags, old_string=old_string, new_string=new_string,
+                    replace_all=replace_all, expected_hash=expected_hash,
+                    validate_only=validate_only,
+                )
+        except (
+            edit_module.EditError,
+            set_take_module.SetTakeError,
+            set_frontmatter_field_module.SetFrontmatterError,
+        ) as e:
+            msg = f"{e.code}: {e.reason}"
+            if getattr(e, "missing", None):
+                msg += f" (missing: {e.missing})"
+            if getattr(e, "candidates", None):
+                msg += f" (candidates: {e.candidates})"
+            raise ValueError(msg) from e
         return result.as_dict()
 
     @mcp.tool
@@ -1397,12 +1362,19 @@ def build_server(*, require_auth: bool) -> FastMCP:
     @tier2_tool
     def create_file(
         path: str,
-        content: str,
+        content: str = "",
         frontmatter: dict | None = None,
         overwrite: bool = False,
         allow_curated: bool = False,
+        kind: str = "file",
+        parents: bool = True,
     ) -> dict:
-        """Tier 2: write a file at an arbitrary vault path.
+        """Tier 2: write a file — or, with `kind="dir"`, create a folder — at an
+        arbitrary vault path.
+
+        With `kind="dir"`, this creates a folder (mkdir -p when `parents=true`)
+        and ignores `content`/`frontmatter`/`overwrite` (folds in the former
+        `create_directory` tool); returns {path, created, warnings}.
 
         Escape hatch for files that don't fit Tier 1 type routing — new folder
         structures (`Identity/`, `Templates/`), skill files, scratch. For
@@ -1427,11 +1399,26 @@ def build_server(*, require_auth: bool) -> FastMCP:
             frontmatter: Optional dict prepended as YAML frontmatter.
             overwrite: If true, replace existing file. Default false.
             allow_curated: Required to write under a curated tree. Default false.
+            kind: "file" (default) or "dir". With "dir", creates a folder
+                instead of a file (former `create_directory`).
+            parents: In "dir" mode, create intermediate folders (mkdir -p).
+                Default true.
 
-        Returns: {path, warnings}.
+        Returns: {path, warnings} for files; {path, created, warnings} for dirs.
         Errors: INVALID_PATH; APPEND_ONLY; CURATED_PROTECTED; FILE_EXISTS;
-                NOT_A_FILE.
+                NOT_A_FILE; (dir mode) NOT_A_DIR; MISSING_PARENT; MKDIR_FAILED.
         """
+        if kind == "dir":
+            try:
+                result = create_directory_module.create_directory(
+                    vault_root,
+                    path=path,
+                    parents=parents,
+                    allow_curated=allow_curated,
+                )
+            except create_directory_module.CreateDirectoryError as e:
+                raise ValueError(f"{e.code}: {e.reason}") from e
+            return result.as_dict()
         try:
             result = create_file_module.create_file(
                 vault_root,
@@ -1481,38 +1468,6 @@ def build_server(*, require_auth: bool) -> FastMCP:
         return result.as_dict()
 
     @tier2_tool
-    def create_directory(
-        path: str,
-        parents: bool = True,
-        allow_curated: bool = False,
-    ) -> dict:
-        """Tier 2: create a folder at a vault path. Idempotent.
-
-        Curated trees require `allow_curated=true`. Append-only trees
-        (Sources/, Evidence/) are allowed at the directory level — those
-        subfolders auto-materialize on `add`/`preserve` writes anyway.
-
-        Args:
-            path: Vault-relative folder path.
-            parents: If true (default), create intermediate folders (mkdir -p).
-            allow_curated: Required to create folders under curated trees.
-
-        Returns: {path, created (bool), warnings}.
-        Errors: INVALID_PATH; CURATED_PROTECTED; NOT_A_DIR; MISSING_PARENT;
-                MKDIR_FAILED.
-        """
-        try:
-            result = create_directory_module.create_directory(
-                vault_root,
-                path=path,
-                parents=parents,
-                allow_curated=allow_curated,
-            )
-        except create_directory_module.CreateDirectoryError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
-        return result.as_dict()
-
-    @tier2_tool
     def move_file(
         old_path: str,
         new_path: str,
@@ -1553,15 +1508,22 @@ def build_server(*, require_auth: bool) -> FastMCP:
         return result.as_dict()
 
     @tier2_tool
-    def delete_file(
+    def delete(
         path: str,
         confirm: bool,
+        recursive: bool = False,
         force_orphan: bool = False,
         force_superseded: bool = False,
         allow_curated: bool = False,
         expected_dead_inbound: list[str] | None = None,
     ) -> dict:
-        """Tier 2: trash a file. Reversible — file moves to _trash/, not /dev/null.
+        """Tier 2: trash a file OR folder (auto-detected). Reversible — moves to
+        _trash/, not /dev/null.
+
+        Dispatches on the path: a directory is trashed whole (needs
+        `recursive=true` if non-empty; folds in the former `delete_directory`),
+        otherwise a single file. `force_superseded`/`expected_dead_inbound`
+        apply to files; `recursive` applies to folders.
 
         Deletes are NEVER permanent at this layer. The file moves to
         `Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`
@@ -1586,6 +1548,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
         Args:
             path: Vault-relative.
             confirm: Must be `true` explicitly. Marks the action deliberate.
+            recursive: For a non-empty FOLDER, required to confirm you know it
+                has contents. Ignored for files.
             force_orphan: Allow trash even if inbound wikilinks exist.
             force_superseded: Allow trash of a file in the supersession chain.
             allow_curated: Required to trash under a curated tree.
@@ -1595,73 +1559,43 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 chain) and don't want each step to false-positive on
                 links that will die in the same batch.
 
-        Returns: {path, trash_path, inbound_link_count, inbound_ignored_count, warnings}.
+        Returns (file): {path, trash_path, inbound_link_count,
+                inbound_ignored_count, warnings}.
+        Returns (dir): {path, trash_path, file_count, inbound_link_count,
+                warnings}.
         Errors: UNCONFIRMED; INVALID_PATH; NOT_FOUND; ALREADY_TRASHED;
                 APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
-                INBOUND_LINKS; TRASH_FAILED.
+                INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
         """
         try:
-            result = delete_file_module.delete_file(
-                vault_root,
-                path=path,
-                confirm=confirm,
-                force_orphan=force_orphan,
-                force_superseded=force_superseded,
-                allow_curated=allow_curated,
-                expected_dead_inbound=expected_dead_inbound,
-            )
-        except delete_file_module.DeleteFileError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
-        return result.as_dict()
-
-    @tier2_tool
-    def delete_directory(
-        path: str,
-        confirm: bool,
-        recursive: bool = False,
-        force_orphan: bool = False,
-        allow_curated: bool = False,
-    ) -> dict:
-        """Tier 2: trash a folder (whole tree). Reversible via _trash/.
-
-        Symmetric with `create_directory`. Like `delete_file`, this NEVER
-        does a permanent delete — the folder is moved to
-        `Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>/`
-        with a `.meta.json` sidecar.
-
-        Refuses:
-        - Sources/, Evidence/ (append-only at any granularity).
-        - The `_trash/` subtree (it's already trashed).
-        - Curated trees unless `allow_curated=true`.
-        - When `confirm=false`.
-        - Non-empty directories unless `recursive=true`.
-        - When .md files in the tree have EXTERNAL inbound wikilinks
-          (i.e. from outside the doomed tree) unless `force_orphan=true`.
-
-        Args:
-            path: Vault-relative folder.
-            confirm: Must be `true` explicitly.
-            recursive: Required for non-empty directories. Acknowledges
-                you know it has contents.
-            force_orphan: Allow trash even if external inbound wikilinks
-                point into the tree.
-            allow_curated: Required under curated trees.
-
-        Returns: {path, trash_path, file_count, inbound_link_count, warnings}.
-        Errors: UNCONFIRMED; INVALID_PATH; NOT_FOUND; NOT_A_DIR;
-                ALREADY_TRASHED; APPEND_ONLY; CURATED_PROTECTED; NOT_EMPTY;
-                INBOUND_LINKS; TRASH_FAILED.
-        """
+            abs_path, _rel = resolve_under_vault(vault_root, path)
+            is_dir = abs_path.is_dir()
+        except VaultPathError:
+            is_dir = False  # let the file backend raise the precise path error
         try:
-            result = delete_directory_module.delete_directory(
-                vault_root,
-                path=path,
-                confirm=confirm,
-                recursive=recursive,
-                force_orphan=force_orphan,
-                allow_curated=allow_curated,
-            )
-        except delete_directory_module.DeleteDirectoryError as e:
+            if is_dir:
+                result = delete_directory_module.delete_directory(
+                    vault_root,
+                    path=path,
+                    confirm=confirm,
+                    recursive=recursive,
+                    force_orphan=force_orphan,
+                    allow_curated=allow_curated,
+                )
+            else:
+                result = delete_file_module.delete_file(
+                    vault_root,
+                    path=path,
+                    confirm=confirm,
+                    force_orphan=force_orphan,
+                    force_superseded=force_superseded,
+                    allow_curated=allow_curated,
+                    expected_dead_inbound=expected_dead_inbound,
+                )
+        except (
+            delete_file_module.DeleteFileError,
+            delete_directory_module.DeleteDirectoryError,
+        ) as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         return result.as_dict()
 
@@ -1695,70 +1629,6 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 allow_curated=allow_curated,
             )
         except append_to_file_module.AppendError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
-        return result.as_dict()
-
-    @tier2_tool
-    def get_frontmatter(path: str) -> dict:
-        """Tier 2: read only the frontmatter of a file. Read-only.
-
-        Lightweight counterpart to `get` — useful when scanning many files
-        ("find all files where status: active and project: substrate")
-        without loading bodies.
-
-        Args:
-            path: Vault-relative.
-
-        Returns: {path, frontmatter (dict), has_frontmatter (bool)}.
-        Errors: INVALID_PATH; NOT_FOUND; NOT_A_FILE; UNREADABLE.
-        """
-        try:
-            result = get_frontmatter_module.get_frontmatter(
-                vault_root, path=path
-            )
-        except get_frontmatter_module.GetFrontmatterError as e:
-            raise ValueError(f"{e.code}: {e.reason}") from e
-        return result.as_dict()
-
-    @tier2_tool
-    def set_frontmatter_field(
-        path: str,
-        field: str,
-        value: str | int | float | bool | list | dict | None,
-        why: str,
-        allow_curated: bool = False,
-    ) -> dict:
-        """Tier 2: surgical edit of one frontmatter field. Bumps `updated:`.
-
-        Lighter than `edit` (which rewrites body or tags). Use this when you
-        need to change a single field — `status`, `project`, `tenant`,
-        `superseded_by`, etc. — without touching the body. Always bumps
-        `updated:` to today.
-
-        Refuses Sources/, Evidence/. Curated trees need `allow_curated=true`.
-        `why` is required and lands in the log entry.
-
-        Args:
-            path: Vault-relative.
-            field: Frontmatter key to set. Cannot be `updated` (auto-bumped).
-            value: New value. JSON-compatible scalar, list, or dict.
-            why: One-line rationale (required — auditable).
-            allow_curated: Required under curated trees.
-
-        Returns: {path, field, old_value, new_value, warnings}.
-        Errors: INVALID_SET; INVALID_PATH; NOT_FOUND; NOT_A_FILE;
-                APPEND_ONLY; CURATED_PROTECTED; UNREADABLE.
-        """
-        try:
-            result = set_frontmatter_field_module.set_frontmatter_field(
-                vault_root,
-                path=path,
-                field=field,
-                value=value,
-                why=why,
-                allow_curated=allow_curated,
-            )
-        except set_frontmatter_field_module.SetFrontmatterError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         return result.as_dict()
 

@@ -825,10 +825,13 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
 
 # ---------------- Tier 2 registration gating (KB_MCP_DISABLE_TIER2) ----------------
 
+# Post-consolidation Tier 2 surface: create_directory folded into create_file
+# (kind="dir"); delete_file/delete_directory merged into `delete`;
+# get_frontmatter folded into `get` (frontmatter_only); set_frontmatter_field
+# folded into `edit` (field=). The latter two are now Tier 1.
 TIER2_TOOLS = {
-    "create_file", "create_directory", "list_directory", "move_file",
-    "delete_file", "delete_directory", "append_to_file", "get_frontmatter",
-    "set_frontmatter_field", "list_trash", "recover_from_trash",
+    "create_file", "list_directory", "move_file", "delete",
+    "append_to_file", "list_trash", "recover_from_trash",
     "list_inbound_links",
 }
 

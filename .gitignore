@@ -6,6 +6,7 @@ __pycache__/
 .env
 logs/*
 !logs/.gitkeep
+analysis/
 *.tmp
 dist/
 build/

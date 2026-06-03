@@ -783,8 +783,12 @@ dependencies = [
     { name = "python-slugify" },
     { name = "pyyaml" },
     { name = "rank-bm25" },
-    { name = "sentence-transformers" },
     { name = "snowballstemmer" },
+]
+
+[package.optional-dependencies]
+embeddings = [
+    { name = "sentence-transformers" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
 ]
@@ -803,11 +807,12 @@ requires-dist = [
     { name = "python-slugify", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "rank-bm25", specifier = ">=0.2.2" },
-    { name = "sentence-transformers", specifier = ">=2.7" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
     { name = "snowballstemmer", specifier = ">=2.2" },
-    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32'", specifier = ">=2.12" },
-    { name = "torch", marker = "sys_platform == 'linux' or sys_platform == 'win32'", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'embeddings') or (sys_platform == 'win32' and extra == 'embeddings')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
 ]
+provides-extras = ["embeddings"]
 
 [package.metadata.requires-dev]
 dev = [
