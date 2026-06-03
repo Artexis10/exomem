@@ -319,6 +319,34 @@ def test_move_file_refuses_sources(vault: Path) -> None:
     assert exc.value.code == "APPEND_ONLY"
 
 
+def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:
+    """Relocating WITHIN Sources/ (e.g. into a themed sub-folder) is allowed.
+
+    Rule 2 protects content immutability, not file location — the bytes are
+    carried verbatim. This is the sanctioned path for organizing Sources/.
+    """
+    src_rel = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
+    dst_rel = "Knowledge Base/Sources/Articles/Health/2026-05-04-best-egcg-supplements.md"
+    result = move_module.move_file(
+        vault, old_path=src_rel, new_path=dst_rel, today=TODAY
+    )
+    assert not (vault / src_rel).exists()
+    assert (vault / dst_rel).exists()
+    assert result.new_path == dst_rel
+
+
+def test_move_file_refuses_into_sources_from_outside(vault: Path) -> None:
+    """Moving a non-source file INTO Sources/ is still forbidden (use `add`)."""
+    with pytest.raises(move_module.MoveFileError) as exc:
+        move_module.move_file(
+            vault,
+            old_path="Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md",
+            new_path="Knowledge Base/Sources/Articles/smuggled-in.md",
+            today=TODAY,
+        )
+    assert exc.value.code == "APPEND_ONLY"
+
+
 def test_move_file_refuses_when_dest_exists(vault: Path) -> None:
     src_rel = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
     dst_rel = "Knowledge Base/Notes/Patterns/locked-cryptographic-contract-with-rfc-citations.md"

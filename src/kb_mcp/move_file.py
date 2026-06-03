@@ -1,7 +1,10 @@
 """The `move_file` Tier 2 op: relocate a file, optionally update wikilinks.
 
-Refuses moves out of Sources/ and Evidence/ (append-only). Refuses moves
-INTO Sources/ or Evidence/ (those are written via `add` / `preserve`).
+Append-only trees (Sources/, Evidence/): relocation WITHIN the same tree is
+allowed (a move carries bytes verbatim — only location changes, content
+stays immutable per rule 2), enabling themed sub-folders. Moves that cross
+the boundary are refused: OUT of an append-only tree, or INTO one from
+elsewhere (those land via `add` / `preserve`).
 Curated trees on either end need `allow_curated=true`.
 
 When `update_wikilinks=true` (default), scans the full vault for
@@ -91,26 +94,36 @@ def move_file(
             ),
         )
 
-    # Append-only guards on EITHER end.
+    # Append-only guards. Rule 2 protects content *immutability*, not file
+    # *location*: a move that stays WITHIN the same append-only tree
+    # (Sources/ -> Sources/, Evidence/ -> Evidence/) carries the bytes
+    # verbatim and only relocates them, so it is permitted — this is the
+    # sanctioned way to organize Sources/ into themed sub-folders. Crossing
+    # the boundary is still forbidden in both directions: moving OUT of an
+    # append-only tree, or INTO one from elsewhere (those go via `add` /
+    # `preserve`).
     src_append = in_append_only_tree(old_rel)
-    if src_append:
-        raise MoveFileError(
-            code="APPEND_ONLY",
-            reason=(
-                f"{old_rel} is in {src_append}/ which is append-only "
-                f"(SKILL.md rule 2). Moves out are forbidden."
-            ),
-        )
     dst_append = in_append_only_tree(new_rel)
-    if dst_append:
-        raise MoveFileError(
-            code="APPEND_ONLY",
-            reason=(
-                f"destination {new_rel} is in {dst_append}/. "
-                f"Use `add` (sources) or `preserve` (evidence) to land "
-                f"content there."
-            ),
-        )
+    intra_append = bool(src_append) and src_append == dst_append
+    if not intra_append:
+        if src_append:
+            raise MoveFileError(
+                code="APPEND_ONLY",
+                reason=(
+                    f"{old_rel} is in {src_append}/ which is append-only "
+                    f"(SKILL.md rule 2). Moves OUT of {src_append}/ are "
+                    f"forbidden; relocation WITHIN {src_append}/ is allowed."
+                ),
+            )
+        if dst_append:
+            raise MoveFileError(
+                code="APPEND_ONLY",
+                reason=(
+                    f"destination {new_rel} is in {dst_append}/. "
+                    f"Use `add` (sources) or `preserve` (evidence) to land "
+                    f"content there from outside {dst_append}/."
+                ),
+            )
 
     # Curated-tree guards on EITHER end.
     src_curated = in_curated_tree(old_rel)
