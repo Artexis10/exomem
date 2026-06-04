@@ -58,8 +58,8 @@ The Knowledge Base does not replace those curated trees. It is a parallel substr
 ```
 
 `<vault>` resolves to the Obsidian vault root. Path differs by machine. From WSL (where Claude Code runs), use these forms:
-- Desktop: `/mnt/d/Archive/Personal Archive/50 Notes/Obsidian` (Windows `D:\Archive\Personal Archive\50 Notes\Obsidian`)
-- Laptop: `/mnt/c/Users/win-laptop/Documents/Obsidian` (Windows `C:\Users\win-laptop\Documents\Obsidian`)
+- Desktop: `/path/to/your/vault` (Windows `<your-vault>`)
+- Laptop: `/path/to/your/vault` (Windows `<your-vault>`)
 
 Both paths are enrolled in `Q_MNT_ALLOWLIST` in `~/.claude/hooks/user-bash-guard.sh` (yadm-tracked). If the relevant path doesn't resolve on the current machine, you're on the other one — try the alternate. Verify allowed filesystem paths before writing.
 
@@ -174,8 +174,8 @@ Sub-folder indexes are not universal — they exist when categorization is itsel
 8. **Deploy via symlink.** The harness loader at `~/.claude/skills/knowledge-base/` is a directory symlink to the KB canonical `_Schema/` folder on each machine — making the canonical and deployed copy literally the same files. Schema ops write to the canonical path; the harness sees the change immediately because it's the same file.
 
     Per-machine symlink targets:
-    - Desktop: `C:\Users\hugoa\.claude\skills\knowledge-base\` → `D:\Archive\Personal Archive\50 Notes\Obsidian\Knowledge Base\_Schema\`
-    - Laptop: `C:\Users\win-laptop\.claude\skills\knowledge-base\` → `C:\Users\win-laptop\Documents\Obsidian\Knowledge Base\_Schema\`
+    - Desktop: `C:\Users\<you>\.claude\skills\knowledge-base\` → `<your-vault>\Knowledge Base\_Schema\`
+    - Laptop: `C:\Users\<you>\.claude\skills\knowledge-base\` → `<your-vault>\Knowledge Base\_Schema\`
 
     The symlinks are per-machine (different targets) and **must be excluded from yadm tracking** so each machine maintains its own local link. The canonical content is sync'd across machines via Obsidian Sync; each machine's symlink resolves to its local vault path.
 

@@ -142,7 +142,7 @@ existing capture-only path). Revisit if downtime bites.
 ## Install
 
 ```powershell
-cd C:\Users\hugoa\Desktop\projects\kb-mcp
+cd C:\path\to\kb-mcp
 
 # 1. Install Python deps (creates .venv automatically).
 #    --extra embeddings pulls torch + sentence-transformers for HYBRID search.
@@ -180,7 +180,7 @@ KB_MCP_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
 # Optional: override vault path
-KB_MCP_VAULT_PATH=D:\Archive\Personal Archive\50 Notes\Obsidian
+KB_MCP_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
 `KB_MCP_BASE_URL` must match the Tailscale Funnel URL exactly — no trailing
