@@ -1,8 +1,8 @@
 ---
 name: knowledge-base
-description: Operates on Hugo's personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when the user wants to save, file, log, compile, distill, search, audit, supersede, or preserve anything in their knowledge base, vault, KB, Obsidian, notes, or "my docs," including oblique phrasings ("interesting, save it," "I want to remember this") when context implies a KB operation. Do NOT trigger for operations on parts of the vault outside the Knowledge Base folder — Cognitive Core, Domains, Prompt Bank, Products, and Personal Context are read-only inputs to this skill, never write targets.
+description: Operates on Hugo's personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when the user wants to save, file, log, compile, distill, search, audit, supersede, or preserve anything in their knowledge base, vault, KB, Obsidian, notes, or "my docs," including oblique phrasings ("interesting, save it," "I want to remember this") when context implies a KB operation. Also engages proactively, without being told: consults the KB for prior conclusions whenever the conversation touches a project, domain, decision, person, or topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (an agreement, decision, solved problem, diagnosed failure, or recognized pattern). Do NOT trigger for operations on parts of the vault outside the Knowledge Base folder — Cognitive Core, Domains, Prompt Bank, Products, and Personal Context are read-only inputs to this skill, never write targets.
 metadata:
-  version: 0.14.2
+  version: 0.15.0
 ---
 
 # Knowledge Base
@@ -19,6 +19,21 @@ The Knowledge Base does not replace those curated trees. It is a parallel substr
 - `Notes/`, `Entities/` — compiled, structured, supersedable. Always carry frontmatter, sources, and links.
 - `Evidence/` — raw legal/factual artifacts (binaries, documents, screenshots). Append-only. No analysis at this layer.
 - The rest of the vault — Claude reads, Claude does not write.
+
+## Proactive engagement
+
+This skill is **context-aware, not just request-driven.** It engages on its own in two situations and stays quiet otherwise. (There are still no hooks/schedules/background triggers — "proactive" means Claude's own judgment mid-conversation, not automation.)
+
+**Proactive retrieval (read) — quiet, surface only hits.** When a turn references something the KB plausibly holds — a project key (`q`, `endstate`, `substrate`, …), a domain (health, finance, …), a named entity/person/decision, or phrasings like "what did I conclude about X," "have I looked at Y," "where did we land on Z" — run a quiet `find` **first** and fold what you find into the answer. Don't narrate the search; mention the KB only when it returned something relevant, and cite the page(s) you used. A miss is "not found in what I searched," never "it doesn't exist" (see Search → never report a miss as absence). Don't run a find on generic turns the KB plainly wouldn't cover.
+
+**Stepping-stone capture (write) — autonomous, then report.** When the conversation reaches a **stepping-stone** — you and Hugo agree on something, a decision is made, a problem is solved, a failure is diagnosed, a pattern is recognized — capture it without being asked:
+
+- Raw material → **add** (already no-confirmation).
+- A durable conclusion → draft the compiled **note**/**link**, run **suggest_links** + the near-duplicate check first, write it under the **standing waiver** (don't ask per-note), then report one line: `Saved → <path>`.
+- The guardrails that remain are the ones that matter: dedupe (prefer **edit**/**replace** over a parallel page; surface a near-duplicate `warning` when it fires — that's a hit worth surfacing) and clean links. The per-write approval is waived, not the integrity checks.
+- Still pause and ask **only** when type/scope is genuinely ambiguous (research vs insight vs experiment; which `Notes/Research/<scope>`; Q-vs-tenant) — the one-line questions from "When to ask vs. when to proceed" still apply.
+
+Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved questions, things Hugo is still weighing. Capture at the landing, not during the flight.
 
 ## Vault layout
 
@@ -179,6 +194,10 @@ These constraints apply equally to Tier 1 and Tier 2 ops — no escape hatch aro
 - "what's in the trash," "show me recoverable deletes" → **list_trash** (Tier 2)
 - "undelete," "recover this," "put it back where it was" → **recover_from_trash** (Tier 2; the ergonomic undo for `delete`)
 
+**Implicit (no explicit ask) — proactive engagement:**
+- topic maps to a project/domain/entity, or "what did I conclude / where did we land on X" → proactive **find** first, fold the hits into the answer (quiet; surface only on a hit)
+- "ok let's go with that," "that settles it," "makes sense, let's do X," or a problem just got solved → stepping-stone: capture via **add**/**note** under the standing waiver, then report the path
+
 When the user says something oblique like "interesting, save it," default to **add** + ask whether to compile a note.
 
 ## Search
@@ -274,7 +293,7 @@ These rules are non-negotiable.
 
     **Batch waiver:** the user may approve a *scope* of multiple files upfront ("draft all Tier 1," "write all four hubs + concepts") rather than each file individually. In that case, write the batch, then summarise paths + count. The waiver is **per-batch** — a new batch of work needs a new scope-approval, not a standing waiver.
 
-    **Standing waiver:** phrasing like "just write it" or recorded preferences in agent memory.
+    **Standing waiver:** phrasing like "just write it," recorded preferences in agent memory, or a stepping-stone reached in an autonomous working session (Hugo's default mode) — draft, write, and report rather than pre-approve (see Proactive engagement).
 
 4. **Frontmatter is mandatory.** Every file written under `Knowledge Base/` must carry frontmatter conforming to `references/frontmatter.md`. Exceptions (index files): `index.md`, `log.md`, and sub-folder `index.md` files. `Sources/` and `Evidence/` raws carry frontmatter unless the artifact is a non-markdown binary (PDF, image, docx) — then the frontmatter lives in a sidecar `.md` if one is needed.
 
@@ -414,10 +433,10 @@ Per-check detail — exactly what each flags, its severity, and the proposed fix
 ## What this skill does NOT do
 
 - Touch anything outside `Knowledge Base/` (the dual-write exception for `~/.claude/skills/knowledge-base/` under hand-edits of `_Schema/` is the only carve-out — see rule 8).
-- Auto-compile sources without confirmation. Sources land; compilation is always a conscious step.
+- Auto-compile *blindly* after every capture. Compilation is a deliberate step taken at a stepping-stone (see Proactive engagement) — under the standing waiver it needs no per-note approval, but it stays a judgment call and is always reported, never a silent dump of every passing remark.
 - Assign numeric confidence scores. Use citation count and recency as the trust signal.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded, mark it; if irrelevant, archive into a `_archive/` subfolder of its current location.
-- Run on hooks, schedules, or background triggers. Operations happen because the user asked.
+- Run on hooks, schedules, or background triggers (claude.ai can't, and we don't want automated writes). Operations happen because the user asked, or because the conversation reached a point where consulting or capturing is clearly warranted — see Proactive engagement.
 - Modify `Sources/` or `Evidence/` files after creation. Mistakes get superseded, not edited.
 
 ## When to ask vs. when to proceed
@@ -432,6 +451,8 @@ Per-check detail — exactly what each flags, its severity, and the proposed fix
 - Marking an existing page `superseded`.
 
 **Proceed without asking:**
+- Proactive `find` for context (read-only) — see Proactive engagement.
+- Capturing a clear stepping-stone conclusion whose type and scope are unambiguous — write under the standing waiver and report the path.
 - `add` operations — raw capture into `Sources/`.
 - `preserve` operations — raw capture into `Evidence/<scope>/`.
 - `find` and `audit` — read-only.
