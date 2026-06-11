@@ -180,13 +180,15 @@ KB_MCP_BASE_URL=https://<device>.<tailnet>.ts.net
 KB_MCP_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
-# Optional: override vault path
+# Required: vault root — the folder that contains Knowledge Base/
 KB_MCP_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
 `KB_MCP_BASE_URL` must match the Tailscale Funnel URL exactly — no trailing
 slash, no `/mcp` suffix. `KB_MCP_GITHUB_USERNAME` is case-insensitive but must
-be the *login* (e.g. `Artexis10`), not the display name.
+be the *login* (e.g. `Artexis10`), not the display name. `KB_MCP_VAULT_PATH` is
+**required**: claude.ai connects over HTTP and passes no environment, so the
+service resolves the vault solely from this line in `.env` at startup.
 
 ### 5. Sanity-test locally
 
