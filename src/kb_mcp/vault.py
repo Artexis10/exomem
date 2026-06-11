@@ -22,9 +22,6 @@ import yaml
 from slugify import slugify as _slugify
 
 
-DESKTOP_VAULT = Path(r"D:\Archive\Personal Archive\50 Notes\Obsidian")
-LAPTOP_VAULT = Path(r"C:\Users\win-laptop\Documents\Obsidian")
-
 SLUG_MAX_LENGTH = 100
 
 # Curated trees are desk-managed; Tier 2 writes refuse by default and
@@ -62,24 +59,26 @@ _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
 def resolve_vault(env_var: str = "KB_MCP_VAULT_PATH") -> Path:
     """Return the Obsidian vault root that contains Knowledge Base/.
 
-    Priority: env override → desktop → laptop. Raises if none resolve.
+    Resolved from the ``{env_var}`` environment variable — the vault *root*, i.e.
+    the folder that contains ``Knowledge Base/``. Raises if it is unset or does
+    not point at a vault. (This is cross-platform: there are no machine-specific
+    fallback paths — every host sets the env var to its own vault.)
     """
     override = os.environ.get(env_var)
-    if override:
-        path = Path(override)
-        if not _is_vault(path):
-            raise RuntimeError(
-                f"{env_var}={override!r} does not look like a vault "
-                f"(no Knowledge Base/_Schema/SKILL.md found)"
-            )
-        return path
-    for candidate in (DESKTOP_VAULT, LAPTOP_VAULT):
-        if _is_vault(candidate):
-            return candidate
-    raise RuntimeError(
-        "Knowledge Base vault not found at the desktop or laptop path. "
-        f"Set {env_var} to override."
-    )
+    if not override:
+        raise RuntimeError(
+            f"{env_var} is not set. Point it at your vault root — the folder "
+            f"that contains 'Knowledge Base/'. For example:\n"
+            f'  macOS/Linux:  export {env_var}="/path/to/your/Obsidian"\n'
+            f'  Windows:      setx {env_var} "C:\\path\\to\\your\\Obsidian"'
+        )
+    path = Path(override)
+    if not _is_vault(path):
+        raise RuntimeError(
+            f"{env_var}={override!r} does not look like a vault "
+            f"(no Knowledge Base/_Schema/SKILL.md found)"
+        )
+    return path
 
 
 def _is_vault(path: Path) -> bool:

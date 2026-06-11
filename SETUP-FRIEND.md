@@ -6,13 +6,17 @@ Windows service — none of the remote/mobile machinery in the main
 [README](README.md). Everything stays on your machine; the only thing that ever
 leaves is the query Claude sends to Anthropic to answer you.
 
+**Works on macOS, Linux, and Windows.** The commands below use a macOS/Linux
+shell; the few Windows (PowerShell) differences are called out inline.
+
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
 ---
 
 ## What you need
 
-- **Python 3.12+**
+- **Python 3.11+** — check with `python3 --version`. On macOS, `brew install
+  python` if you don't have it (or use the [python.org](https://www.python.org/downloads/) installer).
 - **Claude Code** (you already have this)
 - An **Obsidian vault** — or just any folder you want to use as one. It needs a
   `Knowledge Base/` subfolder (we create a minimal one below).
@@ -25,8 +29,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 ```bash
 git clone <repo-url> kb-mcp
 cd kb-mcp
-python -m venv .venv && . .venv/Scripts/activate   # Windows
-# (macOS/Linux: source .venv/bin/activate)
+python3 -m venv .venv && source .venv/bin/activate   # macOS/Linux
+# (Windows PowerShell: python -m venv .venv ; .venv\Scripts\Activate.ps1)
 pip install -e .                 # lean: keyword/BM25 search, no heavy deps
 # for hybrid semantic search, add the extra (~1-2 GB torch + sentence-transformers):
 # pip install -e ".[embeddings]"
@@ -162,7 +166,9 @@ publicly-reachable, authenticated endpoint:
 3. **A GitHub OAuth app** (client id + secret) wired into the OAuthProxy —
    claude.ai connectors require OAuth; static tokens aren't accepted.
 4. **Lock it to your GitHub login** (the single-user verifier), then run it as a
-   service with `--transport streamable-http`.
+   background service with `--transport streamable-http` — `scripts/install-service.sh`
+   sets this up via **launchd** on macOS or **systemd** on Linux (the main
+   [README](README.md) covers all three platforms).
 5. **Add it as a custom connector** in claude.ai.
 
 The main [README](README.md) documents this path end-to-end (it's Hugo's exact
