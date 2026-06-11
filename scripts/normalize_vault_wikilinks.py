@@ -10,7 +10,7 @@ Usage:
     python scripts/normalize_vault_wikilinks.py [--dry-run] [--vault PATH]
 
 By default runs against the vault resolved via `kb_mcp.vault.resolve_vault()`
-(KB_MCP_VAULT_PATH env or desktop/laptop defaults). Use --vault to override.
+(the `KB_MCP_VAULT_PATH` env var). Use --vault to override.
 
 The script:
 1. Builds a WikilinkResolver against the vault (one walk; includes

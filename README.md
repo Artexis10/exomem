@@ -93,7 +93,8 @@ every write logs to `Knowledge Base/log.md`.
 - `logs/kb-mcp.log` — service log. Every call (reads + writes) is
   surfaced via a per-call middleware as `tool=<name> duration_ms=<n>
   event=tool_success|tool_error`. Operational layer (debug "did the
-  call reach the server", spot slow ops, etc.). Rotated by NSSM.
+  call reach the server", spot slow ops, etc.). Rotated in-process
+  (`RotatingFileHandler`, 5 MB × 5) — same on every platform.
 
 Deferred to desk-side: `schema` (KB governance — intentionally non-parity).
 
@@ -112,14 +113,14 @@ writes), `rename_tag`, `find_replace_in_file`, `get_directory_tree`.
                                               │ tailscale funnel
                                               ▼
                             ┌────────────────────────────────────┐
-                            │ Windows desktop                    │
+                            │ host: macOS / Linux / Windows      │
                             │                                    │
                             │   FastMCP @ 127.0.0.1:8765         │
                             │   bearer-token auth                │
                             │   ↓                                │
                             │   tools: find, add                 │
                             │   ↓                                │
-                            │   D:\Archive\...\Knowledge Base    │
+                            │   <vault>/Knowledge Base           │
                             └────────────────────────────────────┘
 ```
 
@@ -202,7 +203,30 @@ uv run python -m kb_mcp --transport streamable-http --host 127.0.0.1 --port 8765
 #                                                              → expect JSON metadata
 ```
 
-### 6. Install as Windows service (auto-start on boot)
+### 6. Install as a service (auto-start on boot)
+
+Pick your platform — all three run the same `streamable-http` server and differ
+only in the OS service manager.
+
+**macOS (launchd):**
+
+```bash
+bash scripts/install-service.sh
+# Restart after .env edits:  bash scripts/restart.sh
+# Uninstall:                 launchctl bootout gui/$(id -u)/com.kb-mcp && rm ~/Library/LaunchAgents/com.kb-mcp.plist
+```
+
+**Linux (systemd --user):**
+
+```bash
+mkdir -p ~/.config/systemd/user
+sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" scripts/kb-mcp.service > ~/.config/systemd/user/kb-mcp.service
+systemctl --user daemon-reload && systemctl --user enable --now kb-mcp
+loginctl enable-linger "$USER"   # keep it running without an active login session
+# Restart after .env edits:  systemctl --user restart kb-mcp   (or: bash scripts/restart.sh)
+```
+
+**Windows (NSSM):**
 
 ```powershell
 # Prereq: NSSM must be installed and on PATH. Easiest:
@@ -244,9 +268,9 @@ host's *own* values. The non-obvious parts:
   not associated with this application." Create a second app (e.g. `kb-mcp (laptop)`)
   with callback `https://<this-host>.<tailnet>.ts.net/auth/callback` and put *its*
   `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` in this machine's `.env`.
-- **Its own `.env` and connector.** The vault path auto-resolves per machine (see the
-  desktop/laptop constants in `src/kb_mcp/vault.py`); override with `KB_MCP_VAULT_PATH`
-  if needed. In claude.ai, add a separate connector pointing at this host's `/mcp` URL
+- **Its own `.env` and connector.** Set `KB_MCP_VAULT_PATH` to this machine's vault
+  root (the folder that contains `Knowledge Base/`). In claude.ai, add a separate
+  connector pointing at this host's `/mcp` URL
   (the URL usually isn't editable in place, so delete + re-add to repoint).
 - **Its own embedding stack (GPU).** Hybrid `find` needs `torch` + `sentence-transformers`
   (the optional `embeddings` extra) in the host's `.venv` — `uv sync --extra embeddings`
@@ -659,12 +683,18 @@ aged list; you pick a coherent set and pass it to `propose_compilation`.
 
 ## Logs
 
-- `logs/kb-mcp.log` — application log (rotated, 5 MB × 5 files)
-- `logs/service.out.log`, `logs/service.err.log` — NSSM stdout/stderr (rotated by NSSM)
+- `logs/kb-mcp.log` — application log (rotated in-process, 5 MB × 5 files; same on every platform)
+- `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr. On Windows
+  NSSM writes and rotates these; launchd/systemd write them but do **not** rotate them
+  (the app's own `kb-mcp.log` above is the durable, self-rotating record). On Linux,
+  `journalctl --user -u kb-mcp` is the primary stdout/stderr view.
 
 ## Restarting the service
 
-`install-service.ps1` grants your user account start/stop rights on the
+**macOS / Linux:** `bash scripts/restart.sh` — launchd `kickstart -k` on macOS,
+`systemctl --user restart` on Linux. It truncates `logs/kb-mcp.log` and tails it.
+
+**Windows:** `install-service.ps1` grants your user account start/stop rights on the
 service, so day-to-day restarts don't need UAC:
 
 ```powershell

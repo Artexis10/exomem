@@ -1,0 +1,32 @@
+# systemd --user unit for kb-mcp (Linux). Cross-platform counterpart to the
+# macOS launchd agent (scripts/com.kb-mcp.plist) and the Windows NSSM service
+# (scripts/install-service.ps1).
+#
+# This is a TEMPLATE: __REPO_ROOT__ and __VENV_PYTHON__ must be substituted with
+# absolute paths before installing. From the repo root:
+#
+#   mkdir -p ~/.config/systemd/user
+#   sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" \
+#       scripts/kb-mcp.service > ~/.config/systemd/user/kb-mcp.service
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now kb-mcp
+#   loginctl enable-linger "$USER"     # so it runs without an active login session
+#
+# Restart after .env edits:  systemctl --user restart kb-mcp   (or: bash scripts/restart.sh)
+# Logs:                       journalctl --user -u kb-mcp -f   (plus logs/kb-mcp.log)
+# Uninstall:                  systemctl --user disable --now kb-mcp && rm ~/.config/systemd/user/kb-mcp.service
+
+[Unit]
+Description=kb-mcp: Obsidian Knowledge Base MCP server for mobile claude.ai
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=__REPO_ROOT__
+ExecStart=__VENV_PYTHON__ -m kb_mcp --transport streamable-http --host 127.0.0.1 --port 8765
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

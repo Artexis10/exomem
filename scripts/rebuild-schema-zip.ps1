@@ -7,8 +7,8 @@
   Repacks _Schema/ into _Schema.zip so it can be re-uploaded as a skill to
   claude.ai whenever SKILL.md / references / project-keys.yaml change.
 
-  Resolves the vault automatically: desktop first, then laptop. Honors
-  $env:KB_MCP_VAULT_PATH when set.
+  Resolves the vault from $env:KB_MCP_VAULT_PATH (the vault root that contains
+  Knowledge Base/).
 
 .EXAMPLE
   pwsh -File scripts/rebuild-schema-zip.ps1
@@ -20,18 +20,12 @@ param()
 $ErrorActionPreference = 'Stop'
 
 function Resolve-Vault {
-  if ($env:KB_MCP_VAULT_PATH) {
-    $p = $env:KB_MCP_VAULT_PATH
-    if (Test-Path (Join-Path $p 'Knowledge Base/_Schema/SKILL.md')) { return $p }
-    throw "KB_MCP_VAULT_PATH=$p does not contain Knowledge Base/_Schema/SKILL.md"
+  if (-not $env:KB_MCP_VAULT_PATH) {
+    throw 'KB_MCP_VAULT_PATH is not set. Point it at your vault root (the folder that contains Knowledge Base/).'
   }
-  foreach ($candidate in @(
-    'D:\Archive\Personal Archive\50 Notes\Obsidian',
-    'C:\Users\win-laptop\Documents\Obsidian'
-  )) {
-    if (Test-Path (Join-Path $candidate 'Knowledge Base/_Schema/SKILL.md')) { return $candidate }
-  }
-  throw 'Could not locate Obsidian vault on this machine. Set $env:KB_MCP_VAULT_PATH.'
+  $p = $env:KB_MCP_VAULT_PATH
+  if (Test-Path (Join-Path $p 'Knowledge Base/_Schema/SKILL.md')) { return $p }
+  throw "KB_MCP_VAULT_PATH=$p does not contain Knowledge Base/_Schema/SKILL.md"
 }
 
 $vault     = Resolve-Vault

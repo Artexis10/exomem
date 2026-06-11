@@ -1,0 +1,50 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  launchd user-agent for kb-mcp (macOS). This is a TEMPLATE: the placeholders
+  __VENV_PYTHON__, __REPO_ROOT__, __BIND_HOST__ and __PORT__ are substituted by
+  scripts/install-service.sh, which writes the rendered copy to
+  ~/Library/LaunchAgents/com.kb-mcp.plist. Cross-platform counterpart to the
+  Windows NSSM service in scripts/install-service.ps1.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.kb-mcp</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>__VENV_PYTHON__</string>
+        <string>-m</string>
+        <string>kb_mcp</string>
+        <string>--transport</string>
+        <string>streamable-http</string>
+        <string>--host</string>
+        <string>__BIND_HOST__</string>
+        <string>--port</string>
+        <string>__PORT__</string>
+    </array>
+
+    <!-- Run from the repo root so the app's load_dotenv() picks up ./.env. -->
+    <key>WorkingDirectory</key>
+    <string>__REPO_ROOT__</string>
+
+    <!-- Start at login and keep it alive (≈ NSSM SERVICE_AUTO_START + restart). -->
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <!-- Don't respawn faster than every 10s in a crash loop (≈ NSSM AppThrottle). -->
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+
+    <key>StandardOutPath</key>
+    <string>__REPO_ROOT__/logs/service.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__REPO_ROOT__/logs/service.err.log</string>
+
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
