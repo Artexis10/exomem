@@ -180,6 +180,10 @@ KB_MCP_BASE_URL=https://<device>.<tailnet>.ts.net
 KB_MCP_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
+# Recommended: a long random string that pins the OAuth signing key, so the
+# claude.ai connector survives FastMCP upgrades / client-secret rotation without
+# re-authorizing. Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
+KB_MCP_JWT_SIGNING_KEY=<long-random-string>
 # Required: vault root — the folder that contains Knowledge Base/
 KB_MCP_VAULT_PATH=<your-Obsidian-vault-root>
 ```
