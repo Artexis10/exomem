@@ -167,6 +167,33 @@ own — or just start writing; the writer auto-registers new keys as you use the
 
 ---
 
+## 7. (Recommended) Make auto-save reliable
+
+The skill *tells* Claude to capture at stepping-stones, but that instruction is
+passive — over a long conversation Claude tends to forget it, so auto-save often
+quietly never fires (you'll know: `Knowledge Base/log.md` only shows saves you
+asked for). This optional hook fixes that — it re-checks "is this worth saving?"
+at the end of every turn:
+
+```bash
+python -m kb_mcp install-hook
+```
+
+It writes a small script to `~/.claude/hooks/` and wires it as a Claude Code
+`Stop` hook (restart Claude Code to activate). It's **language-agnostic** (no
+keyword matching — works the same in any language you write in) and cheap (gated
+so it stays quiet on ordinary turns, plus a per-session cooldown). Every time it
+nudges it logs to `~/.claude/kb-capture-nudge.log`, so you can see the real rate.
+Prefer to wire it by hand? `python -m kb_mcp install-hook --print-only` writes the
+script and prints the settings snippet to paste. Tune with
+`KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_CAPTURE_NUDGE_COOLDOWN_SEC`, or turn it off
+with `KB_CAPTURE_NUDGE_DISABLE=1`.
+
+(Hooks are Claude Code only — claude.ai web/mobile can't run them, so there the
+skill stays best-effort: nudge it with *"save that to kb."*)
+
+---
+
 ## You're up
 
 Try it in Claude Code: *"add this as a source and compile an insight from it,"*

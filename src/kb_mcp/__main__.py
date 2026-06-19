@@ -4,6 +4,7 @@ Subcommands:
 - (default) serve the MCP server — `python -m kb_mcp [--transport ...]`
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the knowledge-base skill into Claude Code
+- `install-hook` — wire the capture-reliability Stop hook into Claude Code
 """
 
 from __future__ import annotations
@@ -22,6 +23,8 @@ def main(argv: list[str] | None = None) -> int:
         return _init_main(raw[1:])
     if raw and raw[0] == "install-skill":
         return _install_skill_main(raw[1:])
+    if raw and raw[0] == "install-hook":
+        return _install_hook_main(raw[1:])
     return _serve_main(raw)
 
 
@@ -130,6 +133,55 @@ def _install_skill_main(argv: list[str]) -> int:
     print(f"  {report['target']}")
     print("Restart Claude Code to load it. Then just talk - it captures at")
     print('natural stopping points, or say "find my notes on X".')
+    return 0
+
+
+def _install_hook_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp install-hook",
+        description=(
+            "Wire the capture-reliability Stop hook into Claude Code so auto-save "
+            "fires on its own at stepping-stones instead of waiting to be told. "
+            "Language-agnostic (no English-keyword gating) and cheap (gated + "
+            "cooldown). Re-running is idempotent."
+        ),
+    )
+    parser.add_argument(
+        "--hook-dir",
+        help="Where to write the hook script (default: ~/.claude/hooks).",
+    )
+    parser.add_argument(
+        "--settings",
+        help="settings.json to wire (default: ~/.claude/settings.json).",
+    )
+    parser.add_argument(
+        "--print-only",
+        action="store_true",
+        help="Write the script but don't touch settings.json; print the snippet to add.",
+    )
+    args = parser.parse_args(argv)
+
+    from . import install_hook as hook_module
+
+    try:
+        report = hook_module.install_hook(
+            hook_dir=args.hook_dir,
+            settings_path=args.settings,
+            wire=not args.print_only,
+        )
+    except FileNotFoundError as e:
+        print(f"kb-mcp install-hook: {e}", file=sys.stderr)
+        return 1
+
+    print("Installed the capture-reliability hook script:")
+    print(f"  {report['script']}")
+    if report["wired"]:
+        print(f"Wired into {report['settings']} as a Stop hook.")
+        print("Restart Claude Code to activate it. Triggers log to")
+        print("  ~/.claude/kb-capture-nudge.log")
+    else:
+        print("Add this to your settings.json (merge into hooks.Stop):")
+        print(hook_module.snippet(report["command"]))
     return 0
 
 
