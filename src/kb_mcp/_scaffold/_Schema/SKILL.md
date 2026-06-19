@@ -53,7 +53,10 @@ Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved q
 ├── Sources/
 │   ├── Articles/                 Captured web/PDF content
 │   ├── Sessions/                 Conversation transcripts OR Claude-written session captures
-│   └── Books/                    Book notes/excerpts
+│   ├── Books/                    Book notes/excerpts
+│   ├── Papers/                   Academic papers
+│   ├── Videos/                   Video transcripts/notes (e.g. a pasted YouTube transcript)
+│   └── Other/                    Miscellaneous captures
 ├── Notes/
 │   ├── Research/{Substrate, Q, Endstate, Sift, Together Unprocessed,
 │   │            Health, Finance, Creative, Science, Travel,
@@ -385,7 +388,8 @@ Easy to confuse (both time-bounded, date-prefixed, with outcomes). **Experiment*
 ## Workflow: typical add-then-compile session
 
 1. **User pastes raw material or asks to log something.**
-2. **Skill creates a `source` file.** Picks `Sources/Articles/`, `Sources/Sessions/`, or `Sources/Books/` based on the input shape. Filename: ISO-date + slug. Frontmatter per `references/frontmatter.md`. Updates `Sources/index.md`.
+2. **Skill creates a `source` file.** Picks the subfolder from the input shape — `Sources/Articles/` (web/PDF), `Sources/Sessions/` (a pasted conversation), `Sources/Books/`, `Sources/Papers/`, `Sources/Videos/`, or `Sources/Other/`. Filename: ISO-date + slug. Frontmatter per `references/frontmatter.md`. Updates `Sources/index.md`.
+   - **Videos are capturable** — file the *transcript* under `Sources/Videos/` (`source_type: video`, `url` required). YouTube usually exposes a transcript/captions panel, so it's a paste, no ASR needed. kb-mcp does not download or transcribe media itself; only a video with no available transcript would need an external ASR step first.
 3. **Skill asks: "Compile a note from this? If yes, what type — research, insight, failure, pattern, experiment, production-log? And what scope (for research) / domain (for experiment) / medium (for production)?"** Skip if the user already specified.
 4. **Skill drafts the compiled page** with frontmatter, sources block (linking back to the source file), wikilinks to existing entities/concepts where they obviously match, and a "Connections" section listing the wikilinks. **Run `suggest_links` on the draft (title + body) first** — it surfaces related existing pages (hub-preferring) you'd otherwise miss; fold the relevant ones into Connections.
 5. **Skill shows the draft, waits for confirmation.** User can revise inline.

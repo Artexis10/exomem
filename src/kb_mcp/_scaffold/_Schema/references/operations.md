@@ -31,7 +31,7 @@ These two updates are non-negotiable for every operation below. The per-operatio
 
 ### Inputs to gather
 - The raw content (pasted text, URL, file reference, conversation excerpt)
-- Source type — usually inferable: pasted Claude transcript → `Sessions/`; URL or article body → `Articles/`; book excerpt → `Books/`. Ask only if ambiguous.
+- Source type — usually inferable: pasted Claude transcript → `Sessions/`; URL or article body → `Articles/`; book excerpt → `Books/`; academic paper → `Papers/`; a video transcript (e.g. a pasted YouTube transcript) → `Videos/` with `url` set. Ask only if ambiguous.
 - Optional: tags, why-captured one-liner
 
 ### Procedure
