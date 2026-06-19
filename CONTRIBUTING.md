@@ -16,9 +16,13 @@ sensitive `Evidence/` examples).
 
 ### To change the skill
 1. Edit the canonical in the vault (`<vault>/Knowledge Base/_Schema/`).
-2. Regenerate: `python scripts/genericize-schema.py --vault <vault-root>`
-   (or set `KB_MCP_VAULT_PATH`). `--check` does a dry run (guard only, no write).
-3. Commit the regenerated `_scaffold/_Schema/`.
+2. **Bump `version:` in SKILL.md frontmatter** (semver). A content change without a
+   version bump is a bug — do it in the same change.
+3. Regenerate the repo scaffold: `python scripts/genericize-schema.py --vault <vault-root>`
+   (or set `KB_MCP_VAULT_PATH`; `--check` dry-runs the guard). Commit the regenerated
+   `_scaffold/_Schema/`.
+4. Rebuild the claude.ai zip: `python scripts/rebuild-schema-zip.py --vault <vault-root>`,
+   then re-upload `<vault>/Knowledge Base/_Schema.zip` to claude.ai.
 
 ### How genericization works
 - **Block markers** in the canonical — `<!-- GENERIC-START … GENERIC-REPLACE --> … <!-- GENERIC-END -->`
