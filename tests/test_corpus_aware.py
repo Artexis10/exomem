@@ -80,6 +80,21 @@ def test_detect_duplicates_noop_when_embeddings_disabled(vault: Path) -> None:
     ) == []
 
 
+def test_dup_threshold_defaults_when_env_unset(monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_DUP_THRESHOLD", raising=False)
+    assert corpus_aware._dup_threshold() == corpus_aware.DUP_THRESHOLD
+
+
+def test_dup_threshold_honors_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_DUP_THRESHOLD", "0.93")
+    assert corpus_aware._dup_threshold() == 0.93
+
+
+def test_dup_threshold_falls_back_on_garbage(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_DUP_THRESHOLD", "loose")
+    assert corpus_aware._dup_threshold() == corpus_aware.DUP_THRESHOLD
+
+
 # ---------------- semantic (model-loading) ----------------
 
 pytest.importorskip("sentence_transformers")

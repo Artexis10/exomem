@@ -234,3 +234,21 @@ The main [README](README.md) documents this path end-to-end (it's Hugo's exact
 setup). Rule of thumb: the **local path is ~90% of the value for ~20% of the
 effort**; the mobile tier is the rest — worth it if you genuinely want your KB
 in your pocket.
+
+### Make the KB proactive in the Claude app (custom instructions)
+
+claude.ai (web/mobile) can't run hooks — those are Claude Code only — so the
+skill's proactive find/capture is best-effort there. To nudge it reliably across
+*all* your chats, paste this into the Claude app at **Settings → Profile → "What
+personal preferences should Claude consider in responses?"**:
+
+```
+Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
+
+I keep a personal Knowledge Base, connected as the "Knowledge Base" connector (kb-mcp). Use it proactively: search it first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search means a gap, not a dead end). Capture durable conclusions on your own (a decision, solved problem, diagnosed failure, or recognized pattern) as a short compiled note, not a transcript, whether or not the topic exists yet, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat and don't narrate empty searches.
+```
+
+The first paragraph is general response style (trim to taste); the second is the KB
+nudge. Account-level custom instructions are always in context, so they make Claude
+reach for the connected KB on its own — the app-side equivalent of the Claude Code
+hooks. The "stay quiet on chit-chat" line keeps it from firing on unrelated chats.

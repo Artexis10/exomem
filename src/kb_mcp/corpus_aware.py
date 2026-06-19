@@ -33,11 +33,28 @@ log = logging.getLogger(__name__)
 # eval harness (scripts/eval_retrieval.py) once a golden set exists. Kept here
 # as named constants so they're one-line greppable.
 HUB_WEIGHT = 0.15  # weight on log1p(graph_in_degree) when re-ranking suggestions
-DUP_THRESHOLD = 0.86  # min doc-doc cosine to call something a near-duplicate
+DUP_THRESHOLD = 0.90  # default min doc-doc cosine for a near-dup; override via KB_MCP_DUP_THRESHOLD
 RELATED_OVERFETCH = 3  # fetch limit * this from find(), then re-rank + trim
 
 # Lead-body word budget for the synthesized "what is this about" query.
 _QUERY_LEAD_WORDS = 400
+
+
+def _dup_threshold() -> float:
+    """DUP_THRESHOLD, overridable at runtime via KB_MCP_DUP_THRESHOLD.
+
+    Lower = more near-dup warnings (0.86 was the old, looser default); higher =
+    stricter (e.g. 0.93). Resolved per call so the env is read live, not frozen
+    at import. Bad values fall back to the default with a logged warning.
+    """
+    raw = os.environ.get("KB_MCP_DUP_THRESHOLD")
+    if raw is None:
+        return DUP_THRESHOLD
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("invalid KB_MCP_DUP_THRESHOLD=%r; using %s", raw, DUP_THRESHOLD)
+        return DUP_THRESHOLD
 
 
 @dataclass
@@ -162,20 +179,23 @@ def detect_duplicates(
     body: str,
     self_path: str | None = None,
     types_filter: list[str] | None = None,
-    threshold: float = DUP_THRESHOLD,
+    threshold: float | None = None,
     top_n: int = 3,
 ) -> list[DupCandidate]:
     """Flag existing pages whose content is near-identical to a draft.
 
     Embeds the draft as PASSAGES (is_query=False — this is doc-to-doc, not a
     query) and cosine-matches against the existing sidecar. Returns at most
-    `top_n` candidates at/above `threshold`, optionally restricted to
+    `top_n` candidates at/above `threshold` (default resolved from
+    `KB_MCP_DUP_THRESHOLD`, else `DUP_THRESHOLD`), optionally restricted to
     `types_filter` page types. No-ops (returns []) when embeddings are disabled
     or the sidecar is empty, so the fast test suite and torch-less deploys are
     unaffected.
     """
     if os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
         return []
+    if threshold is None:
+        threshold = _dup_threshold()
     try:
         from . import embeddings, find as find_module
 

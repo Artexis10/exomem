@@ -660,9 +660,11 @@ the client decides what to wire in.
   related pages you didn't cite). Best-effort, computed pre-write, fully guarded —
   a suggestion failure can never roll back the write.
 - **Near-duplicate warnings**: `note`/`add` surface a `warnings` entry like
-  `possible near-duplicate of [[X]] (cosine 0.91)` when a draft closely matches an
-  existing page (doc-doc cosine over the sidecar). A warning, never a block —
-  append-only + supersession invariants mean the client chooses edit/replace/append.
+  `possible near-duplicate of [[X]] (cosine 0.91)` when a draft's best doc-doc
+  cosine against an existing page meets the threshold (default `0.90`). A warning,
+  never a block — append-only + supersession invariants mean the client chooses
+  edit/replace/append. Tune the noise with **`KB_MCP_DUP_THRESHOLD`** (lower = more
+  warnings, e.g. `0.86`; higher = stricter, e.g. `0.93`).
 
 All of it no-ops under `KB_MCP_DISABLE_EMBEDDINGS`, so the fast test suite and
 the write path's existing behaviour are unchanged when embeddings are off.
