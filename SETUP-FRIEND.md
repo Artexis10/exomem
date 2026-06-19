@@ -11,6 +11,13 @@ shell; the few Windows (PowerShell) differences are called out inline.
 
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
+> **kb-mcp is two parts, and you need both.** The **MCP server** (steps 1–5) is
+> the *hands* — the `find`/`add`/`note` tools. The **skill** (step 6) is the
+> *brain* — it's what tells Claude *when* to save, how to file a source, and how
+> to compile a note. Install the server but skip the skill and Claude has the
+> tools but no idea it's meant to use them: it sits silent and feels broken.
+> **This is the #1 "it does nothing" trap — don't skip step 6.**
+
 ---
 
 ## What you need
@@ -78,11 +85,17 @@ export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 
 - **Lean / keyword-only (default install)** — `pip install -e .` + set
   `KB_MCP_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
-  Instant, no model load, no GPU, works everywhere. The easiest start.
+  Instant, no model load, no GPU, works everywhere. The easiest start. Note it's
+  **silent about it** — there's no error when embeddings are off, so "search
+  works" on a lean install means keyword/BM25, *not* semantic.
 - **Hybrid** — install the extra (`pip install -e ".[embeddings]"`) and leave
   `KB_MCP_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
   of BM25 — best recall on natural-language queries. Ideally an NVIDIA GPU; CPU
-  works but embeds slowly.
+  works but embeds slowly. The vector index builds as you write (each note is
+  embedded on save); to backfill an existing vault, run `audit_fix` with
+  `rebuild_embeddings=True`. Quick check that semantic is live: ask for something
+  using words that *don't* appear in the note — if it still surfaces, embeddings
+  are on.
 
 ---
 
@@ -123,26 +136,34 @@ Restart Claude Code; you should see the `kb-mcp` tools (`find`, `note`, `add`,
 
 ---
 
-## 6. Install + adapt the skill (so Claude knows *how* to use it)
+## 6. Install the skill (REQUIRED — this is the brain)
 
-The `_Schema/SKILL.md` is the operating manual Claude reads. Make Claude Code
-load it as a skill — copy (or symlink) `_Schema/` to your skills folder:
+The server gives Claude the tools; **the skill is what makes Claude actually use
+them** — capture at natural stopping points, file sources to the right folder,
+compile notes under the schema. One command installs it straight from the repo
+into Claude Code's skills folder (no vault path needed — it ships in the package):
 
 ```bash
-# copy:
-cp -r "/path/to/your/Obsidian/Knowledge Base/_Schema" ~/.claude/skills/knowledge-base
-# or symlink (keeps them in sync; needs Developer Mode on Windows for non-admin):
-# ln -s "/path/to/your/Obsidian/Knowledge Base/_Schema" ~/.claude/skills/knowledge-base
+python -m kb_mcp install-skill
 ```
+
+That writes the skill to `~/.claude/skills/knowledge-base/`. **Restart Claude
+Code** so it loads. Useful flags: `--link` symlinks instead of copying so it
+tracks repo updates as you `git pull` (falls back to a copy if your OS refuses
+the symlink); `--force` overwrites an existing install; `--target` picks a
+different folder.
 
 Then **make it yours** — the shipped `SKILL.md` / `project-keys.yaml` are a
 **generic starter** (placeholder projects `personal` / `work`, no machine paths
-or real tenants). Optionally:
+or real tenants). Optionally adapt the **project keys** in your vault's
+`Knowledge Base/_Schema/project-keys.yaml` (the copy the *server* reads) to your
+own — or just start writing; the writer auto-registers new keys as you use them.
 
-- rename the **project keys** in `_Schema/project-keys.yaml` to your own — or
-  just start writing; the writer auto-registers new keys as you use them.
-- if you **symlinked** rather than copied, point rule 8's paths at your machine
-  (skip this if you copied).
+> **What "auto-capture" does and doesn't do.** With the skill loaded, Claude
+> captures on its own *inside a conversation* when it judges you've hit a
+> stepping-stone — a decision, a solved problem, a recognized pattern. There's
+> **no background daemon**: it won't save things while you're away from the chat,
+> and a fresh thread starts fresh. You can always just say *"save that to kb."*
 
 ---
 

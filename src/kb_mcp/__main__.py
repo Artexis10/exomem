@@ -1,8 +1,9 @@
 """`python -m kb_mcp` entry point.
 
-Two subcommands:
+Subcommands:
 - (default) serve the MCP server — `python -m kb_mcp [--transport ...]`
 - `init` — bootstrap a fresh Knowledge Base into a vault
+- `install-skill` — install the knowledge-base skill into Claude Code
 """
 
 from __future__ import annotations
@@ -19,6 +20,8 @@ def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
     if raw and raw[0] == "init":
         return _init_main(raw[1:])
+    if raw and raw[0] == "install-skill":
+        return _install_skill_main(raw[1:])
     return _serve_main(raw)
 
 
@@ -81,7 +84,52 @@ def _init_main(argv: list[str]) -> int:
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see SETUP-FRIEND.md).")
-    print("  2. Adapt Knowledge Base/_Schema/project-keys.yaml to your own projects.")
+    print("  2. Install the skill so Claude knows how to use it: python -m kb_mcp install-skill")
+    print("  3. Adapt Knowledge Base/_Schema/project-keys.yaml to your own projects.")
+    return 0
+
+
+def _install_skill_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp install-skill",
+        description=(
+            "Install the knowledge-base skill into Claude Code's skills folder. "
+            "The MCP server is the hands; the skill is the brain that tells Claude "
+            "when to capture and how to file — without it, the tools sit unused."
+        ),
+    )
+    parser.add_argument(
+        "--target",
+        help="Skill folder to install into (default: ~/.claude/skills/knowledge-base).",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Overwrite an existing install at the target.",
+    )
+    parser.add_argument(
+        "--link",
+        action="store_true",
+        help="Symlink instead of copy, so the install tracks repo updates "
+        "(falls back to copy if the OS refuses the symlink).",
+    )
+    args = parser.parse_args(argv)
+
+    from . import install_skill as install_module
+
+    target = Path(args.target) if args.target else None
+    try:
+        report = install_module.install_skill(target, force=args.force, link=args.link)
+    except (FileExistsError, FileNotFoundError) as e:
+        print(f"kb-mcp install-skill: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"Installed the knowledge-base skill ({report['mode']}, "
+        f"{report['files']} files):"
+    )
+    print(f"  {report['target']}")
+    print("Restart Claude Code to load it. Then just talk - it captures at")
+    print('natural stopping points, or say "find my notes on X".')
     return 0
 
 
