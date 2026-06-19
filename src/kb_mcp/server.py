@@ -286,6 +286,20 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 f"Missing required env vars for GitHub OAuth: {', '.join(missing)}. "
                 "See README.md § Install for setup steps."
             )
+        # Pin the JWT signing key to an explicit secret when provided. FastMCP
+        # otherwise derives it from GITHUB_CLIENT_SECRET, and the encrypted
+        # token-store path is fingerprinted from that key — so rotating the secret
+        # or a FastMCP reinstall/upgrade that changes the derivation orphans the
+        # store and forces claude.ai to re-authorize. An explicit key keeps the
+        # signing key (and the store) stable across both. Set KB_MCP_JWT_SIGNING_KEY
+        # (any long random string) in .env; leave unset to keep the derived default.
+        jwt_signing_key = os.environ.get("KB_MCP_JWT_SIGNING_KEY", "").strip() or None
+        if jwt_signing_key is None:
+            log.info(
+                "KB_MCP_JWT_SIGNING_KEY not set; OAuth signing key derives from the "
+                "GitHub client secret, so connector re-auth can recur on secret "
+                "rotation or FastMCP upgrades. Set it in .env for a stable connector."
+            )
         auth = OAuthProxy(
             upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
             upstream_token_endpoint="https://github.com/login/oauth/access_token",
@@ -293,6 +307,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             upstream_client_secret=gh_secret,
             token_verifier=SingleUserGitHubVerifier(allowed_login=gh_username),
             base_url=base_url,
+            jwt_signing_key=jwt_signing_key,
         )
 
     mcp = FastMCP("kb-mcp", auth=auth, icons=_server_icons())
