@@ -204,6 +204,12 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
     async def verify_token(self, token: str) -> AccessToken | None:
         access = await super().verify_token(token)
         if access is None:
+            # GitHub rejected the token (expired / revoked / invalid). This is what
+            # makes claude.ai re-authorize, so log it (with a timestamp via the log
+            # formatter) to diagnose recurring re-auth churn: frequent regular
+            # intervals point to GitHub OAuth-App token expiry; clustering around a
+            # restart points to the token store / signing key.
+            log.info("kb-mcp auth: token rejected by GitHub (expired/revoked/invalid); client will re-authorize")
             return None
         login = (access.claims.get("login") or "").lower()
         if login != self._allowed_login:
