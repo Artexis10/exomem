@@ -167,30 +167,41 @@ own — or just start writing; the writer auto-registers new keys as you use the
 
 ---
 
-## 7. (Recommended) Make auto-save reliable
+## 7. (Recommended) Make the KB automatic — both directions
 
-The skill *tells* Claude to capture at stepping-stones, but that instruction is
-passive — over a long conversation Claude tends to forget it, so auto-save often
-quietly never fires (you'll know: `Knowledge Base/log.md` only shows saves you
-asked for). This optional hook fixes that — it re-checks "is this worth saving?"
-at the end of every turn:
+The skill *tells* Claude to capture at stepping-stones and to consult the KB
+before answering, but those instructions are passive — over a long conversation
+Claude tends to forget them, so auto-save quietly never fires (you'll know:
+`Knowledge Base/log.md` only shows saves you asked for) and prior notes don't get
+pulled in. This one command installs two small hooks that fix both directions:
 
 ```bash
 python -m kb_mcp install-hook
 ```
 
-It writes a small script to `~/.claude/hooks/` and wires it as a Claude Code
-`Stop` hook (restart Claude Code to activate). It's **language-agnostic** (no
-keyword matching — works the same in any language you write in) and cheap (gated
-so it stays quiet on ordinary turns, plus a per-session cooldown). Every time it
-nudges it logs to `~/.claude/kb-capture-nudge.log`, so you can see the real rate.
-Prefer to wire it by hand? `python -m kb_mcp install-hook --print-only` writes the
-script and prints the settings snippet to paste. Tune with
-`KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_CAPTURE_NUDGE_COOLDOWN_SEC`, or turn it off
-with `KB_CAPTURE_NUDGE_DISABLE=1`.
+- **Write** — a `Stop` hook that re-checks "is this worth saving?" at the end of
+  each turn, so conclusions get captured on their own.
+- **Read** — a `UserPromptSubmit` hook that reminds Claude to run a `find` first
+  when your message touches something the KB might hold, so it actually behaves as
+  your source of truth.
+
+Both are **language-agnostic** (no keyword matching — they work the same in any
+language you write in) and cheap (gated so they stay quiet on ordinary
+turns/prompts, plus a per-session cooldown). They write scripts to
+`~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
+Code to activate. Triggers log to `~/.claude/kb-capture-nudge.log` and
+`~/.claude/kb-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
+by hand? `python -m kb_mcp install-hook --print-only` writes the scripts and
+prints the snippet to paste.
+
+Tune with `KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_RETRIEVE_NUDGE_MIN_CHARS` (and the
+matching `_COOLDOWN_SEC`), or disable either with `KB_CAPTURE_NUDGE_DISABLE=1` /
+`KB_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
+Lower the `MIN_CHARS` values — those scripts pack more meaning per character, so
+the defaults (tuned for English) can under-fire.
 
 (Hooks are Claude Code only — claude.ai web/mobile can't run them, so there the
-skill stays best-effort: nudge it with *"save that to kb."*)
+skill stays best-effort: nudge it with *"save that to kb"* or *"check the kb."*)
 
 ---
 

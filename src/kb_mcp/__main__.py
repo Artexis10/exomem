@@ -4,7 +4,7 @@ Subcommands:
 - (default) serve the MCP server — `python -m kb_mcp [--transport ...]`
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the knowledge-base skill into Claude Code
-- `install-hook` — wire the capture-reliability Stop hook into Claude Code
+- `install-hook` — wire the KB capture + retrieval hooks into Claude Code
 """
 
 from __future__ import annotations
@@ -140,10 +140,11 @@ def _install_hook_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="kb-mcp install-hook",
         description=(
-            "Wire the capture-reliability Stop hook into Claude Code so auto-save "
-            "fires on its own at stepping-stones instead of waiting to be told. "
-            "Language-agnostic (no English-keyword gating) and cheap (gated + "
-            "cooldown). Re-running is idempotent."
+            "Wire the KB capture + retrieval hooks into Claude Code: a Stop hook "
+            "that captures conclusions at stepping-stones (write), and a "
+            "UserPromptSubmit hook that reminds Claude to consult the KB before "
+            "answering (read). Language-agnostic and cheap (gated + cooldown). "
+            "Re-running is idempotent."
         ),
     )
     parser.add_argument(
@@ -173,15 +174,17 @@ def _install_hook_main(argv: list[str]) -> int:
         print(f"kb-mcp install-hook: {e}", file=sys.stderr)
         return 1
 
-    print("Installed the capture-reliability hook script:")
-    print(f"  {report['script']}")
+    print("Installed the KB hook scripts:")
+    for item in report["installed"]:
+        print(f"  {item['event']:<16} {item['script']}")
     if report["wired"]:
-        print(f"Wired into {report['settings']} as a Stop hook.")
-        print("Restart Claude Code to activate it. Triggers log to")
-        print("  ~/.claude/kb-capture-nudge.log")
+        print(f"Wired into {report['settings']}.")
+        print("Restart Claude Code to activate. Triggers log to:")
+        print("  ~/.claude/kb-capture-nudge.log   (write / capture)")
+        print("  ~/.claude/kb-retrieve-nudge.log  (read / retrieval)")
     else:
-        print("Add this to your settings.json (merge into hooks.Stop):")
-        print(hook_module.snippet(report["command"]))
+        print("Add this to your settings.json (merge into hooks):")
+        print(hook_module.snippet(report["installed"]))
     return 0
 
 

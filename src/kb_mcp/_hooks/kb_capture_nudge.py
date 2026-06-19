@@ -21,7 +21,8 @@ cooldown caps frequency; every trigger is logged to ~/.claude/kb-capture-nudge.l
 for tuning.
 
 Tunables (env): KB_CAPTURE_NUDGE_DISABLE=1 (off), KB_CAPTURE_NUDGE_MIN_CHARS
-(default 400), KB_CAPTURE_NUDGE_COOLDOWN_SEC (default 300).
+(default 300 — lower it for a dense script like Japanese, which packs more meaning
+per char), KB_CAPTURE_NUDGE_COOLDOWN_SEC (default 300).
 
 Contract (Claude Code Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
@@ -163,7 +164,7 @@ def main() -> int:
     if not tpath:
         return 0
 
-    min_chars = _env_int("KB_CAPTURE_NUDGE_MIN_CHARS", 400)
+    min_chars = _env_int("KB_CAPTURE_NUDGE_MIN_CHARS", 300)
     cooldown = _env_int("KB_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
 
     assistant_text, tools = _latest_turn(tpath)
