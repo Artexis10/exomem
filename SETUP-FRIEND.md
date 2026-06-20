@@ -220,8 +220,11 @@ publicly-reachable, authenticated endpoint:
 
 1. **An always-on host** — your desktop running 24/7, or a cheap VPS. (Local
    stdio dies when you close Claude Code; mobile needs it always up.)
-2. **A public HTTPS endpoint** — Tailscale Funnel (what Hugo uses) or Cloudflare
-   Tunnel. This exposes the server to the internet, so auth becomes mandatory.
+2. **A public HTTPS endpoint** — **Tailscale Funnel** (no domain needed — gives a
+   free `*.ts.net` host; the simplest path if you don't own a domain) or
+   **Cloudflare Tunnel** (needs a domain you own in Cloudflare; more burst-tolerant
+   under heavy use — Hugo's setup). This exposes the server to the internet, so auth
+   becomes mandatory.
 3. **A GitHub OAuth app** (client id + secret) wired into the OAuthProxy —
    claude.ai connectors require OAuth; static tokens aren't accepted.
 4. **Lock it to your GitHub login** (the single-user verifier), then run it as a
