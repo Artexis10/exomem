@@ -105,12 +105,12 @@ writes), `rename_tag`, `find_replace_in_file`, `get_directory_tree`.
 
 ```
 ┌──────────────────┐   HTTPS    ┌──────────────────────────────┐
-│   claude.ai      │ ─────────▶ │ Tailscale edge              │
-│   (mobile/web    │   bearer   │ <device>.<tailnet>.ts.net   │
-│    backend)      │            │ auto Let's Encrypt cert     │
+│   claude.ai      │ ─────────▶ │ Cloudflare edge             │
+│   (mobile/web    │   bearer   │ kb.substratesystems.io      │
+│    backend)      │            │ TLS terminated at edge      │
 │  160.79.104.0/21 │            └──────────────────────────────┘
 └──────────────────┘                          │
-                                              │ tailscale funnel
+                                              │ cloudflare tunnel
                                               ▼
                             ┌────────────────────────────────────┐
                             │ host: macOS / Linux / Windows      │
@@ -151,12 +151,16 @@ cd C:\path\to\kb-mcp
 #    this remote/GPU deployment wants the extra.
 uv sync --extra embeddings
 
-# 2. Set up the public URL via Tailscale Funnel (you need this URL in step 3).
-# In Tailscale admin console: enable HTTPS for tailnet + enable Funnel for this node.
-# Then:
-tailscale funnel --bg --https=443 http://127.0.0.1:8765
-tailscale funnel status
-# Note the printed URL, e.g. https://<device>.<tailnet>.ts.net
+# 2. Set up the public URL via Cloudflare Tunnel (you need this hostname in step 3).
+#    Prereq: winget install --id Cloudflare.cloudflared
+cloudflared tunnel login                          # one-time browser auth for your zone
+pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.substratesystems.io -TunnelName kb-mcp-desktop
+#    -> public hostname https://kb.substratesystems.io  (the script creates the tunnel,
+#       the DNS record, and an auto-start cloudflared Windows service). In the Cloudflare
+#       dashboard for this hostname: turn OFF Bot Fight Mode + any WAF managed ruleset
+#       (Security Level low) — claude.ai's gateway is bursty automated traffic and
+#       code-bearing notes can trip WAF rules. Cloudflare's edge caps requests at ~100s
+#       (524); run heavy ops (embedding rebuild) via the local CLI, not the connector.
 ```
 
 ### 3. Create a GitHub OAuth App (one-time, ~3 min)
@@ -166,8 +170,8 @@ At <https://github.com/settings/developers> → **OAuth Apps** → **New OAuth A
 | Field | Value |
 |---|---|
 | Application name | `kb-mcp` |
-| Homepage URL | `https://<device>.<tailnet>.ts.net` |
-| Authorization callback URL | `https://<device>.<tailnet>.ts.net/auth/callback` |
+| Homepage URL | `https://kb.substratesystems.io` |
+| Authorization callback URL | `https://kb.substratesystems.io/auth/callback` |
 
 Save the generated **Client ID** and **Client Secret**.
 
@@ -176,7 +180,7 @@ Save the generated **Client ID** and **Client Secret**.
 Create `.env` in the repo root:
 
 ```
-KB_MCP_BASE_URL=https://<device>.<tailnet>.ts.net
+KB_MCP_BASE_URL=https://kb.substratesystems.io
 KB_MCP_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
@@ -188,7 +192,7 @@ KB_MCP_JWT_SIGNING_KEY=<long-random-string>
 KB_MCP_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
-`KB_MCP_BASE_URL` must match the Tailscale Funnel URL exactly — no trailing
+`KB_MCP_BASE_URL` must match the Cloudflare Tunnel hostname exactly — no trailing
 slash, no `/mcp` suffix. `KB_MCP_GITHUB_USERNAME` is case-insensitive but must
 be the *login* (e.g. `Artexis10`), not the display name. `KB_MCP_VAULT_PATH` is
 **required**: claude.ai connects over HTTP and passes no environment, so the
@@ -252,7 +256,7 @@ pwsh -File scripts/install-service.ps1
 
 1. claude.ai → Settings → Connectors → **Add custom connector**
 2. **Name**: `Knowledge Base` (or whatever)
-3. **Server URL**: `https://<device>.<tailnet>.ts.net/mcp`
+3. **Server URL**: `https://kb.substratesystems.io/mcp` (this host's Cloudflare hostname)
 4. Leave **OAuth Client ID** and **OAuth Client Secret** blank — claude.ai
    uses Dynamic Client Registration against your `/register` endpoint.
 5. Save. claude.ai opens a GitHub login window → log in (only the user in
@@ -265,14 +269,16 @@ Each machine is an independent deployment — there is no shared state. To run k
 on a second box (e.g. a laptop alongside the desktop), repeat the install with that
 host's *own* values. The non-obvious parts:
 
-- **Its own Funnel hostname.** Each Tailscale node has a distinct
-  `<node>.<tailnet>.ts.net`, so `KB_MCP_BASE_URL` and the claude.ai connector URL are
-  per-host. `tailscale funnel status` prints this node's name.
+- **Its own Cloudflare hostname.** Give each host a distinct subdomain (desktop
+  `kb.substratesystems.io`, laptop `kb-laptop.substratesystems.io`), so `KB_MCP_BASE_URL`
+  and the claude.ai connector URL are per-host. Run
+  `pwsh -File scripts/setup-cloudflared.ps1 -Hostname <this-host> -TunnelName <unique-name>`
+  on that machine (after `cloudflared tunnel login`).
 - **Its own GitHub OAuth App.** A GitHub OAuth App allows exactly **one**
   Authorization callback URL, so you *cannot* reuse another host's app — its callback
   points at the other host and GitHub rejects the redirect with "The redirect_uri is
   not associated with this application." Create a second app (e.g. `kb-mcp (laptop)`)
-  with callback `https://<this-host>.<tailnet>.ts.net/auth/callback` and put *its*
+  with callback `https://<this-host>.substratesystems.io/auth/callback` and put *its*
   `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` in this machine's `.env`.
 - **Its own `.env` and connector.** Set `KB_MCP_VAULT_PATH` to this machine's vault
   root (the folder that contains `Knowledge Base/`). In claude.ai, add a separate
@@ -729,7 +735,7 @@ sc.exe start kb-mcp
 |---|---|---|
 | claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<funnel-url>/.well-known/oauth-authorization-server` should return JSON. If 404, the OAuthProxy isn't mounted — most likely `KB_MCP_BASE_URL` has a trailing slash or includes `/mcp`. |
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → kb-mcp, set Authorization callback URL to exactly `https://<funnel-url>/auth/callback` (no trailing slash). |
-| GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret in this machine's `.env` (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.<tailnet>.ts.net/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
+| GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret in this machine's `.env` (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.substratesystems.io/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `KB_MCP_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the kb-mcp log for `rejecting token for github login=...`. |
 | claude.ai shows "connector failed" | service down (desktop asleep, service stopped, crash loop) | `Get-Service kb-mcp`; tail `logs/service.err.log` and `logs/kb-mcp.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart, or UAC dismissed | Elevated: `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','kb-mcp'` then `'start','kb-mcp'`. Confirm with `Get-Process python \| Select-Object StartTime`. |

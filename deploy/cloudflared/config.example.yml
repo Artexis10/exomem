@@ -1,0 +1,18 @@
+# cloudflared ingress config for kb-mcp — REFERENCE TEMPLATE.
+#
+# The live copy must live where the Windows service (running as SYSTEM) reads it:
+#   C:\Windows\System32\config\systemprofile\.cloudflared\config.yml
+# `scripts/setup-cloudflared.ps1` generates it there with the real tunnel UUID and
+# copies the credentials + cert alongside. This file is just a committed reference.
+#
+# <UUID>  = the tunnel id from `cloudflared tunnel create` (see `cloudflared tunnel list`)
+# <HOST>  = kb.substratesystems.io (desktop) / kb-laptop.substratesystems.io (laptop)
+
+tunnel: <UUID>
+credentials-file: C:\Windows\System32\config\systemprofile\.cloudflared\<UUID>.json
+
+# Route the public hostname to the local kb-mcp service; everything else 404s.
+ingress:
+  - hostname: <HOST>
+    service: http://127.0.0.1:8765
+  - service: http_status:404
