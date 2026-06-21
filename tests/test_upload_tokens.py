@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from kb_mcp import upload_tokens
 
 SECRET = "s3cret-long-lived"
@@ -39,3 +41,18 @@ def test_malformed_fails() -> None:
 def test_long_lived_token_is_not_a_minted_token() -> None:
     # a raw 64-hex long-lived token has no `v1.` prefix → not accepted here
     assert upload_tokens.verify("a" * 64, SECRET, now=1000) is False
+
+
+# ---------------- mint_for_endpoint (the mint_upload_token tool body) ----------------
+
+
+def test_mint_for_endpoint_returns_verifiable_token() -> None:
+    out = upload_tokens.mint_for_endpoint(SECRET, "https://kb.example.io")
+    assert out["ttl_seconds"] == upload_tokens.DEFAULT_TTL
+    assert out["upload_url"] == "https://kb.example.io/upload"
+    assert upload_tokens.verify(out["token"], SECRET) is True
+
+
+def test_mint_for_endpoint_disabled_without_secret() -> None:
+    with pytest.raises(ValueError, match="UPLOAD_DISABLED"):
+        upload_tokens.mint_for_endpoint(None, "https://kb.example.io")

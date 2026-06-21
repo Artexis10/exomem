@@ -301,9 +301,11 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 "pay the cost", e,
             )
 
+    # Public base URL (e.g. https://kb.substratesystems.io). Used by the OAuth
+    # discovery route AND the mint_upload_token tool, so define it unconditionally.
+    base_url = os.environ.get("KB_MCP_BASE_URL", "").strip().rstrip("/")
     auth = None
     if require_auth:
-        base_url = os.environ.get("KB_MCP_BASE_URL", "").strip().rstrip("/")
         gh_id = os.environ.get("GITHUB_CLIENT_ID", "").strip()
         gh_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip()
         gh_username = os.environ.get("KB_MCP_GITHUB_USERNAME", "").strip()
@@ -1559,6 +1561,31 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 f"{e.code}: {e.reason} (missing: {e.missing})"
             ) from e
         return result.as_dict()
+
+    @mcp.tool
+    def mint_upload_token() -> dict:
+        """Mint a short-lived bearer token for the HTTP `/upload` endpoint.
+
+        This is the hands-off way to file BINARY evidence (images, PDFs, any
+        file) from a claude.ai web session WITHOUT base64. Binaries must NOT be
+        base64-encoded through the model — it's billed as output tokens and is
+        lossy for chat-rendered images. Instead:
+
+        1. Call this tool → `{token, ttl_seconds, upload_url}`.
+        2. In the code sandbox, multipart-POST the user's ATTACHED files to
+           `upload_url` with header `Authorization: Bearer <token>` and form
+           fields `file`, `scope`, `category` (optional `filename`, `description`).
+           Files must be ATTACHMENTS — inline-pasted images never reach the
+           sandbox disk and cannot be sent.
+        3. Write the searchable text manifest separately via `preserve` / `note`.
+
+        The token is Evidence-write only and expires after `ttl_seconds`; the
+        server's long-lived secret never leaves the server.
+
+        Returns: {token, ttl_seconds, upload_url}.
+        Raises: UPLOAD_DISABLED if the server has no upload token configured.
+        """
+        return upload_tokens.mint_for_endpoint(upload_token, base_url)
 
     # ---------------- Tier 2: filesystem-parity escape hatches ----------------
     #

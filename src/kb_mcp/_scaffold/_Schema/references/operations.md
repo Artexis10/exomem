@@ -170,12 +170,19 @@ text-tool argument. Those characters are **model output tokens** — a multi-MB
 file is millions of them, billed to Hugo, and a chat-uploaded image can't even be
 reproduced faithfully. Pick the channel by where the file actually is:
 
-- **On claude.ai web (the model only *sees* the image, has no bytes):** transcribe
-  the content into the evidence/note *text* (that's the queryable part), then hand
-  Hugo a ready link to the upload page —
-  `https://kb.substratesystems.io/upload?scope=<scope>&category=<category>` — so he
-  taps and uploads the original. The model cannot push the bytes itself; the
-  claude.ai code sandbox is network-locked and can't reach the server.
+- **On claude.ai web — hands-off (preferred):** the model can't *emit* the bytes, but
+  it has two channels — the authenticated MCP connector and a code sandbox holding the
+  user's **attached** files. So: (1) call the **`mint_upload_token`** tool → a
+  short-lived `{token, ttl_seconds, upload_url}`; (2) in the sandbox, multipart-`curl`
+  each attached file to `upload_url` with `Authorization: Bearer <token>` and form
+  fields `file` / `scope` / `category` (optional `filename`, `description`);
+  (3) write the searchable text manifest via `preserve` / `note`. No base64, no pasted
+  secret. **Two requirements:** files must be **attached** (inline-pasted images never
+  land on the sandbox disk and can't be sent), and the host must be in the sandbox's
+  egress allowlist (Settings → network; `*.substratesystems.io`, one-time). If the
+  sandbox still can't reach the host, fall back to handing Hugo the prefilled link
+  `https://kb.substratesystems.io/upload?scope=<scope>&category=<category>` to upload
+  from his browser.
 - **Phone / curl / a shortcut:** `POST https://kb.substratesystems.io/upload`
   multipart (`file`, `scope`, `category`, optional `filename`, `description`) with
   `Authorization: Bearer $KB_MCP_UPLOAD_TOKEN` (the token is **always** required;

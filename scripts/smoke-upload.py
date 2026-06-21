@@ -66,8 +66,20 @@ def _upload(token: str, *, scope: str, category: str, filename: str, data: bytes
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--write", action="store_true", help="do a REAL upload into Evidence/_smoketest/")
+    ap.add_argument("--minted", action="store_true", help="verify a freshly-minted short-lived token is accepted (no write)")
     args = ap.parse_args()
     tok = _token()
+
+    if args.minted:
+        from kb_mcp import upload_tokens
+
+        valid = _post({"Authorization": f"Bearer {upload_tokens.mint(tok)}"})
+        expired = _post({"Authorization": f"Bearer {upload_tokens.mint(tok, ttl=-10)}"})
+        ok = valid == 400 and expired == 401
+        print(f"  [{'PASS' if valid == 400 else f'FAIL got {valid}'}] valid minted token   -> expect 400 (accepted, no file)")
+        print(f"  [{'PASS' if expired == 401 else f'FAIL got {expired}'}] expired minted token -> expect 401 (rejected)")
+        print("OK — live service accepts valid minted tokens, rejects expired ones." if ok else "FAILED.")
+        raise SystemExit(0 if ok else 1)
 
     if args.write:
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
