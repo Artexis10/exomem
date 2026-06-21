@@ -720,9 +720,8 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         + Counts), and log.md. Per SKILL.md rule 7.
 
         Args:
-            content: Full text body to capture (markdown/plain text only —
-                NEVER a base64-encoded binary; for files use the /upload
-                endpoint or `preserve`).
+            content: Full text body to capture (markdown / plain text). For
+                files or binaries, use the /upload endpoint instead.
             source_type: One of article, session, book, paper, video, other.
             title: Human title; used to derive the filename slug.
             url: Required when source_type is article, paper, or video.
@@ -1514,12 +1513,10 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         SKILL.md rule 2, Evidence is append-only; analytical takes go in compiled
         notes that link to the evidence file.
 
-        BINARY artifacts (PDFs, images, .docx — any non-text file) do NOT go
-        through this tool. There is no base64 path through the model: encoding a
-        binary is billed as output tokens and is needlessly expensive now that
-        the out-of-band upload exists. For binaries, call `mint_upload_token` and
-        POST the bytes to `/upload` (zero token cost), or drop the file into
-        Evidence/ desk-side via Obsidian Sync.
+        BINARY artifacts (PDFs, images, .docx — any non-text file) are delivered
+        out-of-band, not through this tool: call `mint_upload_token` and POST the
+        bytes to `/upload`, or drop the file into Evidence/ desk-side via Obsidian
+        Sync. The bytes never pass through the model.
 
         Args:
             scope: Incident or domain key (e.g. "Yolo", "Mother Cancer").
@@ -1559,10 +1556,9 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
     def mint_upload_token() -> dict:
         """Mint a short-lived bearer token for the HTTP `/upload` endpoint.
 
-        This is the hands-off way to file BINARY evidence (images, PDFs, any
-        file) from a claude.ai web session WITHOUT base64. Binaries must NOT be
-        base64-encoded through the model — it's billed as output tokens and is
-        lossy for chat-rendered images. Instead:
+        This is how you file BINARY evidence (images, PDFs, any file) from a
+        claude.ai web session — the bytes travel out-of-band, never through the
+        model. Steps:
 
         1. Call this tool → `{token, ttl_seconds, upload_url}`.
         2. In the code sandbox, multipart-POST the user's ATTACHED files to
@@ -1712,7 +1708,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             path: Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.
                 Forward or back slashes accepted. Path-escape guarded.
             content: File body (or full file if `frontmatter` is None). Text
-                only — never a base64-encoded binary; for files use /upload.
+                only; for binaries use the /upload endpoint.
             frontmatter: Optional dict prepended as YAML frontmatter.
             overwrite: If true, replace existing file. Default false.
             allow_curated: Required to write under a curated tree. Default false.
@@ -1931,7 +1927,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
 
         Args:
             path: Vault-relative.
-            content: Text to append (text only — never base64 binary).
+            content: Text to append (text only; binaries go via /upload).
             allow_curated: Required under curated trees.
 
         Returns: {path, bytes_appended, warnings}.

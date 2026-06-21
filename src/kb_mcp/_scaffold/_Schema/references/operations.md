@@ -163,12 +163,10 @@ These two updates are non-negotiable for every operation below. The per-operatio
 - Category — a numbered subfolder under the scope (e.g., `01 - Warning Letter 2026-05-15`, `02 - Promotion Track Evidence`). Use existing categories where they fit; create new ones only when none apply.
 - Optional: descriptive filename if the original is generic (e.g., rename `Screenshot 2026-05-15 at 23.14.png` to `2026-05-15-slack-jovany-king-of-ai-statement.png`)
 
-### Delivering the bytes — never base64 through the model
+### Delivering the bytes — out-of-band (never inline through the model)
 
-The expensive trap: encoding the file into a text-tool argument (the `preserve`
-tool no longer accepts binary content at all). Those characters are **model output tokens** — a multi-MB
-file is millions of them, billed to Hugo, and a chat-uploaded image can't even be
-reproduced faithfully. Pick the channel by where the file actually is:
+Binaries are delivered out-of-band — never inline as a tool argument (the `preserve`
+tool takes text only). Pick the channel by where the file actually is:
 
 - **On claude.ai web — hands-off (preferred):** the model can't *emit* the bytes, but
   it has two channels — the authenticated MCP connector and a code sandbox holding the
@@ -176,7 +174,7 @@ reproduced faithfully. Pick the channel by where the file actually is:
   short-lived `{token, ttl_seconds, upload_url}`; (2) in the sandbox, multipart-`curl`
   each attached file to `upload_url` with `Authorization: Bearer <token>` and form
   fields `file` / `scope` / `category` (optional `filename`, `description`);
-  (3) write the searchable text manifest via `preserve` / `note`. No base64, no pasted
+  (3) write the searchable text manifest via `preserve` / `note`. No inline bytes, no pasted
   secret. **Two requirements:** files must be **attached** (inline-pasted images never
   land on the sandbox disk and can't be sent), and the host must be in the sandbox's
   egress allowlist (Settings → network; `*.substratesystems.io`, one-time). If the
@@ -191,9 +189,8 @@ reproduced faithfully. Pick the channel by where the file actually is:
   token cost, ≤25 MB.
 - **Claude Code / desk-side:** the file is already on local disk — write it straight
   into `Evidence/<scope>/<category>/`, or drop it via Obsidian Sync; the note links it.
-- **`preserve`** is text-only — there is no base64 path through the model anymore;
-  binaries always go via the channels above. Every write tool rejects base64 blobs
-  outright (`BINARY_BLOB_REJECTED`).
+- **`preserve`** is text-only; binaries always go via the channels above. Every write
+  tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 
 ### Procedure
 1. Determine scope and category folder. Create the folder if it doesn't exist yet. Confirm new scope/category with Hugo first — don't silently invent.
