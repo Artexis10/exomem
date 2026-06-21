@@ -309,6 +309,13 @@ def build_server(*, require_auth: bool) -> FastMCP:
             token_verifier=SingleUserGitHubVerifier(allowed_login=gh_username),
             base_url=base_url,
             jwt_signing_key=jwt_signing_key,
+            # GitHub OAuth-App tokens carry no expiry, so FastMCP falls back to a
+            # 1-hour access token by default. For a single-user KB reached from a
+            # phone over the Funnel, that short TTL forces re-auth churn whenever a
+            # client (mobile app especially) can't silently refresh in time. Issue
+            # 30-day access tokens instead; the refresh token already never expires,
+            # and access is still gated to one GitHub login.
+            fallback_access_token_expiry_seconds=30 * 24 * 60 * 60,  # 30 days
         )
 
     mcp = FastMCP("kb-mcp", auth=auth, icons=_server_icons())
