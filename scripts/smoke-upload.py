@@ -82,10 +82,17 @@ def main() -> None:
         raise SystemExit(0 if ok else 1)
 
     if args.write:
+        from kb_mcp import upload_tokens
+
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         data = f"kb-mcp /upload smoke test {ts}\n".encode()
+        # Use a short-lived MINTED token — mirrors the hands-off flow exactly.
         status, body = _upload(
-            tok, scope="_smoketest", category="_smoketest", filename=f"smoke-{ts}.txt", data=data
+            upload_tokens.mint(tok),
+            scope="_smoketest",
+            category="_smoketest",
+            filename=f"smoke-{ts}.txt",
+            data=data,
         )
         print(f"POST /upload (real file) -> {status}")
         print(body)
