@@ -54,17 +54,31 @@ def verify(presented: str | None, secret: str, *, scope: str = "upload", now: in
     return hmac.compare_digest(sig, _sig(secret, scope, exp))
 
 
-def mint_for_endpoint(secret: str | None, base_url: str, *, scope: str = "upload") -> dict:
+def mint_for_endpoint(
+    secret: str | None,
+    base_url: str,
+    *,
+    scope: str = "upload",
+    large_base_url: str | None = None,
+) -> dict:
     """Response payload for the `mint_<scope>_token` MCP tools (or raise if off).
 
     `scope` is "upload" or "download". Returns `{token, ttl_seconds, <scope>_url}`.
     Kept here, not inline in the tool closure, so it's unit-testable without the
     FastMCP machinery. Raising ValueError matches the tool→ValueError convention.
+
+    When `large_base_url` is set (upload scope), also returns `large_upload_url` —
+    an alternate endpoint (e.g. a Tailscale Funnel) NOT behind the ~100 MB
+    Cloudflare edge cap, for uploads larger than that. The same minted token
+    authenticates on both.
     """
     if secret is None:
         raise ValueError(f"{scope.upper()}_DISABLED: server has no KB_MCP_UPLOAD_TOKEN configured")
-    return {
+    out = {
         "token": mint(secret, scope=scope),
         "ttl_seconds": DEFAULT_TTL,
         f"{scope}_url": f"{base_url}/{scope}",
     }
+    if large_base_url:
+        out["large_upload_url"] = f"{large_base_url}/upload"
+    return out

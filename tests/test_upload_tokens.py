@@ -58,6 +58,20 @@ def test_mint_for_endpoint_disabled_without_secret() -> None:
         upload_tokens.mint_for_endpoint(None, "https://kb.example.io")
 
 
+def test_mint_for_endpoint_no_large_url_by_default() -> None:
+    out = upload_tokens.mint_for_endpoint(SECRET, "https://kb.example.io")
+    assert "large_upload_url" not in out
+
+
+def test_mint_for_endpoint_large_url_when_configured() -> None:
+    out = upload_tokens.mint_for_endpoint(
+        SECRET, "https://kb.example.io", large_base_url="https://big.example.ts.net"
+    )
+    assert out["upload_url"] == "https://kb.example.io/upload"
+    assert out["large_upload_url"] == "https://big.example.ts.net/upload"
+    assert upload_tokens.verify(out["token"], SECRET) is True
+
+
 # ---------------- scope isolation (upload vs download) ----------------
 
 

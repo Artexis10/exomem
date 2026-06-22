@@ -421,6 +421,12 @@ def build_server(*, require_auth: bool) -> FastMCP:
     upload_max_bytes = int(
         os.environ.get("KB_MCP_UPLOAD_MAX_BYTES", str(preserve_module.MAX_UPLOAD_BYTES))
     )
+    # Alternate upload host NOT behind the ~100 MB Cloudflare edge cap (e.g. a
+    # Tailscale Funnel) — surfaced to clients as `large_upload_url` for the rare
+    # >100 MB web upload that Cloudflare would 413. Optional; inert when unset.
+    large_upload_base = (
+        os.environ.get("KB_MCP_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    )
     cf_team = os.environ.get("KB_MCP_CF_ACCESS_TEAM_DOMAIN", "").strip() or None
     cf_aud = os.environ.get("KB_MCP_CF_ACCESS_AUD", "").strip() or None
     cf_jwks = cf_access.make_jwks_client(cf_team) if (cf_team and cf_aud) else None
@@ -1663,7 +1669,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         claude.ai web session — the bytes travel out-of-band, never through the
         model. Steps:
 
-        1. Call this tool → `{token, ttl_seconds, upload_url}`.
+        1. Call this tool → `{token, ttl_seconds, upload_url[, large_upload_url]}`.
         2. In the code sandbox, multipart-POST the user's ATTACHED files to
            `upload_url` with header `Authorization: Bearer <token>` and form
            fields `file`, `scope`, `category` (optional `filename`, `description`,
@@ -1674,13 +1680,22 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
            `text` field above — it lands in an embedded sidecar so the otherwise-
            opaque file is findable by its content.
 
+        **Large files (>100 MB):** `upload_url` is fronted by Cloudflare, which
+        413s any body over ~100 MB at the edge. If a file exceeds ~100 MB (or a
+        POST to `upload_url` returns 413), send it to `large_upload_url` instead
+        when that field is present — same token, same form fields, an alternate
+        host with no edge cap. If `large_upload_url` is absent, only `upload_url`
+        is available and >100 MB must go desk-side.
+
         The token is Evidence-write only and expires after `ttl_seconds`; the
         server's long-lived secret never leaves the server.
 
-        Returns: {token, ttl_seconds, upload_url}.
+        Returns: {token, ttl_seconds, upload_url, large_upload_url?}.
         Raises: UPLOAD_DISABLED if the server has no upload token configured.
         """
-        return upload_tokens.mint_for_endpoint(upload_token, base_url)
+        return upload_tokens.mint_for_endpoint(
+            upload_token, base_url, large_base_url=large_upload_base
+        )
 
     @mcp.tool
     def mint_download_token() -> dict:
