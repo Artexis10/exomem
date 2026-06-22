@@ -463,6 +463,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
         scope = str(form.get("scope") or "").strip()
         category = str(form.get("category") or "").strip()
         description = str(form.get("description") or "").strip() or None
+        # Full extracted/OCR'd text of the artifact (the sandbox does the
+        # extraction). Lands in the sidecar body so the binary becomes findable.
+        text = str(form.get("text") or "").strip() or None
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
@@ -479,6 +482,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 filename=filename,
                 stream=upload.file,
                 description=description,
+                text=text,
                 max_bytes=upload_max_bytes,
             )
         except preserve_module.PreserveError as e:
@@ -507,7 +511,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>kb-mcp upload</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
-label{{display:block;margin:.75rem 0 .2rem}}input{{width:100%;padding:.5rem;font:inherit}}
+label{{display:block;margin:.75rem 0 .2rem}}input,textarea{{width:100%;padding:.5rem;font:inherit}}
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
 <h1>Add evidence to the KB</h1>
 <form id=f>
@@ -516,6 +520,7 @@ button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;w
 <label>Category</label><input name=category value="{_attr('category')}" placeholder="e.g. 01 - Check-in" required>
 <label>Filename (optional)</label><input name=filename value="{_attr('filename')}">
 <label>Description (optional)</label><input name=description value="{_attr('description')}">
+<label>Extracted text (optional — makes the file searchable)</label><textarea name=text rows=4 placeholder="OCR / transcribed text"></textarea>
 <label>Upload token (blank if behind Cloudflare Access)</label><input name=token type=password>
 <button type=submit>Upload</button></form>
 <div id=out></div>
@@ -1621,10 +1626,13 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         1. Call this tool → `{token, ttl_seconds, upload_url}`.
         2. In the code sandbox, multipart-POST the user's ATTACHED files to
            `upload_url` with header `Authorization: Bearer <token>` and form
-           fields `file`, `scope`, `category` (optional `filename`, `description`).
-           Files must be ATTACHMENTS — inline-pasted images never reach the
-           sandbox disk and cannot be sent.
-        3. Write the searchable text manifest separately via `preserve` / `note`.
+           fields `file`, `scope`, `category` (optional `filename`, `description`,
+           `text`). Files must be ATTACHMENTS — inline-pasted images never reach
+           the sandbox disk and cannot be sent.
+        3. To make the binary SEARCHABLE, extract its text in the sandbox (OCR an
+           image/scan, read a PDF, transcribe audio/video) and pass it as the
+           `text` field above — it lands in an embedded sidecar so the otherwise-
+           opaque file is findable by its content.
 
         The token is Evidence-write only and expires after `ttl_seconds`; the
         server's long-lived secret never leaves the server.

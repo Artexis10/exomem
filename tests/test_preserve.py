@@ -179,6 +179,66 @@ def test_preserve_auto_creates_scope_and_category_dirs(vault: Path) -> None:
     assert folder.is_dir()
 
 
+def test_preserve_with_text_writes_searchable_sidecar(vault: Path) -> None:
+    """The OCR companion: extracted `text` lands in the sidecar and is findable."""
+    from kb_mcp import find as find_module
+
+    result = preserve_module.preserve(
+        vault,
+        scope="Yolo",
+        category="photos",
+        filename="2026-05-25-kitchen.jpg",
+        content_base64=base64.b64encode(b"\xff\xd8\xff-fakejpeg").decode("ascii"),
+        text="Photo shows a cockroach infestation under the sink, water damage on the cabinet.",
+        today=TODAY,
+    )
+    assert result.sidecar_path == "Knowledge Base/Evidence/Yolo/photos/2026-05-25-kitchen.jpg.md"
+    sidecar = vault / result.sidecar_path
+    body = _read(sidecar)
+    assert "## Extracted text" in body
+    assert "cockroach infestation" in body
+    # The binary itself isn't embeddable, but its text twin is keyword-findable.
+    find_module.clear_cache()
+    hits = find_module.find(vault, query="cockroach infestation", mode="keyword")
+    assert any("2026-05-25-kitchen.jpg.md" in h.path for h in hits), [h.path for h in hits]
+
+
+def test_preserve_text_without_description_still_writes_sidecar(vault: Path) -> None:
+    """`text` alone (no description) is enough to trigger the sidecar."""
+    result = preserve_module.preserve(
+        vault,
+        scope="Yolo",
+        category="docs",
+        filename="2026-05-25-letter.pdf",
+        content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
+        text="Full body of the scanned letter, transcribed.",
+        today=TODAY,
+    )
+    assert result.sidecar_path is not None
+    body = _read(vault / result.sidecar_path)
+    assert "## Extracted text" in body
+    assert "## Description" not in body  # none supplied
+    assert "transcribed" in body
+
+
+def test_preserve_description_and_text_render_both_sections(vault: Path) -> None:
+    result = preserve_module.preserve(
+        vault,
+        scope="Yolo",
+        category="docs",
+        filename="2026-05-25-both.pdf",
+        content_base64=base64.b64encode(b"%PDF-fake").decode("ascii"),
+        description="Civil summons.",
+        text="IN THE DISTRICT COURT ... full transcribed body ...",
+        today=TODAY,
+    )
+    body = _read(vault / result.sidecar_path)
+    assert "## Description" in body
+    assert "Civil summons." in body
+    assert "## Extracted text" in body
+    assert "DISTRICT COURT" in body
+
+
 def test_preserve_appends_to_log(vault: Path) -> None:
     log_file = vault / "Knowledge Base" / "log.md"
     preserve_module.preserve(
