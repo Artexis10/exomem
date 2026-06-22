@@ -38,8 +38,9 @@ def _serve_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--host",
-        default="127.0.0.1",
-        help="Bind address for HTTP transports (default: 127.0.0.1; fronted by Tailscale Funnel).",
+        default=None,
+        help="Bind address for HTTP transports (default: $KB_MCP_HOST, else 127.0.0.1; "
+        "fronted by Cloudflare Tunnel). Set 0.0.0.0 to also serve a direct Tailscale/LAN route.",
     )
     parser.add_argument(
         "--port",

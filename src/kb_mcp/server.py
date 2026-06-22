@@ -515,7 +515,7 @@ label{{display:block;margin:.75rem 0 .2rem}}input{{width:100%;padding:.5rem;font
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
 <h1>Add evidence to the KB</h1>
 <form id=f>
-<label>File</label><input type=file name=file required>
+<label>File <small>(max {upload_max_bytes // (1024 * 1024)} MB; a public link may be capped lower by the proxy)</small></label><input type=file name=file required>
 <label>Scope</label><input name=scope value="{_attr('scope')}" placeholder="e.g. Yolo" required>
 <label>Category</label><input name=category value="{_attr('category')}" placeholder="e.g. 01 - Check-in" required>
 <label>Filename (optional)</label><input name=filename value="{_attr('filename')}">
@@ -2045,13 +2045,19 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
 def run(
     *,
     transport: str = "stdio",
-    host: str = "127.0.0.1",
+    host: str | None = None,
     port: int = 8765,
     log_dir: Path | None = None,
 ) -> None:
     """CLI entry: configure logging, build the server, run it.
 
     Auth is required for HTTP transports; stdio runs auth-free.
+
+    Bind host precedence: $KB_MCP_HOST > the passed `host` > 127.0.0.1. The env var
+    wins (and is resolved AFTER build_server() loads .env) so the deployment can flip
+    the bind from .env without changing the service's launch args. Set
+    KB_MCP_HOST=0.0.0.0 to also serve a non-Cloudflare route (e.g. a direct Tailscale
+    connection to the origin) for uploads larger than the Cloudflare edge cap.
     """
     from .logging_config import configure_logging
 
@@ -2060,11 +2066,12 @@ def run(
     configure_logging(log_dir)
 
     require_auth = transport != "stdio"
-    mcp = build_server(require_auth=require_auth)
+    mcp = build_server(require_auth=require_auth)  # loads .env (KB_MCP_HOST, etc.)
 
     if transport == "stdio":
         log.info("kb-mcp starting on stdio")
         mcp.run(transport="stdio")
     else:
+        host = os.environ.get("KB_MCP_HOST") or host or "127.0.0.1"
         log.info("kb-mcp starting on %s host=%s port=%s", transport, host, port)
         mcp.run(transport=transport, host=host, port=port)

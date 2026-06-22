@@ -32,7 +32,10 @@ from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, k
 log = logging.getLogger(__name__)
 
 MAX_DECODED_BYTES = 5 * 1024 * 1024  # 5 MB — base64-via-model path (tokens cost real money)
-MAX_UPLOAD_BYTES = 25 * 1024 * 1024  # 25 MB — HTTP /upload path (raw bytes, no token cost)
+MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB — HTTP /upload path (raw bytes, no token cost).
+# Aligns with the Cloudflare free-plan ~100 MB edge cap, so the public path and this app cap
+# agree. A deployment that wants larger uploads over a non-Cloudflare route (LAN/Tailscale
+# direct to the origin) raises KB_MCP_UPLOAD_MAX_BYTES in its .env.
 
 
 @dataclass

@@ -186,7 +186,8 @@ tool takes text only). Pick the channel by where the file actually is:
   `Authorization: Bearer $KB_MCP_UPLOAD_TOKEN` (the token is **always** required;
   Cloudflare Access may sit in front as an extra network gate but the server does
   not trust its headers). Lands straight in `Evidence/<scope>/<category>/`, zero
-  token cost, ≤25 MB.
+  token cost. The public link is capped near **100 MB** by the Cloudflare edge;
+  larger originals go desk-side (below) rather than over the public URL.
 - **Claude Code / desk-side:** the file is already on local disk — write it straight
   into `Evidence/<scope>/<category>/`, or drop it via Obsidian Sync; the note links it.
 - **`preserve`** is text-only; binaries always go via the channels above. Every write
