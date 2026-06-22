@@ -27,6 +27,8 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     # No real ASR/OCR in the suite: keep uploads from enqueuing GPU work. Tests that
     # exercise the worker enable it explicitly and stub extract.extract_text.
     monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    # No real CLIP either; tests that exercise it stub embeddings.embed_image/embed_clip_text.
+    monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
 
 
 @pytest.fixture

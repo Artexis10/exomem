@@ -37,15 +37,34 @@ QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # truncation surprises while staying paragraph-coherent.
 MAX_WORDS_PER_CHUNK = 350
 
+# CLIP: one shared image+text space, so a text query can match a (textless) photo
+# by visual content. An EMBEDDER (measurement) like bge — not a captioning VLM —
+# so it stays in-bounds for the pure-substrate server. ViT-B/32 → 512-dim.
+CLIP_MODEL_NAME = "clip-ViT-B-32"
+CLIP_DIM = 512
+
 _MODEL = None
 _MODEL_LOCK = threading.Lock()
 _RERANKER = None
 _RERANKER_LOCK = threading.Lock()
+_CLIP_MODEL = None
+_CLIP_LOCK = threading.Lock()
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
+_CLIP_IMPORT_FAILED = False
 
 
 def sidecar_path(vault_root: Path) -> Path:
     return vault_root / "Knowledge Base" / ".embeddings.sqlite"
+
+
+def clip_sidecar_path(vault_root: Path) -> Path:
+    """Separate per-machine sidecar for CLIP image vectors (independent lifecycle)."""
+    return vault_root / "Knowledge Base" / ".clip.sqlite"
+
+
+def clip_enabled() -> bool:
+    """False when KB_MCP_DISABLE_CLIP is set (mirrors KB_MCP_DISABLE_EMBEDDINGS)."""
+    return not os.environ.get("KB_MCP_DISABLE_CLIP")
 
 
 # Navigation files that aren't real content — their bodies are
@@ -95,6 +114,55 @@ def get_reranker():
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
         _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
     return _RERANKER
+
+
+class ClipUnavailable(Exception):
+    """CLIP (sentence-transformers/Pillow) isn't importable — soft-fail signal."""
+
+
+def get_clip_model():
+    """Lazy CLIP singleton (encodes BOTH images and text). CUDA when available."""
+    global _CLIP_MODEL
+    if _CLIP_MODEL is not None:
+        return _CLIP_MODEL
+    with _CLIP_LOCK:
+        if _CLIP_MODEL is not None:
+            return _CLIP_MODEL
+        import torch
+        from sentence_transformers import SentenceTransformer
+
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+        log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
+        _CLIP_MODEL = SentenceTransformer(CLIP_MODEL_NAME, device=device)
+    return _CLIP_MODEL
+
+
+def embed_image(path: Path) -> np.ndarray:
+    """Encode an image file → float32 (512,), L2-normalized for cosine.
+
+    Raises ClipUnavailable when CLIP/Pillow aren't installed so callers can soft-skip.
+    """
+    try:
+        from PIL import Image
+    except ImportError as e:
+        raise ClipUnavailable(f"Pillow not installed: {e}") from e
+    try:
+        model = get_clip_model()
+    except ImportError as e:
+        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    with Image.open(path) as img:
+        vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
+    return vec.astype(np.float32, copy=False)
+
+
+def embed_clip_text(query: str) -> np.ndarray:
+    """Encode a text query into CLIP space → float32 (512,), L2-normalized."""
+    try:
+        model = get_clip_model()
+    except ImportError as e:
+        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
+    return vec.astype(np.float32, copy=False)
 
 
 def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
@@ -327,6 +395,103 @@ class EmbeddingIndex:
             offset += n
             total += n
         return total
+
+
+class ClipIndex:
+    """Per-vault sqlite sidecar of CLIP image vectors — one vector per image.
+
+    Mirrors EmbeddingIndex (mtime-cached matrix, cosine search) but keyed by image
+    file with no chunking. Lives in its own `.clip.sqlite` so the bge text index is
+    untouched and the two evolve independently.
+    """
+
+    def __init__(self, vault_root: Path):
+        self.vault_root = vault_root
+        self.path = clip_sidecar_path(vault_root)
+        self._cache: tuple[float, list[str], np.ndarray] | None = None
+
+    def _connect(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(self.path)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS images (
+                file_path TEXT PRIMARY KEY,
+                vector BLOB NOT NULL,
+                file_mtime REAL NOT NULL
+            )
+            """
+        )
+        return conn
+
+    def upsert(self, rel_path: str, vector: np.ndarray, mtime: float) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO images (file_path, vector, file_mtime) VALUES (?, ?, ?)",
+                    (rel_path, vector.astype(np.float32).tobytes(), mtime),
+                )
+        finally:
+            conn.close()
+        self._cache = None
+
+    def delete(self, rel_path: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
+        finally:
+            conn.close()
+        self._cache = None
+
+    def has(self, rel_path: str) -> bool:
+        """True if this image already has a vector (used by the startup scan)."""
+        if not self.path.exists():
+            return False
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM images WHERE file_path = ?", (rel_path,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def all_vectors(self) -> tuple[list[str], np.ndarray]:
+        try:
+            sidecar_mtime = self.path.stat().st_mtime
+        except FileNotFoundError:
+            return [], np.zeros((0, CLIP_DIM), dtype=np.float32)
+        if self._cache and self._cache[0] == sidecar_mtime:
+            return self._cache[1], self._cache[2]
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT file_path, vector FROM images ORDER BY file_path"
+            ).fetchall()
+        finally:
+            conn.close()
+        if not rows:
+            self._cache = (sidecar_mtime, [], np.zeros((0, CLIP_DIM), dtype=np.float32))
+            return self._cache[1], self._cache[2]
+        paths = [r[0] for r in rows]
+        matrix = np.stack([np.frombuffer(r[1], dtype=np.float32) for r in rows], axis=0)
+        self._cache = (sidecar_mtime, paths, matrix)
+        return paths, matrix
+
+    def search(self, query_vec: np.ndarray, k: int) -> list[tuple[str, float]]:
+        """Top-k image hits: list of `(file_path, score)` by cosine similarity."""
+        paths, matrix = self.all_vectors()
+        if not paths:
+            return []
+        scores = matrix @ query_vec.astype(np.float32, copy=False)
+        k_eff = min(k, len(scores))
+        if k_eff <= 0:
+            return []
+        top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
+        top_idx = top_idx[np.argsort(-scores[top_idx])]
+        return [(paths[i], float(scores[i])) for i in top_idx]
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:

@@ -303,6 +303,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 "reranker preload failed (%s); first rerank=True call will "
                 "pay the cost", e,
             )
+        # Preload CLIP too so the first image-aware find()/upload doesn't pay the load.
+        if embeddings.clip_enabled():
+            try:
+                log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
+                embeddings.get_clip_model()
+                log.info("CLIP model ready")
+            except Exception as e:  # noqa: BLE001 — preload is best-effort
+                log.warning("CLIP preload failed (%s); first image query will pay the cost", e)
 
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests
@@ -510,17 +518,23 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 {"code": e.code, "reason": e.reason, "missing": e.missing},
                 status_code=status,
             )
-        # Server-side extraction for a media binary uploaded WITHOUT text: the worker
-        # transcribes/OCRs it and fills the (pending) sidecar off the request path, so
-        # the 201 returns now. If the sandbox already supplied `text`, skip — it's done.
-        if media_worker is not None and text is None and result.sidecar_path:
+        # Off-request-path media processing for the uploaded binary:
+        #  - OCR/ASR/PDF text when no `text` was supplied (fills the pending sidecar);
+        #  - CLIP-embed every IMAGE (even one uploaded WITH text) so textless photos
+        #    are findable by visual content. Both run in the worker; the 201 returns now.
+        if media_worker is not None and result.sidecar_path:
             media_type = extract.media_type_for(filename)
             if media_type:
-                media_worker.enqueue(
-                    binary_path=vault_root / result.path,
-                    sidecar_path=vault_root / result.sidecar_path,
-                    media_type=media_type,
-                )
+                do_ocr = text is None
+                do_clip = media_type == "image" and not os.environ.get("KB_MCP_DISABLE_CLIP")
+                if do_ocr or do_clip:
+                    media_worker.enqueue(
+                        binary_path=vault_root / result.path,
+                        sidecar_path=vault_root / result.sidecar_path,
+                        media_type=media_type,
+                        do_ocr=do_ocr,
+                        do_clip=do_clip,
+                    )
         return JSONResponse(result.as_dict(), status_code=201)
 
     @mcp.custom_route("/upload", methods=["GET"])

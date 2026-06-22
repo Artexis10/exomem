@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pytest
 
-from kb_mcp import extract, media_worker, preserve
+from kb_mcp import embeddings, extract, media_worker, preserve
 from kb_mcp import find as find_module
 
 
@@ -89,6 +90,30 @@ def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None
     _preserve_media_stub(vault, filename="two.wav")
     w = media_worker.MediaWorker(vault)
     assert w.scan_pending() == 2
+
+
+def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    res = preserve.preserve_bytes(
+        vault, scope="Yolo", category="photos", filename="p.jpg", data=b"\xff\xd8\xff", text="beach",
+    )
+    monkeypatch.setattr(embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(
+        binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
+        media_type="image", do_ocr=False, do_clip=True,
+    ))
+    assert embeddings.ClipIndex(vault).has(res.path)
+
+
+def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t")
+    preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t")
+    w = media_worker.MediaWorker(vault)
+    assert w._scan_unindexed_images() == 2  # both images queued for CLIP
 
 
 def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> None:

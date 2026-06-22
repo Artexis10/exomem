@@ -156,6 +156,8 @@ class Hit:
     bm25_rank: int | None = None
     vector_rank: int | None = None
     vector_score: float | None = None
+    clip_rank: int | None = None      # rank from CLIP text→image visual search
+    clip_score: float | None = None   # CLIP cosine similarity (image vs the query)
     graph_hop: bool = False
     graph_in_degree: int = 0
     keyword_rank: int | None = None
@@ -194,6 +196,10 @@ class Hit:
             signals["vector_rank"] = self.vector_rank
         if self.vector_score is not None:
             signals["vector_score"] = round(self.vector_score, 4)
+        if self.clip_rank is not None:
+            signals["clip_rank"] = self.clip_rank
+        if self.clip_score is not None:
+            signals["clip_score"] = round(self.clip_score, 4)
         if self.graph_hop:
             signals["graph_hop"] = True
         if self.graph_in_degree:
@@ -472,10 +478,30 @@ def _find_semantic(
     except Exception as e:
         log.warning("vector search failed: %s; falling back to BM25-only", e)
 
+    # ---- CLIP contribution: text→image visual search ----
+    # Lets a text query match a (possibly textless) Evidence photo by visual content.
+    # Returns the image's *sidecar* path (what the corpus indexes); soft-fails when CLIP
+    # isn't installed or the index is empty. Gated by KB_MCP_DISABLE_CLIP.
+    clip_ranking: list[str] = []
+    clip_score_by_path: dict[str, float] = {}
+    if embeddings.clip_enabled() and query.strip():
+        try:
+            clip_idx = embeddings.ClipIndex(vault_root)
+            clip_qvec = embeddings.embed_clip_text(query)
+            for img_rel, score in clip_idx.search(clip_qvec, k=candidate_k):
+                sidecar_rel = img_rel + ".md"
+                if sidecar_rel not in clip_score_by_path and (vault_root / sidecar_rel).exists():
+                    clip_ranking.append(sidecar_rel)
+                    clip_score_by_path[sidecar_rel] = score
+        except embeddings.ClipUnavailable as e:
+            log.warning("CLIP search unavailable (%s); skipping image search", e)
+        except Exception as e:  # noqa: BLE001 — image search is best-effort
+            log.warning("CLIP search failed: %s; skipping image search", e)
+
     bm25_ranking: list[str] = []
     keyword_ranking: list[str] = []
     if mode == "vector":
-        rankings = [vector_ranking] if vector_ranking else []
+        rankings = [r for r in (vector_ranking, clip_ranking) if r]
     else:
         # ---- BM25 contribution ----
         try:
@@ -495,7 +521,7 @@ def _find_semantic(
         # under Q marketing pages on the "market" stem).
         keyword_ranking = _keyword_match_paths(vault_root, query_norm, scope)
         rankings = [
-            r for r in (vector_ranking, bm25_ranking, keyword_ranking) if r
+            r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
         ]
 
     # ---- Graph expansion: 1-hop outbound wikilinks of STRONG candidates ----
@@ -550,7 +576,9 @@ def _find_semantic(
     vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
     bm25_rank_by_path = {p: i + 1 for i, p in enumerate(bm25_ranking)}
     keyword_rank_by_path = {p: i + 1 for i, p in enumerate(keyword_ranking)}
+    clip_rank_by_path = {p: i + 1 for i, p in enumerate(clip_ranking)}
     keyword_set: set[str] = set(keyword_ranking)
+    clip_set: set[str] = set(clip_ranking)
     graph_set = set(graph_ranking)
 
     if not rankings:
@@ -598,6 +626,7 @@ def _find_semantic(
             rel_path not in vector_paths
             and rel_path not in graph_set
             and rel_path not in keyword_set
+            and rel_path not in clip_set
             and keyword_excerpt is None
         ):
             # No literal match, not a graph hop, not vector-ranked, not in
@@ -606,10 +635,10 @@ def _find_semantic(
             if not _stem_tokens_present(page, query_norm):
                 continue
             keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
-        elif rel_path in graph_set and keyword_excerpt is None:
-            # Graph-hop neighbour: no all-tokens-present requirement. The
-            # rationale for surfacing is connectivity to a strong match,
-            # not lexical overlap with the query. Use leading body snippet.
+        elif (rel_path in graph_set or rel_path in clip_set) and keyword_excerpt is None:
+            # Graph-hop neighbour or CLIP visual match: no all-tokens-present
+            # requirement (the reason for surfacing is connectivity / visual
+            # similarity, not lexical overlap). Use the sidecar's leading body.
             body = page.body.strip()
             keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
         chunk = chunk_text_by_path.get(rel_path)
@@ -631,6 +660,8 @@ def _find_semantic(
             bm25_rank=bm25_rank_by_path.get(rel_path),
             vector_rank=vector_rank_by_path.get(rel_path),
             vector_score=vector_score_by_path.get(rel_path),
+            clip_rank=clip_rank_by_path.get(rel_path),
+            clip_score=clip_score_by_path.get(rel_path),
             graph_hop=is_graph_only,
             graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
             keyword_rank=keyword_rank_by_path.get(rel_path),

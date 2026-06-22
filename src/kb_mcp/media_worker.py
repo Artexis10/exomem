@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import extract, preserve
+from . import embeddings, extract, preserve
 
 log = logging.getLogger(__name__)
 
@@ -34,6 +34,8 @@ class _Job:
     binary_path: Path
     sidecar_path: Path
     media_type: str
+    do_ocr: bool = True    # transcribe/OCR/read → fill the sidecar text
+    do_clip: bool = False  # CLIP-embed (images only) → ClipIndex
 
 
 class MediaWorker:
@@ -44,6 +46,7 @@ class MediaWorker:
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._clip_index = embeddings.ClipIndex(vault_root)
 
     def start(self) -> None:
         with self._lock:
@@ -55,8 +58,24 @@ class MediaWorker:
             self._thread.start()
             log.info("media extraction worker started")
 
-    def enqueue(self, *, binary_path: Path, sidecar_path: Path, media_type: str) -> None:
-        self._q.put(_Job(binary_path=binary_path, sidecar_path=sidecar_path, media_type=media_type))
+    def enqueue(
+        self,
+        *,
+        binary_path: Path,
+        sidecar_path: Path,
+        media_type: str,
+        do_ocr: bool = True,
+        do_clip: bool = False,
+    ) -> None:
+        self._q.put(
+            _Job(
+                binary_path=binary_path,
+                sidecar_path=sidecar_path,
+                media_type=media_type,
+                do_ocr=do_ocr,
+                do_clip=do_clip,
+            )
+        )
 
     def stop(self) -> None:
         self._q.put(None)
@@ -78,6 +97,12 @@ class MediaWorker:
                 self._q.task_done()
 
     def _process(self, job: _Job) -> None:
+        if job.do_ocr:
+            self._run_extraction(job)
+        if job.do_clip:
+            self._run_clip(job)
+
+    def _run_extraction(self, job: _Job) -> None:
         try:
             result = extract.extract_text(job.binary_path, media_type=job.media_type)
         except extract.ExtractionUnavailable as e:
@@ -99,7 +124,30 @@ class MediaWorker:
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
 
+    def _run_clip(self, job: _Job) -> None:
+        """CLIP-embed an image into the ClipIndex so it's findable by visual content."""
+        try:
+            vec = embeddings.embed_image(job.binary_path)
+        except embeddings.ClipUnavailable as e:
+            log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
+            return
+        except Exception:  # noqa: BLE001 — a bad image must not kill the worker
+            log.exception("CLIP embedding failed for %s", job.binary_path.name)
+            return
+        try:
+            rel = job.binary_path.resolve().relative_to(self._vault_root.resolve()).as_posix()
+            mtime = job.binary_path.stat().st_mtime
+        except (ValueError, OSError) as e:
+            log.warning("CLIP skip %s: %s", job.binary_path.name, e)
+            return
+        self._clip_index.upsert(rel, vec, mtime)
+        log.info("CLIP-indexed %s", job.binary_path.name)
+
     def scan_pending(self) -> int:
+        """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
+        return self._scan_pending_ocr() + self._scan_unindexed_images()
+
+    def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under Evidence/. Returns count."""
         evidence = self._vault_root / "Knowledge Base" / "Evidence"
         if not evidence.is_dir():
@@ -123,6 +171,35 @@ class MediaWorker:
                 n += 1
         if n:
             log.info("media worker: re-enqueued %d pending extraction(s)", n)
+        return n
+
+    def _scan_unindexed_images(self) -> int:
+        """CLIP-queue every Evidence image not yet in the index (mirrors the OCR scan)."""
+        if not embeddings.clip_enabled():
+            return 0
+        evidence = self._vault_root / "Knowledge Base" / "Evidence"
+        if not evidence.is_dir():
+            return 0
+        n = 0
+        for f in evidence.rglob("*"):
+            if not f.is_file() or extract.media_type_for(f) != "image":
+                continue
+            try:
+                rel = f.resolve().relative_to(self._vault_root.resolve()).as_posix()
+            except (ValueError, OSError):
+                continue
+            if self._clip_index.has(rel):
+                continue
+            self.enqueue(
+                binary_path=f,
+                sidecar_path=f.with_name(f.name + ".md"),
+                media_type="image",
+                do_ocr=False,
+                do_clip=True,
+            )
+            n += 1
+        if n:
+            log.info("media worker: CLIP-queued %d un-indexed image(s)", n)
         return n
 
 
