@@ -32,7 +32,7 @@ from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from . import add as add_module
 from . import append_to_file as append_to_file_module
@@ -523,6 +523,61 @@ try{{const r=await fetch('/upload',{{method:'POST',body:fd,headers:h}});
 out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error: '+err}}}};
 </script>"""
         return HTMLResponse(html)
+
+    # ---- Out-of-band binary DOWNLOAD: the reverse of /upload ----
+    # The sandbox pulls a vault file (dataset, evidence, scan) to analyze it.
+    # Read-only, token-gated (download-scoped), path confined to the vault root.
+    def _download_authorized(request: Request) -> bool:
+        # Same model as /upload: the long-lived master token, a *download*-scoped
+        # minted token, or a verified CF Access JWT. Never a spoofable header.
+        if upload_token is not None:
+            header = request.headers.get("authorization", "")
+            if header.startswith("Bearer "):
+                presented = header[len("Bearer ") :].strip()
+                if secrets.compare_digest(presented, upload_token):
+                    return True
+                if upload_tokens.verify(presented, upload_token, scope="download"):
+                    return True
+        if cf_jwks is not None:
+            if cf_access.verify(
+                request.headers.get("cf-access-jwt-assertion"),
+                jwks_client=cf_jwks,
+                team_domain=cf_team,
+                audience=cf_aud,
+            ):
+                return True
+        return False
+
+    @mcp.custom_route("/download", methods=["GET"])
+    async def _download(request: Request):
+        if not upload_enabled:
+            return JSONResponse(
+                {
+                    "code": "DOWNLOAD_DISABLED",
+                    "reason": "downloads are off: set KB_MCP_UPLOAD_TOKEN (or configure "
+                    "Cloudflare Access via KB_MCP_CF_ACCESS_TEAM_DOMAIN + KB_MCP_CF_ACCESS_AUD)",
+                },
+                status_code=503,
+            )
+        if not _download_authorized(request):
+            return JSONResponse(
+                {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
+                status_code=401,
+            )
+        path = request.query_params.get("path", "")
+        if not path.strip():
+            return JSONResponse(
+                {"code": "INVALID_PATH", "reason": "query param `path` (vault-relative) is required"},
+                status_code=400,
+            )
+        try:
+            abs_path, _rel = resolve_under_vault(
+                vault_root, path, must_exist=True, must_be_file=True
+            )
+        except VaultPathError as e:
+            status = 404 if e.code == "NOT_FOUND" else 400
+            return JSONResponse({"code": e.code, "reason": e.reason}, status_code=status)
+        return FileResponse(abs_path, filename=abs_path.name)
 
     @mcp.tool
     def find(
@@ -1575,6 +1630,21 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         Raises: UPLOAD_DISABLED if the server has no upload token configured.
         """
         return upload_tokens.mint_for_endpoint(upload_token, base_url)
+
+    @mcp.tool
+    def mint_download_token() -> dict:
+        """Mint a short-lived bearer token for the HTTP `/download` endpoint.
+
+        Use to PULL a vault file into the sandbox — a dataset, an evidence
+        binary, a scan — so you can analyze it. Call this, then from the code
+        sandbox GET `download_url?path=<vault-relative path>` with header
+        `Authorization: Bearer <token>`. Read-only; the token is download-scoped
+        (can't write) and expires after `ttl_seconds`.
+
+        Returns: {token, ttl_seconds, download_url}.
+        Raises: DOWNLOAD_DISABLED if the server has no upload token configured.
+        """
+        return upload_tokens.mint_for_endpoint(upload_token, base_url, scope="download")
 
     # ---------------- Tier 2: filesystem-parity escape hatches ----------------
     #
