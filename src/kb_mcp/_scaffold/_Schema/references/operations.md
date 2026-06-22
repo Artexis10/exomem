@@ -73,7 +73,7 @@ These two updates are non-negotiable for every operation below. The per-operatio
   - **Research vs production-log:** secondary synthesis (research) vs documenting the making of a primary creative artifact (production-log).
   - **Experiment vs production-log:** hypothesis → finding (experiment) vs artifact → engagement metrics (production-log).
 - For research notes: scope (`substrate`, `q`, `endstate`, `sift`, `tu`, `book-club`, `health`, `finance`, `creative`, `science`, `travel`, `personal`). Ask if not stated.
-- For Q research notes specifically: confirm whether the note is about Q itself or about a Q tenant. If a tenant, gather the tenant key (`example-tenant`, `tu`, or new). Note that `tu` is dual-purpose: `project: tu` for podcast content/activity research, `project: q + tenant: tu` for TU-as-Q-deployment research.
+- For Q research notes specifically: confirm whether the note is about Q itself or about a Q tenant. If a tenant, gather the tenant key (`ask-dr-chaffee`, `tu`, or new). Note that `tu` is dual-purpose: `project: tu` for podcast content/activity research, `project: q + tenant: tu` for TU-as-Q-deployment research.
 - For experiments: domain (`food`, or another sub-domain). Plus hypothesis, protocol summary, duration, started date.
 - For production-logs: medium (`reels`, `episodes`, `pdfs`, `posts`, or another). Plus projects, host, editor (if known), recording / publish status. Productions are often associated with a research-note (the curriculum / outline) and a pattern (the production rules) — surface those links during the draft.
 - Topic / title (slug) — propose one based on content; confirm
@@ -103,7 +103,7 @@ These two updates are non-negotiable for every operation below. The per-operatio
 - **Spans multiple projects (research-note).** If a research note touches multiple projects, that's a sign it might be an insight or pattern instead. Surface the option. Substrate-level research often masquerades as multi-project research — check whether it's actually company-level.
 - **Topic already covered.** Use `find` first; if a similar note exists, ask whether to extend it (in-place edit) or supersede it.
 - **New scope not in the project list.** Project keys are an open set — they auto-register on first use. Just pass the new slug-shaped key (e.g. `project: home`) to `note`/`replace`/`edit`/`link`; the writer appends it to `_Schema/project-keys.yaml` and creates the matching `Notes/Research/<Folder>/`. A typo guard rejects near-misses (within edit distance 2 of an existing key), so an existing-but-misspelled scope still maps back to the canonical one. Pass `project_category` to bucket the new key (umbrella / product / activity / domain / situation / cross-cutting); omitted, it lands `uncategorized` for Hugo to fix later. The registration surfaces as a warning in the write response — mention it to Hugo, but don't treat a genuinely new scope as illegal or as needing a manual schema edit.
-- **New Q tenant.** If Hugo references a Q tenant not in the current list (`example-tenant`, `tu`), surface it before assuming. Don't silently add tenants.
+- **New Q tenant.** If Hugo references a Q tenant not in the current list (`ask-dr-chaffee`, `tu`), surface it before assuming. Don't silently add tenants.
 - **New experiment domain or production medium.** If Hugo names a domain/medium that isn't yet a subfolder, propose creating it; don't auto-create. Initial seeded set: `Experiments/Food/`, `Productions/Reels/`.
 - **Experiment ongoing / production mid-lifecycle.** When an experiment is being logged at start (vs written up after conclusion), or a production is logged at planning / recording (vs published / reflected), the later sections will be sparse and that's expected. The skill should not insist on filling them.
 - **Production-log status updates.** Production-logs evolve through the lifecycle. When Hugo says things like "the reel batch is published now" or "Kim finished editing," update status + relevant date fields, but don't rewrite the body unless asked. The body is mostly stable from the recording stage onward; only Outcomes and Reflection grow.
@@ -174,10 +174,12 @@ tool takes text only). Pick the channel by where the file actually is:
   short-lived `{token, ttl_seconds, upload_url}`; (2) in the sandbox, multipart-`curl`
   each attached file to `upload_url` with `Authorization: Bearer <token>` and form
   fields `file` / `scope` / `category` (optional `filename`, `description`, **`text`**);
-  (3) to make the binary **searchable**, extract its text *in the sandbox* — OCR an
-  image/scan, read a PDF, transcribe audio/video — and pass it as the `text` field on the
-  same upload. It lands in an embedded sidecar, so the opaque binary becomes findable by
-  its content (no separate manifest needed). No inline bytes, no pasted
+  (3) **searchability is automatic** — the server transcribes audio/video (Whisper),
+  OCRs images (Tesseract), and reads PDFs on the GPU after the upload and fills an
+  embedded sidecar, so the binary becomes findable by its content with no extra step.
+  You *may* still pass a `text` field to supply your own extraction (a richer vision
+  description, or a textless-photo caption the server can't produce) — it wins and
+  skips the server pass. No inline bytes, no pasted
   secret. **Two requirements:** files must be **attached** (inline-pasted images never
   land on the sandbox disk and can't be sent), and the host must be in the sandbox's
   egress allowlist (Settings → network; `*.substratesystems.io`, one-time). If the
@@ -251,7 +253,7 @@ tool takes text only). Pick the channel by where the file actually is:
 - "what reel batches have I shipped"
 
 ### Procedure
-1. Parse the query for type filters (research, insight, failure, pattern, experiment, production-log, entity), project/domain/medium/tenant filters (q, endstate, food, reels, example-tenant, etc.), tag filters, or date ranges.
+1. Parse the query for type filters (research, insight, failure, pattern, experiment, production-log, entity), project/domain/medium/tenant filters (q, endstate, food, reels, ask-dr-chaffee, etc.), tag filters, or date ranges.
 2. Search across:
    - Filenames
    - Frontmatter fields (especially `tags`, `project`, `projects`, `tenant`, `domain`, `medium`, `entity_type`)

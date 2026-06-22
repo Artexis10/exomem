@@ -149,9 +149,23 @@ cd C:\path\to\kb-mcp
 
 # 1. Install Python deps (creates .venv automatically).
 #    --extra embeddings pulls torch + sentence-transformers for HYBRID search.
+#    --extra media pulls faster-whisper + pytesseract + pymupdf for SERVER-SIDE
+#    media extraction (auto transcribe/OCR uploaded binaries → searchable). On
+#    Windows the [media] extra also pins the CUDA-12 runtime (cublas/cudnn/cudart)
+#    that ctranslate2 needs alongside torch's cu132 — see the pyproject comment.
 #    A bare `uv sync` is now the LEAN/keyword-only install (see SETUP-FRIEND.md);
-#    this remote/GPU deployment wants the extra.
-uv sync --extra embeddings
+#    this remote/GPU deployment wants the extras.
+uv sync --extra embeddings --extra media
+
+# 1b. Media extraction needs two SYSTEM tools (not pip-installable):
+#     - Tesseract OCR (images):  winget install --id UB-Mannheim.TesseractOCR -e
+#       (the installer doesn't add it to PATH; the server auto-discovers it at
+#        C:\Program Files\Tesseract-OCR\, or set KB_MCP_TESSERACT_CMD.)
+#     - ffmpeg is bundled by PyAV (pulled via faster-whisper), so audio/video
+#       decode works without a separate install.
+#     Verify the GPU media path:  uv run python scripts/verify-media-gpu.py
+#     Lean/CPU-only boxes can skip all of this — set KB_MCP_DISABLE_MEDIA_EXTRACTION;
+#     uploads still work, just without server-side searchable-text extraction.
 
 # 2. Set up a public HTTPS URL (you need this hostname in step 3). Pick ONE:
 #
