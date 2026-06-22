@@ -33,7 +33,7 @@ from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
-from starlette.responses import HTMLResponse, JSONResponse
+from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
 from . import add as add_module
 from . import append_to_file as append_to_file_module
@@ -463,6 +463,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
         scope = str(form.get("scope") or "").strip()
         category = str(form.get("category") or "").strip()
         description = str(form.get("description") or "").strip() or None
+        # Full extracted/OCR'd text of the artifact (the sandbox does the
+        # extraction). Lands in the sidecar body so the binary becomes findable.
+        text = str(form.get("text") or "").strip() or None
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
@@ -479,6 +482,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 filename=filename,
                 stream=upload.file,
                 description=description,
+                text=text,
                 max_bytes=upload_max_bytes,
             )
         except preserve_module.PreserveError as e:
@@ -507,7 +511,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
 <meta name=viewport content="width=device-width,initial-scale=1">
 <title>kb-mcp upload</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
-label{{display:block;margin:.75rem 0 .2rem}}input{{width:100%;padding:.5rem;font:inherit}}
+label{{display:block;margin:.75rem 0 .2rem}}input,textarea{{width:100%;padding:.5rem;font:inherit}}
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
 <h1>Add evidence to the KB</h1>
 <form id=f>
@@ -516,6 +520,7 @@ button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;w
 <label>Category</label><input name=category value="{_attr('category')}" placeholder="e.g. 01 - Check-in" required>
 <label>Filename (optional)</label><input name=filename value="{_attr('filename')}">
 <label>Description (optional)</label><input name=description value="{_attr('description')}">
+<label>Extracted text (optional — makes the file searchable)</label><textarea name=text rows=4 placeholder="OCR / transcribed text"></textarea>
 <label>Upload token (blank if behind Cloudflare Access)</label><input name=token type=password>
 <button type=submit>Upload</button></form>
 <div id=out></div>
@@ -526,6 +531,61 @@ try{{const r=await fetch('/upload',{{method:'POST',body:fd,headers:h}});
 out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error: '+err}}}};
 </script>"""
         return HTMLResponse(html)
+
+    # ---- Out-of-band binary DOWNLOAD: the reverse of /upload ----
+    # The sandbox pulls a vault file (dataset, evidence, scan) to analyze it.
+    # Read-only, token-gated (download-scoped), path confined to the vault root.
+    def _download_authorized(request: Request) -> bool:
+        # Same model as /upload: the long-lived master token, a *download*-scoped
+        # minted token, or a verified CF Access JWT. Never a spoofable header.
+        if upload_token is not None:
+            header = request.headers.get("authorization", "")
+            if header.startswith("Bearer "):
+                presented = header[len("Bearer ") :].strip()
+                if secrets.compare_digest(presented, upload_token):
+                    return True
+                if upload_tokens.verify(presented, upload_token, scope="download"):
+                    return True
+        if cf_jwks is not None:
+            if cf_access.verify(
+                request.headers.get("cf-access-jwt-assertion"),
+                jwks_client=cf_jwks,
+                team_domain=cf_team,
+                audience=cf_aud,
+            ):
+                return True
+        return False
+
+    @mcp.custom_route("/download", methods=["GET"])
+    async def _download(request: Request):
+        if not upload_enabled:
+            return JSONResponse(
+                {
+                    "code": "DOWNLOAD_DISABLED",
+                    "reason": "downloads are off: set KB_MCP_UPLOAD_TOKEN (or configure "
+                    "Cloudflare Access via KB_MCP_CF_ACCESS_TEAM_DOMAIN + KB_MCP_CF_ACCESS_AUD)",
+                },
+                status_code=503,
+            )
+        if not _download_authorized(request):
+            return JSONResponse(
+                {"code": "UNAUTHORIZED", "reason": "missing or invalid download credential"},
+                status_code=401,
+            )
+        path = request.query_params.get("path", "")
+        if not path.strip():
+            return JSONResponse(
+                {"code": "INVALID_PATH", "reason": "query param `path` (vault-relative) is required"},
+                status_code=400,
+            )
+        try:
+            abs_path, _rel = resolve_under_vault(
+                vault_root, path, must_exist=True, must_be_file=True
+            )
+        except VaultPathError as e:
+            status = 404 if e.code == "NOT_FOUND" else 400
+            return JSONResponse({"code": e.code, "reason": e.reason}, status_code=status)
+        return FileResponse(abs_path, filename=abs_path.name)
 
     @mcp.tool
     def find(
@@ -1566,10 +1626,13 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         1. Call this tool → `{token, ttl_seconds, upload_url}`.
         2. In the code sandbox, multipart-POST the user's ATTACHED files to
            `upload_url` with header `Authorization: Bearer <token>` and form
-           fields `file`, `scope`, `category` (optional `filename`, `description`).
-           Files must be ATTACHMENTS — inline-pasted images never reach the
-           sandbox disk and cannot be sent.
-        3. Write the searchable text manifest separately via `preserve` / `note`.
+           fields `file`, `scope`, `category` (optional `filename`, `description`,
+           `text`). Files must be ATTACHMENTS — inline-pasted images never reach
+           the sandbox disk and cannot be sent.
+        3. To make the binary SEARCHABLE, extract its text in the sandbox (OCR an
+           image/scan, read a PDF, transcribe audio/video) and pass it as the
+           `text` field above — it lands in an embedded sidecar so the otherwise-
+           opaque file is findable by its content.
 
         The token is Evidence-write only and expires after `ttl_seconds`; the
         server's long-lived secret never leaves the server.
@@ -1578,6 +1641,21 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         Raises: UPLOAD_DISABLED if the server has no upload token configured.
         """
         return upload_tokens.mint_for_endpoint(upload_token, base_url)
+
+    @mcp.tool
+    def mint_download_token() -> dict:
+        """Mint a short-lived bearer token for the HTTP `/download` endpoint.
+
+        Use to PULL a vault file into the sandbox — a dataset, an evidence
+        binary, a scan — so you can analyze it. Call this, then from the code
+        sandbox GET `download_url?path=<vault-relative path>` with header
+        `Authorization: Bearer <token>`. Read-only; the token is download-scoped
+        (can't write) and expires after `ttl_seconds`.
+
+        Returns: {token, ttl_seconds, download_url}.
+        Raises: DOWNLOAD_DISABLED if the server has no upload token configured.
+        """
+        return upload_tokens.mint_for_endpoint(upload_token, base_url, scope="download")
 
     # ---------------- Tier 2: filesystem-parity escape hatches ----------------
     #

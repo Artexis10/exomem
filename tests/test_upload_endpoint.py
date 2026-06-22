@@ -166,9 +166,36 @@ def test_cf_access_invalid_jwt_rejected(vault, monkeypatch: pytest.MonkeyPatch) 
     assert r.status_code == 401, r.text
 
 
+def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The OCR companion over HTTP: the `text` form field becomes the embedded,
+    # keyword-findable sidecar body so the binary is searchable by its content.
+    from kb_mcp import find as find_module
+
+    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    r = client.post(
+        "/upload",
+        files={"file": ("invoice.png", b"\x89PNGbytes", "image/png")},
+        data={
+            "scope": "Yolo",
+            "category": "01 - Check-in",
+            "text": "Invoice total 4200 EUR, vendor Acme Plumbing, dated 2026-05-20.",
+        },
+        headers={"Authorization": "Bearer sekret"},
+    )
+    assert r.status_code == 201, r.text
+    sidecar_rel = r.json()["sidecar_path"]
+    assert sidecar_rel and sidecar_rel.endswith("invoice.png.md")
+    sidecar = vault / sidecar_rel
+    assert "Acme Plumbing" in sidecar.read_text(encoding="utf-8")
+    find_module.clear_cache()
+    hits = find_module.find(vault, query="Acme Plumbing", mode="keyword")
+    assert any("invoice.png.md" in h.path for h in hits), [h.path for h in hits]
+
+
 def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
     r = client.get("/upload?scope=Yolo&category=01%20-%20Check-in")
     assert r.status_code == 200
     assert "Add evidence" in r.text
     assert 'value="Yolo"' in r.text
+    assert "name=text" in r.text  # searchable-text field present

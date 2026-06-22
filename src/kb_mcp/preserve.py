@@ -12,8 +12,12 @@ Two input modes:
   comfortably under claude.ai's transport limits).
 - `content`: UTF-8 text for markdown/plain-text artifacts.
 
-If `description` is supplied, a sidecar `<filename>.md` is written alongside
-the artifact with frontmatter explaining what it is.
+If `description` and/or `text` is supplied, a sidecar `<filename>.md` is
+written alongside the artifact: `description` is a short human caption,
+`text` is the full extracted/OCR'd text of the artifact. The sidecar is a
+real `.md` and gets embedded on write, so a binary that is otherwise opaque
+to search becomes findable by its content (the OCR companion). The bytes
+themselves never get an LLM — extraction happens in the caller (the sandbox).
 """
 
 from __future__ import annotations
@@ -74,6 +78,7 @@ def preserve(
     content: str | None = None,
     content_stream: BinaryIO | None = None,
     description: str | None = None,
+    text: str | None = None,
     today: dt.date | None = None,
     max_decoded_bytes: int = MAX_DECODED_BYTES,
     max_stream_bytes: int = MAX_UPLOAD_BYTES,
@@ -178,12 +183,15 @@ def preserve(
 
         writes: list[PlannedWrite] = []
 
-        # Optional sidecar. For binary artifacts the convention is
-        # `<filename>.md` next to the artifact. For .md artifacts that would
-        # produce `<stem>.md.md` (cosmetic but ugly), so use `<stem>-notes.md`
-        # instead — the description belongs alongside, not as a double-ext
-        # twin of the artifact.
-        if description and description.strip():
+        # Optional sidecar. Written when there's a short `description` caption
+        # and/or full extracted `text` (the OCR companion that makes a binary
+        # searchable). For binary artifacts the convention is `<filename>.md`
+        # next to the artifact. For .md artifacts that would produce
+        # `<stem>.md.md` (cosmetic but ugly), so use `<stem>-notes.md` instead —
+        # the sidecar belongs alongside, not as a double-ext twin of the artifact.
+        desc_clean = description.strip() if description and description.strip() else None
+        text_clean = text.strip() if text and text.strip() else None
+        if desc_clean or text_clean:
             if filename_safe.lower().endswith(".md"):
                 stem = filename_safe[:-3]
                 sidecar_path = folder / f"{stem}-notes.md"
@@ -199,7 +207,8 @@ def preserve(
                     scope=scope_safe,
                     category=category_safe,
                     date_iso=date_iso,
-                    description=description.strip(),
+                    description=desc_clean,
+                    text=text_clean,
                 )
                 writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
                 sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
@@ -255,7 +264,10 @@ def preserve(
             warnings.append("Knowledge Base/log.md missing; skipped log entry")
 
         if writes:
-            batch_atomic_write(writes)
+            # Pass vault_root so the sidecar (a real `.md`) is embedded on write
+            # — that's what makes the binary's extracted text immediately
+            # findable. index.md / log.md in the batch are skipped by name.
+            batch_atomic_write(writes, vault_root=vault_root)
 
     except Exception as e:
         log.exception("preserve() failed mid-write; artifact_written=%s", written_artifact)
@@ -277,6 +289,7 @@ def preserve_stream(
     filename: str,
     stream: BinaryIO,
     description: str | None = None,
+    text: str | None = None,
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
 ) -> PreserveResult:
@@ -287,6 +300,9 @@ def preserve_stream(
     memory is one chunk. Funnels through `preserve()` so there is exactly ONE write
     path with identical sanitization, append-only overwrite refusal, sidecar, and
     index/log behavior. The byte cap is enforced during the copy.
+
+    `text` is the artifact's extracted/OCR'd text — it becomes the embedded sidecar
+    body so the binary is findable by its content (the OCR companion).
     """
     return preserve(
         vault_root,
@@ -295,6 +311,7 @@ def preserve_stream(
         filename=filename,
         content_stream=stream,
         description=description,
+        text=text,
         today=today,
         max_stream_bytes=max_bytes,
     )
@@ -308,6 +325,7 @@ def preserve_bytes(
     filename: str,
     data: bytes,
     description: str | None = None,
+    text: str | None = None,
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
 ) -> PreserveResult:
@@ -324,6 +342,7 @@ def preserve_bytes(
         filename=filename,
         stream=io.BytesIO(data),
         description=description,
+        text=text,
         today=today,
         max_bytes=max_bytes,
     )
@@ -396,13 +415,19 @@ def _render_sidecar(
     scope: str,
     category: str,
     date_iso: str,
-    description: str,
+    description: str | None = None,
+    text: str | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
     Uses `type: source` (with `source_type: other`) since the page-type
     taxonomy doesn't have a dedicated `evidence` type. Tags surface the
     evidence + scope context.
+
+    `description` is a short human caption; `text` is the full extracted/OCR'd
+    content of the artifact. Either or both may be present (the caller only
+    writes a sidecar when at least one is). The `## Extracted text` body is what
+    makes an otherwise-opaque binary findable once the sidecar is embedded.
     """
     lines = ["---"]
     lines.append("type: source")
@@ -416,10 +441,16 @@ def _render_sidecar(
     lines.append("")
     lines.append(f"Preserved under `Evidence/{scope}/{category}/`.")
     lines.append("")
-    lines.append("## Description")
-    lines.append("")
-    lines.append(description)
-    lines.append("")
+    if description:
+        lines.append("## Description")
+        lines.append("")
+        lines.append(description)
+        lines.append("")
+    if text:
+        lines.append("## Extracted text")
+        lines.append("")
+        lines.append(text)
+        lines.append("")
     return "\n".join(lines)
 
 

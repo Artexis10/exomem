@@ -173,8 +173,11 @@ tool takes text only). Pick the channel by where the file actually is:
   user's **attached** files. So: (1) call the **`mint_upload_token`** tool → a
   short-lived `{token, ttl_seconds, upload_url}`; (2) in the sandbox, multipart-`curl`
   each attached file to `upload_url` with `Authorization: Bearer <token>` and form
-  fields `file` / `scope` / `category` (optional `filename`, `description`);
-  (3) write the searchable text manifest via `preserve` / `note`. No inline bytes, no pasted
+  fields `file` / `scope` / `category` (optional `filename`, `description`, **`text`**);
+  (3) to make the binary **searchable**, extract its text *in the sandbox* — OCR an
+  image/scan, read a PDF, transcribe audio/video — and pass it as the `text` field on the
+  same upload. It lands in an embedded sidecar, so the opaque binary becomes findable by
+  its content (no separate manifest needed). No inline bytes, no pasted
   secret. **Two requirements:** files must be **attached** (inline-pasted images never
   land on the sandbox disk and can't be sent), and the host must be in the sandbox's
   egress allowlist (Settings → network; `*.substratesystems.io`, one-time). If the
@@ -182,7 +185,7 @@ tool takes text only). Pick the channel by where the file actually is:
   `https://kb.substratesystems.io/upload?scope=<scope>&category=<category>` to upload
   from his browser.
 - **Phone / curl / a shortcut:** `POST https://kb.substratesystems.io/upload`
-  multipart (`file`, `scope`, `category`, optional `filename`, `description`) with
+  multipart (`file`, `scope`, `category`, optional `filename`, `description`, `text`) with
   `Authorization: Bearer $KB_MCP_UPLOAD_TOKEN` (the token is **always** required;
   Cloudflare Access may sit in front as an extra network gate but the server does
   not trust its headers). Lands straight in `Evidence/<scope>/<category>/`, zero
@@ -208,8 +211,31 @@ tool takes text only). Pick the channel by where the file actually is:
 
 ### Writes performed
 - One new file in `Evidence/<scope>/<category>/`
+- Optionally a sidecar `<filename>.md` (when `description` and/or `text` is supplied) — embedded on write, so the binary's extracted text is immediately findable
 - Optionally updated `Evidence/<scope>/index.md`
 - Optionally updated cross-reference line in a relevant `Sources/` or `Entities/` note (with confirmation)
+
+---
+
+## download
+
+**Goal:** Pull a stored vault file *out* into the code sandbox to work on it — the reverse of the upload channel. Read-only; the bytes stream out-of-band, never back through the model.
+
+### Triggers
+- "open / analyze / re-read that file in the sandbox"
+- needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
+
+### Procedure
+1. Call **`mint_download_token`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived; the long-lived secret never leaves the server).
+2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`. The `path` is vault-relative (e.g. `Knowledge Base/Evidence/Yolo/01 - Check-in/scan.pdf`).
+3. The server resolves the path under the vault root (traversal-safe), and streams the file. Confined to the vault; an out-of-vault or missing path is refused (400 / 404).
+
+### Notes
+- The token is **download-scoped** — it can read but not write (an upload token won't work here, and vice-versa).
+- Whole-vault read, like `get` — datasets and evidence live in sibling folders, all reachable by path.
+
+### Writes performed
+- None — read-only.
 
 ---
 
