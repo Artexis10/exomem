@@ -5,6 +5,7 @@ Subcommands:
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
+- `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
 """
 
 from __future__ import annotations
@@ -25,6 +26,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install_skill_main(raw[1:])
     if raw and raw[0] == "install-hook":
         return _install_hook_main(raw[1:])
+    if raw and raw[0] == "backfill-media":
+        return _backfill_media_main(raw[1:])
     return _serve_main(raw)
 
 
@@ -57,6 +60,39 @@ def _serve_main(argv: list[str]) -> int:
     except Exception as e:
         print(f"kb-mcp failed: {e}", file=sys.stderr)
         return 1
+    return 0
+
+
+def _backfill_media_main(argv: list[str]) -> int:
+    import logging
+
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp backfill-media",
+        description="Make pre-existing Evidence binaries searchable: write a sidecar if "
+        "missing, extract text (OCR/ASR/PDF), and CLIP-embed images. Idempotent; CPU or GPU.",
+    )
+    parser.add_argument(
+        "--vault", default=os.environ.get("KB_MCP_VAULT_PATH"),
+        help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)",
+    )
+    parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
+    parser.add_argument("--no-ocr", action="store_true", help="skip text extraction (sidecar + CLIP only)")
+    parser.add_argument("--no-clip", action="store_true", help="skip CLIP image embedding")
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("backfill-media: set --vault or KB_MCP_VAULT_PATH", file=sys.stderr)
+        return 2
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from . import backfill
+
+    backfill.backfill_media(
+        Path(args.vault).expanduser(),
+        do_ocr=not args.no_ocr,
+        do_clip=not args.no_clip,
+        dry_run=args.dry_run,
+        log_fn=print,
+    )
     return 0
 
 

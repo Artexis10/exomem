@@ -174,7 +174,13 @@ class MediaWorker:
         return n
 
     def _scan_unindexed_images(self) -> int:
-        """CLIP-queue every Evidence image not yet in the index (mirrors the OCR scan)."""
+        """CLIP-queue Evidence images that have a sidecar but aren't indexed yet.
+
+        Sidecar-LESS images (pre-feature files) are skipped on purpose: `find()` can't
+        surface a CLIP match without a `<image>.md` sidecar, so indexing them here would be
+        wasted work. The deliberate `kb-mcp backfill-media` pass writes their sidecars
+        (+ OCR + CLIP) — this incremental scan only tops up already-sidecar'd images.
+        """
         if not embeddings.clip_enabled():
             return 0
         evidence = self._vault_root / "Knowledge Base" / "Evidence"
@@ -184,6 +190,8 @@ class MediaWorker:
         for f in evidence.rglob("*"):
             if not f.is_file() or extract.media_type_for(f) != "image":
                 continue
+            if not f.with_name(f.name + ".md").exists():
+                continue  # no sidecar → not findable; backfill-media handles these
             try:
                 rel = f.resolve().relative_to(self._vault_root.resolve()).as_posix()
             except (ValueError, OSError):

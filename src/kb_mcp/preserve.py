@@ -487,6 +487,45 @@ def _render_sidecar(
     return "\n".join(lines)
 
 
+def ensure_media_sidecar(
+    vault_root: Path, binary_path: Path, *, today: dt.date | None = None
+) -> tuple[Path, bool]:
+    """Ensure an Evidence media binary has a sidecar — the back-fill of pre-feature files.
+
+    Images/PDFs/audio dropped into Evidence/ before server-side extraction existed have no
+    `.md` sidecar, so `find()` can't surface them (a CLIP/text match maps to `<file>.md`,
+    which doesn't exist). This writes a minimal stub (`media_type` + `evidence_file` pointer,
+    `extracted_by: none`) and embeds it. Idempotent: returns (existing_sidecar, False) if one
+    already exists, else (new_sidecar, True). Used by `kb-mcp backfill-media`.
+    """
+    media_type = extract.media_type_for(binary_path)
+    if media_type is None:
+        raise ValueError(f"not an extractable media file: {binary_path.name!r}")
+    name = binary_path.name
+    if name.lower().endswith(".md"):
+        sidecar = binary_path.with_name(name[:-3] + "-notes.md")
+    else:
+        sidecar = binary_path.with_name(name + ".md")
+    if sidecar.exists():
+        return sidecar, False
+    rel = binary_path.resolve().relative_to(vault_root.resolve()).as_posix()
+    # Derive scope/category from Knowledge Base/Evidence/<scope>/<category>/… for the tags.
+    parts = rel.split("/")
+    scope = parts[2] if len(parts) > 2 else "evidence"
+    category = parts[3] if len(parts) > 3 else "uncategorized"
+    md = _render_sidecar(
+        artifact_name=name,
+        scope=scope,
+        category=category,
+        date_iso=(today or dt.date.today()).isoformat(),
+        media_type=media_type,
+        evidence_file=rel,
+        extracted_by="none",  # not pending → the auto OCR scan ignores it; backfill OCRs it
+    )
+    batch_atomic_write([PlannedWrite(path=sidecar, content=md)], vault_root=vault_root)
+    return sidecar, True
+
+
 _EXTRACTED_HEADING = "## Extracted text"
 
 

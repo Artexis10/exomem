@@ -166,6 +166,15 @@ uv sync --extra embeddings --extra media
 #     Verify the GPU media path:  uv run python scripts/verify-media-gpu.py
 #     Lean/CPU-only boxes can skip all of this — set KB_MCP_DISABLE_MEDIA_EXTRACTION;
 #     uploads still work, just without server-side searchable-text extraction.
+#     CPU works too (no GPU needed) — just slower; pick a smaller Whisper model with
+#     KB_MCP_WHISPER_MODEL=base. The CUDA-12 wheels above are Windows+GPU only, unused on CPU.
+
+# 1c. Make EXISTING Evidence files searchable (one-shot back-fill). New uploads are
+#     handled automatically; this pass covers files that predate the feature — it writes
+#     a sidecar if missing, extracts text (OCR/ASR/PDF), and CLIP-embeds images. Idempotent.
+#       uv run python -m kb_mcp backfill-media --dry-run   # preview (writes nothing)
+#       uv run python -m kb_mcp backfill-media             # do it (CPU or GPU)
+#     Flags: --no-ocr (sidecar + CLIP only), --no-clip, --vault <root>.
 
 # 2. Set up a public HTTPS URL (you need this hostname in step 3). Pick ONE:
 #
