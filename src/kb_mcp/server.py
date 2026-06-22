@@ -30,6 +30,7 @@ from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
+from starlette.concurrency import run_in_threadpool
 from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse
@@ -465,23 +466,18 @@ def build_server(*, require_auth: bool) -> FastMCP:
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
-        data = await upload.read()
-        if len(data) > upload_max_bytes:
-            return JSONResponse(
-                {
-                    "code": "TOO_LARGE",
-                    "reason": f"{len(data):,} bytes exceeds the "
-                    f"{upload_max_bytes:,}-byte upload limit",
-                },
-                status_code=413,
-            )
+        # Stream the spooled upload straight to Evidence/, off the event loop. The
+        # part size is already bounded by max_part_size above; preserve_stream copies
+        # in chunks, so even a multi-hundred-MB file never lands in RAM (no read() of
+        # the whole body, no base64 round-trip).
         try:
-            result = preserve_module.preserve_bytes(
+            result = await run_in_threadpool(
+                preserve_module.preserve_stream,
                 vault_root,
                 scope=scope,
                 category=category,
                 filename=filename,
-                data=data,
+                stream=upload.file,
                 description=description,
                 max_bytes=upload_max_bytes,
             )

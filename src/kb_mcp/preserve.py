@@ -20,10 +20,12 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import io
 import logging
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import BinaryIO
 
 from . import indexes
 from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, kb_root
@@ -70,9 +72,11 @@ def preserve(
     filename: str,
     content_base64: str | None = None,
     content: str | None = None,
+    content_stream: BinaryIO | None = None,
     description: str | None = None,
     today: dt.date | None = None,
     max_decoded_bytes: int = MAX_DECODED_BYTES,
+    max_stream_bytes: int = MAX_UPLOAD_BYTES,
 ) -> PreserveResult:
     """Capture an artifact to Evidence/<scope>/<category>/<filename>."""
     missing: list[str] = []
@@ -91,11 +95,12 @@ def preserve(
         missing.append("filename")
         reasons.append("filename is empty or only invalid characters")
 
-    if (content_base64 is None) == (content is None):
+    if sum(x is not None for x in (content_base64, content, content_stream)) != 1:
         return _raise(
             "INVALID_PRESERVE",
-            ["content_base64" if content is None else "content"],
-            "Exactly one of `content_base64` or `content` must be supplied.",
+            ["content"],
+            "Exactly one of `content_base64`, `content`, or `content_stream` "
+            "must be supplied.",
         )
 
     if missing:
@@ -140,6 +145,11 @@ def preserve(
             )
         artifact_bytes = decoded
         artifact_text = None
+    elif content_stream is not None:
+        # Large binary: streamed straight to disk in the write block below, so the
+        # file never materializes fully in RAM. Size is enforced during the copy.
+        artifact_bytes = None
+        artifact_text = None
     else:
         # content is UTF-8 text; write as-is.
         artifact_bytes = None
@@ -152,7 +162,13 @@ def preserve(
     sidecar_rel: str | None = None
 
     try:
-        if artifact_bytes is not None:
+        if content_stream is not None:
+            # Stream the upload to disk in chunks — peak memory is one chunk, not
+            # the whole file. Enforces the byte cap mid-copy (defense in depth; the
+            # HTTP layer's max_part_size already bounds the part during parsing).
+            _copy_stream_to_file(content_stream, artifact_path, limit=max_stream_bytes)
+            written_artifact = True
+        elif artifact_bytes is not None:
             # Binary: write directly, no atomic batch (batch_atomic_write is text-only).
             artifact_path.write_bytes(artifact_bytes)
             written_artifact = True
@@ -253,6 +269,37 @@ def preserve(
     )
 
 
+def preserve_stream(
+    vault_root: Path,
+    *,
+    scope: str,
+    category: str,
+    filename: str,
+    stream: BinaryIO,
+    description: str | None = None,
+    today: dt.date | None = None,
+    max_bytes: int = MAX_UPLOAD_BYTES,
+) -> PreserveResult:
+    """Capture a binary STREAM to Evidence/ — the entrypoint for HTTP /upload.
+
+    The bytes arrive out-of-band (multipart over HTTP) and are copied to disk in
+    chunks, so a multi-hundred-MB upload never materializes fully in RAM — peak
+    memory is one chunk. Funnels through `preserve()` so there is exactly ONE write
+    path with identical sanitization, append-only overwrite refusal, sidecar, and
+    index/log behavior. The byte cap is enforced during the copy.
+    """
+    return preserve(
+        vault_root,
+        scope=scope,
+        category=category,
+        filename=filename,
+        content_stream=stream,
+        description=description,
+        today=today,
+        max_stream_bytes=max_bytes,
+    )
+
+
 def preserve_bytes(
     vault_root: Path,
     *,
@@ -264,28 +311,56 @@ def preserve_bytes(
     today: dt.date | None = None,
     max_bytes: int = MAX_UPLOAD_BYTES,
 ) -> PreserveResult:
-    """Capture raw bytes to Evidence/ — the entrypoint for the HTTP /upload route.
+    """Capture an in-memory `bytes` artifact to Evidence/ (back-compat wrapper).
 
-    The bytes arrive out-of-band (multipart over HTTP), never through the model's
-    token stream, so the size budget is generous (`MAX_UPLOAD_BYTES`, not the
-    base64-via-model `MAX_DECODED_BYTES`). We funnel through `preserve()` so there
-    is exactly ONE write path with identical sanitization, append-only overwrite
-    refusal, sidecar, and index/log behavior. The local re-encode is server-side
-    CPU only (no tokens) and negligible relative to a 25 MB upload.
+    Routes through the streaming path (no base64 round-trip) by wrapping the bytes
+    in a BytesIO. Prefer `preserve_stream` when the source is already a file-like
+    (e.g. an HTTP upload's spooled temp file) so nothing is buffered whole.
     """
-    return preserve(
+    return preserve_stream(
         vault_root,
         scope=scope,
         category=category,
         filename=filename,
-        content_base64=base64.b64encode(data).decode("ascii"),
+        stream=io.BytesIO(data),
         description=description,
         today=today,
-        max_decoded_bytes=max_bytes,
+        max_bytes=max_bytes,
     )
 
 
 # ---------------- helpers ----------------
+
+
+_STREAM_CHUNK = 1024 * 1024  # 1 MiB copy buffer
+
+
+def _copy_stream_to_file(stream: BinaryIO, dest: Path, *, limit: int) -> int:
+    """Copy a binary file-like to `dest` in chunks, enforcing `limit` bytes.
+
+    Peak memory is one chunk regardless of file size. On overflow the partial
+    file is removed and TOO_LARGE is raised. Returns the bytes written.
+    """
+    try:
+        stream.seek(0)
+    except (OSError, AttributeError, ValueError):
+        pass  # non-seekable stream: copy from the current position
+    written = 0
+    overflow = False
+    with dest.open("wb") as out:
+        while True:
+            buf = stream.read(_STREAM_CHUNK)
+            if not buf:
+                break
+            written += len(buf)
+            if written > limit:
+                overflow = True
+                break
+            out.write(buf)
+    if overflow:
+        dest.unlink(missing_ok=True)
+        _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
+    return written
 
 
 _INVALID_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')

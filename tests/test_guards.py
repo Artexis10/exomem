@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 
 import pytest
 
@@ -89,6 +90,50 @@ def test_preserve_bytes_honors_max_bytes(vault) -> None:
             category="y",
             filename="big.bin",
             data=b"x" * 2048,
+            max_bytes=1024,
+        )
+    assert exc.value.code == "TOO_LARGE"
+
+
+# ---------------- preserve_stream (the streaming /upload write path) ----------------
+
+
+def test_preserve_stream_writes_exact_bytes(vault) -> None:
+    payload = b"\x00\x01\x02binary-stream" * 1000
+    result = preserve_module.preserve_stream(
+        vault,
+        scope="Yolo",
+        category="01 - Check-in",
+        filename="clip.bin",
+        stream=io.BytesIO(payload),
+    )
+    assert (vault / result.path).read_bytes() == payload
+
+
+def test_preserve_stream_handles_file_larger_than_base64_cap(vault) -> None:
+    # 6 MB — above the 5 MB base64-via-model cap. Proves /upload uses the streaming
+    # path (chunked to disk), not the token-budget base64 path that MAX_DECODED_BYTES
+    # guards.
+    payload = b"x" * (6 * 1024 * 1024)
+    result = preserve_module.preserve_stream(
+        vault,
+        scope="x",
+        category="y",
+        filename="big.bin",
+        stream=io.BytesIO(payload),
+        max_bytes=10 * 1024 * 1024,
+    )
+    assert (vault / result.path).stat().st_size == len(payload)
+
+
+def test_preserve_stream_honors_max_bytes(vault) -> None:
+    with pytest.raises(preserve_module.PreserveError) as exc:
+        preserve_module.preserve_stream(
+            vault,
+            scope="x",
+            category="y",
+            filename="big.bin",
+            stream=io.BytesIO(b"x" * 2048),
             max_bytes=1024,
         )
     assert exc.value.code == "TOO_LARGE"
