@@ -96,6 +96,48 @@ def test_find_clip_surfaces_textless_image(vault, monkeypatch: pytest.MonkeyPatc
     assert "clip_frame_ts" not in d["signals"]
 
 
+def test_has_frames_distinguishes_legacy_single_vector_video(vault) -> None:
+    """A video carrying only a legacy single-vector row (frame_ts NULL) must read as
+    NOT per-keyframe-indexed, so backfill/worker re-index it instead of skipping."""
+    idx = embeddings.ClipIndex(vault)
+    img = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
+    vid = "Knowledge Base/Evidence/Yolo/vids/legacy.mp4"
+
+    idx.upsert(img, _unit(0), 1.0)            # normal image
+    idx.upsert(vid, _unit(1), 1.0)            # STALE single-vector video (frame_ts NULL)
+
+    # has() = any row (true for both); has_frames() = per-keyframe row only.
+    assert idx.has(img) and not idx.has_frames(img)
+    assert idx.has(vid)                       # the bug: looks "done" to has()
+    assert not idx.has_frames(vid)            # the fix: still needs per-keyframe indexing
+
+    idx.upsert_frames(vid, [(10.0, _unit(2)), (20.0, _unit(3))], 2.0)
+    assert idx.has_frames(vid)                # now genuinely per-keyframe indexed
+    paths, frame_ts, _ = idx.all_vectors()
+    assert paths.count(vid) == 2 and None not in [t for p, t in zip(paths, frame_ts) if p == vid]
+
+
+def test_backfill_reindexes_legacy_single_vector_video(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """backfill must NOT skip a video that only has a stale single-vector row."""
+    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    from kb_mcp import backfill
+    p = vault / "Knowledge Base/Evidence/Old/clips/legacy.mp4"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"\x00video")
+    rel = "Knowledge Base/Evidence/Old/clips/legacy.mp4"
+    embeddings.ClipIndex(vault).upsert(rel, _unit(7), 1.0)  # pre-existing single-vector row
+    monkeypatch.setattr(
+        embeddings, "embed_video_frames",
+        lambda f: [(1.0, _unit(0)), (2.0, _unit(1)), (3.0, _unit(2))],
+    )
+    stats = backfill.backfill_media(vault, do_ocr=False, log_fn=lambda *a: None)
+    assert stats.clip_indexed == 1  # re-indexed, not skipped
+    idx = embeddings.ClipIndex(vault)
+    assert idx.has_frames(rel)
+    paths, _, _ = idx.all_vectors()
+    assert paths.count(rel) == 3  # stale NULL row replaced by 3 keyframes
+
+
 def test_find_clip_skipped_when_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
     res = preserve.preserve_bytes(

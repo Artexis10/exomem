@@ -90,9 +90,12 @@ def backfill_media(
         sidecar = _sidecar_for(f)
         need_sidecar = not sidecar.exists()
         need_ocr = do_ocr and not _ocr_done(sidecar)
+        # Video idempotency keys on per-keyframe rows (has_frames), so a legacy
+        # single-vector video (frame_ts NULL) is re-indexed per-keyframe, not skipped.
+        # Images stay on has() (one row = done).
         need_clip = (
-            do_clip and clip_index is not None
-            and media_type in ("image", "video") and not clip_index.has(rel)
+            do_clip and clip_index is not None and media_type in ("image", "video")
+            and not (clip_index.has_frames(rel) if media_type == "video" else clip_index.has(rel))
         )
         if not (need_sidecar or need_ocr or need_clip):
             stats.skipped += 1

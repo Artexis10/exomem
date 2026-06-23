@@ -668,13 +668,35 @@ class ClipIndex:
         self._cache = None
 
     def has(self, rel_path: str) -> bool:
-        """True if this image already has a vector (used by the startup scan)."""
+        """True if this file has ANY vector row (image or video). Correct idempotency
+        for IMAGES (one row); for VIDEOS use `has_frames` — a video with only a stale
+        single-vector (frame_ts NULL) row from the old path returns True here but still
+        needs per-keyframe re-indexing."""
         if not self.path.exists():
             return False
         conn = self._connect()
         try:
             row = conn.execute(
                 "SELECT 1 FROM images WHERE file_path = ?", (rel_path,)
+            ).fetchone()
+        finally:
+            conn.close()
+        return row is not None
+
+    def has_frames(self, rel_path: str) -> bool:
+        """True if this file has at least one PER-KEYFRAME vector (frame_ts NOT NULL).
+
+        The correct idempotency check for VIDEO: a video carrying only a legacy
+        single-vector row (frame_ts NULL, from the pre-multi-vector path) returns
+        False here, so backfill/worker re-index it per-keyframe instead of skipping it.
+        """
+        if not self.path.exists():
+            return False
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM images WHERE file_path = ? AND frame_ts IS NOT NULL",
+                (rel_path,),
             ).fetchone()
         finally:
             conn.close()

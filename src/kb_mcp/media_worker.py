@@ -206,7 +206,9 @@ class MediaWorker:
                 rel = f.resolve().relative_to(self._vault_root.resolve()).as_posix()
             except (ValueError, OSError):
                 continue
-            if self._clip_index.has(rel):
+            # Video keys on per-keyframe rows so a legacy single-vector video
+            # (frame_ts NULL) is re-queued for per-keyframe indexing; image = any row.
+            if (self._clip_index.has_frames(rel) if mt == "video" else self._clip_index.has(rel)):
                 continue
             self.enqueue(
                 binary_path=f,
