@@ -125,9 +125,12 @@ class MediaWorker:
         )
 
     def _run_clip(self, job: _Job) -> None:
-        """CLIP-embed an image into the ClipIndex so it's findable by visual content."""
+        """CLIP-embed an image (or video keyframes) so it's findable by visual content."""
         try:
-            vec = embeddings.embed_image(job.binary_path)
+            if job.media_type == "video":
+                vec = embeddings.embed_video(job.binary_path)
+            else:
+                vec = embeddings.embed_image(job.binary_path)
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP unavailable for %s: %s", job.binary_path.name, e)
             return
@@ -188,7 +191,8 @@ class MediaWorker:
             return 0
         n = 0
         for f in evidence.rglob("*"):
-            if not f.is_file() or extract.media_type_for(f) != "image":
+            mt = extract.media_type_for(f) if f.is_file() else None
+            if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue
             if not f.with_name(f.name + ".md").exists():
                 continue  # no sidecar → not findable; backfill-media handles these
@@ -201,13 +205,13 @@ class MediaWorker:
             self.enqueue(
                 binary_path=f,
                 sidecar_path=f.with_name(f.name + ".md"),
-                media_type="image",
+                media_type=mt,
                 do_ocr=False,
                 do_clip=True,
             )
             n += 1
         if n:
-            log.info("media worker: CLIP-queued %d un-indexed image(s)", n)
+            log.info("media worker: CLIP-queued %d un-indexed image(s)/video(s)", n)
         return n
 
 

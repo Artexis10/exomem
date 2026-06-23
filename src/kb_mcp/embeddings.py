@@ -165,6 +165,75 @@ def embed_clip_text(query: str) -> np.ndarray:
     return vec.astype(np.float32, copy=False)
 
 
+CLIP_VIDEO_FRAMES = 8  # evenly-sampled keyframes mean-pooled into one video vector
+
+
+def embed_video(path: Path, *, max_frames: int = CLIP_VIDEO_FRAMES) -> np.ndarray:
+    """Encode a video → one CLIP vector (mean-pooled over evenly-sampled keyframes).
+
+    A video is a sequence of images: we decode up to `max_frames` evenly-spaced frames,
+    CLIP-embed each, and mean-pool (renormalized) into a single 512-d vector — so a video
+    is findable by what it visually SHOWS, including a SILENT video that has no transcript.
+    Raises ClipUnavailable if CLIP/PyAV/Pillow are missing or no frame decodes.
+    """
+    try:
+        from PIL import Image  # noqa: F401 — frame.to_image() returns a PIL image
+    except ImportError as e:
+        raise ClipUnavailable(f"Pillow not installed: {e}") from e
+    try:
+        model = get_clip_model()
+    except ImportError as e:
+        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    frames = _sample_video_frames(path, max_frames)
+    if not frames:
+        raise ClipUnavailable(f"no decodable video frames in {path.name}")
+    vecs = model.encode(frames, convert_to_numpy=True, normalize_embeddings=True)
+    pooled = vecs.mean(axis=0)
+    norm = float(np.linalg.norm(pooled))
+    pooled = pooled / norm if norm else pooled
+    return pooled.astype(np.float32, copy=False)
+
+
+def _sample_video_frames(path: Path, max_frames: int) -> list:
+    """Sample `max_frames` evenly-spaced frames as PIL images, SEEKING to each timestamp.
+
+    Seeking decodes only ~`max_frames` frames total (O(1) in video length) instead of
+    decoding the whole stream to reach evenly-spaced positions — so a 1-hour video costs
+    the same as a 10-second one. Falls back to first-N sequential decode if the duration is
+    unknown or seeks fail.
+    """
+    try:
+        import av
+    except ImportError as e:
+        raise ClipUnavailable(f"PyAV not installed: {e}") from e
+    frames: list = []
+    with av.open(str(path)) as container:
+        if not container.streams.video:
+            return frames
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        total_secs = 0.0
+        if stream.duration and stream.time_base:
+            total_secs = float(stream.duration * stream.time_base)
+        elif container.duration:
+            total_secs = container.duration / av.time_base
+        if total_secs > 0 and stream.time_base:
+            for k in range(max_frames):
+                t = total_secs * (k + 0.5) / max_frames  # evenly-spaced midpoints
+                try:
+                    container.seek(int(t / float(stream.time_base)), stream=stream, backward=True)
+                    frames.append(next(container.decode(stream)).to_image())
+                except Exception:  # noqa: BLE001 — best-effort sample; skip a bad seek
+                    continue
+        if not frames:  # unknown duration or all seeks failed → first-N sequential
+            container.seek(0)
+            for frame in container.decode(stream):
+                frames.append(frame.to_image())
+                if len(frames) >= max_frames:
+                    break
+    return frames
+
+
 def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
     """Score `(query, passage)` pairs with bge-reranker-base. Returns float32 (N,).
 

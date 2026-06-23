@@ -71,7 +71,13 @@ def backfill_media(
         log_fn("no Knowledge Base/Evidence/ directory; nothing to back-fill")
         return stats
     clip_index = embeddings.ClipIndex(vault_root) if do_clip else None
-    files = sorted(p for p in evidence.rglob("*") if p.is_file() and extract.media_type_for(p))
+    # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
+    # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
+    _order = {"image": 0, "pdf": 1, "audio": 2, "video": 3}
+    files = sorted(
+        (p for p in evidence.rglob("*") if p.is_file() and extract.media_type_for(p)),
+        key=lambda p: (_order.get(extract.media_type_for(p), 9), p.as_posix()),
+    )
     stats.scanned = len(files)
     log_fn(f"scanning {len(files)} media file(s) under Evidence/ (dry_run={dry_run})")
 
@@ -85,7 +91,8 @@ def backfill_media(
         need_sidecar = not sidecar.exists()
         need_ocr = do_ocr and not _ocr_done(sidecar)
         need_clip = (
-            do_clip and clip_index is not None and media_type == "image" and not clip_index.has(rel)
+            do_clip and clip_index is not None
+            and media_type in ("image", "video") and not clip_index.has(rel)
         )
         if not (need_sidecar or need_ocr or need_clip):
             stats.skipped += 1
@@ -117,7 +124,8 @@ def backfill_media(
                 stats.extract_failed += 1
         if need_clip:
             try:
-                clip_index.upsert(rel, embeddings.embed_image(f), f.stat().st_mtime)
+                vec = embeddings.embed_video(f) if media_type == "video" else embeddings.embed_image(f)
+                clip_index.upsert(rel, vec, f.stat().st_mtime)
                 stats.clip_indexed += 1
             except embeddings.ClipUnavailable as e:
                 log_fn(f"  ! CLIP unavailable ({e}); skipping CLIP for the rest")

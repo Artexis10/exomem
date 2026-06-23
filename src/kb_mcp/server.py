@@ -526,13 +526,13 @@ def build_server(*, require_auth: bool) -> FastMCP:
             )
         # Off-request-path media processing for the uploaded binary:
         #  - OCR/ASR/PDF text when no `text` was supplied (fills the pending sidecar);
-        #  - CLIP-embed every IMAGE (even one uploaded WITH text) so textless photos
-        #    are findable by visual content. Both run in the worker; the 201 returns now.
+        #  - CLIP-embed every IMAGE and VIDEO (keyframes) so visual content — including a
+        #    silent video with no transcript — is findable. Both run in the worker; 201 now.
         if media_worker is not None and result.sidecar_path:
             media_type = extract.media_type_for(filename)
             if media_type:
                 do_ocr = text is None
-                do_clip = media_type == "image" and not os.environ.get("KB_MCP_DISABLE_CLIP")
+                do_clip = media_type in ("image", "video") and not os.environ.get("KB_MCP_DISABLE_CLIP")
                 if do_ocr or do_clip:
                     media_worker.enqueue(
                         binary_path=vault_root / result.path,
