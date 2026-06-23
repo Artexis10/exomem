@@ -195,7 +195,13 @@ def embed_video(path: Path, *, max_frames: int = CLIP_VIDEO_FRAMES) -> np.ndarra
 
 
 def _sample_video_frames(path: Path, max_frames: int) -> list:
-    """Decode up to `max_frames` evenly-spaced frames as PIL images (PyAV)."""
+    """Sample `max_frames` evenly-spaced frames as PIL images, SEEKING to each timestamp.
+
+    Seeking decodes only ~`max_frames` frames total (O(1) in video length) instead of
+    decoding the whole stream to reach evenly-spaced positions — so a 1-hour video costs
+    the same as a 10-second one. Falls back to first-N sequential decode if the duration is
+    unknown or seeks fail.
+    """
     try:
         import av
     except ImportError as e:
@@ -206,10 +212,22 @@ def _sample_video_frames(path: Path, max_frames: int) -> list:
             return frames
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
-        total = stream.frames or 0
-        step = max(1, total // max_frames) if total else 30  # ~every 30th frame if count unknown
-        for i, frame in enumerate(container.decode(stream)):
-            if i % step == 0:
+        total_secs = 0.0
+        if stream.duration and stream.time_base:
+            total_secs = float(stream.duration * stream.time_base)
+        elif container.duration:
+            total_secs = container.duration / av.time_base
+        if total_secs > 0 and stream.time_base:
+            for k in range(max_frames):
+                t = total_secs * (k + 0.5) / max_frames  # evenly-spaced midpoints
+                try:
+                    container.seek(int(t / float(stream.time_base)), stream=stream, backward=True)
+                    frames.append(next(container.decode(stream)).to_image())
+                except Exception:  # noqa: BLE001 — best-effort sample; skip a bad seek
+                    continue
+        if not frames:  # unknown duration or all seeks failed → first-N sequential
+            container.seek(0)
+            for frame in container.decode(stream):
                 frames.append(frame.to_image())
                 if len(frames) >= max_frames:
                     break
