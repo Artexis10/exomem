@@ -879,6 +879,7 @@ dependencies = [
 
 [package.optional-dependencies]
 embeddings = [
+    { name = "pillow" },
     { name = "sentence-transformers" },
     { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
     { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
@@ -888,6 +889,7 @@ media = [
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32'" },
     { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32'" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32'" },
+    { name = "pillow" },
     { name = "pymupdf" },
     { name = "pytesseract" },
 ]
@@ -906,6 +908,8 @@ requires-dist = [
     { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
     { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
     { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
+    { name = "pillow", marker = "extra == 'embeddings'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'media'", specifier = ">=10.0" },
     { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
     { name = "pymupdf", marker = "extra == 'media'", specifier = ">=1.24" },
     { name = "pytesseract", marker = "extra == 'media'", specifier = ">=0.3.10" },

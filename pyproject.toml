@@ -28,6 +28,7 @@ dependencies = [
 embeddings = [
     "sentence-transformers>=2.7",
     "torch>=2.12",
+    "pillow>=10.0",  # CLIP image encoding opens images via PIL (sentence-transformers)
 ]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs. Optional so a lean box runs without it — the code
@@ -39,6 +40,7 @@ embeddings = [
 media = [
     "faster-whisper>=1.0",
     "pytesseract>=0.3.10",
+    "pillow>=10.0",  # pytesseract opens images via PIL for OCR
     "pymupdf>=1.24",
     # CUDA-12 runtime for faster-whisper/ctranslate2 on Windows. torch+cu132 ships
     # cuBLAS *13* (different major), so ctranslate2's CUDA-12 cuBLAS + cudart must be
