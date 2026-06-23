@@ -28,7 +28,7 @@ function Wait-ServiceState {
 # --- Self-heal the interpreter ------------------------------------------------
 # Kaspersky periodically quarantines the uv-managed python.exe as a false
 # positive. That leaves the venv (and this service) with no interpreter, so the
-# app can't start and NSSM parks the service in PAUSED — which surfaces as a 502
+# app can't start and NSSM parks the service in PAUSED - which surfaces as a 502
 # at the Tailscale funnel. If the venv interpreter won't run, reinstall it
 # before (re)starting. Add a Kaspersky exclusion for %APPDATA%\uv\python to stop
 # the quarantine at the source; this just makes recovery automatic.
@@ -89,5 +89,5 @@ if (Test-Path $logPath) {
     Write-Host "Log tail:"
     Get-Content $logPath -Tail 8
 } else {
-    Write-Warning "No log file at $logPath yet — service may still be initializing."
+    Write-Warning "No log file at $logPath yet - service may still be initializing."
 }
