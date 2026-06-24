@@ -1,10 +1,16 @@
-"""Bulk media back-fill — make pre-existing Evidence binaries searchable.
+"""Bulk media back-fill — make pre-existing KB binaries searchable.
 
-`kb-mcp backfill-media` walks Evidence/, and for every media file (image/audio/video/pdf):
+`kb-mcp backfill-media` walks the whole `Knowledge Base/` tree (not just
+`Evidence/`), and for every media file (image/audio/video/pdf):
   1. writes a `.md` sidecar if missing — so `find()` can surface it (a CLIP/text match maps
      to `<file>.md`, which must exist);
   2. extracts text (OCR / ASR / PDF) if not already done — text-searchable;
   3. CLIP-embeds images — searchable by visual content.
+
+Coverage is the whole KB so a binary filed anywhere a note can live (an invoice
+under `Finance/`, a screenshot under `Sources/`) becomes searchable — not only
+the `Evidence/` claim-backing tree. Config/cruft dirs are pruned
+(`vault.VAULT_SCAN_SKIP_DIRS`).
 
 Idempotent: re-running only does outstanding work. Runs on CPU or GPU (engines auto-detect).
 The *incremental* path (new uploads) is handled live by the server; this is the deliberate
@@ -19,11 +25,42 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import embeddings, extract, preserve
+from .vault import VAULT_SCAN_SKIP_DIRS
 
 log = logging.getLogger(__name__)
 
 _EXTRACTED_BY_RE = re.compile(r"(?m)^extracted_by:\s*(.+?)\s*$")
 _NOT_DONE = {"none", "pending"}
+
+
+def iter_kb_files(root: Path):
+    """Yield every file under `root`, pruning config/cruft/index dirs.
+
+    Replaces a bare `rglob("*")` so a whole-KB walk never descends into
+    `.git`, the embedding sqlite dir, `_Schema`, etc. (`VAULT_SCAN_SKIP_DIRS`).
+    Shared with the live media worker's KB scans.
+    """
+    stack = [root]
+    while stack:
+        d = stack.pop()
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.is_dir():
+                if child.name not in VAULT_SCAN_SKIP_DIRS:
+                    stack.append(child)
+            elif child.is_file():
+                yield child
+
+
+def _iter_media_files(root: Path):
+    """Yield media files under `root` (pruned walk). `.md` sidecars and other
+    non-media files are filtered out by `extract.media_type_for`."""
+    for f in iter_kb_files(root):
+        if extract.media_type_for(f):
+            yield f
 
 
 def _sidecar_for(binary: Path) -> Path:
@@ -64,22 +101,22 @@ def backfill_media(
     dry_run: bool = False,
     log_fn=log.info,
 ) -> BackfillStats:
-    """Back-fill sidecars + text + CLIP for every media file under Evidence/. Idempotent."""
+    """Back-fill sidecars + text + CLIP for every media file under Knowledge Base/. Idempotent."""
     stats = BackfillStats()
-    evidence = vault_root / "Knowledge Base" / "Evidence"
-    if not evidence.is_dir():
-        log_fn("no Knowledge Base/Evidence/ directory; nothing to back-fill")
+    kb = vault_root / "Knowledge Base"
+    if not kb.is_dir():
+        log_fn("no Knowledge Base/ directory; nothing to back-fill")
         return stats
     clip_index = embeddings.ClipIndex(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
     _order = {"image": 0, "pdf": 1, "audio": 2, "video": 3}
     files = sorted(
-        (p for p in evidence.rglob("*") if p.is_file() and extract.media_type_for(p)),
+        _iter_media_files(kb),
         key=lambda p: (_order.get(extract.media_type_for(p), 9), p.as_posix()),
     )
     stats.scanned = len(files)
-    log_fn(f"scanning {len(files)} media file(s) under Evidence/ (dry_run={dry_run})")
+    log_fn(f"scanning {len(files)} media file(s) under Knowledge Base/ (dry_run={dry_run})")
 
     for i, f in enumerate(files, 1):
         media_type = extract.media_type_for(f)

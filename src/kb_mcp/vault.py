@@ -162,6 +162,23 @@ def batch_atomic_write(
     still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.
     """
     writes = list(writes)
+    # Access-tier backstop: when the caller knows the vault root, refuse any
+    # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
+    # here so every content writer inherits it without per-tool wiring. No
+    # `_access.yaml` → writable_reason() is always None → no-op (Sources/Evidence
+    # are append-only, not readonly, so add/preserve still write fine).
+    if vault_root is not None:
+        from . import access
+
+        vault_resolved = vault_root.resolve()
+        for w in writes:
+            try:
+                rel = w.path.resolve().relative_to(vault_resolved).as_posix()
+            except (ValueError, OSError):
+                continue  # not under the vault (shouldn't happen) — don't block
+            reason = access.writable_reason(vault_root, rel)
+            if reason is not None:
+                raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
     staged: list[tuple[Path, Path]] = []  # (final, tmp)
     try:
         for w in writes:

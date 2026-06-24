@@ -640,6 +640,8 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         types: list[str] | None = None,
         projects: list[str] | None = None,
         tags: list[str] | None = None,
+        file_types: list[str] | None = None,
+        exclude_file_types: list[str] | None = None,
         limit: int = 15,
         scope: str = "kb",
         mode: str = "hybrid",
@@ -660,6 +662,12 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             types: Filter to these page types (source, research-note, insight, failure, pattern, experiment, production-log, entity).
             projects: Filter to pages whose `project` or `projects:` includes any of these keys.
             tags: Filter to pages whose `tags:` includes any of these (case-insensitive).
+            file_types: Scope results to these artifact kinds — note, pdf, image,
+                audio, video, csv, json, tsv. A binary surfaces under its media
+                kind (pdf/image/...); a data file under its dataset card's format
+                (csv/json). Omit to return ALL kinds (the default — search never
+                hides a type unless you ask).
+            exclude_file_types: Drop these kinds from results (same vocabulary).
             limit: Max hits to return. Default 15, hard cap 100.
             scope: "kb" (default) searches Knowledge Base/ first and
                 AUTO-WIDENS to the whole vault when the KB doesn't fill
@@ -732,6 +740,8 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             types=types,
             projects=projects,
             tags=tags,
+            file_types=file_types,
+            exclude_file_types=exclude_file_types,
             limit=limit,
             scope=scope,
             mode=mode,
@@ -1801,8 +1811,14 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             columns: project to these columns (dotted ok). Omit for all.
             sort_by / descending: sort by a column (numeric-aware).
             limit / offset: pagination (limit default 100, hard cap 1000).
-            aggregate: instead of rows — "count", or "func:column" where func ∈
-                min, max, sum, avg, latest, distinct.
+            aggregate: instead of rows — "count"; "func:column" where func ∈
+                min, max, sum, avg, latest, distinct; or "profile" to get a
+                deterministic content profile (per-column kind, distinct values,
+                numeric ranges, date span) under `aggregate.profile` PLUS a
+                ready-to-write markdown dataset card under `aggregate.dataset_card`.
+                Use "profile" to make a CSV/JSON findable — write the card into
+                the KB (fill in its "What this holds" line) so the dataset is
+                discoverable by content without ever embedding its raw rows.
             date_from / date_to / date_column: convenience date-range filter on
                 `date_column` (defaults to a "date" column if present); ISO
                 date strings, compared lexicographically.

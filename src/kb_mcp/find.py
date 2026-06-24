@@ -140,6 +140,19 @@ class ParsedPage:
         return str(ef) if ef else None
 
     @property
+    def file_kind(self) -> str:
+        """Coarse artifact kind for file-type filtering: a dataset's underlying
+        format (csv/json/tsv), a binary companion's media_type (pdf/image/audio/
+        video), else 'note' for a plain markdown page. The vocabulary `find`'s
+        `file_types`/`exclude_file_types` scope on."""
+        if self.page_type == "dataset":
+            fmt = self.frontmatter.get("format")
+            return str(fmt).lower() if fmt else "dataset"
+        if self.media_type:
+            return self.media_type.lower()
+        return "note"
+
+    @property
     def status(self) -> str | None:
         """Lifecycle status — draft / active / superseded / archived (None if unset)."""
         s = self.frontmatter.get("status")
@@ -286,6 +299,8 @@ def find(
     types: list[str] | None = None,
     projects: list[str] | None = None,
     tags: list[str] | None = None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -369,6 +384,7 @@ def find(
             vault_root,
             query_norm=query_norm,
             types=types, projects=projects, tags=tags,
+            file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope,
         )
     else:
@@ -376,6 +392,7 @@ def find(
             vault_root,
             query=query, query_norm=query_norm,
             types=types, projects=projects, tags=tags,
+            file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
@@ -404,6 +421,7 @@ def find(
                 query=query,
                 query_norm=query_norm,
                 types=types, projects=projects, tags=tags,
+                file_types=file_types, exclude_file_types=exclude_file_types,
                 limit=limit,
             )
             if h.path not in seen
@@ -433,6 +451,8 @@ def _find_keyword(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
     limit: int,
     scope: str,
 ) -> list[Hit]:
@@ -454,7 +474,8 @@ def _find_keyword(
         page = _CACHE.get(path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, types=types, projects=projects, tags=tags):
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+                               file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         excerpt = _make_excerpt(page, query_norm)
         if query_norm and excerpt is None:
@@ -489,6 +510,8 @@ def _find_semantic(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
     limit: int,
     scope: str,
     mode: str,
@@ -650,6 +673,7 @@ def _find_semantic(
             vault_root,
             query_norm=query_norm,
             types=types, projects=projects, tags=tags,
+            file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=scope,
         )
 
@@ -683,7 +707,8 @@ def _find_semantic(
         page = _CACHE.get(abs_path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, types=types, projects=projects, tags=tags):
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+                               file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         keyword_excerpt = _make_excerpt(page, query_norm)
         if (
@@ -787,6 +812,8 @@ def _find_outside_kb(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
     limit: int,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
@@ -832,7 +859,8 @@ def _find_outside_kb(
         page = _CACHE.get(vault_root / rel_path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, types=types, projects=projects, tags=tags):
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+                               file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         # Relaxed gate: BM25 score>0 already implies a token match, but the
         # keyword fallback path needs this explicit check.
@@ -1233,10 +1261,20 @@ def _parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None
 def _passes_filters(
     page: ParsedPage,
     *,
+    vault_root: Path | None = None,
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
 ) -> bool:
+    # `excluded` tier (_access.yaml): never surfaced. Checked first — an excluded
+    # page is invisible regardless of how well it matches. (vault_root omitted in
+    # unit tests → skip; real find paths always pass it.)
+    if vault_root is not None:
+        from . import access
+        if not access.is_indexable(vault_root, page.rel_path):
+            return False
     if types and page.page_type not in types:
         return False
     if projects:
@@ -1246,6 +1284,14 @@ def _passes_filters(
     if tags:
         page_tags = set(page.tags)
         if not any(t.lower() in page_tags for t in tags):
+            return False
+    # File-type scoping (opt-in; default None/None lets every kind through — a
+    # search must never hide an artifact type by default).
+    if file_types or exclude_file_types:
+        kind = page.file_kind
+        if file_types and kind not in {ft.lower() for ft in file_types}:
+            return False
+        if exclude_file_types and kind in {ft.lower() for ft in exclude_file_types}:
             return False
     return True
 

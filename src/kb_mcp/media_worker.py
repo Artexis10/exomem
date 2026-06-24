@@ -1,4 +1,4 @@
-"""Background media-extraction worker — fills pending Evidence sidecars off the request path.
+"""Background media-extraction worker — fills pending media sidecars off the request path.
 
 When a media binary is uploaded without text, `preserve()` writes a `pending` stub sidecar
 and the `/upload` route enqueues a job here. A single background thread (the GPU is
@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import embeddings, extract, preserve
+from .backfill import iter_kb_files
 
 log = logging.getLogger(__name__)
 
@@ -157,12 +158,14 @@ class MediaWorker:
         return self._scan_pending_ocr() + self._scan_unindexed_images()
 
     def _scan_pending_ocr(self) -> int:
-        """Re-enqueue every `extracted_by: pending` sidecar under Evidence/. Returns count."""
-        evidence = self._vault_root / "Knowledge Base" / "Evidence"
-        if not evidence.is_dir():
+        """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
+        kb = self._vault_root / "Knowledge Base"
+        if not kb.is_dir():
             return 0
         n = 0
-        for sidecar in evidence.rglob("*.md"):
+        for sidecar in iter_kb_files(kb):
+            if sidecar.suffix.lower() != ".md":
+                continue
             try:
                 head = sidecar.read_text(encoding="utf-8")[:800]
             except OSError:
@@ -183,7 +186,7 @@ class MediaWorker:
         return n
 
     def _scan_unindexed_images(self) -> int:
-        """CLIP-queue Evidence images that have a sidecar but aren't indexed yet.
+        """CLIP-queue KB images that have a sidecar but aren't indexed yet.
 
         Sidecar-LESS images (pre-feature files) are skipped on purpose: `find()` can't
         surface a CLIP match without a `<image>.md` sidecar, so indexing them here would be
@@ -192,12 +195,12 @@ class MediaWorker:
         """
         if not embeddings.clip_enabled():
             return 0
-        evidence = self._vault_root / "Knowledge Base" / "Evidence"
-        if not evidence.is_dir():
+        kb = self._vault_root / "Knowledge Base"
+        if not kb.is_dir():
             return 0
         n = 0
-        for f in evidence.rglob("*"):
-            mt = extract.media_type_for(f) if f.is_file() else None
+        for f in iter_kb_files(kb):
+            mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue
             if not f.with_name(f.name + ".md").exists():

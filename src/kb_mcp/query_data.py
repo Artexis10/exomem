@@ -42,6 +42,7 @@ ALLOWED_SUFFIXES = (".csv", ".tsv", ".json")
 MAX_FILE_BYTES = 25 * 1024 * 1024  # 25 MB guard — KB datasets are small
 HARD_ROW_CAP = 1000
 DEFAULT_LIMIT = 100
+PROFILE_MAX_DISTINCT = 20  # categorical/text columns expose up to this many distinct values
 _COMMON_RECORD_KEYS = ("result", "results", "data", "rows", "items", "entries")
 _OPS = frozenset({
     "eq", "ne", "gt", "gte", "lt", "lte",
@@ -284,6 +285,167 @@ def _aggregate(matched: list[dict], spec: str, date_col: str | None) -> dict:
     raise QueryDataError("BAD_AGGREGATE", f"unknown aggregate func {func!r}")
 
 
+# ---------------- profile (the dataset-card "what it holds" engine) ----------------
+
+
+@dataclass
+class ColumnProfile:
+    """Deterministic per-column summary — the searchable signal of a dataset.
+
+    Pure "measure": numeric → range/sum/avg; date → earliest/latest; otherwise a
+    capped list of distinct values (vendors, item names…). No LLM — Claude writes
+    the prose "what this holds" line; this only stats the raw rows.
+    """
+
+    name: str
+    kind: str            # numeric | date | categorical | text
+    non_null: int
+    distinct: int
+    min: float | None = None
+    max: float | None = None
+    sum: float | None = None
+    avg: float | None = None
+    earliest: str | None = None
+    latest: str | None = None
+    top_values: list[Any] | None = None
+
+    def as_dict(self) -> dict:
+        d: dict[str, Any] = {
+            "name": self.name, "kind": self.kind,
+            "non_null": self.non_null, "distinct": self.distinct,
+        }
+        for k in ("min", "max", "sum", "avg", "earliest", "latest", "top_values"):
+            v = getattr(self, k)
+            if v is not None:
+                d[k] = v
+        return d
+
+
+def _profile_column(name: str, values: list[Any], *, max_distinct: int = PROFILE_MAX_DISTINCT) -> ColumnProfile:
+    non_null = [v for v in values if v not in (None, "")]
+    n = len(non_null)
+    seen: list[Any] = []
+    seen_keys: set[str] = set()
+    for v in non_null:
+        k = str(v)
+        if k not in seen_keys:
+            seen_keys.add(k)
+            seen.append(v)
+    distinct = len(seen)
+
+    nums = [x for v in non_null if (x := _coerce_num(v)) is not None]
+    date_like = sum(1 for v in non_null if _DATE_LIKE.search(str(v)))
+    name_l = name.lower()
+
+    # Date when the name says so or values look date-shaped — but never when the
+    # column is predominantly plain numbers (guards a numeric col named "...date").
+    if n and ("date" in name_l or date_like >= 0.6 * n) and len(nums) < 0.6 * n:
+        svals = [str(v) for v in non_null]
+        return ColumnProfile(name, "date", n, distinct, earliest=min(svals), latest=max(svals))
+    if n and len(nums) >= 0.6 * n:
+        return ColumnProfile(
+            name, "numeric", n, distinct,
+            min=min(nums), max=max(nums), sum=sum(nums), avg=sum(nums) / len(nums),
+        )
+    kind = "categorical" if distinct <= max_distinct else "text"
+    return ColumnProfile(name, kind, n, distinct, top_values=seen[:max_distinct])
+
+
+def profile_data(
+    vault_root: Path,
+    *,
+    path: str,
+    record_path: str | None = None,
+    max_distinct: int = PROFILE_MAX_DISTINCT,
+) -> dict:
+    """Deterministic content profile of a CSV/JSON file — feeds a dataset card.
+
+    Returns `{path, format, total_rows, columns: [ColumnProfile.as_dict()...],
+    warnings}`. The half of the tabular-search pattern that captures *what a
+    dataset holds* without embedding raw rows: a markdown dataset card renders
+    this (vendors, item names, totals, date ranges) and is embedded; the rows
+    stay queryable only via `query_data`.
+    """
+    try:
+        abs_path, rel = resolve_under_vault(vault_root, path, must_exist=True, must_be_file=True)
+    except VaultPathError as e:
+        raise QueryDataError(e.code, e.reason) from None
+    if abs_path.suffix.lower() not in ALLOWED_SUFFIXES:
+        raise QueryDataError("UNSUPPORTED_FORMAT", f"only {list(ALLOWED_SUFFIXES)} supported")
+    fmt, rows, cols, warnings = _load_rows(abs_path, record_path)
+    profiles = [
+        _profile_column(c, [_get_field(r, c) for r in rows], max_distinct=max_distinct).as_dict()
+        for c in cols
+    ]
+    return {
+        "path": rel, "format": fmt, "total_rows": len(rows),
+        "columns": profiles, "warnings": warnings,
+    }
+
+
+def _render_column_line(c: dict) -> str:
+    name, kind = c["name"], c["kind"]
+    if kind == "numeric":
+        return (
+            f"- **{name}** (numeric): min {c.get('min')}, max {c.get('max')}, "
+            f"sum {c.get('sum')}, avg {round(c['avg'], 2) if c.get('avg') is not None else None}"
+        )
+    if kind == "date":
+        return f"- **{name}** (date): {c.get('earliest')} → {c.get('latest')}"
+    vals = ", ".join(str(v) for v in (c.get("top_values") or []))
+    label = "categorical" if kind == "categorical" else "text"
+    suffix = "" if kind == "categorical" else " (sample)"
+    return f"- **{name}** ({label}, {c['distinct']} distinct){suffix}: {vals}"
+
+
+def build_dataset_card(profile: dict, *, title: str | None = None) -> str:
+    """Render a `profile_data` result into a markdown dataset card.
+
+    The card is the embedded, `find`-able surface for a data file: a `dataset`
+    page whose body carries the salient content (vendors, items, ranges) plus a
+    prose placeholder for Claude's "what this holds" summary and a `data_file:`
+    pointer the reader follows into `query_data`. Raw rows are never embedded.
+    """
+    data_file = profile["path"]
+    title = title or Path(data_file).stem
+    cols = profile["columns"]
+    lines = [
+        "---",
+        "type: dataset",
+        f"title: {title}",
+        f"data_file: {data_file}",
+        f"format: {profile['format']}",
+        f"rows: {profile['total_rows']}",
+        "---",
+        "",
+        f"# {title}",
+        "",
+        "## What this holds",
+        "",
+        "<!-- TODO: one-line prose summary of what this dataset contains (Claude fills this in) -->",
+        "",
+        "## Profile",
+        "",
+        f"_Auto-generated from {data_file} ({profile['total_rows']} rows) — regenerate when the data changes._",
+        "",
+        "Columns: " + ", ".join(c["name"] for c in cols),
+        "",
+    ]
+    lines.extend(_render_column_line(c) for c in cols)
+    return "\n".join(lines) + "\n"
+
+
+def _profile_payload(rows: list[dict], cols: list[str], fmt: str, rel: str) -> dict:
+    """Profile already-loaded rows and render a card — the `aggregate="profile"` result."""
+    profile = {
+        "path": rel, "format": fmt, "total_rows": len(rows),
+        "columns": [
+            _profile_column(c, [_get_field(r, c) for r in rows]).as_dict() for c in cols
+        ],
+    }
+    return {"profile": profile, "dataset_card": build_dataset_card(profile)}
+
+
 def query_data(
     vault_root: Path,
     *,
@@ -331,10 +493,14 @@ def query_data(
     total_matched = len(matched)
 
     if aggregate:
+        if aggregate.strip() == "profile":
+            agg: Any = _profile_payload(matched, cols, fmt, rel)
+        else:
+            agg = _aggregate(matched, aggregate, date_col)
         return QueryDataResult(
             path=rel, format=fmt, total_rows=total_rows, total_matched=total_matched,
             returned=0, columns=cols, rows=[],
-            aggregate=_aggregate(matched, aggregate, date_col),
+            aggregate=agg,
             truncated=False, warnings=warnings,
         )
 

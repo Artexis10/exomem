@@ -494,6 +494,7 @@ class EmbeddingIndex:
 
     def rebuild_all(self) -> int:
         """Wipe + re-embed every compiled .md under Knowledge Base/. Returns row count."""
+        from . import access
         from . import find as find_module
 
         kb = self.vault_root / "Knowledge Base"
@@ -515,6 +516,8 @@ class EmbeddingIndex:
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None:
                 continue
+            if not access.is_indexable(self.vault_root, page.rel_path):
+                continue  # excluded tree (_access.yaml) — keep it out of the index
             chunks = chunk_text(page.title, page.body)
             if not chunks:
                 continue

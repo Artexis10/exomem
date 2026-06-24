@@ -188,3 +188,64 @@ def test_numeric_filter_ignores_appended_units_and_dates(vault: Path) -> None:
     rel = _write(vault, "Knowledge Base/Evidence/Test/vitd.csv", csv)
     r = qd.query_data(vault, path=rel, filters=[{"column": "value", "op": "lt", "value": 50}])
     assert {row["value"] for row in r.rows} == {"22,8 nmol/l", "21.1"}  # 100,2 excluded
+
+
+# ---------------- profile + dataset card ("what it holds") ----------------
+
+FINANCE_CSV = (
+    "date,vendor,item,amount\n"
+    "2025-08-25,Ugreen,Nexode 100W charger,28.56\n"
+    "2025-08-25,Ugreen,USB4 240W cable,12.59\n"
+    "2025-07-01,DJI,Mavic battery,99.00\n"
+)
+
+
+def test_profile_data_summarizes_columns(vault: Path) -> None:
+    rel = _write(vault, "Knowledge Base/Finance/invoices.csv", FINANCE_CSV)
+    prof = qd.profile_data(vault, path=rel)
+    assert prof["total_rows"] == 3
+    cols = {c["name"]: c for c in prof["columns"]}
+    assert cols["amount"]["kind"] == "numeric"
+    assert cols["amount"]["sum"] == pytest.approx(140.15)
+    assert cols["amount"]["min"] == pytest.approx(12.59)
+    assert cols["amount"]["max"] == pytest.approx(99.00)
+    assert cols["vendor"]["kind"] == "categorical"
+    assert set(cols["vendor"]["top_values"]) == {"Ugreen", "DJI"}
+    assert cols["date"]["kind"] == "date"
+    assert cols["date"]["earliest"] == "2025-07-01"
+    assert cols["date"]["latest"] == "2025-08-25"
+
+
+def test_build_dataset_card_carries_frontmatter_and_content(vault: Path) -> None:
+    rel = _write(vault, "Knowledge Base/Finance/invoices.csv", FINANCE_CSV)
+    prof = qd.profile_data(vault, path=rel)
+    card = qd.build_dataset_card(prof, title="Invoice register")
+    assert "type: dataset" in card
+    assert f"data_file: {rel}" in card
+    # Salient content the card must expose so `find` can hit it semantically:
+    assert "Ugreen" in card            # a vendor (categorical top value)
+    assert "Nexode 100W charger" in card  # an item value
+    assert "2025-07-01" in card        # date range floor
+    # A prose placeholder for Claude's "what this holds" summary:
+    assert "what this holds" in card.lower()
+
+
+def test_query_data_profile_aggregate_returns_card(vault: Path) -> None:
+    # `aggregate="profile"` is how Claude gets a server-side profile + a ready
+    # dataset card for a raw file it can't read directly.
+    rel = _write(vault, "Knowledge Base/Finance/invoices.csv", FINANCE_CSV)
+    r = qd.query_data(vault, path=rel, aggregate="profile")
+    assert r.aggregate["profile"]["total_rows"] == 3
+    card = r.aggregate["dataset_card"]
+    assert "type: dataset" in card
+    assert f"data_file: {rel}" in card
+    assert "Ugreen" in card
+
+
+def test_raw_data_files_are_never_embeddable() -> None:
+    # The never-embed-rows invariant: CSV/JSON are NOT part of the embedding
+    # corpus (only the markdown dataset card is). Locks Hugo's noise concern.
+    from kb_mcp import embeddings
+    assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.csv")) is False
+    assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.json")) is False
+    assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.md")) is True

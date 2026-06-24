@@ -338,3 +338,40 @@ def test_cache_invalidation_on_mtime_change(vault: Path) -> None:
     os.utime(p, (future, future))
     post = find_module.find(vault, query=sentinel)
     assert any("progressive-disclosure" in h.path for h in post)
+
+
+# ---------------- file-type filters (scoping; default = allow all) ----------------
+
+
+def _mk_page(fm: dict):
+    return find_module.ParsedPage(
+        path=Path("x.md"), rel_path="Knowledge Base/x.md",
+        frontmatter=fm, body="", title="t", mtime=0.0,
+    )
+
+
+def test_file_kind_classification() -> None:
+    assert _mk_page({}).file_kind == "note"
+    assert _mk_page({"type": "insight"}).file_kind == "note"
+    assert _mk_page({"media_type": "pdf"}).file_kind == "pdf"
+    assert _mk_page({"media_type": "image"}).file_kind == "image"
+    assert _mk_page({"type": "dataset", "format": "csv"}).file_kind == "csv"
+    assert _mk_page({"type": "dataset"}).file_kind == "dataset"
+
+
+def test_passes_filters_default_allows_all_kinds() -> None:
+    # No file-type filter → every kind passes. Search must never hide a type by default.
+    for fm in ({}, {"media_type": "pdf"}, {"type": "dataset", "format": "csv"}):
+        assert find_module._passes_filters(_mk_page(fm), types=None, projects=None, tags=None)
+
+
+def test_passes_filters_file_types_include_and_exclude() -> None:
+    pdf = _mk_page({"media_type": "pdf"})
+    note = _mk_page({"type": "insight"})
+    ds = _mk_page({"type": "dataset", "format": "csv"})
+    # include: only listed kinds pass
+    assert find_module._passes_filters(pdf, types=None, projects=None, tags=None, file_types=["pdf"])
+    assert not find_module._passes_filters(note, types=None, projects=None, tags=None, file_types=["pdf"])
+    # exclude: listed kinds drop, others pass
+    assert not find_module._passes_filters(ds, types=None, projects=None, tags=None, exclude_file_types=["csv"])
+    assert find_module._passes_filters(note, types=None, projects=None, tags=None, exclude_file_types=["csv"])
