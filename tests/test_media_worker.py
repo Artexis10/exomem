@@ -68,6 +68,19 @@ def test_worker_marks_failed_on_extraction_error(vault, monkeypatch: pytest.Monk
     assert "extracted_by: pending" not in body  # won't re-loop on restart scan
 
 
+def test_start_prewarms_asr_off_the_request_path(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    import threading
+
+    warmed = threading.Event()
+    monkeypatch.setattr(extract, "prewarm", warmed.set)
+    w = media_worker.MediaWorker(vault)
+    w.start()
+    try:
+        assert warmed.wait(timeout=5.0), "start() should warm ASR in a background thread"
+    finally:
+        w.stop()
+
+
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="later.mp3")

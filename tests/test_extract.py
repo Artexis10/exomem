@@ -38,6 +38,32 @@ def test_extraction_enabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
     assert extract.extraction_enabled() is True
 
 
+def test_prewarm_loads_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    called: list[bool] = []
+    monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
+    extract.prewarm()
+    assert called == [True]  # warmed eagerly
+
+
+def test_prewarm_soft_fails_when_engine_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+
+    def unavailable():
+        raise extract.ExtractionUnavailable("faster-whisper not installed")
+
+    monkeypatch.setattr(extract, "_get_whisper", unavailable)
+    extract.prewarm()  # must not raise — a lean box just stays lazy
+
+
+def test_prewarm_skipped_when_extraction_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    called: list[bool] = []
+    monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
+    extract.prewarm()
+    assert called == []  # disabled → never touches the model
+
+
 def test_extract_text_routes_by_media_type(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(extract, "_transcribe", lambda p, mt: extract.ExtractResult("T", mt, "whisper"))
     monkeypatch.setattr(extract, "_ocr_image", lambda p: extract.ExtractResult("O", "image", "tesseract"))

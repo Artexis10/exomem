@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -143,21 +144,49 @@ def _device() -> str:
         return "cpu"
 
 
+_WHISPER_LOCK = threading.Lock()
+
+
 def _get_whisper():
     global _WHISPER
     if _WHISPER is not None:
         return _WHISPER
-    _ensure_cuda_dll_path()
-    try:
-        from faster_whisper import WhisperModel
-    except ImportError as e:
-        raise ExtractionUnavailable(f"faster-whisper not installed: {e}") from e
-    device = _device()
-    # int8_float16 on GPU keeps large-v3 light without accuracy loss; int8 on CPU.
-    compute_type = "int8_float16" if device == "cuda" else "int8"
-    log.info("loading faster-whisper %s on %s (%s)", WHISPER_MODEL, device, compute_type)
-    _WHISPER = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
+    # Serialize the load so a prewarm thread and a real job can't double-load the model
+    # (two ~3 GB WhisperModels briefly in VRAM). Double-checked: skip the lock once warm.
+    with _WHISPER_LOCK:
+        if _WHISPER is not None:
+            return _WHISPER
+        _ensure_cuda_dll_path()
+        try:
+            from faster_whisper import WhisperModel
+        except ImportError as e:
+            raise ExtractionUnavailable(f"faster-whisper not installed: {e}") from e
+        device = _device()
+        # int8_float16 on GPU keeps large-v3 light without accuracy loss; int8 on CPU.
+        compute_type = "int8_float16" if device == "cuda" else "int8"
+        log.info("loading faster-whisper %s on %s (%s)", WHISPER_MODEL, device, compute_type)
+        _WHISPER = WhisperModel(WHISPER_MODEL, device=device, compute_type=compute_type)
     return _WHISPER
+
+
+def prewarm() -> None:
+    """Eagerly load the ASR model so the first real transcription isn't a cold-start.
+
+    `WHISPER_MODEL` (default large-v3, ~3 GB) loads lazily on first use; with a single
+    GPU-serialized media worker that first job otherwise blocks for minutes while the
+    model reads in. The server calls this off the request path at start (a background
+    thread) so the model warms during boot/idle, not on the user's first audio/video
+    upload. Soft-fail: a box without the engine (or with media extraction disabled)
+    just stays lazy and transcribes nothing until configured.
+    """
+    if not extraction_enabled():
+        return
+    try:
+        _get_whisper()
+    except ExtractionUnavailable as e:
+        log.info("ASR prewarm skipped (engine unavailable): %s", e)
+    except Exception:  # noqa: BLE001 — prewarm must never crash startup
+        log.warning("ASR prewarm failed; will retry lazily on first job", exc_info=True)
 
 
 def _transcribe(path: Path, media_type: str) -> ExtractResult:
