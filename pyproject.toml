@@ -31,7 +31,8 @@ embeddings = [
     "pillow>=10.0",  # CLIP image encoding opens images via PIL (sentence-transformers)
 ]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
-# OCR for images, text for PDFs. Optional so a lean box runs without it — the code
+# OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box
+# runs without it — the code
 # soft-falls back (server extraction skipped; the model-driven /upload `text` path
 # still works). Full install (Hugo's deployment): `uv sync --extra embeddings --extra media`.
 # System deps NOT pip-installable: Tesseract (image OCR) — `winget install UB-Mannheim.TesseractOCR`.
@@ -42,6 +43,10 @@ media = [
     "pytesseract>=0.3.10",
     "pillow>=10.0",  # pytesseract opens images via PIL for OCR
     "pymupdf>=1.24",
+    # docx/xlsx/pptx/html → markdown (Microsoft MarkItDown, MIT). The per-format extras
+    # pull the office libs (mammoth/openpyxl/python-pptx); runs fully local. PDF stays on
+    # PyMuPDF (markitdown's PDF path is its weakest). txt/eml/ics use stdlib, no dep.
+    "markitdown[docx,xlsx,pptx]>=0.1.1",
     # CUDA-12 runtime for faster-whisper/ctranslate2 on Windows. torch+cu132 ships
     # cuBLAS *13* (different major), so ctranslate2's CUDA-12 cuBLAS + cudart must be
     # supplied separately and their bin dirs put on PATH before load — see

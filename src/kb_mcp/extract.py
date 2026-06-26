@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -30,6 +31,16 @@ _AUDIO_EXTS = frozenset({".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac"
 _VIDEO_EXTS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"})
 _IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic"})
 _PDF_EXTS = frozenset({".pdf"})
+# Documents → MarkItDown (Microsoft, MIT) renders office/html to markdown, fully local.
+# PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest). The rest are
+# tiny native parsers — no dependency. Only formats the vault actually holds.
+_DOC_EXTS: dict[str, str] = {
+    ".docx": "docx", ".xlsx": "xlsx", ".pptx": "pptx", ".html": "html", ".htm": "html",
+}
+_MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values())  # {"docx", "xlsx", "pptx", "html"}
+_TEXT_EXTS = frozenset({".txt", ".text", ".log"})  # plain UTF-8 read
+_EMAIL_EXTS = frozenset({".eml"})                  # stdlib email parser
+_CAL_EXTS = frozenset({".ics"})                    # native VEVENT parse
 
 WHISPER_MODEL = os.environ.get("KB_MCP_WHISPER_MODEL", "large-v3")
 # A PDF page yielding fewer than this many characters of embedded text is treated as
@@ -40,7 +51,7 @@ _PDF_OCR_MIN_CHARS = 16
 @dataclass
 class ExtractResult:
     text: str
-    media_type: str           # "audio" | "video" | "image" | "pdf"
+    media_type: str           # audio|video|image|pdf|docx|xlsx|pptx|html|text|email|calendar
     engine: str               # provenance, e.g. "faster-whisper:large-v3", "tesseract", "pymupdf"
     warnings: list[str] = field(default_factory=list)
 
@@ -53,7 +64,11 @@ class ExtractionUnavailable(Exception):
 
 
 def media_type_for(path: str | Path) -> str | None:
-    """Return "audio"|"video"|"image"|"pdf" for a path's extension, else None."""
+    """Coarse extraction kind for a path's extension, else None (not extractable).
+
+    audio/video → ASR, image → OCR (+CLIP), pdf → PyMuPDF, docx/xlsx/pptx/html →
+    MarkItDown, text → plain read, email → stdlib parse, calendar → VEVENT parse.
+    """
     ext = Path(path).suffix.lower()
     if ext in _AUDIO_EXTS:
         return "audio"
@@ -63,6 +78,14 @@ def media_type_for(path: str | Path) -> str | None:
         return "image"
     if ext in _PDF_EXTS:
         return "pdf"
+    if ext in _DOC_EXTS:
+        return _DOC_EXTS[ext]
+    if ext in _TEXT_EXTS:
+        return "text"
+    if ext in _EMAIL_EXTS:
+        return "email"
+    if ext in _CAL_EXTS:
+        return "calendar"
     return None
 
 
@@ -85,6 +108,14 @@ def extract_text(path: str | Path, *, media_type: str | None = None) -> ExtractR
         return _ocr_image(p)
     if mt == "pdf":
         return _extract_pdf(p)
+    if mt in _MARKITDOWN_KINDS:
+        return _extract_document(p, mt)
+    if mt == "text":
+        return _extract_textfile(p)
+    if mt == "email":
+        return _extract_eml(p)
+    if mt == "calendar":
+        return _extract_ics(p)
     raise ExtractionUnavailable(f"no extractor for media_type={mt!r} (path {p.name!r})")
 
 
@@ -255,6 +286,64 @@ def _extract_pdf(path: Path) -> ExtractResult:
         warnings.append(f"{ocr_pages} scanned page(s) recovered via OCR")
     engine = "pymupdf+tesseract" if ocr_pages else "pymupdf"
     return ExtractResult(text="\n\n".join(parts).strip(), media_type="pdf", engine=engine, warnings=warnings)
+
+
+def _extract_document(path: Path, media_type: str) -> ExtractResult:
+    """docx/xlsx/pptx/html → markdown via MarkItDown (Microsoft, MIT; office libs bundled).
+
+    Runs fully local — plugins disabled, no cloud/LLM. PDF deliberately does NOT route
+    here: markitdown's PDF path is weaker than PyMuPDF + our scanned-page OCR fallback.
+    """
+    try:
+        from markitdown import MarkItDown
+    except ImportError as e:
+        raise ExtractionUnavailable(f"markitdown not installed: {e}") from e
+    try:
+        result = MarkItDown(enable_plugins=False).convert(str(path))
+    except Exception as e:  # noqa: BLE001 — a malformed doc must not crash the worker
+        raise ExtractionUnavailable(f"markitdown could not convert {path.name!r}: {e}") from e
+    text = (getattr(result, "text_content", "") or "").strip()
+    return ExtractResult(text=text, media_type=media_type, engine="markitdown")
+
+
+def _extract_textfile(path: Path) -> ExtractResult:
+    """Plain-text files: read as UTF-8 (undecodable bytes replaced). No dependency."""
+    text = path.read_text(encoding="utf-8", errors="replace").strip()
+    return ExtractResult(text=text, media_type="text", engine="text")
+
+
+def _extract_eml(path: Path) -> ExtractResult:
+    """.eml → key headers + the plain/HTML body, via the stdlib email parser (no dep)."""
+    import email
+    from email import policy
+
+    msg = email.message_from_bytes(path.read_bytes(), policy=policy.default)
+    head = [f"{h}: {msg[h]}" for h in ("From", "To", "Cc", "Subject", "Date") if msg[h]]
+    body = ""
+    try:
+        part = msg.get_body(preferencelist=("plain", "html"))
+        if part is not None:
+            body = part.get_content()
+    except Exception:  # noqa: BLE001 — exotic MIME shouldn't fail the whole extract
+        body = ""
+    text = ("\n".join(head) + "\n\n" + (body or "")).strip()
+    return ExtractResult(text=text, media_type="email", engine="email")
+
+
+_ICS_FIELDS = ("SUMMARY", "DESCRIPTION", "LOCATION", "DTSTART", "DTEND", "ORGANIZER", "ATTENDEE")
+
+
+def _extract_ics(path: Path) -> ExtractResult:
+    """.ics → human-meaningful VEVENT fields. Minimal native parse (RFC 5545 line
+    unfolding); no `icalendar` dependency for what is a low-volume format."""
+    raw = path.read_text(encoding="utf-8", errors="replace")
+    unfolded = re.sub(r"\r?\n[ \t]", "", raw)  # join folded continuation lines
+    lines: list[str] = []
+    for line in unfolded.splitlines():
+        name = line.split(":", 1)[0].split(";", 1)[0].upper()
+        if name in _ICS_FIELDS and ":" in line:
+            lines.append(f"{name}: {line.split(':', 1)[1]}")
+    return ExtractResult(text="\n".join(lines).strip(), media_type="calendar", engine="ics")
 
 
 def _ocr_pdf_page(page) -> str:
