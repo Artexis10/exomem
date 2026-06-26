@@ -1,8 +1,16 @@
-"""BM25Okapi over compiled KB pages, with mtime-based per-process cache.
+"""BM25Okapi over compiled KB pages, with mtime-based per-process caches.
 
-Cheap to rebuild for a 600-file vault (<1s), so we don't bother with
-incremental updates — on every `search()` call we scan the tree once for
-the max observed mtime and rebuild if it advanced.
+On every `search()` call we scan the tree once for the max observed mtime and
+rebuild the index if it advanced. The rebuild is *incremental at the document
+level*: a per-doc token cache (keyed by path + mtime, mirroring
+`find.FrontmatterCache`) means only the documents that actually changed get
+re-tokenized. So one large doc, a big corpus, or a write-heavy session no
+longer forces an O(corpus) Snowball re-tokenize on the next `find` — which was
+the failure behind the "uncapped large doc poisoned find" incident (the 512 KB
+extract cap is the complementary, orthogonal fix). The `BM25Okapi` object
+itself is still reconstructed from the cached token lists each rebuild
+(`rank_bm25` has no incremental add/remove API), but that step is cheap
+relative to the stemming it now avoids.
 
 Tokens are stemmed with Snowball (English) so morphologically related
 words score together — "regulation" matches a page with "regulator",
@@ -65,6 +73,29 @@ class BM25Index:
 
     def __init__(self) -> None:
         self._cache: dict[tuple[Path, str], tuple[float, object, list[str]]] = {}
+        # Per-doc token cache, shared across scopes (a file's tokens don't depend
+        # on scope; KB ⊆ vault). Mirrors find.FrontmatterCache's mtime
+        # invalidation: a doc is Snowball-tokenized once and reused until its
+        # mtime advances, so a rebuild only re-stems the docs that changed.
+        # Stale entries for deleted files linger harmlessly — the corpus is
+        # assembled only from currently-walked paths; clear() flushes them.
+        self._tokens: dict[Path, tuple[float, list[str]]] = {}
+        # Diagnostics for the most recent _build(): how many docs were actually
+        # (re)tokenized vs reused from cache. Lets tests assert incrementality
+        # without timing the wall clock.
+        self.last_tokenized: int = 0
+        self.last_reused: int = 0
+
+    def _doc_tokens(self, path: Path, page) -> list[str]:
+        """Tokens for `page`, reusing the cache while the file's mtime is unchanged."""
+        cached = self._tokens.get(path)
+        if cached is not None and cached[0] == page.mtime:
+            self.last_reused += 1
+            return cached[1]
+        tokens = _tokenize(page.title + " " + page.body)
+        self._tokens[path] = (page.mtime, tokens)
+        self.last_tokenized += 1
+        return tokens
 
     def _build(
         self, vault_root: Path, scope: str
@@ -72,7 +103,8 @@ class BM25Index:
         """Walk the KB (or full vault), tokenize each file, build BM25Okapi.
 
         Returns (max_mtime, bm25, paths) where `paths` is parallel to the
-        BM25 document index.
+        BM25 document index. Reuses cached per-doc tokens for unchanged files
+        (see `_doc_tokens`), so only changed docs are re-tokenized.
         """
         # Lazy import — rank_bm25 isn't on the keyword-only hot path.
         from rank_bm25 import BM25Okapi
@@ -84,6 +116,8 @@ class BM25Index:
             kb = vault_root / "Knowledge Base"
             walk = find_module._walk_md(kb)
 
+        self.last_tokenized = 0
+        self.last_reused = 0
         paths: list[str] = []
         corpus: list[list[str]] = []
         max_mtime = 0.0
@@ -91,7 +125,7 @@ class BM25Index:
             page = find_module._CACHE.get(md, vault_root)
             if page is None:
                 continue
-            tokens = _tokenize(page.title + " " + page.body)
+            tokens = self._doc_tokens(md, page)
             if not tokens:
                 continue
             paths.append(page.rel_path)
@@ -132,6 +166,9 @@ class BM25Index:
 
     def clear(self) -> None:
         self._cache.clear()
+        self._tokens.clear()
+        self.last_tokenized = 0
+        self.last_reused = 0
 
 
 def _current_max_mtime(vault_root: Path, scope: str) -> float:

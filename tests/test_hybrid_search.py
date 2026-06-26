@@ -193,6 +193,113 @@ def test_bm25_corpus_is_stemmed(vault) -> None:
     )
 
 
+def _write_md(path, body: str) -> None:
+    """Drop a minimal compiled note straight onto disk (no writer side effects
+    like index refresh), so token-count assertions see exactly one new file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\ntype: insight\nstatus: active\ncreated: 2026-06-27\n"
+        f"updated: 2026-06-27\ntags: []\n---\n\n{body}\n",
+        encoding="utf-8",
+    )
+
+
+def test_bm25_incremental_build_only_tokenizes_changed_doc(vault) -> None:
+    """After a single new write, the rebuild re-tokenizes ONLY the new doc.
+
+    The whole point of the per-doc token cache: a write (which advances the
+    vault's max mtime and so forces the next search to rebuild) must not
+    re-stem the entire corpus — only the document that changed.
+    """
+    import os
+    import time
+
+    bm25.clear_cache()
+    find_module.clear_cache()
+    # Cold build over the whole fixture corpus.
+    bm25.search(vault, "insulin", k=5)
+    cold = bm25._INDEX.last_tokenized
+    assert cold > 1, f"cold build should tokenize the whole corpus; got {cold}"
+    assert bm25._INDEX.last_reused == 0, "nothing to reuse on a cold build"
+
+    # Add ONE new note. Force its mtime past every fixture file so the next
+    # search() definitely rebuilds (avoids any filesystem-resolution ambiguity).
+    probe = vault / "Knowledge Base" / "Notes" / "Insights" / "probe-incremental-one.md"
+    _write_md(probe, "# Probe incremental one\n\nA brand new note about insulin and glucose.")
+    future = time.time() + 10_000
+    os.utime(probe, (future, future))
+
+    bm25.search(vault, "insulin", k=5)
+    assert bm25._INDEX.last_tokenized == 1, (
+        f"rebuild after one write should re-tokenize only the new doc; "
+        f"got {bm25._INDEX.last_tokenized}"
+    )
+    # Every original doc came from the token cache instead of being re-stemmed.
+    assert bm25._INDEX.last_reused == cold, (
+        f"all {cold} original docs should be reused; got {bm25._INDEX.last_reused}"
+    )
+
+
+def test_bm25_edit_retokenizes_only_changed_file(vault) -> None:
+    """Editing one existing file re-tokenizes only that file, not the corpus.
+
+    Bumps the file's mtime explicitly via os.utime so the assertion doesn't
+    depend on the filesystem's mtime resolution (a real edit advances mtime
+    too — that's the cache key).
+    """
+    import os
+    import time
+
+    bm25.clear_cache()
+    find_module.clear_cache()
+    bm25.search(vault, "insulin", k=5)  # cold build
+
+    kb = vault / "Knowledge Base"
+    target = next(find_module._walk_md(kb))  # any indexed file
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+
+    bm25.search(vault, "insulin", k=5)
+    assert bm25._INDEX.last_tokenized == 1, (
+        f"editing one file should re-tokenize only it; "
+        f"got {bm25._INDEX.last_tokenized}"
+    )
+
+
+def test_bm25_cached_tokens_match_fresh_tokenization(vault) -> None:
+    """Ranking parity: cached-token scores equal cold-rebuild scores exactly.
+
+    Cached tokens are byte-identical to freshly stemmed tokens, so the BM25
+    corpus — and therefore every score — must be identical whether a doc was
+    reused from cache or re-tokenized from scratch. This is the deterministic
+    parity proof the handoff asks for (stronger than NDCG drift on a golden set).
+    """
+    import os
+    import time
+
+    bm25.clear_cache()
+    find_module.clear_cache()
+    bm25.search(vault, "insulin", k=50)  # cold over the original corpus
+
+    probe = vault / "Knowledge Base" / "Notes" / "Insights" / "probe-parity.md"
+    _write_md(probe, "# Probe parity\n\nGlucose metabolism and insulin sensitivity.")
+    future = time.time() + 10_000
+    os.utime(probe, (future, future))
+
+    # Incremental path: originals reused from cache, only the new doc stemmed.
+    incremental = bm25.search(vault, "insulin", k=50)
+    assert bm25._INDEX.last_tokenized == 1
+
+    # Cold path: same file set, but every doc tokenized fresh.
+    bm25.clear_cache()
+    cold = bm25.search(vault, "insulin", k=50)
+    assert bm25._INDEX.last_tokenized > 1
+
+    assert incremental == cold, (
+        "cached-token ranking must equal fresh-token ranking exactly"
+    )
+
+
 def test_stem_aware_gate_recovers_morphological_match(vault) -> None:
     """A page that uses 'regulator' should be reachable via 'regulation'.
 
