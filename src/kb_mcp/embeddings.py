@@ -121,18 +121,45 @@ class ClipUnavailable(Exception):
     """CLIP (sentence-transformers/Pillow) isn't importable — soft-fail signal."""
 
 
+def _clip_device() -> str:
+    """Device for CLIP. Honors KB_MCP_CLIP_DEVICE; otherwise GPU only when ASR is NOT
+    running in this process, else CPU.
+
+    Why not always GPU: faster-whisper's CUDA-12 cuDNN/cuBLAS wheels get PATH-prepended
+    (extract._ensure_cuda_dll_path) so ctranslate2 can load — which then shadows
+    torch-cu132's bundled cuDNN 13 and makes CLIP's ViT Conv2d die with
+    CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. bge survives (pure transformer, no conv);
+    CLIP's vision tower doesn't. Since the media worker prewarms ASR at startup, having
+    extraction enabled means PATH is already poisoned, so CLIP must run on CPU — a tiny
+    ViT-B/32, off the request path, embeds in well under a second. A CLIP-only box
+    (KB_MCP_DISABLE_MEDIA_EXTRACTION set) has no conflict and keeps the GPU.
+    """
+    override = os.environ.get("KB_MCP_CLIP_DEVICE")
+    if override:
+        return override
+    # Mirror extract.extraction_enabled() without importing it (avoids a new module edge).
+    asr_active = not os.environ.get("KB_MCP_DISABLE_MEDIA_EXTRACTION")
+    if asr_active:
+        return "cpu"
+    try:
+        import torch
+
+        return "cuda" if torch.cuda.is_available() else "cpu"
+    except Exception:  # noqa: BLE001 — torch absent on a lean box → CPU
+        return "cpu"
+
+
 def get_clip_model():
-    """Lazy CLIP singleton (encodes BOTH images and text). CUDA when available."""
+    """Lazy CLIP singleton (encodes BOTH images and text). Device via _clip_device()."""
     global _CLIP_MODEL
     if _CLIP_MODEL is not None:
         return _CLIP_MODEL
     with _CLIP_LOCK:
         if _CLIP_MODEL is not None:
             return _CLIP_MODEL
-        import torch
         from sentence_transformers import SentenceTransformer
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = _clip_device()
         log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
         _CLIP_MODEL = SentenceTransformer(CLIP_MODEL_NAME, device=device)
     return _CLIP_MODEL

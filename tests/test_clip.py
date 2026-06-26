@@ -37,6 +37,23 @@ class _FakeClip:
         )
 
 
+def test_clip_device_env_and_asr_gating(monkeypatch) -> None:
+    """GPU CLIP shares a process with faster-whisper, whose cu12 cuDNN PATH-prepend
+    breaks CLIP's ViT Conv2d on torch-cu132. So CLIP must run on CPU whenever ASR
+    (media extraction) is enabled; an explicit KB_MCP_CLIP_DEVICE override always wins."""
+    # Explicit override wins regardless of ASR state.
+    monkeypatch.setenv("KB_MCP_CLIP_DEVICE", "cuda")
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    assert embeddings._clip_device() == "cuda"
+    monkeypatch.setenv("KB_MCP_CLIP_DEVICE", "cpu")
+    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    assert embeddings._clip_device() == "cpu"
+    # No override + ASR enabled (the live default) → CPU, dodging the whisper cuDNN clash.
+    monkeypatch.delenv("KB_MCP_CLIP_DEVICE", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    assert embeddings._clip_device() == "cpu"
+
+
 def test_clip_index_upsert_search_has_delete(vault) -> None:
     idx = embeddings.ClipIndex(vault)
     a_path = "Knowledge Base/Evidence/Yolo/photos/a.jpg"
