@@ -1,7 +1,7 @@
 ---
 name: knowledge-base
 description: Operates on Hugo's personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when the user wants to save, file, log, compile, distill, search, audit, supersede, or preserve anything in their KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively, without being told — it consults the KB for prior conclusions when a turn touches a project, domain, decision, or topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (agreement, decision, solved problem, diagnosed failure, or recognized pattern). Do NOT trigger for writes outside the Knowledge Base folder — Cognitive Core, Domains, Prompt Bank, Products, and Personal Context are read-only inputs.
-version: 0.27.0
+version: 0.28.0
 ---
 
 # Knowledge Base
@@ -194,6 +194,7 @@ These constraints apply equally to Tier 1 and Tier 2 ops — no escape hatch aro
 - "rename this page to X," "move this note to Patterns/" → **move_file** (Tier 2; defaults to updating inbound wikilinks)
 - "what's in folder X," "list the files under Y" → **list_directory** (Tier 2)
 - "query my data," "filter the CSV," "what was my X over time," "rows where Y > Z," "sum/avg/latest of a column," "how many entries in <dataset>" → **query_data** (Tier 2)
+- "make this CSV/dataset findable," "write a dataset card," "profile this data file" → **query_data** (`aggregate="profile"`) to emit the card, then **create_file** to write the `type: dataset` page
 - "what links to X" → **list_inbound_links** (Tier 2)
 - "flip the status to archived," "set tenant: tu on this page" (single-field tweak) → **edit** (`field`+`value`)
 - "tack this onto the end of X" → **append_to_file** (Tier 2)
@@ -228,6 +229,7 @@ Empty queries always degrade to filtered-most-recent regardless of mode — ther
 **Scope — the vault is bigger than the KB:**
 - `scope="kb"` (default) searches `Knowledge Base/` first and **auto-widens to the whole vault** when the KB doesn't fill `limit`. So content in sibling folders (`Tracking/`, `Reference/`, `Finance/`, … and the curated trees `Cognitive Core/`, `Domains/`, `Prompt Bank/`, `Products/`, `Personal Context/`) is reachable, not silently invisible. Widened hits carry `outside_kb: true` and their `path` shows the sibling folder. Outside-KB recall is BM25/keyword with a relaxed gate (the vector sidecar is KB-only), so even a terse, numbers-heavy file (a workout/finance tracker) surfaces on a partial token match.
 - `scope="vault"` always walks the whole vault. `scope="kb-only"` is the strict opt-out (KB only, never widens) — use it when you deliberately want curated KB material and nothing else.
+- **Whole-vault corpus + access tiers (2026-06 consolidation).** `Knowledge Base/` was widened to span (effectively) the whole vault — the former siblings above were folded *under* it (raw ones quarantined in `Knowledge Base/Imported/`, to drain into `Notes/` over time), so the auto-widen is now largely vestigial (the vault root holds little but `Knowledge Base/`). One coverage boundary for extraction + embedding + find; write/index governance is per-subtree via a live-loaded `Knowledge Base/_access.yaml`: `readonly` (findable but write-refused — the curated-thinking trees `Products/`, `Systems Thinking/`, …) and `excluded` (private: not indexed, not written). `Sources/` + `Evidence/` stay append-only as before. The principle: decouple capability and searchability from folder *location*.
 - **Never report a search-miss as absence.** An empty result means *"not found in what I searched,"* not *"it doesn't exist."* If the user is sure something exists and `find` returns nothing, the data may be tabular/terse or live outside the KB — try `scope="vault"`, vary the query terms, or `get` a path you suspect. Say "I didn't find it" — distinguish that from "it isn't there."
 
 Additional knobs on `find`:
@@ -236,6 +238,9 @@ Additional knobs on `find`:
 - **`rerank=true`** (off by default, opt-in due to model load) — runs the top fused candidates through `BAAI/bge-reranker-base` (a CrossEncoder) and re-sorts by reranker score. ~50ms/candidate on Blackwell. Useful when ambiguous queries float topically-off vector matches; for everyday hybrid queries the default fusion already handles this.
 - **`prefer_compiled=true`** (default) — applies a small post-fusion multiplier (×1.15) to compiled types (`insight`, `pattern`, `failure`, `research-note`, `entity`) and a small penalty (×0.85) to raw `source`. Reflects the KB's epistemic hierarchy: compiled distillations are the intentional output, sources are inputs. Also re-applied to `rerank_score` so the preference survives reranking. Set false to retrieve raw source discussion verbatim ("what did I capture from Dr. X").
 - **`prefer_active=true`** (default) — soft-demotes `status: superseded` pages (×0.5) so a replaced conclusion can't outrank the page that superseded it, and surfaces `status` + `superseded_by` (the forward pointer to the replacement) on any hit that isn't plain `active`. Never excludes — the tombstone stays findable. Set false to rank a superseded page on its content alone ("what did I used to think about X").
+- **`file_types` / `exclude_file_types`** (default: all kinds) — scope results to (or drop) artifact kinds: `note`, `pdf`, `image`, `audio`, `video`, `csv`, `json`, `tsv`. A binary surfaces under its media kind via its extracted sidecar — a PDF read by pymupdf, an image OCR'd by Tesseract, audio/video transcribed by Whisper *and* CLIP-embedded (per-keyframe for video) for visual search; a data file surfaces under its **dataset card's** `format`. Omit both to search every kind — `find` never hides a type unless you ask. (`exclude_file_types=["image","pdf"]` is the inverse: everything *but* those.)
+
+**Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded (noise) and raw data files aren't `find`-searchable. To make a dataset findable, write a **dataset card** — a small `type: dataset` page (frontmatter `data_file:` + `format:`, a one-line "What this holds", and a column profile) via `create_file`. `query_data(aggregate="profile")` emits a ready-to-write card (vendors, column kinds, ranges, date span). The card is the embedded, findable surface; pull exact rows from the `data_file` with `query_data`. So `find(file_types=["csv"])` returns the *cards*, not the raw files.
 
 **Stemming**: BM25's corpus and the BM25-only stem-aware gate both use Snowball English stems — `regulation` reaches a page that uses `regulator`, `compounding` reaches one that uses `compound`. Keyword mode stays strict-substring (the precision is the feature there).
 
