@@ -12,7 +12,14 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import corpus_aware, find as find_module
+from kb_mcp import (
+    add as add_module,
+    corpus_aware,
+    edit as edit_module,
+    embeddings,
+    find as find_module,
+    note as note_module,
+)
 
 
 # ---------------- pure / torch-free logic ----------------
@@ -95,6 +102,192 @@ def test_dup_threshold_falls_back_on_garbage(monkeypatch) -> None:
     assert corpus_aware._dup_threshold() == corpus_aware.DUP_THRESHOLD
 
 
+# ---------------- conflict (contradiction band) — torch-free ----------------
+#
+# The band partition + candidate restriction are exercised with a `precomputed`
+# cosine map over seeded pages, so the LOGIC is tested deterministically without
+# depending on actual embedding values (which can't be pinned to a band).
+
+
+def _seed_md(
+    vault: Path, rel: str, *, type_: str, status: str = "active", body: str = "Body."
+) -> str:
+    """Write a minimal parseable page at KB-relative `rel` (with .md). Returns the
+    sidecar-form key: vault-relative WITH 'Knowledge Base/' prefix and .md."""
+    p = vault / "Knowledge Base" / rel
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text(
+        f"---\ntype: {type_}\nstatus: {status}\n"
+        f"created: 2026-01-01\nupdated: 2026-01-01\n---\n\n# {rel}\n\n{body}\n",
+        encoding="utf-8",
+    )
+    return f"Knowledge Base/{rel}"
+
+
+@pytest.fixture
+def _no_embed_writes(monkeypatch):
+    """Run a write's corpus block torch-free: stub the embedding machinery so
+    note/add/edit exercise the contradiction WIRING without loading a model."""
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *a, **k: {})
+    monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: [])
+    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *a, **k: None)
+
+
+def test_detect_contradictions_noop_when_embeddings_disabled(vault: Path) -> None:
+    # Suite-wide KB_MCP_DISABLE_EMBEDDINGS — must short-circuit to [].
+    assert corpus_aware.detect_contradictions(vault, title="x", body="y") == []
+
+
+def test_contradiction_floor_defaults_when_env_unset(monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_CONTRADICTION_FLOOR", raising=False)
+    assert corpus_aware._contradiction_floor() == corpus_aware.CONTRADICTION_FLOOR
+
+
+def test_contradiction_floor_honors_env_override(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "0.80")
+    assert corpus_aware._contradiction_floor() == 0.80
+
+
+def test_contradiction_floor_falls_back_on_garbage(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "close")
+    assert corpus_aware._contradiction_floor() == corpus_aware.CONTRADICTION_FLOOR
+
+
+def test_overlap_warning_is_honest() -> None:
+    c = corpus_aware.DupCandidate(path="Notes/Insights/x", title="X", cosine=0.86)
+    w = corpus_aware.overlap_warning(c)
+    assert "[[Notes/Insights/x]]" in w
+    assert "0.86" in w
+    assert "review" in w.lower()
+    # Honest: names contradiction as a QUESTION, never asserts duplicate/verdict.
+    assert "near-duplicate" not in w.lower()
+    assert "contradict" in w.lower()
+
+
+def test_detect_contradictions_band_and_candidate_restriction(vault, monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    active = _seed_md(vault, "Notes/Insights/active-twin.md", type_="insight")
+    superseded = _seed_md(
+        vault, "Notes/Insights/old-twin.md", type_="insight", status="superseded"
+    )
+    source = _seed_md(vault, "Sources/Other/raw-twin.md", type_="source")
+    (vault / "Knowledge Base" / "_access.yaml").write_text(
+        "readonly:\n  - Products\nexcluded: []\n", encoding="utf-8"
+    )
+    readonly = _seed_md(vault, "Products/ro-twin.md", type_="insight")
+    dup = _seed_md(vault, "Notes/Insights/dup-twin.md", type_="insight")
+    below = _seed_md(vault, "Notes/Insights/far.md", type_="insight")
+    find_module.clear_cache()
+
+    precomputed = {
+        active: 0.85,      # in band, active compiled, read-write → FLAGGED
+        superseded: 0.86,  # in band but superseded → excluded
+        source: 0.87,      # in band but not a compiled type → excluded
+        readonly: 0.88,    # in band but readonly tier → excluded
+        dup: 0.95,         # >= ceiling → a duplicate, not a contradiction
+        below: 0.50,       # < floor → not in band
+    }
+    out = corpus_aware.detect_contradictions(
+        vault, title="t", body="b", precomputed=precomputed, top_n=10
+    )
+    assert {corpus_aware._canon(c.path) for c in out} == {"notes/insights/active-twin"}, [
+        c.as_dict() for c in out
+    ]
+
+
+def test_detect_contradictions_excludes_self(vault, monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    p = _seed_md(vault, "Notes/Insights/selfie.md", type_="insight")
+    find_module.clear_cache()
+    out = corpus_aware.detect_contradictions(
+        vault, title="t", body="b",
+        self_path="Knowledge Base/Notes/Insights/selfie",
+        precomputed={p: 0.85}, top_n=10,
+    )
+    assert out == []
+
+
+def test_detect_contradictions_inverted_band_disabled(vault, monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "0.95")  # >= dup ceiling 0.90
+    p = _seed_md(vault, "Notes/Insights/twin.md", type_="insight")
+    find_module.clear_cache()
+    out = corpus_aware.detect_contradictions(
+        vault, title="t", body="b", precomputed={p: 0.93}, top_n=10
+    )
+    assert out == []  # inverted band → disabled, nothing returned
+
+
+def test_note_surfaces_overlap_warning(vault, _no_embed_writes, monkeypatch) -> None:
+    cand = corpus_aware.DupCandidate(
+        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+    )
+    monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
+    res = note_module.note(
+        vault, content="Body.", note_type="insight", title="New One", tags=["t"]
+    )
+    assert any("overlaps active note" in w for w in res.warnings), res.warnings
+
+
+def test_add_surfaces_overlap_warning(
+    vault, source_schema, _no_embed_writes, monkeypatch
+) -> None:
+    cand = corpus_aware.DupCandidate(
+        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+    )
+    monkeypatch.setattr(corpus_aware, "detect_duplicates", lambda *a, **k: [])
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
+    res = add_module.add(
+        vault, source_schema, content="Body.", source_type="other", title="New Capture"
+    )
+    assert any("overlaps active note" in w for w in res.warnings), res.warnings
+
+
+def test_edit_body_change_surfaces_overlap(vault, _no_embed_writes, monkeypatch) -> None:
+    target = _seed_md(vault, "Notes/Insights/editable.md", type_="insight")
+    find_module.clear_cache()
+    cand = corpus_aware.DupCandidate(
+        path="Knowledge Base/Notes/Insights/x", title="X", cosine=0.86
+    )
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", lambda *a, **k: [cand])
+    res = edit_module.edit(vault, path=target, why="refine", new_body="Rewritten claim.")
+    assert any("overlaps active note" in w for w in res.warnings), res.warnings
+
+
+def test_edit_tags_only_skips_contradiction(vault, _no_embed_writes, monkeypatch) -> None:
+    target = _seed_md(vault, "Notes/Insights/retag-me.md", type_="insight")
+    find_module.clear_cache()
+    calls = {"n": 0}
+
+    def _spy(*a, **k):
+        calls["n"] += 1
+        return [corpus_aware.DupCandidate(path="x", title="X", cosine=0.86)]
+
+    monkeypatch.setattr(corpus_aware, "detect_contradictions", _spy)
+    res = edit_module.edit(vault, path=target, why="retag", tags=["a", "b"])
+    assert calls["n"] == 0  # body unchanged → check skipped, no embed
+    assert not any("overlaps active note" in w for w in res.warnings)
+
+
+def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: [])
+    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *a, **k: None)
+    calls = {"n": 0}
+
+    def _spy(*a, **k):
+        calls["n"] += 1
+        return {}
+
+    monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", _spy)
+    note_module.note(
+        vault, content="Body.", note_type="insight", title="Shared Pass One", tags=["t"]
+    )
+    assert calls["n"] == 1  # dup + contradiction partitions share ONE encode
+
+
 # ---------------- semantic (model-loading) ----------------
 
 pytest.importorskip("sentence_transformers")
@@ -150,3 +343,17 @@ def test_note_attaches_suggestions_for_near_twin(vault: Path, embeddings_enabled
     assert d.get("suggestions"), "expected suggestions for a near-twin insight"
     sugg = {corpus_aware._canon(s["path"]) for s in d["suggestions"]}
     assert "notes/insights/progressive-disclosure-without-mode-fragmentation" in sugg
+
+
+def test_detect_contradictions_excludes_real_near_identical(
+    vault: Path, embeddings_enabled
+) -> None:
+    # With REAL embeddings: a page's own content scores >= the dup ceiling, so it
+    # is a duplicate, NOT a contradiction — the band must exclude it.
+    embeddings.EmbeddingIndex(vault).rebuild_all()
+    page = find_module._CACHE.get(vault / _INSIGHT, vault)
+    assert page is not None
+    out = corpus_aware.detect_contradictions(vault, title=page.title, body=page.body)
+    assert not any("progressive-disclosure" in c.path for c in out), [
+        c.as_dict() for c in out
+    ]

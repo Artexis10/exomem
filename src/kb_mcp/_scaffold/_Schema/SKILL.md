@@ -1,7 +1,7 @@
 ---
 name: knowledge-base
 description: Operates on your personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when you want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively — it consults the KB for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Do NOT write outside the Knowledge Base folder; any sibling folders in the vault are read-only inputs.
-version: 0.29.1
+version: 0.30.0
 ---
 
 # Knowledge Base
@@ -503,8 +503,10 @@ auto-fixes); the report is reviewed before anything is written. It covers:
 orphans, broken wikilinks, supersession integrity, stale frontmatter,
 `index.md`/`log.md` drift, aged unprocessed sources (oldest-first — pair with
 `propose_compilation`), status/location mismatch, unfinished experiments, stalled
-production lifecycles, stale hubs/snapshots, unregistered project keys, and
-embedding drift.
+production lifecycles, **stale-review candidates** (active conclusions that are old
+AND rarely surfaced in `find` AND low inbound-link degree — surfaced for review
+only, never decayed or down-ranked; hubs/snapshots excluded as expected-to-drift),
+unregistered project keys, and embedding drift.
 
 Per-check detail — exactly what each flags, its severity, and the proposed fix —
 is in **`references/audit-checks.md`**.
@@ -517,7 +519,10 @@ is in **`references/audit-checks.md`**.
 - Assign numeric confidence scores. Use citation count and recency as the trust
   signal.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
-  mark it; if irrelevant, archive into an `_archive/` subfolder.
+  mark it; if irrelevant, archive into an `_archive/` subfolder. (`audit`'s
+  `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
+  candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
+  anything; `find` ordering is unchanged. Surfacing a candidate ≠ a forgetting curve.)
 - Run on hooks, schedules, or background triggers. Operations happen because you
   asked, or because the conversation reached a point where consulting or capturing
   is clearly warranted.

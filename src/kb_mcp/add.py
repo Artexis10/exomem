@@ -102,13 +102,29 @@ def add(
     # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
     # are disabled so the fast suite and existing add() tests are unaffected.
     dup_warnings: list[str] = []
+    contradiction_warnings: list[str] = []
     if not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
         try:
+            # One embedding pass: dups (vs other sources) + contradictions (vs
+            # active compiled conclusions). Restricting contradiction candidates
+            # to conclusions is what makes an `add`-time flag meaningful ("this
+            # capture challenges conclusion [[Y]]") rather than source-vs-source.
+            cosines = corpus_aware._best_cosine_per_file(
+                vault_root, title=title, body=content
+            )
             dup_warnings = [
                 corpus_aware.dup_warning(c)
                 for c in corpus_aware.detect_duplicates(
                     vault_root, title=title, body=content,
                     self_path=None, types_filter=["source"],
+                    precomputed=cosines,
+                )
+            ]
+            contradiction_warnings = [
+                corpus_aware.overlap_warning(c)
+                for c in corpus_aware.detect_contradictions(
+                    vault_root, title=title, body=content,
+                    self_path=None, precomputed=cosines,
                 )
             ]
         except Exception as e:  # noqa: BLE001 — never break a capture
@@ -195,7 +211,7 @@ def add(
     ]
     writes.extend(sub_writes)
 
-    warnings: list[str] = list(dup_warnings)
+    warnings: list[str] = list(dup_warnings) + list(contradiction_warnings)
     if slug_warning:
         warnings.append(slug_warning)
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
