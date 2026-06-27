@@ -1,6 +1,6 @@
 # kb-mcp — local setup (Claude Code, no cloud)
 
-This is the **friend-friendly** path: run kb-mcp as a **local MCP server inside
+This is the **local-first** path: run kb-mcp as a **local MCP server inside
 Claude Code**, pointed at your own Obsidian vault. No OAuth, no Tailscale, no
 Windows service — none of the remote/mobile machinery in the main
 [README](README.md). Everything stays on your machine; the only thing that ever

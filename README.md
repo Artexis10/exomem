@@ -49,7 +49,7 @@ claude mcp add kb-mcp --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
 python -m kb_mcp install-skill   # the "brain" — don't skip this
 ```
 
-**[SETUP-FRIEND.md](SETUP-FRIEND.md)** walks the local path end to end (vault
+**[SETUP-LOCAL.md](SETUP-LOCAL.md)** walks the local path end to end (vault
 bootstrap, hybrid-vs-lean choice, the skill, and the optional auto-capture hooks).
 For remote / mobile access, see **[docs/deployment.md](docs/deployment.md)**.
 

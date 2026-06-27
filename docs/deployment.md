@@ -3,7 +3,7 @@
 This guide covers the **remote tier**: running kb-mcp as an always-on HTTP service
 behind a public HTTPS endpoint so you can reach your vault from **claude.ai** on
 the web or mobile as a custom connector. The local-only path (Claude Code over
-stdio, no cloud) is in [../SETUP-FRIEND.md](../SETUP-FRIEND.md); start there if you
+stdio, no cloud) is in [../SETUP-LOCAL.md](../SETUP-LOCAL.md); start there if you
 don't need mobile access.
 
 Throughout, replace `<your-host>` / `example.com` with your own hostname.
