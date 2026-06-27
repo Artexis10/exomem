@@ -90,3 +90,34 @@ def test_explicit_query_log_disable(
     monkeypatch.setattr(query_log, "WRITES_PATH", wpath)
     query_log.log_write_call(tool="note", written_path="x", cited_sources=[])
     assert not wpath.exists()
+
+
+def test_logs_get_call_when_enabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("KB_MCP_DISABLE_QUERY_LOG", raising=False)
+    rpath = tmp_path / "reads.jsonl"
+    monkeypatch.setattr(query_log, "READS_PATH", rpath)
+
+    query_log.log_get_call(
+        read_path="Knowledge Base/Notes/Insights/a.md",
+        frontmatter_only=False,
+        include_history=True,
+    )
+    rec = json.loads(rpath.read_text(encoding="utf-8").splitlines()[0])
+    assert rec["tool"] == "get"
+    assert rec["read_path"] == "Knowledge Base/Notes/Insights/a.md"
+    assert rec["frontmatter_only"] is False
+    assert rec["include_history"] is True
+
+
+def test_get_call_noop_when_disabled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("KB_MCP_DISABLE_QUERY_LOG", "1")
+    rpath = tmp_path / "reads.jsonl"
+    monkeypatch.setattr(query_log, "READS_PATH", rpath)
+    query_log.log_get_call(read_path="Knowledge Base/Notes/Insights/a.md")
+    assert not rpath.exists()

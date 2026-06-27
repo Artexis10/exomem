@@ -29,6 +29,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import logging
+import math
 import os
 import re
 from dataclasses import dataclass
@@ -1065,6 +1066,108 @@ def _stale_access_counts(logs_dir: Path | None = None) -> dict[str, int] | None:
     return counts
 
 
+def _stale_activation_params() -> tuple[float, float, float, float]:
+    """(decay d, w_surfaced, w_read, w_cited) for the ACT-R dormancy sort.
+
+    Env-overridable via KB_MCP_STALE_DECAY / _W_SURFACED / _W_READ / _W_CITED;
+    bad values fall back. ACT-R canonical decay d=0.5; access weights order
+    citation > read > surfacing. These weight the review-queue SORT only — they
+    never touch the stale_review gate or `find` ranking.
+    """
+    def _float_env(name: str, default: float) -> float:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return float(raw)
+        except ValueError:
+            log.warning("invalid %s=%r; using %s", name, raw, default)
+            return default
+
+    return (
+        _float_env("KB_MCP_STALE_DECAY", 0.5),
+        _float_env("KB_MCP_STALE_W_SURFACED", 1.0),
+        _float_env("KB_MCP_STALE_W_READ", 2.0),
+        _float_env("KB_MCP_STALE_W_CITED", 3.0),
+    )
+
+
+def _stale_access_events(
+    logs_dir: Path | None = None, today: dt.date | None = None
+) -> dict[str, list[tuple[float, float]]] | None:
+    """Per-path weighted access events `(delta_days, weight)` for the ACT-R sort.
+
+    Parallel to `_stale_access_counts`, but instead of a surfacing COUNT it
+    returns, per canonicalised KB path, the access events feeding the base-level
+    activation B = ln(Σ wⱼ·Δtⱼ^(−d)): find-surfacings (queries.jsonl top_k,
+    weight w_surfaced), get-reads (reads.jsonl, w_read), and citations
+    (writes.jsonl cited_sources, w_cited). delta_days = max((today - ts).days, 1)
+    (floored at 1 to dodge the t^−d singularity).
+
+    Returns None when the signal is UNAVAILABLE — gated for tests
+    (`KB_MCP_DISABLE_RELEVANCE_CHECK`, set by the suite) or all three logs
+    empty — so the caller FALLS BACK to the age-based sort rather than fabricate
+    activation. Reuses the relevance-log reader.
+    """
+    if os.environ.get("KB_MCP_DISABLE_RELEVANCE_CHECK"):
+        return None
+    logs_dir = logs_dir or _RELEVANCE_LOGS_DIR
+    today = today or dt.date.today()
+    _, w_surfaced, w_read, w_cited = _stale_activation_params()
+
+    queries = _relevance_read_jsonl(logs_dir / "queries.jsonl")
+    reads = _relevance_read_jsonl(logs_dir / "reads.jsonl")
+    writes = _relevance_read_jsonl(logs_dir / "writes.jsonl")
+    if not queries and not reads and not writes:
+        return None
+
+    events: dict[str, list[tuple[float, float]]] = {}
+
+    def _delta(ts_raw: object) -> float | None:
+        try:
+            ts = dt.datetime.fromisoformat(str(ts_raw))
+        except (ValueError, TypeError):
+            return None
+        return float(max((today - ts.date()).days, 1))
+
+    for q in queries:
+        delta = _delta(q.get("ts"))
+        if delta is None:
+            continue
+        for t in q.get("top_k") or []:
+            p = t.get("path")
+            if p:
+                events.setdefault(_relevance_canon(p), []).append((delta, w_surfaced))
+
+    for r in reads:
+        delta = _delta(r.get("ts"))
+        if delta is None:
+            continue
+        p = r.get("read_path")
+        if p:
+            events.setdefault(_relevance_canon(p), []).append((delta, w_read))
+
+    for w in writes:
+        delta = _delta(w.get("ts"))
+        if delta is None:
+            continue
+        for c in w.get("cited_sources") or []:
+            if c:
+                events.setdefault(_relevance_canon(c), []).append((delta, w_cited))
+
+    return events
+
+
+def _activation(events: list[tuple[float, float]] | None, d: float) -> float | None:
+    """ACT-R base-level activation B = ln(Σ wⱼ·Δtⱼ^(−d)) over weighted access
+    events. Higher B = more recently/often accessed = LESS dormant. Returns None
+    when there are no events (never accessed) — the caller sorts those to the TOP
+    (most dormant)."""
+    if not events:
+        return None
+    return math.log(sum(w * (dt_days ** (-d)) for dt_days, w in events))
+
+
 def _check_stale_review(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -1085,13 +1188,20 @@ def _check_stale_review(
     type, so it spans the whole writeable KB, not a fixed folder list, and auto-
     excludes the readonly curated trees, append-only Sources/Evidence, hubs/
     snapshots (expected to drift), superseded/archived, and index files.
+
+    Ordering is most-dormant first via ACT-R base-level activation
+    (B = ln(Σ wⱼ·Δtⱼ^(−d)) over weighted access events, ascending; never-accessed
+    sorts to the top); falls back to oldest-first when the access signal is
+    gated/absent. Activation is SORT-ONLY — it never changes who is flagged.
     """
     today = today or dt.date.today()
     min_age_days, max_inbound, max_access = _stale_thresholds()
     degree = _inbound_degree(pages)
     access_counts = _stale_access_counts()  # None when unavailable/gated
+    events_map = _stale_access_events(today=today)  # None when unavailable/gated
+    d, *_ = _stale_activation_params()
 
-    rows: list[tuple[int, AuditFinding]] = []
+    rows: list[tuple[float, int, AuditFinding]] = []
     for page in pages:
         if page.page_type not in _STALE_REVIEW_TYPES:
             continue
@@ -1129,33 +1239,40 @@ def _check_stale_review(
         access_phrase = (
             "" if access_count is None else f", surfaced {access_count}x in find"
         )
-        rows.append((
-            age_days,
-            AuditFinding(
-                category="stale_review",
-                severity="info",
-                path=page.rel_path,
-                detail=(
-                    f"Possibly stale — {age_days}d since updated, "
-                    f"{inbound} inbound link(s){access_phrase}. Still true?"
-                ),
-                proposed_fix=(
-                    "Surfaced for REVIEW only — not auto-decayed or down-ranked; "
-                    "`find` ordering is unchanged. Confirm still true (keep), "
-                    "`replace` (supersede) if newer understanding replaces it, or "
-                    "archive into a `_archive/` subfolder."
-                ),
-                meta={
-                    "age_days": age_days,
-                    "age_bucket": bucket,
-                    "inbound_count": inbound,
-                    "access_count": access_count,  # null when the signal is gated/absent
-                },
+        acts = _activation(events_map.get(page_key) if events_map else None, d)
+        finding = AuditFinding(
+            category="stale_review",
+            severity="info",
+            path=page.rel_path,
+            detail=(
+                f"Possibly stale — {age_days}d since updated, "
+                f"{inbound} inbound link(s){access_phrase}. Still true?"
             ),
-        ))
+            proposed_fix=(
+                "Surfaced for REVIEW only — not auto-decayed or down-ranked; "
+                "`find` ordering is unchanged. Confirm still true (keep), "
+                "`replace` (supersede) if newer understanding replaces it, or "
+                "archive into a `_archive/` subfolder."
+            ),
+            meta={
+                "age_days": age_days,
+                "age_bucket": bucket,
+                "inbound_count": inbound,
+                "access_count": access_count,  # null when the signal is gated/absent
+                "activation": round(acts, 4) if acts is not None else None,
+                "access_observations": (
+                    len(events_map.get(page_key, [])) if events_map else None
+                ),
+            },
+        )
+        # Most-dormant first: activation ASCENDING (never-accessed → -inf at the
+        # top), age DESCENDING on ties (older first). Sort-only — the gate above
+        # already decided who is flagged.
+        sort_act = acts if acts is not None else float("-inf")
+        rows.append((sort_act, age_days, finding))
 
-    rows.sort(key=lambda t: t[0], reverse=True)  # oldest first
-    return [f for _, f in rows]
+    rows.sort(key=lambda r: (r[0], -r[1]))
+    return [f for _, _, f in rows]
 
 
 # ---------------- helpers ----------------

@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 _LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 QUERIES_PATH = _LOG_DIR / "queries.jsonl"
 WRITES_PATH = _LOG_DIR / "writes.jsonl"
+READS_PATH = _LOG_DIR / "reads.jsonl"
 
 
 def _disabled() -> bool:
@@ -120,3 +121,32 @@ def log_write_call(
         )
     except Exception as e:  # noqa: BLE001
         log.debug("log_write_call failed: %s", e)
+
+
+def log_get_call(
+    *,
+    read_path: str,
+    frontmatter_only: bool = False,
+    include_history: bool = False,
+) -> None:
+    """Append one structured record for a get() read. Best-effort.
+
+    Feeds the ACT-R dormancy signal in the stale_review audit (a read is a
+    stronger recency signal than a find-surfacing). Logs ONLY the canonical
+    path, never the body.
+    """
+    if _disabled():
+        return
+    try:
+        _append(
+            READS_PATH,
+            {
+                "ts": _now_iso(),
+                "tool": "get",
+                "read_path": read_path,
+                "frontmatter_only": frontmatter_only,
+                "include_history": include_history,
+            },
+        )
+    except Exception as e:  # noqa: BLE001
+        log.debug("log_get_call failed: %s", e)
