@@ -275,6 +275,7 @@ def note(
     # the fast test suite and existing note() tests see no behaviour change.
     corpus_suggestions: list[dict] = []
     dup_warnings: list[str] = []
+    contradiction_warnings: list[str] = []
     if not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
         try:
             existing_links: set[str] = set(sources_norm)
@@ -290,11 +291,24 @@ def note(
                     limit=6,
                 )
             ]
+            # One embedding pass, partitioned into the dup band and the
+            # contradiction band — the draft is encoded only once per write.
+            cosines = corpus_aware._best_cosine_per_file(
+                vault_root, title=title, body=body_clean
+            )
             dup_warnings = [
                 corpus_aware.dup_warning(c)
                 for c in corpus_aware.detect_duplicates(
                     vault_root, title=title, body=body_clean,
                     self_path=rel_note_no_ext, types_filter=[note_type],
+                    precomputed=cosines,
+                )
+            ]
+            contradiction_warnings = [
+                corpus_aware.overlap_warning(c)
+                for c in corpus_aware.detect_contradictions(
+                    vault_root, title=title, body=body_clean,
+                    self_path=rel_note_no_ext, precomputed=cosines,
                 )
             ]
         except Exception as e:  # noqa: BLE001 — nudges never break a write
@@ -332,6 +346,7 @@ def note(
         + list(source_warnings)
         + list(body_warnings)
         + list(dup_warnings)
+        + list(contradiction_warnings)
     )
     if slug_warning:
         warnings.append(slug_warning)

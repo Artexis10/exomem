@@ -14,6 +14,10 @@ Checks (all read-only; no writes ever):
 - `frontmatter_compliance`: per-page-type required-field gaps,
   `tenant:` set without `project: q`, patterns using `project:` (singular)
   instead of `projects:` (plural list)
+- `stale_review`: active compiled conclusion that is old AND rarely surfaced in
+  `find` AND low inbound-link degree — a measurement-only review candidate.
+  Surfaces it for the reader to judge (keep / supersede / archive); never
+  decays, down-ranks, or moves anything (`find` ordering is unchanged).
 
 Audit is the diagnostic counterpart to the writers. Output is a proposal
 report; nothing is rewritten without explicit confirmation via the
@@ -32,6 +36,7 @@ from pathlib import Path
 
 import yaml
 
+from . import access
 from . import find as find_module
 from . import indexes
 from .vault import (
@@ -48,6 +53,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink", "orphan_entity", "unprocessed_source",
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "relevance_pairs_pending",
+    "stale_review",
 )
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
@@ -158,6 +164,8 @@ def audit(
         findings.extend(_check_embedding_drift(vault_root))
     if "relevance_pairs_pending" in selected:
         findings.extend(_check_relevance_pairs_pending())
+    if "stale_review" in selected:
+        findings.extend(_check_stale_review(vault_root, pages, today=today))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -958,6 +966,196 @@ def _check_relevance_pairs_pending(
         ),
         meta={"new_queries": len(new_queries), "pairs_in_window": pairs_in_window},
     )]
+
+
+# ---------------- check: stale_review ----------------
+
+# Staleness review targets living CONCLUSIONS only. Raw sources have their own
+# `unprocessed_source` check; time-bounded records (production-log/experiment)
+# have lifecycle checks — "is this still true?" doesn't apply to either.
+_STALE_REVIEW_TYPES = frozenset(
+    {"research-note", "insight", "pattern", "failure", "entity"}
+)
+# Convention-named hubs/snapshots are EXPECTED to drift (SKILL.md) — never flag.
+_STALE_SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
+_STALE_SKIP_TAGS = frozenset({"hub", "snapshot"})
+
+
+def _stale_thresholds() -> tuple[int, int, int]:
+    """(min_age_days, max_inbound, max_access), env-overridable; bad values fall back.
+
+    Tunable via KB_MCP_STALE_AGE_DAYS / _MAX_INBOUND / _MAX_ACCESS. These are
+    gate edges, not weights — the check is a filter, never a score (no
+    confidence concept; see SKILL.md rule 5).
+    """
+    def _int_env(name: str, default: int) -> int:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            log.warning("invalid %s=%r; using %s", name, raw, default)
+            return default
+
+    return (
+        _int_env("KB_MCP_STALE_AGE_DAYS", 365),
+        _int_env("KB_MCP_STALE_MAX_INBOUND", 1),
+        _int_env("KB_MCP_STALE_MAX_ACCESS", 1),
+    )
+
+
+def _inbound_degree(pages: list[find_module.ParsedPage]) -> dict[str, int]:
+    """Inbound wikilink count per KB-relative target (canonicalised, no .md).
+
+    Mirrors `_check_orphan_entities`' referenced-set scan (body + frontmatter
+    wikilinks) but COUNTS, over the already-parsed in-memory pages — no second
+    disk walk. A page contributes at most 1 to each target it links (dedup per
+    source) and never to itself; the `Entities/index.md` hub listing is skipped
+    so catalogue rows don't inflate degree.
+    """
+    counts: dict[str, int] = {}
+    for page in pages:
+        if (
+            page.rel_path.endswith("/Entities/index.md")
+            or page.rel_path == "Knowledge Base/Entities/index.md"
+        ):
+            continue
+        self_key = _relevance_canon(page.rel_path)
+        targets: set[str] = set()
+        for match in WIKILINK_PATTERN.finditer(page.body):
+            target = match.group(1).strip().removeprefix("Knowledge Base/").lstrip("/")
+            if target:
+                targets.add(_relevance_canon(target))
+        for value in page.frontmatter.values():
+            for link in _extract_wikilinks_from_value(value):
+                targets.add(
+                    _relevance_canon(link.removeprefix("Knowledge Base/").lstrip("/"))
+                )
+        for target in targets:
+            if target == self_key:
+                continue
+            counts[target] = counts.get(target, 0) + 1
+    return counts
+
+
+def _stale_access_counts(logs_dir: Path | None = None) -> dict[str, int] | None:
+    """How often each KB path was surfaced by `find` (its appearances across
+    `top_k` in logs/queries.jsonl), keyed by canonicalised path.
+
+    Returns None when the access signal is UNAVAILABLE — gated for tests
+    (`KB_MCP_DISABLE_RELEVANCE_CHECK`, set by the suite so the per-vault audit is
+    deterministic regardless of the repo-global log), or no/empty log. None lets
+    the caller DROP the access conjunct rather than fabricate "zero access" from
+    missing telemetry. Reuses the relevance-log reader.
+    """
+    if os.environ.get("KB_MCP_DISABLE_RELEVANCE_CHECK"):
+        return None
+    logs_dir = logs_dir or _RELEVANCE_LOGS_DIR
+    queries = _relevance_read_jsonl(logs_dir / "queries.jsonl")
+    if not queries:
+        return None
+    counts: dict[str, int] = {}
+    for q in queries:
+        for t in q.get("top_k") or []:
+            p = t.get("path")
+            if p:
+                key = _relevance_canon(p)
+                counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def _check_stale_review(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
+) -> list[AuditFinding]:
+    """Surface review candidates: active compiled conclusions that are old AND
+    rarely surfaced in `find` AND low inbound-link degree.
+
+    A measurement-only REVIEW QUEUE — it never decays, down-ranks, moves, or
+    hides anything (`find` ordering is unchanged); the reader judges keep /
+    `replace` (supersede) / archive. All three signals are derived from what the
+    KB already records (frontmatter dates, the wikilink graph, the query
+    log) — no new sidecar. AND-gated as a filter, not a score (no confidence
+    concept). When the access log is unavailable/gated, that conjunct is DROPPED
+    (absence is "unknown", never a fabricated zero), so the gate is age AND
+    low-inbound. Scope is governed by access tier (read-write) + a conclusion
+    type, so it spans the whole writeable KB, not a fixed folder list, and auto-
+    excludes the readonly curated trees, append-only Sources/Evidence, hubs/
+    snapshots (expected to drift), superseded/archived, and index files.
+    """
+    today = today or dt.date.today()
+    min_age_days, max_inbound, max_access = _stale_thresholds()
+    degree = _inbound_degree(pages)
+    access_counts = _stale_access_counts()  # None when unavailable/gated
+
+    rows: list[tuple[int, AuditFinding]] = []
+    for page in pages:
+        if page.page_type not in _STALE_REVIEW_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+
+        updated = _parse_fm_date(
+            page.frontmatter.get("updated") or page.frontmatter.get("created")
+        )
+        if updated is None:
+            continue  # no date → can't judge age; don't fabricate one
+        age_days = max(0, (today - updated).days)
+        if age_days < min_age_days:
+            continue
+
+        page_key = _relevance_canon(page.rel_path)
+        inbound = degree.get(page_key, 0)
+        if inbound > max_inbound:
+            continue
+
+        access_count = None if access_counts is None else access_counts.get(page_key, 0)
+        if access_count is not None and access_count > max_access:
+            continue
+
+        bucket = "aging" if age_days < 2 * min_age_days else "stale"
+        access_phrase = (
+            "" if access_count is None else f", surfaced {access_count}x in find"
+        )
+        rows.append((
+            age_days,
+            AuditFinding(
+                category="stale_review",
+                severity="info",
+                path=page.rel_path,
+                detail=(
+                    f"Possibly stale — {age_days}d since updated, "
+                    f"{inbound} inbound link(s){access_phrase}. Still true?"
+                ),
+                proposed_fix=(
+                    "Surfaced for REVIEW only — not auto-decayed or down-ranked; "
+                    "`find` ordering is unchanged. Confirm still true (keep), "
+                    "`replace` (supersede) if newer understanding replaces it, or "
+                    "archive into a `_archive/` subfolder."
+                ),
+                meta={
+                    "age_days": age_days,
+                    "age_bucket": bucket,
+                    "inbound_count": inbound,
+                    "access_count": access_count,  # null when the signal is gated/absent
+                },
+            ),
+        ))
+
+    rows.sort(key=lambda t: t[0], reverse=True)  # oldest first
+    return [f for _, f in rows]
 
 
 # ---------------- helpers ----------------

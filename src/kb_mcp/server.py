@@ -1031,7 +1031,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
 
     @mcp.tool
     def audit(categories: list[str] | None = None) -> dict:
-        """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, and stale unprocessed sources. Read-only.
+        """Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.
 
         Returns a structured report Claude can read to propose follow-up
         edits via `note`/`add`. Does NOT modify anything.
@@ -1052,10 +1052,20 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         - `frontmatter_compliance`: per-page-type required-field gaps,
           a `tenant:` set without the expected project, patterns using singular
           `project:` instead of plural `projects:`.
+        - `unregistered_project_key`: a `project`/`projects` value not in the
+          registry (typo or genuinely new scope).
+        - `embedding_drift`: vector sidecar rows out of sync with disk (a file
+          changed/added/removed since it was last embedded).
+        - `relevance_pairs_pending`: real-usage (query -> cited_path) labels not
+          yet in the golden retrieval set.
+        - `stale_review`: active compiled conclusion that is old AND rarely
+          surfaced in `find` AND low inbound-link degree — a measurement-only
+          review candidate (still true? keep / supersede / archive). Never
+          decays or down-ranks; `find` ordering is unchanged.
 
         Args:
             categories: Optional filter; only run these checks. Each must be
-                one of the five above. Omit to run all.
+                one of the categories above. Omit to run all.
 
         Returns:
             {findings: [{category, severity, path, detail, proposed_fix}],

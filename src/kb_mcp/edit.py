@@ -33,10 +33,12 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import corpus_aware
 from . import find as find_module
 from . import indexes
 from .vault import (
@@ -221,6 +223,23 @@ def edit(
 
     # Normalize trailing newline so we don't accumulate blanks across edits.
     new_body_final = new_body_final.rstrip() + "\n"
+
+    # Conflict (contradiction-band) surfacing — only when the body actually
+    # changed (a tags-only edit can't introduce a new claim, so it skips the
+    # embed entirely). Best-effort and PRE-commit, so the page's own freshly-
+    # edited vectors aren't in the sidecar yet; `self_path` excludes it anyway.
+    # Measurement, never a block — appended to the edit's warnings.
+    if body_changed and not os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
+        try:
+            body_warnings = list(body_warnings) + [
+                corpus_aware.overlap_warning(c)
+                for c in corpus_aware.detect_contradictions(
+                    vault_root, title="", body=new_body_final, self_path=rel_path
+                )
+            ]
+        except Exception as e:  # noqa: BLE001 — nudges never break an edit
+            log.debug("corpus-aware contradiction check failed (non-fatal): %s", e)
+
     new_text = f"---\n{fm_text}\n---\n{new_body_final}"
 
     changed: list[str] = []
