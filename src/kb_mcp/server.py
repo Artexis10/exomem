@@ -1303,6 +1303,11 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             except get_page_module.GetError as e:
                 raise ValueError(f"{e.code}: {e.reason}") from e
             out = result.as_dict()
+        query_log.log_get_call(
+            read_path=out["path"],
+            frontmatter_only=frontmatter_only,
+            include_history=include_history,
+        )
         if include_history:
             out["history"] = vault.read_log_entries(vault_root, out["path"])
         return out

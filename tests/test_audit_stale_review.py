@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 from pathlib import Path
 
 import pytest
@@ -233,6 +234,98 @@ def test_no_date_note_skipped(vault: Path) -> None:
     )
     find_module.clear_cache()
     assert not [x for x in _stale_findings(vault) if "undated" in x.path]
+
+
+# ---------------- ACT-R dormancy ordering ----------------
+
+
+def test_activation_formula() -> None:
+    d = 0.5
+    # No events → None (never accessed).
+    assert audit_module._activation(None, d) is None
+    assert audit_module._activation([], d) is None
+    # Single event → ln(w · Δt^−d).
+    assert audit_module._activation([(10.0, 1.0)], d) == math.log(1.0 * 10.0 ** -d)
+    # Recent (small Δt) is MORE active (higher B) than an old (large Δt) event.
+    assert (
+        audit_module._activation([(1.0, 1.0)], d)
+        > audit_module._activation([(100.0, 1.0)], d)
+    )
+    # A citation (w=3) is more active than a surfacing (w=1) at the same Δt.
+    assert (
+        audit_module._activation([(10.0, 3.0)], d)
+        > audit_module._activation([(10.0, 1.0)], d)
+    )
+
+
+def test_dormancy_sort_most_dormant_first(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Three old, zero-inbound conclusions. With the access signal enabled, the
+    # review queue reorders them most-dormant first:
+    # never-accessed → surfaced-long-ago → surfaced-recently.
+    _seed_note(vault, "Notes/Insights/never.md", type_="insight", updated="2024-01-01")
+    _seed_note(vault, "Notes/Insights/longago.md", type_="insight", updated="2024-01-01")
+    _seed_note(vault, "Notes/Insights/recent.md", type_="insight", updated="2024-01-01")
+    find_module.clear_cache()
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "queries.jsonl").write_text(
+        "\n".join([
+            json.dumps({
+                "ts": "2025-01-01T10:00:00",
+                "query": "q-longago",
+                "top_k": [{"path": "Knowledge Base/Notes/Insights/longago"}],
+            }),
+            json.dumps({
+                "ts": "2026-06-20T10:00:00",
+                "query": "q-recent",
+                "top_k": [{"path": "Knowledge Base/Notes/Insights/recent"}],
+            }),
+        ]) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
+
+    findings = [
+        x for x in _stale_findings(vault)
+        if x.path.rsplit("/", 1)[-1] in ("never.md", "longago.md", "recent.md")
+    ]
+    order = [x.path.rsplit("/", 1)[-1] for x in findings]
+    assert order == ["never.md", "longago.md", "recent.md"], order
+
+    by = {x.path.rsplit("/", 1)[-1]: x for x in findings}
+    # never-accessed → activation None, zero observations, sorts to the top.
+    assert by["never.md"].meta["activation"] is None
+    assert by["never.md"].meta["access_observations"] == 0
+    # Both surfaced notes have a populated activation; recent is LESS dormant.
+    assert by["longago.md"].meta["activation"] is not None
+    assert by["recent.md"].meta["activation"] is not None
+    assert by["recent.md"].meta["activation"] > by["longago.md"].meta["activation"]
+    assert by["longago.md"].meta["access_observations"] == 1
+
+
+def test_gated_fallback_activation_none_and_oldest_first(vault: Path) -> None:
+    # Suite default has KB_MCP_DISABLE_RELEVANCE_CHECK set → no access signal.
+    # activation/observations are None for all, and findings fall back to the
+    # age-based oldest-first sort (no crash).
+    _seed_note(vault, "Notes/Insights/g-older.md", type_="insight", updated="2023-01-01")
+    _seed_note(vault, "Notes/Insights/g-newer.md", type_="insight", updated="2024-06-01")
+    find_module.clear_cache()
+    findings = [
+        x for x in _stale_findings(vault)
+        if x.path.endswith(("g-older.md", "g-newer.md"))
+    ]
+    by_path = {x.path.rsplit("/", 1)[-1]: x for x in findings}
+    assert set(by_path) == {"g-older.md", "g-newer.md"}
+    for x in by_path.values():
+        assert x.meta["activation"] is None
+        assert x.meta["access_observations"] is None
+    paths = [x.path for x in findings]
+    assert paths.index(by_path["g-older.md"].path) < paths.index(
+        by_path["g-newer.md"].path
+    )
 
 
 # ---------------- docs guard ----------------
