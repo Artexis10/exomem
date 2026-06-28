@@ -275,6 +275,20 @@ CLIP visual search runs CLIP on **CPU when ASR is active** (whisper's cu12 cuDNN
 PATH-prepend otherwise shadows torch's cuDNN and breaks CLIP's Conv2d). Override
 with `KB_MCP_CLIP_DEVICE=cuda`/`cpu` if needed.
 
+Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
+torch and follows the same precedent: it defaults to **CPU when ASR is active**, with
+a `KB_MCP_VOICE_DEVICE=cuda`/`cpu` override. Enroll voices with
+`kb-mcp enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
+`.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
+manage them). With ≥1 profile enrolled and `KB_MCP_DIARIZE` set, matched clusters render
+as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
+(`speechbrain/spkrec-ecapa-voxceleb`, override `KB_MCP_VOICE_EMBED_MODEL`) is gated like
+pyannote's — set `HUGGINGFACE_TOKEN`. Attribution thresholds are tunable via
+`KB_MCP_VOICE_MARGIN`, `KB_MCP_VOICE_MERGE_THRESHOLD`, `KB_MCP_VOICE_CONFIDENT_DELTA`, and
+`KB_MCP_VOICE_REL_GAP` (defaults match the shipped evidence-based values). The whole path is
+default-off + soft-fail: with no profiles or the dep absent it degrades to today's anonymous
+`[Speaker A]: …` output.
+
 ## Revoke access
 
 Pick the strongest option that fits the situation:

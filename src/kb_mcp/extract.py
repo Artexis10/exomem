@@ -335,37 +335,90 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
         return None
 
 
+def _resolve_named_labels(
+    path: Path, turns: list[tuple[float, float, str]]
+) -> dict[str, str] | None:
+    """Resolve raw diarization labels → enrolled speaker names, or None to stay anonymous.
+
+    Optional named-attribution layer over the anonymous turns (default-OFF, soft-fail). When
+    ≥1 voice profile is enrolled AND voice embedding is available, each raw cluster's spans are
+    ECAPA-embedded into a centroid and matched against the profiles by cosine
+    (`speaker_attribution.attribute_clusters`). Returns `{raw_label: display_label}` where a
+    matched cluster gets the profile name and the rest get stable `Speaker A/B…` (by first
+    onset). Returns None — falling through to today's anonymous output — when there are no
+    profiles, the embedder is unavailable, or anything fails. Never raises.
+    """
+    try:
+        from . import vault, voice_embed, voice_profiles
+        from .speaker_attribution import attribute_clusters
+
+        store_path = voice_profiles.voice_profiles_path(vault.resolve_vault())
+        profiles = voice_profiles.load_profiles(store_path)
+        if not profiles:
+            return None  # nobody enrolled → anonymous, no embedding model loaded
+
+        spans_by_label: dict[str, list[tuple[float, float]]] = {}
+        first_onset: dict[str, float] = {}
+        for t_start, t_end, raw in turns:
+            spans_by_label.setdefault(raw, []).append((t_start, t_end))
+            first_onset[raw] = min(first_onset.get(raw, float("inf")), t_start)
+
+        # NOTE: embeds per cluster (each call decodes the file once). A load-once
+        # embed_clusters() is a tracked follow-up — acceptable here since diarization is
+        # opt-in and runs off the request path in the async media worker.
+        centroids: dict[str, object] = {}
+        for raw, spans in spans_by_label.items():
+            vec = voice_embed.embed_spans(path, spans)
+            if vec is None:
+                return None  # embed soft-fail → wholly anonymous (never partially name)
+            centroids[raw] = vec
+
+        attributions = attribute_clusters(centroids, first_onset, profiles)
+        return {raw: attr.label for raw, attr in attributions.items()}
+    except Exception:  # noqa: BLE001 — attribution must never break extraction
+        log.warning("named speaker attribution failed; using anonymous diarization", exc_info=True)
+        return None
+
+
 def _diarize(
     path: Path, seg_list: list
 ) -> tuple[str, list[dict]] | None:
-    """Label ASR segments with speakers and render `[Speaker A]: …` turns.
+    """Label ASR segments with speakers and render `[Speaker A]: …` (or `[<name>]: …`) turns.
 
-    Maps each whisper segment to the diarization speaker whose turn overlaps it most,
-    relabels raw `SPEAKER_00/01/…` to first-appearance `Speaker A/B/…`, and merges
-    consecutive same-speaker segments into one turn. Returns
-    `(labeled_text, speakers)` where `speakers` is the structured turn list, or None
-    on soft-fail (no diarization output / no segments) so the caller uses the plain
-    transcript.
+    Maps each whisper segment to the diarization speaker whose turn overlaps it most, relabels
+    raw `SPEAKER_00/01/…` to first-appearance `Speaker A/B/…`, and merges consecutive
+    same-speaker segments into one turn. When voice profiles are enrolled and embedding succeeds
+    (`_resolve_named_labels`), matched clusters render with the enrolled name instead; everything
+    else (no profiles / soft-fail) is byte-identical to the anonymous output. Returns
+    `(labeled_text, speakers)` where `speakers` is the structured turn list, or None on soft-fail
+    (no diarization output / no segments) so the caller uses the plain transcript.
     """
     turns = _run_diarization(path)
     if not turns or not seg_list:
         return None
 
+    # Optional named layer: raw cluster label → enrolled name (or None → stay anonymous).
+    resolved = _resolve_named_labels(path, turns)
+
     # First-appearance map of raw pyannote labels → "Speaker A", "Speaker B", …
     label_names: dict[str, str] = {}
 
     def _name(raw: str) -> str:
+        if resolved is not None and raw in resolved:
+            return resolved[raw]
         if raw not in label_names:
             label_names[raw] = f"Speaker {chr(ord('A') + len(label_names))}"
         return label_names[raw]
 
+    # Max-overlap segment→turn assignment (earliest-start tiebreak) via the shared, unit-tested
+    # helper — keeps assignment logic in one place for both the anonymous and named paths.
+    from .speaker_assignment import Turn, assign_span
+
+    turn_objs = [Turn(t_start, t_end, raw) for t_start, t_end, raw in turns]
+
     def _speaker_for(start: float, end: float) -> str | None:
-        best_label, best_overlap = None, 0.0
-        for t_start, t_end, raw in turns:
-            overlap = min(end, t_end) - max(start, t_start)
-            if overlap > best_overlap:
-                best_overlap, best_label = overlap, raw
-        return _name(best_label) if best_label is not None else None
+        raw = assign_span(start, end, turn_objs)
+        return _name(raw) if raw is not None else None
 
     merged: list[dict] = []
     for seg in seg_list:

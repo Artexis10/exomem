@@ -4,7 +4,7 @@ Each transcript unit (a Whisper segment) is assigned to the turn it overlaps mos
 the earliest turn for determinism. Replaces naive midpoint assignment, which loses short turns
 and mis-attributes boundary-straddling units.
 
-Pure / torch-free (stdlib only) so it unit-tests without a GPU. Ported from Q's production
+Pure / torch-free (stdlib only) so it unit-tests without a GPU. Ported from a production
 `speaker_assignment` module; consumed by `extract._diarize` to map ASR segments → resolved
 speaker labels.
 """

@@ -6,8 +6,8 @@ either confidently high OR clearly standing out from other clusters) wins the na
 profile may label more than one cluster-group if a speaker is split across non-merging groups.
 Unmatched clusters become stable anonymous `Speaker A/B/…` labels by first-onset order.
 
-Pure / torch-free (numpy only) so it unit-tests without a GPU. Ported from Q's production
-`speaker_attribution` module (single-host "Chaffee vs Guest" → multi-profile), adapted to
+Pure / torch-free (numpy only) so it unit-tests without a GPU. Ported from a production
+`speaker_attribution` module (single-host host-vs-guest → multi-profile), adapted to
 kb-mcp's anonymous `Speaker A` labelling and `KB_MCP_VOICE_*` env overrides.
 
 The attribution is a deterministic *measurement* — a frozen cosine comparison against an
