@@ -104,13 +104,15 @@ def edit(
     old_string: str | None = None,
     new_string: str | None = None,
     replace_all: bool = False,
+    heading: str | None = None,
+    section_position: str = "append",
     expected_hash: str | None = None,
     validate_only: bool = False,
     today: dt.date | None = None,
 ) -> EditResult | EditValidation:
     """Edit a compiled page in place. Bumps `updated:`.
 
-    Three (composable) modes:
+    Four (composable) modes:
     - `new_body` — replace the whole body. The heavyweight mode.
     - `tags` — replace the `tags:` frontmatter list.
     - `old_string`/`new_string` — **surgical** string-replace inside the body.
@@ -120,6 +122,12 @@ def edit(
       `replace_all=True` to replace every occurrence. Surgical mode cannot be
       combined with `new_body` (they both rewrite the body), but may be paired
       with `tags`.
+    - `heading` + `section_position` — **section-targeted**. Locate the
+      `## Heading` (or its bare text), take its section (from the heading line
+      to the next heading of equal-or-higher level, or EOF), and
+      replace/prepend/append `new_string` within it. Token-cheap: you don't
+      re-send the page or quote the exact snippet. Mutually exclusive with
+      `new_body`/`old_string`; may be paired with `tags`.
 
     `why` is required — it lands in the log entry so the change is auditable.
     """
@@ -127,6 +135,28 @@ def edit(
     reasons: list[str] = []
 
     surgical = old_string is not None
+    heading_mode = heading is not None
+
+    if heading_mode and new_body is not None:
+        missing.append("heading/new_body")
+        reasons.append(
+            "section mode (`heading`) and whole-body mode (`new_body`) both rewrite "
+            "the body — supply one or the other, not both"
+        )
+    if heading_mode and surgical:
+        missing.append("heading/old_string")
+        reasons.append(
+            "section mode (`heading`) and surgical mode (`old_string`) are mutually "
+            "exclusive — supply one or the other"
+        )
+    if heading_mode and new_string is None:
+        missing.append("new_string")
+        reasons.append("`new_string` (the section content) is required in heading mode")
+    if heading_mode and section_position not in ("replace", "prepend", "append"):
+        missing.append("section_position")
+        reasons.append(
+            f"section_position must be replace|prepend|append, got {section_position!r}"
+        )
 
     if surgical and new_body is not None:
         missing.append("old_string/new_body")
@@ -140,13 +170,13 @@ def edit(
     if surgical and new_string is not None and new_string == old_string:
         missing.append("new_string")
         reasons.append("`new_string` equals `old_string` — that's a no-op edit")
-    if not surgical and new_string is not None:
+    if not surgical and not heading_mode and new_string is not None:
         missing.append("old_string")
         reasons.append("`new_string` given without `old_string` — nothing to match")
-    if new_body is None and tags is None and not surgical:
-        missing.append("new_body, tags, or old_string")
+    if new_body is None and tags is None and not surgical and not heading_mode:
+        missing.append("new_body, tags, heading, or old_string")
         reasons.append(
-            "must supply at least one of `new_body`, `tags`, or "
+            "must supply at least one of `new_body`, `tags`, `heading`, or "
             "`old_string`/`new_string`; otherwise there's nothing to edit"
         )
     if not why or not why.strip():
@@ -210,6 +240,17 @@ def edit(
             rel_path=rel_path,
         )
         body_changed = True
+    elif heading_mode:
+        # new_string is not None here (validated above).
+        new_body_final, body_warnings = apply_section_edit(
+            body,
+            heading,  # type: ignore[arg-type]
+            section_position,
+            new_string,  # type: ignore[arg-type]
+            vault_root,
+            rel_path=rel_path,
+        )
+        body_changed = True
     elif new_body is not None:
         # Normalize wikilinks to canonical full form. Existing body is left
         # alone to preserve user-intended legacy forms in untouched files.
@@ -244,7 +285,12 @@ def edit(
 
     changed: list[str] = []
     if body_changed:
-        changed.append("body (surgical)" if surgical else "body")
+        if surgical:
+            changed.append("body (surgical)")
+        elif heading_mode:
+            changed.append(f"body (section: {heading})")
+        else:
+            changed.append("body")
     if tags is not None:
         changed.append("tags")
 
@@ -437,6 +483,88 @@ def apply_surgical_replace(
     )
     n = -1 if replace_all else 1
     return body.replace(old_string, new_string_norm, n), warnings
+
+
+_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.*?)[ \t]*$")
+
+
+def _normalize_heading(h: str) -> str:
+    """Drop leading `#` markers + surrounding whitespace so `## Foo` == `Foo`."""
+    return h.lstrip("#").strip()
+
+
+def apply_section_edit(
+    body: str,
+    heading: str,
+    position: str,
+    content: str,
+    vault_root: Path,
+    *,
+    rel_path: str = "",
+    resolver: WikilinkResolver | None = None,
+) -> tuple[str, list[str]]:
+    """Replace/prepend/append `content` within the section under `heading`.
+
+    The section runs from the matched `## Heading` line to the next heading of
+    EQUAL-OR-HIGHER level (or EOF). The heading line itself is preserved; only
+    its body is rewritten. Returns `(new_body, warnings)`.
+
+    Raises EditError(code="HEADING_NOT_FOUND") if the heading is absent. Only
+    the inserted `content` is wikilink-normalized — the rest of the body is left
+    byte-for-byte untouched (matching `apply_surgical_replace`).
+    """
+    where = f" in {rel_path}" if rel_path else ""
+    want = _normalize_heading(heading)
+    lines = body.split("\n")
+
+    h_idx = -1
+    h_level = 0
+    for i, line in enumerate(lines):
+        m = _HEADING_RE.match(line)
+        if m and m.group(2).strip() == want:
+            h_idx = i
+            h_level = len(m.group(1))
+            break
+    if h_idx == -1:
+        raise EditError(
+            code="HEADING_NOT_FOUND",
+            missing=["heading"],
+            reason=(
+                f"heading {heading!r} not found{where}. Match an existing `## Heading` "
+                "(the `#` markers are optional in the arg); read the page first."
+            ),
+        )
+
+    end = len(lines)
+    for j in range(h_idx + 1, len(lines)):
+        m = _HEADING_RE.match(lines[j])
+        if m and len(m.group(1)) <= h_level:
+            end = j
+            break
+
+    if resolver is None:
+        resolver = WikilinkResolver(vault_root)
+    content_norm, warnings = normalize_body_wikilinks(
+        content, vault_root, resolver=resolver
+    )
+    content_lines = content_norm.split("\n")
+
+    before = lines[:h_idx]
+    head_line = lines[h_idx]
+    section_lines = lines[h_idx + 1 : end]
+    after = lines[end:]
+
+    if position == "replace":
+        new_section = content_lines
+    elif position == "prepend":
+        new_section = content_lines + section_lines
+    else:  # append — after the section's existing content, before the next heading
+        trimmed = list(section_lines)
+        while trimmed and trimmed[-1].strip() == "":
+            trimmed.pop()
+        new_section = trimmed + content_lines
+
+    return "\n".join(before + [head_line] + new_section + after), warnings
 
 
 def commit_edit(
