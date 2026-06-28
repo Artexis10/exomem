@@ -13,6 +13,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,10 @@ def main(argv: list[str] | None = None) -> int:
         return _list_speakers_main(raw[1:])
     if raw and raw[0] == "remove-speaker":
         return _remove_speaker_main(raw[1:])
+    # Registry-driven core operations (reads + writes): `kb find "…"`, `kb get …`,
+    # `kb note …`, etc. — every command on the `cli` surface.
+    if raw and raw[0] in _core_op_names():
+        return _core_op_main(raw)
     return _serve_main(raw)
 
 
@@ -65,7 +70,7 @@ def _serve_main(argv: list[str]) -> int:
         server.run(transport=args.transport, host=args.host, port=args.port)
     except KeyboardInterrupt:
         return 130
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
         print(f"kb-mcp failed: {e}", file=sys.stderr)
         return 1
     return 0
@@ -333,6 +338,176 @@ def _install_hook_main(argv: list[str]) -> int:
     else:
         print("Add this to your settings.json (merge into hooks):")
         print(hook_module.snippet(report["installed"]))
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Registry-driven core operations (reads + writes)
+# --------------------------------------------------------------------------- #
+# `note`/`replace` carry a wide, type-specific signature; rather than dozens of
+# flags, their REQUIRED params stay flags and everything else is reachable via a
+# repeatable `--field key=value`, so the CLI stays clean.
+_FIELD_ESCAPE = frozenset({"note", "replace"})
+
+
+def _expose_tier2() -> bool:
+    return not os.environ.get("KB_MCP_DISABLE_TIER2")
+
+
+def _core_op_names() -> frozenset[str]:
+    from . import commands as commands_module
+
+    return frozenset(
+        c.name for c in commands_module.commands_for("cli", expose_tier2=_expose_tier2())
+    )
+
+
+class _CLIParser(argparse.ArgumentParser):
+    """argparse parser that emits `Error [USAGE]: …` and exits 2 on usage errors."""
+
+    def error(self, message: str):  # noqa: ANN201 — argparse signature
+        self.exit(2, f"Error [USAGE]: {message}\n")
+
+
+def _flag(name: str) -> str:
+    return "--" + name.replace("_", "-")
+
+
+def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
+    field_escape = cmd.name in _FIELD_ESCAPE
+    for p in cmd.params:
+        if field_escape and not p.required:
+            continue  # reachable via --field
+        if p.cli_positional:
+            sp.add_argument(
+                p.name,
+                nargs=None if p.required else "?",
+                default=None,
+                help=p.help or None,
+            )
+        elif p.type == "bool":
+            sp.add_argument(
+                _flag(p.name),
+                dest=p.name,
+                action=argparse.BooleanOptionalAction,
+                default=None,
+                help=p.help or None,
+            )
+        elif p.type == "list[str]":
+            sp.add_argument(
+                _flag(p.name),
+                dest=p.name,
+                action="append",
+                default=None,
+                metavar="VALUE",
+                help=(p.help or "") + " (repeatable)",
+            )
+        else:
+            sp.add_argument(
+                _flag(p.name),
+                dest=p.name,
+                default=None,
+                required=p.required and not p.cli_positional,
+                help=p.help or None,
+            )
+    if field_escape:
+        sp.add_argument(
+            "--field",
+            action="append",
+            default=None,
+            metavar="KEY=VALUE",
+            help="set any other parameter (repeatable), e.g. --field severity=critical",
+        )
+
+
+def _collect_raw_args(cmd, args: argparse.Namespace) -> dict:
+    field_escape = cmd.name in _FIELD_ESCAPE
+    raw: dict = {}
+    for p in cmd.params:
+        if field_escape and not p.required:
+            continue
+        val = getattr(args, p.name, None)
+        if val is not None:
+            raw[p.name] = val
+    if field_escape:
+        for item in getattr(args, "field", None) or []:
+            key, sep, value = item.partition("=")
+            if not sep:
+                raise SystemExit(
+                    f"Error [USAGE]: --field expects KEY=VALUE, got {item!r}"
+                )
+            raw[key.strip()] = value
+    return raw
+
+
+def _print_human(result) -> None:
+    if isinstance(result, list):
+        if not result:
+            print("(no results)")
+            return
+        for item in result:
+            if isinstance(item, dict) and "path" in item:
+                title = item.get("title") or ""
+                print(f"{item['path']}  {title}".rstrip())
+            else:
+                print(json.dumps(item, ensure_ascii=False, default=str))
+    else:
+        print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+def _core_op_main(argv: list[str]) -> int:
+    from . import cli_ops
+    from . import commands as commands_module
+    from . import schema as schema_module
+    from .vault import resolve_vault
+
+    cmds = {
+        c.name: c
+        for c in commands_module.commands_for("cli", expose_tier2=_expose_tier2())
+    }
+
+    parser = _CLIParser(prog="kb", description="Query and write the local Knowledge Base.")
+    sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
+    for name in sorted(cmds):
+        cmd = cmds[name]
+        summary = (cmd.description or name).strip().splitlines()[0]
+        sp = sub.add_parser(name, help=summary, description=summary)
+        sp.add_argument(
+            "--json",
+            action="store_true",
+            help="emit the shared {success, data|error} JSON envelope",
+        )
+        _add_command_args(sp, cmd)
+
+    args = parser.parse_args(argv)
+    cmd = cmds[args.op]
+    as_json = getattr(args, "json", False)
+
+    try:
+        vault_root = resolve_vault()
+        raw = _collect_raw_args(cmd, args)
+        kwargs = cli_ops.coerce(
+            cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name
+        )
+        if cmd.needs_schema:
+            injected = (vault_root, schema_module.load_source_schema(vault_root))
+        else:
+            injected = (vault_root,)
+        result = cmd.leaf(*injected, **kwargs)
+    except (cli_ops.OpError, ValueError, TypeError) as e:
+        err = cli_ops.error_dict(e)
+        if as_json:
+            print(json.dumps(cli_ops.envelope(False, error=err), default=str))
+        else:
+            print(f"Error [{err['code']}]: {err['message']}", file=sys.stderr)
+            if err.get("remediation"):
+                print(err["remediation"], file=sys.stderr)
+        return 1
+
+    if as_json:
+        print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
+    else:
+        _print_human(result)
     return 0
 
 
