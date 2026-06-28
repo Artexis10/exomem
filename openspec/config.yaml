@@ -1,0 +1,36 @@
+schema: spec-driven
+
+context: |
+  kb-mcp — a Model Context Protocol server over an Obsidian/markdown vault. It turns the
+  vault you already own into a multimodal, hybrid-search knowledge base for Claude.
+
+  Tech stack: Python 3.11+, FastMCP, sqlite (embeddings sidecar). Hybrid retrieval =
+  BM25 + bge-base-en-v1.5 (768d, GPU) + wikilink graph + bge-reranker, fused via RRF.
+  Multimodal extraction is server-side: Tesseract OCR, faster-whisper ASR, CLIP visual
+  search, MarkItDown for office docs. Optional extras: embeddings, media, diarization,
+  vision. NSSM-managed Windows service; GitHub OAuth proxy; cloudflared tunnel.
+
+  THE CORE CONSTRAINT — "pure substrate": the server MEASURES, the brain (Claude/Max)
+  REASONS. Deterministic transduction (ASR, OCR, embeddings, CLIP, frozen captioners,
+  voice-embedding speaker-ID) is "measurement" and is IN bounds. A server-side reasoning
+  LLM is NEVER added. No confidence/authority floats on notes. Epistemic surfaces
+  (conflict, staleness) MEASURE and SURFACE for review; they never auto-decay or rank.
+
+  Surface consistency (engraph/Endstate-style): every core operation should be reachable
+  consistently across the MCP tools, the CLI (`python -m kb_mcp <cmd>`), and the personal
+  REST facade (`/api/<tool>`), all over the SAME leaf functions — one documented contract,
+  zero logic duplication.
+
+  Test: `PYTHONPATH=src KB_MCP_DISABLE_EMBEDDINGS=1 python -m pytest -q` (run via `uv run`).
+  Lint: `ruff check`. Keep the suite green; torch-backed semantic tests run desk-side.
+
+  The skill scaffold under `src/kb_mcp/_scaffold/` is hand-authored + leak-guarded
+  (tests/test_scaffold_no_leak.py) — keep it generic; no personal/brand tokens anywhere
+  under `src/kb_mcp/`.
+
+rules:
+  proposal:
+    - State default-off + soft-fail behavior explicitly for any optional/heavy capability.
+    - Name the pure-substrate justification when a capability runs a model.
+  tasks:
+    - TDD order: pure-logic unit tests before wiring; torch/model paths behind soft-fail seams.

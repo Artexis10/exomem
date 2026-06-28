@@ -6,6 +6,8 @@ Subcommands:
 - `install-skill` — install the knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
 - `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
+- `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
+  for opt-in diarization (desk-side admin; never an MCP tool)
 """
 
 from __future__ import annotations
@@ -28,6 +30,12 @@ def main(argv: list[str] | None = None) -> int:
         return _install_hook_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
+    if raw and raw[0] == "enroll-speaker":
+        return _enroll_speaker_main(raw[1:])
+    if raw and raw[0] == "list-speakers":
+        return _list_speakers_main(raw[1:])
+    if raw and raw[0] == "remove-speaker":
+        return _remove_speaker_main(raw[1:])
     return _serve_main(raw)
 
 
@@ -93,6 +101,109 @@ def _backfill_media_main(argv: list[str]) -> int:
         dry_run=args.dry_run,
         log_fn=print,
     )
+    return 0
+
+
+def _speaker_vault(args) -> Path | None:
+    """Vault root for the voice-profile store: --vault, else $KB_MCP_VAULT_PATH, else resolve."""
+    if args.vault:
+        return Path(args.vault).expanduser()
+    return None  # enroll_speaker resolves via KB_MCP_VAULT_PATH
+
+
+def _enroll_speaker_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp enroll-speaker",
+        description=(
+            "Enroll (or extend) a named voice profile from an audio sample for opt-in "
+            "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
+            "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
+            "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
+            'Example: kb-mcp enroll-speaker --name Alice --self alice-sample.wav'
+        ),
+    )
+    parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
+    parser.add_argument("--name", required=True, help="speaker name to attach to matched clusters")
+    parser.add_argument(
+        "--self", dest="is_self", action="store_true",
+        help="mark this profile as the vault owner's own voice (is_self).",
+    )
+    parser.add_argument(
+        "--threshold", type=float, default=None,
+        help="per-profile cosine match threshold (default 0.40). Raise for confusable voices.",
+    )
+    parser.add_argument(
+        "--vault", default=os.environ.get("KB_MCP_VAULT_PATH"),
+        help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)",
+    )
+    args = parser.parse_args(argv)
+
+    from . import enroll_speaker as enroll_module
+    from .voice_profiles import DEFAULT_THRESHOLD
+
+    try:
+        rec = enroll_module.enroll_speaker(
+            args.audio, args.name, is_self=args.is_self,
+            threshold=args.threshold if args.threshold is not None else DEFAULT_THRESHOLD,
+            vault_root=_speaker_vault(args),
+        )
+    except (enroll_module.EnrollmentError, RuntimeError) as e:
+        print(f"kb-mcp enroll-speaker: {e}", file=sys.stderr)
+        return 1
+    print(
+        f"Enrolled {args.name!r} ({rec['samples']} sample(s), "
+        f"threshold {rec['threshold']}, is_self={rec['is_self']})."
+    )
+    return 0
+
+
+def _list_speakers_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp list-speakers",
+        description="List the enrolled voice profiles used for named diarization.",
+    )
+    parser.add_argument(
+        "--vault", default=os.environ.get("KB_MCP_VAULT_PATH"),
+        help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)",
+    )
+    args = parser.parse_args(argv)
+
+    from . import enroll_speaker as enroll_module
+
+    try:
+        profiles = enroll_module.list_speakers(_speaker_vault(args))
+    except RuntimeError as e:
+        print(f"kb-mcp list-speakers: {e}", file=sys.stderr)
+        return 1
+    if not profiles:
+        print("No voice profiles enrolled.")
+        return 0
+    for p in profiles:
+        flag = " (self)" if p["is_self"] else ""
+        print(f"  {p['name']}{flag}: {p['samples']} sample(s), threshold {p['threshold']}")
+    return 0
+
+
+def _remove_speaker_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp remove-speaker",
+        description="Delete an enrolled voice profile; that voice then labels anonymously again.",
+    )
+    parser.add_argument("--name", required=True, help="profile name to remove")
+    parser.add_argument(
+        "--vault", default=os.environ.get("KB_MCP_VAULT_PATH"),
+        help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)",
+    )
+    args = parser.parse_args(argv)
+
+    from . import enroll_speaker as enroll_module
+
+    try:
+        removed = enroll_module.remove_speaker(args.name, _speaker_vault(args))
+    except RuntimeError as e:
+        print(f"kb-mcp remove-speaker: {e}", file=sys.stderr)
+        return 1
+    print(f"Removed {args.name!r}." if removed else f"No profile named {args.name!r}.")
     return 0
 
 

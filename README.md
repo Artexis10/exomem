@@ -181,6 +181,9 @@ the repo root). The only required one is the vault path.
 | `KB_MCP_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/office extraction. |
 | `KB_MCP_DISABLE_CLIP` | `1` disables CLIP visual image search. |
 | `KB_MCP_CLIP_DEVICE` | `cpu`/`cuda` override for CLIP (defaults to CPU when ASR is active). |
+| `KB_MCP_DIARIZE` | Set to enable opt-in ASR speaker diarization (`[Speaker A]: …` turns). |
+| `KB_MCP_VOICE_DEVICE` | `cpu`/`cuda` override for the ECAPA voice embedder (defaults to CPU when ASR is active). |
+| `KB_MCP_VOICE_EMBED_MODEL` | ECAPA checkpoint for named-speaker attribution (default `speechbrain/spkrec-ecapa-voxceleb`). |
 | `KB_MCP_WHISPER_MODEL` | Whisper model size for ASR (e.g. `base`, `small`, `large-v3`). |
 | `KB_MCP_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 | `KB_MCP_DUP_THRESHOLD` | Near-duplicate cosine-warning threshold (default `0.90`). |
