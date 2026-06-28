@@ -296,7 +296,12 @@ def _load_diarization_pipeline():
 
     model = os.environ.get("KB_MCP_DIARIZE_MODEL", "pyannote/speaker-diarization-3.1")
     token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
-    return Pipeline.from_pretrained(model, use_auth_token=token)
+    # pyannote.audio 4.x renamed the HF-auth kwarg `use_auth_token` → `token`; keep a
+    # fallback so both 3.x and 4.x load (pyproject pins `>=3.1`, which resolves to either).
+    try:
+        return Pipeline.from_pretrained(model, token=token)
+    except TypeError:
+        return Pipeline.from_pretrained(model, use_auth_token=token)
 
 
 def _get_diarization_pipeline():
