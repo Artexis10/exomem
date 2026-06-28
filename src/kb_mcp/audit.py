@@ -18,6 +18,13 @@ Checks (all read-only; no writes ever):
   `find` AND low inbound-link degree — a measurement-only review candidate.
   Surfaces it for the reader to judge (keep / supersede / archive); never
   decays, down-ranks, or moves anything (`find` ordering is unchanged).
+- `corpus_contradictions`: corpus-wide sweep for pairs of ACTIVE read-write
+  COMPILED conclusions whose embeddings sit in the contradiction band
+  `[floor, dup_threshold)` — close enough to plausibly restate/refine/contradict
+  each other, but not near-duplicates. A PROXIMITY measurement, not a stance
+  judgment (cosine can't tell agreement from contradiction); deduped unordered
+  pairs are surfaced for the reader to reconcile or supersede. Never auto-acts.
+  No-ops cleanly when embeddings are disabled.
 
 Audit is the diagnostic counterpart to the writers. Output is a proposal
 report; nothing is rewritten without explicit confirmation via the
@@ -54,7 +61,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink", "orphan_entity", "unprocessed_source",
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "relevance_pairs_pending",
-    "stale_review",
+    "stale_review", "corpus_contradictions",
 )
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
@@ -167,6 +174,8 @@ def audit(
         findings.extend(_check_relevance_pairs_pending())
     if "stale_review" in selected:
         findings.extend(_check_stale_review(vault_root, pages, today=today))
+    if "corpus_contradictions" in selected:
+        findings.extend(_check_corpus_contradictions(vault_root, pages))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -1273,6 +1282,133 @@ def _check_stale_review(
 
     rows.sort(key=lambda r: (r[0], -r[1]))
     return [f for _, _, f in rows]
+
+
+# ---------------- check: corpus_contradictions ----------------
+
+
+def _is_active_compiled_rw(vault_root: Path, page: find_module.ParsedPage) -> bool:
+    """An active, read-write, COMPILED conclusion — the only pages a contradiction
+    can actually be reconciled against (edit/replace/supersede). Mirrors the scope
+    of `corpus_aware.detect_contradictions` + `_check_stale_review`: a compiled type
+    (`find._COMPILED_TYPES`), not an index/log hub, not superseded/archived/draft,
+    and in a writeable (read-write) tree (auto-excludes readonly curated trees,
+    append-only Sources/Evidence, and excluded subtrees)."""
+    if page.page_type not in find_module._COMPILED_TYPES:
+        return False
+    if page.path.name in ("index.md", "log.md"):
+        return False
+    if page.status in ("superseded", "archived", "draft"):
+        return False
+    if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+        return False
+    return True
+
+
+def _check_corpus_contradictions(
+    vault_root: Path, pages: list[find_module.ParsedPage]
+) -> list[AuditFinding]:
+    """Corpus-wide contradiction sweep: surface PAIRS of active read-write compiled
+    conclusions whose embeddings sit in the band `[floor, dup_threshold)`.
+
+    The audit-time counterpart to `corpus_aware.detect_contradictions` (which fires
+    on a single write): instead of one draft vs. the corpus, it sweeps every active
+    read-write compiled conclusion against every other and reports the deduped,
+    unordered file pairs whose max chunk-cosine lands just below the near-dup
+    ceiling. That band is close enough to plausibly restate, refine, OR contradict —
+    a PROXIMITY measurement, not a stance judgment (cosine can't separate "X works"
+    from "X doesn't"), so each pair is surfaced for the reader to reconcile or
+    supersede; nothing is ever auto-acted.
+
+    Reuses the existing vector sidecar (`EmbeddingIndex.all_vectors()`, cached by
+    mtime) — it reads the chunk vectors already on disk and never re-encodes, so the
+    sweep is O(eligible_files) matmuls over the sidecar matrix and needs no model
+    (works on a CPU/offline box as long as a sidecar exists). The band edges are the
+    same knobs the write-time check uses: floor = `corpus_aware._contradiction_floor`,
+    ceiling = `corpus_aware._dup_threshold`. An inverted band (floor >= ceiling) is
+    disabled. No-ops cleanly (returns []) when embeddings are disabled, the sidecar
+    is empty, or numpy/embeddings are unimportable — the same gate the write-time
+    check honors, so the fast test suite and torch-less deploys are unaffected.
+    """
+    if os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
+        return []
+    from . import corpus_aware
+
+    floor = corpus_aware._contradiction_floor()
+    ceiling = corpus_aware._dup_threshold()
+    if floor >= ceiling:
+        log.warning(
+            "contradiction floor (%s) >= dup ceiling (%s); corpus_contradictions "
+            "sweep disabled this run",
+            floor, ceiling,
+        )
+        return []
+    try:
+        import numpy as np
+
+        from . import embeddings as embeddings_module
+    except ImportError as e:  # numpy is core, but stay defensive
+        log.debug("corpus_contradictions sweep unavailable (%s)", e)
+        return []
+
+    idx = embeddings_module.EmbeddingIndex(vault_root)
+    metadata, matrix = idx.all_vectors()  # cached by sidecar mtime
+    if not metadata or matrix.shape[0] == 0:
+        return []
+
+    # Both endpoints of a flagged pair must be active read-write compiled.
+    eligible: dict[str, find_module.ParsedPage] = {
+        page.rel_path: page
+        for page in pages
+        if _is_active_compiled_rw(vault_root, page)
+    }
+    if len(eligible) < 2:
+        return []
+
+    rows_by_file: dict[str, list[int]] = {}
+    for i, (fp, _cidx, _ctext) in enumerate(metadata):
+        rows_by_file.setdefault(fp, []).append(i)
+
+    # max chunk-cosine per deduped unordered file pair, both endpoints eligible.
+    pair_cos: dict[tuple[str, str], float] = {}
+    for fp, _page in eligible.items():
+        rows = rows_by_file.get(fp)
+        if not rows:
+            continue  # eligible page with no vectors yet (e.g. never embedded)
+        sub = matrix[rows]                       # (m, D) this file's chunk vectors
+        col_max = (sub @ matrix.T).max(axis=0)   # (N,) best cosine file→each chunk
+        in_band = np.nonzero((col_max >= floor) & (col_max < ceiling))[0]
+        for j in in_band:
+            other_fp = metadata[int(j)][0]
+            if other_fp == fp or other_fp not in eligible:
+                continue
+            score = float(col_max[int(j)])
+            a, b = sorted((fp, other_fp))
+            key = (a, b)
+            if key not in pair_cos or score > pair_cos[key]:
+                pair_cos[key] = score
+
+    findings: list[AuditFinding] = []
+    for (a, b), cos in sorted(pair_cos.items(), key=lambda kv: (-kv[1], kv[0])):
+        findings.append(AuditFinding(
+            category="corpus_contradictions",
+            severity="info",
+            path=a,
+            detail=(
+                f"Active conclusion overlaps active conclusion {b!r} "
+                f"(cosine {round(cos, 4)}) — close enough to restate, refine, or "
+                f"contradict. Do they conflict?"
+            ),
+            proposed_fix=(
+                "Surfaced for REVIEW only — a proximity measurement, not an asserted "
+                "contradiction. Read both: if they genuinely conflict, `replace` "
+                "(supersede) the stale one or `reconcile` them; otherwise leave as-is. "
+                "Never auto-acted."
+            ),
+            paths=[a, b],
+            meta={"cosine": round(cos, 4)},
+        ))
+    return findings
 
 
 # ---------------- helpers ----------------

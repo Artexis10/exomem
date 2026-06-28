@@ -558,7 +558,8 @@ _EXTRACTED_HEADING = "## Extracted text"
 
 
 def update_sidecar_extraction(
-    vault_root: Path, sidecar_path: Path, *, text: str, engine: str
+    vault_root: Path, sidecar_path: Path, *, text: str, engine: str,
+    speakers: list[dict] | None = None,
 ) -> None:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
@@ -567,9 +568,23 @@ def update_sidecar_extraction(
     body, then writes via `batch_atomic_write(vault_root=)` so the sidecar is
     re-embedded and immediately findable by its content. `engine` may be a
     `failed: …` marker so a permanent failure stops the restart re-enqueue loop.
+
+    `speakers` (optional, from opt-in ASR diarization) carries the structured turn
+    list; when present its distinct speaker labels are recorded as a `speakers:`
+    frontmatter list so the transcript's `[Speaker A]: …` turns are also queryable
+    structurally. Omitted (None/empty) leaves the frontmatter unchanged — every
+    existing call site is unaffected.
     """
     content = sidecar_path.read_text(encoding="utf-8")
     content = _set_frontmatter_field(content, "extracted_by", engine)
+    if speakers:
+        labels: list[str] = []
+        for turn in speakers:
+            label = str(turn.get("speaker", "")).strip()
+            if label and label not in labels:
+                labels.append(label)
+        if labels:
+            content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
     batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
 

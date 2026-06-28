@@ -51,6 +51,34 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     assert "extracted_by: pending" not in body
 
 
+def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Opt-in diarization output round-trips: labeled turns into the sidecar text AND
+    # the distinct speaker labels into a `speakers:` frontmatter list.
+    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="meeting2.mp3")
+    sidecar = vault / result.sidecar_path
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda p, media_type=None: extract.ExtractResult(
+            text="[Speaker A]: we shipped it\n[Speaker B]: nice work",
+            media_type="audio",
+            engine="faster-whisper:test+diarized",
+            speakers=[
+                {"speaker": "Speaker A", "start": 0.0, "end": 1.0, "text": "we shipped it"},
+                {"speaker": "Speaker B", "start": 1.0, "end": 2.0, "text": "nice work"},
+            ],
+        ),
+    )
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"))
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert "[Speaker A]: we shipped it" in body
+    assert "[Speaker B]: nice work" in body
+    assert "speakers: [Speaker A, Speaker B]" in body
+    assert "extracted_by: faster-whisper:test+diarized" in body
+
+
 def test_worker_marks_failed_on_extraction_error(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="bad.mp3")

@@ -1488,6 +1488,11 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
           surfaced in `find` AND low inbound-link degree — a measurement-only
           review candidate (still true? keep / supersede / archive). Never
           decays or down-ranks; `find` ordering is unchanged.
+        - `corpus_contradictions`: corpus-wide pairs of active read-write
+          compiled conclusions whose embeddings sit just below the near-dup
+          threshold (close enough to restate/refine/contradict). A proximity
+          measurement surfaced for review (reconcile or supersede); never
+          auto-acted. No-ops when embeddings are disabled.
 
         Args:
             categories: Optional filter; only run these checks. Each must be
