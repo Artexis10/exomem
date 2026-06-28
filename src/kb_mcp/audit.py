@@ -22,8 +22,12 @@ Checks (all read-only; no writes ever):
   COMPILED conclusions whose embeddings sit in the contradiction band
   `[floor, dup_threshold)` — close enough to plausibly restate/refine/contradict
   each other, but not near-duplicates. A PROXIMITY measurement, not a stance
-  judgment (cosine can't tell agreement from contradiction); deduped unordered
-  pairs are surfaced for the reader to reconcile or supersede. Never auto-acts.
+  judgment (cosine can't tell agreement from contradiction); deduped pairs are
+  surfaced for the reader to reconcile or supersede. The queue is ORDERED by a
+  review priority (cosine + ACT-R dormancy of the pair's notes), same-family
+  `Notes/Research/<X>/` architecture noise is demoted, and the surfaced set is
+  capped at `KB_MCP_CONTRADICTION_TOP_N` with an explicit omitted count.
+  Ordering/capping is measure-only — never auto-acts, never touches `find`.
   No-ops cleanly when embeddings are disabled.
 
 Audit is the diagnostic counterpart to the writers. Output is a proposal
@@ -175,7 +179,7 @@ def audit(
     if "stale_review" in selected:
         findings.extend(_check_stale_review(vault_root, pages, today=today))
     if "corpus_contradictions" in selected:
-        findings.extend(_check_corpus_contradictions(vault_root, pages))
+        findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -1287,6 +1291,87 @@ def _check_stale_review(
 # ---------------- check: corpus_contradictions ----------------
 
 
+def _contradiction_top_n() -> int:
+    """Default cap on surfaced contradiction pairs (env KB_MCP_CONTRADICTION_TOP_N).
+
+    Default 40. `0` or a negative value disables the cap (surface every in-band
+    pair, no omitted-count summary finding). Bad values log + fall back. This
+    caps only the SURFACED review list — it never changes what is measured.
+    """
+    raw = os.environ.get("KB_MCP_CONTRADICTION_TOP_N")
+    if raw is None:
+        return 40
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("invalid KB_MCP_CONTRADICTION_TOP_N=%r; using 40", raw)
+        return 40
+
+
+def _contradiction_w_dormancy() -> float:
+    """Weight on the pair's ACT-R dormancy in the review priority
+    (env KB_MCP_CONTRADICTION_W_DORMANCY).
+
+    priority = cosine + w · pair_dormancy, where pair_dormancy ∈ [0, 1]. Default
+    0.5: cosine occupies a narrow band (~[0.5, 0.93)) so a dormant pair earns up
+    to +0.5, enough to lift a forgotten close pair over a fresher equally-close
+    one while cosine still anchors the base order. Bad values log + fall back.
+    Sort-only — it never changes who is eligible or `find` ranking.
+    """
+    raw = os.environ.get("KB_MCP_CONTRADICTION_W_DORMANCY")
+    if raw is None:
+        return 0.5
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("invalid KB_MCP_CONTRADICTION_W_DORMANCY=%r; using 0.5", raw)
+        return 0.5
+
+
+def _contradiction_family(rel_path: str) -> str | None:
+    """Return the `Notes/Research/<X>` family segment of a KB path, else None.
+
+    The architecture-cluster noise is same-family adjacency: many
+    `Notes/Research/<X>/*-architecture` pairs that are expected to sit close. Two
+    notes are 'same-family' when they share the `<X>` subfolder directly under
+    `Notes/Research/`. Returns `"Notes/Research/<X>"` for such a path (after the
+    leading `Knowledge Base/` is stripped) and None for anything outside that
+    tree (or directly in it with no `<X>` subfolder).
+    """
+    stripped = rel_path.removeprefix("Knowledge Base/").lstrip("/")
+    parts = stripped.split("/")
+    # parts = ["Notes", "Research", "<X>", ..., "file.md"] → need an <X> dir
+    # before the filename, so at least 4 components.
+    if len(parts) >= 4 and parts[0] == "Notes" and parts[1] == "Research":
+        return "/".join(parts[:3])
+    return None
+
+
+def _pair_dormancy(
+    rel_a: str,
+    rel_b: str,
+    events_map: dict[str, list[tuple[float, float]]] | None,
+    d: float,
+) -> float:
+    """Most-forgotten endpoint's dormancy ∈ [0, 1] for a contradiction pair.
+
+    Per note, reuse the `stale_review` ACT-R activation B = ln(Σ wⱼ·Δtⱼ^(−d)):
+    never-accessed (no events) OR a gated/absent access signal → maximally
+    dormant (1.0), never a fabricated "active"; otherwise squash via the logistic
+    1/(1+e^B) so a highly-active note → ~0 and a barely-active note → ~1. The
+    pair takes the MAX over its two notes — one forgotten endpoint is the review
+    trigger ("did I forget I already concluded the opposite?").
+    """
+    def _one(rel: str) -> float:
+        events = events_map.get(_relevance_canon(rel)) if events_map else None
+        b = _activation(events, d)
+        if b is None:
+            return 1.0
+        return 1.0 / (1.0 + math.exp(b))
+
+    return max(_one(rel_a), _one(rel_b))
+
+
 def _is_active_compiled_rw(vault_root: Path, page: find_module.ParsedPage) -> bool:
     """An active, read-write, COMPILED conclusion — the only pages a contradiction
     can actually be reconciled against (edit/replace/supersede). Mirrors the scope
@@ -1306,7 +1391,10 @@ def _is_active_compiled_rw(vault_root: Path, page: find_module.ParsedPage) -> bo
 
 
 def _check_corpus_contradictions(
-    vault_root: Path, pages: list[find_module.ParsedPage]
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+    *,
+    today: dt.date | None = None,
 ) -> list[AuditFinding]:
     """Corpus-wide contradiction sweep: surface PAIRS of active read-write compiled
     conclusions whose embeddings sit in the band `[floor, dup_threshold)`.
@@ -1329,6 +1417,17 @@ def _check_corpus_contradictions(
     disabled. No-ops cleanly (returns []) when embeddings are disabled, the sidecar
     is empty, or numpy/embeddings are unimportable — the same gate the write-time
     check honors, so the fast test suite and torch-less deploys are unaffected.
+
+    The surfaced pairs are ORDERED into a usable review queue (the raw sweep is
+    flat cosine-descending and dominated by same-family architecture noise): each
+    pair gets a review `priority = cosine + w · pair_dormancy`, where pair_dormancy
+    is the most-forgotten endpoint's ACT-R dormancy (reusing the `stale_review`
+    activation calc — a dormant note in a close pair is the "is this still true /
+    did I forget I concluded the opposite" case). Same-family pairs (both notes in
+    one `Notes/Research/<X>/` subfolder) are flagged and sorted last. The surfaced
+    set is capped at `KB_MCP_CONTRADICTION_TOP_N` (default 40; `0` = uncapped) with
+    an explicit omitted-count summary finding — never a silent truncation. This
+    ORDERS/CAPS the review list only; it never mutates a note or touches `find`.
     """
     if os.environ.get("KB_MCP_DISABLE_EMBEDDINGS"):
         return []
@@ -1388,8 +1487,37 @@ def _check_corpus_contradictions(
             if key not in pair_cos or score > pair_cos[key]:
                 pair_cos[key] = score
 
+    # Order into a usable review queue: priority = cosine + w · pair_dormancy,
+    # same-family pairs demoted, then capped at top-N with an explicit count.
+    # Dormancy reuses the stale_review ACT-R calc; gated/absent access → 1.0
+    # (maximally dormant) so ordering degrades to cosine, never crashes.
+    events_map = _stale_access_events(today=today)  # None when gated/unavailable
+    d, *_ = _stale_activation_params()
+    w_dormancy = _contradiction_w_dormancy()
+
+    scored: list[tuple[bool, float, str, str, float, float]] = []
+    for (a, b), cos in pair_cos.items():
+        same_family = (
+            _contradiction_family(a) is not None
+            and _contradiction_family(a) == _contradiction_family(b)
+        )
+        dormancy = _pair_dormancy(a, b, events_map, d)
+        priority = cos + w_dormancy * dormancy
+        scored.append((same_family, priority, a, b, cos, dormancy))
+
+    # Cross-family first; within a bucket by priority desc; path tiebreak.
+    scored.sort(key=lambda r: (r[0], -r[1], r[2], r[3]))
+
+    top_n = _contradiction_top_n()
+    capped = top_n > 0 and len(scored) > top_n
+    shown = scored[:top_n] if capped else scored
+
     findings: list[AuditFinding] = []
-    for (a, b), cos in sorted(pair_cos.items(), key=lambda kv: (-kv[1], kv[0])):
+    for same_family, priority, a, b, cos, dormancy in shown:
+        family_note = (
+            " Same-family adjacency (likely architecture-cluster noise) — demoted."
+            if same_family else ""
+        )
         findings.append(AuditFinding(
             category="corpus_contradictions",
             severity="info",
@@ -1397,7 +1525,7 @@ def _check_corpus_contradictions(
             detail=(
                 f"Active conclusion overlaps active conclusion {b!r} "
                 f"(cosine {round(cos, 4)}) — close enough to restate, refine, or "
-                f"contradict. Do they conflict?"
+                f"contradict. Do they conflict?{family_note}"
             ),
             proposed_fix=(
                 "Surfaced for REVIEW only — a proximity measurement, not an asserted "
@@ -1406,7 +1534,31 @@ def _check_corpus_contradictions(
                 "Never auto-acted."
             ),
             paths=[a, b],
-            meta={"cosine": round(cos, 4)},
+            meta={
+                "cosine": round(cos, 4),
+                "priority": round(priority, 4),
+                "dormancy": round(dormancy, 4),
+                "same_family": same_family,
+            },
+        ))
+
+    if capped:
+        omitted = len(scored) - top_n
+        findings.append(AuditFinding(
+            category="corpus_contradictions",
+            severity="info",
+            path="Knowledge Base/",
+            detail=(
+                f"{omitted} more lower-priority/same-family contradiction pair(s) "
+                f"not shown (showing top {top_n} of {len(scored)}; raise "
+                f"KB_MCP_CONTRADICTION_TOP_N or set it to 0 to see all)."
+            ),
+            proposed_fix=(
+                "Work the surfaced pairs first; raise KB_MCP_CONTRADICTION_TOP_N "
+                "(or set it to 0) to surface the remainder. Ordering/capping is "
+                "measurement-only — nothing is mutated or auto-acted."
+            ),
+            meta={"truncated": omitted, "shown": top_n, "total": len(scored)},
         ))
     return findings
 

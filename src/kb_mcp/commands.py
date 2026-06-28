@@ -491,7 +491,11 @@ def op_audit(
       compiled conclusions whose embeddings sit just below the near-dup
       threshold (close enough to restate/refine/contradict). A proximity
       measurement surfaced for review (reconcile or supersede); never
-      auto-acted. No-ops when embeddings are disabled.
+      auto-acted. The queue is ordered by review priority (cosine + ACT-R
+      dormancy), same-family `Notes/Research/<X>/` architecture noise is
+      demoted, and the surfaced set is capped at KB_MCP_CONTRADICTION_TOP_N
+      (default 40; 0 = uncapped) with an explicit "N more not shown" line.
+      No-ops when embeddings are disabled.
 
     Args:
         categories: Optional filter; only run these checks. Each must be
