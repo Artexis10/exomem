@@ -19,7 +19,6 @@ import pytest
 from kb_mcp import audit as audit_module
 from kb_mcp import find as find_module
 
-
 _TODAY = dt.date(2026, 6, 27)
 
 
@@ -332,8 +331,10 @@ def test_gated_fallback_activation_none_and_oldest_first(vault: Path) -> None:
 
 
 def test_server_audit_docstring_lists_stale_review_and_drops_five() -> None:
-    import kb_mcp.server as server
+    # The audit tool description now lives in the command registry (op_audit's
+    # docstring), which drives the MCP/REST/CLI/OpenAPI surfaces.
+    import kb_mcp.commands as commands
 
-    src = Path(server.__file__).read_text(encoding="utf-8")
+    src = Path(commands.__file__).read_text(encoding="utf-8")
     assert "stale_review" in src
     assert "one of the five above" not in src

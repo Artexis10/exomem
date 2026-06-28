@@ -71,7 +71,7 @@ def test_outbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> Non
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 200, r.text
-    links = r.json()["links"]
+    links = r.json()["data"]["links"]
     assert "Knowledge Base/Notes/Insights/link-target" in links["outbound"]
 
 
@@ -84,7 +84,7 @@ def test_inbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 200, r.text
-    inbound = r.json()["links"]["inbound"]
+    inbound = r.json()["data"]["links"]["inbound"]
     assert any("link-source" in m["path"] for m in inbound), inbound
 
 
@@ -97,7 +97,7 @@ def test_links_absent_when_flag_off(vault, monkeypatch: pytest.MonkeyPatch) -> N
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 200, r.text
-    assert "links" not in r.json()
+    assert "links" not in r.json()["data"]
 
 
 def test_link_summary_helper_direct(vault, monkeypatch: pytest.MonkeyPatch) -> None:

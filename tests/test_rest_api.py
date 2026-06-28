@@ -31,7 +31,14 @@ def test_rest_disabled_without_key(vault, monkeypatch: pytest.MonkeyPatch) -> No
     client = _client(vault, monkeypatch)  # no KB_MCP_REST_API_KEY
     r = client.post("/api/find", json={"query": "metabolism", "mode": "keyword"})
     assert r.status_code == 503, r.text
-    assert r.json()["error"] == "REST_DISABLED"
+    assert r.json() == {
+        "success": False,
+        "error": {
+            "code": "REST_DISABLED",
+            "message": "REST API is off: set KB_MCP_REST_API_KEY to enable the /api/* facade",
+            "remediation": None,
+        },
+    }
 
 
 def test_rest_wrong_key_unauthorized(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -59,13 +66,15 @@ def test_rest_find_roundtrip_matches_mcp_shape(vault, monkeypatch: pytest.Monkey
     )
     assert r.status_code == 200, r.text
     payload = r.json()
-    assert isinstance(payload, list)
-    # Same shape as the MCP `find` tool: a bare list of hit dicts.
+    assert payload["success"] is True
+    data = payload["data"]
+    assert isinstance(data, list)
+    # Same hit shape as the MCP `find` tool, wrapped in the shared envelope.
     find_module.clear_cache()
     expected = [h.as_dict() for h in find_module.find(vault, query="metabolism", mode="keyword")]
-    assert payload == expected
-    assert payload, "keyword find for 'metabolism' should surface fixture notes"
-    assert {"path", "title", "type"} <= set(payload[0].keys())
+    assert data == expected
+    assert data, "keyword find for 'metabolism' should surface fixture notes"
+    assert {"path", "title", "type"} <= set(data[0].keys())
 
 
 def test_rest_minted_rest_scoped_token_authorizes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,7 +111,7 @@ def test_rest_get_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 200, r.text
-    body = r.json()
+    body = r.json()["data"]
     assert body["frontmatter"]["type"] == "insight"
     assert "Progressive disclosure" in body["body"]
     assert "links" not in body  # links default off
@@ -130,7 +139,7 @@ def test_rest_note_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> No
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 200, r.text
-    written = vault / r.json()["path"]
+    written = vault / r.json()["data"]["path"]
     assert written.exists()
     assert "scriptable" in written.read_text(encoding="utf-8")
 
@@ -143,7 +152,10 @@ def test_rest_note_validation_error_is_400(vault, monkeypatch: pytest.MonkeyPatc
         headers={"Authorization": "Bearer sekret"},
     )
     assert r.status_code == 400, r.text
-    assert "error" in r.json() and "reason" in r.json()
+    payload = r.json()
+    assert payload["success"] is False
+    assert payload["error"]["code"] == "INVALID_NOTE"
+    assert payload["error"]["message"]
 
 
 def test_rest_malformed_body_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,7 +166,7 @@ def test_rest_malformed_body_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> N
         headers={"Authorization": "Bearer sekret", "Content-Type": "application/json"},
     )
     assert r.status_code == 400, r.text
-    assert r.json()["error"] == "INVALID_BODY"
+    assert r.json()["error"]["code"] == "INVALID_BODY"
 
 
 def test_rest_openapi_self_doc(vault, monkeypatch: pytest.MonkeyPatch) -> None:

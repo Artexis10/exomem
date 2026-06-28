@@ -126,6 +126,56 @@ recoverable via `recover_from_trash`); every write logs to
   event=tool_success|tool_error`. The operational layer (did the call reach the
   server, spot slow ops). Rotated in-process (5 MB × 5) — same on every platform.
 
+## One surface, three doors (MCP / REST / CLI)
+
+Every operation is declared **once** in a command registry (`src/kb_mcp/commands.py`).
+That single declaration drives all of:
+
+- the **MCP tool** Claude calls (`find`, `note`, …),
+- a **REST** route `POST /api/<name>` (the personal HTTP facade), and
+- a **CLI** subcommand `kb <name>` (reads *and* writes, from a terminal or script).
+
+Adding an operation is one registry entry — the surfaces can't drift. A
+byte-identical schema-fidelity test pins the MCP tools so what Claude sees never
+changes when the registry evolves.
+
+**CLI (`kb` / `kb-mcp`).** Installing the package adds two console scripts; `kb`
+is the daily driver (`kb-mcp` is the namespaced alias and also carries the admin
+subcommands — `init`, `install-skill`, serving, …). `python -m kb_mcp` works too.
+Verb-first, with a global `--json` envelope and `0`/`1`/`2` exit codes (success /
+operation error / usage error):
+
+```bash
+kb find "carbonation rig" --mode keyword          # human listing (path  title)
+kb find "carbonation rig" --json                  # {"success": true, "data": [ … ]}
+kb get "Notes/Insights/some-note" --json
+kb note --note-type insight --title "…" --content "# …"      # writes to the vault
+# note's type-specific args use a --field escape so the CLI stays clean:
+kb note --note-type research-note --title "…" --content "# …" --field project=my-project
+```
+
+A failed op prints `Error [CODE]: message` (+ a remediation line) and exits `1`;
+a missing required argument exits `2`.
+
+**REST facade (`/api/<name>`).** Opt-in: set `KB_MCP_REST_API_KEY` to enable the
+`/api/*` routes (off → `503`). Every registry op gets a route; the request body is
+JSON, the response is the shared envelope. `GET /api/openapi.json` self-documents
+the surface with real per-parameter schemas.
+
+```bash
+curl -s -X POST http://127.0.0.1:8765/api/find \
+  -H "Authorization: Bearer $KB_MCP_REST_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"query": "carbonation rig", "mode": "keyword"}'
+# → {"success": true, "data": [ … ]}
+```
+
+**Shared envelope** (CLI `--json` + REST): success is `{"success": true, "data": …}`;
+failure is `{"success": false, "error": {"code", "message", "remediation"}}` with a
+stable, machine-readable `code`. Text-write fields keep the base64 binary-blob guard
+(`BINARY_BLOB_REJECTED`) on both surfaces — push binaries through `/upload`, not a
+text field.
+
 ## Multimodal extraction (optional)
 
 Two optional dependency extras turn binaries into searchable text/vectors. Both
@@ -178,6 +228,7 @@ the repo root). The only required one is the vault path.
 | `KB_MCP_VAULT_PATH` | **Required.** Vault root — the folder that contains `Knowledge Base/`. |
 | `KB_MCP_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search (no torch/vectors). |
 | `KB_MCP_DISABLE_TIER2` | `1` drops the 8 Tier 2 escape-hatch tools (leaner tool surface). |
+| `KB_MCP_REST_API_KEY` | Enables the personal `POST /api/<name>` REST facade (bearer-auth). Unset → `/api/*` returns `503`. |
 | `KB_MCP_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/office extraction. |
 | `KB_MCP_DISABLE_CLIP` | `1` disables CLIP visual image search. |
 | `KB_MCP_CLIP_DEVICE` | `cpu`/`cuda` override for CLIP (defaults to CPU when ASR is active). |
