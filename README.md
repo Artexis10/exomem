@@ -240,6 +240,7 @@ the repo root). The only required one is the vault path.
 | `KB_MCP_DIARIZE_SIDECAR_PYTHON` | Override path to the diarizer sidecar's Python (default `sidecar/diarizer/.venv/Scripts/python.exe`). |
 | `KB_MCP_DIARIZE_TIMEOUT` | Seconds the sidecar subprocess may run before soft-failing to a plain transcript (default: `max(900, duration×6)`). |
 | `KB_MCP_DIARIZE_MODEL` | pyannote checkpoint the sidecar loads (default `pyannote/speaker-diarization-3.1`). |
+| `KB_MCP_DIARIZE_CLUSTERING_THRESHOLD` | Optional pyannote clustering-threshold override (higher → fewer clusters). Default: pyannote's own. |
 | `KB_MCP_VOICE_DEVICE` | `cpu`/`cuda` override for the ECAPA voice embedder (defaults to CPU when ASR is active). |
 | `KB_MCP_VOICE_EMBED_MODEL` | ECAPA checkpoint for named-speaker attribution (default `speechbrain/spkrec-ecapa-voxceleb`). |
 | `KB_MCP_WHISPER_MODEL` | Whisper model size for ASR (e.g. `base`, `small`, `large-v3`). |

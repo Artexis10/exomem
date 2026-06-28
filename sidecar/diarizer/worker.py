@@ -63,9 +63,22 @@ def _load_pipeline():
     token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
     # pyannote 4.x uses `token`; 3.x used `use_auth_token`. Support both.
     try:
-        return Pipeline.from_pretrained(model, token=token)
+        pipeline = Pipeline.from_pretrained(model, token=token)
     except TypeError:
-        return Pipeline.from_pretrained(model, use_auth_token=token)
+        pipeline = Pipeline.from_pretrained(model, use_auth_token=token)
+    # Optional clustering-threshold override (mirrors Q's PYANNOTE_CLUSTERING_THRESHOLD). Applied
+    # only when set, so default pyannote behaviour is unchanged. Higher → fewer clusters (merge
+    # similar voices); lower → more sensitive. Tune to curb over-splitting on conversational audio.
+    thr = os.environ.get("KB_MCP_DIARIZE_CLUSTERING_THRESHOLD")
+    if thr and pipeline is not None:
+        try:
+            clustering = getattr(pipeline, "clustering", None)
+            if clustering is not None and hasattr(clustering, "threshold"):
+                clustering.threshold = float(thr)
+                print(f"[worker] clustering.threshold={thr}", file=sys.stderr)
+        except Exception:  # noqa: BLE001 — an optional knob must never break diarization
+            pass
+    return pipeline
 
 
 def _annotation(output):
