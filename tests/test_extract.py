@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from kb_mcp import extract
@@ -141,3 +143,138 @@ def test_extract_document_soft_fails_on_bad_input(tmp_path) -> None:
     # → still ExtractionUnavailable (wrapped). Either way, never a hard crash.
     with pytest.raises(extract.ExtractionUnavailable):
         extract._extract_document(tmp_path / "does-not-exist.docx", "docx")
+
+
+# ---------------- optional: ASR speaker diarization (KB_MCP_DIARIZE, default OFF) ----
+
+
+class _FakeSeg:
+    def __init__(self, text: str, start: float, end: float) -> None:
+        self.text = text
+        self.start = start
+        self.end = end
+
+
+class _FakeWhisper:
+    def __init__(self, segs: list) -> None:
+        self._segs = segs
+
+    def transcribe(self, path):  # faster-whisper returns (segments_generator, info)
+        return iter(self._segs), None
+
+
+def test_diarize_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    assert extract._diarize_enabled() is False
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    assert extract._diarize_enabled() is True
+
+
+def test_transcribe_plain_when_diarize_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    segs = [_FakeSeg("hello there", 0.0, 1.0), _FakeSeg("general kenobi", 1.0, 2.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "hello there general kenobi"
+    assert r.speakers is None
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
+
+
+def test_transcribe_labels_speakers_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    segs = [_FakeSeg("hello there", 0.0, 1.0), _FakeSeg("general kenobi", 1.0, 2.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    # Stub the raw diarization → two turns mapped to distinct speakers (no real model).
+    monkeypatch.setattr(
+        extract, "_run_diarization",
+        lambda p: [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")],
+    )
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert "[Speaker A]: hello there" in r.text
+    assert "[Speaker B]: general kenobi" in r.text
+    assert r.engine.endswith("+diarized")
+    assert r.speakers is not None
+    assert [t["speaker"] for t in r.speakers] == ["Speaker A", "Speaker B"]
+    assert r.speakers[0]["text"] == "hello there"
+
+
+def test_transcribe_merges_consecutive_same_speaker(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    segs = [_FakeSeg("part one", 0.0, 1.0), _FakeSeg("part two", 1.0, 2.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization",
+        lambda p: [(0.0, 2.0, "SPEAKER_00")],  # one speaker the whole time
+    )
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "[Speaker A]: part one part two"
+    assert len(r.speakers) == 1
+
+
+def test_transcribe_soft_fails_to_plain_when_diarization_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setattr(extract, "_DIARIZATION_PIPELINE", None)
+    segs = [_FakeSeg("solo line", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+
+    def _no_dep():
+        raise ImportError("pyannote.audio not installed")
+
+    # Real _run_diarization runs; its pipeline loader raises ImportError → soft-fail.
+    monkeypatch.setattr(extract, "_load_diarization_pipeline", _no_dep)
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "solo line"
+    assert r.speakers is None
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
+
+
+# ---------------- optional: vision captioning (KB_MCP_VISION_CAPTION, default OFF) ----
+
+
+def test_vision_caption_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_VISION_CAPTION", raising=False)
+    assert extract._vision_caption_enabled() is False
+    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    assert extract._vision_caption_enabled() is True
+
+
+def test_maybe_caption_ocr_only_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("KB_MCP_VISION_CAPTION", raising=False)
+    called: list = []
+    monkeypatch.setattr(extract, "_caption_image", lambda p: called.append(p) or "nope")
+    text, engine = extract._maybe_caption("ocr body", Path("x.png"))
+    assert text == "ocr body"
+    assert engine == "tesseract"
+    assert called == []  # flag off → captioner is never invoked
+
+
+def test_maybe_caption_prepends_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setattr(extract, "_caption_image", lambda p: "a cat sitting on a mat")
+    text, engine = extract._maybe_caption("INVOICE 7731", Path("x.png"))
+    assert text == "a cat sitting on a mat\n\nINVOICE 7731"
+    assert engine.startswith("tesseract+")
+
+
+def test_maybe_caption_empty_ocr_returns_caption_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setattr(extract, "_caption_image", lambda p: "a beach at sunset")
+    text, engine = extract._maybe_caption("", Path("x.png"))
+    assert text == "a beach at sunset"
+    assert engine.startswith("tesseract+")
+
+
+def test_maybe_caption_soft_fails_to_ocr_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setattr(extract, "_CAPTIONER", None)
+
+    def _no_dep():
+        raise ImportError("transformers not installed")
+
+    # Real _caption_image runs; its model loader raises ImportError → soft-fail.
+    monkeypatch.setattr(extract, "_load_captioner", _no_dep)
+    text, engine = extract._maybe_caption("ocr body", Path("x.png"))
+    assert text == "ocr body"
+    assert engine == "tesseract"

@@ -57,6 +57,23 @@ media = [
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
     "nvidia-cuda-runtime-cu12; sys_platform == 'win32'",
 ]
+# Opt-in ASR speaker diarization (KB_MCP_DIARIZE). A pretrained pyannote clustering
+# model labels who-spoke-when so transcripts carry `[Speaker A]: …` turns. Heavy +
+# default-OFF + soft-fail, so it's an extra, never a core dep — the base install and
+# the test suite never require it. pyannote gates its weights behind a HF token
+# (HUGGINGFACE_TOKEN). Full install: `uv sync --extra media --extra diarization`.
+diarization = [
+    "pyannote.audio>=3.1",
+]
+# Opt-in vision captioning (KB_MCP_VISION_CAPTION). A FROZEN image-caption model
+# (BLIP/Florence-2 class, run via transformers) prepends a one-line description to an
+# image's OCR text. Default-OFF (it generates text — see extract.py's pure-substrate
+# note) + soft-fail, so it's an extra, never a core dep. transformers/torch come from
+# the `embeddings` extra on a GPU box. Full install:
+# `uv sync --extra media --extra embeddings --extra vision`.
+vision = [
+    "transformers>=4.40",
+]
 
 [dependency-groups]
 dev = [

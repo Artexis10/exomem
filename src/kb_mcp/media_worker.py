@@ -125,7 +125,8 @@ class MediaWorker:
             return
         text = result.text.strip() or "(no text detected)"
         preserve.update_sidecar_extraction(
-            self._vault_root, job.sidecar_path, text=text, engine=result.engine
+            self._vault_root, job.sidecar_path, text=text, engine=result.engine,
+            speakers=result.speakers,
         )
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
