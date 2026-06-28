@@ -3,7 +3,7 @@
 ### Requirement: Isolated Diarization Execution
 
 The system SHALL run the pyannote who-spoke-when pipeline in an isolated sidecar virtual
-environment (standard CPU torch) as a subprocess, and SHALL NOT import pyannote in the main service
+environment (a standard CUDA torch — GPU-capable, CPU fallback) as a subprocess, and SHALL NOT import pyannote in the main service
 process. The main process SHALL pass the audio file path to the sidecar and receive speaker turns
 as JSON; it SHALL resolve those anonymous turns to enrolled names via the existing main-process
 ECAPA attribution, which is unaffected by the sidecar's pyannote version. Any failure of the
@@ -46,9 +46,10 @@ NOT raise.
 
 The diarizer sidecar SHALL be a self-contained, reproducibly-pinned uv project that is provisioned
 at deploy time and never built or resolved at service runtime. The sidecar SHALL pin a torch /
-torchaudio / pyannote / speechbrain / huggingface_hub combination free of the cu132-era version
-walls, independent of the main venv's torch pin. The running service SHALL invoke the sidecar
-interpreter only by path.
+torchaudio / pyannote combination that is free of the main venv's version walls AND retains
+Blackwell `sm_120` GPU kernels (a standard CUDA-13 torch), independent of the main venv's torch
+pin. The running service SHALL invoke the sidecar interpreter only by path, selecting GPU or CPU
+via `KB_MCP_DIARIZE_DEVICE`.
 
 #### Scenario: Provisioned once per box
 
@@ -56,9 +57,11 @@ interpreter only by path.
 - **THEN** the sidecar venv is built from its committed `pyproject.toml` + `uv.lock`
 - **AND** the running service needs only the sidecar interpreter path thereafter, never `uv`
 
-#### Scenario: Pinned stack clears the version walls
+#### Scenario: Pinned stack clears the version walls and keeps the GPU
 
 - **WHEN** the sidecar resolves its dependencies
-- **THEN** torchaudio retains `AudioMetaData` / `list_audio_backends`, speechbrain is pre-LazyModule,
-  huggingface_hub retains `use_auth_token`, and no torchcodec is pulled
-- **AND** the pyannote pipeline imports and loads on a Blackwell/cu132 host outside the main venv
+- **THEN** torch is a CUDA-13 build whose `get_arch_list()` includes `sm_120` (the Blackwell GPU),
+  and the pyannote package version is one that does not call the torchaudio functions the main
+  venv's newer torchaudio removed
+- **AND** the pyannote pipeline imports, sees the GPU, and diarizes on it outside the main venv
+  (torchcodec may be present but is unused — decoding goes through the pre-decoded waveform path)

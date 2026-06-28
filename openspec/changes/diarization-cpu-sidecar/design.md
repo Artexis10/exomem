@@ -26,13 +26,17 @@ transcript. Never raises.
 
 ## Decisions
 
-- **Isolated uv project with a deliberately-OLD pinned stack.** `sidecar/diarizer/pyproject.toml`
-  pins `pyannote.audio 3.1.1` / `torch 2.2.2+cpu` / `torchaudio 2.2.2+cpu` / `speechbrain 0.5.16`
-  / `huggingface_hub 0.25` (Python 3.12, auto-fetched by uv). Each pin clears a specific wall:
-  torchaudio 2.2 still has `AudioMetaData` + `list_audio_backends`; speechbrain 0.5.x has no
-  LazyModule; hf_hub 0.25 still has `use_auth_token`; no torchcodec is pulled. **These pins are
-  load-bearing — `uv lock --upgrade` would float back into the trap.** Empirically validated on the
-  Windows box: the full stack imports and the worker runs end-to-end up to the gated model.
+- **Isolated uv project pinned to Q's proven Blackwell stack.** `sidecar/diarizer/pyproject.toml`
+  pins `pyannote.audio 4.x` (loading the `speaker-diarization-3.1` model) / `torch 2.9.1+cu130` /
+  `torchaudio 2.9.1` (Python 3.12, auto-fetched by uv). `torch 2.9.1+cu130` is the sweet spot — it
+  ships Blackwell `sm_120` kernels AND works with pyannote, whereas the main service's `2.12+cu132`
+  forces `torchaudio 2.11` (which dropped `AudioMetaData`/`set_audio_backend`). The pyannote **4.x
+  package** is required because the 3.1 package calls those removed torchaudio functions; the 4.x
+  package loads the faster 3.1 *model* and returns a `DiarizeOutput` the worker unwraps. No
+  speechbrain (the sidecar only diarizes; ECAPA is main-side). torchcodec rides along (a pyannote-4
+  dep) but is never used — we pre-decode and pass a waveform dict, so its Windows load failure is a
+  harmless warning. **These pins are load-bearing — `uv lock --upgrade` would float back into the
+  trap.** Verified end-to-end on an RTX 5080: 47s vs 18min CPU for a 37-min track.
 - **Sidecar decodes via faster-whisper `decode_audio`** (the same decoder the main ASR uses) and
   feeds pyannote a pre-decoded `{waveform, sample_rate}` dict — guarantees timebase parity with
   the whisper segments the main venv assigns turns to, and avoids torchaudio/torchcodec decode.
@@ -44,10 +48,13 @@ transcript. Never raises.
   ~seconds of per-call model load is noise next to whisper ASR on the same file, and spawn-per-file
   gives crash isolation for free. A long-lived worker (amortized load, but health/restart/hang
   plumbing) is a future option, not the MVP.
-- **Child env: merge + force CPU.** `env={**os.environ, "CUDA_VISIBLE_DEVICES": "",
-  "HF_HUB_DISABLE_PROGRESS_BARS": "1"}` — merge (a Windows child needs SystemRoot/PATH), CUDA off
-  forces the sidecar's CPU torch and neutralizes the cu12 PATH poisoning the main process applied
-  in `_ensure_cuda_dll_path`. The HF token + `KB_MCP_DIARIZE_MODEL` flow through via inheritance.
+- **Child env: merge + device-aware CUDA/PATH.** `_diarizer_child_env()` merges the parent env (a
+  Windows child needs SystemRoot/PATH) and quiets HF. Device from `KB_MCP_DIARIZE_DEVICE`
+  (cpu|cuda|auto, default auto): `cpu` sets `CUDA_VISIBLE_DEVICES=""`; otherwise the GPU stays
+  visible and the cu12 `nvidia/*/bin` wheel dirs the main process prepended in
+  `_ensure_cuda_dll_path` are **stripped from the child PATH** so they can't shadow the sidecar's
+  bundled cu130 cuDNN (the CLIP/cuDNN shadow class of bug). The HF token + `KB_MCP_DIARIZE_MODEL`
+  flow through via inheritance.
 - **Duration-scaled timeout.** `max(900, duration×6)` seconds, `KB_MCP_DIARIZE_TIMEOUT` overrides.
   CPU pyannote is slow and the first call also downloads weights; a hung child blocks the single
   media thread, so we over-budget rather than kill a valid long job. `TimeoutExpired` → `None`.

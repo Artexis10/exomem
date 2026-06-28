@@ -340,6 +340,30 @@ def _diarizer_timeout(path: Path) -> float:
     return max(900.0, duration * 6.0)
 
 
+def _is_nvidia_wheel_bin(p: str) -> bool:
+    """True for a `…/nvidia/<pkg>/bin` dir — the cu12 wheel bins `_ensure_cuda_dll_path` prepends."""
+    q = p.replace("\\", "/").lower().rstrip("/")
+    return "/nvidia/" in q and q.endswith("/bin")
+
+
+def _diarizer_child_env() -> dict[str, str]:
+    """Env for the sidecar subprocess.
+
+    Merge the parent env (a Windows child needs SystemRoot/PATH) and quiet HF. Device policy from
+    `KB_MCP_DIARIZE_DEVICE` (cpu | cuda | auto, default auto): `cpu` forces CUDA off; otherwise the
+    GPU stays visible but the main venv's cu12 nvidia wheel bin dirs are stripped from PATH so they
+    can't shadow the sidecar's bundled cu130 CUDA/cuDNN (the CLIP/cuDNN shadow class of bug).
+    """
+    env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+    pref = os.environ.get("KB_MCP_DIARIZE_DEVICE", "auto").lower()
+    if pref == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        return env
+    cleaned = [p for p in env.get("PATH", "").split(os.pathsep) if not _is_nvidia_wheel_bin(p)]
+    env["PATH"] = os.pathsep.join(cleaned)
+    return env
+
+
 def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
     """Run diarization in the isolated CPU-torch sidecar subprocess → `[(start, end, raw_label), …]`.
 
@@ -363,14 +387,7 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
                 capture_output=True,
                 text=True,
                 timeout=_diarizer_timeout(path),
-                # Merge (not replace) env: a Windows child needs SystemRoot/PATH. CUDA off forces
-                # the sidecar's CPU torch and neutralizes the cu12 PATH poisoning this process
-                # applied in _ensure_cuda_dll_path; HF progress bars off keeps the log clean.
-                env={
-                    **os.environ,
-                    "CUDA_VISIBLE_DEVICES": "",
-                    "HF_HUB_DISABLE_PROGRESS_BARS": "1",
-                },
+                env=_diarizer_child_env(),
             )
         except subprocess.TimeoutExpired:
             log.warning("diarizer sidecar timed out for %s; using plain transcript", path.name)

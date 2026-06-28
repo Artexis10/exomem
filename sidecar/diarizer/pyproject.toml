@@ -1,65 +1,45 @@
 [project]
 name = "kb-mcp-diarizer"
 version = "0.1.0"
-description = "Isolated CPU-torch sidecar: pyannote speaker diarization for kb-mcp, invoked as a subprocess."
-# Pinned BELOW 3.13 on purpose: the known-good torch 2.2.x line (see below) ships no
-# cp313 wheels. uv auto-fetches a compatible interpreter (3.11/3.12) for this venv — it is
-# fully decoupled from the main service's Python.
+description = "Isolated diarization sidecar for kb-mcp: pyannote on standard CUDA torch, invoked as a subprocess. GPU-capable (Blackwell sm_120) with CPU fallback."
+# <3.13 on purpose: the pinned torch 2.9.x line ships cp311/cp312 wheels; uv auto-fetches a
+# compatible interpreter for this venv (decoupled from the main service's Python).
 requires-python = ">=3.11,<3.13"
 
 # ⚠️ THESE PINS ARE LOAD-BEARING — DO NOT `uv lock --upgrade` THEM. ⚠️
-# The whole reason this sidecar exists is that the main venv's torch-2.12+cu132 pin transitively
-# forces torchaudio 2.11 + pyannote 3.4 + speechbrain 1.x, which is the EXACT combo that breaks
-# pyannote with six version walls (torchaudio.AudioMetaData & list_audio_backends removed in 2.11,
-# speechbrain 1.x LazyModule breaks inspect.getmodule, …). Those are VERSION walls, not GPU walls —
-# CPU torch alone does NOT fix them. Letting this project float to the newest CPU torch just
-# reproduces the same trap on CPU. So we deliberately pin the canonical, heavily-used stack that
-# pyannote's `speaker-diarization-3.1` pipeline was built and tested against:
+# This mirrors Q's PROVEN Blackwell-GPU diarization stack (verified end-to-end on an RTX 5080:
+# 47s vs 18min CPU for a 37-min track). The sidecar exists because the main service's bleeding-edge
+# torch-2.12+cu132 is incompatible with pyannote (torchaudio 2.11 dropped AudioMetaData /
+# set_audio_backend, etc.). torch 2.9.1+cu130 is the sweet spot: it has Blackwell sm_120 kernels
+# AND works with pyannote — "cu130 required; cu126 lacks sm_120" (Q's Dockerfile). Key choices:
+#   - pyannote.audio 4.x PACKAGE (drops the dead torchaudio set_audio_backend/AudioMetaData calls
+#     the 3.1 package made) while the worker still loads the speaker-diarization-3.1 MODEL (faster
+#     than the v4 pipeline; Q does the same). The 4.x output is a DiarizeOutput wrapper — the worker
+#     pulls the Annotation off it.
+#   - No speechbrain: the sidecar ONLY diarizes; ECAPA named-attribution runs in the main venv.
+#   - torchcodec rides along (pyannote 4 dep) but is NEVER used — we pre-decode via faster-whisper
+#     and pass pyannote a {waveform, sample_rate} dict, so its Windows libtorchcodec load failure is
+#     a harmless warning (pyannote itself documents the waveform-dict path as the fix).
 dependencies = [
-    # 3.1.x is the version that matches the `speaker-diarization-3.1` checkpoint, keeps the
-    # `{waveform, sample_rate}` dict input API, and (via its own pin) constrains speechbrain<1 —
-    # sidestepping the 1.x LazyModule wall. <3.2 stays clear of the torchaudio-2.11 / speechbrain-1
-    # era entirely.
-    "pyannote.audio>=3.1,<3.2",
-    # pyannote 3.1.1 declares `speechbrain` with NO upper bound, so it floats to 1.x — whose
-    # LazyModule makes `inspect.getmodule` force-import optional integrations during pipeline load
-    # and raise (wall #3 in the cu132 diagnosis). Pin to the pre-LazyModule 0.5.x line (Q's
-    # production pin) to avoid it.
-    "speechbrain>=0.5.16,<1",
-    # torch/torchaudio 2.2.x still ship `AudioMetaData` + `list_audio_backends` (removed in 2.11),
-    # have cp311/cp312 wheels, and are a rock-solid pyannote 3.1 pairing. From the CPU index below.
-    "torch>=2.2,<2.3",
-    "torchaudio>=2.2,<2.3",
-    # torch 2.2.x is built against the numpy 1.x ABI; numpy 2.x triggers "_ARRAY_API not found".
-    "numpy>=1.26,<2",
-    # Bundles PyAV/ffmpeg and provides `decode_audio` — the SAME decoder the main venv's ASR uses,
-    # so diarization turns share the whisper timebase and segment↔turn assignment can't drift.
-    # `<1.1` keeps it on the numpy-1.x-compatible line that pairs with the torch 2.2 pin.
-    "faster-whisper>=1.0,<1.1",
-    # faster-whisper's utils.py does a module-level `import requests` but doesn't declare it; it
-    # normally rides in transitively, but the speechbrain<1 pin removed the only provider. Declare
-    # it so `from faster_whisper.audio import decode_audio` imports cleanly.
-    "requests>=2.28",
-    # pyannote 3.1.1 calls `hf_hub_download(..., use_auth_token=...)` internally; huggingface_hub
-    # removed that kwarg at 0.26. pyannote declares no upper bound, so it floats to 1.x and the
-    # model load dies with `unexpected keyword argument 'use_auth_token'`. Cap below the removal.
-    "huggingface_hub>=0.19,<0.26",
+    "pyannote.audio>=4.0",
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
+    # Bundles PyAV/ffmpeg + provides decode_audio — the SAME decoder the main venv's ASR uses, so
+    # diarization turns share the whisper timebase and segment↔turn assignment can't drift.
+    "faster-whisper>=1.0",
+    "soundfile>=0.13",
 ]
 
-# Script-only project: don't build/install a local package — just resolve deps and build the
-# venv. `worker.py` is invoked by absolute path, never imported as a package.
 [tool.uv]
 package = false
 
-# A clean, ecosystem-compatible CPU torch/torchaudio for pyannote, fully separate from the main
-# repo's torch-2.12+cu132 build. This project does NOT inherit the main pyproject's
-# `[tool.uv.sources]` (a sibling pyproject is its own uv project); the CPU index is pinned here
-# explicitly so it can never resolve the cu132 wheel.
+# Standard CUDA-13.0 torch (Blackwell sm_120), fully separate from the main repo's torch-2.12+cu132.
+# A cu130 build also runs on CPU (device=cpu), so this one venv serves both GPU and CPU boxes.
 [tool.uv.sources]
-torch = [{ index = "pytorch-cpu" }]
-torchaudio = [{ index = "pytorch-cpu" }]
+torch = [{ index = "pytorch-cu130" }]
+torchaudio = [{ index = "pytorch-cu130" }]
 
 [[tool.uv.index]]
-name = "pytorch-cpu"
-url = "https://download.pytorch.org/whl/cpu"
+name = "pytorch-cu130"
+url = "https://download.pytorch.org/whl/cu130"
 explicit = true

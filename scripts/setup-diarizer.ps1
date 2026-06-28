@@ -1,10 +1,11 @@
-# Build the isolated CPU-torch speaker-diarization sidecar venv (sidecar/diarizer/.venv).
+# Build the isolated speaker-diarization sidecar venv (sidecar/diarizer/.venv).
 #
 # Run ONCE per box at deploy time. Requires `uv` on PATH (same as the main `uv sync`); uv
-# auto-fetches a compatible Python 3.12 for the sidecar (its pinned torch 2.2.x line has no 3.13
-# wheels). NOT needed at service runtime — the running service only invokes the sidecar's
-# python.exe by path (extract._diarizer_sidecar_python). pyannote runs here, isolated, because it
-# is fundamentally incompatible with the main venv's torch-2.12+cu132 build.
+# auto-fetches a compatible Python 3.12 for the sidecar. NOT needed at service runtime — the
+# running service only invokes the sidecar's python.exe by path (extract._diarizer_sidecar_python).
+# pyannote runs here, isolated, on a STANDARD CUDA torch (2.9.1+cu130, Blackwell sm_120) because it
+# is incompatible with the main venv's bleeding-edge torch-2.12+cu132. The sidecar runs on GPU when
+# available (KB_MCP_DIARIZE_DEVICE=auto, default) and falls back to CPU.
 #
 # Usage:
 #   pwsh -File scripts/setup-diarizer.ps1            # build the venv
@@ -25,9 +26,10 @@ uv sync --directory $DiarizeDir   # creates sidecar/diarizer/.venv from pyprojec
 $Py = Join-Path $DiarizeDir ".venv\Scripts\python.exe"
 if (-not (Test-Path $Py)) { throw "sidecar venv build failed: $Py missing" }
 
-# Import smoke: proves the pinned stack (pyannote 3.1 / torch 2.2 / torchaudio 2.2 / speechbrain
-# 0.5.16 / huggingface_hub 0.25) assembles — i.e. none of the cu132-era version walls are present.
-& $Py -c "import warnings; warnings.filterwarnings('ignore'); import torch, torchaudio; from torchaudio import AudioMetaData, list_audio_backends; from pyannote.audio import Pipeline; from faster_whisper.audio import decode_audio; print('diarizer sidecar OK | torch', torch.__version__, '| torchaudio', torchaudio.__version__)"
+# Import smoke: proves the pinned stack (pyannote 4 / torch 2.9.1+cu130 / torchaudio 2.9.1)
+# assembles and reports whether the GPU is visible (Blackwell sm_120). torchcodec's libtorchcodec
+# load warning on Windows is harmless — we pre-decode and pass pyannote a waveform dict.
+& $Py -c "import warnings; warnings.filterwarnings('ignore'); import torch; from pyannote.audio import Pipeline; from faster_whisper.audio import decode_audio; print('diarizer sidecar OK | torch', torch.__version__, '| cuda', torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'CPU')"
 
 if ($Prewarm) {
     # Pull the gated pyannote weights into the shared HF cache now, instead of on the first upload.
@@ -36,7 +38,7 @@ if ($Prewarm) {
         Write-Warning "HUGGINGFACE_TOKEN/HF_TOKEN not set - skipping prewarm (gated download would fail)."
     } else {
         Write-Host "Prewarming pyannote weights (downloads to the shared HF cache)..."
-        & $Py -c "import os; from pyannote.audio import Pipeline; Pipeline.from_pretrained(os.environ.get('KB_MCP_DIARIZE_MODEL','pyannote/speaker-diarization-3.1'), use_auth_token=os.environ.get('HUGGINGFACE_TOKEN') or os.environ.get('HF_TOKEN'))"
+        & $Py -c "import os; from pyannote.audio import Pipeline; m=os.environ.get('KB_MCP_DIARIZE_MODEL','pyannote/speaker-diarization-3.1'); t=os.environ.get('HUGGINGFACE_TOKEN') or os.environ.get('HF_TOKEN'); Pipeline.from_pretrained(m, token=t)"
         Write-Host "  weights cached."
     }
 }

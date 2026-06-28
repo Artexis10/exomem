@@ -11,6 +11,7 @@ plain transcript and never raises.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -124,8 +125,37 @@ def test_outfile_cleaned_up_after_run(monkeypatch) -> None:
     assert not Path(captured["out"]).exists()  # temp out-file removed in the finally block
 
 
-def test_child_env_forces_cpu_and_merges_parent(monkeypatch) -> None:
+def test_is_nvidia_wheel_bin() -> None:
+    assert extract._is_nvidia_wheel_bin("C:\\venv\\Lib\\site-packages\\nvidia\\cublas\\bin")
+    assert extract._is_nvidia_wheel_bin("/v/lib/python/site-packages/nvidia/cudnn/bin")
+    assert not extract._is_nvidia_wheel_bin("C:\\Windows\\System32")
+    assert not extract._is_nvidia_wheel_bin("/usr/local/bin")
+
+
+def test_child_env_cpu_forces_cuda_off(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cpu")
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/x/nvidia/cublas/bin"]))
+    env = extract._diarizer_child_env()
+    assert env["CUDA_VISIBLE_DEVICES"] == ""  # CPU forced
+    assert env.get("HF_HUB_DISABLE_PROGRESS_BARS") == "1"
+    assert any(k.upper() == "PATH" for k in env)  # merged with the parent env
+
+
+def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cuda")
+    monkeypatch.setenv(
+        "PATH", os.pathsep.join(["C:\\Windows", "C:\\v\\nvidia\\cublas\\bin", "C:\\v\\nvidia\\cudnn\\bin"])
+    )
+    env = extract._diarizer_child_env()
+    assert env.get("CUDA_VISIBLE_DEVICES", "x") != ""  # GPU stays visible (not blanked)
+    parts = env["PATH"].split(os.pathsep)
+    assert "C:\\Windows" in parts  # non-nvidia entries kept
+    assert not any("nvidia" in p.lower() for p in parts)  # cu12 wheel bins stripped → no cuDNN shadow
+
+
+def test_run_diarization_passes_device_env(monkeypatch) -> None:
     _fake_python(monkeypatch)
+    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cpu")
     captured: dict[str, dict] = {}
 
     def _run(cmd, *a, **k):
@@ -135,11 +165,7 @@ def test_child_env_forces_cpu_and_merges_parent(monkeypatch) -> None:
 
     monkeypatch.setattr(extract.subprocess, "run", _run)
     extract._run_diarization(Path("x.wav"))
-    env = captured["env"]
-    assert env["CUDA_VISIBLE_DEVICES"] == ""  # sidecar forced to CPU, neutralizes inherited PATH
-    assert env.get("HF_HUB_DISABLE_PROGRESS_BARS") == "1"
-    # Merged with os.environ (Windows child needs SystemRoot/PATH), not a bare replacement.
-    assert any(k.upper() == "PATH" for k in env)
+    assert captured["env"]["CUDA_VISIBLE_DEVICES"] == ""  # device knob flows into the subprocess
 
 
 def test_sidecar_python_override_missing_returns_none(monkeypatch, tmp_path) -> None:

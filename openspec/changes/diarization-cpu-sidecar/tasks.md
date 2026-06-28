@@ -51,3 +51,20 @@
       the unchanged ECAPA naming). Then confirm the embedding stack is intact (a `find` + a fresh
       image/PDF upload still index — no torchcodec/cuDNN regression).
 - [x] 4.5 `openspec validate diarization-cpu-sidecar --strict` passes.
+
+## 5. GPU pivot — final stack (supersedes the initial CPU pins)
+
+The first iteration pinned a CPU-only stack (pyannote 3.1.1 / torch 2.2.2+cpu) — over-conservative.
+Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was unnecessary.
+
+- [x] 5.1 Re-pin `sidecar/diarizer/` to Q's proven GPU stack: `pyannote.audio>=4.0` (loads the
+      `speaker-diarization-3.1` model) / `torch==2.9.1` + `torchaudio==2.9.1` from the **cu130**
+      index (Blackwell `sm_120`). Dropped speechbrain (sidecar only diarizes). Re-locked.
+- [x] 5.2 Worker: add `KB_MCP_DIARIZE_DEVICE` (cpu|cuda|auto) → `pipeline.to(cuda)`; handle the
+      pyannote-4 `DiarizeOutput` (unwrap `exclusive_speaker_diarization`/`speaker_diarization`);
+      suppress the harmless torchcodec-on-Windows warning.
+- [x] 5.3 `extract._run_diarization`: device-aware child env (`_diarizer_child_env`) — only force
+      `CUDA_VISIBLE_DEVICES=""` for cpu; for cuda/auto keep the GPU and strip the cu12 `nvidia/*/bin`
+      dirs from the child PATH (cuDNN-shadow fix). Tests updated.
+- [x] 5.4 Verified end-to-end on the RTX 5080: **47s vs 18min CPU** for a 37-min track (~23×);
+      multi-speaker mix diarizes correctly. setup-diarizer.ps1 + README + this spec updated.

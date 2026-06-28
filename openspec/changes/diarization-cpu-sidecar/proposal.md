@@ -13,13 +13,17 @@ that pairs with it), which forces the broken pyannote/speechbrain/hf_hub combo.
 
 ## What Changes
 
-- **Run only the pyannote pipeline in an isolated sidecar venv with standard CPU torch**, as a
-  subprocess. A new `sidecar/diarizer/` uv project pins the canonical, rock-solid pyannote-3.1
-  stack (`pyannote.audio 3.1.1` / `torch 2.2.2+cpu` / `torchaudio 2.2.2+cpu` / `speechbrain 0.5.16`
-  / `huggingface_hub 0.25`, Python 3.12) where every version wall is absent. A standalone
+- **Run only the pyannote pipeline in an isolated sidecar venv on a standard CUDA torch**, as a
+  subprocess. A new `sidecar/diarizer/` uv project pins Q's proven Blackwell stack
+  (`pyannote.audio 4.x` package loading the `speaker-diarization-3.1` model / `torch 2.9.1+cu130`
+  — which still ships `sm_120` kernels, "cu130 required; cu126 lacks sm_120" / `torchaudio 2.9.1`,
+  Python 3.12). It runs **on the GPU** (`KB_MCP_DIARIZE_DEVICE=auto`, ~20× faster than CPU —
+  measured 47s vs 18min for a 37-min track on an RTX 5080) and falls back to CPU. A standalone
   `worker.py` decodes audio (faster-whisper's PyAV `decode_audio` — same decoder as the main ASR,
   so turns share the whisper timebase), runs the pipeline, and writes `{"turns":[…]}` JSON to an
-  out-file.
+  out-file. (The bleeding-edge `torch 2.12+cu132` the main service uses is the one pyannote can't
+  ride — it forces torchaudio 2.11, which dropped the APIs pyannote needs; `2.9.1+cu130` is the
+  sweet spot with both `sm_120` and pyannote compatibility.)
 - **`extract._run_diarization` becomes a thin subprocess seam**: locate the sidecar interpreter →
   spawn the worker → parse the out-file → `[(start, end, label)]`. Everything downstream
   (`_resolve_named_labels` → `voice_embed.embed_spans` ECAPA → `speaker_attribution` → `_diarize`)
