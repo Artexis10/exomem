@@ -29,3 +29,30 @@ def reciprocal_rank_fusion(
             seen.add(path)
             fused[path] = fused.get(path, 0.0) + 1.0 / (k + rank)
     return sorted(fused.items(), key=lambda t: (-t[1], t[0]))
+
+
+def reciprocal_rank_fusion_weighted(
+    result_lists: list[list[str]], weights: list[float], k: int = 60
+) -> list[tuple[str, float]]:
+    """Weighted RRF: each lane votes `weight_i * 1/(k+rank)` instead of `1/(k+rank)`.
+
+    Identical to `reciprocal_rank_fusion` when every weight is 1.0 — the seam
+    the intent-adaptive ranker uses to up-weight the lanes that matter for a
+    given query class (e.g. graph for relationship queries, bm25/keyword for
+    exact lookups) without disturbing the conceptual default. `weights` must be
+    the same length as `result_lists`, aligned positionally.
+    """
+    if len(weights) != len(result_lists):
+        raise ValueError(
+            f"weights ({len(weights)}) must align with result_lists "
+            f"({len(result_lists)})"
+        )
+    fused: dict[str, float] = {}
+    for ranking, weight in zip(result_lists, weights, strict=True):
+        seen: set[str] = set()
+        for rank, path in enumerate(ranking, start=1):
+            if path in seen:
+                continue
+            seen.add(path)
+            fused[path] = fused.get(path, 0.0) + weight * (1.0 / (k + rank))
+    return sorted(fused.items(), key=lambda t: (-t[1], t[0]))

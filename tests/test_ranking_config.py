@@ -31,6 +31,52 @@ def test_default_config_matches_legacy_constants() -> None:
     assert find_module.DEFAULT_RANKING == cfg
 
 
+def test_default_config_temporal_fields_are_off() -> None:
+    """Temporal boost defaults to OFF (1.0) so recency never perturbs a default
+    ranking; sigma is the documented 60-day Gaussian width."""
+    cfg = find_module.RankingConfig()
+    assert cfg.temporal_boost == 1.0
+    assert cfg.temporal_sigma_days == 60.0
+
+
+def test_default_conceptual_weights_are_neutral() -> None:
+    """The common-case intent must be fully neutral (all 1.0) so weighted RRF
+    reproduces the unweighted default exactly."""
+    cfg = find_module.RankingConfig()
+    assert cfg.intent_weights_conceptual == (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    # Every intent tuple has one weight per fusion lane (LANE_ORDER length).
+    assert len(find_module.LANE_ORDER) == 6
+    for intent in ("conceptual", "exact", "relationship", "temporal"):
+        assert len(cfg.intent_weights(intent)) == 6
+    # Non-conceptual intents DO diverge (that's the feature).
+    assert cfg.intent_weights("exact") != cfg.intent_weights_conceptual
+    assert cfg.intent_weights("relationship") != cfg.intent_weights_conceptual
+    assert cfg.intent_weights("temporal") != cfg.intent_weights_conceptual
+    # Unknown intent falls back to neutral.
+    assert cfg.intent_weights("bogus") == cfg.intent_weights_conceptual
+
+
+def test_intent_weights_lane_emphasis() -> None:
+    """Each non-conceptual intent up-weights its signature lane."""
+    cfg = find_module.RankingConfig()
+    # exact favours the lexical lanes (bm25 idx1, keyword idx2) over vector (idx0).
+    assert cfg.intent_weights("exact")[1] > cfg.intent_weights("exact")[0]
+    assert cfg.intent_weights("exact")[2] > cfg.intent_weights("exact")[0]
+    # relationship favours the graph lane (idx4).
+    assert cfg.intent_weights("relationship")[4] > 1.0
+    # temporal favours the recency lane (idx5).
+    assert cfg.intent_weights("temporal")[5] > 1.0
+
+
+def test_intent_override_does_not_change_conceptual_default(vault: Path) -> None:
+    """Forcing intent='conceptual' must match the auto-classified conceptual
+    default for a conceptual query — i.e. the override is a no-op there."""
+    for query in ("metabolism", "progressive disclosure"):
+        auto = find_module.find(vault, query=query, mode="hybrid")
+        forced = find_module.find(vault, query=query, mode="hybrid", intent="conceptual")
+        assert [h.path for h in auto] == [h.path for h in forced]
+
+
 def test_default_config_reproduces_no_config(vault: Path) -> None:
     """Passing config=DEFAULT_RANKING must be identical to passing nothing."""
     for query in ("metabolism", "progressive disclosure", "EGCG"):

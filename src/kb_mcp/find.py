@@ -10,8 +10,10 @@ Cached in-process between calls: keyed by file path, invalidated by mtime.
 from __future__ import annotations
 
 import logging
+import math
 import re
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -56,6 +58,43 @@ class RankingConfig:
     candidate_floor: int = 50
     graph_seed_cap: int = 20  # per-ranker fanout cap for 1-hop expansion
 
+    # ---- Temporal lane (Gaussian recency) ----
+    # `temporal_boost` is the peak multiplier a brand-new page gets on a
+    # temporal query: 1.0 = OFF (the default), so recency NEVER perturbs a
+    # non-temporal ranking. The post-RRF boost only fires when both
+    # `_is_temporal_query(query)` is true AND `temporal_boost != 1.0`.
+    temporal_boost: float = 1.0
+    temporal_sigma_days: float = 60.0  # Gaussian width: ~halflife of "recent"
+
+    # ---- Intent-adaptive weighted RRF ----
+    # One weight per fusion lane, aligned positionally to LANE_ORDER:
+    #   (vector, bm25, keyword, clip, graph, temporal)
+    # `conceptual` is fully neutral (all 1.0) so the common case reproduces the
+    # pre-feature unweighted RRF byte-for-byte; only the non-conceptual intents
+    # diverge. The adaptivity is the feature, not a global ranking change.
+    intent_weights_conceptual: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 1.0)
+    # exact: literal lookups — favour the lexical lanes (bm25 + keyword), damp
+    # the semantic/connectivity lanes that float topical-but-inexact matches.
+    intent_weights_exact: tuple[float, ...] = (0.7, 1.5, 1.5, 1.0, 0.7, 1.0)
+    # relationship: "what links/cites/relates to X" — favour the graph lane.
+    intent_weights_relationship: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.8, 1.0)
+    # temporal: up-weight the recency lane so newer matches surface first.
+    intent_weights_temporal: tuple[float, ...] = (1.0, 1.0, 1.0, 1.0, 1.0, 2.0)
+
+    def intent_weights(self, intent: str) -> tuple[float, ...]:
+        """Lane-weight tuple for a classified intent; conceptual (neutral) default."""
+        return {
+            "exact": self.intent_weights_exact,
+            "temporal": self.intent_weights_temporal,
+            "relationship": self.intent_weights_relationship,
+            "conceptual": self.intent_weights_conceptual,
+        }.get(intent, self.intent_weights_conceptual)
+
+
+# Fusion lane order — the canonical alignment for the per-intent weight tuples.
+# MUST match the order lanes are assembled into the weighted RRF in
+# `_find_semantic` (see `lane_rankings`).
+LANE_ORDER = ("vector", "bm25", "keyword", "clip", "graph", "temporal")
 
 DEFAULT_RANKING = RankingConfig()
 
@@ -305,7 +344,13 @@ def find(
     scope: str = "kb",
     mode: str = "hybrid",
     graph: bool = True,
-    rerank: bool = False,
+    rerank: bool | None = None,
+    auto_rerank: bool = False,
+    temporal: bool = True,
+    intent: str | None = None,
+    updated_after: str | None = None,
+    updated_before: str | None = None,
+    recency_days: int | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     config: RankingConfig | None = None,
@@ -338,11 +383,30 @@ def find(
     surfaces 1-hop neighbours of strong matches. Set False for pure
     BM25+vector hybrid without graph expansion.
 
-    `rerank`: when True (off by default; opt-in due to model-load cost),
-    runs the top `3 * limit` fused candidates through BAAI/bge-reranker-base
-    (a CrossEncoder) and re-sorts by reranker score. Recovers ordering
-    quality on ambiguous queries — the LLM-Wiki cases where vector floats
-    a topically-off doc to the top. ~50ms / candidate on Blackwell.
+    `rerank`: True/False forces the BAAI/bge-reranker-base CrossEncoder pass
+    on/off; `None` (default) defers to `auto_rerank`. When on, runs the top
+    `3 * limit` fused candidates through the reranker and re-sorts by reranker
+    score. Recovers ordering quality on ambiguous queries — the LLM-Wiki cases
+    where vector floats a topically-off doc to the top. ~50ms / candidate on
+    Blackwell. Off by default to keep the model out of the common path.
+
+    `auto_rerank`: when True AND `rerank` is left unset (None), the reranker
+    fires only when `should_rerank()` judges it worthwhile (top-3 vector/bm25
+    disagreement >50% or a long query). An explicit `rerank=True/False` always
+    wins over this. Default False so the suite never loads the model implicitly.
+
+    `temporal`: when True (default), temporal queries (recent/latest/when/...)
+    get a recency fusion lane and the optional Gaussian recency boost
+    (`config.temporal_boost`). Both are strict no-ops on non-temporal queries,
+    so this never perturbs the common case. Set False to disable recency logic.
+
+    `intent`: force the intent label ("exact"/"temporal"/"relationship"/
+    "conceptual") instead of classifying from the query text — a testing/override
+    seam. None (default) auto-classifies. Drives the per-intent lane weights.
+
+    `updated_after` / `updated_before` (ISO date strings) and `recency_days`
+    (int) are an explicit post-filter: hits whose `updated` date falls outside
+    the window are dropped (undated hits drop too). All None/off by default.
 
     `prefer_compiled`: when True (default), applies a small multiplicative
     boost to fused/rerank scores for COMPILED page types (insight, pattern,
@@ -394,6 +458,7 @@ def find(
             types=types, projects=projects, tags=tags,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
+            auto_rerank=auto_rerank, temporal=temporal, intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
             config=config or DEFAULT_RANKING,
@@ -441,6 +506,15 @@ def find(
             reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
             kb_keep = limit - reserve
             hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+
+    # Explicit recency window (off by default) — drop out-of-window hits last,
+    # after auto-widen, so it governs every mode uniformly.
+    hits = _filter_by_date(
+        hits,
+        updated_after=updated_after,
+        updated_before=updated_before,
+        recency_days=recency_days,
+    )
     return hits
 
 
@@ -516,7 +590,10 @@ def _find_semantic(
     scope: str,
     mode: str,
     graph: bool = True,
-    rerank: bool = False,
+    rerank: bool | None = False,
+    auto_rerank: bool = False,
+    temporal: bool = True,
+    intent: str | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     config: RankingConfig = DEFAULT_RANKING,
@@ -677,7 +754,35 @@ def _find_semantic(
             limit=limit, scope=scope,
         )
 
-    fused = fusion.reciprocal_rank_fusion(rankings, k=config.rrf_k)
+    # ---- Temporal lane: recency-ordered candidates (temporal queries only) ----
+    # Built ONLY when the query is temporal, so it's empty (and thus a no-op in
+    # fusion) for every other query — keeping the common path byte-identical.
+    temporal_ranking: list[str] = []
+    if temporal and _is_temporal_query(query):
+        pool: list[str] = []
+        for lane in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking):
+            pool.extend(lane)
+        temporal_ranking = _recency_ranking(pool, vault_root, candidate_k)
+
+    # ---- Intent-adaptive weighted RRF ----
+    # Classify the query, pick the per-intent lane weights, fuse. The
+    # "conceptual" default is all-1.0, so the common case reproduces the
+    # unweighted RRF exactly; only non-conceptual intents reweight the lanes.
+    intent_label = intent or _classify_intent(query)
+    weights = config.intent_weights(intent_label)
+    lane_rankings = [
+        vector_ranking, bm25_ranking, keyword_ranking,
+        clip_ranking, graph_ranking, temporal_ranking,
+    ]
+    active_lists: list[list[str]] = []
+    active_weights: list[float] = []
+    for lane, w in zip(lane_rankings, weights, strict=True):
+        if lane:
+            active_lists.append(lane)
+            active_weights.append(w)
+    fused = fusion.reciprocal_rank_fusion_weighted(
+        active_lists, active_weights, k=config.rrf_k
+    )
     # Apply type-weight boost before iterating fused candidates — affects the
     # iteration order for non-rerank flows. For rerank, the boost is also
     # applied to rerank_score below so it survives the final sort.
@@ -685,6 +790,10 @@ def _find_semantic(
         fused = _apply_type_boost(fused, vault_root, config)
     if prefer_active:
         fused = _apply_status_demotion(fused, vault_root, config)
+    # Gaussian recency multiplier (off unless config.temporal_boost != 1.0 AND
+    # the query is temporal). Mirrors the type/status post-RRF multipliers.
+    if temporal:
+        fused = _apply_temporal_boost(fused, vault_root, query, config)
     vector_paths: set[str] = set(vector_ranking)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
@@ -693,8 +802,12 @@ def _find_semantic(
     # any single token with the query (false positives). Vector-ranked
     # candidates skip that gate by design: surfacing semantically-similar
     # files that don't contain the literal tokens is the whole point.
-    # When reranking, we over-fetch then trim post-rerank.
-    target_n = limit * 3 if rerank else limit
+    # When reranking, we over-fetch then trim post-rerank. `rerank` may be
+    # unset (None) with `auto_rerank` on — in that case we don't yet know
+    # whether we'll rerank (should_rerank inspects the built hits), so over-fetch
+    # whenever reranking is even possible.
+    may_rerank = rerank is True or (rerank is None and auto_rerank)
+    target_n = limit * 3 if may_rerank else limit
     hits: list[Hit] = []
     seen: set[str] = set()
     for rel_path, _score in fused:
@@ -761,7 +874,15 @@ def _find_semantic(
         if len(hits) >= target_n:
             break
 
-    if rerank and hits:
+    # Resolve the rerank decision. An explicit rerank=True/False always wins;
+    # otherwise (rerank is None) auto_rerank consults should_rerank on the built
+    # hits. Keeps the reranker model out of the default/test path.
+    if rerank is None:
+        do_rerank = auto_rerank and should_rerank(hits, query, config)
+    else:
+        do_rerank = rerank
+
+    if do_rerank and hits:
         try:
             from . import embeddings as emb
             # Best passage for each hit: the matched chunk when we have one,
@@ -1009,6 +1130,201 @@ def _apply_status_demotion(
         adjusted.append((path, score * mult))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
+
+
+# ---- Intent classification + temporal lane (deterministic, no LLM) ----
+# Pure pattern-matching, per the pure-substrate constraint: NO model decides
+# intent — only literal markers do. Word-boundaried so a marker can't fire from
+# a substring of an unrelated token (e.g. "reference-marker-xyz" must NOT read
+# as a relationship query).
+_TEMPORAL_MARKERS = re.compile(
+    r"\b(recent|recently|latest|newest|today|yesterday|tonight|"
+    r"week|weeks|month|months|year|years|"
+    r"when|before|after|since|until|ago|"
+    r"20\d\d|\d{4}-\d{2}-\d{2})\b",
+    re.IGNORECASE,
+)
+_RELATIONSHIP_MARKERS = re.compile(
+    r"\b(links?|linked|relate[sd]?|related|relationship|"
+    r"connect(?:s|ed|ion|ions)?|cite[sd]?|citations?|"
+    r"mention(?:s|ed)?)\b",
+    re.IGNORECASE,
+)
+_EXACT_LEADING = re.compile(r"^(who|whose|what|which)\b", re.IGNORECASE)
+
+
+def _is_temporal_query(query: str) -> bool:
+    """True when the query carries a recency/time marker (deterministic scan).
+
+    Gates the temporal lane + Gaussian recency boost. Markers: recent/latest/
+    today/yesterday/week/month/year/when/before/after/since/ago, a bare 4-digit
+    year (20xx), or an ISO date. Word-boundaried to avoid substring false hits.
+    """
+    if not query:
+        return False
+    return _TEMPORAL_MARKERS.search(query) is not None
+
+
+def _classify_intent(query: str) -> str:
+    """Deterministic intent label: exact | temporal | relationship | conceptual.
+
+    Precedence: a literal/lookup signal (quotes, a wikilink, or a leading
+    who/what/which) wins as "exact"; then temporal markers; then relationship
+    markers; else the common "conceptual" case (semantic recall). Used only to
+    pick a lane-weight tuple — never changes WHICH candidates are considered,
+    only how they're fused.
+    """
+    q = (query or "").strip()
+    if not q:
+        return "conceptual"
+    if '"' in q or "[[" in q:
+        return "exact"
+    if _EXACT_LEADING.match(q):
+        return "exact"
+    if _is_temporal_query(q):
+        return "temporal"
+    if _RELATIONSHIP_MARKERS.search(q):
+        return "relationship"
+    return "conceptual"
+
+
+def _parse_date(value: str | None) -> date | None:
+    """Best-effort ISO date parse (YYYY-MM-DD prefix); None when unparseable."""
+    if not value:
+        return None
+    try:
+        return date.fromisoformat(str(value).strip()[:10])
+    except ValueError:
+        return None
+
+
+def _recency_multiplier(days_old: float, config: RankingConfig = DEFAULT_RANKING) -> float:
+    """Gaussian recency weight: peaks at `temporal_boost` for a brand-new page,
+    decaying to 1.0 over `temporal_sigma_days`. Returns 1.0 when boost is off."""
+    if config.temporal_boost == 1.0:
+        return 1.0
+    sigma = config.temporal_sigma_days or 1.0
+    return 1.0 + (config.temporal_boost - 1.0) * math.exp(
+        -(days_old ** 2) / (2.0 * sigma ** 2)
+    )
+
+
+def _apply_temporal_boost(
+    fused: list[tuple[str, float]],
+    vault_root: Path,
+    query: str,
+    config: RankingConfig = DEFAULT_RANKING,
+) -> list[tuple[str, float]]:
+    """Re-sort fused `(path, score)` after a Gaussian recency multiplier.
+
+    Mirrors `_apply_type_boost`/`_apply_status_demotion` but gated on BOTH a
+    temporal query AND `temporal_boost != 1.0`, so it is a strict no-op for the
+    default config and for every non-temporal query. Pages with no parseable
+    `updated`/`captured` date keep their score (multiplier 1.0).
+    """
+    if not _is_temporal_query(query) or config.temporal_boost == 1.0:
+        return fused
+    today = date.today()
+    adjusted: list[tuple[str, float]] = []
+    for path, score in fused:
+        page = _CACHE.get(vault_root / path, vault_root)
+        d = _parse_date(page.updated) if page else None
+        if d is None:
+            mult = 1.0
+        else:
+            days_old = max(0.0, float((today - d).days))
+            mult = _recency_multiplier(days_old, config)
+        adjusted.append((path, score * mult))
+    adjusted.sort(key=lambda t: (-t[1], t[0]))
+    return adjusted
+
+
+def _recency_ranking(
+    candidate_paths: list[str], vault_root: Path, cap: int
+) -> list[str]:
+    """The temporal fusion lane: candidate paths ordered most-recently-updated
+    first. Undated pages are dropped (no recency vote). Capped at `cap`."""
+    dated: list[tuple[date, str]] = []
+    seen: set[str] = set()
+    for p in candidate_paths:
+        if p in seen:
+            continue
+        seen.add(p)
+        page = _CACHE.get(vault_root / p, vault_root)
+        if page is None:
+            continue
+        d = _parse_date(page.updated)
+        if d is not None:
+            dated.append((d, p))
+    dated.sort(key=lambda t: (-t[0].toordinal(), t[1]))
+    return [p for _, p in dated][:cap]
+
+
+def _filter_by_date(
+    hits: list[Hit],
+    *,
+    updated_after: str | None = None,
+    updated_before: str | None = None,
+    recency_days: int | None = None,
+) -> list[Hit]:
+    """Drop hits whose `updated` date falls outside the requested window.
+
+    All three knobs are optional and off by default. A hit with no parseable
+    date is dropped when any window is active (it can't be confirmed in-range).
+    """
+    after = _parse_date(updated_after)
+    before = _parse_date(updated_before)
+    floor: date | None = None
+    if recency_days is not None and recency_days >= 0:
+        floor = date.today() - timedelta(days=recency_days)
+    if after is None and before is None and floor is None:
+        return hits
+    out: list[Hit] = []
+    for h in hits:
+        d = _parse_date(h.updated)
+        if d is None:
+            continue
+        if after is not None and d < after:
+            continue
+        if before is not None and d > before:
+            continue
+        if floor is not None and d < floor:
+            continue
+        out.append(h)
+    return out
+
+
+def should_rerank(
+    hits: list[Hit], query: str, config: RankingConfig = DEFAULT_RANKING
+) -> bool:
+    """Heuristic: is this query worth the reranker's model-load cost?
+
+    True when the top-3 vector and top-3 bm25 paths disagree by >50% (the
+    rankers can't agree on the best matches, so a cross-encoder tiebreak pays
+    off) OR the query is long (>=5 tokens, where lexical signal is diluted).
+    Deterministic and torch-free — inspects only the ranks already on `hits`.
+    """
+    if len((query or "").split()) >= 5:
+        return True
+    vec = [
+        h.path
+        for h in sorted(
+            (h for h in hits if h.vector_rank is not None),
+            key=lambda h: h.vector_rank,  # type: ignore[arg-type,return-value]
+        )
+    ][:3]
+    bm = [
+        h.path
+        for h in sorted(
+            (h for h in hits if h.bm25_rank is not None),
+            key=lambda h: h.bm25_rank,  # type: ignore[arg-type,return-value]
+        )
+    ][:3]
+    if not vec or not bm:
+        return False
+    overlap = len(set(vec) & set(bm))
+    disagreement = 1.0 - overlap / max(len(vec), len(bm))
+    return disagreement > 0.5
 
 
 def _keyword_match_paths(vault_root: Path, query_norm: str, scope: str) -> list[str]:
