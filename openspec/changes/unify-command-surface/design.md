@@ -1,21 +1,19 @@
-# Design — Unified command surface
+# Design — Unified command surface (single source of truth)
 
 ## Context
 
-Three surfaces, one set of leaf functions, but the *surface wiring* is hand-maintained per
-surface (server.py MCP decorators + REST routes + `post_tools` OpenAPI list; `__main__.py` CLI).
-The leaf functions (`find_module.find`, `note_module.note`, …) already take `vault_root` + kwargs
-and return plain dicts/dataclasses — so a single declaration per operation can drive every surface.
+Three surfaces, one set of leaf functions, but the *surface wiring* is hand-maintained per surface
+(server.py MCP decorators + REST routes + `post_tools` OpenAPI list; `__main__.py` CLI). The leaf
+functions (`find_module.find`, `note_module.note`, …) take `vault_root` + kwargs and return plain
+dicts/dataclasses — so a single declaration per operation can generate *every* surface.
 
 ## Goals / non-goals
 
-- **Goal:** one declarative registry as the source of truth for REST + OpenAPI + CLI; a real CLI
-  for the core ops with Endstate-style ergonomics; no surface drift.
-- **Non-goal:** regenerating the `@mcp.tool` decorators (they stay hand-registered — rich
-  docstrings, `note`'s runtime project-key docstring, the tier-2 conditional). Instead a test
-  asserts the registry agrees with the live MCP tool set.
-- **Non-goal:** auth changes (CLI local-only; REST keeps `KB_MCP_REST_API_KEY`), streaming, and
-  exposing every write op via CLI in this change.
+- **Goal:** one registry as the genuine single source of truth generating MCP + REST + CLI +
+  OpenAPI; a real `kb` CLI (reads + writes) with Endstate ergonomics; provably no change to what
+  Claude sees.
+- **Non-goal:** auth changes (CLI local-only; REST keeps `KB_MCP_REST_API_KEY`), streaming,
+  SKILL/scaffold doc merges.
 
 ## The registry (`commands.py`)
 
@@ -23,59 +21,67 @@ and return plain dicts/dataclasses — so a single declaration per operation can
 @dataclass(frozen=True)
 class Param:
     name: str
-    type: str            # "str" | "int" | "bool" | "list[str]"
+    type: str            # "str" | "int" | "bool" | "list[str]" | "dict"
     required: bool = False
     help: str = ""
-    cli_positional: bool = False   # first positional arg in the CLI (e.g. find's query, get's path)
+    cli_positional: bool = False
 
 @dataclass(frozen=True)
 class Command:
-    name: str            # canonical op name, identical across surfaces
-    leaf: Callable       # the leaf function (called as leaf(vault_root, **kwargs))
-    summary: str
+    name: str            # canonical op name — identical across all surfaces
+    leaf: Callable       # leaf(vault_root, **kwargs)
+    description: str      # the FULL tool description Claude reads (was the MCP docstring)
     params: tuple[Param, ...]
     surfaces: frozenset  # subset of {"mcp", "rest", "cli"}
     tier: int = 1
+    cli_writes: bool = False  # marks a vault-mutating op (for CLI grouping/confirms)
 ```
 
-`COMMANDS: tuple[Command, ...]` enumerates the operations. Read/query ops (`find`, `get`, `audit`,
-`suggest_links`, `provenance_report`, `query_data`, `list_directory`) get `{"mcp","rest","cli"}`;
-write ops (`note`, `add`, `edit`, `replace`, `link`, `preserve`, `reconcile`) get `{"mcp","rest"}`
-for now (CLI deferred — registry makes it a one-line flip later). `surfaces` carries `"mcp"` only
-as the consistency-check anchor; it does NOT register the MCP tool (those stay hand-wired).
+`COMMANDS: tuple[Command, ...]` enumerates every operation, carrying its description + param specs.
+
+## How one registry drives all four surfaces
+
+- **MCP (the key piece): generated via `bind_vault`.** `bind_vault(leaf, vault_root)` returns a
+  callable whose `__signature__` is the leaf's signature **minus `vault_root`**, whose `__doc__` is
+  the registry `description`, and which calls `leaf(vault_root, **kwargs)`. FastMCP introspects that
+  bound callable exactly as it does a hand-written wrapper, so `mcp.tool(bind_vault(cmd.leaf, root))`
+  registers a tool with the same input-schema + description. The build loops `COMMANDS` with `"mcp"`.
+  - **Fidelity guard (non-negotiable):** a snapshot test captures every current tool's
+    `inputSchema` + `description` (committed as a fixture), and asserts the registry-generated tools
+    are **byte-identical**. This is what makes a 24-tool migration safe — Claude's view can't drift.
+  - **Exceptions:** any tool whose generated schema can't match cleanly (the wide `note`, the
+    `note`-docstring project-key injection, anything with a non-introspectable signature) stays
+    hand-registered and is listed in `HAND_REGISTERED_EXCEPTIONS`; the snapshot test skips those but
+    asserts the exception list is explicit (no silent gaps).
+- **REST:** loop `COMMANDS` with `"rest"` → `@mcp.custom_route("/api/<name>", POST)` with one generic
+  handler (gate → JSON body → coerce to leaf kwargs via `Param` specs → `run_in_threadpool` →
+  envelope). Existing 9 names + leaf calls preserved (pinned by a back-compat test).
+- **OpenAPI:** generated from the `Param` specs (real per-parameter schemas + the description);
+  deletes the `post_tools` hand-list.
+- **CLI:** loop `COMMANDS` with `"cli"` → an `argparse` subparser per op (positional for
+  `cli_positional` params, `--flags` for the rest; `list[str]` repeatable/comma; `bool` store_true).
+  Exposes **reads and writes**. `note`'s type-specific args use a `--field key=value` escape so the
+  CLI stays clean. Endstate ergonomics: global `--json` (envelope) vs human default; structured
+  `Error [CODE]: message` + remediation; exit 0/1/2. Local-only (already has vault access).
 
 ## Decisions
 
-- **Registry drives REST, not MCP.** A loop over `COMMANDS` with `"rest"` registers
-  `@mcp.custom_route("/api/<name>", POST)` using one generic handler: gate → parse JSON body →
-  coerce body to leaf kwargs via the `Param` specs → `run_in_threadpool(cmd.leaf, vault_root, **kwargs)`
-  → envelope. This replaces the 9 hand-wired blocks and expands coverage. The existing 9 names +
-  their leaf calls are preserved (a back-compat test pins them).
-- **OpenAPI is generated** from the `Param` specs — real per-parameter schemas + the summary, not
-  `{type: object}`. Kills the `post_tools` hand-list and its drift.
-- **CLI is generated** from `COMMANDS` with `"cli"`. `argparse` subparser per op; `cli_positional`
-  params become positionals (`find "query"`, `get <path>`), the rest become `--flags`
-  (`list[str]` → repeatable or comma-split; `bool` → store_true). Endstate ergonomics:
-  - global `--json` → single-line envelope to stdout; default → human-readable.
-  - structured errors: `Error [CODE]: message` + remediation (human) / envelope `error` block (json).
-  - exit codes: 0 ok, 1 op error, 2 usage/arg error.
-  - CLI is **local-only** (already has vault filesystem access; no auth needed), matching today.
+- **Console scripts:** add `[project.scripts]` `kb = "kb_mcp.__main__:main"` and
+  `kb-mcp = "kb_mcp.__main__:main"` — `kb find "…"` is the daily command; `kb-mcp` the namespaced
+  alias. `python -m kb_mcp` keeps working.
 - **Shared envelope** (`cli_ops.envelope`): `{success, data, error: {code, message, remediation}}`,
-  mirroring Endstate. REST 200 wraps results as `{success: true, data: …}`; REST 4xx as
-  `{success: false, error: {…}}`. The REST facade is personal + new, so adopting the envelope is a
-  low-risk contract improvement (documented as the one behavior change).
-- **Wide signatures (`note`, 20+ args):** the registry `params` lists the *exposed* set (the common
-  fields); type-specific extras stay reachable via MCP. CLI scope for writes is deferred anyway, so
-  REST keeps full kwargs pass-through for them.
-- **Consistency guard:** a test asserts every `Command` with `"mcp"` exists as a live MCP tool and
-  its `leaf` is the same callable the MCP tool delegates to — so the registry can't silently drift
-  from the real tool set.
+  mirroring Endstate. REST 200 → `{success:true, data:…}`; REST 4xx → `{success:false, error:{…}}`.
+  Personal facade → adopting the envelope is a low-risk contract improvement (the one documented
+  behavior change).
+- **Description lives in the registry, not the wrapper.** Moving each tool's description into
+  `Command.description` is the migration's bulk; the snapshot test guarantees each moved string is
+  reproduced verbatim.
+- **Tier-2 honored:** `tier=2` ops respect `KB_MCP_DISABLE_TIER2` for MCP/REST/CLI exposure.
+- **Binary-blob guard preserved** in the REST coercion for text fields (`BINARY_BLOB_REJECTED`).
 
 ## Risks
 
-- The REST refactor must be **behavior-preserving** for the existing 9 routes — pinned by a
-  before/after test (same status codes, same leaf calls, same result payloads under the envelope).
-- Body→kwargs coercion must reject unknown/oversized fields the way the hand-written handlers did
-  (keep the `BINARY_BLOB_REJECTED` guard for text fields).
-- `query_data`/`list_directory` are tier-2 (opt-out via `KB_MCP_DISABLE_TIER2`) — the registry
-  honors the same flag for their REST/CLI exposure.
+- **FastMCP schema fidelity** is the central risk — mitigated by the byte-identical snapshot test +
+  the explicit exception list. Build order: snapshot FIRST, then migrate, so every step is checked.
+- The REST refactor must be behavior-preserving for the existing 9 (before/after test).
+- `note`'s width: handled by keeping it a hand-registered MCP exception + a `--field` CLI escape.
