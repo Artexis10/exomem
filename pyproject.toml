@@ -17,6 +17,7 @@ dependencies = [
     "rank-bm25>=0.2.2",
     "numpy>=1.26",
     "snowballstemmer>=2.2",
+    "watchdog>=4.0",            # live file-watcher: re-embed out-of-band .md edits (lazy import; soft-fails if absent)
 ]
 
 # Hybrid semantic search (local vector embeddings). Optional so a lean install

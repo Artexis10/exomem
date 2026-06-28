@@ -22,6 +22,7 @@ Transports:
 from __future__ import annotations
 
 import base64
+import json
 import logging
 import os
 import secrets
@@ -217,6 +218,42 @@ def _find_call_summary(message) -> str:
     return f' query="{q}" mode={mode} scope={scope}'
 
 
+class _RestJSONResponse(JSONResponse):
+    """JSONResponse that renders frontmatter dates (datetime.date) as ISO strings.
+
+    YAML parses `created: 2026-01-01` to a `datetime.date`, which Starlette's default
+    json.dumps can't serialize. The MCP transport sidesteps this via pydantic; the
+    REST facade needs its own `default=str` fallback.
+    """
+
+    def render(self, content) -> bytes:  # noqa: ANN001
+        return json.dumps(
+            content, ensure_ascii=False, allow_nan=False, default=str
+        ).encode("utf-8")
+
+
+def _link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
+    """Inbound + outbound wikilink summary for the `get(links=True)` option.
+
+    Inbound reuses `vault.find_inbound_wikilinks` (the same matcher
+    `list_inbound_links` uses); outbound scans the body's wikilinks (code spans
+    skipped), de-duped and order-preserved.
+    """
+    inbound = (
+        [m.as_dict() for m in vault.find_inbound_wikilinks(vault_root, rel_path)]
+        if rel_path
+        else []
+    )
+    outbound: list[str] = []
+    seen: set[str] = set()
+    for m in find_body_wikilinks(body):
+        target = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+        if target and target not in seen:
+            seen.add(target)
+            outbound.append(target)
+    return {"inbound": inbound, "outbound": outbound}
+
+
 def _server_icons() -> list[mcp.types.Icon]:
     """Load icon.svg from the package dir and return an mcp.types.Icon list.
 
@@ -330,6 +367,22 @@ def build_server(*, require_auth: bool) -> FastMCP:
             media_worker.scan_pending()  # re-enqueue anything a prior run left pending
         except Exception as e:  # noqa: BLE001 — startup scan is best-effort
             log.warning("media worker startup scan failed: %s", e)
+
+    # Live file-watcher: re-embed out-of-band Obsidian/mobile/filesystem `.md` edits in
+    # ~1s instead of waiting for a manual `reconcile`. Off when KB_MCP_DISABLE_FILE_WATCHER
+    # is set, and also when embeddings are disabled (no point watching if we can't embed —
+    # the test suite sets KB_MCP_DISABLE_EMBEDDINGS, so the watcher never starts in tests).
+    file_watcher = None
+    if not os.environ.get("KB_MCP_DISABLE_FILE_WATCHER") and not os.environ.get(
+        "KB_MCP_DISABLE_EMBEDDINGS"
+    ):
+        from . import file_watcher as file_watcher_module
+
+        file_watcher = file_watcher_module.FileWatcher(vault_root)
+        try:
+            file_watcher.start()  # soft no-op if watchdog isn't installed
+        except Exception as e:  # noqa: BLE001 — the watcher must never break startup
+            log.warning("file watcher start failed: %s", e)
 
     # Public base URL (e.g. https://kb.example.com). Used by the OAuth
     # discovery route AND the mint_upload_token tool, so define it unconditionally.
@@ -637,6 +690,379 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
             status = 404 if e.code == "NOT_FOUND" else 400
             return JSONResponse({"code": e.code, "reason": e.reason}, status_code=status)
         return FileResponse(abs_path, filename=abs_path.name)
+
+    # ---- Personal REST facade: /api/<tool> JSON wrappers over the SAME leaves ----
+    #
+    # A token-gated HTTP/JSON surface for scripting the KB from your own tools
+    # (a cron job, a shell script, a phone shortcut) WITHOUT the MCP/OAuth dance.
+    # This is NOT a public/ChatGPT plugin surface: single long-lived API key
+    # (KB_MCP_REST_API_KEY), no /.well-known/ai-plugin.json. Disabled (503) unless
+    # the key is set — opt-in only. Each handler calls the exact same leaf function
+    # the matching MCP tool calls (no duplicated business logic) and maps the JSON
+    # body to kwargs, returning the leaf's structured error as 400 {error, reason}.
+    rest_api_key = os.environ.get("KB_MCP_REST_API_KEY", "").strip() or None
+    rest_enabled = rest_api_key is not None
+
+    def _rest_authorized(request: Request) -> bool:
+        # Same non-spoofable model as /upload: the long-lived REST key (constant-time
+        # compared), a short-lived `rest`-scoped minted token, or a verified CF Access
+        # JWT. Never the plaintext cf-access-* email header.
+        if rest_api_key is not None:
+            header = request.headers.get("authorization", "")
+            if header.startswith("Bearer "):
+                presented = header[len("Bearer ") :].strip()
+                if secrets.compare_digest(presented, rest_api_key):
+                    return True
+                if upload_tokens.verify(presented, rest_api_key, scope="rest"):
+                    return True
+        if cf_jwks is not None:
+            if cf_access.verify(
+                request.headers.get("cf-access-jwt-assertion"),
+                jwks_client=cf_jwks,
+                team_domain=cf_team,
+                audience=cf_aud,
+            ):
+                return True
+        return False
+
+    def _rest_err(code: str, reason: str, status: int) -> JSONResponse:
+        return JSONResponse({"error": code, "reason": reason}, status_code=status)
+
+    def _rest_gate(request: Request) -> JSONResponse | None:
+        """503 when the facade is off, 401 when unauthorized, else None (proceed)."""
+        if not rest_enabled:
+            return _rest_err(
+                "REST_DISABLED",
+                "REST API is off: set KB_MCP_REST_API_KEY to enable the /api/* facade",
+                503,
+            )
+        if not _rest_authorized(request):
+            return _rest_err("UNAUTHORIZED", "missing or invalid REST API key", 401)
+        return None
+
+    async def _rest_body(request: Request) -> dict | None:
+        """Parse the JSON request body to a dict. `{}` for empty; None if malformed."""
+        try:
+            raw = await request.body()
+        except Exception:  # noqa: BLE001
+            return {}
+        if not raw or not raw.strip():
+            return {}
+        try:
+            data = json.loads(raw)
+        except Exception:  # noqa: BLE001
+            return None
+        return data if isinstance(data, dict) else None
+
+    @mcp.custom_route("/api/find", methods=["POST"])
+    async def _api_find(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            hits = await run_in_threadpool(
+                find_module.find,
+                vault_root,
+                query=body.get("query", ""),
+                types=body.get("types"),
+                projects=body.get("projects"),
+                tags=body.get("tags"),
+                file_types=body.get("file_types"),
+                exclude_file_types=body.get("exclude_file_types"),
+                limit=body.get("limit", 15),
+                scope=body.get("scope", "kb"),
+                mode=body.get("mode", "hybrid"),
+                graph=body.get("graph", True),
+                rerank=body.get("rerank", False),
+                prefer_compiled=body.get("prefer_compiled", True),
+                prefer_active=body.get("prefer_active", True),
+            )
+        except (ValueError, TypeError) as e:
+            return _rest_err("INVALID_FIND", str(e), 400)
+        query_log.log_find_call(
+            query=body.get("query", ""), mode=body.get("mode", "hybrid"),
+            scope=body.get("scope", "kb"), types=body.get("types"),
+            projects=body.get("projects"), tags=body.get("tags"),
+            limit=body.get("limit", 15), rerank=body.get("rerank", False),
+            prefer_compiled=body.get("prefer_compiled", True),
+            graph=body.get("graph", True), hits=hits,
+        )
+        # Same shape as the MCP `find` tool: a bare list of hit dicts.
+        return _RestJSONResponse([h.as_dict() for h in hits])
+
+    @mcp.custom_route("/api/get", methods=["POST"])
+    async def _api_get(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            result = await run_in_threadpool(
+                get_page_module.get_page, vault_root, path=body.get("path", "")
+            )
+        except get_page_module.GetError as e:
+            status = 404 if e.code == "NOT_FOUND" else 400
+            return _rest_err(e.code, e.reason, status)
+        out = result.as_dict()
+        if body.get("include_history"):
+            out["history"] = vault.read_log_entries(vault_root, out["path"])
+        if body.get("links"):
+            out["links"] = _link_summary(vault_root, out["path"], out["body"])
+        query_log.log_get_call(
+            read_path=out["path"], include_history=bool(body.get("include_history"))
+        )
+        return _RestJSONResponse(out)
+
+    @mcp.custom_route("/api/note", methods=["POST"])
+    async def _api_note(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            result = await run_in_threadpool(
+                lambda: note_module.note(
+                    vault_root,
+                    content=body.get("content", ""),
+                    note_type=body.get("note_type", ""),
+                    title=body.get("title", ""),
+                    project=body.get("project"),
+                    projects=body.get("projects"),
+                    sources=body.get("sources"),
+                    tags=body.get("tags"),
+                    status=body.get("status"),
+                    severity=body.get("severity"),
+                    pattern_type=body.get("pattern_type"),
+                    domain=body.get("domain"),
+                    started=body.get("started"),
+                    duration=body.get("duration"),
+                    hypothesis=body.get("hypothesis"),
+                    n=body.get("n"),
+                    concluded=body.get("concluded"),
+                    medium=body.get("medium"),
+                    recorded=body.get("recorded"),
+                    published=body.get("published"),
+                    host=body.get("host"),
+                    editor=body.get("editor"),
+                    project_category=body.get("project_category"),
+                )
+            )
+        except note_module.NoteError as e:
+            return _rest_err(e.code, f"{e.reason} (missing: {e.missing})", 400)
+        query_log.log_write_call(
+            tool="note", written_path=result.path, cited_sources=body.get("sources")
+        )
+        return _RestJSONResponse(result.as_dict())
+
+    @mcp.custom_route("/api/add", methods=["POST"])
+    async def _api_add(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            result = await run_in_threadpool(
+                lambda: add_module.add(
+                    vault_root,
+                    source_schema,
+                    content=body.get("content", ""),
+                    source_type=body.get("source_type", ""),
+                    title=body.get("title", ""),
+                    url=body.get("url"),
+                    tags=body.get("tags"),
+                    why_captured=body.get("why_captured"),
+                )
+            )
+        except add_module.AddError as e:
+            return _rest_err(e.code, f"{e.reason} (missing: {e.missing})", 400)
+        query_log.log_write_call(tool="add", written_path=result.path, cited_sources=[])
+        return _RestJSONResponse(result.as_dict())
+
+    @mcp.custom_route("/api/edit", methods=["POST"])
+    async def _api_edit(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            result = await run_in_threadpool(
+                lambda: edit_module.edit(
+                    vault_root,
+                    path=body.get("path", ""),
+                    why=body.get("why", ""),
+                    new_body=body.get("new_body"),
+                    tags=body.get("tags"),
+                    old_string=body.get("old_string"),
+                    new_string=body.get("new_string"),
+                    replace_all=body.get("replace_all", False),
+                    heading=body.get("heading"),
+                    section_position=body.get("section_position", "append"),
+                    expected_hash=body.get("expected_hash"),
+                    validate_only=body.get("validate_only", False),
+                )
+            )
+        except edit_module.EditError as e:
+            return _rest_err(e.code, f"{e.reason} (missing: {e.missing})", 400)
+        return _RestJSONResponse(result.as_dict())
+
+    @mcp.custom_route("/api/audit", methods=["POST"])
+    async def _api_audit(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            report = await run_in_threadpool(
+                audit_module.audit, vault_root, categories=body.get("categories")
+            )
+        except (ValueError, TypeError) as e:
+            return _rest_err("INVALID_AUDIT", str(e), 400)
+        return _RestJSONResponse(report.as_dict())
+
+    @mcp.custom_route("/api/reconcile", methods=["POST"])
+    async def _api_reconcile(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        report = await run_in_threadpool(
+            reconcile_module.reconcile, vault_root, dry_run=body.get("dry_run", False)
+        )
+        return _RestJSONResponse(report.as_dict())
+
+    @mcp.custom_route("/api/list_directory", methods=["POST"])
+    async def _api_list_directory(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        try:
+            result = await run_in_threadpool(
+                list_directory_module.list_directory,
+                vault_root,
+                path=body.get("path", ""),
+                recursive=body.get("recursive", False),
+                include_hidden=body.get("include_hidden", False),
+            )
+        except list_directory_module.ListDirectoryError as e:
+            status = 404 if e.code == "NOT_FOUND" else 400
+            return _rest_err(e.code, e.reason, status)
+        return _RestJSONResponse(result.as_dict())
+
+    @mcp.custom_route("/api/suggest_links", methods=["POST"])
+    async def _api_suggest_links(request: Request) -> JSONResponse:
+        gate = _rest_gate(request)
+        if gate is not None:
+            return gate
+        body = await _rest_body(request)
+        if body is None:
+            return _rest_err("INVALID_BODY", "request body must be a JSON object", 400)
+        path = body.get("path")
+        draft_title = body.get("draft_title")
+        draft_body = body.get("draft_body")
+        limit = body.get("limit", 8)
+        scope = body.get("scope", "kb")
+        try:
+            if path:
+                gp = await run_in_threadpool(
+                    get_page_module.get_page, vault_root, path=path
+                )
+                page = find_module._CACHE.get(vault_root / gp.path, vault_root)
+                if page is None:
+                    return _rest_err("UNREADABLE", f"could not parse {gp.path}", 400)
+                existing_links = set(
+                    find_module._outbound_wikilink_paths(page, vault_root)
+                )
+                suggestions = await run_in_threadpool(
+                    lambda: corpus_aware_module.suggest_related(
+                        vault_root, title=page.title, body=page.body,
+                        self_path=page.rel_path, existing_links=existing_links,
+                        limit=limit, scope=scope,
+                    )
+                )
+            elif draft_title or draft_body:
+                body_md = draft_body or ""
+                existing_links = set()
+                for m in find_body_wikilinks(body_md):
+                    inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+                    if inner:
+                        existing_links.add(inner)
+                suggestions = await run_in_threadpool(
+                    lambda: corpus_aware_module.suggest_related(
+                        vault_root, title=draft_title or "", body=body_md,
+                        self_path=None, existing_links=existing_links,
+                        limit=limit, scope=scope,
+                    )
+                )
+            else:
+                return _rest_err(
+                    "INVALID_SUGGEST",
+                    "provide either `path` or `draft_title`/`draft_body`",
+                    400,
+                )
+        except get_page_module.GetError as e:
+            status = 404 if e.code == "NOT_FOUND" else 400
+            return _rest_err(e.code, e.reason, status)
+        return _RestJSONResponse([s.as_dict() for s in suggestions])
+
+    @mcp.custom_route("/api/openapi.json", methods=["GET"])
+    async def _api_openapi(request: Request) -> JSONResponse:
+        # Self-documentation only — minimal, hand-built OpenAPI 3.1 of the /api/*
+        # surface. NOT a public plugin manifest (no /.well-known/ai-plugin.json).
+        if not rest_enabled:
+            return _rest_err("REST_DISABLED", "set KB_MCP_REST_API_KEY to enable", 503)
+        post_tools = [
+            "find", "get", "note", "add", "edit",
+            "audit", "reconcile", "list_directory", "suggest_links",
+        ]
+        paths = {
+            f"/api/{name}": {
+                "post": {
+                    "operationId": name,
+                    "summary": f"JSON wrapper over the `{name}` KB tool",
+                    "security": [{"bearerAuth": []}],
+                    "requestBody": {
+                        "content": {"application/json": {"schema": {"type": "object"}}}
+                    },
+                    "responses": {
+                        "200": {"description": "tool result (JSON)"},
+                        "400": {"description": "{error, reason}"},
+                        "401": {"description": "missing/invalid API key"},
+                        "503": {"description": "REST API disabled"},
+                    },
+                }
+            }
+            for name in post_tools
+        }
+        return JSONResponse(
+            {
+                "openapi": "3.1.0",
+                "info": {"title": "kb-mcp personal REST facade", "version": "1.0.0"},
+                "components": {
+                    "securitySchemes": {
+                        "bearerAuth": {"type": "http", "scheme": "bearer"}
+                    }
+                },
+                "paths": paths,
+            }
+        )
 
     @mcp.tool
     def find(
@@ -1245,7 +1671,10 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
 
     @mcp.tool
     def get(
-        path: str, frontmatter_only: bool = False, include_history: bool = False
+        path: str,
+        frontmatter_only: bool = False,
+        include_history: bool = False,
+        links: bool = False,
     ) -> dict:
         """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body + raw content.
 
@@ -1275,6 +1704,13 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 this note changed / what was the old version / show its history"
                 and to verify an edit's rationale. `[]` when the page has no
                 recorded edits.
+            links: If true, attach a `links` summary —
+                `{inbound: [...], outbound: [...]}`. `inbound` lists files whose
+                wikilinks resolve to this page (each
+                `{path, line_number, context, raw_target}`); `outbound` lists
+                the distinct wikilink targets in this page's body. Use it to
+                see a note's graph neighbourhood in one call. Default off (no
+                behaviour change).
 
         Returns:
             {path, frontmatter, body, content, content_hash, mtime}.
@@ -1310,6 +1746,10 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         )
         if include_history:
             out["history"] = vault.read_log_entries(vault_root, out["path"])
+        if links:
+            out["links"] = _link_summary(
+                vault_root, out.get("path", ""), out.get("body", "")
+            )
         return out
 
     @mcp.tool
@@ -1321,6 +1761,8 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         old_string: str | None = None,
         new_string: str | None = None,
         replace_all: bool = False,
+        heading: str | None = None,
+        section_position: str = "append",
         edits: list[dict] | None = None,
         row_key: str | None = None,
         take: str | None = None,
@@ -1396,6 +1838,13 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 differ from it).
             replace_all: Replace every occurrence instead of requiring a
                 unique match. Default False.
+            heading: Section-targeted mode — the `## Heading` (the `#` markers
+                are optional) under which to place `new_string`. The section
+                spans from that heading to the next heading of equal-or-higher
+                level (or EOF). Mutually exclusive with new_body/old_string.
+                Raises HEADING_NOT_FOUND if absent.
+            section_position: With `heading`, where to put `new_string`:
+                "append" (default), "prepend", or "replace" the section body.
             edits: Batch-surgical mode — list of {old_string, new_string,
                 replace_all?} applied sequentially in one atomic commit.
             row_key: Take-row mode — natural leading text of the row to fill
@@ -1461,8 +1910,9 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
                 result = edit_module.edit(
                     vault_root, path=path, why=why, new_body=new_body,
                     tags=tags, old_string=old_string, new_string=new_string,
-                    replace_all=replace_all, expected_hash=expected_hash,
-                    validate_only=validate_only,
+                    replace_all=replace_all, heading=heading,
+                    section_position=section_position,
+                    expected_hash=expected_hash, validate_only=validate_only,
                 )
         except (
             edit_module.EditError,
