@@ -1,23 +1,38 @@
-"""Self-tuning RankingConfig search — desk-side tooling, NO server changes.
+"""Self-tuning RankingConfig search — the closed feedback loop, desk-side.
 
 Coordinate-descends the RankingConfig knobs (rrf_k, compiled_boost,
-source_penalty, temporal_boost, and the per-intent lane weights) to MAXIMIZE
-NDCG@10 over the golden query set, reusing the same NDCG evaluator the offline
-harness uses (`scripts/eval_retrieval.py`). It PROPOSES (prints) the winning
-config and its delta vs DEFAULT_RANKING — it never writes defaults back. The
-operator reviews and edits `find.py` by hand (visibility over auto-mutation).
+source_penalty, temporal_boost, and the per-intent lane weights) under a
+LEXICOGRAPHIC objective `(pair_mrr, golden_ndcg)`:
 
-Pure-substrate: the optimizer is deterministic coordinate descent over a fixed
-candidate grid. No model decides anything.
+- the 9 hand-authored golden queries are the trusted anchor, enforced as a HARD
+  FLOOR — any candidate whose golden NDCG@10 drops more than EPSILON below the
+  DEFAULT_RANKING baseline is infeasible and never selected;
+- the mined `(query -> cited_path)` pairs (fresh-mined each run) are the
+  improvement signal, scored as BINARY relevance via mean reciprocal rank — a
+  cited doc is relevant, full stop; the mined `confidence` is only a filter
+  (CONF_MIN), never a grade (grading by it would bake the incumbent rank in);
+- below MIN_PAIRS distinct eligible pair queries the pairs term is OFF and the
+  run reduces exactly to a golden-only tune.
 
-The real run needs torch + the live vault (it force-enables embeddings via
+It writes a reviewed CANDIDATE (`logs/ranking_config.candidate.json`) + a delta
+REPORT — it NEVER auto-applies and never edits find.py. `--adopt` promotes the
+candidate to the committed repo-root `ranking_config.json` (which find() loads
+when no explicit config is passed), gated by the same golden floor. Reversal is
+deleting / reverting that file.
+
+Pure-substrate: deterministic coordinate descent over a fixed grid; relevance
+labels come only from recorded usage; no model decides anything.
+
+The real run needs torch + the live vault (force-enables embeddings via
 eval_retrieval), so it is desk-side only:
 
-    uv run python scripts/auto_tune_ranking.py
+    uv run python scripts/auto_tune_ranking.py            # mine -> tune -> candidate + report
     uv run python scripts/auto_tune_ranking.py --window-hours 6
+    uv run python scripts/auto_tune_ranking.py --adopt    # promote candidate (floor-gated)
 
-The pure pieces — `optimize()`, `load_relevance_pairs()`, `load_golden()`,
-`config_from_dict()` — are torch-free and unit-tested in tests/test_auto_tune.py.
+The pure pieces — `optimize()`, `pairs_to_eval()`, `pair_mrr()`,
+`combined_score()`, `config_from_dict()`, `write_candidate()`, `adopt()` — are
+torch-free and unit-tested in tests/test_auto_tune.py.
 """
 
 from __future__ import annotations
@@ -25,7 +40,9 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import json
+import os
 import sys
+import tempfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -36,11 +53,26 @@ HERE = Path(__file__).resolve().parent
 SRC = HERE.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+if str(HERE) not in sys.path:
+    sys.path.insert(0, str(HERE))  # sibling scripts (derive_relevance_pairs, eval_retrieval)
 
-from kb_mcp.find import DEFAULT_RANKING, RankingConfig  # noqa: E402
+from kb_mcp.find import (  # noqa: E402
+    DEFAULT_RANKING,
+    RankingConfig,
+    ranking_config_from_jsonable,
+    ranking_config_to_jsonable,
+)
 
 DEFAULT_GOLDEN = HERE.parent / "tests" / "golden" / "queries.yaml"
 DEFAULT_PAIRS = HERE.parent / "logs" / "relevance_pairs.jsonl"
+DEFAULT_CANDIDATE = HERE.parent / "logs" / "ranking_config.candidate.json"
+DEFAULT_REPORT = HERE.parent / "logs" / "ranking_config.report.md"
+ADOPTED_CONFIG = HERE.parent / "ranking_config.json"
+
+# Objective guardrails (all CLI-overridable). See openspec/changes/close-auto-tune-loop.
+EPSILON = 0.01     # max golden NDCG@10 the tuner may spend below baseline (hard floor)
+MIN_PAIRS = 8      # distinct eligible pair queries before the pairs term turns on
+CONF_MIN = 0.25    # mined-confidence floor — a FILTER on pairs, never a relevance grade
 
 
 # --------------------------------------------------------------------------- #
@@ -200,20 +232,239 @@ def config_from_dict(knobs: dict[str, Any]) -> RankingConfig:
 
 
 # --------------------------------------------------------------------------- #
-# Real (desk-side) NDCG evaluator — reuses the offline harness. Lazy-imported so
-# the pure core above stays torch-free.
+# Mined-pair scoring (torch-free): pairs are BINARY relevance labels.
 # --------------------------------------------------------------------------- #
-def build_evaluate_fn(
-    vault_root: Path, golden: list[dict], *, rerank: bool = False
-) -> Callable[[dict[str, Any]], float]:
-    """Return `knobs -> mean NDCG@10` over the golden set, on the live vault."""
+def pairs_to_eval(
+    pairs: list[dict], golden_queries: set[str], *, conf_min: float
+) -> list[dict]:
+    """Group mined pairs into binary-relevance eval rows.
+
+    Drops pairs below `conf_min` (confidence is a FILTER, never a grade) and any
+    pair whose query already appears in `golden_queries` (lower/stripped), so the
+    trusted golden signal isn't double-counted. Returns one row per remaining
+    distinct query: `{"query": <raw>, "relevant": set(canon paths)}`.
+    """
+    by_query: dict[str, set[str]] = {}
+    for p in pairs:
+        if float(p.get("confidence", 0.0)) < conf_min:
+            continue
+        q = p.get("query")
+        cited = p.get("cited_path")
+        if not q or not cited:
+            continue
+        if q.strip().lower() in golden_queries:
+            continue
+        by_query.setdefault(q, set()).add(cited)
+    return [{"query": q, "relevant": rel} for q, rel in by_query.items() if rel]
+
+
+def pair_mrr(ranked_by_query: dict[str, list[str]], pair_rows: list[dict]) -> float:
+    """Mean reciprocal rank of the first relevant (cited) path per eligible query.
+
+    Binary relevance: the score depends only on WHERE a cited path lands in the
+    ranking, never on the mined confidence — so a rank-1 pair is a guardrail, not a
+    lever that would reward keeping the incumbent order.
+    """
+    if not pair_rows:
+        return 0.0
+    total = 0.0
+    for row in pair_rows:
+        ranked = ranked_by_query.get(row["query"], [])
+        relevant = row["relevant"]
+        rr = 0.0
+        for idx, path in enumerate(ranked, start=1):
+            if path in relevant:
+                rr = 1.0 / idx
+                break
+        total += rr
+    return total / len(pair_rows)
+
+
+def pair_recall10(
+    ranked_by_query: dict[str, list[str]], pair_rows: list[dict], *, k: int = 10
+) -> float:
+    """Mean fraction of a query's cited paths present in the top-k (report-only)."""
+    if not pair_rows:
+        return 0.0
+    total = 0.0
+    for row in pair_rows:
+        ranked = ranked_by_query.get(row["query"], [])[:k]
+        relevant = row["relevant"]
+        if not relevant:
+            continue
+        total += sum(1 for p in relevant if p in ranked) / len(relevant)
+    return total / len(pair_rows)
+
+
+def combined_score(
+    golden_ndcg: float,
+    pair_mrr_value: float,
+    *,
+    baseline_golden: float,
+    epsilon: float,
+    n_eligible: int,
+    min_pairs: int,
+) -> tuple[float, float]:
+    """The lexicographic objective value for one config.
+
+    `optimize()` compares these tuples by `>` (lexicographic):
+      - `(-1.0, g)`      golden regresses past the floor → infeasible (dominated);
+      - `(0.0, g)`       too few eligible pairs          → golden-only (== today);
+      - `(pair_mrr, g)`  otherwise                       → pairs primary, golden tiebreak.
+    """
+    if golden_ndcg < baseline_golden - epsilon:
+        return (-1.0, golden_ndcg)
+    if n_eligible < min_pairs:
+        return (0.0, golden_ndcg)
+    return (pair_mrr_value, golden_ndcg)
+
+
+# --------------------------------------------------------------------------- #
+# Candidate + report writers, and the floor-gated adopt step (torch-free).
+# --------------------------------------------------------------------------- #
+def _atomic_write_text(path: Path, text: str) -> None:
+    """Write `text` to `path` atomically (tmp sibling + os.replace)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent)
+    )
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def write_candidate(path: Path, cfg: RankingConfig, meta: dict) -> None:
+    """Write the reviewed candidate: `{config: <full knobs>, meta: <measurements>}`.
+
+    `config` is a full, find()-loadable RankingConfig; `meta` carries the measured
+    golden/pairs values the adopt gate reads (so adoption needs no torch rerun).
+    """
+    payload = {"config": ranking_config_to_jsonable(cfg), "meta": meta}
+    _atomic_write_text(path, json.dumps(payload, indent=2, ensure_ascii=False) + "\n")
+
+
+def _knob_delta_rows(default_cfg: RankingConfig, best_cfg: RankingConfig) -> list[str]:
+    d = ranking_config_to_jsonable(default_cfg)
+    b = ranking_config_to_jsonable(best_cfg)
+    return [f"| `{key}` | {d[key]} | {b[key]} |" for key in d if b[key] != d[key]]
+
+
+def write_report(
+    path: Path, default_cfg: RankingConfig, best_cfg: RankingConfig, meta: dict
+) -> None:
+    """Write a human-readable markdown delta report for review before `--adopt`."""
+    deltas = _knob_delta_rows(default_cfg, best_cfg)
+    lines = [
+        "# Ranking auto-tune report",
+        "",
+        f"- golden NDCG@10: {meta['baseline_golden']} (baseline) "
+        f"→ {meta['candidate_golden']} (candidate)",
+        f"- pair-MRR: {meta['pair_mrr']} | pair-recall@10: {meta['pair_recall10']}",
+        f"- eligible pair queries: {meta['n_eligible_pairs']} "
+        f"(MIN_PAIRS={meta['min_pairs']}, guard_active={meta['guard_active']})",
+        f"- window_hours={meta['window_hours']} epsilon={meta['epsilon']}",
+        "",
+        "## Knob changes vs DEFAULT_RANKING",
+        "",
+    ]
+    if deltas:
+        lines += ["| knob | default | candidate |", "|---|---|---|", *deltas]
+    else:
+        lines.append(
+            "_No knob changed — DEFAULT_RANKING is already optimal under the "
+            "current objective (expected while the pairs guard is active)._"
+        )
+    lines += [
+        "",
+        "## To adopt",
+        "",
+        "```",
+        "uv run python scripts/auto_tune_ranking.py --adopt",
+        "git add ranking_config.json && git commit -m 'tune: adopt ranking config'",
+        "# deploy + restart the service — find() loads ranking_config.json at startup",
+        "```",
+        "",
+        "Revert anytime by deleting `ranking_config.json` (or `git revert`).",
+        "",
+    ]
+    _atomic_write_text(path, "\n".join(lines))
+
+
+def adopt(
+    candidate_path: Path, target_path: Path, *, force: bool, epsilon: float
+) -> int:
+    """Promote the candidate to the committed adopted config, gated by the floor.
+
+    Refuses when the candidate's recorded golden NDCG@10 is more than `epsilon`
+    below its recorded baseline (the same floor that governs tuning) unless
+    `force`. Writes ONLY the raw config knobs to `target_path` so find() loads it
+    directly.
+    """
+    if not candidate_path.exists():
+        print(f"no candidate at {candidate_path}; run a tune first", file=sys.stderr)
+        return 1
+    payload = json.loads(candidate_path.read_text(encoding="utf-8"))
+    config_dict = payload.get("config", {})
+    meta = payload.get("meta", {})
+    # Validate the config loads (raises on a malformed/foreign file).
+    ranking_config_from_jsonable(config_dict)
+    bg, cg = meta.get("baseline_golden"), meta.get("candidate_golden")
+    if bg is not None and cg is not None and cg < bg - epsilon and not force:
+        print(
+            f"refusing to adopt: candidate golden NDCG@10 {cg} is more than "
+            f"{epsilon} below baseline {bg}. Re-run with --adopt --force to override.",
+            file=sys.stderr,
+        )
+        return 1
+    _atomic_write_text(
+        target_path, json.dumps(config_dict, indent=2, ensure_ascii=False) + "\n"
+    )
+    print(f"adopted -> {target_path}")
+    print(f"  git add {target_path.name} && git commit -m 'tune: adopt ranking config'")
+    print("  # then deploy + restart so find() reloads the config")
+    return 0
+
+
+# --------------------------------------------------------------------------- #
+# Real (desk-side) combined objective — reuses the offline harness. Lazy-imported
+# so the pure core above stays torch-free.
+# --------------------------------------------------------------------------- #
+def build_combined_evaluate_fn(
+    vault_root: Path,
+    golden: list[dict],
+    pair_rows: list[dict],
+    *,
+    baseline_golden: float,
+    epsilon: float,
+    min_pairs: int,
+    rerank: bool = False,
+) -> Callable[[dict[str, Any]], tuple[float, float]]:
+    """Return `knobs -> (pair_mrr, golden_ndcg)`, the lexicographic objective."""
     import eval_retrieval  # lazy: force-enables embeddings on import
 
-    def _evaluate(knobs: dict[str, Any]) -> float:
+    pair_queries = [r["query"] for r in pair_rows]
+    n_eligible = len(pair_rows)
+
+    def _evaluate(knobs: dict[str, Any]) -> tuple[float, float]:
         cfg = config_from_dict(knobs)
-        return eval_retrieval._evaluate(
-            vault_root, golden, cfg, rerank=rerank
-        )["ndcg10"]
+        g = eval_retrieval._evaluate(vault_root, golden, cfg, rerank=rerank)["ndcg10"]
+        # Infeasible or guarded: the pairs term is irrelevant — skip ranking pairs.
+        if g < baseline_golden - epsilon or n_eligible < min_pairs:
+            pmrr = 0.0
+        else:
+            ranked = eval_retrieval.rank_queries(
+                vault_root, pair_queries, cfg, rerank=rerank, k=10
+            )
+            pmrr = pair_mrr(ranked, pair_rows)
+        return combined_score(
+            g, pmrr, baseline_golden=baseline_golden, epsilon=epsilon,
+            n_eligible=n_eligible, min_pairs=min_pairs,
+        )
 
     return _evaluate
 
@@ -221,10 +472,28 @@ def build_evaluate_fn(
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--golden", type=Path, default=DEFAULT_GOLDEN)
-    ap.add_argument("--pairs", type=Path, default=DEFAULT_PAIRS)
+    ap.add_argument("--candidate", type=Path, default=DEFAULT_CANDIDATE)
+    ap.add_argument("--report", type=Path, default=DEFAULT_REPORT)
+    ap.add_argument("--window-hours", type=float, default=2.0,
+                    help="mining window: max gap between a find() and a citing write")
     ap.add_argument("--rerank", action="store_true", help="evaluate with rerank on")
     ap.add_argument("--max-passes", type=int, default=12)
+    ap.add_argument("--epsilon", type=float, default=EPSILON,
+                    help="golden NDCG@10 floor below baseline (default 0.01)")
+    ap.add_argument("--min-pairs", type=int, default=MIN_PAIRS,
+                    help="distinct eligible pair queries before pairs term turns on")
+    ap.add_argument("--conf-min", type=float, default=CONF_MIN,
+                    help="mined-confidence filter on pairs (not a grade)")
+    ap.add_argument("--adopt", action="store_true",
+                    help="promote the existing candidate to ranking_config.json (floor-gated)")
+    ap.add_argument("--force", action="store_true",
+                    help="with --adopt, promote even if it regresses golden")
     args = ap.parse_args()
+
+    if args.adopt:
+        return adopt(args.candidate, ADOPTED_CONFIG, force=args.force, epsilon=args.epsilon)
+
+    import derive_relevance_pairs as drp  # lazy (torch-free)
 
     from kb_mcp.vault import resolve_vault  # lazy
 
@@ -233,31 +502,71 @@ def main() -> int:
     if not golden:
         print(f"no golden queries loaded from {args.golden}", file=sys.stderr)
         return 1
-    pairs = load_relevance_pairs(args.pairs)
-    print(f"vault={vault_root}")
-    print(f"golden: {len(golden)} queries | relevance_pairs: {len(pairs)} rows")
 
-    evaluate_fn = build_evaluate_fn(vault_root, golden, rerank=args.rerank)
+    # Step 0: mine fresh so the objective reflects current usage (idempotent snapshot).
+    pairs = drp.mine_pairs(args.window_hours * 3600, write=True)
+    golden_queries = {g["query"].strip().lower() for g in golden}
+    pair_rows = pairs_to_eval(pairs, golden_queries, conf_min=args.conf_min)
+    guard_active = len(pair_rows) < args.min_pairs
+
+    print(f"vault={vault_root}")
+    print(f"golden: {len(golden)} queries | mined pairs: {len(pairs)} | "
+          f"eligible pair queries: {len(pair_rows)} | pairs guard: "
+          f"{'ON (golden-only)' if guard_active else 'off'}")
+
+    import eval_retrieval  # lazy: force-enables embeddings
+    baseline_golden = eval_retrieval._evaluate(
+        vault_root, golden, DEFAULT_RANKING, rerank=args.rerank
+    )["ndcg10"]
+
+    evaluate_fn = build_combined_evaluate_fn(
+        vault_root, golden, pair_rows,
+        baseline_golden=baseline_golden, epsilon=args.epsilon,
+        min_pairs=args.min_pairs, rerank=args.rerank,
+    )
     start = default_knobs()
-    base_score = evaluate_fn(start)
-    best, best_score = optimize(
+    best, _best_score = optimize(
         candidate_axes(), evaluate_fn, start=start, max_passes=args.max_passes
     )
+    best_cfg = config_from_dict(best)
 
-    print(f"\nDEFAULT NDCG@10 = {base_score:.4f}")
-    print(f"BEST    NDCG@10 = {best_score:.4f}  (delta {best_score - base_score:+.4f})")
-    print("\n=== PROPOSED config (review, then hand-edit find.py defaults) ===")
-    for knob, value in best.items():
-        changed = " *" if value != start.get(knob) else ""
-        print(f"  {knob:<28} {value}{changed}")
-    cfg = config_from_dict(best)
-    print("\nRankingConfig(")
-    print(f"    rrf_k={cfg.rrf_k}, compiled_boost={cfg.compiled_boost}, ")
-    print(f"    source_penalty={cfg.source_penalty}, temporal_boost={cfg.temporal_boost},")
-    print(f"    intent_weights_exact={cfg.intent_weights_exact},")
-    print(f"    intent_weights_relationship={cfg.intent_weights_relationship},")
-    print(f"    intent_weights_temporal={cfg.intent_weights_temporal},")
-    print(")")
+    # Final measured metrics for the chosen config (candidate meta + report).
+    candidate_golden = eval_retrieval._evaluate(
+        vault_root, golden, best_cfg, rerank=args.rerank
+    )["ndcg10"]
+    if guard_active:
+        pmrr = prec = None
+    else:
+        ranked = eval_retrieval.rank_queries(
+            vault_root, [r["query"] for r in pair_rows], best_cfg, rerank=args.rerank, k=10
+        )
+        pmrr = round(pair_mrr(ranked, pair_rows), 4)
+        prec = round(pair_recall10(ranked, pair_rows), 4)
+
+    meta = {
+        "baseline_golden": round(baseline_golden, 4),
+        "candidate_golden": round(candidate_golden, 4),
+        "pair_mrr": pmrr,
+        "pair_recall10": prec,
+        "n_eligible_pairs": len(pair_rows),
+        "guard_active": guard_active,
+        "window_hours": args.window_hours,
+        "epsilon": args.epsilon,
+        "min_pairs": args.min_pairs,
+    }
+    write_candidate(args.candidate, best_cfg, meta)
+    write_report(args.report, DEFAULT_RANKING, best_cfg, meta)
+
+    changed = [k for k in best if best[k] != start.get(k)]
+    print(f"\nDEFAULT golden NDCG@10 = {baseline_golden:.4f}")
+    print(f"BEST    golden NDCG@10 = {candidate_golden:.4f}  "
+          f"(delta {candidate_golden - baseline_golden:+.4f}; floor -{args.epsilon})")
+    if not guard_active:
+        print(f"pair-MRR = {pmrr}  pair-recall@10 = {prec}")
+    print(f"changed knobs: {', '.join(changed) if changed else '(none — default is optimal)'}")
+    print(f"candidate -> {args.candidate}")
+    print(f"report    -> {args.report}")
+    print("review the report, then: uv run python scripts/auto_tune_ranking.py --adopt")
     return 0
 
 

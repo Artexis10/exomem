@@ -9,8 +9,11 @@ Cached in-process between calls: keyed by file path, invalidated by mtime.
 
 from __future__ import annotations
 
+import dataclasses
+import json
 import logging
 import math
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import date, timedelta
@@ -97,6 +100,110 @@ class RankingConfig:
 LANE_ORDER = ("vector", "bm25", "keyword", "clip", "graph", "temporal")
 
 DEFAULT_RANKING = RankingConfig()
+
+
+# --------------------------------------------------------------------------- #
+# Adopted-config seam: the auto-tuner writes a reviewed `ranking_config.json`;
+# `find()` loads it once per process when no explicit `config` is passed. Absent
+# file (or any parse error) → DEFAULT_RANKING, byte-identical to the in-code
+# baseline. The live `op_find` calls find() WITHOUT config (consults disk); the
+# eval harnesses pass config= explicitly (hermetic, never touch disk).
+# --------------------------------------------------------------------------- #
+# src/kb_mcp/find.py → parents[2] is the repo (or deploy-checkout) root.
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+
+_ACTIVE_RANKING: RankingConfig | None = None
+_ACTIVE_RANKING_LOADED = False
+
+
+def ranking_config_to_jsonable(cfg: RankingConfig) -> dict[str, Any]:
+    """Plain-dict form of a RankingConfig (tuples render as JSON arrays)."""
+    return dataclasses.asdict(cfg)
+
+
+def ranking_config_from_jsonable(data: dict[str, Any]) -> RankingConfig:
+    """Build a RankingConfig from a parsed JSON dict, field by field.
+
+    Unknown keys are ignored (schema-drift-safe) and missing keys fall back to
+    the dataclass default. Scalar fields are coerced to int/float per their
+    default; the four `intent_weights_*` fields are coerced to float tuples and
+    MUST have exactly `len(LANE_ORDER)` entries. Raises on an uncoercible value
+    or a wrong-length lane tuple so the caller can fail loud.
+    """
+    field_names = {f.name for f in dataclasses.fields(RankingConfig)}
+    unknown = set(data) - field_names
+    if unknown:
+        log.warning(
+            "ranking config: ignoring unknown knob(s): %s", ", ".join(sorted(unknown))
+        )
+    n_lanes = len(LANE_ORDER)
+    kwargs: dict[str, Any] = {}
+    for f in dataclasses.fields(RankingConfig):
+        if f.name not in data:
+            continue
+        value = data[f.name]
+        if f.name.startswith("intent_weights_"):
+            tup = tuple(float(x) for x in value)
+            if len(tup) != n_lanes:
+                raise ValueError(
+                    f"{f.name}: expected {n_lanes} lane weights, got {len(tup)}"
+                )
+            kwargs[f.name] = tup
+        elif isinstance(f.default, bool):
+            kwargs[f.name] = bool(value)
+        elif isinstance(f.default, int):
+            kwargs[f.name] = int(value)
+        else:
+            kwargs[f.name] = float(value)
+    return RankingConfig(**kwargs)
+
+
+def _load_adopted_ranking() -> RankingConfig:
+    """Resolve the active RankingConfig from disk; DEFAULT_RANKING on absence/error.
+
+    Resolution order:
+      1. ``KB_MCP_DISABLE_RANKING_CONFIG`` set → DEFAULT_RANKING (hermetic; the
+         test suite sets this so a committed file never pollutes the suite).
+      2. ``KB_MCP_RANKING_CONFIG=<path>`` → that path.
+      3. ``<repo_root>/ranking_config.json`` if present.
+      4. else DEFAULT_RANKING.
+
+    A malformed / wrong-typed / bad-lane-length file fails LOUD (``log.error``)
+    and falls back to DEFAULT_RANKING — it never crashes the server and never
+    applies a partially-parsed config.
+    """
+    if os.environ.get("KB_MCP_DISABLE_RANKING_CONFIG"):
+        return DEFAULT_RANKING
+    override = os.environ.get("KB_MCP_RANKING_CONFIG")
+    path = Path(override) if override else _REPO_ROOT / "ranking_config.json"
+    if not path.exists():
+        return DEFAULT_RANKING
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("ranking config must be a JSON object")
+        return ranking_config_from_jsonable(data)
+    except Exception as exc:  # noqa: BLE001 — degrade to known-good, loudly.
+        log.error(
+            "adopted ranking config %s invalid (%s); using DEFAULT_RANKING", path, exc
+        )
+        return DEFAULT_RANKING
+
+
+def _active_ranking() -> RankingConfig:
+    """The adopted RankingConfig, loaded once per process (memoized)."""
+    global _ACTIVE_RANKING, _ACTIVE_RANKING_LOADED
+    if not _ACTIVE_RANKING_LOADED:
+        _ACTIVE_RANKING = _load_adopted_ranking()
+        _ACTIVE_RANKING_LOADED = True
+    return _ACTIVE_RANKING if _ACTIVE_RANKING is not None else DEFAULT_RANKING
+
+
+def reset_active_ranking_cache() -> None:
+    """Drop the memoized adopted config (tests; desk-side adopt happens out of band)."""
+    global _ACTIVE_RANKING, _ACTIVE_RANKING_LOADED
+    _ACTIVE_RANKING = None
+    _ACTIVE_RANKING_LOADED = False
 
 
 @dataclass
@@ -461,7 +568,7 @@ def find(
             auto_rerank=auto_rerank, temporal=temporal, intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
-            config=config or DEFAULT_RANKING,
+            config=config if config is not None else _active_ranking(),
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,

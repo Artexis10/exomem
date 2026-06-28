@@ -24,6 +24,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("KB_MCP_DISABLE_RELEVANCE_CHECK", "1")
+    # A committed repo-root ranking_config.json must never perturb the suite:
+    # force find()'s adopted-config seam to DEFAULT_RANKING. Tests that exercise
+    # the load seam delete this var via their own monkeypatch.
+    monkeypatch.setenv("KB_MCP_DISABLE_RANKING_CONFIG", "1")
     # No real ASR/OCR in the suite: keep uploads from enqueuing GPU work. Tests that
     # exercise the worker enable it explicitly and stub extract.extract_text.
     monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")

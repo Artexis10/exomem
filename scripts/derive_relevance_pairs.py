@@ -8,7 +8,10 @@ from ordinary search-then-compile usage and are the only compounding relevance
 signal a single-user vault produces.
 
 Output:
-- `logs/relevance_pairs.jsonl` — the derived pairs (a derived log, safe to write).
+- `logs/relevance_pairs.jsonl` — the derived pairs, rewritten as an ATOMIC,
+  DEDUPED SNAPSHOT each run (not appended). It is a pure derived artifact of
+  `queries × writes × window`, so re-running over the same logs is byte-identical
+  and idempotent — safe to run on a schedule. The source logs are the audit trail.
 - A PROPOSED YAML block printed to stdout for additions to tests/golden/queries.yaml.
   We never auto-edit the golden set (visibility over gating): the user confirms and
   pastes. Constants are never auto-tuned from these.
@@ -23,7 +26,9 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import os
 import sys
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -117,7 +122,48 @@ def derive_pairs(
                         "via_write": w.get("written_path"),
                         "source": "note-citation",
                     }
-    return sorted(best.values(), key=lambda p: -p["confidence"])
+    # Secondary keys (query, cited_path) make the order fully deterministic so the
+    # snapshot is byte-identical across runs regardless of dict iteration order.
+    return sorted(
+        best.values(), key=lambda p: (-p["confidence"], p["query"], p["cited_path"])
+    )
+
+
+def _atomic_write_jsonl(path: Path, rows: list[dict]) -> None:
+    """Write `rows` as JSONL to `path` atomically (tmp sibling + os.replace).
+
+    A concurrent reader sees the whole old or whole new file, never a torn one.
+    """
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_str = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+    tmp = Path(tmp_str)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            for row in rows:
+                f.write(json.dumps(row, ensure_ascii=False) + "\n")
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
+def mine_pairs(
+    window_seconds: float, *, write: bool, logs_dir: Path = LOGS
+) -> list[dict]:
+    """Mine deduped (query -> cited_path) pairs from the usage logs under `logs_dir`.
+
+    Reads `queries.jsonl` + `writes.jsonl`, derives weak relevance pairs, and —
+    when `write` — rewrites `relevance_pairs.jsonl` as an ATOMIC, DEDUPED SNAPSHOT
+    (overwrite, not append) so re-running over the same logs is idempotent and
+    byte-identical. Returns the pairs. This is the reusable seam the auto-tuner
+    imports to mine fresh before each tune.
+    """
+    queries = _read_jsonl(logs_dir / QUERIES.name)
+    writes = _read_jsonl(logs_dir / WRITES.name)
+    pairs = derive_pairs(queries, writes, window_seconds)
+    if write:
+        _atomic_write_jsonl(logs_dir / PAIRS_OUT.name, pairs)
+    return pairs
 
 
 def _propose_golden(pairs: list[dict], existing: set[str]) -> dict[str, list[str]]:
@@ -151,16 +197,12 @@ def main() -> int:
         )
         return 1
 
-    pairs = derive_pairs(queries, writes, args.window_hours * 3600)
+    pairs = mine_pairs(args.window_hours * 3600, write=not args.dry_run)
     print(f"derived {len(pairs)} (query -> cited_path) relevance pairs "
           f"from {len(queries)} queries x {len(writes)} writes")
 
-    if not args.dry_run and pairs:
-        PAIRS_OUT.parent.mkdir(parents=True, exist_ok=True)
-        with PAIRS_OUT.open("a", encoding="utf-8") as f:
-            for p in pairs:
-                f.write(json.dumps(p, ensure_ascii=False) + "\n")
-        print(f"appended pairs -> {PAIRS_OUT}")
+    if not args.dry_run:
+        print(f"wrote snapshot ({len(pairs)} pairs) -> {PAIRS_OUT}")
 
     proposed = _propose_golden(pairs, _existing_golden_queries(GOLDEN))
     if proposed:

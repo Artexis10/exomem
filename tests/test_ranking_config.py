@@ -11,7 +11,10 @@ candidate_k / graph_seed_cap / rrf_k / type-boost, all of which the config feeds
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
+
+import pytest
 
 from kb_mcp import find as find_module
 
@@ -108,3 +111,74 @@ def test_type_boost_honors_config() -> None:
         p for p, _ in find_module._apply_type_boost(fused, fixtures, penalize)
     ]
     assert flipped[0] == source
+
+
+def test_ranking_config_jsonable_roundtrip() -> None:
+    """to_jsonable → json → from_jsonable must reproduce the config exactly, with
+    the intent-weight fields surviving as tuples (the frozen dataclass needs
+    hashable fields)."""
+    default = find_module.DEFAULT_RANKING
+    rt = find_module.ranking_config_from_jsonable(
+        json.loads(json.dumps(find_module.ranking_config_to_jsonable(default)))
+    )
+    assert rt == default
+
+    tuned = find_module.RankingConfig(
+        rrf_k=30,
+        compiled_boost=1.3,
+        intent_weights_exact=(0.5, 2.0, 2.0, 1.0, 0.5, 1.0),
+    )
+    rt2 = find_module.ranking_config_from_jsonable(
+        json.loads(json.dumps(find_module.ranking_config_to_jsonable(tuned)))
+    )
+    assert rt2 == tuned
+    assert isinstance(rt2.intent_weights_exact, tuple)
+
+
+def test_adopted_config_applies_then_reverts(
+    vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """find() with no `config` loads an adopted file; deleting it (with a cache
+    reset) restores byte-identical DEFAULT behavior. The reversibility guard."""
+    monkeypatch.delenv("KB_MCP_DISABLE_RANKING_CONFIG", raising=False)
+    tuned = find_module.RankingConfig(compiled_boost=0.1)  # heavy compiled penalty
+    cfg_path = tmp_path / "ranking_config.json"
+    cfg_path.write_text(
+        json.dumps(find_module.ranking_config_to_jsonable(tuned)), encoding="utf-8"
+    )
+    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg_path))
+    find_module.reset_active_ranking_cache()
+
+    queries = ("egcg", "metabolism", "progressive disclosure")
+    # The seam applies the adopted file when no config is passed.
+    for q in queries:
+        adopted = [h.path for h in find_module.find(vault, query=q, mode="hybrid")]
+        explicit = [
+            h.path for h in find_module.find(vault, query=q, mode="hybrid", config=tuned)
+        ]
+        assert adopted == explicit
+    # ...and the adopted config genuinely perturbs ranking vs DEFAULT somewhere.
+    changed = any(
+        [h.path for h in find_module.find(vault, query=q, mode="hybrid", config=tuned)]
+        != [
+            h.path
+            for h in find_module.find(
+                vault, query=q, mode="hybrid", config=find_module.DEFAULT_RANKING
+            )
+        ]
+        for q in queries
+    )
+    assert changed, "the tuned config should reorder at least one fixture query"
+
+    # Revert: delete the file + reset cache → no-config find() == DEFAULT path.
+    cfg_path.unlink()
+    find_module.reset_active_ranking_cache()
+    for q in queries:
+        reverted = [h.path for h in find_module.find(vault, query=q, mode="hybrid")]
+        default = [
+            h.path
+            for h in find_module.find(
+                vault, query=q, mode="hybrid", config=find_module.DEFAULT_RANKING
+            )
+        ]
+        assert reverted == default

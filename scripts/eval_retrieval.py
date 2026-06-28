@@ -84,6 +84,10 @@ def _evaluate(
             query=g["query"],
             limit=k_max,
             mode="hybrid",
+            # The golden targets are all KB paths, so evaluate KB-only: this skips
+            # the scope="kb" auto-widen scan over the ~20-folder wider vault, which
+            # dominates eval wall-time per query (the tuner makes hundreds of calls).
+            scope="kb-only",
             rerank=rerank,
             config=config,
         )
@@ -103,6 +107,30 @@ def _evaluate(
         "n": len(rows),
         "rows": rows,
     }
+
+
+def rank_queries(
+    vault_root: Path,
+    queries: list[str],
+    config: find_module.RankingConfig,
+    *,
+    rerank: bool = False,
+    k: int = 10,
+) -> dict[str, list[str]]:
+    """Return `{query: [canon'd ranked paths]}` for each query under `config`.
+
+    The canonical find()+`_canon` path, reused by the auto-tuner's pair metrics so
+    mined-pair scoring sees exactly what `_evaluate` scores for golden queries.
+    """
+    out: dict[str, list[str]] = {}
+    for q in queries:
+        hits = find_module.find(
+            vault_root, query=q, limit=k, mode="hybrid",
+            scope="kb-only",  # mined-pair targets are KB paths; skip the auto-widen scan
+            rerank=rerank, config=config,
+        )
+        out[q] = [_canon(h.path) for h in hits]
+    return out
 
 
 def _config_label(cfg: find_module.RankingConfig, rerank: bool) -> str:
