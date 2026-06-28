@@ -32,9 +32,12 @@ Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
+import subprocess
+import tempfile
 import threading
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -272,10 +275,16 @@ def _transcribe(path: Path, media_type: str) -> ExtractResult:
 
 
 # ---------------- optional: ASR speaker diarization (KB_MCP_DIARIZE, default OFF) ----
-
-
-_DIARIZATION_PIPELINE = None
-_DIARIZATION_LOCK = threading.Lock()
+#
+# pyannote's who-spoke-when pipeline runs in an ISOLATED CPU-torch sidecar venv (sidecar/diarizer/)
+# as a subprocess, NOT in this process: the main service runs a custom torch-2.12+cu132 (Blackwell)
+# build for whisper/CLIP/bge, which is fundamentally incompatible with the pyannote/torchaudio
+# ecosystem (torchcodec native-lib load failure, torchaudio AudioMetaData / list_audio_backends
+# removed in 2.11, speechbrain 1.x LazyModule, hf_hub use_auth_token removal). Those are VERSION
+# walls, not GPU walls, so CPU torch alone doesn't fix them — the sidecar pins the canonical
+# pyannote-3.1 stack (torch 2.2.2 / torchaudio 2.2.2 / speechbrain 0.5.16 / huggingface_hub 0.25)
+# where pyannote is rock-solid. The sidecar returns anonymous turns as JSON; the named-attribution
+# layer below (ECAPA voice profiles → cosine) runs HERE on the main venv, unchanged.
 
 
 def _diarize_enabled() -> bool:
@@ -284,68 +293,130 @@ def _diarize_enabled() -> bool:
     return bool(os.environ.get("KB_MCP_DIARIZE"))
 
 
-def _load_diarization_pipeline():
-    """Lazy-import + load the pretrained pyannote speaker-diarization pipeline.
+def _diarizer_sidecar_python() -> Path | None:
+    """Locate the isolated diarization sidecar's interpreter, or None if unprovisioned.
 
-    Soft-import seam (patched in tests): a box without the `[diarization]` extra
-    raises ImportError here, which `_run_diarization` catches → plain transcript.
-    `KB_MCP_DIARIZE_MODEL` overrides the pretrained checkpoint; `HUGGINGFACE_TOKEN`
-    (pyannote gates its weights behind a HF token) is honored if set.
+    `KB_MCP_DIARIZE_SIDECAR_PYTHON` overrides; else the conventional
+    `sidecar/diarizer/.venv/{Scripts/python.exe|bin/python}` under the repo root. Returns None
+    (→ plain transcript) when the venv isn't built — never auto-builds at runtime.
     """
-    from pyannote.audio import Pipeline  # soft dep — only imported when enabled
+    override = os.environ.get("KB_MCP_DIARIZE_SIDECAR_PYTHON")
+    if override:
+        p = Path(override)
+        return p if p.is_file() else None
+    root = Path(__file__).resolve().parents[2]  # src/kb_mcp/extract.py → repo root
+    rel = "Scripts/python.exe" if os.name == "nt" else "bin/python"
+    py = root / "sidecar" / "diarizer" / ".venv" / rel
+    return py if py.is_file() else None
 
-    model = os.environ.get("KB_MCP_DIARIZE_MODEL", "pyannote/speaker-diarization-3.1")
-    token = os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN")
-    # pyannote.audio 4.x renamed the HF-auth kwarg `use_auth_token` → `token`; keep a
-    # fallback so both 3.x and 4.x load (pyproject pins `>=3.1`, which resolves to either).
+
+def _diarizer_worker_script() -> Path:
+    return Path(__file__).resolve().parents[2] / "sidecar" / "diarizer" / "worker.py"
+
+
+def _diarizer_timeout(path: Path) -> float:
+    """Subprocess wall-clock budget, scaled by audio duration.
+
+    CPU pyannote runs slower than real time and the FIRST call also downloads weights; a hung
+    child blocks the single-threaded media worker, so we over-budget rather than kill a valid long
+    job. `KB_MCP_DIARIZE_TIMEOUT` (seconds) overrides. Floor covers the weight download + short
+    clips; the duration scale handles long recordings.
+    """
+    override = os.environ.get("KB_MCP_DIARIZE_TIMEOUT")
+    if override:
+        try:
+            return float(override)
+        except ValueError:
+            pass
+    duration = 0.0
     try:
-        return Pipeline.from_pretrained(model, token=token)
-    except TypeError:
-        return Pipeline.from_pretrained(model, use_auth_token=token)
+        import av
+
+        with av.open(str(path)) as container:
+            if container.duration:  # AV_TIME_BASE microseconds
+                duration = float(container.duration) / 1_000_000.0
+    except Exception:  # noqa: BLE001 — can't probe → use the floor
+        duration = 0.0
+    return max(900.0, duration * 6.0)
 
 
-def _get_diarization_pipeline():
-    """Lazy singleton for the diarization pipeline (one load per process)."""
-    global _DIARIZATION_PIPELINE
-    if _DIARIZATION_PIPELINE is not None:
-        return _DIARIZATION_PIPELINE
-    with _DIARIZATION_LOCK:
-        if _DIARIZATION_PIPELINE is None:
-            _DIARIZATION_PIPELINE = _load_diarization_pipeline()
-    return _DIARIZATION_PIPELINE
+def _is_nvidia_wheel_bin(p: str) -> bool:
+    """True for a `…/nvidia/<pkg>/bin` dir — the cu12 wheel bins `_ensure_cuda_dll_path` prepends."""
+    q = p.replace("\\", "/").lower().rstrip("/")
+    return "/nvidia/" in q and q.endswith("/bin")
+
+
+def _diarizer_child_env() -> dict[str, str]:
+    """Env for the sidecar subprocess.
+
+    Merge the parent env (a Windows child needs SystemRoot/PATH) and quiet HF. Device policy from
+    `KB_MCP_DIARIZE_DEVICE` (cpu | cuda | auto, default auto): `cpu` forces CUDA off; otherwise the
+    GPU stays visible but the main venv's cu12 nvidia wheel bin dirs are stripped from PATH so they
+    can't shadow the sidecar's bundled cu130 CUDA/cuDNN (the CLIP/cuDNN shadow class of bug).
+    """
+    env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
+    pref = os.environ.get("KB_MCP_DIARIZE_DEVICE", "auto").lower()
+    if pref == "cpu":
+        env["CUDA_VISIBLE_DEVICES"] = ""
+        return env
+    cleaned = [p for p in env.get("PATH", "").split(os.pathsep) if not _is_nvidia_wheel_bin(p)]
+    env["PATH"] = os.pathsep.join(cleaned)
+    return env
 
 
 def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
-    """Run the pretrained diarization pipeline → `[(start, end, raw_label), …]`.
+    """Run diarization in the isolated CPU-torch sidecar subprocess → `[(start, end, raw_label), …]`.
 
-    Soft-fail: returns None when the dep/model is unavailable or anything errors, so
-    `_transcribe` falls back to the plain transcript. Never raises.
+    Soft-fail: returns None on ANY failure (sidecar venv absent, spawn error, nonzero exit, timeout,
+    or unparseable output) so `_transcribe` falls back to the plain transcript. Never raises. The
+    subprocess inherits this process's env — so `HUGGINGFACE_TOKEN` / `KB_MCP_DIARIZE_MODEL` flow
+    through — with CUDA forced off and HF progress bars silenced. The result crosses the boundary as
+    a JSON out-file (not stdout, which pyannote/lightning/tqdm can pollute).
     """
+    py = _diarizer_sidecar_python()
+    if py is None:
+        log.debug("diarizer sidecar venv not provisioned; using plain transcript")
+        return None
+    out_fd, out_name = tempfile.mkstemp(prefix="kb_diar_", suffix=".json")
+    os.close(out_fd)
+    out_path = Path(out_name)
     try:
-        pipeline = _get_diarization_pipeline()
-    except ImportError as e:
-        log.debug("diarization dep not installed: %s", e)
-        return None
-    except Exception:  # noqa: BLE001 — model/token/GPU issues must soft-fail, not crash
-        log.warning("diarization pipeline load failed; using plain transcript", exc_info=True)
-        return None
-    try:
-        # Decode via faster-whisper's PyAV path and hand pyannote a pre-decoded waveform dict,
-        # bypassing pyannote 4.x / torchaudio's torchcodec decoder (its native lib won't load
-        # against torch-cu132 — the diarization blocker diagnosed 2026-06-28).
-        import torch
-        from faster_whisper.audio import decode_audio
-
-        samples = decode_audio(str(path), sampling_rate=16000)
-        waveform = torch.as_tensor(samples, dtype=torch.float32).unsqueeze(0)
-        annotation = pipeline({"waveform": waveform, "sample_rate": 16000})
-        return [
-            (float(turn.start), float(turn.end), str(label))
-            for turn, _track, label in annotation.itertracks(yield_label=True)
-        ]
-    except Exception:  # noqa: BLE001 — a bad/unsupported file must soft-fail to plain ASR
-        log.warning("diarization run failed for %s; using plain transcript", path.name, exc_info=True)
-        return None
+        try:
+            proc = subprocess.run(
+                [str(py), str(_diarizer_worker_script()), str(path), str(out_path)],
+                capture_output=True,
+                text=True,
+                timeout=_diarizer_timeout(path),
+                env=_diarizer_child_env(),
+            )
+        except subprocess.TimeoutExpired:
+            log.warning("diarizer sidecar timed out for %s; using plain transcript", path.name)
+            return None
+        except Exception:  # noqa: BLE001 — spawn failure must soft-fail, not crash extraction
+            log.warning(
+                "diarizer sidecar spawn failed for %s; using plain transcript",
+                path.name,
+                exc_info=True,
+            )
+            return None
+        if proc.returncode != 0:
+            tail = ((proc.stderr or "").strip().splitlines() or [""])[-1]
+            log.warning("diarizer sidecar exited %s for %s: %s", proc.returncode, path.name, tail)
+            return None
+        try:
+            turns = json.loads(out_path.read_text(encoding="utf-8"))["turns"]
+            return [(float(t["start"]), float(t["end"]), str(t["label"])) for t in turns]
+        except Exception:  # noqa: BLE001 — missing/garbled output must soft-fail to plain ASR
+            log.warning(
+                "diarizer sidecar produced no parseable turns for %s; using plain transcript",
+                path.name,
+            )
+            return None
+    finally:
+        try:
+            out_path.unlink()
+        except OSError:
+            pass
 
 
 def _resolve_named_labels(

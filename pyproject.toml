@@ -57,20 +57,22 @@ media = [
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
     "nvidia-cuda-runtime-cu12; sys_platform == 'win32'",
 ]
-# Opt-in ASR speaker diarization (KB_MCP_DIARIZE). A pretrained pyannote clustering
-# model labels who-spoke-when so transcripts carry `[Speaker A]: …` turns; with voice
-# profiles enrolled (`kb-mcp enroll-speaker`), a frozen speechbrain ECAPA voiceprint
-# (`speechbrain/spkrec-ecapa-voxceleb`, override KB_MCP_VOICE_EMBED_MODEL) resolves matched
-# clusters to enrolled names (`[Alice]: …`) by deterministic cosine — measurement, not a brain.
-# Heavy + default-OFF + soft-fail, so it's an extra, never a core dep — the base install and
-# the test suite never require it. Both pyannote and the ECAPA checkpoint gate their weights
-# behind a HF token (HUGGINGFACE_TOKEN). Full install: `uv sync --extra media --extra diarization`.
-# WARNING (diagnosed 2026-06-28): the extra transitively pulls `torchcodec`, whose native lib
-# won't load against the torch-cu132 build AND breaks `sentence-transformers` (the embedding
-# stack) on import. It is UNUSED here — audio decode goes through faster-whisper's PyAV path —
-# so REMOVE it after installing: `uv pip uninstall torchcodec`.
+# Opt-in ASR speaker diarization (KB_MCP_DIARIZE). The pyannote who-spoke-when pipeline does NOT
+# live here: it runs in an ISOLATED CPU-torch sidecar venv (sidecar/diarizer/, built via
+# scripts/setup-diarizer.ps1) as a subprocess, because pyannote/torchaudio are fundamentally
+# incompatible with this venv's custom torch-2.12+cu132 build (torchcodec, torchaudio API
+# removals, speechbrain 1.x LazyModule, hf_hub use_auth_token — all VERSION walls, not GPU walls).
+# This `diarization` extra now installs ONLY the named-attribution side that runs in THIS venv:
+# a frozen speechbrain ECAPA voiceprint (`speechbrain/spkrec-ecapa-voxceleb`, override
+# KB_MCP_VOICE_EMBED_MODEL) resolves the sidecar's anonymous clusters to enrolled names
+# (`[Alice]: …`) by deterministic cosine — measurement, not a brain. Default-OFF + soft-fail, so
+# it's an extra, never a core dep — the base install and test suite never require it. The ECAPA
+# checkpoint gates its weights behind a HF token (HUGGINGFACE_TOKEN); the pyannote checkpoints are
+# the sidecar's concern. Full install: `uv sync --extra media --extra diarization` THEN
+# `pwsh scripts/setup-diarizer.ps1`. (Removing pyannote from this venv also retires the old
+# `uv pip uninstall torchcodec` dance — pyannote was the only thing that pulled torchcodec, which
+# used to break sentence-transformers on the next restart.)
 diarization = [
-    "pyannote.audio>=3.1",
     "speechbrain>=1.0",  # ECAPA-TDNN speaker embeddings for named-speaker attribution
 ]
 # Opt-in vision captioning (KB_MCP_VISION_CAPTION). A FROZEN image-caption model

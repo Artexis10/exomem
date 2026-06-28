@@ -235,7 +235,12 @@ the repo root). The only required one is the vault path.
 | `KB_MCP_IMAGE_TAGS` | Set to append zero-shot CLIP tags (`Tags: invoice, table, …`) to an image's indexed text. Default off; no new dependency (reuses CLIP). |
 | `KB_MCP_IMAGE_TAGS_TOPK` | Max image tags to emit per image (default `5`). |
 | `KB_MCP_IMAGE_TAGS_THRESHOLD` | Raw-cosine floor a tag must clear (default `0.22`). |
-| `KB_MCP_DIARIZE` | Set to enable opt-in ASR speaker diarization (`[Speaker A]: …` turns). |
+| `KB_MCP_DIARIZE` | Set to enable opt-in ASR speaker diarization (`[Speaker A]: …` turns). Requires the diarizer sidecar (see below). |
+| `KB_MCP_DIARIZE_DEVICE` | Sidecar device: `cpu`/`cuda`/`auto` (default `auto` → GPU when available, else CPU). |
+| `KB_MCP_DIARIZE_SIDECAR_PYTHON` | Override path to the diarizer sidecar's Python (default `sidecar/diarizer/.venv/Scripts/python.exe`). |
+| `KB_MCP_DIARIZE_TIMEOUT` | Seconds the sidecar subprocess may run before soft-failing to a plain transcript (default: `max(900, duration×6)`). |
+| `KB_MCP_DIARIZE_MODEL` | pyannote checkpoint the sidecar loads (default `pyannote/speaker-diarization-3.1`). |
+| `KB_MCP_DIARIZE_CLUSTERING_THRESHOLD` | Optional pyannote clustering-threshold override (higher → fewer clusters). Default: pyannote's own. |
 | `KB_MCP_VOICE_DEVICE` | `cpu`/`cuda` override for the ECAPA voice embedder (defaults to CPU when ASR is active). |
 | `KB_MCP_VOICE_EMBED_MODEL` | ECAPA checkpoint for named-speaker attribution (default `speechbrain/spkrec-ecapa-voxceleb`). |
 | `KB_MCP_WHISPER_MODEL` | Whisper model size for ASR (e.g. `base`, `small`, `large-v3`). |
@@ -247,6 +252,31 @@ the repo root). The only required one is the vault path.
 Remote-only (see [docs/deployment.md](docs/deployment.md)): `KB_MCP_BASE_URL`,
 `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `KB_MCP_GITHUB_USERNAME`,
 `KB_MCP_JWT_SIGNING_KEY`.
+
+### Speaker diarization sidecar
+
+`KB_MCP_DIARIZE` adds `[Speaker A]: …` (or, with voice profiles enrolled, `[Alice]: …`)
+turns to transcripts. The pyannote *who-spoke-when* pipeline is **incompatible** with this
+server's bleeding-edge `torch-2.12+cu132` build, so it runs in an **isolated sidecar venv**
+(`sidecar/diarizer/`) as a subprocess, pinned to a standard `torch-2.9.1+cu130` that still has
+Blackwell `sm_120` kernels — so it runs **on the GPU** (`KB_MCP_DIARIZE_DEVICE=auto`, ~20× faster
+than CPU) and falls back to CPU. The main service shells out the turn detection and resolves the
+anonymous turns to enrolled names locally via ECAPA. The whole feature is **default-off and
+soft-fail**: with the flag unset, or the sidecar unbuilt, or anything failing, extraction is
+byte-for-byte the plain transcript.
+
+Provision it once per box (needs `uv`; not needed at service runtime):
+
+```powershell
+uv sync --extra media --extra embeddings --extra diarization   # main venv (ECAPA + ASR)
+pwsh -File scripts/setup-diarizer.ps1 -Prewarm                  # builds sidecar/diarizer/.venv
+```
+
+`setup-diarizer.ps1` builds the sidecar venv from its pinned `sidecar/diarizer/uv.lock` (uv
+auto-fetches a Python 3.12 for it). The pyannote checkpoints are HF-gated: set
+`HUGGINGFACE_TOKEN` and accept the conditions for **both** `pyannote/speaker-diarization-3.1` and
+`pyannote/segmentation-3.0`. Then `KB_MCP_DIARIZE=1`, enroll yourself
+(`kb-mcp enroll-speaker --name <you> --self <sample.wav>`), and restart.
 
 ## License
 

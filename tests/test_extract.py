@@ -215,15 +215,12 @@ def test_transcribe_soft_fails_to_plain_when_diarization_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("KB_MCP_DIARIZE", "1")
-    monkeypatch.setattr(extract, "_DIARIZATION_PIPELINE", None)
     segs = [_FakeSeg("solo line", 0.0, 1.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
 
-    def _no_dep():
-        raise ImportError("pyannote.audio not installed")
-
-    # Real _run_diarization runs; its pipeline loader raises ImportError → soft-fail.
-    monkeypatch.setattr(extract, "_load_diarization_pipeline", _no_dep)
+    # Sidecar venv not provisioned → real _run_diarization runs its locate-then-spawn path,
+    # finds no sidecar interpreter, and soft-fails to the plain transcript.
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
     r = extract._transcribe(Path("x.wav"), "audio")
     assert r.text == "solo line"
     assert r.speakers is None

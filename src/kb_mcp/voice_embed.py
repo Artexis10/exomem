@@ -150,12 +150,20 @@ def embed_spans(audio_path, spans) -> np.ndarray | None:
         _disable_tf32()
         vectors: list[np.ndarray] = []
         total = waveform.shape[-1]
+        # ECAPA's TDNN convolutions need a minimum input length; sub-~0.4s spans (common when a
+        # diarizer over-splits on backchannels/crosstalk) either error in F.pad or carry no usable
+        # voiceprint. Skip them — a real speaker has longer spans to embed; a speaker with only
+        # tiny spans stays anonymous, which is the right degradation.
+        min_samples = int(0.4 * sr)
         for start, end in spans:
             a = max(0, int(float(start) * sr))
             b = min(total, int(float(end) * sr))
-            if b <= a:
+            if b - a < min_samples:
                 continue
-            emb = model.encode_batch(waveform[:, a:b])
+            try:
+                emb = model.encode_batch(waveform[:, a:b])
+            except Exception:  # noqa: BLE001 — one bad span must not kill the whole cluster
+                continue
             arr = emb.detach().cpu().numpy() if hasattr(emb, "detach") else np.asarray(emb)
             vectors.append(np.asarray(arr, dtype=np.float32).reshape(-1))
         if not vectors:
