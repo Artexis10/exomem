@@ -33,11 +33,15 @@ dependencies = [
 [tool.uv]
 package = false
 
-# Standard CUDA-13.0 torch (Blackwell sm_120), fully separate from the main repo's torch-2.12+cu132.
-# A cu130 build also runs on CPU (device=cpu), so this one venv serves both GPU and CPU boxes.
+# torch source is platform-conditional so this sidecar builds on Windows / Linux / macOS:
+#   - win32 + linux → the CUDA-13.0 (cu130) index → Blackwell sm_120 GPU kernels (a cu130 build
+#     also runs on CPU, so a GPU-less Linux box still works, just slower).
+#   - macOS (and anything else) → default PyPI → the CPU/MPS wheels (cu130 has no macOS wheels;
+#     pinning it unconditionally would break `uv sync` on a Mac). The worker's device=auto falls
+#     back to CPU there. Mirrors the marker pattern in the main pyproject's [tool.uv.sources].
 [tool.uv.sources]
-torch = [{ index = "pytorch-cu130" }]
-torchaudio = [{ index = "pytorch-cu130" }]
+torch = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
+torchaudio = [{ index = "pytorch-cu130", marker = "sys_platform == 'win32' or sys_platform == 'linux'" }]
 
 [[tool.uv.index]]
 name = "pytorch-cu130"

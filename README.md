@@ -272,10 +272,18 @@ uv sync --extra media --extra embeddings --extra diarization   # main venv (ECAP
 pwsh -File scripts/setup-diarizer.ps1 -Prewarm                  # builds sidecar/diarizer/.venv
 ```
 
-`setup-diarizer.ps1` builds the sidecar venv from its pinned `sidecar/diarizer/uv.lock` (uv
-auto-fetches a Python 3.12 for it). The pyannote checkpoints are HF-gated: set
-`HUGGINGFACE_TOKEN` and accept the conditions for **both** `pyannote/speaker-diarization-3.1` and
-`pyannote/segmentation-3.0`. Then `KB_MCP_DIARIZE=1`, enroll yourself
+`setup-diarizer.ps1` is the Windows convenience wrapper (it also runs an import smoke + optional
+`-Prewarm`). On **Linux/macOS** build the sidecar with the underlying command directly:
+
+```bash
+uv sync --directory sidecar/diarizer
+```
+
+The sidecar is **cross-platform**: its torch source is platform-conditional — the cu130 (CUDA-13)
+index on Windows/Linux (GPU, Blackwell `sm_120`), and default PyPI on macOS (CPU/MPS, since cu130
+has no macOS wheels). uv auto-fetches a Python 3.12 for it. The pyannote checkpoints are HF-gated:
+set `HUGGINGFACE_TOKEN` and accept the conditions for **both** `pyannote/speaker-diarization-3.1`
+and `pyannote/segmentation-3.0`. Then `KB_MCP_DIARIZE=1`, enroll yourself
 (`kb-mcp enroll-speaker --name <you> --self <sample.wav>`), and restart.
 
 ## License
