@@ -1,25 +1,31 @@
 # kb-mcp — instructions for Claude
 
-## Concurrent sessions share ONE checkout — work in a worktree
+## Concurrent sessions share ONE checkout — isolate new work in a worktree
 
-This repo is often worked on by more than one Claude Code session at the same
-time, all sharing a single working tree. `git checkout <branch>` or `git stash`
-in that shared checkout yanks files out from under the other session (it has
-already caused a mid-edit collision).
+This repo is often worked on by more than one Claude Code session at once, all
+sharing the primary working tree. The hazard is **not "touching the primary"** —
+it's **destroying or colliding with another session's in-flight (uncommitted)
+work**. So judge an operation by its *effect*, not by a memorized command list.
 
-**Rule: never switch branches or `git stash` in the primary checkout.** For ANY
-new change — feature, fix, or docs — work in a dedicated git worktree and
-commit/push from there, leaving the primary checkout on whatever branch the other
-session is using.
+**Rule: never run a git operation that discards/overwrites uncommitted changes or
+rewrites the working tree in the shared primary checkout — unless the user
+explicitly approves that specific operation.** That covers `git checkout
+<branch>` / `git switch` (swaps files), `git stash`, `git reset --hard`,
+`git checkout -- <file>` / `git restore <file>` / `git clean` (discard a file's
+uncommitted state), and any rebase/merge that rewrites the tree. These have
+already caused a mid-edit collision.
 
-What's forbidden is anything that *yanks files out from under another session*:
-`git checkout <branch>`, `git switch`, `git stash`, `git reset --hard`, a
-rebase/merge that rewrites the working tree. What's **fine** (do it yourself, no
-worktree needed): a fast-forward `git pull` / `git pull --ff-only` on the branch
-the checkout is *already* on (e.g. pulling `main` while on `main` after a merge) —
-it only advances, it doesn't switch or stash. Read-only git (`status`, `log`,
-`diff`, `fetch`) is always fine. So: don't make the user paste a `git pull` you
-could run — only the worktree/branch-switch operations are off-limits here.
+**Always fine on the primary — no worktree, no approval:** read-only git
+(`status`, `log`, `diff`, `fetch`); a clean `git pull --ff-only` on the branch
+it's already on (it only advances, and *refuses* rather than clobber if
+uncommitted work would conflict); and anything off the git tree — building/syncing
+venvs (`uv sync`), running or restarting the service, editing a file you yourself
+just created. Don't hand the user a command you can safely run yourself.
+
+**Mitigation:** isolate any *new change* — feature, fix, or docs — in a dedicated
+git worktree (its own branch + tree) and commit/push from there, leaving the
+primary untouched for the other session. The worktree is the default for new work;
+the rule above is the guardrail for when you must operate on the primary.
 
 - Native (Claude Code): `EnterWorktree` — branches off `origin/main`; edit,
   commit, `git push origin HEAD:main` (or open a PR), then `ExitWorktree`.
