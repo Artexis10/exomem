@@ -1,7 +1,7 @@
 ---
 name: knowledge-base
 description: Operates on your personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when you want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively — it consults the KB for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Do NOT write outside the Knowledge Base folder; any sibling folders in the vault are read-only inputs.
-version: 0.30.0
+version: 0.31.0
 ---
 
 # Knowledge Base
@@ -60,6 +60,18 @@ diagnosed, a pattern is recognized — capture it:
 
 Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
 questions. Capture at the landing, not during the flight.
+
+**Comprehensive coverage, minimal expression.** Capturing at the landing is about
+*timing*, not *volume* — it never means keep less. Minimality is a property of
+*expression* — distillation, signal-density, no redundancy — never of *coverage*.
+Don't drop context or detail because it "doesn't seem important": importance is
+usually only legible in hindsight, and nothing here forces the tradeoff (no
+retention decay, hybrid BM25+vector retrieval, append-only `Sources/`, no storage
+limit). Default coverage to comprehensive; reserve concision for *how* a note is
+written, not *what* it keeps. Torn between keeping a detail and dropping it? Keep
+it — an over-kept detail is free to retrieval, a dropped one is unrecoverable.
+Capture more, at the right layer: raw verbatim to `Sources/` liberally; compiled
+notes stay distilled in form but never context-pruned.
 
 ## Vault layout
 
@@ -516,7 +528,11 @@ is in **`references/audit-checks.md`**.
 
 - Touch anything outside `Knowledge Base/`.
 - Auto-compile *blindly* after every capture. Compilation is a deliberate step
-  taken at a stepping-stone; it's always reported, never a silent dump.
+  taken at a stepping-stone; it's always reported, never a silent dump of raw
+  transcripts or every passing remark. "No silent dump" targets *noise* —
+  transcripts, mid-flight tangents — not *signal*: it never licenses pruning
+  context or detail from a note (see *Comprehensive coverage, minimal expression*
+  under Proactive engagement).
 - Assign numeric confidence scores. Use citation count and recency as the trust
   signal.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
