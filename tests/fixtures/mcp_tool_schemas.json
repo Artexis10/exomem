@@ -500,6 +500,21 @@
           "default": null,
           "description": "Filter to pages whose `tags:` includes any of these (case-insensitive)."
         },
+        "speakers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to diarized media whose `speakers:` frontmatter includes any of\nthese named speakers (case-insensitive) — e.g. \"what did Alice say about X\".\nAND'd with the query/other filters; OR'd within the list."
+        },
         "file_types": {
           "anyOf": [
             {

@@ -206,6 +206,7 @@ def op_find(
     types: list[str] | None = None,
     projects: list[str] | None = None,
     tags: list[str] | None = None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int = 15,
@@ -228,6 +229,9 @@ def op_find(
         types: Filter to these page types (source, research-note, insight, failure, pattern, experiment, production-log, entity).
         projects: Filter to pages whose `project` or `projects:` includes any of these keys.
         tags: Filter to pages whose `tags:` includes any of these (case-insensitive).
+        speakers: Filter to diarized media whose `speakers:` frontmatter includes any of
+            these named speakers (case-insensitive) — e.g. "what did Alice say about X".
+            AND'd with the query/other filters; OR'd within the list.
         file_types: Scope results to these artifact kinds — note, pdf, image,
             audio, video, csv, json, tsv. A binary surfaces under its media
             kind (pdf/image/...); a data file under its dataset card's format
@@ -305,6 +309,7 @@ def op_find(
         types=types,
         projects=projects,
         tags=tags,
+        speakers=speakers,
         file_types=file_types,
         exclude_file_types=exclude_file_types,
         limit=limit,

@@ -292,9 +292,10 @@ Empty queries degrade to filtered-most-recent regardless of mode.
 Additional knobs on `find`: `graph=true` (1-hop neighbours of strong matches),
 `rerank=true` (CrossEncoder re-sort, opt-in), `prefer_compiled=true` (default;
 favours compiled types over raw `source`), `prefer_active=true` (default;
-soft-demotes superseded pages), and `file_types` / `exclude_file_types` (scope to
+soft-demotes superseded pages), `file_types` / `exclude_file_types` (scope to
 or drop artifact kinds: `note`, `pdf`, `image`, `audio`, `video`, `docx`, `xlsx`,
-`pptx`, `html`, `text`, `email`, `calendar`, `csv`, `json`, `tsv`).
+`pptx`, `html`, `text`, `email`, `calendar`, `csv`, `json`, `tsv`), and `speakers`
+(restrict to diarized media whose `speakers:` frontmatter names a given person).
 
 **Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded and raw
 data files aren't `find`-searchable. To make a dataset findable, write a

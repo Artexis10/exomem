@@ -274,6 +274,13 @@ class ParsedPage:
         return [str(x).lower() for x in t] if isinstance(t, list) else []
 
     @property
+    def speakers(self) -> list[str]:
+        """Named speakers from a diarized media sidecar's `speakers:` frontmatter
+        (e.g. `[Alice, Speaker B]`). Empty when undiarized or not a media sidecar."""
+        s = self.frontmatter.get("speakers") or []
+        return [str(x) for x in s] if isinstance(s, list) else []
+
+    @property
     def media_type(self) -> str | None:
         """audio/video/image/pdf on an Evidence media sidecar, else None."""
         mt = self.frontmatter.get("media_type")
@@ -445,6 +452,7 @@ def find(
     types: list[str] | None = None,
     projects: list[str] | None = None,
     tags: list[str] | None = None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int = 15,
@@ -554,7 +562,7 @@ def find(
         hits = _find_keyword(
             vault_root,
             query_norm=query_norm,
-            types=types, projects=projects, tags=tags,
+            types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope,
         )
@@ -562,7 +570,7 @@ def find(
         hits = _find_semantic(
             vault_root,
             query=query, query_norm=query_norm,
-            types=types, projects=projects, tags=tags,
+            types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=walk_scope, mode=mode, graph=graph, rerank=rerank,
             auto_rerank=auto_rerank, temporal=temporal, intent=intent,
@@ -592,7 +600,7 @@ def find(
                 vault_root,
                 query=query,
                 query_norm=query_norm,
-                types=types, projects=projects, tags=tags,
+                types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
                 limit=limit,
             )
@@ -632,6 +640,7 @@ def _find_keyword(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int,
@@ -655,7 +664,7 @@ def _find_keyword(
         page = _CACHE.get(path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         excerpt = _make_excerpt(page, query_norm)
@@ -691,6 +700,7 @@ def _find_semantic(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int,
@@ -856,7 +866,7 @@ def _find_semantic(
         return _find_keyword(
             vault_root,
             query_norm=query_norm,
-            types=types, projects=projects, tags=tags,
+            types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=scope,
         )
@@ -927,7 +937,7 @@ def _find_semantic(
         page = _CACHE.get(abs_path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         keyword_excerpt = _make_excerpt(page, query_norm)
@@ -1040,6 +1050,7 @@ def _find_outside_kb(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int,
@@ -1087,7 +1098,7 @@ def _find_outside_kb(
         page = _CACHE.get(vault_root / rel_path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags,
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
             continue
         # Relaxed gate: BM25 score>0 already implies a token match, but the
@@ -1688,6 +1699,7 @@ def _passes_filters(
     types: list[str] | None,
     projects: list[str] | None,
     tags: list[str] | None,
+    speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
 ) -> bool:
@@ -1707,6 +1719,10 @@ def _passes_filters(
     if tags:
         page_tags = set(page.tags)
         if not any(t.lower() in page_tags for t in tags):
+            return False
+    if speakers:
+        page_speakers = {s.lower() for s in page.speakers}
+        if not any(s.lower() in page_speakers for s in speakers):
             return False
     # File-type scoping (opt-in; default None/None lets every kind through — a
     # search must never hide an artifact type by default).
