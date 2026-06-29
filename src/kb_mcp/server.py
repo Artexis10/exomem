@@ -22,10 +22,12 @@ Transports:
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
 import os
 import secrets
+import time
 from pathlib import Path
 
 import mcp.types
@@ -214,13 +216,48 @@ def _server_icons() -> list[mcp.types.Icon]:
 
 
 class SingleUserGitHubVerifier(GitHubTokenVerifier):
-    """Reject any GitHub token whose login isn't the allowed user."""
+    """Reject any GitHub token whose login isn't the allowed user.
+
+    Caches *validated* tokens for a short TTL (``KB_MCP_AUTH_CACHE_TTL`` seconds,
+    default 300). Without it every MCP request — and a single connector operation
+    fires several (ListTools + ListResources + ListPrompts + CallTool) — re-hits the
+    GitHub API to revalidate the same token, adding seconds of `api.github.com`
+    round-trips to the hot path. GitHub OAuth-App tokens carry no time-expiry, so the
+    only invalidation is a deliberate revoke / secret rotation, and a re-authorized
+    client presents a *new* token (a new cache key) that validates immediately — so
+    the TTL only bounds how long a revoked-but-still-presented token keeps working,
+    which doesn't happen for a single user. Only successes are cached (a rejection is
+    re-checked every call, so recovery is instant); set the TTL to 0 to disable.
+    """
+
+    _DEFAULT_TTL = 300.0
+    _MAX_ENTRIES = 64  # single user → tiny; cap guards against unbounded distinct tokens
 
     def __init__(self, *, allowed_login: str, **kwargs):
         super().__init__(**kwargs)
         self._allowed_login = allowed_login.lower()
+        self._cache: dict[str, tuple[float, AccessToken]] = {}
+
+    def _ttl(self) -> float:
+        raw = os.environ.get("KB_MCP_AUTH_CACHE_TTL")
+        if raw is None:
+            return self._DEFAULT_TTL
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            return self._DEFAULT_TTL
 
     async def verify_token(self, token: str) -> AccessToken | None:
+        ttl = self._ttl()
+        key = hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
+        if ttl > 0 and key:
+            hit = self._cache.get(key)
+            if hit is not None:
+                ts, cached = hit
+                if time.monotonic() - ts < ttl:
+                    return cached
+                del self._cache[key]  # expired
+
         access = await super().verify_token(token)
         if access is None:
             # GitHub rejected the token (expired / revoked / invalid). This is what
@@ -234,6 +271,15 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
         if login != self._allowed_login:
             log.warning("rejecting token for github login=%r", login)
             return None
+
+        if ttl > 0 and key:
+            now = time.monotonic()
+            if len(self._cache) >= self._MAX_ENTRIES:
+                # Drop expired entries before inserting; cheap, the cache is tiny.
+                self._cache = {
+                    k: v for k, v in self._cache.items() if now - v[0] < ttl
+                }
+            self._cache[key] = (now, access)
         return access
 
 

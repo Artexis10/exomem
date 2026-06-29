@@ -142,14 +142,18 @@ def test_child_env_cpu_forces_cuda_off(monkeypatch) -> None:
 
 
 def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
+    # Colon-free, pathsep-portable entries: a Windows drive path ("C:\\Windows") contains
+    # `:`, which IS os.pathsep on Linux — joining/splitting it on the CI runner shatters the
+    # drive letter. `_is_nvidia_wheel_bin` normalizes separators, so unix-style paths still
+    # exercise the strip on every platform (mirrors test_child_env_cpu_forces_cuda_off).
     monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cuda")
     monkeypatch.setenv(
-        "PATH", os.pathsep.join(["C:\\Windows", "C:\\v\\nvidia\\cublas\\bin", "C:\\v\\nvidia\\cudnn\\bin"])
+        "PATH", os.pathsep.join(["/usr/bin", "/x/nvidia/cublas/bin", "/x/nvidia/cudnn/bin"])
     )
     env = extract._diarizer_child_env()
     assert env.get("CUDA_VISIBLE_DEVICES", "x") != ""  # GPU stays visible (not blanked)
     parts = env["PATH"].split(os.pathsep)
-    assert "C:\\Windows" in parts  # non-nvidia entries kept
+    assert "/usr/bin" in parts  # non-nvidia entries kept
     assert not any("nvidia" in p.lower() for p in parts)  # cu12 wheel bins stripped → no cuDNN shadow
 
 

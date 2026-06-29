@@ -8,9 +8,15 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
-import torch
 
-from kb_mcp import voice_embed
+# The embeddings/voice extra (torch) isn't installed in lean CI — skip the whole module
+# there instead of erroring on collection, which is what reddened the `tests` workflow on
+# every PR. Mirrors the importorskip gate the other model-loading tests already use.
+pytest.importorskip("torch")
+
+import torch  # noqa: E402
+
+from kb_mcp import voice_embed  # noqa: E402
 
 
 def test_voice_device_env_and_asr_gating(monkeypatch: pytest.MonkeyPatch) -> None:
