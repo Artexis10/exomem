@@ -52,7 +52,7 @@ These appear on every page type:
 
 | Field | Required | Notes |
 |---|---|---|
-| `domain` | yes | `food`, `health`, `workflow`, etc. — matches the subfolder under `Notes/Experiments/` |
+| `domain` | yes | `workflow`, `research`, `ops`, etc. — matches the subfolder under `Notes/Experiments/` |
 | `started` | yes | ISO date the experiment actually began (may differ from `created` if planning preceded execution) |
 | `duration` | yes | freeform string: `"30 days"`, `"2 weeks"`, `"ongoing"` |
 | `concluded` | optional | ISO date the experiment ended; absent while ongoing |
@@ -65,7 +65,7 @@ These appear on every page type:
 
 | Field | Required | Notes |
 |---|---|---|
-| `medium` | yes | `reels`, `episodes`, `pdfs`, `posts`, etc. — matches the subfolder under `Notes/Productions/` |
+| `medium` | yes | `posts`, `articles`, `pdfs`, `episodes`, etc. — matches the subfolder under `Notes/Productions/` |
 | `status` | yes | one of: `planned`, `recorded`, `edited`, `published`, `reflected`, `dropped`, `archived`. Different from other page types — production-logs have lifecycle states. |
 | `recorded` | optional | ISO date primary capture happened |
 | `published` | optional | ISO date or `null` while still pre-publish |
@@ -159,17 +159,17 @@ tags: [retrieval, agentic-rag, knowledge-graph, governance]
 ```yaml
 ---
 type: experiment
-domain: food
+domain: workflow
 status: active
 created: 2026-05-01
 updated: 2026-05-09
 started: 2026-05-09
 duration: "30 days"
 n: 1
-hypothesis: "Eliminating dairy reduces sinus inflammation"
+hypothesis: "Batching code review into one daily slot cuts context-switching"
 sources:
-  - "[[Knowledge Base/Sources/Books/2026-04-the-elimination-diet]]"
-tags: [diet, elimination, sinus]
+  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+tags: [workflow, batching, focus]
 ---
 ```
 
@@ -178,20 +178,20 @@ tags: [diet, elimination, sinus]
 ```yaml
 ---
 type: production-log
-medium: reels
+medium: posts
 status: recorded
 created: 2026-05-09
 updated: 2026-05-09
 recorded: 2026-05-09
 published: null
-projects: [example-podcast]
+projects: [project-alpha]
 host: the host
 editor: a teammate
 sources:
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-curriculum-design]]"
+  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
 related:
-  - "[[Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum]]"
-  - "[[Knowledge Base/Notes/Patterns/conversational-reel-script]]"
-tags: [reels, metabolism, batch-02]
+  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+tags: [posts, launch, batch-01]
 ---
 ```

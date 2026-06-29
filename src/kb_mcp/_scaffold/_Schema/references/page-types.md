@@ -214,8 +214,8 @@ Conditions where it's a regression.
 
 ## experiment
 
-**Location:** `Notes/Experiments/<domain>/` where domain is `Food`, or another
-sub-domain that emerges (`Health`, `Workflow`, etc.). Add a new sub-domain only
+**Location:** `Notes/Experiments/<domain>/` where domain is `Workflow`, or another
+sub-domain that emerges (`Research`, `Ops`, etc.). Add a new sub-domain only
 when the first experiment in that domain is being written.
 **Naming:** `YYYY-MM-<slug>.md` — date-prefixed because experiments are time-bounded events, not evolving notes. Use the **start month**.
 **Mutability:** Editable while ongoing; once concluded, body is read-only except for supersession or follow-up notes that link back.
@@ -226,17 +226,17 @@ when the first experiment in that domain is being written.
 ```markdown
 ---
 type: experiment
-domain: food
+domain: workflow
 status: active
 created: 2026-05-09
 updated: 2026-05-09
 started: 2026-05-09
 duration: "30 days"
 n: 1
-hypothesis: "Eliminating dairy reduces sinus inflammation"
+hypothesis: "Batching code review into one daily slot cuts context-switching"
 sources:
-  - "[[Knowledge Base/Sources/Books/2026-04-the-elimination-diet]]"
-tags: [diet, elimination, sinus]
+  - "[[Knowledge Base/Sources/Books/2026-04-deep-work]]"
+tags: [workflow, batching, focus]
 ---
 
 # <Experiment name>
@@ -282,8 +282,8 @@ about* something and synthesize? First → experiment. Second → research-note.
 
 ## production-log
 
-**Location:** `Notes/Productions/<medium>/` where medium is `Reels`, `Episodes`,
-`PDFs`, `Posts`, or another medium that emerges. Add a new medium subfolder only
+**Location:** `Notes/Productions/<medium>/` where medium is `Posts`, `Articles`,
+`PDFs`, `Episodes`, or another medium that emerges. Add a new medium subfolder only
 when the first production in that medium is being written.
 **Naming:** `YYYY-MM-<slug>.md` — date-prefixed by start month.
 **Mutability:** Editable across the production lifecycle (planned → recorded → edited → published → reflected). Once complete and reflection is logged, treat as read-only except for supersession.
@@ -303,21 +303,21 @@ when the first production in that medium is being written.
 ```markdown
 ---
 type: production-log
-medium: reels
+medium: posts
 status: recorded
 created: 2026-05-09
 updated: 2026-05-09
 recorded: 2026-05-09
 published: null
-projects: [example-podcast]
+projects: [project-alpha]
 host: the host
 editor: a teammate
 sources:
-  - "[[Knowledge Base/Sources/Sessions/2026-05-09-curriculum-design]]"
+  - "[[Knowledge Base/Sources/Sessions/2026-05-09-launch-planning]]"
 related:
-  - "[[Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum]]"
-  - "[[Knowledge Base/Notes/Patterns/conversational-reel-script]]"
-tags: [reels, metabolism, batch-02]
+  - "[[Knowledge Base/Notes/Research/Project Alpha/launch-messaging]]"
+  - "[[Knowledge Base/Notes/Patterns/short-form-post-template]]"
+tags: [posts, launch, batch-01]
 ---
 
 # <Production batch name>
@@ -392,12 +392,12 @@ entity_type: person
 status: active
 created: 2026-05-09
 updated: 2026-05-09
-affiliation: Tesla / OpenAI alumnus
+affiliation: independent researcher
 relationship: public-figure
-tags: [ml, llm]
+tags: [research, methods]
 ---
 
-# Andrej Karpathy
+# Jordan Lee
 
 ## Summary
 
@@ -466,7 +466,7 @@ What this commits us to and what it forecloses.
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
 - Notes (research, insight, failure, pattern): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
 - Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
-- Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-metabolism-basics.md`
+- Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
 - Entities — People: working short used in daily reference; H1 carries the long form when it differs.
 - Entities — Concepts / Libraries / Decisions: Title Case, canonical name.
 

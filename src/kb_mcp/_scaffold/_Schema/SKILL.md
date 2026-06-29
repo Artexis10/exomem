@@ -437,7 +437,7 @@ The `project` field on a research note is a slug-shaped key registered in
 most-specific scope first. A typical starter set:
 
 - Products / projects: `project-alpha`, `project-beta` — one key per project.
-- Domains: `work`, plus your own (`health`, `finance`, `creative`, …).
+- Domains: `work`, plus your own (`research`, `ops`, …).
 - Cross-cutting: `personal` — anything not tied to a specific project or domain.
 
 For **patterns** that apply across multiple projects, use `projects:` (plural
@@ -449,8 +449,8 @@ slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
 `Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
 Pass `project_category` to bucket the new key (product / activity / domain /
 cross-cutting); omitted, it lands `uncategorized`. A **typo guard** rejects new
-keys within edit distance ≤2 of an existing key (`helath` → "Did you mean
-'health'?") so the registry stays clean.
+keys within edit distance ≤2 of an existing key (`wrok` → "Did you mean
+'work'?") so the registry stays clean.
 
 ### Experiment vs production-log
 

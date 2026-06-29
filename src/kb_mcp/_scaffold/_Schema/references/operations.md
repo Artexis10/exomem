@@ -122,7 +122,7 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 ### Triggers
 - "create an entity for X," "add a concept page for Y"
 - "this references [[X]]" where X doesn't exist yet (offered as a side-effect of `note`)
-- "add Karpathy to People," "add pgvector to Libraries"
+- "add Ada Lovelace to People," "add pgvector to Libraries"
 
 ### Inputs to gather
 - Entity name (becomes filename — see `page-types.md` § entity naming)

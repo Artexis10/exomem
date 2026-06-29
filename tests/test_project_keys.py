@@ -191,11 +191,11 @@ def test_note_surfaces_typo_as_project_key_typo_error(vault: Path) -> None:
             content="# Note\n\n## Question\n\nbody",
             note_type="research-note",
             title="Typo probe",
-            project="helath",  # missing 't' — distance 1 from "health"
+            project="wrok",  # transposed — distance 2 from "work"
             today=TODAY,
         )
     assert exc_info.value.code == "PROJECT_KEY_TYPO"
-    assert "health" in exc_info.value.reason  # suggestion present
+    assert "work" in exc_info.value.reason  # suggestion present
 
 
 def test_set_frontmatter_field_blocks_project_typo(vault: Path) -> None:
@@ -249,12 +249,12 @@ def test_link_decision_blocks_project_typo(vault: Path) -> None:
             entity_type="decision",
             name="Test Decision",
             summary="testing typo guard via link",
-            project="helath",  # distance 1 from "health"
+            project="wrok",  # distance 2 from "work"
             decision_status="proposed",
             today=TODAY,
         )
     assert exc_info.value.code == "PROJECT_KEY_TYPO"
-    assert "health" in exc_info.value.reason
+    assert "work" in exc_info.value.reason
 
 
 def test_link_decision_autoregisters_new_project(vault: Path) -> None:

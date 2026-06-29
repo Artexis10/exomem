@@ -7,10 +7,9 @@ insights/failures/patterns/production-logs.
 Adding a key is a YAML edit, not a code change. Validation in `note.py`
 calls into this module to get the current accepted set + folder mapping.
 
-If the YAML is missing or unparseable we fall back to a built-in safe
-default so the writer never refuses every project key. The fallback
-mirrors what was hardcoded before the config existed; a warning lands in
-the service log when it fires.
+If the YAML is missing or unparseable we fall back to a small neutral
+starter set so the writer never refuses every project key; a warning
+lands in the service log when it fires.
 """
 
 from __future__ import annotations
@@ -27,20 +26,15 @@ from .vault import kb_root
 log = logging.getLogger(__name__)
 
 
-# Fallback used when project-keys.yaml is missing or malformed. Matches the
-# pre-config hardcoded set so the writer keeps accepting all historical keys
-# even if the config disappears.
+# Fallback used when project-keys.yaml is missing or malformed. A neutral
+# starter set matching `_scaffold/_Schema/project-keys.yaml`, so a vault whose
+# config disappeared still accepts the shipped defaults. Real scopes live in the
+# vault's project-keys.yaml and auto-register on first write.
 _FALLBACK_PROJECTS: dict[str, str] = {
     "personal": "Personal",
-    "work": "Work",
     "project-alpha": "Project Alpha",
     "project-beta": "Project Beta",
-    "book-club": "Book Club",
-    "health": "Health",
-    "finance": "Finance",
-    "creative": "Creative",
-    "science": "Science",
-    "travel": "Travel",
+    "work": "Work",
 }
 
 

@@ -965,7 +965,7 @@
             }
           ],
           "default": null,
-          "description": "REQUIRED for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, work, project-alpha, project-beta, book-club, health, finance, creative, science, travel."
+          "description": "REQUIRED for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
         },
         "projects": {
           "anyOf": [
@@ -980,7 +980,7 @@
             }
           ],
           "default": null,
-          "description": "List of project keys (plural). Optional for insight,\nfailure, pattern, production-log. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, work, project-alpha, project-beta, book-club, health, finance, creative, science, travel."
+          "description": "List of project keys (plural). Optional for insight,\nfailure, pattern, production-log. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
         },
         "sources": {
           "anyOf": [

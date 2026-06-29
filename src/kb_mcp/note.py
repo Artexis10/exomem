@@ -60,30 +60,6 @@ NOTE_TYPES = (
     "experiment", "production-log",
 )
 
-# NOTE: PROJECT_KEYS and PROJECT_TO_FOLDER are now loaded from
-# `Knowledge Base/_Schema/project-keys.yaml` at validation time. The module-
-# level constants below are kept as references for tests/back-compat but are
-# NOT consulted by the live writer — use `_load_keys(vault_root)` instead.
-# To add a new project: edit project-keys.yaml in the vault, no code change
-# needed. See kb_mcp/project_keys.py for the loader.
-PROJECT_KEYS = (
-    "personal", "work", "project-alpha", "project-beta", "book-club",
-    "health", "finance", "creative", "science", "travel",
-)
-
-PROJECT_TO_FOLDER: dict[str, str] = {
-    "personal": "Personal",
-    "work": "Work",
-    "project-alpha": "Project Alpha",
-    "project-beta": "Project Beta",
-    "book-club": "Book Club",
-    "health": "Health",
-    "finance": "Finance",
-    "creative": "Creative",
-    "science": "Science",
-    "travel": "Travel",
-}
-
 
 def _load_keys(vault_root: Path) -> project_keys_module.ProjectRegistry:
     """Load the live project registry (from `_Schema/project-keys.yaml`)."""
@@ -634,7 +610,7 @@ def _resolve_path(
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
         registry = _load_keys(vault_root)
-        folder_name = registry.folder_for(project) or PROJECT_TO_FOLDER.get(project, project.capitalize())
+        folder_name = registry.folder_for(project) or project.capitalize()
         folder = kb / "Notes" / "Research" / folder_name
         stem = slug
     elif note_type == "insight":
