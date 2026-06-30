@@ -7,8 +7,7 @@
 #
 # Prereqs:
 #   - .venv exists with kb-mcp installed, e.g.
-#       python3 -m venv .venv && source .venv/bin/activate && pip install -e ".[embeddings]"
-#     (or `uv sync --extra embeddings`).
+#       uv sync --extra embeddings
 #   - .env in the repo root with the GitHub OAuth vars (KB_MCP_BASE_URL,
 #     KB_MCP_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) and
 #     KB_MCP_VAULT_PATH. See the Install section of README.md.

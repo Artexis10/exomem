@@ -5,6 +5,7 @@ Subcommands:
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
+- `doctor` — read-only local install/setup preflight
 - `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
 - `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
   for opt-in diarization (desk-side admin; never an MCP tool)
@@ -29,6 +30,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install_skill_main(raw[1:])
     if raw and raw[0] == "install-hook":
         return _install_hook_main(raw[1:])
+    if raw and raw[0] == "doctor":
+        return _doctor_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
     if raw and raw[0] == "enroll-speaker":
@@ -115,6 +118,35 @@ def _backfill_media_main(argv: list[str]) -> int:
         log_fn=print,
     )
     return 0
+
+
+def _doctor_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="kb-mcp doctor",
+        description="Read-only local setup preflight for kb-mcp installs.",
+    )
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)",
+    )
+    parser.add_argument(
+        "--profile",
+        choices=("lean", "hybrid", "media", "remote"),
+        default="lean",
+        help="capability profile to validate (default: lean)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    from . import doctor as doctor_module
+
+    report = doctor_module.doctor(vault=args.vault, profile=args.profile)
+    if args.json:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, default=str))
+    else:
+        print(doctor_module.render_human(report))
+    return 0 if report.success else 1
 
 
 def _speaker_vault(args) -> Path | None:

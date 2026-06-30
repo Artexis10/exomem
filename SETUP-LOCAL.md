@@ -24,6 +24,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 
 - **Python 3.11+** — check with `python3 --version`. On macOS, `brew install
   python` if you don't have it (or use the [python.org](https://www.python.org/downloads/) installer).
+- **uv** — the documented install path uses the repo lockfile. Install from
+  <https://docs.astral.sh/uv/> if `uv --version` fails.
 - **Claude Code** (you already have this)
 - An **Obsidian vault** — or just any folder you want to use as one. It needs a
   `Knowledge Base/` subfolder (we create a minimal one below).
@@ -36,20 +38,22 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 ```bash
 git clone <repo-url> kb-mcp
 cd kb-mcp
-python3 -m venv .venv && source .venv/bin/activate   # macOS/Linux
-# (Windows PowerShell: python -m venv .venv ; .venv\Scripts\Activate.ps1)
-pip install -e .                 # lean: keyword/BM25 search, no heavy deps
+uv sync                         # lean: keyword/BM25 search, no heavy deps
 # for hybrid semantic search, add the extra (~1-2 GB torch + sentence-transformers):
-# pip install -e ".[embeddings]"
+# uv sync --extra embeddings
 ```
 
-> **Lean by default.** `pip install -e .` is the light path — search runs on
+> **Lean by default.** `uv sync` is the light path — search runs on
 > keyword/BM25, no torch, no GPU, works everywhere (incl. Mac / no-GPU). For
 > hybrid semantic search (better recall on natural-language queries), install
-> the extra: `pip install -e ".[embeddings]"` — that's the ~1-2 GB torch
+> the extra: `uv sync --extra embeddings` — that's the ~1-2 GB torch
 > download (CUDA build, best on an NVIDIA GPU; CPU works but embeds slowly).
 > Start lean; upgrade anytime by installing the extra and unsetting
 > `KB_MCP_DISABLE_EMBEDDINGS`.
+
+If you already manage Python environments yourself, `pip install -e .` still
+works as a fallback; the `uv` path is preferred because it honors `uv.lock` and
+the repo's configured PyTorch wheel source.
 
 ---
 
@@ -60,7 +64,7 @@ contract, and the typed `Sources/ Notes/{…} Entities/{…} Evidence/` tree —
 your vault:
 
 ```bash
-python -m kb_mcp init --vault "/path/to/your/Obsidian"
+uv run python -m kb_mcp init --vault "/path/to/your/Obsidian"
 ```
 
 It refuses if a `Knowledge Base/` already exists, so it won't clobber anything.
@@ -83,19 +87,27 @@ export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 
 ## 4. (Choose) hybrid vs lean
 
-- **Lean / keyword-only (default install)** — `pip install -e .` + set
+- **Lean / keyword-only (default install)** — `uv sync` + set
   `KB_MCP_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
   Instant, no model load, no GPU, works everywhere. The easiest start. Note it's
   **silent about it** — there's no error when embeddings are off, so "search
   works" on a lean install means keyword/BM25, *not* semantic.
-- **Hybrid** — install the extra (`pip install -e ".[embeddings]"`) and leave
+- **Hybrid** — install the extra (`uv sync --extra embeddings`) and leave
   `KB_MCP_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
   of BM25 — best recall on natural-language queries. Ideally an NVIDIA GPU; CPU
   works but embeds slowly. The vector index builds as you write (each note is
-  embedded on save); to backfill an existing vault, run `audit_fix` with
-  `rebuild_embeddings=True`. Quick check that semantic is live: ask for something
+  embedded on save); to backfill an existing vault, run `kb reconcile` after
+  installing the extra. Quick check that semantic is live: ask for something
   using words that *don't* appear in the note — if it still surfaces, embeddings
   are on.
+
+Preflight the selected path before wiring Claude:
+
+```bash
+uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile lean
+# or, after installing embeddings:
+uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile hybrid
+```
 
 ---
 
@@ -107,11 +119,11 @@ Easiest — the CLI (run from anywhere):
 claude mcp add kb-mcp \
   --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
   --env KB_MCP_DISABLE_EMBEDDINGS=1 \
-  -- python -m kb_mcp --transport stdio
+  -- uv --directory "$PWD" run python -m kb_mcp --transport stdio
 ```
 
-(Drop the `KB_MCP_DISABLE_EMBEDDINGS` line for hybrid. Use the **full path to
-your venv's `python`** if `python` on PATH isn't the venv one.)
+(Drop the `KB_MCP_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
+fallback instead of uv, use the **full path to your venv's `python`**.)
 
 Or by hand in `.mcp.json` (project) / your Claude Code settings:
 
@@ -119,8 +131,8 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 {
   "mcpServers": {
     "kb-mcp": {
-      "command": "python",
-      "args": ["-m", "kb_mcp", "--transport", "stdio"],
+      "command": "uv",
+      "args": ["--directory", "/path/to/kb-mcp", "run", "python", "-m", "kb_mcp", "--transport", "stdio"],
       "env": {
         "KB_MCP_VAULT_PATH": "/path/to/your/Obsidian",
         "KB_MCP_DISABLE_EMBEDDINGS": "1"
@@ -131,7 +143,7 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```
 
 Restart Claude Code; you should see the `kb-mcp` tools (`find`, `note`, `add`,
-`audit`, `reconcile`, …). Quick test before wiring: `python -m kb_mcp
+`audit`, `reconcile`, …). Quick test before wiring: `uv run python -m kb_mcp
 --transport stdio` should start and wait on stdin without error.
 
 ---
@@ -144,7 +156,7 @@ compile notes under the schema. One command installs it straight from the repo
 into Claude Code's skills folder (no vault path needed — it ships in the package):
 
 ```bash
-python -m kb_mcp install-skill
+uv run python -m kb_mcp install-skill
 ```
 
 That writes the skill to `~/.claude/skills/knowledge-base/`. **Restart Claude
@@ -176,7 +188,7 @@ Claude tends to forget them, so auto-save quietly never fires (you'll know:
 pulled in. This one command installs two small hooks that fix both directions:
 
 ```bash
-python -m kb_mcp install-hook
+uv run python -m kb_mcp install-hook
 ```
 
 - **Write** — a `Stop` hook that re-checks "is this worth saving?" at the end of
@@ -191,7 +203,7 @@ turns/prompts, plus a per-session cooldown). They write scripts to
 `~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
 Code to activate. Triggers log to `~/.claude/kb-capture-nudge.log` and
 `~/.claude/kb-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
-by hand? `python -m kb_mcp install-hook --print-only` writes the scripts and
+by hand? `uv run python -m kb_mcp install-hook --print-only` writes the scripts and
 prints the snippet to paste.
 
 Tune with `KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_RETRIEVE_NUDGE_MIN_CHARS` (and the

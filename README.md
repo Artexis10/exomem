@@ -41,12 +41,13 @@ no OAuth, ~20 minutes**:
 
 ```bash
 git clone <repo-url> kb-mcp && cd kb-mcp
-python3 -m venv .venv && source .venv/bin/activate   # Windows: .venv\Scripts\Activate.ps1
-pip install -e .                 # lean: keyword/BM25 search, no heavy deps
-python -m kb_mcp init --vault "/path/to/your/Obsidian"
+uv sync                         # lean: keyword/BM25 search, no heavy deps
+uv run python -m kb_mcp init --vault "/path/to/your/Obsidian"
+uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian"
 claude mcp add kb-mcp --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
-  --env KB_MCP_DISABLE_EMBEDDINGS=1 -- python -m kb_mcp --transport stdio
-python -m kb_mcp install-skill   # the "brain" — don't skip this
+  --env KB_MCP_DISABLE_EMBEDDINGS=1 -- \
+  uv --directory "$PWD" run python -m kb_mcp --transport stdio
+uv run python -m kb_mcp install-skill   # the "brain" — don't skip this
 ```
 
 **[SETUP-LOCAL.md](SETUP-LOCAL.md)** walks the local path end to end (vault
@@ -182,11 +183,11 @@ Two optional dependency extras turn binaries into searchable text/vectors. Both
 **soft-fall-back**: if the libraries aren't installed, search degrades to
 keyword/BM25 and uploads still work, just without server-side extraction.
 
-- **`embeddings`** (`pip install -e ".[embeddings]"`) — `torch` +
+- **`embeddings`** (`uv sync --extra embeddings`) — `torch` +
   `sentence-transformers` + `pillow`. Adds the local vector half of hybrid `find`
   (a bge text model) and **CLIP** image embedding for visual search. ~1–2 GB
   download.
-- **`media`** (`pip install -e ".[media]"`) — server-side extraction on upload:
+- **`media`** (`uv sync --extra media`) — server-side extraction on upload:
   **faster-whisper** ASR for audio/video, **Tesseract** OCR for images,
   **PyMuPDF** for PDFs, and **MarkItDown** for Office/HTML docs
   (docx/xlsx/pptx/html). Two system tools are not pip-installable: **Tesseract OCR**
@@ -203,6 +204,11 @@ RTX 50-series (Blackwell, sm_120) is supported. See
 Blackwell/CUDA details. Disable extraction entirely with
 `KB_MCP_DISABLE_MEDIA_EXTRACTION=1` (uploads still work; no searchable-text
 extraction).
+
+`pip install -e .` remains supported if you manage your own virtual environment,
+but the documented path uses `uv` so the lockfile and the configured PyTorch index
+are honored. Check a machine with `uv run python -m kb_mcp doctor --profile lean`
+or `--profile hybrid|media|remote` before wiring a client.
 
 ## Remote access (optional)
 
