@@ -15,12 +15,35 @@ profile before wiring a client or optional capability.
 - **AND** each check contains `id`, `status`, `message`, and `remediation`
 - **AND** no vault file is created, modified, moved, or deleted
 
+#### Scenario: Missing required lean setup
+
+- **WHEN** `doctor` cannot resolve a vault containing `Knowledge Base/_Schema/SKILL.md`
+- **THEN** it exits non-zero
+- **AND** it reports a remediation that tells the user to set `KB_MCP_VAULT_PATH`
+  or pass `--vault` and run `init` if needed
+
+### Requirement: Profile-Specific Readiness
+
+The doctor command SHALL validate the requested capability profile. `lean` SHALL
+check Python/package/vault/registry basics. `hybrid` SHALL additionally check
+embeddings dependencies and embedding sidecar state. `media` SHALL additionally
+check media extraction dependencies and Tesseract discovery. `remote` SHALL
+additionally check public URL and OAuth-related environment variables.
+
+#### Scenario: Optional capability profile is requested
+
+- **WHEN** `doctor --profile media` is run without media extraction dependencies
+- **THEN** the report marks the missing media components as failures
+- **AND** the remediation names the relevant `uv sync --extra ...` command
+
 #### Scenario: Media profile reports install gaps
 
 - **WHEN** `doctor --profile media` is run without media extraction dependencies
 - **THEN** the report marks missing media components as failures
 - **AND** the remediation names `uv sync --extra media` and any required system
   tool such as Tesseract
+
+## ADDED Requirements
 
 ### Requirement: Sample Vault Smoke
 
