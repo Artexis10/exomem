@@ -319,6 +319,15 @@ class ParsedPage:
             return []
         return [str(x) for x in sb] if isinstance(sb, list) else [str(sb)]
 
+    @property
+    def supersedes(self) -> list[str]:
+        """Wikilink(s) to the page(s) this one replaced — the backward supersession
+        pointer `replace` writes on a new page (empty when it supersedes nothing)."""
+        sv = self.frontmatter.get("supersedes")
+        if not sv:
+            return []
+        return [str(x) for x in sv] if isinstance(sv, list) else [str(sv)]
+
 
 def _format_timestamp(seconds: float) -> str:
     """Seconds → `mm:ss` (or `h:mm:ss` past an hour) for human-readable video deeplinks."""

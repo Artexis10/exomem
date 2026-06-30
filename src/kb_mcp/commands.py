@@ -39,6 +39,7 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import evolution as evolution_module
 from . import find as find_module
 from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
@@ -578,6 +579,55 @@ def op_attention(
     """
     report = attention_module.attention(vault_root, categories=categories, limit=limit)
     return report.as_dict()
+
+
+def op_evolution(
+    vault_root: Path,
+    query: str = "",
+    limit: int = 10,
+    scope: str = "kb",
+    projects: list[str] | None = None,
+    tags: list[str] | None = None,
+) -> dict:
+    """How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only.
+
+    For a topic `query`, finds the matching notes, follows each one's supersession
+    chain (the `supersedes`/`superseded_by` links `replace` records), and returns one
+    ordered timeline per chain — oldest version → newest. Each version carries its own
+    structurally-extracted claims, its date, and the RECORDED reason it was superseded
+    (the `why:` logged at that edit). The server only orders and surfaces what you
+    wrote; it does NOT generate a "here's how your thinking changed" summary — you read
+    the consecutive versions and see the shift.
+
+    Use this for "how did my view on X evolve / what did I used to think / why did this
+    change". Use `find` for plain lookup. Notes never superseded are omitted (no
+    evolution to show); a topic with no supersession returns empty `timelines` — an
+    honest "nothing changed here", not an error. Read-only: mutates nothing; `find`
+    ordering is unchanged.
+
+    Args:
+        query: The topic to trace (free text, like `find`).
+        limit: Max chains (timelines) to return, by find relevance (default 10;
+            0 or negative = uncapped). Chains beyond the cap are reported in
+            `truncation`, never dropped silently.
+        scope: Search scope passed to `find` — "kb" (default) / "vault" / "kb-only".
+        projects: Optional project-key filter passed to `find`.
+        tags: Optional tag filter passed to `find`.
+
+    Returns:
+        {query, timelines: [{chain_id, topic_anchor, span: {from, to, n_versions},
+         versions: [{path, title, status, date, claims: {lede, sections, outline},
+         transition: {reason, date} | null}]}], truncation: [...]}. `transition` is
+        null on the active head; `versions` run oldest → newest by supersession order.
+    """
+    return evolution_module.evolution(
+        vault_root,
+        query=query,
+        limit=limit,
+        scope=scope,
+        projects=projects,
+        tags=tags,
+    )
 
 
 def op_audit_fix(
@@ -1944,6 +1994,7 @@ _SPEC: tuple[tuple, ...] = (
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
     ("attention", op_attention, 1, False, False, None, _MCRC),
+    ("evolution", op_evolution, 1, False, False, "query", _MCRC),
     ("audit_fix", op_audit_fix, 1, True, False, None, _MCRC),
     ("reconcile", op_reconcile, 1, True, False, None, _MCRC),
     ("provenance_report", op_provenance_report, 1, False, False, None, _MCRC),
