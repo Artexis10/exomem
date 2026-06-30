@@ -50,7 +50,7 @@ _NEIGHBOR_LEDE_CHARS = 160
 RECOGNIZED_SECTIONS: frozenset[str] = frozenset({
     "summary", "problem", "conclusion", "decision", "pattern", "hypothesis",
     "result", "results", "insight", "tl;dr", "tldr", "takeaway", "why",
-    "finding", "findings",
+    "finding", "findings", "claim", "claims",
 })
 
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")

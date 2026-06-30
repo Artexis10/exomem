@@ -474,6 +474,60 @@
       "type": "object"
     }
   },
+  "evolution": {
+    "description": "How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only.\n\nFor a topic `query`, finds the matching notes, follows each one's supersession\nchain (the `supersedes`/`superseded_by` links `replace` records), and returns one\nordered timeline per chain — oldest version → newest. Each version carries its own\nstructurally-extracted claims, its date, and the RECORDED reason it was superseded\n(the `why:` logged at that edit). The server only orders and surfaces what you\nwrote; it does NOT generate a \"here's how your thinking changed\" summary — you read\nthe consecutive versions and see the shift.\n\nUse this for \"how did my view on X evolve / what did I used to think / why did this\nchange\". Use `find` for plain lookup. Notes never superseded are omitted (no\nevolution to show); a topic with no supersession returns empty `timelines` — an\nhonest \"nothing changed here\", not an error. Read-only: mutates nothing; `find`\nordering is unchanged.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "type": "string",
+          "description": "The topic to trace (free text, like `find`)."
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "description": "Max chains (timelines) to return, by find relevance (default 10;\n0 or negative = uncapped). Chains beyond the cap are reported in\n`truncation`, never dropped silently."
+        },
+        "scope": {
+          "default": "kb",
+          "type": "string",
+          "description": "Search scope passed to `find` — \"kb\" (default) / \"vault\" / \"kb-only\"."
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project-key filter passed to `find`."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional tag filter passed to `find`."
+        }
+      },
+      "type": "object"
+    }
+  },
   "find": {
     "description": "Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.",
     "inputSchema": {
