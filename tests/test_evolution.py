@@ -105,6 +105,9 @@ Phased rollout of the widget service, 5% at a time.
 LOG = """\
 # Activity log
 
+## [2026-04-01] edit | Notes/Insights/widget-cache-v3
+Tidied prose; notes that v3 supersedes the TTL approach. No claim change.
+
 ## [2026-03-15] replace | Notes/Insights/widget-cache-v3
 Supersedes `Notes/Insights/widget-cache-v2` via kb-mcp. LRU beat TTL on the measured hit-rate.
 
@@ -158,6 +161,8 @@ def test_transitions_carry_recorded_reasons_head_is_null(chains: Path) -> None:
     a, b, c = tl["versions"]
     assert "TTL after the latency spike" in a["transition"]["reason"]   # A -> B reason (from B's log)
     assert "LRU beat TTL" in b["transition"]["reason"]                  # B -> C reason (from C's log)
+    # The `replace` op is picked, NOT the newer `edit` entry that merely mentions "supersede".
+    assert "Tidied prose" not in b["transition"]["reason"]
     assert c["transition"] is None                                      # active head
 
 

@@ -104,8 +104,17 @@ def _order_chain(vault_root: Path, members: dict[str, ParsedPage]) -> list[Parse
 
 def _transition_reason(vault_root: Path, new_page: ParsedPage) -> tuple[str | None, str | None]:
     """The recorded reason `new_page` superseded its predecessor — read verbatim from the
-    `log.md` entry `replace` writes under the new page (returns (reason, date))."""
-    for entry in vault_module.read_log_entries(vault_root, new_page.rel_path):
+    `log.md` entry `replace` writes under the new page (returns (reason, date)).
+
+    Match the explicit `replace` op first (what supersession records); fall back to a
+    summary mention only if absent, so a later ordinary `edit` whose rationale happens to
+    say "supersede" can't masquerade as the transition reason.
+    """
+    entries = vault_module.read_log_entries(vault_root, new_page.rel_path)
+    for entry in entries:
+        if entry.get("op") == "replace":
+            return entry.get("summary"), entry.get("date")
+    for entry in entries:
         if "supersede" in entry.get("summary", "").lower():
             return entry["summary"], entry.get("date")
     return None, None
@@ -138,14 +147,16 @@ def _build_timeline(
             "transition": transition,
         })
 
-    dates = [p.updated for p in shown if p.updated]
+    # span + n_versions describe the WHOLE chain (`ordered`), not just the shown window —
+    # the truncation note carries the dropped count, so these stay chain-level facts.
+    dates = [p.updated for p in ordered if p.updated]
     timeline = {
         "chain_id": ordered[-1].rel_path,   # the active head
         "topic_anchor": anchor,
         "span": {
             "from": min(dates) if dates else "",
             "to": max(dates) if dates else "",
-            "n_versions": len(versions),
+            "n_versions": len(ordered),
         },
         "versions": versions,
     }
@@ -168,9 +179,8 @@ def build_timelines(
     max_chains = _int_env(max_chains, "KB_MCP_EVOLUTION_MAX_CHAINS", _DEFAULT_MAX_CHAINS)
     max_versions = _int_env(max_versions, "KB_MCP_EVOLUTION_MAX_VERSIONS", _DEFAULT_MAX_VERSIONS)
 
-    truncation: list[str] = []
     seen_heads: set[str] = set()
-    timelines: list[dict] = []
+    built: list[tuple[dict, int]] = []  # (timeline, dropped_versions)
     for hit in hits:
         page = find_module._CACHE.get(vault_root / hit.path, vault_root)
         if page is None:
@@ -183,23 +193,29 @@ def build_timelines(
         if head in seen_heads:
             continue  # another hit already surfaced this chain
         seen_heads.add(head)
-        timeline, dropped = _build_timeline(
+        built.append(_build_timeline(
             vault_root, ordered, anchor=page.rel_path, max_versions=max_versions
+        ))
+
+    # Apply the chains cap FIRST, so per-timeline version-truncation notes below can only
+    # reference chains that are actually returned (never a dropped one).
+    truncation: list[str] = []
+    total = len(built)
+    if max_chains > 0 and total > max_chains:
+        built = built[:max_chains]
+        truncation.append(
+            f"showing {max_chains} of {total} chains "
+            f"({total - max_chains} more not shown; raise `limit`)"
         )
+
+    timelines: list[dict] = []
+    for timeline, dropped in built:
         if dropped:
             truncation.append(
-                f"timeline {head} capped at {max_versions} versions "
+                f"timeline {timeline['chain_id']} capped at {max_versions} versions "
                 f"({dropped} older not shown; raise KB_MCP_EVOLUTION_MAX_VERSIONS)"
             )
         timelines.append(timeline)
-
-    total = len(timelines)
-    if max_chains > 0 and total > max_chains:
-        timelines = timelines[:max_chains]
-        truncation.append(
-            f"showing {max_chains} of {total} chains "
-            f"({total - max_chains} more not shown; raise KB_MCP_EVOLUTION_MAX_CHAINS)"
-        )
     return {"timelines": timelines, "truncation": truncation}
 
 
@@ -216,15 +232,19 @@ def evolution(
 
     Finds the topic, resolves each hit's supersession chain, and returns one ordered
     timeline per chain. Empty `timelines` means nothing matching the topic has been
-    superseded — honestly empty, not an error.
+    superseded — honestly empty, not an error. Results are bounded by `find`'s candidate
+    pool (≤100): a chain whose only matching members fall outside it won't surface.
     """
+    # Overfetch candidates since several hits collapse into one chain; `find` clamps to
+    # 100, so an "uncapped" (limit<=0) call fetches that full pool.
+    overfetch = 100 if limit <= 0 else min(max(limit * _OVERFETCH, 25), 100)
     hits = find_module.find(
         vault_root,
         query=query,
         scope=scope,
         projects=projects,
         tags=tags,
-        limit=max(limit * _OVERFETCH, 25),
+        limit=overfetch,
     )
     built = build_timelines(vault_root, hits, max_chains=limit)
     return {"query": query, **built}

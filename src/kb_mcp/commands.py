@@ -616,9 +616,10 @@ def op_evolution(
 
     Returns:
         {query, timelines: [{chain_id, topic_anchor, span: {from, to, n_versions},
-         versions: [{path, title, status, date, claims: {lede, sections, outline},
-         transition: {reason, date} | null}]}], truncation: [...]}. `transition` is
-        null on the active head; `versions` run oldest → newest by supersession order.
+         versions: [{path, title, status, date, claims: {title, type, lede, sections,
+         outline}, transition: {reason, date} | null}]}], truncation: [...]}.
+        `transition` is null on the active head; `versions` run oldest → newest by
+        supersession order; `span`/`n_versions` describe the whole chain.
     """
     return evolution_module.evolution(
         vault_root,
