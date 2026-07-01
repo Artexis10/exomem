@@ -22,7 +22,6 @@ import yaml
 
 from .vault import kb_root
 
-
 log = logging.getLogger(__name__)
 
 
@@ -268,7 +267,7 @@ def register_project_key(
         for k, f in _FALLBACK_PROJECTS.items():
             bootstrap_lines.append(f"  {k}:")
             bootstrap_lines.append(f"    folder: {f}")
-            bootstrap_lines.append(f"    category: uncategorized")
+            bootstrap_lines.append("    category: uncategorized")
         path.write_text("\n".join(bootstrap_lines) + "\n", encoding="utf-8")
 
     text = path.read_text(encoding="utf-8")

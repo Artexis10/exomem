@@ -14,7 +14,6 @@ import pytest
 from kb_mcp import note as note_module
 from kb_mcp import project_keys as project_keys_module
 
-
 TODAY = dt.date(2026, 5, 28)
 
 

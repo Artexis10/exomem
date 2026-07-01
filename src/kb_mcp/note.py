@@ -35,8 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import corpus_aware
-from . import indexes
+from . import corpus_aware, indexes
 from . import project_keys as project_keys_module
 from .vault import (
     PlannedWrite,
@@ -50,7 +49,6 @@ from .vault import (
     slugify_with_truncation_check,
     unique_path,
 )
-
 
 log = logging.getLogger(__name__)
 
