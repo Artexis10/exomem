@@ -38,7 +38,7 @@
       validation error → `{success:false,error:{code,...}}`; OpenAPI lists real params; blob guard.
 
 ## 6. CLI from the registry (reads + writes)
-- [x] 6.1 `[project.scripts]`: `kb` and `kb-mcp` → `kb_mcp.__main__:main`. `python -m kb_mcp` still works.
+- [x] 6.1 `[project.scripts]`: `kb` and `exomem` → `kb_mcp.__main__:main`. `python -m kb_mcp` still works.
 - [x] 6.2 In `__main__.py`, generate a subparser per `COMMANDS` (cli) op (positional for positional
       params, `--flags` for the rest; `note`'s type-specific args via `--field key=value`); global
       `--json`; dispatch → resolve vault → coerce → `cmd.leaf(vault_root, **kwargs)` → human or

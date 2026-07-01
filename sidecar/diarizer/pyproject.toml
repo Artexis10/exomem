@@ -1,7 +1,7 @@
 [project]
-name = "kb-mcp-diarizer"
+name = "exomem-diarizer"
 version = "0.1.0"
-description = "Isolated diarization sidecar for kb-mcp: pyannote on standard CUDA torch, invoked as a subprocess. GPU-capable (Blackwell sm_120) with CPU fallback."
+description = "Isolated diarization sidecar for exomem: pyannote on standard CUDA torch, invoked as a subprocess. GPU-capable (Blackwell sm_120) with CPU fallback."
 # <3.13 on purpose: the pinned torch 2.9.x line ships cp311/cp312 wheels; uv auto-fetches a
 # compatible interpreter for this venv (decoupled from the main service's Python).
 requires-python = ">=3.11,<3.13"

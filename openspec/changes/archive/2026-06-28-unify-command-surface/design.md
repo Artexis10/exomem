@@ -67,7 +67,7 @@ class Command:
 ## Decisions
 
 - **Console scripts:** add `[project.scripts]` `kb = "kb_mcp.__main__:main"` and
-  `kb-mcp = "kb_mcp.__main__:main"` — `kb find "…"` is the daily command; `kb-mcp` the namespaced
+  `exomem = "kb_mcp.__main__:main"` — `kb find "…"` is the daily command; `exomem` the namespaced
   alias. `python -m kb_mcp` keeps working.
 - **Shared envelope** (`cli_ops.envelope`): `{success, data, error: {code, message, remediation}}`,
   mirroring Endstate. REST 200 → `{success:true, data:…}`; REST 4xx → `{success:false, error:{…}}`.

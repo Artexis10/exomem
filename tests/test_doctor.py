@@ -1,4 +1,4 @@
-"""`kb-mcp doctor` install-readiness preflight.
+"""`exomem doctor` install-readiness preflight.
 
 The checks stay torch-free in the suite: profile-specific dependency availability
 is exercised by stubbing the import-spec seam rather than importing heavy extras.

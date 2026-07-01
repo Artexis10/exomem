@@ -7,7 +7,7 @@ MCP's scope:
 
 Both are markdown with embedded tables. Parsing is conservative: we extract the
 narrow facts we need; if either doc changes shape and parsing fails, we raise
-loudly at startup so kb-mcp never silently drifts from the canonical schema.
+loudly at startup so exomem never silently drifts from the canonical schema.
 """
 
 from __future__ import annotations
@@ -31,7 +31,7 @@ REQUIRED_FIELD_ROW_PATTERN = re.compile(
 
 @dataclass(frozen=True)
 class SourceSchema:
-    """The narrow slice of schema kb-mcp's `add` tool needs to enforce."""
+    """The narrow slice of schema exomem's `add` tool needs to enforce."""
 
     source_types: tuple[str, ...]
     required_fields: tuple[str, ...]

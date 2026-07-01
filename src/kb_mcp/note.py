@@ -899,7 +899,7 @@ def _activity_summary(
             modifier_parts.append(status)
     modifier = (", " + ", ".join(modifier_parts)) if modifier_parts else ""
     return (
-        f"`{path_part}` ({note_type}{modifier}, mobile via kb-mcp) "
+        f"`{path_part}` ({note_type}{modifier}, mobile via exomem) "
         f"— \"{title.strip()}\""
     )
 
@@ -932,7 +932,7 @@ def _log_entry_body(
     else:
         scope = "cross-cutting"
     parts.append(
-        f"Mobile compile via kb-mcp. note_type={note_type}. "
+        f"Mobile compile via exomem. note_type={note_type}. "
         f"scope={scope}. \"{title.strip()}\"."
     )
     if note_type == "failure" and severity:

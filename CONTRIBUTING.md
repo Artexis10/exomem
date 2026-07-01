@@ -7,9 +7,9 @@ checkout, so switching branches or stashing in the main working tree disrupts th
 other session. Do every new change in its own git worktree:
 
 ```
-git worktree add ../kb-mcp-<topic> -b <branch>
+git worktree add ../exomem-<topic> -b <branch>
 # work, commit, push from the worktree
-git worktree remove ../kb-mcp-<topic>
+git worktree remove ../exomem-<topic>
 ```
 
 Commit and push from the worktree; leave the primary checkout on whatever branch

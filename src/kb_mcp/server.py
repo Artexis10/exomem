@@ -65,7 +65,7 @@ _GUARDED_WRITE_FIELDS = commands_module.GUARDED_WRITE_FIELDS
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration.
 
-    Service-log only (`logs/kb-mcp.log`). The durable content history lives
+    Service-log only (`logs/exomem.log`). The durable content history lives
     in `Knowledge Base/log.md` (writes only, KB-scoped) — this layer is
     operational: which tool was called, when, by whom, did it succeed.
     Reads land here too, by design, so we can answer "did the connector
@@ -270,7 +270,7 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
             # formatter) to diagnose recurring re-auth churn: frequent regular
             # intervals point to GitHub OAuth-App token expiry; clustering around a
             # restart points to the token store / signing key.
-            log.info("kb-mcp auth: token rejected by GitHub (expired/revoked/invalid); client will re-authorize")
+            log.info("exomem auth: token rejected by GitHub (expired/revoked/invalid); client will re-authorize")
             return None
         login = (access.claims.get("login") or "").lower()
         if login != self._allowed_login:
@@ -427,7 +427,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             fallback_access_token_expiry_seconds=30 * 24 * 60 * 60,  # 30 days
         )
 
-    mcp = FastMCP("kb-mcp", auth=auth, icons=_server_icons())
+    mcp = FastMCP("exomem", auth=auth, icons=_server_icons())
     mcp.add_middleware(CallTraceMiddleware())
 
     if auth is not None:
@@ -604,7 +604,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
 
         html = f"""<!doctype html><meta charset=utf-8>
 <meta name=viewport content="width=device-width,initial-scale=1">
-<title>kb-mcp upload</title>
+<title>exomem upload</title>
 <style>body{{font:16px system-ui;max-width:34rem;margin:2rem auto;padding:0 1rem}}
 label{{display:block;margin:.75rem 0 .2rem}}input,textarea{{width:100%;padding:.5rem;font:inherit}}
 button{{margin-top:1rem;padding:.6rem 1rem;font:inherit}}#out{{margin-top:1rem;white-space:pre-wrap}}</style>
@@ -839,7 +839,7 @@ out.textContent=r.status+' '+await r.text();}}catch(err){{out.textContent='Error
         return JSONResponse(
             {
                 "openapi": "3.1.0",
-                "info": {"title": "kb-mcp personal REST facade", "version": "1.0.0"},
+                "info": {"title": "exomem personal REST facade", "version": "1.0.0"},
                 "components": {
                     "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
                 },
@@ -966,9 +966,9 @@ def run(
     mcp = build_server(require_auth=require_auth)  # loads .env (KB_MCP_HOST, etc.)
 
     if transport == "stdio":
-        log.info("kb-mcp starting on stdio")
+        log.info("exomem starting on stdio")
         mcp.run(transport="stdio")
     else:
         host = os.environ.get("KB_MCP_HOST") or host or "127.0.0.1"
-        log.info("kb-mcp starting on %s host=%s port=%s", transport, host, port)
+        log.info("exomem starting on %s host=%s port=%s", transport, host, port)
         mcp.run(transport=transport, host=host, port=port)

@@ -1,4 +1,4 @@
-# kb-mcp sample vault
+# exomem sample vault
 
 Tiny public vault for first-run smoke tests and documentation examples.
 

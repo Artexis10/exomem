@@ -1,6 +1,6 @@
-# kb-mcp — local setup (Claude Code, no cloud)
+# exomem — local setup (Claude Code, no cloud)
 
-This is the **local-first** path: run kb-mcp as a **local MCP server inside
+This is the **local-first** path: run exomem as a **local MCP server inside
 Claude Code**, pointed at your own Obsidian vault. No OAuth, no Tailscale, no
 Windows service — none of the remote/mobile machinery in the main
 [README](README.md). Everything stays on your machine; the only thing that ever
@@ -11,7 +11,7 @@ shell; the few Windows (PowerShell) differences are called out inline.
 
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
-> **kb-mcp is two parts, and you need both.** The **MCP server** (steps 1–5) is
+> **exomem is two parts, and you need both.** The **MCP server** (steps 1–5) is
 > the *hands* — the `find`/`add`/`note` tools. The **skill** (step 6) is the
 > *brain* — it's what tells Claude *when* to save, how to file a source, and how
 > to compile a note. Install the server but skip the skill and Claude has the
@@ -36,8 +36,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 ## 1. Install
 
 ```bash
-git clone <repo-url> kb-mcp
-cd kb-mcp
+git clone <repo-url> exomem
+cd exomem
 uv sync                         # lean: keyword/BM25 search, no heavy deps
 # for hybrid semantic search, add the extra (~1-2 GB torch + sentence-transformers):
 # uv sync --extra embeddings
@@ -126,7 +126,7 @@ uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile hybrid
 Easiest — the CLI (run from anywhere):
 
 ```bash
-claude mcp add kb-mcp \
+claude mcp add exomem \
   --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
   --env KB_MCP_DISABLE_EMBEDDINGS=1 \
   -- uv --directory "$PWD" run python -m kb_mcp --transport stdio
@@ -140,9 +140,9 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```json
 {
   "mcpServers": {
-    "kb-mcp": {
+    "exomem": {
       "command": "uv",
-      "args": ["--directory", "/path/to/kb-mcp", "run", "python", "-m", "kb_mcp", "--transport", "stdio"],
+      "args": ["--directory", "/path/to/exomem", "run", "python", "-m", "kb_mcp", "--transport", "stdio"],
       "env": {
         "KB_MCP_VAULT_PATH": "/path/to/your/Obsidian",
         "KB_MCP_DISABLE_EMBEDDINGS": "1"
@@ -152,7 +152,7 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 }
 ```
 
-Restart Claude Code; you should see the `kb-mcp` tools (`find`, `note`, `add`,
+Restart Claude Code; you should see the `exomem` tools (`find`, `note`, `add`,
 `audit`, `reconcile`, …). Quick test before wiring: `uv run python -m kb_mcp
 --transport stdio` should start and wait on stdin without error.
 
@@ -269,7 +269,7 @@ personal preferences should Claude consider in responses?"**:
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 
-I keep a personal Knowledge Base, connected as the "Knowledge Base" connector (kb-mcp). Use it proactively: search it first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search means a gap, not a dead end). Capture durable conclusions on your own (a decision, solved problem, diagnosed failure, or recognized pattern) as a short compiled note, not a transcript, whether or not the topic exists yet, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat and don't narrate empty searches.
+I keep a personal Knowledge Base, connected as the "Knowledge Base" connector (exomem). Use it proactively: search it first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search means a gap, not a dead end). Capture durable conclusions on your own (a decision, solved problem, diagnosed failure, or recognized pattern) as a short compiled note, not a transcript, whether or not the topic exists yet, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat and don't narrate empty searches.
 ```
 
 The first paragraph is general response style (trim to taste); the second is the KB

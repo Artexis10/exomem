@@ -1,6 +1,6 @@
 ## Why
 
-kb-mcp ships the pieces of a self-tuning retrieval ranker — a golden eval set
+exomem ships the pieces of a self-tuning retrieval ranker — a golden eval set
 (`tests/golden/queries.yaml`), an offline NDCG harness (`scripts/eval_retrieval.py`),
 a coordinate-descent tuner (`scripts/auto_tune_ranking.py`) over `RankingConfig`,
 and a usage miner (`scripts/derive_relevance_pairs.py`) that turns ordinary

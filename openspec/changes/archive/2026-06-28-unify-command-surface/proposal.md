@@ -1,13 +1,13 @@
 ## Why
 
-kb-mcp exposes its operations across three surfaces — **MCP tools** (24, for Claude), a personal **REST facade** (9 hand-wired `/api/*` routes), and a **CLI** (admin-only). They share leaf functions (no business-logic duplication — good), but the *surface definitions* are duplicated and inconsistent:
+exomem exposes its operations across three surfaces — **MCP tools** (24, for Claude), a personal **REST facade** (9 hand-wired `/api/*` routes), and a **CLI** (admin-only). They share leaf functions (no business-logic duplication — good), but the *surface definitions* are duplicated and inconsistent:
 
 - Exposing one operation takes **3–4 edits in different spots** (`@mcp.tool` decorator, a `@mcp.custom_route` block, the `post_tools` OpenAPI list, optionally a CLI handler).
 - **REST covers only 9** of the operations; the rest (replace, link, preserve, provenance_report, query_data…) have no HTTP endpoint.
 - The **OpenAPI spec is a hand-maintained list** (`post_tools`, server.py:1031) with generic `{type: object}` schemas — it drifts and documents nothing useful.
 - The **CLI can't run the core operations at all** — no `find`, `get`, `audit` from a terminal/script.
 
-engraph and Endstate each have **one clean, consistent command contract**. kb-mcp should too — **one declarative registry as the genuine single source of truth** that drives *every* surface (MCP, REST, CLI, OpenAPI), so adding an operation is one entry and the surfaces can't drift.
+engraph and Endstate each have **one clean, consistent command contract**. exomem should too — **one declarative registry as the genuine single source of truth** that drives *every* surface (MCP, REST, CLI, OpenAPI), so adding an operation is one entry and the surfaces can't drift.
 
 ## What Changes
 

@@ -1,7 +1,7 @@
 # Project keys for research-notes (`project:`) and cross-cutting notes
 # (`projects:` list on insights/failures/patterns/production-logs).
 #
-# Single source of truth. kb-mcp loads this at startup; adding a key here
+# Single source of truth. exomem loads this at startup; adding a key here
 # makes it immediately accepted by `note`/`replace`/`audit`. New keys also
 # auto-register here the first time you use them, so you can just start
 # writing and let this grow.

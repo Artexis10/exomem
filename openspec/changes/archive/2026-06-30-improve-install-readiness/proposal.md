@@ -1,6 +1,6 @@
 ## Why
 
-kb-mcp is already public-surface clean and already uses `uv` internally (`uv.lock`,
+exomem is already public-surface clean and already uses `uv` internally (`uv.lock`,
 CI, deployment docs, sidecar setup), but the first-run experience still reads like a
 personal Python project: the local quickstart leads with manual venv + `pip`, and a
 new user has no single command that explains what is missing on their machine.

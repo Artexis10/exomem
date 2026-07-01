@@ -322,7 +322,7 @@ def _activity_summary(
     tags: list[str],
 ) -> str:
     """One-liner for the top index's Recent activity bullet."""
-    base = f"`{rel_source_no_ext.replace('Knowledge Base/', '')}` (source, {source_type}, mobile capture via kb-mcp)"
+    base = f"`{rel_source_no_ext.replace('Knowledge Base/', '')}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
     return f"{base} — {excerpt}{tags_part}"
@@ -339,7 +339,7 @@ def _log_entry_body(
     """Multi-line description body for log.md."""
     parts: list[str] = []
     parts.append(
-        f"Mobile capture via kb-mcp. source_type={source_type}. \"{title.strip()}\"."
+        f"Mobile capture via exomem. source_type={source_type}. \"{title.strip()}\"."
     )
     if url:
         parts.append(f"url: {url}.")

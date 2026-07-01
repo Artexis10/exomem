@@ -182,7 +182,7 @@ def recover_from_trash(
         restore_rel.removesuffix(".md") if restore_rel.endswith(".md") else restore_rel
     )
     log_body = (
-        f"Recovered {trash_rel!r} → {restore_rel!r} via kb-mcp Tier 2. "
+        f"Recovered {trash_rel!r} → {restore_rel!r} via exomem Tier 2. "
         f"kind={kind}."
     )
     if curated and allow_curated:

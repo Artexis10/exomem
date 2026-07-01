@@ -7,7 +7,7 @@ the sidecar (`preserve.update_sidecar_extraction`) and re-embeds it — so the 2
 immediately and the binary becomes searchable shortly after.
 
 In-memory queue (no DB). A startup `scan_pending()` re-enqueues any `extracted_by: pending`
-sidecar so a restart doesn't strand jobs — mirroring kb-mcp's reconcile-heals-drift approach.
+sidecar so a restart doesn't strand jobs — mirroring exomem's reconcile-heals-drift approach.
 A genuine extraction error marks the sidecar `extracted_by: failed: …` so it won't loop.
 """
 
@@ -197,7 +197,7 @@ class MediaWorker:
 
         Sidecar-LESS images (pre-feature files) are skipped on purpose: `find()` can't
         surface a CLIP match without a `<image>.md` sidecar, so indexing them here would be
-        wasted work. The deliberate `kb-mcp backfill-media` pass writes their sidecars
+        wasted work. The deliberate `exomem backfill-media` pass writes their sidecars
         (+ OCR + CLIP) — this incremental scan only tops up already-sidecar'd images.
         """
         if not embeddings.clip_enabled():

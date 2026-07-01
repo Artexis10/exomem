@@ -109,13 +109,13 @@ LOG = """\
 Tidied prose; notes that v3 supersedes the TTL approach. No claim change.
 
 ## [2026-03-15] replace | Notes/Insights/widget-cache-v3
-Supersedes `Notes/Insights/widget-cache-v2` via kb-mcp. LRU beat TTL on the measured hit-rate.
+Supersedes `Notes/Insights/widget-cache-v2` via exomem. LRU beat TTL on the measured hit-rate.
 
 ## [2026-03-01] replace | Notes/Insights/widget-cache-v2
-Supersedes `Notes/Insights/widget-cache` via kb-mcp. Switched to a TTL after the latency spike.
+Supersedes `Notes/Insights/widget-cache` via exomem. Switched to a TTL after the latency spike.
 
 ## [2026-02-16] replace | Notes/Insights/widget-rollout-v2
-Supersedes `Notes/Insights/widget-rollout` via kb-mcp. Phased rollout replaced big-bang.
+Supersedes `Notes/Insights/widget-rollout` via exomem. Phased rollout replaced big-bang.
 """
 
 INS = "Knowledge Base/Notes/Insights"

@@ -1,6 +1,6 @@
-# kb-mcp — remote deployment
+# exomem — remote deployment
 
-This guide covers the **remote tier**: running kb-mcp as an always-on HTTP service
+This guide covers the **remote tier**: running exomem as an always-on HTTP service
 behind a public HTTPS endpoint so you can reach your vault from **claude.ai** on
 the web or mobile as a custom connector. The local-only path (Claude Code over
 stdio, no cloud) is in [../SETUP-LOCAL.md](../SETUP-LOCAL.md); start there if you
@@ -49,7 +49,7 @@ editing the vault directly (the local capture path). Run on a box that stays up
 ## 1. Install dependencies
 
 ```powershell
-cd /path/to/kb-mcp
+cd /path/to/exomem
 
 # Install Python deps (creates .venv automatically).
 #   --extra embeddings pulls torch + sentence-transformers for HYBRID search.
@@ -110,7 +110,7 @@ burst-tolerant under load. Prereq:
 
 ```powershell
 cloudflared tunnel login
-pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName kb-mcp-host
+pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName exomem-host
 #   -> https://kb.example.com (script makes the tunnel + DNS + auto-start service).
 ```
 
@@ -123,7 +123,7 @@ At <https://github.com/settings/developers> → **OAuth Apps** → **New OAuth A
 
 | Field | Value |
 |---|---|
-| Application name | `kb-mcp` |
+| Application name | `exomem` |
 | Homepage URL | `https://kb.example.com` |
 | Authorization callback URL | `https://kb.example.com/auth/callback` |
 
@@ -180,17 +180,17 @@ only in the OS service manager.
 ```bash
 bash scripts/install-service.sh
 # Restart after .env edits:  bash scripts/restart.sh
-# Uninstall:                 launchctl bootout gui/$(id -u)/com.kb-mcp && rm ~/Library/LaunchAgents/com.kb-mcp.plist
+# Uninstall:                 launchctl bootout gui/$(id -u)/com.exomem && rm ~/Library/LaunchAgents/com.exomem.plist
 ```
 
 **Linux (systemd --user):**
 
 ```bash
 mkdir -p ~/.config/systemd/user
-sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" scripts/kb-mcp.service > ~/.config/systemd/user/kb-mcp.service
-systemctl --user daemon-reload && systemctl --user enable --now kb-mcp
+sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" scripts/exomem.service > ~/.config/systemd/user/exomem.service
+systemctl --user daemon-reload && systemctl --user enable --now exomem
 loginctl enable-linger "$USER"   # keep it running without an active login session
-# Restart after .env edits:  systemctl --user restart kb-mcp   (or: bash scripts/restart.sh)
+# Restart after .env edits:  systemctl --user restart exomem   (or: bash scripts/restart.sh)
 ```
 
 **Windows (NSSM):**
@@ -203,10 +203,10 @@ loginctl enable-linger "$USER"   # keep it running without an active login sessi
 # The script self-elevates; approve the UAC prompt.
 pwsh -File scripts/install-service.ps1
 # Uninstall:
-#   nssm stop kb-mcp && nssm remove kb-mcp confirm
+#   nssm stop exomem && nssm remove exomem confirm
 # Restart (after .env edits): elevated shell required
-#   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','kb-mcp'
-#   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'start','kb-mcp'
+#   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'
+#   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'start','exomem'
 ```
 
 ## 7. Add to claude.ai
@@ -222,7 +222,7 @@ pwsh -File scripts/install-service.ps1
 
 ## Deploying on a second machine (multi-host)
 
-Each machine is an independent deployment — there is no shared state. To run kb-mcp
+Each machine is an independent deployment — there is no shared state. To run exomem
 on a second box (e.g. a laptop alongside a desktop), repeat the install with that
 host's *own* values. The non-obvious parts:
 
@@ -235,7 +235,7 @@ host's *own* values. The non-obvious parts:
   Authorization callback URL, so you *cannot* reuse another host's app — its
   callback points at the other host and GitHub rejects the redirect with "The
   redirect_uri is not associated with this application." Create a second app (e.g.
-  `kb-mcp (laptop)`) with callback `https://<this-host>.example.com/auth/callback`
+  `exomem (laptop)`) with callback `https://<this-host>.example.com/auth/callback`
   and put *its* `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` in this machine's
   `.env`.
 - **Its own `.env` and connector.** Set `KB_MCP_VAULT_PATH` to this machine's vault
@@ -296,7 +296,7 @@ sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active**, with
 a `KB_MCP_VOICE_DEVICE=cuda`/`cpu` override. Enroll voices with
-`kb-mcp enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
+`exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
 manage them). With ≥1 profile enrolled and `KB_MCP_DIARIZE` set, matched clusters render
 as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
@@ -313,25 +313,25 @@ Pick the strongest option that fits the situation:
 
 | Situation | Action |
 |---|---|
-| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find `kb-mcp` → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
-| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → `kb-mcp` → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
+| Suspect the GitHub OAuth grant is compromised | Revoke at <https://github.com/settings/applications> → find `exomem` → Revoke. claude.ai's token dies on the next call (the verifier hits `api.github.com/user` per request). |
+| Suspect the GitHub OAuth App secret leaked | Rotate the secret at <https://github.com/settings/developers> → `exomem` → "Generate a new client secret". Update `GITHUB_CLIENT_SECRET` in `.env`, restart the service. |
 | Want to disconnect just claude.ai | Delete the connector in claude.ai → Settings → Connectors. |
 | Want to take the endpoint offline entirely | `tailscale funnel --https=443 off` (or stop the Cloudflare tunnel). The endpoint becomes unreachable from the public internet. |
-| Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','kb-mcp'`). The tunnel stays up but proxies to nothing. |
+| Want to stop the service but leave the public URL configured | Stop the service (e.g. elevated `Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'stop','exomem'`). The tunnel stays up but proxies to nothing. |
 | Want a clean uninstall | Stop + remove service, turn off the tunnel/Funnel, delete the connector in claude.ai, delete the GitHub OAuth App. |
 
 ## Restarting the service
 
 **macOS / Linux:** `bash scripts/restart.sh` — launchd `kickstart -k` on macOS,
-`systemctl --user restart` on Linux. It truncates `logs/kb-mcp.log` and tails it.
+`systemctl --user restart` on Linux. It truncates `logs/exomem.log` and tails it.
 
 **Windows:** `install-service.ps1` grants your user account start/stop rights on
 the service, so day-to-day restarts don't need UAC:
 
 ```powershell
-sc.exe stop kb-mcp
-sc.exe start kb-mcp
-Get-Content logs\kb-mcp.log -Tail 6
+sc.exe stop exomem
+sc.exe start exomem
+Get-Content logs\exomem.log -Tail 6
 ```
 
 If you skipped the grant (or installed from an older version of the script),
@@ -341,29 +341,29 @@ missing.
 For a stuck restart (orphan python processes holding port 8765), force-clean:
 
 ```powershell
-sc.exe stop kb-mcp
+sc.exe stop exomem
 Get-Process python -ErrorAction SilentlyContinue | Stop-Process -Force
-sc.exe start kb-mcp
+sc.exe start exomem
 ```
 
 ## Logs
 
-- `logs/kb-mcp.log` — application log (rotated in-process, 5 MB × 5 files; same on
+- `logs/exomem.log` — application log (rotated in-process, 5 MB × 5 files; same on
   every platform).
 - `logs/service.out.log`, `logs/service.err.log` — service stdout/stderr. On
   Windows NSSM writes and rotates these; launchd/systemd write them but do **not**
-  rotate them (the app's own `kb-mcp.log` is the durable, self-rotating record). On
-  Linux, `journalctl --user -u kb-mcp` is the primary stdout/stderr view.
+  rotate them (the app's own `exomem.log` is the durable, self-rotating record). On
+  Linux, `journalctl --user -u exomem` is the primary stdout/stderr view.
 
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON. If 404, the OAuthProxy isn't mounted — most likely `KB_MCP_BASE_URL` has a trailing slash or includes `/mcp`. |
-| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → kb-mcp, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
+| GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
-| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `KB_MCP_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the kb-mcp log for `rejecting token for github login=...`. |
-| claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/kb-mcp.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
+| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `KB_MCP_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
+| claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/exomem.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
 | `KB vault not found` on startup | vault path moved or `KB_MCP_VAULT_PATH` wrong | set `KB_MCP_VAULT_PATH` to the absolute vault root in `.env`. |

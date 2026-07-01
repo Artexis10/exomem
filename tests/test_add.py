@@ -57,9 +57,9 @@ def test_add_session_no_url_ok(
     result = add_module.add(
         vault,
         source_schema,
-        content="Pasted conversation about kb-mcp scope.",
+        content="Pasted conversation about exomem scope.",
         source_type="session",
-        title="kb-mcp scope session",
+        title="exomem scope session",
         today=TODAY,
     )
     assert result.path.endswith(".md")

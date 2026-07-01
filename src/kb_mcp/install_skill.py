@@ -58,7 +58,7 @@ def install_skill(
     if not (_SKILL_SRC / "SKILL.md").exists():
         raise FileNotFoundError(
             f"bundled skill missing at {_SKILL_SRC} (SKILL.md not found) — "
-            "is the kb-mcp install intact?"
+            "is the exomem install intact?"
         )
 
     target = (Path(target) if target is not None else DEFAULT_TARGET).expanduser()

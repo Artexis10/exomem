@@ -1,7 +1,7 @@
 [project]
-name = "kb-mcp"
+name = "exomem"
 version = "0.1.0"
-description = "Self-hosted MCP server exposing an Obsidian/markdown knowledge base to any MCP client (Claude, Cursor, ...), with multimodal OCR/ASR/CLIP search"
+description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
@@ -92,11 +92,10 @@ dev = [
 ]
 
 [project.scripts]
-# `kb find "…"` is the daily command; `kb-mcp` is the namespaced alias (and still
-# carries the admin subcommands: init / install-skill / serve / …). `python -m
-# kb_mcp` keeps working too — all three route to the same entry point.
+# exomem is the public CLI; kb is the short daily-driver alias.
+# python -m kb_mcp remains available for source checkouts.
 kb = "kb_mcp.__main__:main"
-kb-mcp = "kb_mcp.__main__:main"
+exomem = "kb_mcp.__main__:main"
 
 [build-system]
 requires = ["hatchling"]

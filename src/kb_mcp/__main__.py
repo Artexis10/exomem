@@ -56,7 +56,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 def _serve_main(argv: list[str]) -> int:
-    parser = argparse.ArgumentParser(prog="kb-mcp")
+    parser = argparse.ArgumentParser(prog="exomem")
     parser.add_argument(
         "--transport",
         choices=("stdio", "http", "streamable-http"),
@@ -82,7 +82,7 @@ def _serve_main(argv: list[str]) -> int:
     except KeyboardInterrupt:
         return 130
     except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
-        print(f"kb-mcp failed: {e}", file=sys.stderr)
+        print(f"exomem failed: {e}", file=sys.stderr)
         return 1
     return 0
 
@@ -91,7 +91,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     import logging
 
     parser = argparse.ArgumentParser(
-        prog="kb-mcp backfill-media",
+        prog="exomem backfill-media",
         description="Make pre-existing Evidence binaries searchable: write a sidecar if "
         "missing, extract text (OCR/ASR/PDF), and CLIP-embed images. Idempotent; CPU or GPU.",
     )
@@ -122,8 +122,8 @@ def _backfill_media_main(argv: list[str]) -> int:
 
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp doctor",
-        description="Read-only local setup preflight for kb-mcp installs.",
+        prog="exomem doctor",
+        description="Read-only local setup preflight for exomem installs.",
     )
     parser.add_argument(
         "--vault",
@@ -158,13 +158,13 @@ def _speaker_vault(args) -> Path | None:
 
 def _enroll_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp enroll-speaker",
+        prog="exomem enroll-speaker",
         description=(
             "Enroll (or extend) a named voice profile from an audio sample for opt-in "
             "diarization. The sample is embedded into a 192-dim ECAPA voiceprint and stored in "
             "the per-machine profile store beside the embedding sidecar — desk-side admin, never "
             "an MCP tool. Re-enrolling the same name running-averages the centroid over samples. "
-            'Example: kb-mcp enroll-speaker --name Alice --self alice-sample.wav'
+            'Example: exomem enroll-speaker --name Alice --self alice-sample.wav'
         ),
     )
     parser.add_argument("audio", help="path to an audio sample of the speaker's voice")
@@ -193,7 +193,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
             vault_root=_speaker_vault(args),
         )
     except (enroll_module.EnrollmentError, RuntimeError) as e:
-        print(f"kb-mcp enroll-speaker: {e}", file=sys.stderr)
+        print(f"exomem enroll-speaker: {e}", file=sys.stderr)
         return 1
     print(
         f"Enrolled {args.name!r} ({rec['samples']} sample(s), "
@@ -204,7 +204,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
 
 def _list_speakers_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp list-speakers",
+        prog="exomem list-speakers",
         description="List the enrolled voice profiles used for named diarization.",
     )
     parser.add_argument(
@@ -218,7 +218,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     try:
         profiles = enroll_module.list_speakers(_speaker_vault(args))
     except RuntimeError as e:
-        print(f"kb-mcp list-speakers: {e}", file=sys.stderr)
+        print(f"exomem list-speakers: {e}", file=sys.stderr)
         return 1
     if not profiles:
         print("No voice profiles enrolled.")
@@ -231,7 +231,7 @@ def _list_speakers_main(argv: list[str]) -> int:
 
 def _remove_speaker_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp remove-speaker",
+        prog="exomem remove-speaker",
         description="Delete an enrolled voice profile; that voice then labels anonymously again.",
     )
     parser.add_argument("--name", required=True, help="profile name to remove")
@@ -246,7 +246,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     try:
         removed = enroll_module.remove_speaker(args.name, _speaker_vault(args))
     except RuntimeError as e:
-        print(f"kb-mcp remove-speaker: {e}", file=sys.stderr)
+        print(f"exomem remove-speaker: {e}", file=sys.stderr)
         return 1
     print(f"Removed {args.name!r}." if removed else f"No profile named {args.name!r}.")
     return 0
@@ -254,7 +254,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
 
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp init",
+        prog="exomem init",
         description="Bootstrap a fresh Knowledge Base scaffold into a vault.",
     )
     parser.add_argument(
@@ -274,7 +274,7 @@ def _init_main(argv: list[str]) -> int:
     try:
         report = init_module.init_vault(Path(vault), force=args.force)
     except FileExistsError as e:
-        print(f"kb-mcp init: {e}", file=sys.stderr)
+        print(f"exomem init: {e}", file=sys.stderr)
         return 1
     print(f"Initialized Knowledge Base at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
@@ -287,7 +287,7 @@ def _init_main(argv: list[str]) -> int:
 
 def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp install-skill",
+        prog="exomem install-skill",
         description=(
             "Install the knowledge-base skill into Claude Code's skills folder. "
             "The MCP server is the hands; the skill is the brain that tells Claude "
@@ -317,7 +317,7 @@ def _install_skill_main(argv: list[str]) -> int:
     try:
         report = install_module.install_skill(target, force=args.force, link=args.link)
     except (FileExistsError, FileNotFoundError) as e:
-        print(f"kb-mcp install-skill: {e}", file=sys.stderr)
+        print(f"exomem install-skill: {e}", file=sys.stderr)
         return 1
     print(
         f"Installed the knowledge-base skill ({report['mode']}, "
@@ -331,7 +331,7 @@ def _install_skill_main(argv: list[str]) -> int:
 
 def _install_hook_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="kb-mcp install-hook",
+        prog="exomem install-hook",
         description=(
             "Wire the KB capture + retrieval hooks into Claude Code: a Stop hook "
             "that captures conclusions at stepping-stones (write), and a "
@@ -364,7 +364,7 @@ def _install_hook_main(argv: list[str]) -> int:
             wire=not args.print_only,
         )
     except FileNotFoundError as e:
-        print(f"kb-mcp install-hook: {e}", file=sys.stderr)
+        print(f"exomem install-hook: {e}", file=sys.stderr)
         return 1
 
     print("Installed the KB hook scripts:")

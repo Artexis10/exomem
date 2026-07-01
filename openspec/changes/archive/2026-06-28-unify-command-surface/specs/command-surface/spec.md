@@ -57,7 +57,7 @@ hand-maintained tool list. The previously hand-wired routes SHALL be preserved.
 
 ### Requirement: A First-Class CLI Over All Operations
 
-The system SHALL ship console-script entry points `kb` and `kb-mcp` that expose every registry op on
+The system SHALL ship console-script entry points `kb` and `exomem` that expose every registry op on
 the `cli` surface (reads AND writes) as a verb-first subcommand, with positional args for params
 marked positional and `--flags` for the rest. It SHALL support a global `--json` structured envelope,
 emit structured error codes with remediation, and return exit code 0 on success, 1 on operation

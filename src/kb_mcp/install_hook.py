@@ -76,7 +76,7 @@ def install_hook(
         for name in (py_name, sh_name):
             if not (_HOOK_DIR_SRC / name).exists():
                 raise FileNotFoundError(
-                    f"bundled hook file missing at {_HOOK_DIR_SRC / name} — is the kb-mcp install intact?"
+                    f"bundled hook file missing at {_HOOK_DIR_SRC / name} — is the exomem install intact?"
                 )
     hook_dir = (Path(hook_dir).expanduser() if hook_dir else DEFAULT_HOOK_DIR)
     hook_dir.mkdir(parents=True, exist_ok=True)

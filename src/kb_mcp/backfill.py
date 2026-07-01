@@ -1,6 +1,6 @@
 """Bulk media back-fill — make pre-existing KB binaries searchable.
 
-`kb-mcp backfill-media` walks the whole `Knowledge Base/` tree (not just
+`exomem backfill-media` walks the whole `Knowledge Base/` tree (not just
 `Evidence/`), and for every media file (image/audio/video/pdf):
   1. writes a `.md` sidecar if missing — so `find()` can surface it (a CLIP/text match maps
      to `<file>.md`, which must exist);

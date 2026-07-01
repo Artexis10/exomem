@@ -260,7 +260,7 @@ def register_project_key(
         path.parent.mkdir(parents=True, exist_ok=True)
         bootstrap_lines = [
             "# Project keys for research-notes and cross-cutting projects: list.",
-            "# kb-mcp loads this at startup and auto-appends new keys on use.",
+            "# exomem loads this at startup and auto-appends new keys on use.",
             "",
             "projects:",
         ]
@@ -286,7 +286,7 @@ def register_project_key(
     # Append the entry at end of the file. Keep formatting simple — a YAML
     # round-trip would lose comments + ordering.
     new_block = (
-        f"\n  # auto-registered by kb-mcp\n"
+        f"\n  # auto-registered by exomem\n"
         f"  {key}:\n"
         f"    folder: {folder_name}\n"
         f"    category: {category}\n"

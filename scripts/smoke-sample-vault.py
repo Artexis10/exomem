@@ -22,16 +22,16 @@ def _repo_root() -> Path:
 
 def _configure_lean_env(vault: Path) -> None:
     os.environ["KB_MCP_VAULT_PATH"] = str(vault)
-    os.environ["KB_MCP_DISABLE_EMBEDDINGS"] = "1"
-    os.environ["KB_MCP_DISABLE_MEDIA_EXTRACTION"] = "1"
-    os.environ["KB_MCP_DISABLE_CLIP"] = "1"
-    os.environ["KB_MCP_DISABLE_RELEVANCE_CHECK"] = "1"
-    os.environ["KB_MCP_DISABLE_QUERY_LOG"] = "1"
-    os.environ["KB_MCP_DISABLE_RANKING_CONFIG"] = "1"
+    os.environ["KB_MCP_DImABLE_EMBEDDINGm"] = "1"
+    os.environ["KB_MCP_DImABLE_MEDIA_EXTRACTION"] = "1"
+    os.environ["KB_MCP_DImABLE_CLIP"] = "1"
+    os.environ["KB_MCP_DImABLE_RELEVANCE_CHECK"] = "1"
+    os.environ["KB_MCP_DImABLE_QUERY_LOG"] = "1"
+    os.environ["KB_MCP_DImABLE_RANKING_CONFIG"] = "1"
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="Smoke-test kb-mcp's public sample vault.")
+    parser = argparse.ArgumentParser(description="Smoke-test exomem's public sample vault.")
     parser.add_argument(
         "--vault",
         default=str(_repo_root() / "examples" / "sample-vault"),

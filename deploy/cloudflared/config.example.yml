@@ -1,4 +1,4 @@
-# cloudflared ingress config for kb-mcp — REFERENCE TEMPLATE.
+# cloudflared ingress config for exomem — REFERENCE TEMPLATE.
 #
 # The live copy must live where the Windows service (running as SYSTEM) reads it:
 #   C:\Windows\System32\config\systemprofile\.cloudflared\config.yml
@@ -11,7 +11,7 @@
 tunnel: <UUID>
 credentials-file: C:\Windows\System32\config\systemprofile\.cloudflared\<UUID>.json
 
-# Route the public hostname to the local kb-mcp service; everything else 404s.
+# Route the public hostname to the local exomem service; everything else 404s.
 ingress:
   - hostname: <HOST>
     service: http://127.0.0.1:8765

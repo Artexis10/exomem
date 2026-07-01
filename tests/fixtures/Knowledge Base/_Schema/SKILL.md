@@ -482,7 +482,7 @@ under the vault root with no prefix guessing:
 `Sources/` file via the `sources:` frontmatter list (mirrors the source's
 `ingested_into:` list).
 
-**The writer normalizes on your behalf.** kb-mcp's writers run every wikilink
+**The writer normalizes on your behalf.** exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.

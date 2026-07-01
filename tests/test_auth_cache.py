@@ -117,7 +117,7 @@ def test_real_super_verify_does_not_crash_on_cache_miss(
 
     Every other test in this file replaces ``GitHubTokenVerifier.verify_token``
     wholesale, so none of them exercise the parent's first line —
-    ``is_cached, cached_result = self._cache.get(token)``. When kb-mcp's verifier
+    ``is_cached, cached_result = self._cache.get(token)``. When exomem's verifier
     overwrote ``self._cache`` with a plain ``dict``, that line unpacked
     ``dict.get(token)``'s ``None`` return → ``TypeError: cannot unpack
     non-iterable NoneType object`` → the OAuth token-swap failed → every

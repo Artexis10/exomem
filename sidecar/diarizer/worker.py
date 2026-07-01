@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""kb-mcp diarization sidecar — standalone, runs in the isolated CUDA-torch sidecar venv.
+"""exomem diarization sidecar — standalone, runs in the isolated CUDA-torch sidecar venv.
 
 Reads an audio/video path + an output-file path, decodes to 16 kHz mono, runs the pyannote
 speaker-diarization pipeline (on GPU when available, else CPU), and writes

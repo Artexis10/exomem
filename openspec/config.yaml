@@ -1,7 +1,7 @@
 schema: spec-driven
 
 context: |
-  kb-mcp — a Model Context Protocol server over an Obsidian/markdown vault. It turns the
+  exomem — a Model Context Protocol server over an Obsidian/markdown vault. It turns the
   vault you already own into a multimodal, hybrid-search knowledge base for Claude.
 
   Tech stack: Python 3.11+, FastMCP, sqlite (embeddings sidecar). Hybrid retrieval =

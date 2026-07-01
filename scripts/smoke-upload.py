@@ -85,7 +85,7 @@ def main() -> None:
         from kb_mcp import upload_tokens
 
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
-        data = f"kb-mcp /upload smoke test {ts}\n".encode()
+        data = f"exomem /upload smoke test {ts}\n".encode()
         # Use a short-lived MINTED token — mirrors the hands-off flow exactly.
         status, body = _upload(
             upload_tokens.mint(tok),

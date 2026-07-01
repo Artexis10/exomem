@@ -1,11 +1,11 @@
 ## Why
 
-kb-mcp's opt-in ASR diarization (`KB_MCP_DIARIZE`) labels who-spoke-when but only
+exomem's opt-in ASR diarization (`KB_MCP_DIARIZE`) labels who-spoke-when but only
 *anonymously*: `[Speaker A]: …`, `[Speaker B]: …`. For a personal vault the high-value
 question is "what did **I** say in that meeting?" vs the other person — which anonymous
 labels can't answer and `find` can't target. Q already runs a production speaker pipeline
 that resolves anonymous clusters to **named** speakers via voice-embedding profiles. This
-change ports that approach into kb-mcp — adapted to a vault (no DB; a small local profile
+change ports that approach into exomem — adapted to a vault (no DB; a small local profile
 store) — so diarized transcripts carry real names and become findable by speaker.
 
 It stays **pure-substrate**: voice-embedding speaker-ID is deterministic *measurement*

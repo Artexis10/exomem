@@ -8,7 +8,7 @@ Unmatched clusters become stable anonymous `Speaker A/B/…` labels by first-ons
 
 Pure / torch-free (numpy only) so it unit-tests without a GPU. Ported from a production
 `speaker_attribution` module (single-host host-vs-guest → multi-profile), adapted to
-kb-mcp's anonymous `Speaker A` labelling and `KB_MCP_VOICE_*` env overrides.
+exomem's anonymous `Speaker A` labelling and `KB_MCP_VOICE_*` env overrides.
 
 The attribution is a deterministic *measurement* — a frozen cosine comparison against an
 enrolled centroid with fixed thresholds — not a judgment and not an LLM. It prefers leaving a
@@ -44,7 +44,7 @@ DEFAULT_REL_GAP = _env_float("KB_MCP_VOICE_REL_GAP", 0.10)
 
 
 def _anon_label(i: int) -> str:
-    """0-indexed guest order → 'Speaker A', 'Speaker B', … (matches kb-mcp's anonymous scheme)."""
+    """0-indexed guest order → 'Speaker A', 'Speaker B', … (matches exomem's anonymous scheme)."""
     return f"Speaker {chr(ord('A') + i)}" if i < 26 else f"Speaker {i + 1}"
 
 

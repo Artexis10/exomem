@@ -1,7 +1,7 @@
 """One-shot cleanup: rewrite every wikilink under `Knowledge Base/` to the
 canonical full vault-rooted form, plus refresh sub-folder indexes.
 
-This is the "drain the lake" Phase 5 step from the plan. The kb-mcp writer
+This is the "drain the lake" Phase 5 step from the plan. The exomem writer
 now enforces canonical form on every write going forward (Phase 1), but
 existing files have drift accumulated over months. Run this once to bring
 the vault to a clean baseline.

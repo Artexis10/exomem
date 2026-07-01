@@ -2,7 +2,7 @@
 
 ## Context
 
-kb-mcp already loads a CLIP model (`embeddings.get_clip_model()`, `clip-ViT-B-32`) that encodes
+exomem already loads a CLIP model (`embeddings.get_clip_model()`, `clip-ViT-B-32`) that encodes
 images (`embed_image`) and text queries (`embed_clip_text`) into one shared 512-dim space, used
 today for visual `find`. Image extraction (`extract._ocr_image`) produces the text that the
 sidecar stores and that BM25 + bge index. That text is currently OCR output plus an optional

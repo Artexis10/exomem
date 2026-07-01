@@ -53,6 +53,18 @@ jobs:
       - name: Build package
         run: uv build
 
+  capabilities:
+    name: capabilities doc
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Check generated capabilities doc
+        run: uv run python scripts/generate-capabilities.py --check
+
   lint:
     name: ruff (advisory)
     runs-on: ubuntu-latest

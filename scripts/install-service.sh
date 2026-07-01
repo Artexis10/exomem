@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Install kb-mcp as an always-on background service on macOS (launchd user agent).
+# Install exomem as an always-on background service on macOS (launchd user agent).
 #
 # This is the cross-platform counterpart to scripts/install-service.ps1
-# (Windows/NSSM). On Linux, use the systemd unit instead: scripts/kb-mcp.service
+# (Windows/NSSM). On Linux, use the systemd unit instead: scripts/exomem.service
 # (its header has the install steps). No sudo needed here — it's a per-user agent.
 #
 # Prereqs:
-#   - .venv exists with kb-mcp installed, e.g.
+#   - .venv exists with exomem installed, e.g.
 #       uv sync --extra embeddings
 #   - .env in the repo root with the GitHub OAuth vars (KB_MCP_BASE_URL,
 #     KB_MCP_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) and
@@ -15,11 +15,11 @@
 # Usage:     bash scripts/install-service.sh
 # Override:  KB_MCP_BIND_HOST=127.0.0.1 KB_MCP_PORT=8765 bash scripts/install-service.sh
 # Restart:   bash scripts/restart.sh            # after .env edits
-# Uninstall: launchctl bootout gui/$(id -u)/com.kb-mcp && rm ~/Library/LaunchAgents/com.kb-mcp.plist
+# Uninstall: launchctl bootout gui/$(id -u)/com.exomem && rm ~/Library/LaunchAgents/com.exomem.plist
 
 set -euo pipefail
 
-LABEL="com.kb-mcp"
+LABEL="com.exomem"
 BIND_HOST="${KB_MCP_BIND_HOST:-127.0.0.1}"
 PORT="${KB_MCP_PORT:-8765}"
 
@@ -30,17 +30,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 if [[ "$(uname -s)" != "Darwin" ]]; then
     echo "This installer targets macOS (launchd)." >&2
-    echo "On Linux, use the systemd unit: scripts/kb-mcp.service" >&2
+    echo "On Linux, use the systemd unit: scripts/exomem.service" >&2
     echo "  (see the 'Install as a service' section of README.md)." >&2
     exit 1
 fi
 
 VENV_PYTHON="$REPO_ROOT/.venv/bin/python"
 LOG_DIR="$REPO_ROOT/logs"
-PLIST_SRC="$SCRIPT_DIR/com.kb-mcp.plist"
+PLIST_SRC="$SCRIPT_DIR/com.exomem.plist"
 PLIST_DEST="$HOME/Library/LaunchAgents/$LABEL.plist"
 
-[[ -x "$VENV_PYTHON" ]] || { echo "venv python not found at $VENV_PYTHON — create the venv and install kb-mcp first (see README)." >&2; exit 1; }
+[[ -x "$VENV_PYTHON" ]] || { echo "venv python not found at $VENV_PYTHON — create the venv and install exomem first (see README)." >&2; exit 1; }
 [[ -f "$REPO_ROOT/.env" ]] || { echo ".env missing in $REPO_ROOT — add the GitHub OAuth vars (see README Install)." >&2; exit 1; }
 [[ -f "$PLIST_SRC" ]] || { echo "plist template missing at $PLIST_SRC" >&2; exit 1; }
 mkdir -p "$LOG_DIR" "$HOME/Library/LaunchAgents"
@@ -59,7 +59,7 @@ launchctl kickstart -k "gui/$(id -u)/$LABEL"
 
 echo "Installed and started '$LABEL' bound to ${BIND_HOST}:${PORT}."
 echo "  plist:   $PLIST_DEST"
-echo "  logs:    $LOG_DIR/service.out.log (stdout), service.err.log (stderr), kb-mcp.log (app)"
+echo "  logs:    $LOG_DIR/service.out.log (stdout), service.err.log (stderr), exomem.log (app)"
 echo "  status:  launchctl print gui/$(id -u)/$LABEL | grep -i state"
 echo "  restart: bash scripts/restart.sh   (after .env edits)"
 echo "  remove:  launchctl bootout gui/$(id -u)/$LABEL && rm \"$PLIST_DEST\""

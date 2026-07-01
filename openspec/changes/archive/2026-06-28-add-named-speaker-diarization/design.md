@@ -2,7 +2,7 @@
 
 ## Context
 
-kb-mcp already has anonymous diarization (`extract._diarize`: pyannote
+exomem already has anonymous diarization (`extract._diarize`: pyannote
 `speaker-diarization-3.1` → per-segment max-overlap label → `[Speaker A]:` turns,
 gated by `KB_MCP_DIARIZE`, soft-fail to plain transcript). What it lacks is the step
 from `SPEAKER_00` to **a name**. Q solves exactly this in production; this change ports

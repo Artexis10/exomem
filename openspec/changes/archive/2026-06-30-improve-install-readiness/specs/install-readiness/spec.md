@@ -11,7 +11,7 @@ manage Python environments manually.
 
 - **WHEN** a new user reads the README or local setup guide
 - **THEN** the first install commands use `uv sync`
-- **AND** the first kb-mcp commands use `uv run python -m kb_mcp`
+- **AND** the first exomem commands use `uv run python -m kb_mcp`
 - **AND** pip appears only as a fallback path
 
 ### Requirement: Read-Only Doctor Command

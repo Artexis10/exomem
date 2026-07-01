@@ -157,7 +157,7 @@ def create_file(
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body_parts: list[str] = []
     op_word = "create_file (overwrite)" if overwrite and abs_path.exists() else "create_file"
-    log_body_parts.append(f"Created via kb-mcp Tier 2. {len(full_text):,} chars.")
+    log_body_parts.append(f"Created via exomem Tier 2. {len(full_text):,} chars.")
     if frontmatter is not None:
         log_body_parts.append(f"Frontmatter keys: {list(frontmatter.keys())}.")
     if curated and allow_curated:

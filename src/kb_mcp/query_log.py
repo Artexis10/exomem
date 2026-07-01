@@ -3,7 +3,7 @@
 Two JSONL files under the repo `logs/` dir (already gitignored via `logs/*`,
 NSSM-rotated neighborhood, NEVER Obsidian-synced — query text can name sensitive
 Evidence scopes, so it stays on the box at the same trust boundary as
-`logs/kb-mcp.log`):
+`logs/exomem.log`):
 
 - `logs/queries.jsonl` : one object per find() call (query + ranking signals)
 - `logs/writes.jsonl`  : one object per note/add/replace write (path + citations)

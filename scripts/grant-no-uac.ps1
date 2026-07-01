@@ -1,4 +1,4 @@
-# Grants the invoking user start/stop rights on the kb-mcp service so future
+# Grants the invoking user start/stop rights on the exomem service so future
 # restarts don't require UAC. Idempotent — re-running with the ACE already
 # present is a no-op.
 #
@@ -7,7 +7,7 @@
 #   (script self-elevates for the actual sdset)
 
 $ErrorActionPreference = "Stop"
-$ServiceName = "kb-mcp"
+$ServiceName = "exomem"
 
 $account = "$env:USERDOMAIN\$env:USERNAME"
 $sid = (New-Object System.Security.Principal.NTAccount($account)).Translate([System.Security.Principal.SecurityIdentifier]).Value

@@ -247,7 +247,7 @@ def delete_file(
     meta = {
         "original_path": rel_path,
         "trashed_at": now.isoformat(),
-        "deleted_by": "kb-mcp",
+        "deleted_by": "exomem",
         "inbound_link_count_at_trash": len(inbound_all),
         "inbound_ignored_at_trash": [m.as_dict() for m in inbound_ignored],
         "inbound_remaining_at_trash": [m.as_dict() for m in inbound],
@@ -269,7 +269,7 @@ def delete_file(
     today_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body = (
-        f"Trashed {rel_path!r} → {trash_rel!r} via kb-mcp Tier 2. "
+        f"Trashed {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
         f"inbound_links_at_trash={len(inbound_all)} "
         f"(ignored={len(inbound_ignored)}, remaining={len(inbound)})."
     )

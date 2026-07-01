@@ -666,7 +666,7 @@ wheels = [
 ]
 
 [[package]]
-name = "kb-mcp-diarizer"
+name = "exomem-diarizer"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

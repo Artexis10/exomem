@@ -604,7 +604,7 @@ def commit_edit(
 
     rel_no_ext = rel_path.removesuffix(".md")
     if log_file.exists():
-        log_body_parts = [f"Edit via kb-mcp. {why.strip()}"]
+        log_body_parts = [f"Edit via exomem. {why.strip()}"]
         if changed:
             log_body_parts.append(f"Changed: {', '.join(changed)}.")
         log_body = " ".join(log_body_parts)

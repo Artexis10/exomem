@@ -1,4 +1,4 @@
-# Install kb-mcp as a Windows service via NSSM.
+# Install exomem as a Windows service via NSSM.
 #
 # Prereqs:
 #   - NSSM installed (https://nssm.cc/download) and on PATH, OR pass -NssmPath.
@@ -11,12 +11,12 @@
 #   pwsh -File scripts/install-service.ps1 -NssmPath "C:\nssm\nssm.exe"
 #
 # Uninstall:
-#   nssm stop kb-mcp
-#   nssm remove kb-mcp confirm
+#   nssm stop exomem
+#   nssm remove exomem confirm
 
 param(
     [string]$NssmPath = "nssm",
-    [string]$ServiceName = "kb-mcp",
+    [string]$ServiceName = "exomem",
     [string]$BindHost = "127.0.0.1",
     [int]$Port = 8765
 )
@@ -68,7 +68,7 @@ if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out
 & $NssmPath set $ServiceName Start SERVICE_AUTO_START
 & $NssmPath set $ServiceName AppRestartDelay 5000
 & $NssmPath set $ServiceName AppThrottle 10000
-& $NssmPath set $ServiceName Description "kb-mcp: Obsidian Knowledge Base MCP server for mobile claude.ai"
+& $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
 
 & $NssmPath start $ServiceName
 
@@ -94,4 +94,4 @@ try {
 }
 
 Write-Host "Installed and started service '$ServiceName' bound to ${BindHost}:${Port}."
-Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), kb-mcp.log (app)"
+Write-Host "Logs: $logDir\service.out.log (stdout), service.err.log (stderr), exomem.log (app)"

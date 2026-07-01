@@ -1,6 +1,6 @@
-# Cloudflare Tunnel — kb-mcp ingress setup & cutover runbook
+# Cloudflare Tunnel — exomem ingress setup & cutover runbook
 
-Per-machine playbook for putting kb-mcp behind **Cloudflare Tunnel** — either a fresh
+Per-machine playbook for putting exomem behind **Cloudflare Tunnel** — either a fresh
 setup or **migrating an existing host off Tailscale Funnel**. The server code is
 unchanged (the public URL is env-driven via `KB_MCP_BASE_URL`); this is purely
 ingress + `.env` + GitHub OAuth App + the claude.ai connector.
@@ -11,12 +11,12 @@ ingress + `.env` + GitHub OAuth App + the claude.ai connector.
 
 Substitute throughout:
 - `<HOST>` = `kb.example.com` (desktop) / `kb-laptop.example.com` (laptop)
-- `<TUNNEL>` = `kb-mcp-desktop` / `kb-mcp-laptop`
+- `<TUNNEL>` = `exomem-desktop` / `exomem-laptop`
 
 ## Prereqs
 - `winget install --id Cloudflare.cloudflared`
 - The target domain is in your Cloudflare account.
-- kb-mcp already installed and running as a service on `127.0.0.1:8765`.
+- exomem already installed and running as a service on `127.0.0.1:8765`.
 
 ## Steps — order matters
 
@@ -59,7 +59,7 @@ Substitute throughout:
   → `{"resource":"https://<HOST>/mcp","authorization_servers":["https://<HOST>/"], ...}`
 - `cloudflared tunnel info <TUNNEL>` → shows active connection(s).
 - claude.ai: connector connected, tools listed, a `find` returns results.
-- Reboot: both `cloudflared` and `kb-mcp` services auto-start and the connector still works.
+- Reboot: both `cloudflared` and `exomem` services auto-start and the connector still works.
 
 ## Rollback (config-only — keep Tailscale Funnel running as standby)
 - `.env`: `KB_MCP_BASE_URL` back to the `*.ts.net` URL.
@@ -79,6 +79,6 @@ Substitute throughout:
 - **Cutover ordering** — the CRITICAL note above; verify the live base URL before retrying.
 - **Cloudflare edge ~100s request cap** — run heavy ops (embedding rebuild, large audit)
   via the local CLI, not the connector.
-- **Access-log triage still works behind Cloudflare** — `logs/kb-mcp.log` /
+- **Access-log triage still works behind Cloudflare** — `logs/exomem.log` /
   `logs/service.out.log` still surface the Anthropic gateway IP `160.79.106.x` through
   the tunnel.

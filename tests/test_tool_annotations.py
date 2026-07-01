@@ -4,7 +4,7 @@ open-world hints) so cautious clients render them correctly.
 ChatGPT's tool-call panel badged the read-only `find` as WRITE / OPEN-WORLD /
 DESTRUCTIVE because the tools shipped no MCP annotation hints, so the client
 assumed the worst. The hints are derived from the command registry:
-`readOnlyHint = not cli_writes`, `openWorldHint = False` for every tool (kb-mcp is
+`readOnlyHint = not cli_writes`, `openWorldHint = False` for every tool (exomem is
 a closed local vault), and `destructiveHint` is True only for the small set of
 overwrite/remove ops (`commands.DESTRUCTIVE_OPS`). This test pins that contract
 against the live server so a new tool can't ship un-annotated or mis-classified.
@@ -55,7 +55,7 @@ def test_every_tool_is_annotated(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_open_world_hint_false_for_all(monkeypatch: pytest.MonkeyPatch) -> None:
-    # kb-mcp operates on a closed local vault and reaches no external systems.
+    # exomem operates on a closed local vault and reaches no external systems.
     ann = _live_annotations(_build_server(monkeypatch))
     open_world = [n for n, a in ann.items() if not a or a.get("openWorldHint") is not False]
     assert not open_world, f"tools not marked closed-world: {sorted(open_world)}"

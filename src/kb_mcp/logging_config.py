@@ -1,4 +1,4 @@
-"""Rotating-file logger configuration for kb-mcp."""
+"""Rotating-file logger configuration for exomem."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ def configure_logging(log_dir: Path, level: int = logging.INFO) -> None:
         level = getattr(logging, env_level, level)
     log_dir.mkdir(parents=True, exist_ok=True)
     handler = RotatingFileHandler(
-        log_dir / "kb-mcp.log",
+        log_dir / "exomem.log",
         maxBytes=5 * 1024 * 1024,
         backupCount=5,
         encoding="utf-8",

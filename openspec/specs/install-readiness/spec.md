@@ -1,7 +1,7 @@
 # install-readiness Specification
 
 ## Purpose
-Make kb-mcp reproducible and diagnosable for new installs by documenting a
+Make exomem reproducible and diagnosable for new installs by documenting a
 `uv`-first setup path and providing a read-only local preflight command for core
 and optional capability profiles.
 
@@ -17,7 +17,7 @@ manage Python environments manually.
 
 - **WHEN** a new user reads the README or local setup guide
 - **THEN** the first install commands use `uv sync`
-- **AND** the first kb-mcp commands use `uv run python -m kb_mcp`
+- **AND** the first exomem commands use `uv run python -m kb_mcp`
 - **AND** pip appears only as a fallback path
 
 ### Requirement: Read-Only Doctor Command

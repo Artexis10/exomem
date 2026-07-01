@@ -1,4 +1,4 @@
-"""Offline retrieval-quality eval harness for kb-mcp.
+"""Offline retrieval-quality eval harness for exomem.
 
 Runs `find()` against the REAL vault (embeddings ENABLED) over a golden query
 set and reports NDCG@5/@10, MRR, recall@10 — so every ranking change becomes a

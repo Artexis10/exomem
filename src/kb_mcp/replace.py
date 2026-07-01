@@ -155,7 +155,7 @@ def replace(
     log_writes: list[PlannedWrite] = []
     if log_file.exists():
         log_body_parts = [
-            f"Supersedes `{rel_old_no_ext}` via kb-mcp."
+            f"Supersedes `{rel_old_no_ext}` via exomem."
         ]
         if reason and reason.strip():
             log_body_parts.append(reason.strip())

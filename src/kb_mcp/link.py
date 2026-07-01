@@ -460,7 +460,7 @@ def _activity_summary(
         modifier_parts.append(project)
     modifier = ", ".join(modifier_parts)
     return (
-        f"`{path_part}` ({modifier}, mobile via kb-mcp) — \"{name}\""
+        f"`{path_part}` ({modifier}, mobile via exomem) — \"{name}\""
     )
 
 
@@ -475,7 +475,7 @@ def _log_entry_body(
 ) -> str:
     parts: list[str] = []
     parts.append(
-        f"Mobile link via kb-mcp. entity_type={entity_type}. \"{name}\"."
+        f"Mobile link via exomem. entity_type={entity_type}. \"{name}\"."
     )
     if entity_type == "concept" and domain:
         parts.append(f"domain={domain}.")

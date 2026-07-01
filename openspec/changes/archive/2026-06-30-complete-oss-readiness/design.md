@@ -5,7 +5,7 @@
 - **Sample vault is committed under `examples/`.** It is separate from
   `tests/fixtures` so README commands can point at public-facing content without
   implying the test fixture is user documentation.
-- **Smoke script is lean and read-only.** It imports kb-mcp directly, sets the
+- **Smoke script is lean and read-only.** It imports exomem directly, sets the
   same lightweight env gates used in tests, and verifies doctor/find/get/audit on
   the sample vault. It does not initialize, write, reconcile, or build embeddings.
 - **Media remains optional.** The docs should make `uv sync --extra media` and

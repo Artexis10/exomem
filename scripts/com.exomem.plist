@@ -1,16 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  launchd user-agent for kb-mcp (macOS). This is a TEMPLATE: the placeholders
+  launchd user-agent for exomem (macOS). This is a TEMPLATE: the placeholders
   __VENV_PYTHON__, __REPO_ROOT__, __BIND_HOST__ and __PORT__ are substituted by
   scripts/install-service.sh, which writes the rendered copy to
-  ~/Library/LaunchAgents/com.kb-mcp.plist. Cross-platform counterpart to the
+  ~/Library/LaunchAgents/com.exomem.plist. Cross-platform counterpart to the
   Windows NSSM service in scripts/install-service.ps1.
 -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.kb-mcp</string>
+    <string>com.exomem</string>
 
     <key>ProgramArguments</key>
     <array>

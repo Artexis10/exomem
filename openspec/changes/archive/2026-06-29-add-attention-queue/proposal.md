@@ -1,6 +1,6 @@
 ## Why
 
-kb-mcp ships three **measurement-only epistemic queues** that already work but have
+exomem ships three **measurement-only epistemic queues** that already work but have
 **no single front door**, so they go unused in day-to-day review:
 
 - `stale_review` — active compiled conclusions that are old AND rarely surfaced in

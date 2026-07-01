@@ -232,7 +232,7 @@ def move_file(
     date_iso = today.isoformat()
     new_rel_no_ext = new_rel.removesuffix(".md") if new_rel.endswith(".md") else new_rel
     log_body = (
-        f"Moved {old_rel!r} → {new_rel!r} via kb-mcp Tier 2. "
+        f"Moved {old_rel!r} → {new_rel!r} via exomem Tier 2. "
         f"wikilinks_updated={wikilinks_updated} across {len(files_touched)} file(s)."
     )
     if src_curated or dst_curated:

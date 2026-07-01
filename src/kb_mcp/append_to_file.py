@@ -114,7 +114,7 @@ def append_to_file(
     date_iso = today.isoformat()
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     bytes_appended = len((joiner + content).encode("utf-8"))
-    log_body = f"Appended {bytes_appended:,} bytes via kb-mcp Tier 2."
+    log_body = f"Appended {bytes_appended:,} bytes via exomem Tier 2."
     if curated and allow_curated:
         log_body += f" allow_curated=true (target tree: {curated})."
     log_warning = write_log_entry(

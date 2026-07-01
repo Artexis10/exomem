@@ -261,10 +261,10 @@ def preserve(
         rel_artifact_for_summary = rel_artifact.replace("Knowledge Base/", "")
         activity_summary = (
             f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
-            f"mobile via kb-mcp)"
+            f"mobile via exomem)"
         )
         log_body = (
-            f"Mobile preserve via kb-mcp. scope={scope_safe}, "
+            f"Mobile preserve via exomem. scope={scope_safe}, "
             f"category={category_safe}, filename={filename_safe}."
         )
         if description and description.strip():
@@ -524,7 +524,7 @@ def ensure_media_sidecar(
     `.md` sidecar, so `find()` can't surface them (a CLIP/text match maps to `<file>.md`,
     which doesn't exist). This writes a minimal stub (`media_type` + `evidence_file` pointer,
     `extracted_by: none`) and embeds it. Idempotent: returns (existing_sidecar, False) if one
-    already exists, else (new_sidecar, True). Used by `kb-mcp backfill-media`.
+    already exists, else (new_sidecar, True). Used by `exomem backfill-media`.
     """
     media_type = extract.media_type_for(binary_path)
     if media_type is None:

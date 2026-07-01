@@ -1,8 +1,9 @@
 # Release checklist
 
-kb-mcp is source-first today: users install from a checkout with `uv`. Release
-Please manages version bumps, `CHANGELOG.md`, tags, and GitHub Releases. PyPI
-publishing is intentionally not automated yet.
+exomem is source-first today: users can install from a checkout with `uv`.
+Release Please manages version bumps, `CHANGELOG.md`, tags, and GitHub Releases.
+When `PYPI_PUBLISH_ENABLED=true` is configured for the repository, release-created
+workflows also publish the wheel/sdist to PyPI using trusted publishing.
 
 ## Versioning policy
 
@@ -35,6 +36,8 @@ uv run python -m pytest -q
 uvx ruff check .
 npm exec --yes @fission-ai/openspec -- validate --specs --strict
 uv run python scripts/smoke-sample-vault.py
+uv run python scripts/demo-sample-vault.py
+uv run python scripts/generate-capabilities.py --check
 uv run python -m kb_mcp doctor --vault examples/sample-vault --profile lean
 uv build
 ```
@@ -74,9 +77,23 @@ marker.
 5. Release Please tags `vX.Y.Z` and creates the GitHub Release.
 6. The release workflow builds `dist/` with `uv build` and uploads the wheel/sdist
    to the GitHub Release.
+7. If `PYPI_PUBLISH_ENABLED=true`, the release workflow builds the same package
+   artifacts in the `pypi` environment and publishes them through PyPI trusted
+   publishing.
 
 The initial `0.1.0` baseline is recorded in `.release-please-manifest.json` and
 `CHANGELOG.md`; future releases should come from Release Please rather than
-manual version edits. Add PyPI publishing when the project wants package-index
-distribution, trusted publishing, and an explicit support contract for installed
-versions.
+manual version edits.
+
+## PyPI trusted publishing
+
+PyPI publishing is wired but off by default. To enable it:
+
+1. Create the PyPI project and configure a trusted publisher for this repository.
+2. Use workflow `.github/workflows/release-please.yml`, environment `pypi`, and
+   the `publish-pypi` job.
+3. Add a GitHub repository variable `PYPI_PUBLISH_ENABLED` with value `true`.
+4. Keep the `pypi` environment protected if a manual approval gate is desired.
+
+No long-lived PyPI token is required; the publish job uses GitHub OIDC (`id-token:
+write`) and `pypa/gh-action-pypi-publish`.

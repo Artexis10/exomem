@@ -1,4 +1,4 @@
-"""Local install preflight checks for kb-mcp.
+"""Local install preflight checks for exomem.
 
 `doctor` is deliberately CLI-only and read-only: it inspects the host, Python
 environment, vault path, optional dependency imports, and environment variables.
@@ -102,7 +102,7 @@ def _check_python() -> DoctorCheck:
         return _check(
             "python.version",
             "fail",
-            f"Python {version} is too old; kb-mcp requires Python 3.11+.",
+            f"Python {version} is too old; exomem requires Python 3.11+.",
             "Install Python 3.11+ or let uv provision it with `uv sync`.",
         )
     return _check("python.version", "pass", f"Python {version} satisfies >=3.11.")
@@ -121,13 +121,13 @@ def _check_uv() -> DoctorCheck:
 
 
 def _check_console_scripts() -> DoctorCheck:
-    found = [name for name in ("kb", "kb-mcp") if shutil.which(name)]
+    found = [name for name in ("exomem", "kb") if shutil.which(name)]
     if found:
         return _check("cli.entrypoint", "pass", f"Console script(s) on PATH: {', '.join(found)}.")
     return _check(
         "cli.entrypoint",
         "warn",
-        "No `kb` or `kb-mcp` console script found on PATH.",
+        "No `exomem` or `kb` console script found on PATH.",
         "Run through `uv run python -m kb_mcp ...`, or install the package into the active "
         "environment with `uv sync` / `pip install -e .`.",
     )
@@ -372,7 +372,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean") -> DoctorRepo
 
 def render_human(report: DoctorReport) -> str:
     lines = [
-        f"kb-mcp doctor ({report.profile})",
+        f"exomem doctor ({report.profile})",
         f"overall: {'PASS' if report.success else 'FAIL'}",
     ]
     by_status: dict[Status, list[DoctorCheck]] = {"fail": [], "warn": [], "pass": []}

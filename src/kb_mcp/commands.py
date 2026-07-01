@@ -94,7 +94,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
 def mcp_tool_annotations(name: str, *, read_only: bool) -> ToolAnnotations:
     """MCP behaviour hints for one tool — what cautious clients render as badges.
 
-    kb-mcp operates on a CLOSED local vault and never reaches external systems, so
+    exomem operates on a CLOSED local vault and never reaches external systems, so
     `openWorldHint` is always False. `readOnlyHint` comes from the command's
     `cli_writes` flag (search/get/list ops are read-only). `destructiveHint` is only
     meaningful for writes: additive writes are non-destructive; only `DESTRUCTIVE_OPS`

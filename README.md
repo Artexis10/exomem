@@ -1,17 +1,17 @@
-# kb-mcp
+# exomem
 
 An MCP server that makes your Obsidian / markdown vault searchable — text, PDFs,
 Office docs, images, and audio — from inside any MCP client (Claude, Cursor, …).
 Self-hosted; your files stay yours.
 
-## Why kb-mcp
+## Why exomem
 
-- **Meets you where you work.** kb-mcp is an MCP *server*: your KB shows up as
+- **Meets you where you work.** exomem is an MCP *server*: your KB shows up as
   native tools inside Claude, Cursor, or any MCP client — desktop and mobile. You
   don't move into a new app; the KB comes to the agent you already use.
 - **In place, not a silo.** It reads and writes your actual markdown files. They
   stay plain, portable, yours — editable in Obsidian, versioned/backed-up however
-  you like. Most note-AI tools import *copies* into their own store; kb-mcp
+  you like. Most note-AI tools import *copies* into their own store; exomem
   operates on the originals.
 - **Multimodal, not just text.** Beyond markdown it extracts and searches PDFs,
   Office docs (docx/xlsx/pptx), images (OCR + CLIP visual search), and audio/video
@@ -29,10 +29,42 @@ Self-hosted; your files stay yours.
 ## How it compares
 
 - **vs. doc-chat / RAG apps:** they ingest copies into their own store and you
-  work inside their UI; kb-mcp works in place over your live vault, inside your
+  work inside their UI; exomem works in place over your live vault, inside your
   existing agent.
-- **vs. other MCP note servers:** most are text-only search/CRUD; kb-mcp adds
+- **vs. other MCP note servers:** most are text-only search/CRUD; exomem adds
   multimodal extraction + CLIP visual search + a typed/governed knowledge model.
+
+For a deeper point-in-time comparison with engraph, see
+**[docs/comparison-engraph.md](docs/comparison-engraph.md)**.
+
+## 5-minute proof
+
+Run exomem against the bundled sample vault before connecting your own notes:
+
+```bash
+git clone <repo-url> exomem && cd exomem
+uv sync
+uv run python scripts/demo-sample-vault.py
+```
+
+Expected shape:
+
+```text
+exomem sample-vault demo
+vault: examples/sample-vault
+
+1. doctor: PASS (lean profile)
+2. find "retrieval":
+   - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
+   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
+3. get retrieval insight:
+   - title: Retrieval needs owned files
+   - type: insight
+   - excerpt: Local-first knowledge tools should retrieve from files the user already owns.
+4. audit: PASS (broken_wikilink, unprocessed_source)
+
+demo PASS
+```
 
 ## Quickstart (local)
 
@@ -40,12 +72,11 @@ The fastest path is **local, inside Claude Code, over your own vault — no clou
 no OAuth, ~20 minutes**:
 
 ```bash
-git clone <repo-url> kb-mcp && cd kb-mcp
 uv sync                         # lean: keyword/BM25 search, no heavy deps
 uv run python scripts/smoke-sample-vault.py
 uv run python -m kb_mcp init --vault "/path/to/your/Obsidian"
 uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian"
-claude mcp add kb-mcp --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
+claude mcp add exomem --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
   --env KB_MCP_DISABLE_EMBEDDINGS=1 -- \
   uv --directory "$PWD" run python -m kb_mcp --transport stdio
 uv run python -m kb_mcp install-skill   # the "brain" — don't skip this
@@ -125,7 +156,7 @@ recoverable via `recover_from_trash`); every write logs to
 
 - `Knowledge Base/log.md` — durable content history. Writes only, KB-scoped. The
   "what happened to the vault" record; never auto-purged.
-- `logs/kb-mcp.log` — service log. Every call (reads + writes) is surfaced via a
+- `logs/exomem.log` — service log. Every call (reads + writes) is surfaced via a
   per-call middleware as `tool=<name> duration_ms=<n>
   event=tool_success|tool_error`. The operational layer (did the call reach the
   server, spot slow ops). Rotated in-process (5 MB × 5) — same on every platform.
@@ -143,9 +174,9 @@ Adding an operation is one registry entry — the surfaces can't drift. A
 byte-identical schema-fidelity test pins the MCP tools so what Claude sees never
 changes when the registry evolves.
 
-**CLI (`kb` / `kb-mcp`).** Installing the package adds two console scripts; `kb`
-is the daily driver (`kb-mcp` is the namespaced alias and also carries the admin
-subcommands — `init`, `install-skill`, serving, …). `python -m kb_mcp` works too.
+**CLI (`exomem` / `kb`).** Installing the package adds console scripts; `exomem`
+is the public command and `kb` is the short daily-driver alias.
+`python -m kb_mcp` works too from source checkouts.
 Verb-first, with a global `--json` envelope and `0`/`1`/`2` exit codes (success /
 operation error / usage error):
 
@@ -297,7 +328,7 @@ index on Windows/Linux (GPU, Blackwell `sm_120`), and default PyPI on macOS (CPU
 has no macOS wheels). uv auto-fetches a Python 3.12 for it. The pyannote checkpoints are HF-gated:
 set `HUGGINGFACE_TOKEN` and accept the conditions for **both** `pyannote/speaker-diarization-3.1`
 and `pyannote/segmentation-3.0`. Then `KB_MCP_DIARIZE=1`, enroll yourself
-(`kb-mcp enroll-speaker --name <you> --self <sample.wav>`), and restart.
+(`exomem enroll-speaker --name <you> --self <sample.wav>`), and restart.
 
 ## License
 

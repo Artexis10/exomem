@@ -1,4 +1,4 @@
-# kb-mcp — instructions for Claude
+# exomem — instructions for Claude
 
 ## Concurrent sessions share ONE checkout — isolate new work in a worktree
 
@@ -29,8 +29,8 @@ the rule above is the guardrail for when you must operate on the primary.
 
 - Native (Claude Code): `EnterWorktree` — branches off `origin/main`; edit,
   commit, `git push origin HEAD:main` (or open a PR), then `ExitWorktree`.
-- Manual: `git worktree add ../kb-mcp-<topic> -b <branch>`; work, commit, push;
-  then `git worktree remove ../kb-mcp-<topic>`.
+- Manual: `git worktree add ../exomem-<topic> -b <branch>`; work, commit, push;
+  then `git worktree remove ../exomem-<topic>`.
 
 ## Editing the skill scaffold (hand-authored — keep it generic)
 
@@ -54,6 +54,6 @@ scaffold and needs no version bump here.)
 claude.ai connector problems are almost always **connection-side, not the service**.
 A healthy service returns a fast `401` at the funnel. The most common cause is the
 **Tailscale Funnel relay throttling the connector's request burst** — the connector
-looks disconnected but the kb-mcp service is RUNNING and fine. **Diagnose from the
+looks disconnected but the exomem service is RUNNING and fine. **Diagnose from the
 access log before touching the server** (look for the claude.ai gateway IPs); don't
 restart the service reflexively.

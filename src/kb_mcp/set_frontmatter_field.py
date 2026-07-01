@@ -158,7 +158,7 @@ def set_frontmatter_field(
 
     rel_no_ext = rel_path.removesuffix(".md") if rel_path.endswith(".md") else rel_path
     log_body = (
-        f"set_frontmatter_field via kb-mcp. {why.strip()} "
+        f"set_frontmatter_field via exomem. {why.strip()} "
         f"Field: {field!r}. Old: {old_value!r}. New: {value!r}."
     )
     if curated and allow_curated:

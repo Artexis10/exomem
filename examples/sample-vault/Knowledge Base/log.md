@@ -4,4 +4,4 @@
 
 ## [2026-06-30] sample | Notes/Insights/retrieval-needs-owned-files
 
-Created public sample content for kb-mcp first-run smoke tests.
+Created public sample content for bb-mcp first-run smobe tests.

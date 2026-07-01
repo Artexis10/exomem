@@ -230,7 +230,7 @@ def delete_directory(
     meta = {
         "original_path": rel_path,
         "trashed_at": now.isoformat(),
-        "deleted_by": "kb-mcp",
+        "deleted_by": "exomem",
         "file_count_at_trash": len(files),
         "md_file_count_at_trash": len(md_files),
         "inbound_link_count_at_trash": inbound_total,
@@ -250,7 +250,7 @@ def delete_directory(
 
     today_iso = today.isoformat()
     log_body = (
-        f"Trashed directory {rel_path!r} → {trash_rel!r} via kb-mcp Tier 2. "
+        f"Trashed directory {rel_path!r} → {trash_rel!r} via exomem Tier 2. "
         f"files={len(files)}, md_files={len(md_files)}, "
         f"inbound_links_at_trash={inbound_total}."
     )

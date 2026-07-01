@@ -1,4 +1,4 @@
-# Restart the kb-mcp service properly: wait for STOP_PENDING to finish
+# Restart the exomem service properly: wait for STOP_PENDING to finish
 # before starting. No UAC needed (sdset granted RPWPCR to your user).
 #
 # Usage:
@@ -7,7 +7,7 @@
 
 param(
     [switch]$Force,
-    [string]$ServiceName = "kb-mcp"
+    [string]$ServiceName = "exomem"
 )
 
 $ErrorActionPreference = "Stop"
@@ -71,7 +71,7 @@ if ($Force) {
 }
 
 # Truncate the app log so the post-restart tail shows only this session.
-$logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "logs\kb-mcp.log"
+$logPath = Join-Path (Split-Path -Parent $PSScriptRoot) "logs\exomem.log"
 if (Test-Path $logPath) {
     Remove-Item $logPath -Force -ErrorAction SilentlyContinue
 }

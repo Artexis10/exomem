@@ -13,7 +13,7 @@ tags: [sample, architecture]
 
 ## Question
 
-What does the smallest useful kb-mcp vault need to demonstrate?
+What does the smallest useful exomem vault need to demonstrate?
 
 ## Findings
 
