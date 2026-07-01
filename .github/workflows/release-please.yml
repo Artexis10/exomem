@@ -4,21 +4,28 @@ on:
   push:
     branches: [main]
 
-# Uses the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
+# Prefer the same GitHub App-token pattern as the Endstate repos. A non-GITHUB_TOKEN
 # credential lets Release Please PRs and releases trigger normal CI/release events.
+# If the app secrets are not configured on this repo yet, fall back to GITHUB_TOKEN
+# so release automation still works, with GitHub's normal recursion protection.
 permissions:
-  contents: read
+  contents: write
+  issues: write
+  pull-requests: write
 
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    env:
+      HAS_RELEASE_APP: ${{ secrets.RELEASE_PLEASE_APP_ID != '' && secrets.RELEASE_PLEASE_APP_PRIVATE_KEY != '' }}
     outputs:
       release_created: ${{ steps.release.outputs.release_created }}
       tag_name: ${{ steps.release.outputs.tag_name }}
     steps:
       - name: Mint GitHub App installation token
+        if: env.HAS_RELEASE_APP == 'true'
         id: app-token
-        uses: actions/create-github-app-token@v1
+        uses: actions/create-github-app-token@v3
         with:
           app-id: ${{ secrets.RELEASE_PLEASE_APP_ID }}
           private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
@@ -26,7 +33,7 @@ jobs:
       - uses: googleapis/release-please-action@v4
         id: release
         with:
-          token: ${{ steps.app-token.outputs.token }}
+          token: ${{ steps.app-token.outputs.token || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
 
