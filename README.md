@@ -1,7 +1,7 @@
 # exomem
 
 [![PyPI](https://img.shields.io/pypi/v/exomem.svg)](https://pypi.org/project/exomem/)
-[![Python](https://img.shields.io/pypi/pyversions/exomem.svg)](https://pypi.org/project/exomem/)
+[![Python](https://img.shields.io/badge/python-%3E%3D3.11-3776ab.svg)](https://pypi.org/project/exomem/)
 [![CI](https://github.com/Artexis10/exomem/actions/workflows/ci.yml/badge.svg)](https://github.com/Artexis10/exomem/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
