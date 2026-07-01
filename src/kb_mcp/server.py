@@ -345,6 +345,16 @@ def build_server(*, require_auth: bool) -> FastMCP:
             except Exception as e:  # noqa: BLE001 — preload is best-effort
                 log.warning("CLIP preload failed (%s); first image query will pay the cost", e)
 
+    # Warm the lexical/derived caches too (parsed pages, BM25 corpora for both
+    # scopes, wikilink resolver, embedding/CLIP matrices when enabled) so the
+    # first find doesn't pay the first-build stemming cliff. Best-effort;
+    # KB_MCP_DISABLE_WARMUP skips it.
+    try:
+        from . import warmup
+        warmup.warm_caches(vault_root)
+    except Exception as e:  # noqa: BLE001 — warm-up is best-effort
+        log.warning("cache warm-up failed (%s); first find pays the cost", e)
+
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests
     # and on lean boxes via KB_MCP_DISABLE_MEDIA_EXTRACTION (mirrors the embeddings flag).

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import json
 import logging
 import math
@@ -22,6 +23,7 @@ from collections import OrderedDict
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
 from datetime import date, timedelta
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 
@@ -73,6 +75,22 @@ class RankingConfig:
     # `_is_temporal_query(query)` is true AND `temporal_boost != 1.0`.
     temporal_boost: float = 1.0
     temporal_sigma_days: float = 60.0  # Gaussian width: ~halflife of "recent"
+
+    # ---- Usage-activation boost (opt-in via find(prefer_used=true)) ----
+    # Bounded multiplicative post-boost from ACT-R activation over the JSONL
+    # access logs (see usage.py). `usage_boost` is the CEILING of the
+    # multiplier — deliberately below `compiled_boost` so usage can break
+    # ties but never override the epistemic hierarchy, and low enough that
+    # a superseded tombstone at max usage still loses to its active
+    # successor (0.5 × 1.10 < 1.0). `usage_w_surfaced` defaults to 0: being
+    # surfaced by find is not a choice anyone made (rich-get-richer guard);
+    # reads and citations are genuine selection acts.
+    usage_boost: float = 1.10
+    usage_decay: float = 0.5
+    usage_horizon_days: float = 90.0
+    usage_w_surfaced: float = 0.0
+    usage_w_read: float = 1.0
+    usage_w_cited: float = 2.0
 
     # ---- Intent-adaptive weighted RRF ----
     # One weight per fusion lane, aligned positionally to LANE_ORDER:
@@ -333,6 +351,29 @@ class ParsedPage:
             return []
         return [str(x) for x in sv] if isinstance(sv, list) else [str(sv)]
 
+    # ---- Derived-text memoization (computed at most once per page revision;
+    # FrontmatterCache replaces the whole ParsedPage on mtime change, so these
+    # never go stale). Nothing query-dependent is cached here. ----
+
+    @cached_property
+    def body_stripped(self) -> str:
+        return self.body.strip()
+
+    @cached_property
+    def body_norm(self) -> str:
+        return self.body_stripped.lower()
+
+    @cached_property
+    def title_norm(self) -> str:
+        return self.title.lower()
+
+    @cached_property
+    def stem_set(self) -> frozenset[str]:
+        """Snowball stems of title+body — the corpus side of the stem gates."""
+        from . import bm25
+
+        return frozenset(bm25.tokenize(self.title + " " + self.body))
+
 
 def _format_timestamp(seconds: float) -> str:
     """Seconds → `mm:ss` (or `h:mm:ss` past an hour) for human-readable video deeplinks."""
@@ -387,6 +428,12 @@ class Hit:
     # demotion. Omitted when status is active/unset so live hits stay noise-free.
     status: str | None = None
     superseded_by: list[str] = field(default_factory=list)
+    # Usage-activation transparency (prefer_used=true only): the raw ACT-R
+    # activation B and the multiplier it produced, so the caller sees exactly
+    # why and by how much a hit was boosted. None (omitted) whenever the
+    # boost didn't touch this hit — default responses are byte-identical.
+    activation: float | None = None
+    usage_boost_applied: float | None = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -430,6 +477,10 @@ class Hit:
             signals["keyword_rank"] = self.keyword_rank
         if self.rerank_score is not None:
             signals["rerank_score"] = round(self.rerank_score, 4)
+        if self.activation is not None:
+            signals["activation"] = round(self.activation, 4)
+        if self.usage_boost_applied is not None:
+            signals["usage_boost"] = round(self.usage_boost_applied, 4)
         if signals:
             out["signals"] = signals
         return out
@@ -552,28 +603,76 @@ def _find_cache_size() -> int:
         return _DEFAULT_FIND_CACHE_SIZE
 
 
-def _stat_walk_freshness(paths) -> tuple[int, int]:
-    """(file count, max st_mtime_ns) over an iterable of paths."""
-    count = 0
+def _walk_freshness_key(paths) -> tuple[int, int, str]:
+    """(file count, max st_mtime_ns, digest of sorted path+mtime pairs).
+
+    Digest-strength on purpose: count/max-mtime alone miss a delete paired
+    with a create, a rename (mtime preserved), and a replacement carrying an
+    older mtime. Every consumer that caches corpus-derived state (the hot
+    find cache, BM25, the wikilink resolver, the inbound-link index) compares
+    the whole triple, so those histories now invalidate correctly.
+    """
+    entries: list[tuple[str, int]] = []
     latest = 0
     for p in paths:
         try:
             ns = p.stat().st_mtime_ns
         except OSError:
             continue
-        count += 1
+        entries.append((str(p), ns))
         if ns > latest:
             latest = ns
-    return count, latest
+    entries.sort()
+    h = hashlib.blake2b(digest_size=16)
+    for sp, ns in entries:
+        h.update(sp.encode("utf-8", "surrogatepass"))
+        h.update(b"\0")
+        h.update(str(ns).encode("ascii"))
+        h.update(b"\0")
+    return len(entries), latest, h.hexdigest()
+
+
+class FreshnessSnapshot:
+    """Per-request corpus freshness: each markdown scope is stat-walked at
+    most once per `find()` call, and every consumer (hot-cache key, BM25
+    rebuild check, wikilink-resolver reuse, auto-widen's vault BM25) shares
+    the result instead of re-walking. Lazy — a `scope="kb-only"` request
+    never pays the vault walk."""
+
+    def __init__(self, vault_root: Path) -> None:
+        self._root = vault_root
+        self._kb: tuple[int, int, str] | None = None
+        self._vault: tuple[int, int, str] | None = None
+
+    def kb(self) -> tuple[int, int, str]:
+        if self._kb is None:
+            kb = self._root / "Knowledge Base"
+            self._kb = _walk_freshness_key(_walk_md(kb) if kb.is_dir() else ())
+        return self._kb
+
+    def vault(self) -> tuple[int, int, str]:
+        if self._vault is None:
+            from .vault import walk_vault_md
+
+            self._vault = _walk_freshness_key(walk_vault_md(self._root))
+        return self._vault
+
+    def for_scope(self, scope: str) -> tuple[int, int, str]:
+        return self.vault() if scope == "vault" else self.kb()
 
 
 def _freshness_key(
-    vault_root: Path, *, scope: str, query_norm: str, mode: str
+    vault_root: Path,
+    *,
+    scope: str,
+    query_norm: str,
+    mode: str,
+    snapshot: FreshnessSnapshot,
 ) -> tuple:
     """Freshness inputs that can change this request's answer.
 
-    - scope="kb-only": KB count/max-mtime only.
-    - scope="vault": full-vault walk count/max-mtime.
+    - scope="kb-only": KB walk key only.
+    - scope="vault": full-vault walk key.
     - scope="kb" with a non-empty query: BOTH (auto-widen reserves out-of-KB
       slots on every non-empty query).
     - hybrid/vector modes: the embedding and CLIP sidecar mtimes (0 when
@@ -582,12 +681,9 @@ def _freshness_key(
     parts: list[Any] = [date.today().toordinal()]
     kb = vault_root / "Knowledge Base"
     if scope in ("kb", "kb-only"):
-        walk = _walk_md(kb) if kb.is_dir() else ()
-        parts.append(("kb", *_stat_walk_freshness(walk)))
+        parts.append(("kb", *snapshot.kb()))
     if scope == "vault" or (scope == "kb" and query_norm):
-        from .vault import walk_vault_md
-
-        parts.append(("vault", *_stat_walk_freshness(walk_vault_md(vault_root))))
+        parts.append(("vault", *snapshot.vault()))
     if mode in ("hybrid", "vector"):
         for name in (".embeddings.sqlite", ".clip.sqlite"):
             try:
@@ -620,6 +716,7 @@ def find(
     recency_days: int | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
+    prefer_used: bool = False,
     config: RankingConfig | None = None,
     timings: FindTimings | None = None,
 ) -> list[Hit]:
@@ -689,6 +786,16 @@ def find(
     + `superseded_by` either way, so the reader sees it's superseded and where
     it points. Set False to rank superseded pages on their content alone (e.g.
     "what did I used to think about X").
+
+    `prefer_used`: when True (OFF by default — default ranking is usage-blind
+    and byte-identical), applies a bounded, positive-only usage-activation
+    boost from the JSONL access logs (see `usage.py`): pages you actually
+    read and cite get up to `config.usage_boost` (≤ the compiled boost, so
+    usage breaks ties but never overrides the epistemic hierarchy). Never a
+    penalty, never creates candidates — it can only reorder pages the
+    content lanes already surfaced. Boosted hits expose `signals.activation`
+    and `signals.usage_boost`. Strict no-op on cold start, absent logs, or
+    `KB_MCP_DISABLE_USAGE_BOOST`. Bypasses the hot find cache.
     """
     if scope not in ("kb", "vault", "kb-only"):
         raise ValueError(
@@ -703,9 +810,22 @@ def find(
     limit = min(limit, 100)
     query_norm = (query or "").lower().strip()
 
+    # One freshness snapshot + one parsed-page memo per request: every
+    # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
+    # shares them instead of re-walking / re-stat'ing.
+    snapshot = FreshnessSnapshot(vault_root)
+    page_memo: dict[str, ParsedPage | None] = {}
+
+    def _page_of(rel: str) -> ParsedPage | None:
+        if rel not in page_memo:
+            page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
+        return page_memo[rel]
+
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
+    # prefer_used bypasses the cache entirely — simplest correct interaction;
+    # log freshness never has to enter the cache key.
     resolved_config = config if config is not None else _active_ranking()
-    cache_size = _find_cache_size()
+    cache_size = 0 if prefer_used else _find_cache_size()
     cache_key: tuple | None = None
     if timings is not None:
         timings.cache["enabled"] = cache_size > 0
@@ -722,7 +842,8 @@ def find(
         )
         with _span(timings, "freshness"):
             fresh = _freshness_key(
-                vault_root, scope=scope, query_norm=query_norm, mode=mode
+                vault_root, scope=scope, query_norm=query_norm, mode=mode,
+                snapshot=snapshot,
             )
         cache_key = (request_key, fresh)
         with _span(timings, "cache_lookup"):
@@ -762,8 +883,11 @@ def find(
             auto_rerank=auto_rerank, temporal=temporal, intent=intent,
             prefer_compiled=prefer_compiled,
             prefer_active=prefer_active,
+            prefer_used=prefer_used,
             config=resolved_config,
             timings=timings,
+            snapshot=snapshot,
+            page_memo=page_memo,
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
@@ -790,7 +914,7 @@ def find(
                     query_norm=query_norm,
                     types=types, projects=projects, tags=tags, speakers=speakers,
                     file_types=file_types, exclude_file_types=exclude_file_types,
-                    limit=limit,
+                    limit=limit, snapshot=snapshot,
                 )
                 if h.path not in seen
             ]
@@ -798,7 +922,7 @@ def find(
                 strong: list[Hit] = []
                 weak: list[Hit] = []
                 for h in hits:
-                    page = _CACHE.get(vault_root / h.path, vault_root)
+                    page = _page_of(h.path)
                     # Word/stem-level, not substring: a bare "x3" query must not
                     # treat files that merely contain "x3" inside a longer token
                     # (a hash, "max3...", a log copy) as strong topical matches.
@@ -910,12 +1034,32 @@ def _find_semantic(
     intent: str | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
+    prefer_used: bool = False,
     config: RankingConfig = DEFAULT_RANKING,
     timings: FindTimings | None = None,
+    snapshot: FreshnessSnapshot | None = None,
+    page_memo: dict[str, ParsedPage | None] | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
     from . import bm25, embeddings, fusion
+
+    if snapshot is None:
+        snapshot = FreshnessSnapshot(vault_root)
+    if page_memo is None:
+        page_memo = {}
+
+    # Usage-activation map for the opt-in boost. Empty dict = strict no-op
+    # (default, cold start, gated, or kill-switched).
+    usage_map: dict[str, float] = {}
+    if prefer_used:
+        from . import usage as usage_module
+        usage_map = usage_module.activation_map(config)
+
+    def _page_of(rel: str) -> ParsedPage | None:
+        if rel not in page_memo:
+            page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
+        return page_memo[rel]
 
     # Pull more than we need so post-filter losses don't starve the result.
     candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
@@ -998,7 +1142,10 @@ def _find_semantic(
         # ---- BM25 contribution ----
         try:
             with _span(timings, "bm25"):
-                bm25_hits = bm25.search(vault_root, query, k=candidate_k, scope=scope)
+                bm25_hits = bm25.search(
+                    vault_root, query, k=candidate_k, scope=scope,
+                    freshness=snapshot.for_scope(scope),
+                )
                 bm25_ranking = [p for p, _ in bm25_hits]
         except ImportError as e:
             log.warning("BM25 unavailable (%s); using vector-only", e)
@@ -1046,7 +1193,7 @@ def _find_semantic(
                     graph_seeds.append(p)
                     continue
                 # BM25-only seed: gate via stem-aware tokens-present.
-                page = _CACHE.get(vault_root / p, vault_root)
+                page = _page_of(p)
                 if page is None:
                     continue
                 if (
@@ -1054,12 +1201,20 @@ def _find_semantic(
                     or _stem_tokens_present(page, query_norm)
                 ):
                     graph_seeds.append(p)
+        # One resolver for the whole request, freshness-checked against the
+        # request's own vault snapshot (no extra walk).
+        resolver = (
+            _get_query_resolver(vault_root, freshness=snapshot.vault())
+            if graph_seeds else None
+        )
         seen_target: set[str] = set()
         for seed_rel in graph_seeds:
-            page = _CACHE.get(vault_root / seed_rel, vault_root)
+            page = _page_of(seed_rel)
             if page is None:
                 continue
-            for target_rel in _outbound_wikilink_paths(page, vault_root):
+            for target_rel in _outbound_wikilink_paths(
+                page, vault_root, resolver=resolver
+            ):
                 # Count in-degree for ALL targets — primary-ranked hubs benefit
                 # too. graph_ranking still only carries non-primary targets so
                 # RRF doesn't double-count them.
@@ -1130,17 +1285,22 @@ def _find_semantic(
         fused = fusion.reciprocal_rank_fusion_weighted(
             active_lists, active_weights, k=config.rrf_k
         )
-        # Apply type-weight boost before iterating fused candidates — affects the
-        # iteration order for non-rerank flows. For rerank, the boost is also
-        # applied to rerank_score below so it survives the final sort.
-        if prefer_compiled:
-            fused = _apply_type_boost(fused, vault_root, config)
-        if prefer_active:
-            fused = _apply_status_demotion(fused, vault_root, config)
-        # Gaussian recency multiplier (off unless config.temporal_boost != 1.0 AND
-        # the query is temporal). Mirrors the type/status post-RRF multipliers.
-        if temporal:
-            fused = _apply_temporal_boost(fused, vault_root, query, config)
+        # Post-RRF multiplicative boosts (type / status / Gaussian recency) in
+        # ONE pass with ONE sort. Order-equivalent to the historical
+        # sequential _apply_type_boost → _apply_status_demotion →
+        # _apply_temporal_boost passes: each of those ended with the same
+        # total-order sort key (-score, path), so only the final combined
+        # multiplier ever determined the order (guarded by the equivalence
+        # tests). For rerank, type/status/usage are also applied to
+        # rerank_score below so they survive the final sort.
+        fused = _apply_post_rrf_multipliers(
+            fused, query, config,
+            prefer_compiled=prefer_compiled,
+            prefer_active=prefer_active,
+            temporal=temporal,
+            page_of=_page_of,
+            usage_map=usage_map,
+        )
     vector_paths: set[str] = set(vector_ranking)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
@@ -1162,10 +1322,9 @@ def _find_semantic(
         if rel_path in seen:
             continue
         seen.add(rel_path)
-        abs_path = vault_root / rel_path
-        if abs_path.name.lower() in _NAVIGATION_BASENAMES:
+        if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
             continue
-        page = _CACHE.get(abs_path, vault_root)
+        page = _page_of(rel_path)
         if page is None:
             continue
         if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
@@ -1198,6 +1357,15 @@ def _find_semantic(
             and rel_path not in vector_rank_by_path
             and rel_path not in bm25_rank_by_path
         )
+        hit_activation: float | None = None
+        hit_usage_mult: float | None = None
+        if usage_map:
+            from . import usage as usage_module
+            hit_activation = usage_map.get(usage_module.canon(rel_path))
+            if hit_activation is not None:
+                hit_usage_mult = usage_module.usage_multiplier(
+                    hit_activation, config
+                )
         hits.append(Hit(
             path=page.rel_path,
             type=page.page_type,
@@ -1218,6 +1386,8 @@ def _find_semantic(
             graph_hop=is_graph_only,
             graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
             keyword_rank=keyword_rank_by_path.get(rel_path),
+            activation=hit_activation,
+            usage_boost_applied=hit_usage_mult,
         ))
         if len(hits) >= target_n:
             break
@@ -1248,8 +1418,7 @@ def _find_semantic(
                 if ctext:
                     passages.append(ctext)
                 else:
-                    abs_p = vault_root / h.path
-                    pg = _CACHE.get(abs_p, vault_root)
+                    pg = _page_of(h.path)
                     body = (pg.body if pg else "") or h.excerpt
                     passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
             scores = emb.rerank_pairs(query, passages)
@@ -1271,6 +1440,12 @@ def _find_semantic(
                 for h in hits:
                     if h.rerank_score is not None:
                         h.rerank_score *= _status_multiplier(h.status, config)
+            # Re-apply the usage boost too, mirroring type/status, so an
+            # opted-in boost survives the post-rerank sort.
+            if usage_map:
+                for h in hits:
+                    if h.rerank_score is not None and h.usage_boost_applied:
+                        h.rerank_score *= h.usage_boost_applied
             hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
         except ImportError as e:
             log.warning("rerank requested but reranker unavailable: %s", e)
@@ -1301,6 +1476,7 @@ def _find_outside_kb(
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
     limit: int,
+    snapshot: FreshnessSnapshot | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
@@ -1324,7 +1500,8 @@ def _find_outside_kb(
     candidates: list[str] = []
     try:
         for path, _score in bm25.search(
-            vault_root, query, k=bm25_k, scope="vault"
+            vault_root, query, k=bm25_k, scope="vault",
+            freshness=snapshot.vault() if snapshot is not None else None,
         ):
             if not path.startswith("Knowledge Base/"):
                 candidates.append(path)
@@ -1382,8 +1559,7 @@ def _any_stem_present(page: ParsedPage, query_norm: str) -> bool:
     if not query_norm:
         return False
     from . import bm25 as bm25_module
-    text_stems = set(bm25_module.tokenize(page.title + " " + page.body))
-    return any(qs in text_stems for qs in bm25_module.tokenize(query_norm))
+    return any(qs in page.stem_set for qs in bm25_module.tokenize(query_norm))
 
 
 def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
@@ -1493,6 +1669,73 @@ def _apply_status_demotion(
         page = _CACHE.get(vault_root / path, vault_root)
         mult = _status_multiplier(page.status if page else None, config)
         adjusted.append((path, score * mult))
+    adjusted.sort(key=lambda t: (-t[1], t[0]))
+    return adjusted
+
+
+def _apply_post_rrf_multipliers(
+    fused: list[tuple[str, float]],
+    query: str,
+    config: RankingConfig,
+    *,
+    prefer_compiled: bool,
+    prefer_active: bool,
+    temporal: bool,
+    page_of,
+    usage_map: dict[str, float] | None = None,
+) -> list[tuple[str, float]]:
+    """All post-RRF multiplicative boosts in one pass with one final sort.
+
+    Combines the type boost (`prefer_compiled`, with the media-sidecar
+    source-penalty exemption), the supersession demotion (`prefer_active`),
+    and the Gaussian recency multiplier (temporal query AND
+    `config.temporal_boost != 1.0`). Order-equivalent to running the three
+    single-purpose `_apply_*` passes sequentially — each ended with the same
+    total-order sort key `(-score, path)`, so intermediate orders never
+    mattered; those functions remain as the reference implementations the
+    equivalence tests compare against. When no stage is active the input is
+    returned unchanged (matching the historical all-off path, which never
+    re-sorted). `page_of` is the per-request ParsedPage memo, so each
+    candidate is stat'd/parsed at most once per request.
+    """
+    temporal_active = (
+        temporal and config.temporal_boost != 1.0 and _is_temporal_query(query)
+    )
+    usage_active = bool(usage_map)
+    if not (prefer_compiled or prefer_active or temporal_active or usage_active):
+        return fused
+    if usage_active:
+        from . import usage as usage_module
+    today = date.today() if temporal_active else None
+    adjusted: list[tuple[str, float]] = []
+    for path, score in fused:
+        page = page_of(path)
+        # Multiply the score progressively (never pre-combine multipliers) so
+        # the float ops are bit-identical to the sequential reference passes.
+        if prefer_compiled:
+            if page is not None and page.media_type:
+                # A media sidecar is `type: source`, but the binary it points
+                # at IS the answer — exempt from the source penalty.
+                pass
+            else:
+                score = score * _type_multiplier(
+                    page.page_type if page else None, config
+                )
+        if prefer_active:
+            score = score * _status_multiplier(
+                page.status if page else None, config
+            )
+        if temporal_active:
+            d = _parse_date(page.updated) if page else None
+            if d is not None:
+                score = score * _recency_multiplier(
+                    max(0.0, float((today - d).days)), config
+                )
+        if usage_active:
+            b = usage_map.get(usage_module.canon(path))
+            if b is not None:
+                score = score * usage_module.usage_multiplier(b, config)
+        adjusted.append((path, score))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted
 
@@ -1724,7 +1967,9 @@ def _keyword_match_paths(vault_root: Path, query_norm: str, scope: str) -> list[
     return [p for _, p in matches]
 
 
-def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
+def _outbound_wikilink_paths(
+    page: ParsedPage, vault_root: Path, resolver=None
+) -> list[str]:
     """Vault-relative POSIX paths (no .md) that this page's body links to.
 
     Skips matches inside fenced code blocks and inline code (delegates to
@@ -1732,16 +1977,15 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
     `normalize_wikilink` so bare / KB-stripped / aliased forms all resolve to
     the same canonical path. Unresolvable targets and folder-hub links
     (trailing `/`) are dropped. `#anchor` is stripped — anchors are intra-
-    page jumps, not separate files.
+    page jumps, not separate files. Pass `resolver` to reuse one across a
+    request (the graph lane does); None builds/reuses the process cache.
     """
     from .vault import (
-        WikilinkResolver,
         find_body_wikilinks,
         normalize_wikilink,
     )
-    # Build the resolver once per query (or once across the whole find call —
-    # see _resolver_cache below).
-    resolver = _get_query_resolver(vault_root)
+    if resolver is None:
+        resolver = _get_query_resolver(vault_root)
     out: list[str] = []
     seen: set[str] = set()
     for m in find_body_wikilinks(page.body):
@@ -1772,30 +2016,26 @@ def _outbound_wikilink_paths(page: ParsedPage, vault_root: Path) -> list[str]:
     return out
 
 
-_RESOLVER_CACHE: dict[Path, tuple[float, "object"]] = {}
+_RESOLVER_CACHE: dict[Path, tuple[tuple, "object"]] = {}
 
 
-def _get_query_resolver(vault_root: Path):
-    """Per-process WikilinkResolver cache, invalidated when the vault changes."""
-    from .vault import WikilinkResolver, walk_vault_md
-    # Cheap freshness key: hash a count + most-recent mtime. WikilinkResolver
-    # build walks the whole vault, so we want to reuse it across queries.
-    latest = 0.0
-    count = 0
-    for p in walk_vault_md(vault_root):
-        try:
-            t = p.stat().st_mtime
-        except OSError:
-            continue
-        if t > latest:
-            latest = t
-        count += 1
-    key = (count, latest)
+def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
+    """Per-process WikilinkResolver cache, invalidated when the vault changes.
+
+    Freshness is the digest-strength `_walk_freshness_key` triple — the old
+    (count, max-mtime) pair missed pure renames, which change the resolver's
+    stem/title maps without touching count or any mtime. Pass `freshness`
+    (from the request's FreshnessSnapshot) to skip the walk; None computes it
+    here for out-of-request callers.
+    """
+    from .vault import WikilinkResolver
+    if freshness is None:
+        freshness = FreshnessSnapshot(vault_root).vault()
     cached = _RESOLVER_CACHE.get(vault_root)
-    if cached and cached[0] == key:
+    if cached and cached[0] == freshness:
         return cached[1]
     resolver = WikilinkResolver(vault_root)
-    _RESOLVER_CACHE[vault_root] = (key, resolver)
+    _RESOLVER_CACHE[vault_root] = (freshness, resolver)
     return resolver
 
 
@@ -1811,7 +2051,7 @@ def _stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
     if not query_norm:
         return True
     from . import bm25 as bm25_module
-    text_stems = set(bm25_module.tokenize(page.title + " " + page.body))
+    text_stems = page.stem_set
     for tok in query_norm.split():
         if not tok:
             continue
@@ -2004,12 +2244,12 @@ def _make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
 
     If query is empty, returns the first ~200 chars of body (no match required).
     """
-    body = page.body.strip()
+    body = page.body_stripped
     if not query_norm:
         snippet = body[:EXCERPT_MAX_LEN]
         return _collapse(snippet)
-    title_norm = page.title.lower()
-    body_norm = body.lower()
+    title_norm = page.title_norm
+    body_norm = page.body_norm
     tokens = query_norm.split()
     if not tokens:
         snippet = body[:EXCERPT_MAX_LEN]
@@ -2047,8 +2287,11 @@ def _collapse(s: str) -> str:
 
 def clear_cache() -> None:
     """Test hook: flush every in-process find cache between tests — parsed
-    pages, the wikilink resolver, and the hot find-result cache."""
+    pages, the wikilink resolver, the hot find-result cache, and the vault
+    inbound-link index."""
     _CACHE.entries.clear()
     _RESOLVER_CACHE.clear()
     with _FIND_CACHE_LOCK:
         _FIND_CACHE.clear()
+    from . import vault as vault_module
+    vault_module.clear_inbound_index()

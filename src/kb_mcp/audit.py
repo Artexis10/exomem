@@ -38,7 +38,6 @@ existing write tools (no auto-fix).
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import math
 import os
@@ -864,27 +863,15 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
 
 
 def _relevance_canon(path: str) -> str:
-    p = (path or "").strip().replace("\\", "/")
-    if p.lower().endswith(".md"):
-        p = p[:-3]
-    if p.startswith("Knowledge Base/"):
-        p = p[len("Knowledge Base/"):]
-    return p.lower()
+    """Delegates to the shared usage primitives (see `usage.py`)."""
+    from . import usage
+    return usage.canon(path)
 
 
 def _relevance_read_jsonl(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    out: list[dict] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            out.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-    return out
+    """Delegates to the shared usage primitives (see `usage.py`)."""
+    from . import usage
+    return usage.read_jsonl(path)
 
 
 def _relevance_golden_queries(path: Path) -> set[str]:
@@ -1083,7 +1070,10 @@ def _stale_activation_params() -> tuple[float, float, float, float]:
     Env-overridable via KB_MCP_STALE_DECAY / _W_SURFACED / _W_READ / _W_CITED;
     bad values fall back. ACT-R canonical decay d=0.5; access weights order
     citation > read > surfacing. These weight the review-queue SORT only — they
-    never touch the stale_review gate or `find` ranking.
+    never touch the stale_review gate, and they never touch DEFAULT `find`
+    ranking. (The opt-in `find(prefer_used=true)` boost is the sole, explicit
+    exception: it consumes the same shared primitives via `usage.py` with its
+    own RankingConfig weights — notably w_surfaced=0 — never these.)
     """
     def _float_env(name: str, default: float) -> float:
         raw = os.environ.get(name)
@@ -1118,65 +1108,25 @@ def _stale_access_events(
     Returns None when the signal is UNAVAILABLE — gated for tests
     (`KB_MCP_DISABLE_RELEVANCE_CHECK`, set by the suite) or all three logs
     empty — so the caller FALLS BACK to the age-based sort rather than fabricate
-    activation. Reuses the relevance-log reader.
+    activation. Delegates to the shared primitives in `usage.py` (extracted
+    from here verbatim; the parity test guards the move) with audit's own
+    env-tunable weights and NO horizon.
     """
-    if os.environ.get("KB_MCP_DISABLE_RELEVANCE_CHECK"):
-        return None
-    logs_dir = logs_dir or _RELEVANCE_LOGS_DIR
-    today = today or dt.date.today()
+    from . import usage
     _, w_surfaced, w_read, w_cited = _stale_activation_params()
-
-    queries = _relevance_read_jsonl(logs_dir / "queries.jsonl")
-    reads = _relevance_read_jsonl(logs_dir / "reads.jsonl")
-    writes = _relevance_read_jsonl(logs_dir / "writes.jsonl")
-    if not queries and not reads and not writes:
-        return None
-
-    events: dict[str, list[tuple[float, float]]] = {}
-
-    def _delta(ts_raw: object) -> float | None:
-        try:
-            ts = dt.datetime.fromisoformat(str(ts_raw))
-        except (ValueError, TypeError):
-            return None
-        return float(max((today - ts.date()).days, 1))
-
-    for q in queries:
-        delta = _delta(q.get("ts"))
-        if delta is None:
-            continue
-        for t in q.get("top_k") or []:
-            p = t.get("path")
-            if p:
-                events.setdefault(_relevance_canon(p), []).append((delta, w_surfaced))
-
-    for r in reads:
-        delta = _delta(r.get("ts"))
-        if delta is None:
-            continue
-        p = r.get("read_path")
-        if p:
-            events.setdefault(_relevance_canon(p), []).append((delta, w_read))
-
-    for w in writes:
-        delta = _delta(w.get("ts"))
-        if delta is None:
-            continue
-        for c in w.get("cited_sources") or []:
-            if c:
-                events.setdefault(_relevance_canon(c), []).append((delta, w_cited))
-
-    return events
+    return usage.access_events(
+        logs_dir or _RELEVANCE_LOGS_DIR, today,
+        w_surfaced=w_surfaced, w_read=w_read, w_cited=w_cited,
+    )
 
 
 def _activation(events: list[tuple[float, float]] | None, d: float) -> float | None:
     """ACT-R base-level activation B = ln(Σ wⱼ·Δtⱼ^(−d)) over weighted access
     events. Higher B = more recently/often accessed = LESS dormant. Returns None
     when there are no events (never accessed) — the caller sorts those to the TOP
-    (most dormant)."""
-    if not events:
-        return None
-    return math.log(sum(w * (dt_days ** (-d)) for dt_days, w in events))
+    (most dormant). Delegates to `usage.activation`."""
+    from . import usage
+    return usage.activation(events, d)
 
 
 def _check_stale_review(
@@ -1189,7 +1139,9 @@ def _check_stale_review(
     rarely surfaced in `find` AND low inbound-link degree.
 
     A measurement-only REVIEW QUEUE — it never decays, down-ranks, moves, or
-    hides anything (`find` ordering is unchanged); the reader judges keep /
+    hides anything (DEFAULT `find` ordering is unchanged; the opt-in
+    `find(prefer_used=true)` boost is the sole explicit exception, and it
+    lives in `usage.py`/`find.py`, not here); the reader judges keep /
     `replace` (supersede) / archive. All three signals are derived from what the
     KB already records (frontmatter dates, the wikilink graph, the query
     log) — no new sidecar. AND-gated as a filter, not a score (no confidence

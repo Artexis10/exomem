@@ -259,6 +259,7 @@ def op_find(
     rerank: bool = False,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
+    prefer_used: bool = False,
     pack: bool = False,
     detail: str = "full",
     include_timings: bool = False,
@@ -331,6 +332,19 @@ def op_find(
             pointer) so you can see it's superseded. Set false to rank a
             superseded page on its content alone (e.g. "what did I used to
             think about X").
+        prefer_used: When true (OFF by default — default ranking is
+            usage-blind), applies a bounded, positive-only usage boost:
+            pages you actually read (`get`) and cite in written notes rank
+            slightly higher, from ACT-R activation over the server's own
+            access logs. Capped below the compiled boost so usage breaks
+            ties but never overrides the epistemic hierarchy; never a
+            penalty; never ADDS results — it only reorders pages the
+            content lanes already matched. Boosted hits expose
+            `signals.activation` + `signals.usage_boost` so you can see
+            exactly why. Reading and citing pages IS the feedback loop —
+            no separate feedback call exists or is needed. Use for "what
+            have I been working with lately" recall; leave off for
+            neutral knowledge lookup.
         pack: When true (off by default), ALSO assemble a reasoning-ready
             context pack from the top hits and change the return to
             {"hits": [...], "pack": {...}} (with pack off, the return is the
@@ -405,6 +419,7 @@ def op_find(
         rerank=rerank,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
+        prefer_used=prefer_used,
         timings=timings,
     )
     pack_obj: dict | None = None
@@ -423,6 +438,7 @@ def op_find(
         query=query, mode=mode, scope=scope,
         types=types, projects=projects, tags=tags,
         limit=limit, rerank=rerank, prefer_compiled=prefer_compiled,
+        prefer_used=prefer_used,
         graph=graph, hits=hits,
         timing_summary=_timing_log_summary(timings_dict),
     )
@@ -905,8 +921,9 @@ def op_get(
     frontmatter_only: bool = False,
     include_history: bool = False,
     links: bool = False,
+    include_raw: bool = False,
 ) -> dict:
-    """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body + raw content.
+    """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).
 
     Reads anywhere under the vault root — not just `Knowledge Base/`.
     This lets you cite from curated, read-only sibling folders (e.g.
@@ -941,14 +958,21 @@ def op_get(
             the distinct wikilink targets in this page's body. Use it to
             see a note's graph neighbourhood in one call. Default off (no
             behaviour change).
+        include_raw: If true, ALSO return `content` — the raw file text
+            including the frontmatter delimiters. Off by default because it
+            duplicates `frontmatter` + `body` (double the tokens on every
+            read) and nothing in the normal workflow needs it: edits
+            round-trip `body`, and the drift guard uses `content_hash`,
+            which the server always computes over the raw bytes for you.
 
     Returns:
-        {path, frontmatter, body, content, content_hash, mtime}.
-        `content` is the raw file text (including frontmatter delimiters);
-        `body` is just the markdown after the frontmatter. `content_hash`
-        is a sha256 you can echo back to `edit`/`multi_edit` via
-        `expected_hash` to refuse a write if the file changed on disk since
-        this read (two-writer drift guard); `mtime` is advisory.
+        {path, frontmatter, body, content_hash, mtime}.
+        `body` is the markdown after the frontmatter — what you feed back
+        into `edit(new_body=...)`. `content_hash` is a sha256 of the raw
+        file text; echo it to `edit`/`multi_edit` via `expected_hash` to
+        refuse a write if the file changed on disk since this read
+        (two-writer drift guard); `mtime` is advisory.
+        Adds `content` (raw file text) when `include_raw=true`.
         Adds `history` when `include_history=true`.
 
     Errors:
@@ -968,7 +992,7 @@ def op_get(
             result = get_page_module.get_page(vault_root, path=path)
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
-        out = result.as_dict()
+        out = result.as_dict(include_raw=include_raw)
     query_log.log_get_call(
         read_path=out["path"],
         frontmatter_only=frontmatter_only,
