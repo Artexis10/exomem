@@ -312,52 +312,20 @@ def build_server(*, require_auth: bool) -> FastMCP:
     # of a frozen docstring list that drifts. Re-read on each server start.
     project_keys_hint = project_keys_module.keys_hint(vault_root)
 
-    # Preload bge-base so the first hybrid query in this process is fast
-    # (otherwise the HF-Hub HEAD redirects + tokenizer load happen on the
-    # first user-facing call — ~30s of dead air). Tests set
-    # EXOMEM_DISABLE_EMBEDDINGS to skip this entirely.
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        try:
-            from . import embeddings
-            log.info("preloading embedding model %s", embeddings.MODEL_NAME)
-            embeddings.get_model()
-            log.info("embedding model ready")
-        except Exception as e:  # noqa: BLE001 — preload is best-effort
-            log.warning(
-                "embedding preload failed (%s); first hybrid query will "
-                "pay the cost", e,
-            )
-        # Reranker is opt-in via find(rerank=True), but the first call
-        # without preload is ~30s of HF metadata + load. Preloading
-        # alongside the embedder keeps that surprise off the user.
-        try:
-            from . import embeddings
-            log.info("preloading reranker %s", embeddings.RERANKER_NAME)
-            embeddings.get_reranker()
-            log.info("reranker model ready")
-        except Exception as e:  # noqa: BLE001 — preload is best-effort
-            log.warning(
-                "reranker preload failed (%s); first rerank=True call will "
-                "pay the cost", e,
-            )
-        # Preload CLIP too so the first image-aware find()/upload doesn't pay the load.
-        if embeddings.clip_enabled():
-            try:
-                log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
-                embeddings.get_clip_model()
-                log.info("CLIP model ready")
-            except Exception as e:  # noqa: BLE001 — preload is best-effort
-                log.warning("CLIP preload failed (%s); first image query will pay the cost", e)
-
-    # Warm the lexical/derived caches too (parsed pages, BM25 corpora for both
-    # scopes, wikilink resolver, embedding/CLIP matrices when enabled) so the
-    # first find doesn't pay the first-build stemming cliff. Best-effort;
-    # EXOMEM_DISABLE_WARMUP skips it.
-    try:
-        from . import warmup
-        warmup.warm_caches(vault_root)
-    except Exception as e:  # noqa: BLE001 — warm-up is best-effort
-        log.warning("cache warm-up failed (%s); first find pays the cost", e)
+    # Warm-up: lexical caches (parsed pages, BM25 both scopes, resolver,
+    # embedding/CLIP matrices) and model preloads (bge, reranker, CLIP).
+    # Default is a background daemon thread so the transport listens
+    # immediately — lexical `find` works right away; model-touching lanes
+    # defer via `readiness` until their component lands (OpenSpec:
+    # add-instant-start-boot). EXOMEM_EAGER_BOOT=1 restores the old blocking
+    # boot (rollback lever for deploys); EXOMEM_DISABLE_WARMUP skips warm-up
+    # entirely (pure lazy).
+    from . import warmup
+    if warmup.warmup_enabled():
+        if os.environ.get("EXOMEM_EAGER_BOOT"):
+            warmup.warm_all(vault_root)
+        else:
+            warmup.start_background(vault_root)
 
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests

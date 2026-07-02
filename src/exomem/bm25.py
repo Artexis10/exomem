@@ -86,6 +86,9 @@ class BM25Index:
         # without timing the wall clock.
         self.last_tokenized: int = 0
         self.last_reused: int = 0
+        # Serializes corpus builds: the background warm thread and a racing
+        # request must produce ONE build (the loser waits, then reuses).
+        self._build_lock = threading.Lock()
 
     def _doc_tokens(self, path: Path, page) -> list[str]:
         """Tokens for `page`, reusing the cache while the file's mtime is unchanged."""
@@ -151,10 +154,15 @@ class BM25Index:
         cache_key = (vault_root, scope)
         cached = self._cache.get(cache_key)
         if cached is None or cached[0] != freshness:
-            log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
-            bm25, paths = self._build(vault_root, scope)
-            cached = (freshness, bm25, paths)
-            self._cache[cache_key] = cached
+            with self._build_lock:
+                # Double-check: a concurrent builder may have stored a fresh
+                # corpus while this thread waited on the lock.
+                cached = self._cache.get(cache_key)
+                if cached is None or cached[0] != freshness:
+                    log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
+                    bm25, paths = self._build(vault_root, scope)
+                    cached = (freshness, bm25, paths)
+                    self._cache[cache_key] = cached
         return cached[1], cached[2]
 
     def search(
@@ -189,10 +197,11 @@ class BM25Index:
         self._fresh_corpus(vault_root, scope, None)
 
     def clear(self) -> None:
-        self._cache.clear()
-        self._tokens.clear()
-        self.last_tokenized = 0
-        self.last_reused = 0
+        with self._build_lock:
+            self._cache.clear()
+            self._tokens.clear()
+            self.last_tokenized = 0
+            self.last_reused = 0
 
 
 def corpus_key(vault_root: Path, scope: str) -> tuple:
