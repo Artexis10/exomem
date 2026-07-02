@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/Artexis10/exomem/compare/v0.3.0...v0.4.0) (2026-07-02)
+
+
+### Features
+
+* Docker distribution — lean/ml images, compose with tunnel profiles, gated GHCR publish ([#90](https://github.com/Artexis10/exomem/issues/90)) ([88286b2](https://github.com/Artexis10/exomem/commit/88286b2d91c80914def999db894aa7d56bfdd5cb))
+* lexical-first instant start — non-blocking boot, background warm, readiness defer gates ([#86](https://github.com/Artexis10/exomem/issues/86)) ([3e42418](https://github.com/Artexis10/exomem/commit/3e424183c539de851684bb7dd373963e35e7ed89))
+* packaged `exomem demo` + wheel-path onboarding gate — prove value in 30 seconds ([#87](https://github.com/Artexis10/exomem/issues/87)) ([8056308](https://github.com/Artexis10/exomem/commit/8056308bcf7e533f98a19c5cbb3a76c7135edffa))
+* remote connector quickstart — doctor --probe, ngrok no-domain path, ingress docs rework ([#89](https://github.com/Artexis10/exomem/issues/89)) ([33084b0](https://github.com/Artexis10/exomem/commit/33084b07f354458be0d9e472a786494053c76417))
+* semantic video segments — timed transcripts, fused topic segmentation, transcript_match_at ([#88](https://github.com/Artexis10/exomem/issues/88)) ([5561ec1](https://github.com/Artexis10/exomem/commit/5561ec159929e4301ca57bb09b6b3913d344232c))
+
+
+### Bug Fixes
+
+* **cli:** first-run polish — entry points target exomem, warm names the missing extra ([#91](https://github.com/Artexis10/exomem/issues/91)) ([c7971f1](https://github.com/Artexis10/exomem/commit/c7971f1d421eb993281bdba2a05fa70b1fb1db8f))
+
 ## [0.3.0](https://github.com/Artexis10/exomem/compare/v0.2.1...v0.3.0) (2026-07-02)
 
 
