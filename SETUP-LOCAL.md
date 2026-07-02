@@ -20,6 +20,30 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 
 ---
 
+## One command (recommended)
+
+After step 1 below (clone + `uv sync`), everything else is a single command:
+
+```bash
+uv run python -m exomem setup
+```
+
+It prompts for your vault, **scans it and shows what's already there** —
+existing notes are never touched; exomem writes only under `Knowledge Base/` —
+then initializes the KB, picks lean vs hybrid, runs `doctor`, registers the
+server with Claude Code (or prints the `.mcp.json` snippet if the `claude` CLI
+isn't on PATH), installs the skill, and offers the optional hooks. Re-running
+is safe: completed steps report `[skipped]`.
+
+Non-interactive (scripts/CI):
+`uv run python -m exomem setup --yes --vault "/path/to/vault" --lean`
+
+The numbered steps below are the **manual path** — exactly what `setup` does
+under the hood, kept for troubleshooting and for people who prefer explicit
+steps.
+
+---
+
 ## What you need
 
 - **Python 3.11+** — check with `python3 --version`. On macOS, `brew install

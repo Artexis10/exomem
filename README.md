@@ -91,43 +91,32 @@ demo PASS
 
 ## Local quickstart
 
-Point exomem at a vault folder that contains, or should contain,
-`Knowledge Base/`:
+One command does the whole local setup — scans your vault, initializes the
+Knowledge Base, runs the preflight, registers the server with Claude Code, and
+installs the skill:
 
 ```bash
-exomem init --vault "/path/to/your/Obsidian"
-exomem doctor --vault "/path/to/your/Obsidian" --profile lean
+exomem setup --vault "/path/to/your/Obsidian"
 ```
 
-For Claude Code over stdio:
+Already have a vault full of notes? That's the normal case: the wizard shows
+what's there first, and exomem only ever writes under `Knowledge Base/` — your
+existing files stay untouched (read-only, still searchable). Re-running `setup`
+is safe; completed steps report `[skipped]`. Non-interactive:
+`exomem setup --yes --vault "/path" --lean`.
 
-```bash
-claude mcp add exomem \
-  --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
-  --env EXOMEM_DISABLE_EMBEDDINGS=1 \
-  -- exomem --transport stdio
-```
-
-For Claude Code, install the bundled Exomem Knowledge Base skill so the agent
-knows when to search, capture, and compile notes:
-
-```bash
-exomem install-skill
-```
-
-Optional for heavier daily use:
-
-```bash
-exomem install-hook
-```
+The individual steps (`exomem init` / `doctor` / `install-skill` /
+`install-hook`, plus `claude mcp add`) still exist as the manual path — see
+[SETUP-LOCAL.md](SETUP-LOCAL.md).
 
 The skill installs under the stable Claude Code name `knowledge-base`; Exomem is
-the server and tool layer behind it. The skill is recommended for Claude Code.
-Hooks are Claude Code-only reliability nudges for long sessions: a read-side
-reminder before answers and a write-side
-reminder at natural stopping points. Other MCP clients can still use the server;
-put the same knowledge-discipline instructions in their system/project
-instructions if they do not support skills.
+the server and tool layer behind it. The skill is recommended for Claude Code —
+the server gives Claude the tools, the skill is what makes it use them. Hooks
+are Claude Code-only reliability nudges for long sessions: a read-side reminder
+before answers and a write-side reminder at natural stopping points. Other MCP
+clients can still use the server; put the same knowledge-discipline
+instructions in their system/project instructions if they do not support
+skills.
 
 Full local setup is in [SETUP-LOCAL.md](SETUP-LOCAL.md). Remote/mobile setup is
 in [docs/remote-checklist.md](docs/remote-checklist.md) and

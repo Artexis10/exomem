@@ -2,6 +2,7 @@
 
 Subcommands:
 - (default) serve the MCP server — `python -m exomem [--transport ...]`
+- `setup` — guided one-command local onboarding (scan → init → doctor → register → skill)
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
@@ -24,6 +25,10 @@ from . import server
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "setup":
+        from .setup_wizard import setup_main
+
+        return setup_main(raw[1:])
     if raw and raw[0] == "init":
         return _init_main(raw[1:])
     if raw and raw[0] == "install-skill":
