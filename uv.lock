@@ -631,6 +631,88 @@ wheels = [
 ]
 
 [[package]]
+name = "exomem"
+version = "0.3.0"
+source = { editable = "." }
+dependencies = [
+    { name = "fastmcp" },
+    { name = "numpy" },
+    { name = "pyjwt", extra = ["crypto"] },
+    { name = "python-dotenv" },
+    { name = "python-multipart" },
+    { name = "python-slugify" },
+    { name = "pyyaml" },
+    { name = "rank-bm25" },
+    { name = "snowballstemmer" },
+    { name = "watchdog" },
+]
+
+[package.optional-dependencies]
+diarization = [
+    { name = "speechbrain" },
+]
+embeddings = [
+    { name = "pillow" },
+    { name = "sentence-transformers" },
+    { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
+    { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
+]
+media = [
+    { name = "faster-whisper" },
+    { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32'" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32'" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32'" },
+    { name = "pillow" },
+    { name = "pymupdf" },
+    { name = "pytesseract" },
+]
+vision = [
+    { name = "transformers" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "httpx" },
+    { name = "pytest" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.0" },
+    { name = "fastmcp", specifier = ">=2.10" },
+    { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'media'", specifier = ">=0.1.1" },
+    { name = "numpy", specifier = ">=1.26" },
+    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
+    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
+    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
+    { name = "pillow", marker = "extra == 'embeddings'", specifier = ">=10.0" },
+    { name = "pillow", marker = "extra == 'media'", specifier = ">=10.0" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
+    { name = "pymupdf", marker = "extra == 'media'", specifier = ">=1.24" },
+    { name = "pytesseract", marker = "extra == 'media'", specifier = ">=0.3.10" },
+    { name = "python-dotenv", specifier = ">=1.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
+    { name = "python-slugify", specifier = ">=8.0" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "rank-bm25", specifier = ">=0.2.2" },
+    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
+    { name = "snowballstemmer", specifier = ">=2.2" },
+    { name = "speechbrain", marker = "extra == 'diarization'", specifier = ">=1.0" },
+    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'embeddings') or (sys_platform == 'win32' and extra == 'embeddings')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
+    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
+    { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
+    { name = "watchdog", specifier = ">=4.0" },
+]
+provides-extras = ["embeddings", "media", "diarization", "vision"]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", specifier = ">=8.0" },
+]
+
+[[package]]
 name = "faster-whisper"
 version = "1.2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -1009,88 +1091,6 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/19/74/a633ee74eb36c44aa6d1095e7cc5569bebf04342ee146178e2d36600708b/jsonschema_specifications-2025.9.1.tar.gz", hash = "sha256:b540987f239e745613c7a9176f3edb72b832a4ac465cf02712288397832b5e8d", size = 32855, upload-time = "2025-09-08T01:34:59.186Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/41/45/1a4ed80516f02155c51f51e8cedb3c1902296743db0bbc66608a0db2814f/jsonschema_specifications-2025.9.1-py3-none-any.whl", hash = "sha256:98802fee3a11ee76ecaca44429fda8a41bff98b00a0f2838151b113f210cc6fe", size = 18437, upload-time = "2025-09-08T01:34:57.871Z" },
-]
-
-[[package]]
-name = "exomem"
-version = "0.1.0"
-source = { editable = "." }
-dependencies = [
-    { name = "fastmcp" },
-    { name = "numpy" },
-    { name = "pyjwt", extra = ["crypto"] },
-    { name = "python-dotenv" },
-    { name = "python-multipart" },
-    { name = "python-slugify" },
-    { name = "pyyaml" },
-    { name = "rank-bm25" },
-    { name = "snowballstemmer" },
-    { name = "watchdog" },
-]
-
-[package.optional-dependencies]
-diarization = [
-    { name = "speechbrain" },
-]
-embeddings = [
-    { name = "pillow" },
-    { name = "sentence-transformers" },
-    { name = "torch", version = "2.12.0", source = { registry = "https://pypi.org/simple" }, marker = "sys_platform != 'linux' and sys_platform != 'win32'" },
-    { name = "torch", version = "2.12.0+cu132", source = { registry = "https://download.pytorch.org/whl/cu132" }, marker = "sys_platform == 'linux' or sys_platform == 'win32'" },
-]
-media = [
-    { name = "faster-whisper" },
-    { name = "markitdown", extra = ["docx", "pptx", "xlsx"] },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32'" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32'" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32'" },
-    { name = "pillow" },
-    { name = "pymupdf" },
-    { name = "pytesseract" },
-]
-vision = [
-    { name = "transformers" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "httpx" },
-    { name = "pytest" },
-]
-
-[package.metadata]
-requires-dist = [
-    { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.0" },
-    { name = "fastmcp", specifier = ">=2.10" },
-    { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'media'", specifier = ">=0.1.1" },
-    { name = "numpy", specifier = ">=1.26" },
-    { name = "nvidia-cublas-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
-    { name = "nvidia-cuda-runtime-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
-    { name = "nvidia-cudnn-cu12", marker = "sys_platform == 'win32' and extra == 'media'" },
-    { name = "pillow", marker = "extra == 'embeddings'", specifier = ">=10.0" },
-    { name = "pillow", marker = "extra == 'media'", specifier = ">=10.0" },
-    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.8" },
-    { name = "pymupdf", marker = "extra == 'media'", specifier = ">=1.24" },
-    { name = "pytesseract", marker = "extra == 'media'", specifier = ">=0.3.10" },
-    { name = "python-dotenv", specifier = ">=1.0" },
-    { name = "python-multipart", specifier = ">=0.0.9" },
-    { name = "python-slugify", specifier = ">=8.0" },
-    { name = "pyyaml", specifier = ">=6.0" },
-    { name = "rank-bm25", specifier = ">=0.2.2" },
-    { name = "sentence-transformers", marker = "extra == 'embeddings'", specifier = ">=2.7" },
-    { name = "snowballstemmer", specifier = ">=2.2" },
-    { name = "speechbrain", marker = "extra == 'diarization'", specifier = ">=1.0" },
-    { name = "torch", marker = "(sys_platform == 'linux' and extra == 'embeddings') or (sys_platform == 'win32' and extra == 'embeddings')", specifier = ">=2.12", index = "https://download.pytorch.org/whl/cu132" },
-    { name = "torch", marker = "sys_platform != 'linux' and sys_platform != 'win32' and extra == 'embeddings'", specifier = ">=2.12" },
-    { name = "transformers", marker = "extra == 'vision'", specifier = ">=4.40" },
-    { name = "watchdog", specifier = ">=4.0" },
-]
-provides-extras = ["embeddings", "media", "diarization", "vision"]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "httpx", specifier = ">=0.27" },
-    { name = "pytest", specifier = ">=8.0" },
 ]
 
 [[package]]
