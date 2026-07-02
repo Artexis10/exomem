@@ -243,6 +243,38 @@ def prewarm() -> None:
         log.warning("ASR prewarm failed; will retry lazily on first job", exc_info=True)
 
 
+def log_diarization_readiness(vault_root: Path | None = None) -> None:
+    """One boot-time log line saying whether diarization can actually run.
+
+    Diarization soft-fails by design (a broken stack degrades to plain transcripts), so
+    without this line a missing sidecar venv / HF token / profile store is invisible in
+    the output. WARNING when the flag is on but a prerequisite is missing, else INFO.
+    Token presence is reported as a boolean — the value never enters the log. Never
+    raises (same contract as `prewarm`).
+    """
+    try:
+        from . import voice_profiles
+
+        enabled = _diarize_enabled()
+        sidecar_venv = _diarizer_sidecar_python() is not None
+        hf_token = bool(os.environ.get("HUGGINGFACE_TOKEN") or os.environ.get("HF_TOKEN"))
+        names: list[str] = []
+        if vault_root is not None:
+            names = sorted(
+                voice_profiles.load_profiles(voice_profiles.voice_profiles_path(vault_root))
+            )
+        line = (
+            f"diarization readiness: enabled={enabled} sidecar_venv={sidecar_venv} "
+            f"hf_token={hf_token} profiles={len(names)}"
+        )
+        if names:
+            line += f" ({', '.join(names)})"
+        level = logging.WARNING if enabled and not (sidecar_venv and hf_token) else logging.INFO
+        log.log(level, "%s", line)
+    except Exception:  # noqa: BLE001 — a diagnostics line must never break startup
+        log.debug("diarization readiness check failed", exc_info=True)
+
+
 def _transcribe(path: Path, media_type: str) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
@@ -287,10 +319,22 @@ def _transcribe(path: Path, media_type: str) -> ExtractResult:
 # layer below (ECAPA voice profiles → cosine) runs HERE on the main venv, unchanged.
 
 
+_FALSY_ENV = {"", "0", "false", "no", "off"}
+
+
+def _env_flag(name: str) -> bool:
+    """Truthy opt-in parse: unset, '', '0', 'false', 'no', 'off' (any case) → False.
+
+    Opt-in flags gate behavior that must stay OFF unless deliberately enabled; a bare
+    presence check would read `EXOMEM_DIARIZE=0` as opted IN.
+    """
+    return os.environ.get(name, "").strip().lower() not in _FALSY_ENV
+
+
 def _diarize_enabled() -> bool:
-    """True only when EXOMEM_DIARIZE is set. OFF by default — diarization never
+    """True only when EXOMEM_DIARIZE is set truthy. OFF by default — diarization never
     changes existing extraction unless explicitly opted in."""
-    return bool(os.environ.get("EXOMEM_DIARIZE"))
+    return _env_flag("EXOMEM_DIARIZE")
 
 
 def _diarizer_sidecar_python() -> Path | None:
@@ -375,7 +419,10 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
     """
     py = _diarizer_sidecar_python()
     if py is None:
-        log.debug("diarizer sidecar venv not provisioned; using plain transcript")
+        log.warning(
+            "EXOMEM_DIARIZE is set but the diarizer sidecar venv is not provisioned "
+            "(scripts/setup-diarizer.ps1); using plain transcript"
+        )
         return None
     out_fd, out_name = tempfile.mkstemp(prefix="kb_diar_", suffix=".json")
     os.close(out_fd)
@@ -607,7 +654,7 @@ _CAPTIONER_LOCK = threading.Lock()
 def _vision_caption_enabled() -> bool:
     """True only when EXOMEM_VISION_CAPTION is set. OFF by default (see the
     pure-substrate note above) — captioning never changes OCR output unless opted in."""
-    return bool(os.environ.get("EXOMEM_VISION_CAPTION"))
+    return _env_flag("EXOMEM_VISION_CAPTION")
 
 
 def _caption_model_name() -> str:

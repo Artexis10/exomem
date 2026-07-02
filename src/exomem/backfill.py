@@ -71,17 +71,32 @@ def _sidecar_for(binary: Path) -> Path:
     return binary.with_name(name + ".md")
 
 
-def _ocr_done(sidecar: Path) -> bool:
-    """True if the sidecar already has extracted text (a real engine in extracted_by)."""
+def _extracted_engine(sidecar: Path) -> str | None:
+    """The sidecar's raw `extracted_by:` value, or None when absent/unreadable."""
     try:
         head = sidecar.read_text("utf-8")[:800]
     except OSError:
-        return False
+        return None
     m = _EXTRACTED_BY_RE.search(head)
-    if not m:
+    return m.group(1).strip() if m else None
+
+
+def _ocr_done(sidecar: Path) -> bool:
+    """True if the sidecar already has extracted text (a real engine in extracted_by)."""
+    v = _extracted_engine(sidecar)
+    return v is not None and v not in _NOT_DONE and not v.startswith("failed:")
+
+
+def _needs_rediarize(sidecar: Path, media_type: str | None) -> bool:
+    """True for an audio/video sidecar transcribed BEFORE diarization was enabled: a
+    completed ASR engine (not pending/failed/no-audio) without the `+diarized` marker —
+    that marker is the re-diarize done-state, which keeps the pass idempotent."""
+    if media_type not in ("audio", "video"):
         return False
-    v = m.group(1).strip()
-    return v not in _NOT_DONE and not v.startswith("failed:")
+    v = _extracted_engine(sidecar)
+    if v is None or v in _NOT_DONE or v.startswith("failed:") or v == "no-audio":
+        return False
+    return not v.endswith("+diarized")
 
 
 def _is_frame_child(sidecar: Path) -> bool:
@@ -115,6 +130,7 @@ class BackfillStats:
     sidecars_created: int = 0
     extracted: int = 0
     extract_failed: int = 0
+    rediarized: int = 0
     clip_indexed: int = 0
     scene_frames_written: int = 0
     skipped: int = 0
@@ -125,15 +141,26 @@ def backfill_media(
     *,
     do_ocr: bool = True,
     do_clip: bool = True,
+    rediarize: bool = False,
     dry_run: bool = False,
     log_fn=log.info,
 ) -> BackfillStats:
-    """Back-fill sidecars + text + CLIP for every media file under Knowledge Base/. Idempotent."""
+    """Back-fill sidecars + text + CLIP for every media file under Knowledge Base/. Idempotent.
+
+    `rediarize` re-extracts audio/video whose transcript predates diarization (a completed
+    ASR engine without `+diarized`) so they gain labeled turns + `speakers:` frontmatter.
+    """
     stats = BackfillStats()
     kb = vault_root / "Knowledge Base"
     if not kb.is_dir():
         log_fn("no Knowledge Base/ directory; nothing to back-fill")
         return stats
+    if rediarize and not extract._diarize_enabled():
+        log_fn(
+            "--rediarize requested but EXOMEM_DIARIZE is not enabled; "
+            "skipping re-diarization (set EXOMEM_DIARIZE=1)"
+        )
+        rediarize = False
     clip_index = embeddings.ClipIndex(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
@@ -170,29 +197,52 @@ def backfill_media(
             do_clip and clip_index is not None and media_type == "video"
             and scene_frames.scene_frames_enabled() and not _scenes_done(f)
         )
-        if not (need_sidecar or need_ocr or need_clip or need_scenes):
+        # Re-diarize targets ONLY sidecars whose extraction is otherwise done (`not
+        # need_ocr`): a pending/missing sidecar takes the normal OCR path, which
+        # diarizes anyway when the flag is on.
+        need_rediarize = (
+            rediarize and do_ocr and not need_ocr and _needs_rediarize(sidecar, media_type)
+        )
+        if not (need_sidecar or need_ocr or need_clip or need_scenes or need_rediarize):
             stats.skipped += 1
             continue
         if dry_run:
             todo = " ".join(t for t, on in
                             (("sidecar", need_sidecar), ("ocr", need_ocr), ("clip", need_clip),
-                             ("scenes", need_scenes)) if on)
+                             ("scenes", need_scenes), ("rediarize", need_rediarize)) if on)
             log_fn(f"  [{i}/{len(files)}] {rel} -> {todo}")
             stats.sidecars_created += need_sidecar
             stats.extracted += need_ocr
             stats.clip_indexed += need_clip
+            stats.rediarized += need_rediarize
             continue
 
         if need_sidecar:
             sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
             stats.sidecars_created += int(created)
-        if need_ocr:
+        if need_ocr or need_rediarize:
             try:
                 res = extract.extract_text(f, media_type=media_type)
-                preserve.update_sidecar_extraction(
-                    vault_root, sidecar, text=res.text.strip() or "(no text detected)", engine=res.engine
-                )
-                stats.extracted += 1
+                if need_rediarize and not res.engine.endswith("+diarized"):
+                    # Diarization soft-failed (extract's contract) — the result is the
+                    # same plain transcript the sidecar already holds. Leave its bytes
+                    # untouched and stop re-diarizing: every further attempt would fail
+                    # the same way. Mirrors the do_ocr/do_clip degradation pattern.
+                    log_fn(
+                        f"  ! diarization unavailable (engine {res.engine}); "
+                        "skipping re-diarization for the rest"
+                    )
+                    rediarize = False
+                else:
+                    preserve.update_sidecar_extraction(
+                        vault_root, sidecar,
+                        text=res.text.strip() or "(no text detected)", engine=res.engine,
+                        speakers=res.speakers,
+                    )
+                    if need_rediarize:
+                        stats.rediarized += 1
+                    else:
+                        stats.extracted += 1
             except extract.ExtractionUnavailable as e:
                 log_fn(f"  ! extraction engine unavailable ({e}); skipping OCR for the rest")
                 do_ocr = False

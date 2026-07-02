@@ -229,10 +229,10 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 
-Legacy `KB_MCP_*` names (from the project's former working name, kb-mcp) remain
+Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain
 honored: each is promoted to its `EXOMEM_*` equivalent at startup, with an
-explicitly set `EXOMEM_*` value winning on conflict. `import kb_mcp` and
-`python -m kb_mcp` likewise keep working as deprecated aliases.
+explicitly set `EXOMEM_*` value winning on conflict. `import exomem` and
+`python -m exomem` likewise keep working as deprecated aliases.
 
 Remote-only variables and full deployment notes are in
 [docs/deployment.md](docs/deployment.md).
