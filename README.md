@@ -271,7 +271,9 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
 | `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
 | `EXOMEM_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
-| `EXOMEM_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
+| `EXOMEM_WHISPER_MODEL` | faster-whisper model size for ASR, such as `base` or `small`. |
+| `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
+| `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 
 Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain

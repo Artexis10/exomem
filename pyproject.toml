@@ -57,6 +57,16 @@ media = [
     "nvidia-cudnn-cu12; sys_platform == 'win32'",
     "nvidia-cuda-runtime-cu12; sys_platform == 'win32'",
 ]
+# Apple-Silicon (Metal) ASR backend: mlx-whisper runs Whisper on the Mac GPU via MLX,
+# which faster-whisper/CTranslate2 cannot (no Metal). extract.get_transcriber() auto-selects
+# it on macOS arm64 when installed; EXOMEM_ASR_BACKEND=mlx|faster-whisper forces the choice,
+# EXOMEM_MLX_WHISPER_MODEL picks the HF repo (default mlx-community/whisper-large-v3-mlx). The
+# marker makes the extra a no-op off Apple Silicon, so `--extra media-mlx` is harmless on any
+# host. Pair with `--extra media` (PyAV decode + OCR/PDF). Full Mac install:
+# `uv sync --extra embeddings --extra media --extra media-mlx`.
+media-mlx = [
+  "mlx-whisper>=0.4; sys_platform == 'darwin' and platform_machine == 'arm64'",
+]
 # Opt-in ASR speaker diarization (KB_MCP_DIARIZE). The pyannote who-spoke-when pipeline does NOT
 # live here: it runs in an ISOLATED CPU-torch sidecar venv (sidecar/diarizer/, built via
 # scripts/setup-diarizer.ps1) as a subprocess, because pyannote/torchaudio are fundamentally

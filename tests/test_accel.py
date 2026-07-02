@@ -21,6 +21,8 @@ _ENV_KEYS = (
     "EXOMEM_VOICE_DEVICE",
     "EXOMEM_DISABLE_MEDIA_EXTRACTION",
     "PYTORCH_ENABLE_MPS_FALLBACK",
+    "EXOMEM_ASR_BACKEND",
+    "EXOMEM_MLX_WHISPER_MODEL",
 )
 
 
@@ -164,3 +166,95 @@ def test_get_transcriber_is_faster_whisper_and_keeps_engine_label(
     segments, engine = backend.transcribe(Path("clip.wav"))
     assert engine == f"faster-whisper:{extract.WHISPER_MODEL}"
     assert [s.text for s in segments] == ["hi"]
+
+
+# ---- MLX (Apple Silicon Metal) ASR backend ----
+
+def _fake_mlx(monkeypatch: pytest.MonkeyPatch, segments: list[dict], capture: dict | None = None):
+    """Inject a fake `mlx_whisper` module so the backend runs off Apple Silicon."""
+    mlx = types.ModuleType("mlx_whisper")
+
+    def transcribe(audio, path_or_hf_repo=None):
+        if capture is not None:
+            capture["audio"] = audio
+            capture["repo"] = path_or_hf_repo
+        return {"segments": segments, "text": "", "language": "en"}
+
+    mlx.transcribe = transcribe
+    monkeypatch.setitem(sys.modules, "mlx_whisper", mlx)
+
+
+def _fake_fw_decode(monkeypatch: pytest.MonkeyPatch, array) -> None:
+    """Inject a fake `faster_whisper.audio.decode_audio` returning a canned array."""
+    fw = types.ModuleType("faster_whisper")
+    fw_audio = types.ModuleType("faster_whisper.audio")
+    fw_audio.decode_audio = lambda _p, sampling_rate=16000: array
+    fw.audio = fw_audio
+    monkeypatch.setitem(sys.modules, "faster_whisper", fw)
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", fw_audio)
+
+
+def test_mlx_backend_normalizes_segments_and_engine_label(monkeypatch: pytest.MonkeyPatch) -> None:
+    """MLX yields segment *dicts*; the backend adapts them to the .text/.start/.end objects
+    the extractor consumes, and stamps an `mlx-whisper:<model>` provenance label."""
+    from pathlib import Path
+
+    from exomem import extract
+
+    capture: dict = {}
+    _fake_fw_decode(monkeypatch, [0.0, 0.0, 0.0])
+    _fake_mlx(
+        monkeypatch,
+        [{"start": 0.0, "end": 1.5, "text": " hello"}, {"start": 1.5, "end": 2.0, "text": " world"}],
+        capture,
+    )
+    segments, engine = extract.MlxWhisperBackend().transcribe(Path("clip.wav"))
+    assert engine == f"mlx-whisper:{extract.MLX_WHISPER_MODEL}"
+    assert [(round(s.start, 2), round(s.end, 2), s.text.strip()) for s in segments] == [
+        (0.0, 1.5, "hello"),
+        (1.5, 2.0, "world"),
+    ]
+    # PyAV-decoded array is passed to MLX (not the raw path) when faster-whisper is present.
+    assert capture["audio"] == [0.0, 0.0, 0.0]
+    assert capture["repo"] == extract.MLX_WHISPER_MODEL
+
+
+def test_mlx_load_audio_falls_back_to_path_without_faster_whisper(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from exomem import extract
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", None)
+    monkeypatch.setitem(sys.modules, "faster_whisper.audio", None)
+    assert extract.MlxWhisperBackend._load_audio(Path("a.wav")) == str(Path("a.wav"))
+
+
+def test_mlx_backend_missing_dep_raises_extraction_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from pathlib import Path
+
+    from exomem import extract
+
+    monkeypatch.setitem(sys.modules, "mlx_whisper", None)  # import mlx_whisper → ImportError
+    with pytest.raises(extract.ExtractionUnavailable):
+        extract.MlxWhisperBackend().transcribe(Path("x.wav"))
+
+
+def test_get_transcriber_selection(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import extract
+
+    # Explicit override wins over auto-detection.
+    monkeypatch.setenv("EXOMEM_ASR_BACKEND", "mlx")
+    assert isinstance(extract.get_transcriber(), extract.MlxWhisperBackend)
+    monkeypatch.setenv("EXOMEM_ASR_BACKEND", "faster-whisper")
+    assert isinstance(extract.get_transcriber(), extract.FasterWhisperBackend)
+
+    # Auto: MLX on Apple Silicon (mlx-whisper importable), else faster-whisper.
+    monkeypatch.delenv("EXOMEM_ASR_BACKEND", raising=False)
+    monkeypatch.setattr(extract, "_mlx_available", lambda: True)
+    assert isinstance(extract.get_transcriber(), extract.MlxWhisperBackend)
+    monkeypatch.setattr(extract, "_mlx_available", lambda: False)
+    assert isinstance(extract.get_transcriber(), extract.FasterWhisperBackend)

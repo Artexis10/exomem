@@ -10,9 +10,10 @@ Each engine is **soft-imported** and lazily loaded: a lean box without the `[med
 extra (or with `EXOMEM_DISABLE_MEDIA_EXTRACTION` set) simply raises `ExtractionUnavailable`,
 and the caller skips server extraction — the model-driven `/upload` `text` path still works.
 
-Engines are swappable behind `extract_text(path, media_type=...) -> ExtractResult`: the
-faster-whisper backend can be replaced with a torch/transformers Whisper if CTranslate2
-lacks Blackwell `sm_120` kernels (the verification gate), without touching callers.
+Engines are swappable behind `extract_text(path, media_type=...) -> ExtractResult`. ASR
+specifically runs behind a `TranscriptionBackend` seam (see `get_transcriber`): faster-
+whisper (CTranslate2, CUDA/CPU) or mlx-whisper (Apple Silicon Metal GPU), selected by
+platform, without touching callers.
 
 Two OPTIONAL deepen-the-moat transducers ship here, both DEFAULT-OFF + soft-fail:
 
@@ -247,7 +248,7 @@ def prewarm() -> None:
     if not extraction_enabled():
         return
     try:
-        _get_whisper()
+        get_transcriber().prewarm()
     except ExtractionUnavailable as e:
         log.info("ASR prewarm skipped (engine unavailable): %s", e)
     except Exception:  # noqa: BLE001 — prewarm must never crash startup
@@ -257,12 +258,18 @@ def prewarm() -> None:
 # ---------------- ASR backend seam ----------------
 #
 # Transcription runs behind a swappable backend so the engine can vary by platform
-# without touching `_transcribe`. faster-whisper (CTranslate2) is the only shipped
-# backend; it supports CUDA + CPU but has NO Metal path, so on Apple Silicon ASR runs
-# on CPU. An `MlxWhisperBackend` (mlx-whisper) would slot in at `get_transcriber` to put
-# transcription on the Mac GPU — a bounded follow-up (new optional dep + segment-format
-# normalization), deliberately not built here. This realizes the swap-without-touching-
-# callers intent stated in the module docstring.
+# without touching `_transcribe`. Two backends ship:
+#   - FasterWhisperBackend (CTranslate2): CUDA or CPU. No Metal path.
+#   - MlxWhisperBackend (mlx-whisper): Apple Silicon Metal GPU, from the optional
+#     `[media-mlx]` extra.
+# `get_transcriber()` auto-selects MLX on Apple Silicon when it's installed, else
+# faster-whisper; `EXOMEM_ASR_BACKEND=mlx|faster-whisper` forces the choice.
+
+# Default MLX model repo (HF). large-v3 for quality parity with faster-whisper's default;
+# override to e.g. `mlx-community/whisper-large-v3-turbo` for a lighter, faster run on a Mac.
+MLX_WHISPER_MODEL = os.environ.get(
+    "EXOMEM_MLX_WHISPER_MODEL", "mlx-community/whisper-large-v3-mlx"
+)
 
 
 class TranscriptionSegment(Protocol):
@@ -283,6 +290,10 @@ class TranscriptionBackend(Protocol):
         """
         ...
 
+    def prewarm(self) -> None:
+        """Eagerly load the model so the first real job isn't a cold start."""
+        ...
+
 
 class FasterWhisperBackend:
     """CTranslate2 faster-whisper — CUDA or CPU (never Metal). Device and compute_type
@@ -295,10 +306,89 @@ class FasterWhisperBackend:
         segments, _info = model.transcribe(str(path))
         return segments, f"faster-whisper:{WHISPER_MODEL}"
 
+    def prewarm(self) -> None:
+        _get_whisper()
+
+
+class _MlxSegment:
+    """Adapts an mlx-whisper segment dict to the ``.text``/``.start``/``.end`` attribute
+    shape the extractor consumes (faster-whisper yields objects; MLX yields dicts)."""
+
+    __slots__ = ("text", "start", "end")
+
+    def __init__(self, seg: dict):
+        self.text = seg.get("text", "")
+        self.start = float(seg.get("start", 0.0) or 0.0)
+        self.end = float(seg.get("end", self.start) or self.start)
+
+
+class MlxWhisperBackend:
+    """mlx-whisper on Apple Silicon (Metal GPU) — what accelerates ASR on a Mac, since
+    faster-whisper/CTranslate2 has no Metal path. Audio is decoded via PyAV (the shared
+    16 kHz whisper timebase) when faster-whisper is present, else the file path is handed
+    to mlx-whisper's own loader. MLX caches the model in memory after the first load."""
+
+    @staticmethod
+    def _require_mlx():
+        try:
+            import mlx_whisper
+        except ImportError as e:  # the optional [media-mlx] extra isn't installed
+            raise ExtractionUnavailable(f"mlx-whisper not installed: {e}") from e
+        return mlx_whisper
+
+    @staticmethod
+    def _load_audio(path: Path):
+        """16 kHz mono float32 array via PyAV when available (no ffmpeg, shared timebase);
+        else the path string, which mlx-whisper decodes itself (via ffmpeg)."""
+        try:
+            from faster_whisper.audio import decode_audio
+        except ImportError:
+            return str(path)
+        return decode_audio(str(path), sampling_rate=16000)
+
+    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+        mlx_whisper = self._require_mlx()
+        result = mlx_whisper.transcribe(
+            self._load_audio(path), path_or_hf_repo=MLX_WHISPER_MODEL
+        )
+        segments = [_MlxSegment(s) for s in result.get("segments", [])]
+        return segments, f"mlx-whisper:{MLX_WHISPER_MODEL}"
+
+    def prewarm(self) -> None:
+        import numpy as np
+
+        mlx_whisper = self._require_mlx()
+        # A 1 s silent buffer forces the download + model load into MLX's in-memory cache
+        # (public API only — no reliance on mlx-whisper internals), so the first real job
+        # isn't a cold start.
+        mlx_whisper.transcribe(
+            np.zeros(16000, dtype=np.float32), path_or_hf_repo=MLX_WHISPER_MODEL
+        )
+
+
+def _mlx_available() -> bool:
+    """True on Apple Silicon with mlx-whisper importable (the [media-mlx] extra)."""
+    import platform
+    import sys
+
+    if sys.platform != "darwin" or platform.machine() != "arm64":
+        return False
+    import importlib.util
+
+    return importlib.util.find_spec("mlx_whisper") is not None
+
 
 def get_transcriber() -> TranscriptionBackend:
-    """The active ASR backend. faster-whisper today; an Apple-Silicon Metal backend
-    (mlx-whisper) would be selected here on macOS — see the seam note above."""
+    """The active ASR backend: mlx-whisper on Apple Silicon (Metal GPU) when available,
+    else faster-whisper (CUDA/CPU). Force the choice with
+    ``EXOMEM_ASR_BACKEND=mlx|faster-whisper``."""
+    pref = (os.environ.get("EXOMEM_ASR_BACKEND") or "auto").strip().lower()
+    if pref == "mlx":
+        return MlxWhisperBackend()
+    if pref in ("faster-whisper", "faster_whisper", "ctranslate2"):
+        return FasterWhisperBackend()
+    if _mlx_available():  # auto
+        return MlxWhisperBackend()
     return FasterWhisperBackend()
 
 

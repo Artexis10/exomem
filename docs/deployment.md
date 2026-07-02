@@ -302,15 +302,26 @@ Apple Silicon gets GPU acceleration for the torch models with **no extra wheels*
 text embedder, bge reranker, and CLIP — auto-select the Metal GPU when no CUDA is
 present, so interactive `find`, note-write embedding, and CLIP image search run on
 the GPU on an M-series Mac. `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically so
-any op MPS lacks degrades to CPU instead of raising. Two caveats: (1) **ASR**
-(faster-whisper / ctranslate2) has **no Metal backend**, so audio/video
-transcription stays on CPU — pick a smaller `EXOMEM_WHISPER_MODEL` (e.g. `base`)
-to cut cost; a Metal `mlx-whisper` backend slots in behind `extract.get_transcriber`
-as a planned follow-up. (2) **Voiceprints** (ECAPA) and **diarization** stay on CPU
-by default for cross-machine numeric parity — opt in per model with
-`EXOMEM_VOICE_DEVICE=mps` / `EXOMEM_DIARIZE_DEVICE=mps`. Force every torch model to a
-device with `EXOMEM_TORCH_DEVICE=cpu|mps|cuda` (handy to dodge thermal throttling on
-a fanless MacBook Air during a large `backfill-media`).
+any op MPS lacks degrades to CPU instead of raising.
+
+**ASR on the Metal GPU (`media-mlx` extra).** faster-whisper/ctranslate2 has no Metal
+backend, but ASR runs behind a `TranscriptionBackend` seam (`extract.get_transcriber`)
+with two implementations: `FasterWhisperBackend` (CUDA/CPU) and `MlxWhisperBackend`
+(**mlx-whisper**, Metal GPU). Install the extra — `uv sync --extra media --extra
+media-mlx` — and `get_transcriber()` **auto-selects MLX on Apple Silicon**, putting
+transcription on the GPU too. `EXOMEM_ASR_BACKEND=mlx|faster-whisper` forces the choice;
+`EXOMEM_MLX_WHISPER_MODEL` picks the HF repo (default `mlx-community/whisper-large-v3-mlx`;
+use `mlx-community/whisper-large-v3-turbo` for a lighter, faster run on a fanless Air).
+Without the extra, transcription falls back to CPU faster-whisper — pick a smaller
+`EXOMEM_WHISPER_MODEL` (e.g. `base`) there to cut cost. Audio is decoded via PyAV (the
+shared 16 kHz whisper timebase) when the `media` extra is present, else mlx-whisper
+decodes the file itself (needs `ffmpeg` on PATH).
+
+Two more notes: **Voiceprints** (ECAPA) and **diarization** stay on CPU by default for
+cross-machine numeric parity — opt in per model with `EXOMEM_VOICE_DEVICE=mps` /
+`EXOMEM_DIARIZE_DEVICE=mps`. And you can force every torch model to a device with
+`EXOMEM_TORCH_DEVICE=cpu|mps|cuda` (handy to dodge thermal throttling on a fanless
+MacBook Air during a large `backfill-media`).
 
 The `media` extra adds a wrinkle: `faster-whisper` runs on **ctranslate2**, which
 wants **CUDA-12** cuBLAS/cuDNN/cudart, while torch's `cu132` build ships cuBLAS
