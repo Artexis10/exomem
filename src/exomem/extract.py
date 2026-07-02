@@ -39,10 +39,12 @@ import re
 import subprocess
 import tempfile
 import threading
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Protocol
 
-from . import semantic_segments
+from . import accel, semantic_segments
 
 log = logging.getLogger(__name__)
 
@@ -252,6 +254,54 @@ def prewarm() -> None:
         log.warning("ASR prewarm failed; will retry lazily on first job", exc_info=True)
 
 
+# ---------------- ASR backend seam ----------------
+#
+# Transcription runs behind a swappable backend so the engine can vary by platform
+# without touching `_transcribe`. faster-whisper (CTranslate2) is the only shipped
+# backend; it supports CUDA + CPU but has NO Metal path, so on Apple Silicon ASR runs
+# on CPU. An `MlxWhisperBackend` (mlx-whisper) would slot in at `get_transcriber` to put
+# transcription on the Mac GPU — a bounded follow-up (new optional dep + segment-format
+# normalization), deliberately not built here. This realizes the swap-without-touching-
+# callers intent stated in the module docstring.
+
+
+class TranscriptionSegment(Protocol):
+    """The per-segment fields `_transcribe` consumes (text + timing)."""
+
+    text: str
+    start: float
+    end: float
+
+
+class TranscriptionBackend(Protocol):
+    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+        """Transcribe `path` → ``(segments, engine_label)``.
+
+        ``segments`` yields objects exposing ``.text`` / ``.start`` / ``.end``;
+        ``engine_label`` is the provenance string stored on the sidecar (e.g.
+        ``faster-whisper:large-v3``).
+        """
+        ...
+
+
+class FasterWhisperBackend:
+    """CTranslate2 faster-whisper — CUDA or CPU (never Metal). Device and compute_type
+    live in `_get_whisper`; this wrapper keeps the loader seam that tests patch."""
+
+    def transcribe(self, path: Path) -> tuple[Iterable[TranscriptionSegment], str]:
+        model = _get_whisper()
+        # faster-whisper decodes the media's audio stream via PyAV (handles video
+        # containers too), so a video file can be passed directly — no ffmpeg step.
+        segments, _info = model.transcribe(str(path))
+        return segments, f"faster-whisper:{WHISPER_MODEL}"
+
+
+def get_transcriber() -> TranscriptionBackend:
+    """The active ASR backend. faster-whisper today; an Apple-Silicon Metal backend
+    (mlx-whisper) would be selected here on macOS — see the seam note above."""
+    return FasterWhisperBackend()
+
+
 def log_diarization_readiness(vault_root: Path | None = None) -> None:
     """One boot-time log line saying whether diarization can actually run.
 
@@ -290,12 +340,8 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
     if media_type == "video" and not _has_audio_stream(path):
         return ExtractResult(text="", media_type=media_type, engine="no-audio")
-    model = _get_whisper()
-    # faster-whisper decodes the media's audio stream via PyAV (handles video containers
-    # too), so a video file can be passed directly — no separate ffmpeg extraction step.
-    segments, _info = model.transcribe(str(path))
+    segments, engine = get_transcriber().transcribe(path)
     seg_list = list(segments)  # materialize once: diarization needs per-segment timing
-    engine = f"faster-whisper:{WHISPER_MODEL}"
 
     # OPTIONAL speaker diarization (EXOMEM_DIARIZE, default OFF). A pretrained
     # clustering model (deterministic transduction, not an LLM) labels who-spoke-when
@@ -744,7 +790,9 @@ def _load_captioner():
     """
     from transformers import pipeline  # soft dep — only imported when enabled
 
-    device = 0 if _device() == "cuda" else -1
+    # This captioner IS a torch model, so it can use MPS on Apple Silicon (unlike
+    # the CTranslate2 ASR engine); device via the shared torch-device selector.
+    device = accel.pipeline_device()
     return pipeline("image-to-text", model=_caption_model_name(), device=device)
 
 

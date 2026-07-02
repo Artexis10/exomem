@@ -20,19 +20,39 @@ from exomem import voice_embed  # noqa: E402
 
 
 def test_voice_device_env_and_asr_gating(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Mirrors embeddings._clip_device: GPU only when ASR (media extraction) is disabled;
-    an explicit EXOMEM_VOICE_DEVICE override always wins."""
-    # Explicit override wins regardless of ASR state.
+    """ECAPA device policy via `accel`: an explicit EXOMEM_VOICE_DEVICE override always wins;
+    CUDA is avoided while ASR is active (the cuDNN-shadow clash); and MPS is never
+    auto-selected — voiceprints are matched by cosine against profiles from other machines and
+    MPS float32 kernels drift from CPU, so Apple Silicon is opt-in only."""
+    import torch
+
+    from exomem import accel
+
+    # Explicit override wins regardless of hardware / ASR state.
     monkeypatch.setenv("EXOMEM_VOICE_DEVICE", "cuda")
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert voice_embed._voice_device() == "cuda"
     monkeypatch.setenv("EXOMEM_VOICE_DEVICE", "cpu")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     assert voice_embed._voice_device() == "cpu"
-    # No override + ASR enabled (the live default) → CPU, dodging the whisper cuDNN clash.
+
     monkeypatch.delenv("EXOMEM_VOICE_DEVICE", raising=False)
+    monkeypatch.delenv("EXOMEM_TORCH_DEVICE", raising=False)
+
+    # CUDA box + ASR active → CPU (dodges the whisper cuDNN clash).
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(accel, "_mps_available", lambda _t: False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert voice_embed._voice_device() == "cpu"
+
+    # Apple Silicon (MPS, no CUDA): NOT auto-selected → CPU for cross-machine parity.
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(accel, "_mps_available", lambda _t: True)
+    assert voice_embed._voice_device() == "cpu"
+
+    # …but an explicit opt-in is honored.
+    monkeypatch.setenv("EXOMEM_VOICE_DEVICE", "mps")
+    assert voice_embed._voice_device() == "mps"
 
 
 def test_disable_tf32_turns_tf32_off() -> None:

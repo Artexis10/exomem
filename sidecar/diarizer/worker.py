@@ -44,11 +44,27 @@ def _decode(path: str):
 
 
 def _device() -> str:
-    """Resolve the run device. KB_MCP_DIARIZE_DEVICE = cpu | cuda | auto (default auto)."""
+    """Resolve the run device. EXOMEM_DIARIZE_DEVICE (or legacy KB_MCP_DIARIZE_DEVICE)
+    = cpu | cuda | mps | auto (default auto → cuda if available, else cpu).
+
+    `auto` never picks MPS: pyannote on this pinned sidecar stack is validated on
+    CUDA/CPU, and diarization feeds cross-machine voiceprint attribution, so Apple
+    Silicon Metal is an explicit opt-in (`=mps`) rather than an automatic choice.
+    """
     import torch
 
-    pref = os.environ.get("KB_MCP_DIARIZE_DEVICE", "auto").lower()
+    pref = (
+        os.environ.get("EXOMEM_DIARIZE_DEVICE")
+        or os.environ.get("KB_MCP_DIARIZE_DEVICE")
+        or "auto"
+    ).lower()
     if pref == "cpu":
+        return "cpu"
+    if pref == "mps":
+        backend = getattr(torch.backends, "mps", None)
+        if backend is not None and backend.is_available():
+            os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
+            return "mps"
         return "cpu"
     if pref in ("cuda", "gpu", "auto"):
         return "cuda" if torch.cuda.is_available() else "cpu"
@@ -109,8 +125,8 @@ def _diarize(audio_path: str) -> list[dict]:
             "and accepted conditions for speaker-diarization-3.1 + segmentation-3.0"
         )
     dev = _device()
-    if dev == "cuda":
-        pipeline.to(torch.device("cuda"))
+    if dev in ("cuda", "mps"):
+        pipeline.to(torch.device(dev))
     print(f"[worker] device={dev}", file=sys.stderr)
     annotation = _annotation(pipeline({"waveform": waveform, "sample_rate": 16000}))
     return [

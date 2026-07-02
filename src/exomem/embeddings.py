@@ -25,6 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import accel
 
 log = logging.getLogger(__name__)
 
@@ -83,36 +84,34 @@ def _is_embeddable_path(path: Path) -> bool:
 
 
 def get_model():
-    """Lazy singleton. Picks CUDA when available, falls back to CPU."""
+    """Lazy singleton. Device via `accel.select_device` (CUDA > MPS > CPU)."""
     global _MODEL
     if _MODEL is not None:
         return _MODEL
     with _MODEL_LOCK:
         if _MODEL is not None:
             return _MODEL
-        # Heavy imports stay local — keyword-mode and existing tests must not
+        # Heavy import stays local — keyword-mode and existing tests must not
         # pay this cost.
-        import torch
         from sentence_transformers import SentenceTransformer
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = accel.select_device()
         log.info("loading embedding model %s on %s", MODEL_NAME, device)
         _MODEL = SentenceTransformer(MODEL_NAME, device=device)
     return _MODEL
 
 
 def get_reranker():
-    """Lazy singleton for the cross-encoder reranker. CUDA when available."""
+    """Lazy singleton for the cross-encoder reranker. Device via `accel.select_device`."""
     global _RERANKER
     if _RERANKER is not None:
         return _RERANKER
     with _RERANKER_LOCK:
         if _RERANKER is not None:
             return _RERANKER
-        import torch
         from sentence_transformers import CrossEncoder
 
-        device = "cuda" if torch.cuda.is_available() else "cpu"
+        device = accel.select_device()
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
         _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
     return _RERANKER
@@ -123,31 +122,22 @@ class ClipUnavailable(Exception):
 
 
 def _clip_device() -> str:
-    """Device for CLIP. Honors EXOMEM_CLIP_DEVICE; otherwise GPU only when ASR is NOT
-    running in this process, else CPU.
+    """Device for CLIP. Honors EXOMEM_CLIP_DEVICE; otherwise CUDA > MPS > CPU via
+    `accel.select_device`, but avoids CUDA when ASR is active in this process.
 
-    Why not always GPU: faster-whisper's CUDA-12 cuDNN/cuBLAS wheels get PATH-prepended
-    (extract._ensure_cuda_dll_path) so ctranslate2 can load — which then shadows
-    torch-cu132's bundled cuDNN 13 and makes CLIP's ViT Conv2d die with
+    Why avoid CUDA under ASR: faster-whisper's CUDA-12 cuDNN/cuBLAS wheels get
+    PATH-prepended (extract._ensure_cuda_dll_path) so ctranslate2 can load — which
+    then shadows torch-cu132's bundled cuDNN 13 and makes CLIP's ViT Conv2d die with
     CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. bge survives (pure transformer, no conv);
     CLIP's vision tower doesn't. Since the media worker prewarms ASR at startup, having
-    extraction enabled means PATH is already poisoned, so CLIP must run on CPU — a tiny
-    ViT-B/32, off the request path, embeds in well under a second. A CLIP-only box
-    (EXOMEM_DISABLE_MEDIA_EXTRACTION set) has no conflict and keeps the GPU.
-    """
-    override = os.environ.get("EXOMEM_CLIP_DEVICE")
-    if override:
-        return override
-    # Mirror extract.extraction_enabled() without importing it (avoids a new module edge).
-    asr_active = not os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION")
-    if asr_active:
-        return "cpu"
-    try:
-        import torch
+    extraction enabled means PATH is already poisoned, so CLIP falls to CPU there — a
+    tiny ViT-B/32, off the request path, embeds in well under a second.
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001 — torch absent on a lean box → CPU
-        return "cpu"
+    This clash is **CUDA-only**: `avoid_cuda_when_asr` fires only when the auto-pick
+    would be CUDA, so on Apple Silicon CLIP keeps the MPS (Metal) GPU even with ASR
+    running. A CLIP-only box (EXOMEM_DISABLE_MEDIA_EXTRACTION set) also keeps the GPU.
+    """
+    return accel.select_device(override_env="EXOMEM_CLIP_DEVICE", avoid_cuda_when_asr=True)
 
 
 def get_clip_model():

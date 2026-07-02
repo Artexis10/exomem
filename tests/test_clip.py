@@ -38,20 +38,42 @@ class _FakeClip:
 
 
 def test_clip_device_env_and_asr_gating(monkeypatch) -> None:
-    """GPU CLIP shares a process with faster-whisper, whose cu12 cuDNN PATH-prepend
-    breaks CLIP's ViT Conv2d on torch-cu132. So CLIP must run on CPU whenever ASR
-    (media extraction) is enabled; an explicit EXOMEM_CLIP_DEVICE override always wins."""
-    # Explicit override wins regardless of ASR state.
+    """CLIP device policy via `accel`: an explicit EXOMEM_CLIP_DEVICE override always wins;
+    otherwise CUDA is avoided while ASR is active (the faster-whisper cuDNN-shadow clash that
+    breaks CLIP's ViT Conv2d on torch-cu132) — but MPS is not, since the clash is CUDA-only, so
+    on Apple Silicon CLIP keeps the Metal GPU even with ASR running."""
+    import sys
+    import types
+
+    from exomem import accel
+
+    def set_hw(*, cuda: bool, mps: bool) -> None:
+        # Fake torch so this runs torch-free (test_clip has no module-level torch gate).
+        torch = types.ModuleType("torch")
+        torch.cuda = types.SimpleNamespace(is_available=lambda: cuda)
+        torch.backends = types.SimpleNamespace()
+        monkeypatch.setitem(sys.modules, "torch", torch)
+        monkeypatch.setattr(accel, "_mps_available", lambda _t: mps)
+
+    # Explicit override wins regardless of hardware / ASR state.
     monkeypatch.setenv("EXOMEM_CLIP_DEVICE", "cuda")
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert embeddings._clip_device() == "cuda"
     monkeypatch.setenv("EXOMEM_CLIP_DEVICE", "cpu")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     assert embeddings._clip_device() == "cpu"
-    # No override + ASR enabled (the live default) → CPU, dodging the whisper cuDNN clash.
+
     monkeypatch.delenv("EXOMEM_CLIP_DEVICE", raising=False)
+    monkeypatch.delenv("EXOMEM_TORCH_DEVICE", raising=False)
+
+    # CUDA box + ASR active → CPU (dodges the whisper cuDNN clash).
+    set_hw(cuda=True, mps=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert embeddings._clip_device() == "cpu"
+
+    # Apple Silicon (MPS, no CUDA) + ASR active → MPS: the clash is CUDA-only.
+    set_hw(cuda=False, mps=True)
+    assert embeddings._clip_device() == "mps"
 
 
 def test_clip_index_upsert_search_has_delete(vault) -> None:

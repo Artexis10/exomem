@@ -239,29 +239,37 @@ def _check_torch_cuda() -> DoctorCheck:
         return _check(
             "torch.cuda",
             "fail",
-            "torch is not installed, so CUDA availability cannot be checked.",
+            "torch is not installed, so GPU acceleration cannot be checked.",
             "Install embeddings with `uv sync --extra embeddings`.",
         )
     try:
         import torch
 
-        available = bool(torch.cuda.is_available())
-        if available:
+        if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             arches = ", ".join(torch.cuda.get_arch_list())
             return _check("torch.cuda", "pass", f"CUDA visible to torch: {name} ({arches}).")
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available() and mps.is_built():
+            return _check(
+                "torch.cuda",
+                "pass",
+                "Apple Silicon MPS (Metal) backend available — bge/CLIP embeddings will "
+                "use the GPU. Note: faster-whisper (ASR) has no Metal path and stays on CPU.",
+            )
         return _check(
             "torch.cuda",
             "warn",
-            "torch imports but CUDA is not available; embeddings/media will run on CPU.",
-            "This is supported. On NVIDIA GPU hosts, verify the uv torch source and driver.",
+            "torch imports but no GPU (CUDA or MPS) is available; embeddings/media run on CPU.",
+            "This is supported. On NVIDIA hosts verify the uv torch source and driver; on "
+            "Apple Silicon ensure a recent arm64 torch wheel (default PyPI ships MPS).",
         )
     except Exception as e:  # noqa: BLE001
         return _check(
             "torch.cuda",
             "warn",
-            f"torch imports failed during CUDA probe: {e}",
-            "Re-run `uv sync --extra embeddings`; on GPU hosts, verify the CUDA wheel/driver.",
+            f"torch imports failed during GPU probe: {e}",
+            "Re-run `uv sync --extra embeddings`; on GPU hosts, verify the CUDA/torch wheel.",
         )
 
 

@@ -248,9 +248,11 @@ System tools: Tesseract is required for image OCR. On Windows:
 winget install --id UB-Mannheim.TesseractOCR -e
 ```
 
-GPU acceleration is useful but not required. See
-[docs/deployment.md](docs/deployment.md) for CUDA, Blackwell, diarization, and
-remote-service details.
+GPU acceleration is useful but not required, and cross-platform: NVIDIA **CUDA**
+(Linux/Windows) and Apple Silicon **MPS/Metal** (macOS) are both auto-detected for
+the torch models (bge embeddings, reranker, CLIP), with CPU as the fallback. See
+[docs/deployment.md](docs/deployment.md) for CUDA, Blackwell, Apple Silicon,
+diarization, and remote-service details.
 
 ## Configuration
 
@@ -264,6 +266,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
 | `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
 | `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
+| `EXOMEM_TORCH_DEVICE` | Force the device for all torch models: `cuda`, `mps`, or `cpu` (default: auto-detect CUDA → MPS → CPU). Pin `cpu` to avoid thermal throttling on a fanless Mac. |
 | `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
 | `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
