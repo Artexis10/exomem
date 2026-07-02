@@ -67,6 +67,27 @@ def test_promote_legacy_never_clobbers_explicit_new_name(monkeypatch) -> None:
     assert os.environ["EXOMEM_RENAME_PROBE2"] == "new-wins"
 
 
+def test_dotenv_legacy_vars_promoted_at_server_build(vault, monkeypatch) -> None:
+    """A pre-rename .env (KB_MCP_* keys) loads inside build_server, after the
+    import-time promotion — the post-dotenv re-promotion must cover it."""
+    from exomem import server as server_mod
+
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
+    monkeypatch.delenv("KB_MCP_VAULT_PATH", raising=False)
+
+    def fake_load_dotenv(*args, **kwargs):
+        os.environ["KB_MCP_VAULT_PATH"] = str(vault)  # what an old .env supplies
+
+    monkeypatch.setattr(server_mod, "load_dotenv", fake_load_dotenv)
+    try:
+        srv = server_mod.build_server(require_auth=False)
+        assert srv is not None
+        assert os.environ["EXOMEM_VAULT_PATH"] == str(vault)
+    finally:
+        os.environ.pop("EXOMEM_VAULT_PATH", None)
+        os.environ.pop("KB_MCP_VAULT_PATH", None)
+
+
 def test_legacy_env_reaches_a_real_reader(monkeypatch) -> None:
     from exomem import embeddings
 

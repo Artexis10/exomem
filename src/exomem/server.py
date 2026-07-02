@@ -42,7 +42,7 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import cf_access, cli_ops, extract, guards, schema, upload_tokens
+from . import cf_access, cli_ops, env_compat, extract, guards, schema, upload_tokens
 from . import commands as commands_module
 from . import preserve as preserve_module
 from . import project_keys as project_keys_module
@@ -295,6 +295,10 @@ def build_server(*, require_auth: bool) -> FastMCP:
     True for HTTP transports; False for stdio.
     """
     load_dotenv(override=True)
+    # A .env written before the exomem rename supplies KB_MCP_* names, and it
+    # loads AFTER the import-time promotion — re-promote so legacy configs keep
+    # working (explicitly set EXOMEM_* values still win).
+    env_compat.promote_legacy()
 
     vault_root = resolve_vault()
     source_schema = schema.load_source_schema(vault_root)
