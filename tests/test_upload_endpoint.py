@@ -10,7 +10,7 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from kb_mcp import server
+from exomem import server
 
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
@@ -19,7 +19,7 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     # ambient shell may already have them set (the author's deployment box does).
     # Clear them first so a test that doesn't pass one sees the "disabled" default
     # instead of silently inheriting the ambient value (caught a false 401 vs 503).
-    for leaky in ("KB_MCP_UPLOAD_TOKEN", "KB_MCP_UPLOAD_MAX_BYTES"):
+    for leaky in ("EXOMEM_UPLOAD_TOKEN", "EXOMEM_UPLOAD_MAX_BYTES"):
         monkeypatch.delenv(leaky, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -28,7 +28,7 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
 
 
 def test_upload_requires_auth(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.post(
         "/upload",
         files={"file": ("shot.png", b"\x89PNGdata", "image/png")},
@@ -38,7 +38,7 @@ def test_upload_requires_auth(vault, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.post(
         "/upload",
         files={"file": ("shot.png", b"\x89PNGrealbytes", "image/png")},
@@ -55,7 +55,7 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
 def test_spoofed_cf_access_header_is_not_trusted(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # A client-supplied Cf-Access-* header is spoofable and must NEVER authorize.
     # Regression for the spoofable-field auth-bypass finding.
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.post(
         "/upload",
         files={"file": ("a.bin", b"bytes", "application/octet-stream")},
@@ -79,7 +79,7 @@ def test_upload_disabled_ignores_spoofed_header(vault, monkeypatch: pytest.Monke
 
 def test_upload_rejects_oversize(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(
-        vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret", KB_MCP_UPLOAD_MAX_BYTES="16"
+        vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret", EXOMEM_UPLOAD_MAX_BYTES="16"
     )
     r = client.post(
         "/upload",
@@ -91,7 +91,7 @@ def test_upload_rejects_oversize(vault, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_upload_duplicate_is_conflict(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     headers = {"Authorization": "Bearer sekret"}
     first = client.post(
         "/upload",
@@ -110,9 +110,9 @@ def test_upload_duplicate_is_conflict(vault, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_minted_short_lived_token_authorizes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kb_mcp import upload_tokens
+    from exomem import upload_tokens
 
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     minted = upload_tokens.mint("sekret")  # valid ~15 min
     r = client.post(
         "/upload",
@@ -124,9 +124,9 @@ def test_minted_short_lived_token_authorizes(vault, monkeypatch: pytest.MonkeyPa
 
 
 def test_expired_minted_token_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kb_mcp import upload_tokens
+    from exomem import upload_tokens
 
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     expired = upload_tokens.mint("sekret", ttl=-10)  # already past exp
     r = client.post(
         "/upload",
@@ -139,12 +139,12 @@ def test_expired_minted_token_rejected(vault, monkeypatch: pytest.MonkeyPatch) -
 
 def test_cf_access_valid_jwt_authorizes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # No bearer token configured; a *verified* CF Access JWT is the credential.
-    monkeypatch.setattr("kb_mcp.cf_access.verify", lambda *a, **k: True)
+    monkeypatch.setattr("exomem.cf_access.verify", lambda *a, **k: True)
     client = _client(
         vault,
         monkeypatch,
-        KB_MCP_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
-        KB_MCP_CF_ACCESS_AUD="aud123",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
+        EXOMEM_CF_ACCESS_AUD="aud123",
     )
     r = client.post(
         "/upload",
@@ -156,12 +156,12 @@ def test_cf_access_valid_jwt_authorizes(vault, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_cf_access_invalid_jwt_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("kb_mcp.cf_access.verify", lambda *a, **k: False)
+    monkeypatch.setattr("exomem.cf_access.verify", lambda *a, **k: False)
     client = _client(
         vault,
         monkeypatch,
-        KB_MCP_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
-        KB_MCP_CF_ACCESS_AUD="aud123",
+        EXOMEM_CF_ACCESS_TEAM_DOMAIN="t.cloudflareaccess.com",
+        EXOMEM_CF_ACCESS_AUD="aud123",
     )
     r = client.post(
         "/upload",
@@ -175,9 +175,9 @@ def test_cf_access_invalid_jwt_rejected(vault, monkeypatch: pytest.MonkeyPatch) 
 def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # The OCR companion over HTTP: the `text` form field becomes the embedded,
     # keyword-findable sidecar body so the binary is searchable by its content.
-    from kb_mcp import find as find_module
+    from exomem import find as find_module
 
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.post(
         "/upload",
         files={"file": ("invoice.png", b"\x89PNGbytes", "image/png")},
@@ -199,7 +199,7 @@ def test_upload_text_field_writes_searchable_sidecar(vault, monkeypatch: pytest.
 
 
 def test_upload_get_serves_prefilled_form(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_UPLOAD_TOKEN="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
     r = client.get("/upload?scope=Yolo&category=01%20-%20Check-in")
     assert r.status_code == 200
     assert "Add evidence" in r.text

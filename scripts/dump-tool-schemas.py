@@ -29,15 +29,15 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 def _build_server():
     """Build the server exactly as the fidelity test does (deterministic env)."""
-    from kb_mcp import server as server_module
+    from exomem import server as server_module
 
     server_module.load_dotenv = lambda *a, **k: None  # never read a real .env
-    os.environ["KB_MCP_DISABLE_EMBEDDINGS"] = "1"
-    os.environ["KB_MCP_DISABLE_RELEVANCE_CHECK"] = "1"
-    os.environ["KB_MCP_DISABLE_MEDIA_EXTRACTION"] = "1"
-    os.environ["KB_MCP_DISABLE_CLIP"] = "1"
-    os.environ.pop("KB_MCP_DISABLE_TIER2", None)  # tier-2 ON
-    os.environ["KB_MCP_VAULT_PATH"] = str(FIXTURE_VAULT)
+    os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    os.environ["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
+    os.environ["EXOMEM_DISABLE_MEDIA_EXTRACTION"] = "1"
+    os.environ["EXOMEM_DISABLE_CLIP"] = "1"
+    os.environ.pop("EXOMEM_DISABLE_TIER2", None)  # tier-2 ON
+    os.environ["EXOMEM_VAULT_PATH"] = str(FIXTURE_VAULT)
     return server_module.build_server(require_auth=False)
 
 

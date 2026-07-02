@@ -5,8 +5,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kb_mcp import embeddings, extract, media_worker, preserve
-from kb_mcp import find as find_module
+from exomem import embeddings, extract, media_worker, preserve
+from exomem import find as find_module
 
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
@@ -17,7 +17,7 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
 
 
 def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault)
     assert result.sidecar_path is not None
     body = (vault / result.sidecar_path).read_text(encoding="utf-8")
@@ -27,13 +27,13 @@ def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPat
 
 
 def test_preserve_media_no_stub_when_extraction_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     result = _preserve_media_stub(vault, filename="rec2.mp3")
     assert result.sidecar_path is None  # nothing would fill it → don't write a stub
 
 
 def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="call.mp3")
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
@@ -54,7 +54,7 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
 def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # Opt-in diarization output round-trips: labeled turns into the sidecar text AND
     # the distinct speaker labels into a `speakers:` frontmatter list.
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="meeting2.mp3")
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
@@ -80,7 +80,7 @@ def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.Monke
 
 
 def test_worker_marks_failed_on_extraction_error(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="bad.mp3")
     sidecar = vault / result.sidecar_path
 
@@ -110,7 +110,7 @@ def test_start_prewarms_asr_off_the_request_path(vault, monkeypatch: pytest.Monk
 
 
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="later.mp3")
     sidecar = vault / result.sidecar_path
 
@@ -126,7 +126,7 @@ def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatc
 
 
 def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     _preserve_media_stub(vault, filename="one.mp3")
     _preserve_media_stub(vault, filename="two.wav")
     w = media_worker.MediaWorker(vault)
@@ -134,8 +134,8 @@ def test_scan_pending_reenqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="photos", filename="p.jpg", data=b"\xff\xd8\xff", text="beach",
     )
@@ -149,8 +149,8 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t")
     preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t")
     w = media_worker.MediaWorker(vault)
@@ -158,7 +158,7 @@ def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     # Provide text so the sidecar is populated + keyword-findable; media frontmatter is set either way.
     preserve.preserve_bytes(
         vault, scope="Yolo", category="audio", filename="meeting.mp3", data=b"X",

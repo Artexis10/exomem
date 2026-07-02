@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import commands
-from kb_mcp import find as find_module
+from exomem import commands
+from exomem import find as find_module
 
 
 def _count_semantic(monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -90,7 +90,7 @@ def test_sidecar_mtime_invalidates(vault: Path, monkeypatch, sidecar_name: str) 
 
 
 def test_cache_disabled_by_env(vault: Path, monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_FIND_CACHE_SIZE", "0")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     calls = _count_semantic(monkeypatch)
     find_module.find(vault, query="metabolism")
     find_module.find(vault, query="metabolism")

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from kb_mcp.speaker_attribution import (
+from exomem.speaker_attribution import (
     Attribution,
     Profile,
     _group_clusters,

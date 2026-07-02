@@ -21,7 +21,7 @@
 # Usage (laptop):
 #   pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb-laptop.example.com -TunnelName exomem-laptop
 #
-# After this: set KB_MCP_BASE_URL=https://<Hostname> in .env, update the GitHub OAuth
+# After this: set EXOMEM_BASE_URL=https://<Hostname> in .env, update the GitHub OAuth
 # App callback to https://<Hostname>/auth/callback, restart exomem, re-add the connector.
 
 param(
@@ -134,7 +134,7 @@ Write-Host "Tunnel '$TunnelName' ($Uuid) -> https://$Hostname -> http://127.0.0.
 Write-Host "Service status: $((Get-Service cloudflared).Status)"
 Write-Host ""
 Write-Host "NEXT (not automated):"
-Write-Host "  1. .env:  KB_MCP_BASE_URL=https://$Hostname"
+Write-Host "  1. .env:  EXOMEM_BASE_URL=https://$Hostname"
 Write-Host "  2. GitHub OAuth App: Homepage https://$Hostname ; callback https://$Hostname/auth/callback"
 Write-Host "  3. Restart exomem:  pwsh -File scripts/restart.ps1"
 Write-Host "  4. claude.ai: re-add the connector at https://$Hostname/mcp (redo GitHub OAuth)"

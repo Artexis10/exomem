@@ -4,7 +4,7 @@ find() consults disk for a tuned config ONLY when called without an explicit
 `config` (the live server's path); the eval harnesses pass config= and stay
 hermetic. These tests exercise the loader directly: resolution order, coercion,
 fail-loud-then-DEFAULT, and the per-process memo. They drop the suite-wide
-KB_MCP_DISABLE_RANKING_CONFIG so the real seam runs, and pin the resolved path
+EXOMEM_DISABLE_RANKING_CONFIG so the real seam runs, and pin the resolved path
 to a tmp file so a committed repo-root config can't leak in.
 """
 
@@ -16,14 +16,14 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import find as find_module
+from exomem import find as find_module
 
 
 @pytest.fixture(autouse=True)
 def _exercise_real_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """Undo the suite-wide disable flag and reset the memo around each test."""
-    monkeypatch.delenv("KB_MCP_DISABLE_RANKING_CONFIG", raising=False)
-    monkeypatch.delenv("KB_MCP_RANKING_CONFIG", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RANKING_CONFIG", raising=False)
+    monkeypatch.delenv("EXOMEM_RANKING_CONFIG", raising=False)
     find_module.reset_active_ranking_cache()
     yield
     find_module.reset_active_ranking_cache()
@@ -35,7 +35,7 @@ def _write(path: Path, data: dict) -> Path:
 
 
 def test_absent_file_returns_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(tmp_path / "nope.json"))
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(tmp_path / "nope.json"))
     assert find_module._active_ranking() == find_module.DEFAULT_RANKING
 
 
@@ -50,7 +50,7 @@ def test_valid_file_is_loaded_with_tuple_coercion(
             "intent_weights_exact": [0.7, 1.5, 1.5, 1.0, 0.7, 1.0],
         },
     )
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg))
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg))
     loaded = find_module._active_ranking()
     assert loaded.rrf_k == 30
     assert loaded.compiled_boost == 1.3
@@ -66,8 +66,8 @@ def test_malformed_json_fails_loud_then_default(
 ) -> None:
     bad = tmp_path / "ranking_config.json"
     bad.write_text("{not valid json", encoding="utf-8")
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(bad))
-    with caplog.at_level(logging.ERROR, logger="kb_mcp.find"):
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(bad))
+    with caplog.at_level(logging.ERROR, logger="exomem.find"):
         assert find_module._active_ranking() == find_module.DEFAULT_RANKING
     assert any("invalid" in r.message for r in caplog.records)
 
@@ -76,8 +76,8 @@ def test_unknown_knob_ignored_missing_defaulted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     cfg = _write(tmp_path / "ranking_config.json", {"rrf_k": 42, "bogus_knob": 5})
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg))
-    with caplog.at_level(logging.WARNING, logger="kb_mcp.find"):
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg))
+    with caplog.at_level(logging.WARNING, logger="exomem.find"):
         loaded = find_module._active_ranking()
     assert loaded.rrf_k == 42  # known knob applied
     assert loaded.compiled_boost == find_module.DEFAULT_RANKING.compiled_boost
@@ -88,8 +88,8 @@ def test_bad_lane_tuple_length_fails_loud_then_default(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
     cfg = _write(tmp_path / "ranking_config.json", {"intent_weights_exact": [1.0, 2.0, 3.0]})
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg))
-    with caplog.at_level(logging.ERROR, logger="kb_mcp.find"):
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg))
+    with caplog.at_level(logging.ERROR, logger="exomem.find"):
         assert find_module._active_ranking() == find_module.DEFAULT_RANKING
     assert any("lane weights" in r.message or "invalid" in r.message for r in caplog.records)
 
@@ -98,8 +98,8 @@ def test_disable_flag_forces_default_even_with_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     cfg = _write(tmp_path / "ranking_config.json", {"rrf_k": 30})
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg))
-    monkeypatch.setenv("KB_MCP_DISABLE_RANKING_CONFIG", "1")
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg))
+    monkeypatch.setenv("EXOMEM_DISABLE_RANKING_CONFIG", "1")
     assert find_module._active_ranking() == find_module.DEFAULT_RANKING
 
 
@@ -117,7 +117,7 @@ def test_memo_loads_once_until_reset(
 ) -> None:
     cfg = tmp_path / "ranking_config.json"
     _write(cfg, {"rrf_k": 30})
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg))
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg))
     assert find_module._active_ranking().rrf_k == 30
     _write(cfg, {"rrf_k": 77})  # change on disk
     assert find_module._active_ranking().rrf_k == 30  # memo still serves the old value

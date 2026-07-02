@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import query_data as qd
+from exomem import query_data as qd
 
 
 CSV = (
@@ -245,7 +245,7 @@ def test_query_data_profile_aggregate_returns_card(vault: Path) -> None:
 def test_raw_data_files_are_never_embeddable() -> None:
     # The never-embed-rows invariant: CSV/JSON are NOT part of the embedding
     # corpus (only the markdown dataset card is). Locks the noise concern.
-    from kb_mcp import embeddings
+    from exomem import embeddings
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.csv")) is False
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.json")) is False
     assert embeddings._is_embeddable_path(Path("Knowledge Base/Finance/x.md")) is True

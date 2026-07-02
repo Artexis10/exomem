@@ -102,7 +102,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/kb_mcp"]
+# exomem is the real package; kb_mcp is the permanent import-compat shim.
+packages = ["src/exomem", "src/kb_mcp"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

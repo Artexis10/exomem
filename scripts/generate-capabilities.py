@@ -15,7 +15,7 @@ SRC_PATH = REPO_ROOT / "src"
 
 def _load_commands():
     sys.path.insert(0, str(SRC_PATH))
-    from kb_mcp import commands
+    from exomem import commands
 
     return commands
 
@@ -74,7 +74,7 @@ def build_capabilities_markdown() -> str:
     lines = [
         "# Capabilities",
         "",
-        "This file is generated from `src/kb_mcp/commands.py`.",
+        "This file is generated from `src/exomem/commands.py`.",
         "Run `uv run python scripts/generate-capabilities.py` to refresh it.",
         "Run `uv run python scripts/generate-capabilities.py --check` to verify it is current.",
         "",

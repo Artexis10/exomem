@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import edit as edit_module
+from exomem import edit as edit_module
 
 
 TODAY = dt.date(2026, 6, 1)

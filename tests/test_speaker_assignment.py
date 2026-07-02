@@ -1,7 +1,7 @@
 """Unit tests for max-overlap segment→turn assignment (pure, torch-free)."""
 from __future__ import annotations
 
-from kb_mcp.speaker_assignment import Turn, assign_span, assign_spans, overlap
+from exomem.speaker_assignment import Turn, assign_span, assign_spans, overlap
 
 
 def test_overlap_basic_and_disjoint():

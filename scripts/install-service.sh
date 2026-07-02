@@ -8,20 +8,20 @@
 # Prereqs:
 #   - .venv exists with exomem installed, e.g.
 #       uv sync --extra embeddings
-#   - .env in the repo root with the GitHub OAuth vars (KB_MCP_BASE_URL,
-#     KB_MCP_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) and
-#     KB_MCP_VAULT_PATH. See the Install section of README.md.
+#   - .env in the repo root with the GitHub OAuth vars (EXOMEM_BASE_URL,
+#     EXOMEM_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET) and
+#     EXOMEM_VAULT_PATH. See the Install section of README.md.
 #
 # Usage:     bash scripts/install-service.sh
-# Override:  KB_MCP_BIND_HOST=127.0.0.1 KB_MCP_PORT=8765 bash scripts/install-service.sh
+# Override:  EXOMEM_BIND_HOST=127.0.0.1 EXOMEM_PORT=8765 bash scripts/install-service.sh
 # Restart:   bash scripts/restart.sh            # after .env edits
 # Uninstall: launchctl bootout gui/$(id -u)/com.exomem && rm ~/Library/LaunchAgents/com.exomem.plist
 
 set -euo pipefail
 
 LABEL="com.exomem"
-BIND_HOST="${KB_MCP_BIND_HOST:-127.0.0.1}"
-PORT="${KB_MCP_PORT:-8765}"
+BIND_HOST="${EXOMEM_BIND_HOST:-127.0.0.1}"
+PORT="${EXOMEM_PORT:-8765}"
 
 # Resolve repo root from this script's own location (scripts/..), so it works
 # regardless of the caller's working directory.

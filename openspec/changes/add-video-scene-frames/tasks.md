@@ -7,7 +7,7 @@
       `detect_scenes(series, *, hash_threshold, hist_threshold, min_scene_secs, max_scenes)`
       over `[(ts, hash64, hist)]`: anchor-based boundaries, min-duration merge, midpoint
       representative, weakest-boundary merge at cap. Env knobs
-      `KB_MCP_VIDEO_SCENE_THRESHOLD` / `KB_MCP_VIDEO_SCENE_MIN_SECS` with unparseable→default.
+      `EXOMEM_VIDEO_SCENE_THRESHOLD` / `EXOMEM_VIDEO_SCENE_MIN_SECS` with unparseable→default.
 - [x] 1.3 Tests `tests/test_scene_detect.py` (no PyAV): static jitter → 1 scene; N distinct
       patterns → N scenes at correct boundaries; sub-min-secs flicker merges; cap merges the
       weakest boundaries; histogram-only change detected; empty/single-candidate edges; env
@@ -17,7 +17,7 @@
 - [x] 2.1 Add `_iter_iframe_metrics(path)` (skip_frame NONKEY, 64×64 gray8 reformat, ≥2s
       thinning, ~900 candidate cap) and `_decode_frames_at(path, ts_list)` (pass 2, existing
       seek pattern).
-- [x] 2.2 Add `sample_video_scenes(path)` and the `KB_MCP_VIDEO_SCENE_FRAMES` gate branch in
+- [x] 2.2 Add `sample_video_scenes(path)` and the `EXOMEM_VIDEO_SCENE_FRAMES` gate branch in
       `embed_video_frames` — a variant returning `(vectors, scenes_with_images)` so the worker
       gets both from one decode pass; fallback to `_sample_video_keyframes` candidates on
       unknown duration / too-few I-frames / any pass-1 error.
@@ -29,7 +29,7 @@
 ## 3. Frame writer (new module) + sidecar extension
 - [x] 3.1 Extend `preserve._render_sidecar` with optional `parent_media` / `frame_ts`
       frontmatter (emitted only when provided; existing callers unchanged).
-- [x] 3.2 Add `src/kb_mcp/scene_frames.py`: `scene_frames_enabled()`, `frames_dir_for(video)`,
+- [x] 3.2 Add `src/exomem/scene_frames.py`: `scene_frames_enabled()`, `frames_dir_for(video)`,
       `frame_filename(idx, ts)` + `parse_frame_ts(name)`, `clear_scene_frames(vault_root,
       video)` (removes owned jpg+sidecars, calls `embeddings.delete_after_remove`),
       `write_scene_frames(vault_root, video, scenes_with_images)` (≤1280px q80 JPEG + sidecar
@@ -67,12 +67,12 @@
       gate-off run untouched.
 
 ## 7. Docs
-- [x] 7.1 README env table rows (`KB_MCP_VIDEO_SCENE_FRAMES`, `KB_MCP_VIDEO_SCENE_THRESHOLD`,
-      `KB_MCP_VIDEO_SCENE_MIN_SECS`); note in `docs/deployment.md` (worker budget, backfill
+- [x] 7.1 README env table rows (`EXOMEM_VIDEO_SCENE_FRAMES`, `EXOMEM_VIDEO_SCENE_THRESHOLD`,
+      `EXOMEM_VIDEO_SCENE_MIN_SECS`); note in `docs/deployment.md` (worker budget, backfill
       migration). Scaffold/SKILL untouched.
 
 ## 8. Verify
-- [x] 8.1 `PYTHONPATH=src KB_MCP_DISABLE_EMBEDDINGS=1 python -m pytest -q` green.
+- [x] 8.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green.
 - [x] 8.2 `ruff check` clean.
 - [x] 8.3 `openspec validate add-video-scene-frames --strict` passes; leak guard green.
 - [ ] 8.4 Desk-side smoke (GPU box, media extra, gate on): upload a real screen recording →

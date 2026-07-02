@@ -1,6 +1,6 @@
 """Regression backstop: the shipped generic scaffold must not contain personal data.
 
-`src/kb_mcp/_scaffold/` is the generic starter skill shipped to new users (via
+`src/exomem/_scaffold/` is the generic starter skill shipped to new users (via
 `init` / `install-skill`). Its `_Schema/` is a HAND-AUTHORED, deliberately-generic
 starter (not derived from any private vault). This test scans the COMMITTED
 scaffold two ways:
@@ -22,14 +22,14 @@ import importlib.util
 import re
 from pathlib import Path
 
-import kb_mcp
+import exomem
 
 # The whole shipped scaffold (not just _Schema): index/log stubs, Sources/Notes/
 # Entities indexes, and the _Schema docs all ship to new users.
-SCAFFOLD = Path(kb_mcp.__file__).resolve().parent / "_scaffold"
+SCAFFOLD = Path(exomem.__file__).resolve().parent / "_scaffold"
 SCAFFOLD_SCHEMA = SCAFFOLD / "_Schema"
-SOURCE = Path(kb_mcp.__file__).resolve().parent  # src/kb_mcp/
-REPO = Path(kb_mcp.__file__).resolve().parent.parent.parent  # src/kb_mcp -> repo root
+SOURCE = Path(exomem.__file__).resolve().parent  # src/exomem/
+REPO = Path(exomem.__file__).resolve().parent.parent.parent  # src/exomem -> repo root
 
 
 # Explicit synthetic private-token denylist. Each entry is (label, regex, case_insensitive).
@@ -53,7 +53,7 @@ _PERSONAL_TOKENS: list[tuple[str, str, bool]] = [
 ]
 
 
-# Source-tree denylist (src/kb_mcp/**). Distinct from the scaffold list above:
+# Source-tree denylist (src/exomem/**). Distinct from the scaffold list above:
 # the shipped Python SOURCE legitimately uses the bare architecture noun
 # "substrate" (the "pure-substrate" principle), so this denylists
 # synthetic private domain labels rather than bare architectural terms. Product
@@ -110,7 +110,7 @@ def test_scaffold_ships_no_personal_data() -> None:
 
 def test_scaffold_ships_no_personal_tokens() -> None:
     """Explicit denylist: the author's names/products/podcast/domain/structure
-    must not appear ANYWHERE under src/kb_mcp/_scaffold/."""
+    must not appear ANYWHERE under src/exomem/_scaffold/."""
     compiled = [
         (label, re.compile(rx, re.IGNORECASE if ci else 0))
         for label, rx, ci in _PERSONAL_TOKENS
@@ -131,7 +131,7 @@ def test_scaffold_ships_no_personal_tokens() -> None:
 
 
 def test_source_ships_no_personal_tokens() -> None:
-    """The shipped Python source (src/kb_mcp/**) must not name the author,
+    """The shipped Python source (src/exomem/**) must not name the author,
     their collaborators, products, or vault-structure labels.
 
     This is the hard wall for the SOURCE CODE de-identification pass: comments,
@@ -146,7 +146,7 @@ def test_source_ships_no_personal_tokens() -> None:
     ]
     assert compiled, "denylist must be non-empty (test would be vacuous)"
     files = _source_files()
-    assert files, "no files found under src/kb_mcp/ — wrong scan root?"
+    assert files, "no files found under src/exomem/ — wrong scan root?"
     offenders: list[str] = []
     for f in files:
         try:

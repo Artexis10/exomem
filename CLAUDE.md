@@ -34,7 +34,7 @@ the rule above is the guardrail for when you must operate on the primary.
 
 ## Editing the skill scaffold (hand-authored — keep it generic)
 
-The skill shipped to new users lives at `src/kb_mcp/_scaffold/_Schema/`
+The skill shipped to new users lives at `src/exomem/_scaffold/_Schema/`
 (SKILL.md + `references/*.md` + `project-keys.yaml`). It is a **hand-authored,
 deliberately-generic starter** — edit it directly. It is NOT generated from a
 private vault; `scripts/genericize-schema.py` is retired as a generator (running
@@ -42,7 +42,7 @@ it would clobber the hand-authored scaffold).
 
 The hard rule: **keep it generic.** `tests/test_scaffold_no_leak.py` fails if any
 personal name, product, or vault-structure label appears in the scaffold — or
-anywhere under `src/kb_mcp/`. If a test flags a token, genericize it; don't add it
+anywhere under `src/exomem/`. If a test flags a token, genericize it; don't add it
 to an allowlist.
 
 (Maintainer-only: a private claude.ai `.skill` zip is still derived from a private

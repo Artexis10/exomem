@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kb_mcp import backfill, embeddings, extract, preserve
+from exomem import backfill, embeddings, extract, preserve
 
 REL = "Knowledge Base/Evidence/Old/photos/legacy.jpg"
 

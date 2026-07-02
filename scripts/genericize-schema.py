@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Generate the shipped generic skill scaffold from the vault canonical.
 
-`src/kb_mcp/_scaffold/_Schema/` is a DERIVED artifact — the genericized, shippable
+`src/exomem/_scaffold/_Schema/` is a DERIVED artifact — the genericized, shippable
 copy of the skill whose canonical source lives in the vault's `_Schema/`. This
 script is its build step, the sibling of `scripts/rebuild-schema-zip.*` (which
 derives the claude.ai zip from the same canonical). RETIRED as a generator: the
@@ -33,7 +33,7 @@ Leak-guard (aborts before writing on any hit), two layers:
   survive into the output.
 
 Usage: python scripts/genericize-schema.py [--vault <root>] [--check]
-  --vault   vault root containing "Knowledge Base/" (default: $KB_MCP_VAULT_PATH)
+  --vault   vault root containing "Knowledge Base/" (default: $EXOMEM_VAULT_PATH)
   --check   dry run: run the guard, report, write nothing.
 """
 
@@ -47,7 +47,7 @@ import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
-SCAFFOLD = REPO / "src" / "kb_mcp" / "_scaffold" / "_Schema"
+SCAFFOLD = REPO / "src" / "exomem" / "_scaffold" / "_Schema"
 GENERIC_KEYS = REPO / "scripts" / "generic" / "project-keys.yaml"
 LOCAL_DENYLIST = REPO / "scripts" / "generic" / "leakguard.txt"
 LOCAL_SUBS = REPO / "scripts" / "generic" / "substitutions.txt"
@@ -139,12 +139,12 @@ def leak_scan(files: dict[str, str], denylist: list[str]) -> list[str]:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="genericize-schema")
-    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)")
+    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)")
     ap.add_argument("--check", action="store_true", help="dry run: guard only, write nothing")
     ap.add_argument("--force", action="store_true", help="regenerate anyway (RETIRED — clobbers the hand-authored scaffold)")
     args = ap.parse_args()
 
-    # RETIRED as a generator: the shipped scaffold at src/kb_mcp/_scaffold/_Schema/
+    # RETIRED as a generator: the shipped scaffold at src/exomem/_scaffold/_Schema/
     # is now HAND-AUTHORED (a lean, deliberately-generic starter) and guarded by
     # tests/test_scaffold_no_leak.py — it is no longer derived from a vault
     # canonical, so regenerating would overwrite it. The marker/leak utilities in
@@ -152,16 +152,16 @@ def main() -> int:
     if not args.check and not args.force:
         print(
             "genericize-schema: RETIRED as a generator. The scaffold at "
-            "src/kb_mcp/_scaffold/_Schema/ is hand-authored and leak-guarded "
+            "src/exomem/_scaffold/_Schema/ is hand-authored and leak-guarded "
             "(tests/test_scaffold_no_leak.py) — edit it directly, keep it generic. "
             "Use --check to dry-run the leak scan, or --force to regenerate anyway.",
             file=sys.stderr,
         )
         return 2
 
-    vault = args.vault or os.environ.get("KB_MCP_VAULT_PATH")
+    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
     if not vault:
-        print("genericize: set --vault or KB_MCP_VAULT_PATH (vault root containing 'Knowledge Base/').", file=sys.stderr)
+        print("genericize: set --vault or EXOMEM_VAULT_PATH (vault root containing 'Knowledge Base/').", file=sys.stderr)
         return 2
     canon = Path(vault).expanduser() / "Knowledge Base" / "_Schema"
     if not (canon / "SKILL.md").exists():

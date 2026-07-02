@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import scene_frames
-from kb_mcp.embeddings import Scene
+from exomem import scene_frames
+from exomem.embeddings import Scene
 
 
 class _FakeImg:

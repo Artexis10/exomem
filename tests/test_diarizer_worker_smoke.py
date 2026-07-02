@@ -21,7 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import extract
+from exomem import extract
 
 _SIDECAR_PY = extract._diarizer_sidecar_python()
 

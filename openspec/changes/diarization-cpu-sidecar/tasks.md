@@ -7,7 +7,7 @@
       `numpy<2` / `faster-whisper<1.1` / `requests` (Python `>=3.11,<3.13`).
 - [x] 1.2 `uv lock` → commit `sidecar/diarizer/uv.lock`; resolved pyannote 3.1.1 / torch 2.2.2+cpu /
       torchaudio 2.2.2+cpu / speechbrain 0.5.16 / huggingface_hub 0.25.2, no torchcodec.
-- [x] 1.3 Add `sidecar/diarizer/worker.py`: standalone (no `kb_mcp` import); stdout→stderr; decode
+- [x] 1.3 Add `sidecar/diarizer/worker.py`: standalone (no `exomem` import); stdout→stderr; decode
       via faster-whisper `decode_audio`; load pyannote (`token=`/`use_auth_token=` fallback); write
       `{"turns":[…]}` UTF-8 JSON to the out-file; clear nonzero-exit error on a gated/unloadable
       pipeline.
@@ -21,8 +21,8 @@
       spawn-OSError all → `None`; happy path → parsed turns; out-file cleaned up; child env forces
       CPU + merges parent; timeout override + floor.
 - [x] 2.2 Rewrite `extract._run_diarization` to the subprocess seam; add `_diarizer_sidecar_python`
-      (override `KB_MCP_DIARIZE_SIDECAR_PYTHON`), `_diarizer_worker_script`, `_diarizer_timeout`
-      (duration-scaled, `KB_MCP_DIARIZE_TIMEOUT`). Merge env with `CUDA_VISIBLE_DEVICES=""` +
+      (override `EXOMEM_DIARIZE_SIDECAR_PYTHON`), `_diarizer_worker_script`, `_diarizer_timeout`
+      (duration-scaled, `EXOMEM_DIARIZE_TIMEOUT`). Merge env with `CUDA_VISIBLE_DEVICES=""` +
       `HF_HUB_DISABLE_PROGRESS_BARS=1`. Out-file result channel. Soft-fail on everything.
 - [x] 2.3 Delete the dead in-process pipeline symbols `_load_diarization_pipeline` /
       `_get_diarization_pipeline` / `_DIARIZATION_PIPELINE` / `_DIARIZATION_LOCK` (the only main-venv
@@ -35,8 +35,8 @@
       `speechbrain`); rewrite the torchcodec warning comment (the uninstall dance is retired).
 - [x] 3.2 `uv lock` the main project → pyannote 4.0.5 + its tree (incl. torchcodec 0.14.0) dropped.
 - [x] 3.3 Add `scripts/setup-diarizer.ps1` (`uv sync --directory`, import smoke, `-Prewarm`); update
-      the README env table (`KB_MCP_DIARIZE_SIDECAR_PYTHON`, `KB_MCP_DIARIZE_TIMEOUT`,
-      `KB_MCP_DIARIZE_MODEL`) + a "Speaker diarization sidecar" provisioning section.
+      the README env table (`EXOMEM_DIARIZE_SIDECAR_PYTHON`, `EXOMEM_DIARIZE_TIMEOUT`,
+      `EXOMEM_DIARIZE_MODEL`) + a "Speaker diarization sidecar" provisioning section.
 - [x] 3.4 Add the gated `tests/test_diarizer_worker_smoke.py` (skips unless the sidecar venv exists;
       with a token → happy path, without → graceful nonzero exit).
 
@@ -46,7 +46,7 @@
 - [x] 4.3 Gated worker smoke passes on the dev box (sidecar built, no token → graceful-failure
       branch verified).
 - [ ] 4.4 Deploy-box end-to-end (Hugo runs — needs the sidecar venv + `HUGGINGFACE_TOKEN` + accepted
-      gates): `setup-diarizer.ps1 -Prewarm` → `KB_MCP_DIARIZE=1` → restart → diarize a real
+      gates): `setup-diarizer.ps1 -Prewarm` → `EXOMEM_DIARIZE=1` → restart → diarize a real
       2-speaker recording → confirm `[Hugo]: …` + `[Speaker B]: …` render (sidecar turns flow through
       the unchanged ECAPA naming). Then confirm the embedding stack is intact (a `find` + a fresh
       image/PDF upload still index — no torchcodec/cuDNN regression).
@@ -60,7 +60,7 @@ Q runs the same diarization on the same Blackwell 5080 GPU, which proved CPU was
 - [x] 5.1 Re-pin `sidecar/diarizer/` to Q's proven GPU stack: `pyannote.audio>=4.0` (loads the
       `speaker-diarization-3.1` model) / `torch==2.9.1` + `torchaudio==2.9.1` from the **cu130**
       index (Blackwell `sm_120`). Dropped speechbrain (sidecar only diarizes). Re-locked.
-- [x] 5.2 Worker: add `KB_MCP_DIARIZE_DEVICE` (cpu|cuda|auto) → `pipeline.to(cuda)`; handle the
+- [x] 5.2 Worker: add `EXOMEM_DIARIZE_DEVICE` (cpu|cuda|auto) → `pipeline.to(cuda)`; handle the
       pyannote-4 `DiarizeOutput` (unwrap `exclusive_speaker_diarization`/`speaker_diarization`);
       suppress the harmless torchcodec-on-Windows warning.
 - [x] 5.3 `extract._run_diarization`: device-aware child env (`_diarizer_child_env`) — only force

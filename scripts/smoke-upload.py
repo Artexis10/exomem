@@ -24,11 +24,11 @@ ENV = Path(__file__).resolve().parents[1] / ".env"
 
 def _token() -> str:
     for line in ENV.read_text(encoding="utf-8").splitlines():
-        if line.strip().startswith("KB_MCP_UPLOAD_TOKEN="):
+        if line.strip().startswith("EXOMEM_UPLOAD_TOKEN="):
             tok = line.split("=", 1)[1].strip()
             if tok:
                 return tok
-    raise SystemExit("KB_MCP_UPLOAD_TOKEN not set in .env — run scripts/set-upload-token.py first")
+    raise SystemExit("EXOMEM_UPLOAD_TOKEN not set in .env — run scripts/set-upload-token.py first")
 
 
 def _post(headers: dict) -> int:
@@ -71,7 +71,7 @@ def main() -> None:
     tok = _token()
 
     if args.minted:
-        from kb_mcp import upload_tokens
+        from exomem import upload_tokens
 
         valid = _post({"Authorization": f"Bearer {upload_tokens.mint(tok)}"})
         expired = _post({"Authorization": f"Bearer {upload_tokens.mint(tok, ttl=-10)}"})
@@ -82,7 +82,7 @@ def main() -> None:
         raise SystemExit(0 if ok else 1)
 
     if args.write:
-        from kb_mcp import upload_tokens
+        from exomem import upload_tokens
 
         ts = dt.datetime.now().strftime("%Y%m%d-%H%M%S")
         data = f"exomem /upload smoke test {ts}\n".encode()

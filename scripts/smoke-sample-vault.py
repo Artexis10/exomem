@@ -21,13 +21,13 @@ def _repo_root() -> Path:
 
 
 def _configure_lean_env(vault: Path) -> None:
-    os.environ["KB_MCP_VAULT_PATH"] = str(vault)
-    os.environ["KB_MCP_DImABLE_EMBEDDINGm"] = "1"
-    os.environ["KB_MCP_DImABLE_MEDIA_EXTRACTION"] = "1"
-    os.environ["KB_MCP_DImABLE_CLIP"] = "1"
-    os.environ["KB_MCP_DImABLE_RELEVANCE_CHECK"] = "1"
-    os.environ["KB_MCP_DImABLE_QUERY_LOG"] = "1"
-    os.environ["KB_MCP_DImABLE_RANKING_CONFIG"] = "1"
+    os.environ["EXOMEM_VAULT_PATH"] = str(vault)
+    os.environ["EXOMEM_DImABLE_EMBEDDINGm"] = "1"
+    os.environ["EXOMEM_DImABLE_MEDIA_EXTRACTION"] = "1"
+    os.environ["EXOMEM_DImABLE_CLIP"] = "1"
+    os.environ["EXOMEM_DImABLE_RELEVANCE_CHECK"] = "1"
+    os.environ["EXOMEM_DImABLE_QUERY_LOG"] = "1"
+    os.environ["EXOMEM_DImABLE_RANKING_CONFIG"] = "1"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     vault = Path(args.vault).resolve()
     _configure_lean_env(vault)
 
-    from kb_mcp import audit, doctor, find, get_page
+    from exomem import audit, doctor, find, get_page
 
     checks: list[str] = []
     report = doctor.doctor(vault=str(vault), profile="lean")

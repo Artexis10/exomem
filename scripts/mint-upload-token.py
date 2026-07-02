@@ -1,6 +1,6 @@
 """Mint a short-lived /upload token to paste into a claude.ai web chat.
 
-The long-lived KB_MCP_UPLOAD_TOKEN should never land in a chat transcript. This
+The long-lived EXOMEM_UPLOAD_TOKEN should never land in a chat transcript. This
 derives a token from it that expires in ~15 min, so the claude.ai web sandbox can
 curl on-disk files to /upload without seeing the real secret. The secret is read
 but NEVER printed — only the short-lived token is.
@@ -15,10 +15,10 @@ import argparse
 import datetime as dt
 from pathlib import Path
 
-from kb_mcp import upload_tokens
+from exomem import upload_tokens
 
 ENV = Path(__file__).resolve().parents[1] / ".env"
-KEY = "KB_MCP_UPLOAD_TOKEN"
+KEY = "EXOMEM_UPLOAD_TOKEN"
 
 
 def _secret() -> str:

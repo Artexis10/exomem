@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import find as find_module
+from exomem import find as find_module
 
 
 def test_query_substring_hits_body(vault: Path) -> None:
@@ -269,7 +269,7 @@ def test_reserve_surfaces_out_of_kb_even_when_kb_has_matches(vault: Path) -> Non
     their own; the reserve guarantees the out-of-KB file still appears, while
     the KB keeps the majority.
     """
-    from kb_mcp import bm25
+    from exomem import bm25
     token = "zzreservetokenzz"
     ins = vault / "Knowledge Base" / "Notes" / "Insights"
     (ins / "reserve-a.md").write_text(
@@ -306,7 +306,7 @@ def test_sync_conflict_files_excluded_from_results(vault: Path) -> None:
     They are transient conflict copies (of log.md, notes, etc.) — indexing them
     pollutes results and wastes slots. They must be skipped under every scope.
     """
-    from kb_mcp import bm25
+    from exomem import bm25
     token = "zzsyncconflicttokenzz"
     p = vault / "Knowledge Base" / "log.sync-conflict-20260602-005505-ABC123.md"
     p.write_text(

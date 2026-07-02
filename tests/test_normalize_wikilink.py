@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp.vault import (
+from exomem.vault import (
     AmbiguousWikilinkError,
     UnresolvedWikilinkError,
     WikilinkResolver,

@@ -39,7 +39,7 @@ def main() -> int:
 
     # --- faster-whisper on GPU (the gate that matters) ---
     try:
-        from kb_mcp import extract
+        from exomem import extract
 
         extract._ensure_cuda_dll_path()  # register nvidia-* CUDA-12 DLLs on Windows
 
@@ -71,7 +71,7 @@ def main() -> int:
         import av
         import numpy as np
 
-        from kb_mcp import embeddings
+        from exomem import embeddings
 
         # Synthesize a ~24s clip with a white square that marches across the frame —
         # SPATIAL structure (not just colour) so the luminance pHash sees distinct

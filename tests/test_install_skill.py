@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import install_skill as install_module
+from exomem import install_skill as install_module
 
 
 def test_install_skill_copies_into_target(tmp_path: Path) -> None:
@@ -60,9 +60,9 @@ def test_install_skill_force_overwrites_cleanly(tmp_path: Path) -> None:
 
 
 def test_install_skill_via_cli(tmp_path: Path) -> None:
-    """`python -m kb_mcp install-skill --target <path>` installs and returns 0;
+    """`python -m exomem install-skill --target <path>` installs and returns 0;
     a second run refuses (1) without --force, then succeeds (0) with it."""
-    from kb_mcp.__main__ import main
+    from exomem.__main__ import main
 
     target = tmp_path / "knowledge-base"
     assert main(["install-skill", "--target", str(target)]) == 0

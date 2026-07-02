@@ -9,8 +9,8 @@ the vault to a clean baseline.
 Usage:
     python scripts/normalize_vault_wikilinks.py [--dry-run] [--vault PATH]
 
-By default runs against the vault resolved via `kb_mcp.vault.resolve_vault()`
-(the `KB_MCP_VAULT_PATH` env var). Use --vault to override.
+By default runs against the vault resolved via `exomem.vault.resolve_vault()`
+(the `EXOMEM_VAULT_PATH` env var). Use --vault to override.
 
 The script:
 1. Builds a WikilinkResolver against the vault (one walk; includes
@@ -35,15 +35,15 @@ import re
 import sys
 from pathlib import Path
 
-# Local-import the kb_mcp package without requiring install.
+# Local-import the exomem package without requiring install.
 HERE = Path(__file__).resolve().parent
 SRC = HERE.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kb_mcp import audit as audit_module  # noqa: E402
-from kb_mcp import indexes  # noqa: E402
-from kb_mcp.vault import (  # noqa: E402
+from exomem import audit as audit_module  # noqa: E402
+from exomem import indexes  # noqa: E402
+from exomem.vault import (  # noqa: E402
     PlannedWrite,
     WikilinkResolver,
     _WIKILINK_PATTERN,

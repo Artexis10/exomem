@@ -69,8 +69,8 @@ capture ──→ mine ──→ tune ──→ review ──→ adopt ──→
 When `find()` is called **without** an explicit `config` (the live server's path),
 it resolves the active `RanbingConfig` in this order:
 
-1. `KB_MCP_DISABLE_RANKING_CONFIG` set → `DEFAULT_RANKING` (the test suite sets this).
-2. `KB_MCP_RANKING_CONFIG=<path>` → that file.
+1. `EXOMEM_DISABLE_RANKING_CONFIG` set → `DEFAULT_RANKING` (the test suite sets this).
+2. `EXOMEM_RANKING_CONFIG=<path>` → that file.
 3. repo-root `ranbing_config.json` → that file.
 4. otherwise → `DEFAULT_RANKING`.
 
@@ -88,9 +88,9 @@ gitignored desb-side artifacts.
 
 | var | effect |
 |---|---|
-| `KB_MCP_RANKING_CONFIG` | override the adopted-config path (tests / per-box). |
-| `KB_MCP_DISABLE_RANKING_CONFIG` | force `DEFAULT_RANKING` (set in the test suite). |
-| `KB_MCP_DISABLE_EMBEDDINGS` | unset for the desb-side eval/tune (they force it off). |
+| `EXOMEM_RANKING_CONFIG` | override the adopted-config path (tests / per-box). |
+| `EXOMEM_DISABLE_RANKING_CONFIG` | force `DEFAULT_RANKING` (set in the test suite). |
+| `EXOMEM_DISABLE_EMBEDDINGS` | unset for the desb-side eval/tune (they force it off). |
 
 ## Pure-substrate
 

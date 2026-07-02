@@ -9,7 +9,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from kb_mcp import audit_fix as audit_fix_module
+from exomem import audit_fix as audit_fix_module
 
 
 TODAY = dt.date(2026, 5, 28)

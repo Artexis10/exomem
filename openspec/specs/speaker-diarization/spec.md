@@ -6,7 +6,7 @@ TBD - created by archiving change add-named-speaker-diarization. Update Purpose 
 ### Requirement: Named-Speaker Attribution via Voice Profiles
 
 The system SHALL resolve anonymous diarization clusters to enrolled speaker names when ASR
-diarization is enabled (`KB_MCP_DIARIZE`) and at least one voice profile is enrolled — by
+diarization is enabled (`EXOMEM_DIARIZE`) and at least one voice profile is enrolled — by
 computing a per-cluster ECAPA voice embedding and matching it against profile centroids by
 cosine similarity. A cluster SHALL be assigned a profile name only when the match clears the
 configured threshold, margin, and standout rules; otherwise it SHALL remain anonymous.
@@ -34,19 +34,19 @@ configured threshold, margin, and standout rules; otherwise it SHALL remain anon
 
 ### Requirement: Default-Off and Anonymous Fallback
 
-The capability SHALL change no behavior unless `KB_MCP_DIARIZE` is set AND at least one profile
+The capability SHALL change no behavior unless `EXOMEM_DIARIZE` is set AND at least one profile
 is enrolled. With diarization disabled, or enabled with zero enrolled profiles, the system
 SHALL produce output byte-identical to the current anonymous diarization (or plain transcript).
 
 #### Scenario: No profiles enrolled
 
-- **WHEN** `KB_MCP_DIARIZE` is set but no voice profiles are enrolled
+- **WHEN** `EXOMEM_DIARIZE` is set but no voice profiles are enrolled
 - **THEN** diarization runs exactly as today, emitting anonymous `[Speaker A]: …` turns
 - **AND** no voice-embedding model is loaded
 
 #### Scenario: Diarization disabled
 
-- **WHEN** `KB_MCP_DIARIZE` is unset
+- **WHEN** `EXOMEM_DIARIZE` is unset
 - **THEN** extraction emits the plain transcript with no diarization and no profile lookup
 
 ### Requirement: Soft-Fail Degradation
@@ -89,20 +89,20 @@ a 192-dim ECAPA centroid, a per-profile threshold, a sample count, and an `is_se
 
 ### Requirement: CLI Speaker Enrollment
 
-The system SHALL expose enrollment via the `python -m kb_mcp` CLI: `enroll-speaker`
+The system SHALL expose enrollment via the `python -m exomem` CLI: `enroll-speaker`
 (extract an ECAPA centroid from an audio sample and persist a profile, with a `--self` flag
 for the vault owner), `list-speakers`, and `remove-speaker`. Enrollment SHALL NOT be exposed
 as an MCP connector tool.
 
 #### Scenario: Enroll the vault owner
 
-- **WHEN** `python -m kb_mcp enroll-speaker --name Hugo --self <sample.wav>` is run
+- **WHEN** `python -m exomem enroll-speaker --name Hugo --self <sample.wav>` is run
 - **THEN** a profile "Hugo" with `is_self: true` and a 192-dim centroid is stored
 - **AND** `list-speakers` reports it
 
 #### Scenario: Remove a profile
 
-- **WHEN** `python -m kb_mcp remove-speaker --name Hugo` is run
+- **WHEN** `python -m exomem remove-speaker --name Hugo` is run
 - **THEN** the "Hugo" profile is deleted from the store
 - **AND** subsequent diarization labels that voice anonymously again
 

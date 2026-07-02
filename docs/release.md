@@ -38,16 +38,16 @@ npm exec --yes @fission-ai/openspec -- validate --specs --strict
 uv run python scripts/smoke-sample-vault.py
 uv run python scripts/demo-sample-vault.py
 uv run python scripts/generate-capabilities.py --check
-uv run python -m kb_mcp doctor --vault examples/sample-vault --profile lean
+uv run python -m exomem doctor --vault examples/sample-vault --profile lean
 uv build
 ```
 
 Optional host-specific checks:
 
 ```bash
-uv run python -m kb_mcp doctor --profile hybrid
-uv run python -m kb_mcp doctor --profile media
-uv run python -m kb_mcp doctor --profile remote
+uv run python -m exomem doctor --profile hybrid
+uv run python -m exomem doctor --profile media
+uv run python -m exomem doctor --profile remote
 ```
 
 Run the optional checks only on machines configured for those profiles. `media`

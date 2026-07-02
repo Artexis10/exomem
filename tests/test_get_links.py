@@ -9,8 +9,8 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from kb_mcp import find as find_module
-from kb_mcp import server
+from exomem import find as find_module
+from exomem import server
 
 TARGET_REL = "Knowledge Base/Notes/Insights/link-target.md"
 SOURCE_REL = "Knowledge Base/Notes/Insights/link-source.md"
@@ -54,7 +54,7 @@ def _seed(vault: Path) -> None:
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
-    for leaky in ("KB_MCP_REST_API_KEY", "KB_MCP_UPLOAD_TOKEN"):
+    for leaky in ("EXOMEM_REST_API_KEY", "EXOMEM_UPLOAD_TOKEN"):
         monkeypatch.delenv(leaky, raising=False)
     for key, value in env.items():
         monkeypatch.setenv(key, value)
@@ -64,7 +64,7 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
 
 def test_outbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/get",
         json={"path": SOURCE_REL, "links": True},
@@ -77,7 +77,7 @@ def test_outbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_inbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/get",
         json={"path": TARGET_REL, "links": True},
@@ -90,7 +90,7 @@ def test_inbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_links_absent_when_flag_off(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     _seed(vault)
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/get",
         json={"path": SOURCE_REL},  # links defaults False

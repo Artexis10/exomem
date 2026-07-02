@@ -5,7 +5,7 @@ TBD - created by archiving change image-zero-shot-tags. Update Purpose after arc
 ## Requirements
 ### Requirement: Zero-Shot CLIP Image Tags
 
-The system SHALL, when image tagging is enabled (`KB_MCP_IMAGE_TAGS`), enrich an image's
+The system SHALL, when image tagging is enabled (`EXOMEM_IMAGE_TAGS`), enrich an image's
 extracted text with zero-shot tags computed from the already-loaded CLIP model: it SHALL embed a
 fixed generic tag vocabulary with CLIP's text encoder (once, cached), cosine the image's CLIP
 embedding against that vocabulary, and select the top-K tags whose cosine score clears a
@@ -14,7 +14,7 @@ single `Tags: <a>, <b>, …` line so they are indexed by BM25 and the bge text i
 
 #### Scenario: Depicted concept becomes findable text
 
-- **WHEN** an image is extracted with `KB_MCP_IMAGE_TAGS` set and its CLIP embedding scores the
+- **WHEN** an image is extracted with `EXOMEM_IMAGE_TAGS` set and its CLIP embedding scores the
   vocabulary terms `invoice` and `table` above the threshold
 - **THEN** the extracted text gains a `Tags: invoice, table` line (after any OCR/caption text)
 - **AND** that line is stored in the image's sidecar and indexed like any other extracted text
@@ -28,34 +28,34 @@ single `Tags: <a>, <b>, …` line so they are indexed by BM25 and the bge text i
 
 - **WHEN** tags are computed
 - **THEN** the existing CLIP model singleton and its device selection (CPU when ASR is active, per
-  `KB_MCP_CLIP_DEVICE`) are reused with no additional model load and no new dependency
+  `EXOMEM_CLIP_DEVICE`) are reused with no additional model load and no new dependency
 
 ### Requirement: Configurable Top-K and Threshold
 
-The number of tags and the cosine threshold SHALL be configurable via `KB_MCP_IMAGE_TAGS_TOPK`
-and `KB_MCP_IMAGE_TAGS_THRESHOLD`, with sane defaults when unset or unparseable. Only tags whose
+The number of tags and the cosine threshold SHALL be configurable via `EXOMEM_IMAGE_TAGS_TOPK`
+and `EXOMEM_IMAGE_TAGS_THRESHOLD`, with sane defaults when unset or unparseable. Only tags whose
 score is greater than or equal to the threshold SHALL be emitted.
 
 #### Scenario: Threshold filters weak matches
 
-- **WHEN** a vocabulary term's cosine score is below `KB_MCP_IMAGE_TAGS_THRESHOLD`
+- **WHEN** a vocabulary term's cosine score is below `EXOMEM_IMAGE_TAGS_THRESHOLD`
 - **THEN** that term is not emitted as a tag
 
 #### Scenario: Top-K override limits output
 
-- **WHEN** `KB_MCP_IMAGE_TAGS_TOPK` is set to 1 and several terms clear the threshold
+- **WHEN** `EXOMEM_IMAGE_TAGS_TOPK` is set to 1 and several terms clear the threshold
 - **THEN** exactly one tag — the highest-scoring — is emitted
 
 #### Scenario: Unparseable override falls back to the default
 
-- **WHEN** `KB_MCP_IMAGE_TAGS_TOPK` or `KB_MCP_IMAGE_TAGS_THRESHOLD` is set to a non-numeric value
+- **WHEN** `EXOMEM_IMAGE_TAGS_TOPK` or `EXOMEM_IMAGE_TAGS_THRESHOLD` is set to a non-numeric value
 - **THEN** the corresponding built-in default is used and tagging still proceeds
 
 ### Requirement: Generic Tag Vocabulary
 
 The tag vocabulary SHALL be a fixed, generic set of common visual concepts (objects, scenes,
 document and screen kinds) shipped in the package. It SHALL contain no personal, brand, tenant, or
-vault-structure tokens, so it passes the source leak guard that scans all of `src/kb_mcp/`.
+vault-structure tokens, so it passes the source leak guard that scans all of `src/exomem/`.
 
 #### Scenario: Vocabulary is generic and leak-safe
 
@@ -69,13 +69,13 @@ vault-structure tokens, so it passes the source leak guard that scans all of `sr
 
 ### Requirement: Default-Off and Byte-Identical When Unset
 
-Image tagging SHALL change no behavior unless `KB_MCP_IMAGE_TAGS` is set. With the flag unset, the
+Image tagging SHALL change no behavior unless `EXOMEM_IMAGE_TAGS` is set. With the flag unset, the
 image extraction output SHALL be byte-identical to the current OCR (plus optional caption) output,
 and no tagging or CLIP-text code path SHALL run.
 
 #### Scenario: Flag unset leaves extraction unchanged
 
-- **WHEN** an image is extracted with `KB_MCP_IMAGE_TAGS` unset
+- **WHEN** an image is extracted with `EXOMEM_IMAGE_TAGS` unset
 - **THEN** the extracted text and engine are exactly today's OCR/caption result with no `Tags:` line
 - **AND** no tag computation is performed
 

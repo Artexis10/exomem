@@ -7,8 +7,8 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from kb_mcp import vault as vault_module
-from kb_mcp.vault import InboundLink, find_inbound_wikilinks, walk_vault_md
+from exomem import vault as vault_module
+from exomem.vault import InboundLink, find_inbound_wikilinks, walk_vault_md
 
 
 def _reference_scan(vault_root: Path, target_rel_path: str) -> list[InboundLink]:

@@ -1,15 +1,15 @@
 """CLI speaker enrollment (embedder patched) — enroll writes a profile, --self, list/remove.
 
 The ECAPA embedder is stubbed so no model loads; we drive the public functions and the
-`python -m kb_mcp` subcommand dispatch against a tmp profile store.
+`python -m exomem` subcommand dispatch against a tmp profile store.
 """
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from kb_mcp import __main__ as cli
-from kb_mcp import enroll_speaker, voice_embed, voice_profiles
+from exomem import __main__ as cli
+from exomem import enroll_speaker, voice_embed, voice_profiles
 
 
 @pytest.fixture

@@ -12,8 +12,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kb_mcp import bm25, embeddings, fusion
-from kb_mcp import find as find_module
+from exomem import bm25, embeddings, fusion
+from exomem import find as find_module
 
 # ============================================================================
 # Light tests — no model load
@@ -73,7 +73,7 @@ def test_rrf_dedupes_within_a_single_list() -> None:
 
 def test_audit_flags_embedding_drift(tmp_path) -> None:
     """When file mtime advances past the sidecar row's mtime, audit should flag it."""
-    from kb_mcp import audit as audit_module
+    from exomem import audit as audit_module
     vault = tmp_path / "vault"
     (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
     # Minimal SKILL.md so resolve_vault wouldn't reject (we call audit directly).
@@ -171,7 +171,7 @@ def test_bm25_search_smoke(vault) -> None:
 
 def test_bm25_corpus_is_stemmed(vault) -> None:
     """BM25 tokenization runs Snowball — query "compounding" matches "compound"."""
-    from kb_mcp import create_file as create_file_module
+    from exomem import create_file as create_file_module
     create_file_module.create_file(
         vault,
         path="Knowledge Base/Notes/Insights/probe-stem-compound.md",
@@ -304,11 +304,11 @@ def test_stem_aware_gate_recovers_morphological_match(vault) -> None:
     """A page that uses 'regulator' should be reachable via 'regulation'.
 
     Probes the BM25-only stem-aware gate in _find_semantic. Vector results
-    are disabled (KB_MCP_DISABLE_EMBEDDINGS), so the only way this page
+    are disabled (EXOMEM_DISABLE_EMBEDDINGS), so the only way this page
     reaches the result set is via BM25 (also stemmed) + the stem-aware
     all-tokens-present check.
     """
-    from kb_mcp import create_file as create_file_module
+    from exomem import create_file as create_file_module
     create_file_module.create_file(
         vault,
         path="Knowledge Base/Notes/Insights/probe-stem-regulator.md",
@@ -389,8 +389,8 @@ def test_prefer_compiled_reorders_above_source(vault, source_schema) -> None:
     so BM25 scores them similarly. The type-weight boost is the only
     signal that can break the tie.
     """
-    from kb_mcp import add as add_module
-    from kb_mcp import create_file as create_file_module
+    from exomem import add as add_module
+    from exomem import create_file as create_file_module
 
     probe_body = "The distinctivetypeprobe word appears here exactly once."
     # Source via add() (Sources/ is append-only — must use the typed writer).
@@ -496,7 +496,7 @@ def test_graph_in_degree_counts_inbound_from_seeds(vault) -> None:
     (vector OR stem-gated BM25). Builds three pages all linking to one hub
     plus mentioning a distinctive query term — the hub then has in-degree 3.
     """
-    from kb_mcp import create_file as create_file_module
+    from exomem import create_file as create_file_module
     hub_path = "Knowledge Base/Notes/Insights/probe-indegree-hub.md"
     create_file_module.create_file(
         vault,
@@ -557,7 +557,7 @@ def test_graph_expansion_surfaces_linked_neighbour(vault) -> None:
     probe-graph-neighbour shares no query token but is wikilinked from
     -anchor. Querying for "anchor" should surface -neighbour via graph hop.
     """
-    from kb_mcp import create_file as create_file_module
+    from exomem import create_file as create_file_module
     create_file_module.create_file(
         vault,
         path="Knowledge Base/Notes/Insights/probe-graph-neighbour.md",
@@ -624,8 +624,8 @@ pytest.importorskip("torch")
 
 @pytest.fixture
 def embeddings_enabled(monkeypatch):
-    """Lift the conftest-wide KB_MCP_DISABLE_EMBEDDINGS gate for these tests."""
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    """Lift the conftest-wide EXOMEM_DISABLE_EMBEDDINGS gate for these tests."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     # Reset module-level import-failed flag in case earlier tests tripped it.
     embeddings._IMPORT_FAILED = False
 
@@ -642,7 +642,7 @@ def test_embed_query_and_passage_shapes(embeddings_enabled) -> None:
 
 def test_writer_updates_sidecar(vault, embeddings_enabled) -> None:
     """Calling note() should land chunks for the new file in the sidecar."""
-    from kb_mcp import note as note_module
+    from exomem import note as note_module
 
     note_module.note(
         vault,
@@ -671,7 +671,7 @@ def test_rerank_reorders_top_k(vault, embeddings_enabled) -> None:
     bge-reranker-base's training, which is opaque to test for content this
     small. Smoke-level confidence is enough.
     """
-    from kb_mcp import audit_fix as audit_fix_module
+    from exomem import audit_fix as audit_fix_module
     audit_fix_module.audit_fix(vault, rebuild_embeddings=True)
     hits = find_module.find(
         vault, query="metabolic disease", mode="hybrid",
@@ -694,8 +694,8 @@ def test_hybrid_finds_semantic_match_keyword_misses(
     vault, embeddings_enabled
 ) -> None:
     """A natural-language query reaches a page whose body uses different words."""
-    from kb_mcp import audit_fix as audit_fix_module
-    from kb_mcp import create_file as create_file_module
+    from exomem import audit_fix as audit_fix_module
+    from exomem import create_file as create_file_module
 
     # Drop a probe page whose body contains the *concept* but not the literal
     # query tokens.

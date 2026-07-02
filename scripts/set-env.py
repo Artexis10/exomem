@@ -1,10 +1,10 @@
 """Set a single KEY=VALUE line in .env, idempotently.
 
-A tiny helper for flipping non-secret feature flags (e.g. KB_MCP_VISION_CAPTION)
+A tiny helper for flipping non-secret feature flags (e.g. EXOMEM_VISION_CAPTION)
 without hand-editing .env. Replaces the line in place if the key already exists,
 otherwise appends it on a clean line. Restart the service to load the change.
 
-    uv run --no-sync python scripts/set-env.py KB_MCP_VISION_CAPTION 1
+    uv run --no-sync python scripts/set-env.py EXOMEM_VISION_CAPTION 1
 
 For generated secrets use the dedicated helpers (set-rest-key.py,
 set-upload-token.py) instead — this one writes the literal value you pass.
@@ -22,7 +22,7 @@ _KEY_RE = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("key", help="env var name, e.g. KB_MCP_VISION_CAPTION")
+    ap.add_argument("key", help="env var name, e.g. EXOMEM_VISION_CAPTION")
     ap.add_argument("value", help="value to set, e.g. 1")
     args = ap.parse_args()
 

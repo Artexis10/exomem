@@ -15,8 +15,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import audit, commands, query_log, usage
-from kb_mcp import find as find_module
+from exomem import audit, commands, query_log, usage
+from exomem import find as find_module
 
 
 @pytest.fixture()
@@ -24,7 +24,7 @@ def logs_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Tmp logs dir wired as the usage source, with the suite gate lifted."""
     d = tmp_path / "logs"
     d.mkdir()
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(query_log, "_LOG_DIR", d)
     usage.reset_usage_cache()
     yield d
@@ -176,7 +176,7 @@ def test_kill_switch(vault: Path, logs_dir: Path, monkeypatch) -> None:
     alpha, beta = _seed_tie_pages(vault)
     ts = dt.datetime.now().isoformat(timespec="seconds")
     _log_read(logs_dir, beta, ts)
-    monkeypatch.setenv("KB_MCP_DISABLE_USAGE_BOOST", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_USAGE_BOOST", "1")
     hits = find_module.find(vault, query="usageprobe marker", prefer_used=True)
     ours = [h for h in hits if "usage-tie-" in h.path]
     assert [h.path for h in ours] == [alpha, beta]
@@ -199,7 +199,7 @@ def test_prefer_used_bypasses_hot_cache(vault: Path, logs_dir: Path, monkeypatch
 
 def test_snapshot_refresh_sees_new_log_lines(vault: Path, logs_dir: Path, monkeypatch) -> None:
     alpha, beta = _seed_tie_pages(vault)
-    monkeypatch.setenv("KB_MCP_USAGE_REFRESH_S", "0")  # re-stat logs every call
+    monkeypatch.setenv("EXOMEM_USAGE_REFRESH_S", "0")  # re-stat logs every call
     hits = find_module.find(vault, query="usageprobe marker", prefer_used=True)
     ours = [h.path for h in hits if "usage-tie-" in h.path]
     assert ours == [alpha, beta]

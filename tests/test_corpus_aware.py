@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import (
+from exomem import (
     add as add_module,
     corpus_aware,
     edit as edit_module,
@@ -80,7 +80,7 @@ def test_suggest_related_why_mentions_signals(monkeypatch) -> None:
 
 
 def test_detect_duplicates_noop_when_embeddings_disabled(vault: Path) -> None:
-    # Runs under the suite-wide KB_MCP_DISABLE_EMBEDDINGS — must short-circuit to
+    # Runs under the suite-wide EXOMEM_DISABLE_EMBEDDINGS — must short-circuit to
     # [] without loading torch or touching a sidecar.
     assert corpus_aware.detect_duplicates(
         vault, title="anything", body="some body", types_filter=["insight"]
@@ -88,17 +88,17 @@ def test_detect_duplicates_noop_when_embeddings_disabled(vault: Path) -> None:
 
 
 def test_dup_threshold_defaults_when_env_unset(monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_DUP_THRESHOLD", raising=False)
+    monkeypatch.delenv("EXOMEM_DUP_THRESHOLD", raising=False)
     assert corpus_aware._dup_threshold() == corpus_aware.DUP_THRESHOLD
 
 
 def test_dup_threshold_honors_env_override(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_DUP_THRESHOLD", "0.93")
+    monkeypatch.setenv("EXOMEM_DUP_THRESHOLD", "0.93")
     assert corpus_aware._dup_threshold() == 0.93
 
 
 def test_dup_threshold_falls_back_on_garbage(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_DUP_THRESHOLD", "loose")
+    monkeypatch.setenv("EXOMEM_DUP_THRESHOLD", "loose")
     assert corpus_aware._dup_threshold() == corpus_aware.DUP_THRESHOLD
 
 
@@ -128,29 +128,29 @@ def _seed_md(
 def _no_embed_writes(monkeypatch):
     """Run a write's corpus block torch-free: stub the embedding machinery so
     note/add/edit exercise the contradiction WIRING without loading a model."""
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(corpus_aware, "_best_cosine_per_file", lambda *a, **k: {})
     monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: [])
     monkeypatch.setattr(embeddings, "upsert_after_write", lambda *a, **k: None)
 
 
 def test_detect_contradictions_noop_when_embeddings_disabled(vault: Path) -> None:
-    # Suite-wide KB_MCP_DISABLE_EMBEDDINGS — must short-circuit to [].
+    # Suite-wide EXOMEM_DISABLE_EMBEDDINGS — must short-circuit to [].
     assert corpus_aware.detect_contradictions(vault, title="x", body="y") == []
 
 
 def test_contradiction_floor_defaults_when_env_unset(monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_CONTRADICTION_FLOOR", raising=False)
+    monkeypatch.delenv("EXOMEM_CONTRADICTION_FLOOR", raising=False)
     assert corpus_aware._contradiction_floor() == corpus_aware.CONTRADICTION_FLOOR
 
 
 def test_contradiction_floor_honors_env_override(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "0.80")
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", "0.80")
     assert corpus_aware._contradiction_floor() == 0.80
 
 
 def test_contradiction_floor_falls_back_on_garbage(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "close")
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", "close")
     assert corpus_aware._contradiction_floor() == corpus_aware.CONTRADICTION_FLOOR
 
 
@@ -166,7 +166,7 @@ def test_overlap_warning_is_honest() -> None:
 
 
 def test_detect_contradictions_band_and_candidate_restriction(vault, monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     active = _seed_md(vault, "Notes/Insights/active-twin.md", type_="insight")
     superseded = _seed_md(
         vault, "Notes/Insights/old-twin.md", type_="insight", status="superseded"
@@ -197,7 +197,7 @@ def test_detect_contradictions_band_and_candidate_restriction(vault, monkeypatch
 
 
 def test_detect_contradictions_excludes_self(vault, monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     p = _seed_md(vault, "Notes/Insights/selfie.md", type_="insight")
     find_module.clear_cache()
     out = corpus_aware.detect_contradictions(
@@ -209,8 +209,8 @@ def test_detect_contradictions_excludes_self(vault, monkeypatch) -> None:
 
 
 def test_detect_contradictions_inverted_band_disabled(vault, monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", "0.95")  # >= dup ceiling 0.90
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", "0.95")  # >= dup ceiling 0.90
     p = _seed_md(vault, "Notes/Insights/twin.md", type_="insight")
     find_module.clear_cache()
     out = corpus_aware.detect_contradictions(
@@ -272,7 +272,7 @@ def test_edit_tags_only_skips_contradiction(vault, _no_embed_writes, monkeypatch
 
 
 def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: [])
     monkeypatch.setattr(embeddings, "upsert_after_write", lambda *a, **k: None)
     calls = {"n": 0}
@@ -293,14 +293,14 @@ def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
 pytest.importorskip("sentence_transformers")
 pytest.importorskip("torch")
 
-from kb_mcp import embeddings, note as note_module  # noqa: E402
+from exomem import embeddings, note as note_module  # noqa: E402
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
 
 
 @pytest.fixture
 def embeddings_enabled(monkeypatch):
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     embeddings._IMPORT_FAILED = False
 
 

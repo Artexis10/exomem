@@ -18,14 +18,14 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import server as server_module
+from exomem import server as server_module
 
 
 def _build(monkeypatch: pytest.MonkeyPatch):
     """Build the server against the fixture vault, embeddings off for speed."""
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.delenv("KB_MCP_DISABLE_TIER2", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     return server_module.build_server(require_auth=False)
 
 

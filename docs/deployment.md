@@ -64,24 +64,24 @@ Media extraction needs two **system** tools (not pip-installable):
 
 - **Tesseract OCR** (images): `winget install --id UB-Mannheim.TesseractOCR -e`.
   The installer doesn't add it to PATH; the server auto-discovers it at
-  `C:\Program Files\Tesseract-OCR\`, or set `KB_MCP_TESSERACT_CMD`.
+  `C:\Program Files\Tesseract-OCR\`, or set `EXOMEM_TESSERACT_CMD`.
 - **ffmpeg** is bundled by PyAV (pulled via faster-whisper), so audio/video decode
   works without a separate install.
 
 Verify the GPU media path: `uv run python scripts/verify-media-gpu.py`.
 
 Lean / CPU-only boxes can skip all of this — set
-`KB_MCP_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
+`EXOMEM_DISABLE_MEDIA_EXTRACTION`; uploads still work, just without server-side
 searchable-text extraction. CPU also works (no GPU needed), just slower — pick a
-smaller Whisper model with `KB_MCP_WHISPER_MODEL=base`. The CUDA-12 wheels above
+smaller Whisper model with `EXOMEM_WHISPER_MODEL=base`. The CUDA-12 wheels above
 are Windows + GPU only, unused on CPU.
 
 To make **existing** Evidence/media files searchable (one-shot back-fill; new
 uploads are handled automatically), run:
 
 ```powershell
-uv run python -m kb_mcp backfill-media --dry-run   # preview (writes nothing)
-uv run python -m kb_mcp backfill-media             # do it (CPU or GPU)
+uv run python -m exomem backfill-media --dry-run   # preview (writes nothing)
+uv run python -m exomem backfill-media             # do it (CPU or GPU)
 ```
 
 It writes a sidecar if missing, extracts text (OCR/ASR/PDF), and CLIP-embeds
@@ -134,21 +134,21 @@ Save the generated **Client ID** and **Client Secret**.
 Create `.env` in the repo root:
 
 ```
-KB_MCP_BASE_URL=https://kb.example.com
-KB_MCP_GITHUB_USERNAME=<your-github-login>
+EXOMEM_BASE_URL=https://kb.example.com
+EXOMEM_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
 # Recommended: a long random string that pins the OAuth signing key, so the
 # claude.ai connector survives FastMCP upgrades / client-secret rotation without
 # re-authorizing. Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
-KB_MCP_JWT_SIGNING_KEY=<long-random-string>
+EXOMEM_JWT_SIGNING_KEY=<long-random-string>
 # Required: vault root — the folder that contains Knowledge Base/
-KB_MCP_VAULT_PATH=<your-Obsidian-vault-root>
+EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
 ```
 
-`KB_MCP_BASE_URL` must match your public hostname (from step 2) exactly — no
-trailing slash, no `/mcp` suffix. `KB_MCP_GITHUB_USERNAME` is case-insensitive but
-must be the *login*, not the display name. `KB_MCP_VAULT_PATH` is **required**:
+`EXOMEM_BASE_URL` must match your public hostname (from step 2) exactly — no
+trailing slash, no `/mcp` suffix. `EXOMEM_GITHUB_USERNAME` is case-insensitive but
+must be the *login*, not the display name. `EXOMEM_VAULT_PATH` is **required**:
 claude.ai connects over HTTP and passes no environment, so the service resolves the
 vault solely from this line in `.env` at startup.
 
@@ -156,14 +156,14 @@ vault solely from this line in `.env` at startup.
 
 ```powershell
 # Configuration profile check
-uv run python -m kb_mcp doctor --profile remote
+uv run python -m exomem doctor --profile remote
 
 # stdio (no auth needed)
-uv run python -m kb_mcp --transport stdio
+uv run python -m exomem --transport stdio
 # Ctrl-C to stop
 
 # HTTP (OAuth required)
-uv run python -m kb_mcp --transport streamable-http --host 127.0.0.1 --port 8765
+uv run python -m exomem --transport streamable-http --host 127.0.0.1 --port 8765
 # In another terminal:
 #   curl.exe -i http://127.0.0.1:8765/mcp                      → expect 401
 #   curl.exe -i http://127.0.0.1:8765/.well-known/oauth-authorization-server
@@ -217,7 +217,7 @@ pwsh -File scripts/install-service.ps1
 4. Leave **OAuth Client ID** and **OAuth Client Secret** blank — claude.ai uses
    Dynamic Client Registration against your `/register` endpoint.
 5. Save. claude.ai opens a GitHub login window → log in (only the user in
-   `KB_MCP_GITHUB_USERNAME` is allowed) → approve consent → redirects back to
+   `EXOMEM_GITHUB_USERNAME` is allowed) → approve consent → redirects back to
    claude.ai. The tools appear in the palette.
 
 ## Deploying on a second machine (multi-host)
@@ -226,7 +226,7 @@ Each machine is an independent deployment — there is no shared state. To run e
 on a second box (e.g. a laptop alongside a desktop), repeat the install with that
 host's *own* values. The non-obvious parts:
 
-- **Its own public hostname.** `KB_MCP_BASE_URL` and the connector URL are
+- **Its own public hostname.** `EXOMEM_BASE_URL` and the connector URL are
   per-host. Tailscale gives each node a distinct `<node>.<tailnet>.ts.net`
   automatically (`tailscale funnel status`); for Cloudflare, give each host a
   distinct subdomain (e.g. `kb.example.com`, `kb-laptop.example.com`) via
@@ -238,7 +238,7 @@ host's *own* values. The non-obvious parts:
   `exomem (laptop)`) with callback `https://<this-host>.example.com/auth/callback`
   and put *its* `GITHUB_CLIENT_ID` / `GITHUB_CLIENT_SECRET` in this machine's
   `.env`.
-- **Its own `.env` and connector.** Set `KB_MCP_VAULT_PATH` to this machine's vault
+- **Its own `.env` and connector.** Set `EXOMEM_VAULT_PATH` to this machine's vault
   root. In claude.ai, add a separate connector pointing at this host's `/mcp` URL
   (the URL usually isn't editable in place, so delete + re-add to repoint).
 - **Its own embedding stack (GPU).** Hybrid `find` needs `torch` +
@@ -277,19 +277,19 @@ resolves CUDA via the wheels' RPATH.
 
 CLIP visual search runs CLIP on **CPU when ASR is active** (whisper's cu12 cuDNN
 PATH-prepend otherwise shadows torch's cuDNN and breaks CLIP's Conv2d). Override
-with `KB_MCP_CLIP_DEVICE=cuda`/`cpu` if needed.
+with `EXOMEM_CLIP_DEVICE=cuda`/`cpu` if needed.
 
-Zero-shot **image tags** (`KB_MCP_IMAGE_TAGS`, default off) reuse that same loaded
+Zero-shot **image tags** (`EXOMEM_IMAGE_TAGS`, default off) reuse that same loaded
 CLIP model — no extra dependency. When set, each extracted image is cosine-scored
 against a fixed generic tag vocabulary and the top matches are appended to its
 indexed text as a `Tags: invoice, table, screenshot` line, so a photo is findable
 by what it depicts (not just its OCR text). It is a frozen cosine measurement (no
 LLM), inherits the CLIP device logic above, and soft-fails to no tags when CLIP is
-absent. Tune with `KB_MCP_IMAGE_TAGS_TOPK` (default 5) and
-`KB_MCP_IMAGE_TAGS_THRESHOLD` (raw cosine, default 0.22); only newly-extracted
+absent. Tune with `EXOMEM_IMAGE_TAGS_TOPK` (default 5) and
+`EXOMEM_IMAGE_TAGS_THRESHOLD` (raw cosine, default 0.22); only newly-extracted
 images are tagged.
 
-**Video scene frames** (`KB_MCP_VIDEO_SCENE_FRAMES`, default off) upgrade video
+**Video scene frames** (`EXOMEM_VIDEO_SCENE_FRAMES`, default off) upgrade video
 indexing from uniform-interval keyframes to visual-change scene detection, and
 persist one representative JPEG per scene in a `<video>.frames/` directory next to
 the video (each with a sidecar pointing back at the parent + timestamp). Frames
@@ -299,9 +299,9 @@ video's hit and surfaces `scene_frame` + `scene_match_at`. Detection is a cheap
 I-frame-only metrics pass (PyAV `skip_frame NONKEY`, 64×64 grayscale hash +
 histogram) — no new dependency, and it soft-fails back to the uniform sampler.
 The worker budget stays modest: decoding I-frames of an hour-long 1080p video
-takes seconds, plus at most `KB_MCP_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
-Tune boundaries with `KB_MCP_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
-and `KB_MCP_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
+takes seconds, plus at most `EXOMEM_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
+Tune boundaries with `EXOMEM_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
+and `EXOMEM_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
 run `exomem backfill-media` with the flag set — idempotent, and it replaces the
 old uniform CLIP rows with scene-aware ones.
 
@@ -311,15 +311,15 @@ sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active**, with
-a `KB_MCP_VOICE_DEVICE=cuda`/`cpu` override. Enroll voices with
+a `EXOMEM_VOICE_DEVICE=cuda`/`cpu` override. Enroll voices with
 `exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
-manage them). With ≥1 profile enrolled and `KB_MCP_DIARIZE` set, matched clusters render
+manage them). With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render
 as `[<name>]: …`; unknown voices stay anonymous. The ECAPA checkpoint
-(`speechbrain/spkrec-ecapa-voxceleb`, override `KB_MCP_VOICE_EMBED_MODEL`) is gated like
+(`speechbrain/spkrec-ecapa-voxceleb`, override `EXOMEM_VOICE_EMBED_MODEL`) is gated like
 pyannote's — set `HUGGINGFACE_TOKEN`. Attribution thresholds are tunable via
-`KB_MCP_VOICE_MARGIN`, `KB_MCP_VOICE_MERGE_THRESHOLD`, `KB_MCP_VOICE_CONFIDENT_DELTA`, and
-`KB_MCP_VOICE_REL_GAP` (defaults match the shipped evidence-based values). The whole path is
+`EXOMEM_VOICE_MARGIN`, `EXOMEM_VOICE_MERGE_THRESHOLD`, `EXOMEM_VOICE_CONFIDENT_DELTA`, and
+`EXOMEM_VOICE_REL_GAP` (defaults match the shipped evidence-based values). The whole path is
 default-off + soft-fail: with no profiles or the dep absent it degrades to today's anonymous
 `[Speaker A]: …` output.
 
@@ -375,14 +375,14 @@ sc.exe start exomem
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON. If 404, the OAuthProxy isn't mounted — most likely `KB_MCP_BASE_URL` has a trailing slash or includes `/mcp`. |
+| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON. If 404, the OAuthProxy isn't mounted — most likely `EXOMEM_BASE_URL` has a trailing slash or includes `/mcp`. |
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
-| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `KB_MCP_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
+| claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
 | claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/exomem.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
-| `KB vault not found` on startup | vault path moved or `KB_MCP_VAULT_PATH` wrong | set `KB_MCP_VAULT_PATH` to the absolute vault root in `.env`. |
+| `KB vault not found` on startup | vault path moved or `EXOMEM_VAULT_PATH` wrong | set `EXOMEM_VAULT_PATH` to the absolute vault root in `.env`. |
 | Schema parse error on startup | `_Schema/references/frontmatter.md` shape changed | diff against the version that was working; the parser is conservative on purpose. |
 | `add` fails with `INVALID_SOURCE` | missing required field (url for article/paper/video; non-empty content/title) | the error payload names the missing field; fix and retry. |
 

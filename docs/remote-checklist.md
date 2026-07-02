@@ -8,21 +8,21 @@ walkthrough and troubleshooting are in [deployment.md](deployment.md).
 ```bash
 uv sync
 uv run python scripts/smoke-sample-vault.py
-uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile lean
+uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile lean
 ```
 
 For semantic search, install the extra and validate it before remote setup:
 
 ```bash
 uv sync --extra embeddings
-uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile hybrid
+uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile hybrid
 ```
 
 For server-side media extraction:
 
 ```bash
 uv sync --extra embeddings --extra media
-uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile media
+uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile media
 ```
 
 Install Tesseract separately if the media doctor reports it missing.
@@ -52,20 +52,20 @@ Do not reuse another machine's OAuth app unless it uses the exact same hostname.
 Required for remote:
 
 ```text
-KB_MCP_BASE_URL=https://<your-host>
-KB_MCP_GITHUB_USERNAME=<your-github-login>
+EXOMEM_BASE_URL=https://<your-host>
+EXOMEM_GITHUB_USERNAME=<your-github-login>
 GITHUB_CLIENT_ID=<from GitHub>
 GITHUB_CLIENT_SECRET=<from GitHub>
-KB_MCP_JWT_SIGNING_KEY=<long random string>
-KB_MCP_VAULT_PATH=<absolute vault root>
+EXOMEM_JWT_SIGNING_KEY=<long random string>
+EXOMEM_VAULT_PATH=<absolute vault root>
 ```
 
-`KB_MCP_BASE_URL` has no trailing slash and no `/mcp` suffix.
+`EXOMEM_BASE_URL` has no trailing slash and no `/mcp` suffix.
 
 ## 5. Doctor passes
 
 ```bash
-uv run python -m kb_mcp doctor --profile remote
+uv run python -m exomem doctor --profile remote
 ```
 
 This validates the env shape and remote prerequisites before claude.ai tries to
@@ -77,6 +77,6 @@ register the connector.
 2. Start the tunnel/Funnel to the same local port.
 3. Add a claude.ai custom connector at `https://<your-host>/mcp`.
 4. Complete the GitHub OAuth login as the account named in
-   `KB_MCP_GITHUB_USERNAME`.
+   `EXOMEM_GITHUB_USERNAME`.
 
 After any `.env` edit, restart the service. The server reads the file at startup.

@@ -22,7 +22,7 @@ in the stack.
 
 ## What Changes
 
-- **Scene-aware keyframe sampling** (`KB_MCP_VIDEO_SCENE_FRAMES` gate): a cheap I-frame-only
+- **Scene-aware keyframe sampling** (`EXOMEM_VIDEO_SCENE_FRAMES` gate): a cheap I-frame-only
   metrics pass (PyAV `skip_frame NONKEY`, 64×64 grayscale reformat) feeds a pure
   `detect_scenes()` — anchor-based hash/histogram boundary detection with a minimum scene
   duration and a weakest-boundary merge when scenes exceed the existing keyframe cap. The
@@ -36,7 +36,7 @@ in the stack.
   `parent_media: <video rel path>` and `frame_ts: <seconds>`.
 - **Frames are OCR'd through the existing image path** (`extracted_by: pending` sidecar →
   worker OCR → `## Extracted text`), so on-screen text is BM25/keyword-findable. Restart
-  recovery and `KB_MCP_IMAGE_TAGS` apply for free.
+  recovery and `EXOMEM_IMAGE_TAGS` apply for free.
 - **No double-counting:** frame JPEGs get NO ClipIndex rows — the parent video's per-scene
   vectors own visual search. Both CLIP-enqueue points (worker startup scan, backfill) skip
   sidecars carrying `parent_media`.
@@ -46,11 +46,11 @@ in the stack.
   video hits resolve the nearest saved frame by filename timestamp.
 - **Backfill:** `exomem backfill-media` grows an idempotent `need_scenes` pass that regenerates
   scene frames (and scene-aware vectors) for already-indexed videos when the gate is on.
-- **Env-gated, default-OFF, soft-fail.** `KB_MCP_VIDEO_SCENE_FRAMES` unset ⇒ byte-identical
+- **Env-gated, default-OFF, soft-fail.** `EXOMEM_VIDEO_SCENE_FRAMES` unset ⇒ byte-identical
   behavior (uniform sampling, no files written, `find` unchanged). Tuning:
-  `KB_MCP_VIDEO_SCENE_THRESHOLD` (hash bits), `KB_MCP_VIDEO_SCENE_MIN_SECS`. Any frame-write
+  `EXOMEM_VIDEO_SCENE_THRESHOLD` (hash bits), `EXOMEM_VIDEO_SCENE_MIN_SECS`. Any frame-write
   failure still leaves the video vectors-indexed; total detection failure falls back to the
-  uniform sampler. Requires the CLIP path (`KB_MCP_DISABLE_CLIP` ⇒ no scene work).
+  uniform sampler. Requires the CLIP path (`EXOMEM_DISABLE_CLIP` ⇒ no scene work).
 - **No new dependency.** PyAV (via faster-whisper), Pillow, numpy, CLIP — all already present.
 
 Out of scope (future changes): semantic/transcript-topic segmentation fused with visual events;
@@ -67,19 +67,19 @@ keyframes; per-scene VLM captions.
 
 ## Impact
 
-- Code: `src/kb_mcp/embeddings.py` (pure `detect_scenes` core, I-frame metrics pass, gate branch
-  in `embed_video_frames`); `src/kb_mcp/scene_frames.py` (new — frame/sidecar writer, filename
-  timestamp codec, nearest-frame lookup); `src/kb_mcp/media_worker.py` (video branch wiring +
-  frame-child exclusion in the startup CLIP scan); `src/kb_mcp/find.py` (pre-fusion frame-child
-  collapse, `scene_frame`/`scene_match_at` hit fields); `src/kb_mcp/preserve.py`
-  (`_render_sidecar` optional `parent_media`/`frame_ts`); `src/kb_mcp/backfill.py`
+- Code: `src/exomem/embeddings.py` (pure `detect_scenes` core, I-frame metrics pass, gate branch
+  in `embed_video_frames`); `src/exomem/scene_frames.py` (new — frame/sidecar writer, filename
+  timestamp codec, nearest-frame lookup); `src/exomem/media_worker.py` (video branch wiring +
+  frame-child exclusion in the startup CLIP scan); `src/exomem/find.py` (pre-fusion frame-child
+  collapse, `scene_frame`/`scene_match_at` hit fields); `src/exomem/preserve.py`
+  (`_render_sidecar` optional `parent_media`/`frame_ts`); `src/exomem/backfill.py`
   (`need_scenes` pass).
 - Deps: none added.
-- Default-off ⇒ zero behavior change when `KB_MCP_VIDEO_SCENE_FRAMES` is unset.
+- Default-off ⇒ zero behavior change when `EXOMEM_VIDEO_SCENE_FRAMES` is unset.
 - Worker budget: pass 1 decodes I-frames only at 64×64 grayscale (seconds for an hour-long
   1080p video); pass 2 seeks/decodes ≤ the existing keyframe cap (40) at full res — comparable
   to today's path and far below ASR cost on the same worker thread.
 - Storage: ≤ cap × ~100–200 KB JPEG per video plus one small sidecar per frame; frames are
   normal Evidence files (list/audit/get/download work unchanged).
-- Docs: `KB_MCP_VIDEO_SCENE_FRAMES` / `..._THRESHOLD` / `..._MIN_SECS` in the README env table;
+- Docs: `EXOMEM_VIDEO_SCENE_FRAMES` / `..._THRESHOLD` / `..._MIN_SECS` in the README env table;
   note in `docs/deployment.md`. (Scaffold/SKILL untouched — leak-guarded; handled separately.)

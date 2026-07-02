@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import preserve as preserve_module
+from exomem import preserve as preserve_module
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -46,7 +46,7 @@ def test_cap_extracted_text_truncates_over_limit(monkeypatch: pytest.MonkeyPatch
 
 def test_capped_sidecar_keeps_corpus_small(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The worker/backfill write path must cap, so one oversized doc can't poison find.
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     monkeypatch.setattr(preserve_module, "_MAX_EXTRACT_BYTES", 500)
     res = preserve_module.preserve_bytes(
         vault, scope="Test", category="docs", filename="huge.docx", data=b"BINARY"
@@ -210,7 +210,7 @@ def test_preserve_auto_creates_scope_and_category_dirs(vault: Path) -> None:
 
 def test_preserve_with_text_writes_searchable_sidecar(vault: Path) -> None:
     """The OCR companion: extracted `text` lands in the sidecar and is findable."""
-    from kb_mcp import find as find_module
+    from exomem import find as find_module
 
     result = preserve_module.preserve(
         vault,

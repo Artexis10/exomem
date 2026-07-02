@@ -12,8 +12,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kb_mcp import extract, vault, voice_embed, voice_profiles
-from kb_mcp.speaker_attribution import Profile
+from exomem import extract, vault, voice_embed, voice_profiles
+from exomem.speaker_attribution import Profile
 
 
 class _FakeSeg:
@@ -44,7 +44,7 @@ _TURNS = [(0.0, 1.0, "SPEAKER_00"), (1.0, 2.0, "SPEAKER_01")]
 
 def _wire(monkeypatch, *, profiles, embed):
     """Enable diarization and patch the whisper, pyannote, profile-store, and embedder seams."""
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(list(_SEGS)))
     monkeypatch.setattr(extract, "_run_diarization", lambda p: list(_TURNS))
     monkeypatch.setattr(vault, "resolve_vault", lambda: Path("/vault"))
@@ -103,11 +103,11 @@ def test_embed_soft_fail_falls_back_to_anonymous(monkeypatch: pytest.MonkeyPatch
 
 
 def test_resolution_failure_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    # resolve_vault blowing up (e.g. KB_MCP_VAULT_PATH unset) must degrade, not crash.
+    # resolve_vault blowing up (e.g. EXOMEM_VAULT_PATH unset) must degrade, not crash.
     def _boom():
-        raise RuntimeError("KB_MCP_VAULT_PATH is not set")
+        raise RuntimeError("EXOMEM_VAULT_PATH is not set")
 
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(list(_SEGS)))
     monkeypatch.setattr(extract, "_run_diarization", lambda p: list(_TURNS))
     monkeypatch.setattr(vault, "resolve_vault", _boom)

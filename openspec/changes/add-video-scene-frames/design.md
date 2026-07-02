@@ -39,7 +39,7 @@ that single decode feeds both CLIP encoding and the JPEG write.
 error in pass 1 → the existing `_sample_video_keyframes` uniform sampler is the candidate
 source. Never hard-fails past what today's path tolerates.
 
-**Gate-off = byte-identical:** with `KB_MCP_VIDEO_SCENE_FRAMES` unset, `embed_video_frames`
+**Gate-off = byte-identical:** with `EXOMEM_VIDEO_SCENE_FRAMES` unset, `embed_video_frames`
 runs today's uniform sampling + `_dedup_keyframes` untouched and writes no files.
 
 ## D2. Storage layout
@@ -62,7 +62,7 @@ Frame JPEGs get **no ClipIndex rows** — the parent video's per-scene rows (sam
 timestamps) own visual search. Enforced by skipping any image whose sidecar carries
 `parent_media` at both CLIP-enqueue points: `media_worker._scan_unindexed_images` and
 backfill's `need_clip`. OCR rides the existing pending-sidecar path (`do_ocr=True,
-do_clip=False` per frame); `KB_MCP_IMAGE_TAGS` applies to frames for free.
+do_clip=False` per frame); `EXOMEM_IMAGE_TAGS` applies to frames for free.
 
 ## D4. `find` grouping — collapse at lane level, pre-fusion
 

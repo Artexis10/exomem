@@ -12,7 +12,7 @@ SRC = HERE.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kb_mcp.vault import WikilinkResolver, resolve_vault  # noqa: E402
+from exomem.vault import WikilinkResolver, resolve_vault  # noqa: E402
 from normalize_vault_wikilinks import normalize_file, walk_kb_md  # noqa: E402
 
 

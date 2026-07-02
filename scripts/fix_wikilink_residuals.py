@@ -25,7 +25,7 @@ SRC = HERE.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
-from kb_mcp.vault import (  # noqa: E402
+from exomem.vault import (  # noqa: E402
     PlannedWrite,
     _WIKILINK_PATTERN,
     _mask_code_spans,

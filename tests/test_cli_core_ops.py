@@ -1,6 +1,6 @@
 """The registry-driven CLI core operations (`kb find`/`get`/`audit`/`note` …).
 
-Drives `kb_mcp.__main__.main` in-process with explicit argv against a temp vault,
+Drives `exomem.__main__.main` in-process with explicit argv against a temp vault,
 asserting the human vs `--json` envelope output and the 0/1/2 exit-code contract.
 """
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp.__main__ import main
+from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
 
@@ -153,8 +153,8 @@ def test_malformed_field_exits_2(vault: Path, capsys) -> None:
 def test_tier2_op_disabled_emits_unavailable(
     vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`kb <tier2-op>` with KB_MCP_DISABLE_TIER2 set names the gap, exit 2."""
-    monkeypatch.setenv("KB_MCP_DISABLE_TIER2", "1")
+    """`kb <tier2-op>` with EXOMEM_DISABLE_TIER2 set names the gap, exit 2."""
+    monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
     code, _out, err = _run(["query_data", "some.csv"], capsys)
     assert code == 2
     assert "Error [UNAVAILABLE]" in err

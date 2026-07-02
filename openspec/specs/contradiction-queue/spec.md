@@ -52,23 +52,23 @@ dropped.
 
 ### Requirement: Capped Surfacing with an Explicit Omitted Count
 
-The system SHALL cap the surfaced pairs at the top `KB_MCP_CONTRADICTION_TOP_N`
+The system SHALL cap the surfaced pairs at the top `EXOMEM_CONTRADICTION_TOP_N`
 (default 40) by review priority and SHALL, when more pairs are in band, append
 exactly one summary finding reporting the number of lower-priority/same-family
 pairs not shown. The system MUST NOT silently truncate. Setting
-`KB_MCP_CONTRADICTION_TOP_N` to `0` SHALL disable the cap and surface all pairs
+`EXOMEM_CONTRADICTION_TOP_N` to `0` SHALL disable the cap and surface all pairs
 with no summary finding.
 
 #### Scenario: Excess pairs are capped and counted
 
-- **WHEN** the number of in-band pairs exceeds `KB_MCP_CONTRADICTION_TOP_N`
+- **WHEN** the number of in-band pairs exceeds `EXOMEM_CONTRADICTION_TOP_N`
 - **THEN** only the top-N pairs by priority are surfaced as pair findings
 - **AND** one additional summary finding reports the omitted count via
   `meta.truncated` and a detail line stating "<N> more ... pairs not shown"
 
 #### Scenario: Cap disabled surfaces everything
 
-- **WHEN** `KB_MCP_CONTRADICTION_TOP_N` is `0`
+- **WHEN** `EXOMEM_CONTRADICTION_TOP_N` is `0`
 - **THEN** every in-band pair is surfaced
 - **AND** no summary finding is appended
 
@@ -76,7 +76,7 @@ with no summary finding.
 
 The ordering, demotion, and capping SHALL be measurement-only. The system MUST
 NOT mutate any note, MUST NOT auto-supersede, and MUST NOT affect `find` ranking.
-When embeddings are disabled (`KB_MCP_DISABLE_EMBEDDINGS`), the category SHALL
+When embeddings are disabled (`EXOMEM_DISABLE_EMBEDDINGS`), the category SHALL
 continue to short-circuit to an empty result without loading any model.
 
 #### Scenario: Audit run leaves notes untouched
@@ -87,6 +87,6 @@ continue to short-circuit to an empty result without loading any model.
 
 #### Scenario: Embeddings disabled stays a no-op
 
-- **WHEN** `KB_MCP_DISABLE_EMBEDDINGS` is set
+- **WHEN** `EXOMEM_DISABLE_EMBEDDINGS` is set
 - **THEN** the category returns no findings and loads no embedding model
 

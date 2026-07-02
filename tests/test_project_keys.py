@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import note as note_module
-from kb_mcp import project_keys as project_keys_module
+from exomem import note as note_module
+from exomem import project_keys as project_keys_module
 
 TODAY = dt.date(2026, 5, 28)
 
@@ -199,8 +199,8 @@ def test_note_surfaces_typo_as_project_key_typo_error(vault: Path) -> None:
 
 def test_set_frontmatter_field_blocks_project_typo(vault: Path) -> None:
     """Patching `project` to a typo via set_frontmatter_field should raise."""
-    from kb_mcp import note as note_module
-    from kb_mcp import set_frontmatter_field as sff_module
+    from exomem import note as note_module
+    from exomem import set_frontmatter_field as sff_module
     # Land a note first so there's something to patch.
     r = note_module.note(
         vault,
@@ -220,9 +220,9 @@ def test_set_frontmatter_field_blocks_project_typo(vault: Path) -> None:
 
 def test_set_frontmatter_field_autoregisters_new_project(vault: Path) -> None:
     """Patching `project` to a genuinely new (distance ≥3) key should auto-register."""
-    from kb_mcp import note as note_module
-    from kb_mcp import project_keys as pk_module
-    from kb_mcp import set_frontmatter_field as sff_module
+    from exomem import note as note_module
+    from exomem import project_keys as pk_module
+    from exomem import set_frontmatter_field as sff_module
     r = note_module.note(
         vault,
         content="# Note\n\n## Question\n\nbody",
@@ -241,7 +241,7 @@ def test_set_frontmatter_field_autoregisters_new_project(vault: Path) -> None:
 
 def test_link_decision_blocks_project_typo(vault: Path) -> None:
     """A typo via link(entity_type='decision') should raise LinkError code=PROJECT_KEY_TYPO."""
-    from kb_mcp import link as link_module
+    from exomem import link as link_module
     with pytest.raises(link_module.LinkError) as exc_info:
         link_module.link(
             vault,
@@ -258,8 +258,8 @@ def test_link_decision_blocks_project_typo(vault: Path) -> None:
 
 def test_link_decision_autoregisters_new_project(vault: Path) -> None:
     """A genuinely new project (distance ≥3) on link(decision) should auto-register."""
-    from kb_mcp import link as link_module
-    from kb_mcp import project_keys as pk_module
+    from exomem import link as link_module
+    from exomem import project_keys as pk_module
     link_module.link(
         vault,
         entity_type="decision",
@@ -275,8 +275,8 @@ def test_link_decision_autoregisters_new_project(vault: Path) -> None:
 
 def test_audit_flags_unregistered_project_key(vault: Path) -> None:
     """Audit's new category catches frontmatter project values not in the registry."""
-    from kb_mcp import audit as audit_module
-    from kb_mcp import create_file as cf_module
+    from exomem import audit as audit_module
+    from exomem import create_file as cf_module
     # Use Tier 2 create_file to bypass the auto-register path and land a
     # frontmatter value the registry doesn't know about. Mirrors how
     # historical/pre-guard pages could still have drift.

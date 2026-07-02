@@ -10,14 +10,14 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import bm25, warmup
-from kb_mcp import find as find_module
+from exomem import bm25, warmup
+from exomem import find as find_module
 
 
 def _count_walks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """Count TOP-LEVEL kb-tree and vault-tree walks (_walk_md recurses into
     itself per subdirectory; only root-level invocations are walks)."""
-    from kb_mcp import vault as vault_module
+    from exomem import vault as vault_module
 
     kb_root = vault / "Knowledge Base"
     counts = {"kb": 0, "vault": 0}
@@ -41,7 +41,7 @@ def _count_walks(vault: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
 def test_steady_state_walk_budget(vault: Path, monkeypatch) -> None:
     """A warmed repeat hybrid query stat-walks each scope at most once
     (freshness snapshot) plus the keyword lane's single parse walk."""
-    monkeypatch.setenv("KB_MCP_FIND_CACHE_SIZE", "0")  # force the lanes to run
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")  # force the lanes to run
     find_module.find(vault, query="metabolism")  # warm BM25/resolver/pages
     counts = _count_walks(vault, monkeypatch)
     find_module.find(vault, query="metabolism")
@@ -52,7 +52,7 @@ def test_steady_state_walk_budget(vault: Path, monkeypatch) -> None:
 
 
 def test_kb_only_scope_never_walks_vault(vault: Path, monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_FIND_CACHE_SIZE", "0")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     find_module.find(vault, query="metabolism", scope="kb-only", graph=False)
     counts = _count_walks(vault, monkeypatch)
     find_module.find(vault, query="metabolism", scope="kb-only", graph=False)
@@ -198,7 +198,7 @@ def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
 
 
 def test_warmup_disabled_by_env(vault: Path, monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_WARMUP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     assert warmup.warm_caches(vault) == {}
     assert not find_module._CACHE.entries
 

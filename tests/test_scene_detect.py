@@ -9,8 +9,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kb_mcp import embeddings
-from kb_mcp.embeddings import detect_scenes
+from exomem import embeddings
+from exomem.embeddings import detect_scenes
 
 FLAT = np.full(32, 1 / 32, dtype=np.float32)  # uniform histogram — no luminance signal
 
@@ -101,19 +101,19 @@ def test_empty_and_single_candidate() -> None:
 
 
 def test_detect_scenes_uses_env_threshold(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_THRESHOLD", "25")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_THRESHOLD", "25")
     series = [(0.0, 0, FLAT), (10.0, _bits(20), FLAT)]
     assert len(detect_scenes(series)) == 1  # 20 ≤ 25 → no boundary
 
 
 def test_env_knobs_override_and_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_THRESHOLD", "15")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_THRESHOLD", "15")
     assert embeddings._scene_hash_threshold() == 15
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_THRESHOLD", "chunky")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_THRESHOLD", "chunky")
     assert embeddings._scene_hash_threshold() == embeddings.SCENE_HASH_THRESHOLD
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_MIN_SECS", "2.5")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_MIN_SECS", "2.5")
     assert embeddings._scene_min_secs() == 2.5
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_MIN_SECS", "nah")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_MIN_SECS", "nah")
     assert embeddings._scene_min_secs() == embeddings.SCENE_MIN_SECS
 
 
@@ -173,7 +173,7 @@ def _fake_pil(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_gate_off_uses_uniform_sampler(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_VIDEO_SCENE_FRAMES", raising=False)
+    monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
     _fake_pil(monkeypatch)
     frames = [(float(t), _FakeImg(_GRAD)) for t in range(0, 40, 8)]
     called: dict[str, object] = {}
@@ -195,7 +195,7 @@ def test_gate_off_uses_uniform_sampler(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_gate_on_embed_video_frames_returns_scene_vectors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     _fake_pil(monkeypatch)
     series = [(float(t), 0 if t < 30 else _bits(20), FLAT) for t in range(0, 60, 2)]
     monkeypatch.setattr(embeddings, "_iter_iframe_metrics", lambda p: series)

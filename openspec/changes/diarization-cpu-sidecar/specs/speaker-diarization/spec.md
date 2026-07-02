@@ -13,7 +13,7 @@ NOT raise.
 
 #### Scenario: Diarization runs in the sidecar subprocess
 
-- **WHEN** `KB_MCP_DIARIZE` is set and the diarizer sidecar venv is provisioned
+- **WHEN** `EXOMEM_DIARIZE` is set and the diarizer sidecar venv is provisioned
 - **THEN** the main process spawns the sidecar interpreter on `worker.py` with the audio path and
   an output-file path
 - **AND** the sidecar writes `{"turns": [{"start", "end", "label"}, …]}` JSON to the output file
@@ -22,7 +22,7 @@ NOT raise.
 
 #### Scenario: Sidecar not provisioned degrades to plain transcript
 
-- **WHEN** `KB_MCP_DIARIZE` is set but `sidecar/diarizer/.venv` (or `KB_MCP_DIARIZE_SIDECAR_PYTHON`)
+- **WHEN** `EXOMEM_DIARIZE` is set but `sidecar/diarizer/.venv` (or `EXOMEM_DIARIZE_SIDECAR_PYTHON`)
   resolves to no interpreter
 - **THEN** no subprocess is spawned, the condition is logged, and extraction emits the plain
   transcript
@@ -49,7 +49,7 @@ at deploy time and never built or resolved at service runtime. The sidecar SHALL
 torchaudio / pyannote combination that is free of the main venv's version walls AND retains
 Blackwell `sm_120` GPU kernels (a standard CUDA-13 torch), independent of the main venv's torch
 pin. The running service SHALL invoke the sidecar interpreter only by path, selecting GPU or CPU
-via `KB_MCP_DIARIZE_DEVICE`.
+via `EXOMEM_DIARIZE_DEVICE`.
 
 #### Scenario: Provisioned once per box
 

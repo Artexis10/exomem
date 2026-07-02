@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import provenance as provenance_module
+from exomem import provenance as provenance_module
 
 
 def _make_page(vault: Path, stem: str, body: str) -> str:

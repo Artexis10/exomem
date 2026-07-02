@@ -6,8 +6,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import commands
-from kb_mcp.vault import content_hash
+from exomem import commands
+from exomem.vault import content_hash
 
 
 def _page(vault: Path) -> str:

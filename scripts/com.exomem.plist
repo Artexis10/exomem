@@ -16,7 +16,7 @@
     <array>
         <string>__VENV_PYTHON__</string>
         <string>-m</string>
-        <string>kb_mcp</string>
+        <string>exomem</string>
         <string>--transport</string>
         <string>streamable-http</string>
         <string>--host</string>

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import extract
+from exomem import extract
 
 
 @pytest.mark.parametrize(
@@ -41,14 +41,14 @@ def test_is_extractable() -> None:
 
 
 def test_extraction_enabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     assert extract.extraction_enabled() is False
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert extract.extraction_enabled() is True
 
 
 def test_prewarm_loads_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     called: list[bool] = []
     monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
     extract.prewarm()
@@ -56,7 +56,7 @@ def test_prewarm_loads_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_prewarm_soft_fails_when_engine_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
 
     def unavailable():
         raise extract.ExtractionUnavailable("faster-whisper not installed")
@@ -66,7 +66,7 @@ def test_prewarm_soft_fails_when_engine_unavailable(monkeypatch: pytest.MonkeyPa
 
 
 def test_prewarm_skipped_when_extraction_disabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     called: list[bool] = []
     monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
     extract.prewarm()
@@ -145,7 +145,7 @@ def test_extract_document_soft_fails_on_bad_input(tmp_path) -> None:
         extract._extract_document(tmp_path / "does-not-exist.docx", "docx")
 
 
-# ---------------- optional: ASR speaker diarization (KB_MCP_DIARIZE, default OFF) ----
+# ---------------- optional: ASR speaker diarization (EXOMEM_DIARIZE, default OFF) ----
 
 
 class _FakeSeg:
@@ -164,14 +164,14 @@ class _FakeWhisper:
 
 
 def test_diarize_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
     assert extract._diarize_enabled() is False
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     assert extract._diarize_enabled() is True
 
 
 def test_transcribe_plain_when_diarize_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
     segs = [_FakeSeg("hello there", 0.0, 1.0), _FakeSeg("general kenobi", 1.0, 2.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
     r = extract._transcribe(Path("x.wav"), "audio")
@@ -181,7 +181,7 @@ def test_transcribe_plain_when_diarize_off(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_transcribe_labels_speakers_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     segs = [_FakeSeg("hello there", 0.0, 1.0), _FakeSeg("general kenobi", 1.0, 2.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
     # Stub the raw diarization → two turns mapped to distinct speakers (no real model).
@@ -199,7 +199,7 @@ def test_transcribe_labels_speakers_when_enabled(monkeypatch: pytest.MonkeyPatch
 
 
 def test_transcribe_merges_consecutive_same_speaker(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     segs = [_FakeSeg("part one", 0.0, 1.0), _FakeSeg("part two", 1.0, 2.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
     monkeypatch.setattr(
@@ -214,7 +214,7 @@ def test_transcribe_merges_consecutive_same_speaker(monkeypatch: pytest.MonkeyPa
 def test_transcribe_soft_fails_to_plain_when_diarization_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     segs = [_FakeSeg("solo line", 0.0, 1.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
 
@@ -227,18 +227,18 @@ def test_transcribe_soft_fails_to_plain_when_diarization_unavailable(
     assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
 
 
-# ---------------- optional: vision captioning (KB_MCP_VISION_CAPTION, default OFF) ----
+# ---------------- optional: vision captioning (EXOMEM_VISION_CAPTION, default OFF) ----
 
 
 def test_vision_caption_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_VISION_CAPTION", raising=False)
+    monkeypatch.delenv("EXOMEM_VISION_CAPTION", raising=False)
     assert extract._vision_caption_enabled() is False
-    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setenv("EXOMEM_VISION_CAPTION", "1")
     assert extract._vision_caption_enabled() is True
 
 
 def test_maybe_caption_ocr_only_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_VISION_CAPTION", raising=False)
+    monkeypatch.delenv("EXOMEM_VISION_CAPTION", raising=False)
     called: list = []
     monkeypatch.setattr(extract, "_caption_image", lambda p: called.append(p) or "nope")
     text, engine = extract._maybe_caption("ocr body", Path("x.png"))
@@ -248,7 +248,7 @@ def test_maybe_caption_ocr_only_when_flag_off(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_maybe_caption_prepends_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setenv("EXOMEM_VISION_CAPTION", "1")
     monkeypatch.setattr(extract, "_caption_image", lambda p: "a cat sitting on a mat")
     text, engine = extract._maybe_caption("INVOICE 7731", Path("x.png"))
     assert text == "a cat sitting on a mat\n\nINVOICE 7731"
@@ -256,7 +256,7 @@ def test_maybe_caption_prepends_when_enabled(monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_maybe_caption_empty_ocr_returns_caption_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setenv("EXOMEM_VISION_CAPTION", "1")
     monkeypatch.setattr(extract, "_caption_image", lambda p: "a beach at sunset")
     text, engine = extract._maybe_caption("", Path("x.png"))
     assert text == "a beach at sunset"
@@ -264,7 +264,7 @@ def test_maybe_caption_empty_ocr_returns_caption_only(monkeypatch: pytest.Monkey
 
 
 def test_maybe_caption_soft_fails_to_ocr_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_VISION_CAPTION", "1")
+    monkeypatch.setenv("EXOMEM_VISION_CAPTION", "1")
     monkeypatch.setattr(extract, "_CAPTIONER", None)
 
     def _no_dep():

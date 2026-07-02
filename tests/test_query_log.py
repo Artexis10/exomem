@@ -1,6 +1,6 @@
 """query_log is best-effort structured logging for the retrieval feedback loop.
 
-The suite-wide conftest sets KB_MCP_DISABLE_EMBEDDINGS, which also disables
+The suite-wide conftest sets EXOMEM_DISABLE_EMBEDDINGS, which also disables
 query_log — so these tests both (a) confirm the no-op-when-disabled contract and
 (b) explicitly re-enable + redirect the JSONL paths to tmp to exercise writes.
 """
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import query_log
+from exomem import query_log
 
 
 class _FakeHit:
@@ -24,7 +24,7 @@ class _FakeHit:
 
 
 def test_noop_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setattr(query_log, "WRITES_PATH", tmp_path / "writes.jsonl")
     query_log.log_write_call(tool="note", written_path="x", cited_sources=[])
     assert not (tmp_path / "writes.jsonl").exists()
@@ -33,8 +33,8 @@ def test_noop_when_disabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
 def test_logs_find_call_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_QUERY_LOG", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
     qpath = tmp_path / "queries.jsonl"
     monkeypatch.setattr(query_log, "QUERIES_PATH", qpath)
 
@@ -65,8 +65,8 @@ def test_logs_find_call_when_enabled(
 def test_logs_write_call_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_QUERY_LOG", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
     wpath = tmp_path / "writes.jsonl"
     monkeypatch.setattr(query_log, "WRITES_PATH", wpath)
 
@@ -84,8 +84,8 @@ def test_logs_write_call_when_enabled(
 def test_explicit_query_log_disable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setenv("KB_MCP_DISABLE_QUERY_LOG", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_QUERY_LOG", "1")
     wpath = tmp_path / "writes.jsonl"
     monkeypatch.setattr(query_log, "WRITES_PATH", wpath)
     query_log.log_write_call(tool="note", written_path="x", cited_sources=[])
@@ -95,8 +95,8 @@ def test_explicit_query_log_disable(
 def test_logs_get_call_when_enabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_QUERY_LOG", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_QUERY_LOG", raising=False)
     rpath = tmp_path / "reads.jsonl"
     monkeypatch.setattr(query_log, "READS_PATH", rpath)
 
@@ -115,8 +115,8 @@ def test_logs_get_call_when_enabled(
 def test_get_call_noop_when_disabled(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setenv("KB_MCP_DISABLE_QUERY_LOG", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_QUERY_LOG", "1")
     rpath = tmp_path / "reads.jsonl"
     monkeypatch.setattr(query_log, "READS_PATH", rpath)
     query_log.log_get_call(read_path="Knowledge Base/Notes/Insights/a.md")

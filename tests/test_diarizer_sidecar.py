@@ -16,14 +16,14 @@ import subprocess
 import sys
 from pathlib import Path
 
-from kb_mcp import extract
+from exomem import extract
 
 
 def _fake_python(monkeypatch) -> None:
     """Make the sidecar locator return a real file so `_run_diarization` proceeds to spawn, and
     short-circuit the PyAV duration probe via the timeout override (keeps the test hermetic)."""
     monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path(sys.executable))
-    monkeypatch.setenv("KB_MCP_DIARIZE_TIMEOUT", "30")
+    monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "30")
 
 
 def test_sidecar_absent_returns_none_without_spawning(monkeypatch) -> None:
@@ -133,7 +133,7 @@ def test_is_nvidia_wheel_bin() -> None:
 
 
 def test_child_env_cpu_forces_cuda_off(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cpu")
+    monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cpu")
     monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/x/nvidia/cublas/bin"]))
     env = extract._diarizer_child_env()
     assert env["CUDA_VISIBLE_DEVICES"] == ""  # CPU forced
@@ -146,7 +146,7 @@ def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
     # `:`, which IS os.pathsep on Linux — joining/splitting it on the CI runner shatters the
     # drive letter. `_is_nvidia_wheel_bin` normalizes separators, so unix-style paths still
     # exercise the strip on every platform (mirrors test_child_env_cpu_forces_cuda_off).
-    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cuda")
+    monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cuda")
     monkeypatch.setenv(
         "PATH", os.pathsep.join(["/usr/bin", "/x/nvidia/cublas/bin", "/x/nvidia/cudnn/bin"])
     )
@@ -159,7 +159,7 @@ def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
 
 def test_run_diarization_passes_device_env(monkeypatch) -> None:
     _fake_python(monkeypatch)
-    monkeypatch.setenv("KB_MCP_DIARIZE_DEVICE", "cpu")
+    monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cpu")
     captured: dict[str, dict] = {}
 
     def _run(cmd, *a, **k):
@@ -173,13 +173,13 @@ def test_run_diarization_passes_device_env(monkeypatch) -> None:
 
 
 def test_sidecar_python_override_missing_returns_none(monkeypatch, tmp_path) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE_SIDECAR_PYTHON", str(tmp_path / "nope.exe"))
+    monkeypatch.setenv("EXOMEM_DIARIZE_SIDECAR_PYTHON", str(tmp_path / "nope.exe"))
     assert extract._diarizer_sidecar_python() is None
 
 
 def test_timeout_override_and_floor(monkeypatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE_TIMEOUT", "123")
+    monkeypatch.setenv("EXOMEM_DIARIZE_TIMEOUT", "123")
     assert extract._diarizer_timeout(Path("x.wav")) == 123.0
-    monkeypatch.delenv("KB_MCP_DIARIZE_TIMEOUT", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE_TIMEOUT", raising=False)
     # Unprobeable path → the generous floor.
     assert extract._diarizer_timeout(Path("does-not-exist.wav")) >= 900.0

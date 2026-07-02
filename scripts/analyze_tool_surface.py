@@ -40,7 +40,7 @@ from collections import Counter
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-SKILL_MD = REPO_ROOT / "src" / "kb_mcp" / "_scaffold" / "_Schema" / "SKILL.md"
+SKILL_MD = REPO_ROOT / "src" / "exomem" / "_scaffold" / "_Schema" / "SKILL.md"
 DEFAULT_LOG = REPO_ROOT / "logs" / "exomem.log"
 REPORT_PATH = REPO_ROOT / "analysis" / "tool-surface-report.md"
 
@@ -94,16 +94,16 @@ def _build_and_list(disable_tier2: bool) -> list:
     """Build the FastMCP server and return its registered Tool objects.
 
     Mirrors tests/test_tier2.py::_registered_tool_names: neutralize the server's
-    load_dotenv so our env toggles (KB_MCP_DISABLE_TIER2/_EMBEDDINGS) stick, and
+    load_dotenv so our env toggles (EXOMEM_DISABLE_TIER2/_EMBEDDINGS) stick, and
     list tools without running middleware.
     """
-    from kb_mcp import server as server_module
+    from exomem import server as server_module
 
     server_module.load_dotenv = lambda *a, **k: None  # type: ignore[assignment]
     if disable_tier2:
-        os.environ["KB_MCP_DISABLE_TIER2"] = "1"
+        os.environ["EXOMEM_DISABLE_TIER2"] = "1"
     else:
-        os.environ.pop("KB_MCP_DISABLE_TIER2", None)
+        os.environ.pop("EXOMEM_DISABLE_TIER2", None)
     mcp = server_module.build_server(require_auth=False)
     return asyncio.run(mcp.list_tools(run_middleware=False))
 
@@ -177,7 +177,7 @@ def measure_static_surface() -> dict:
 def measure_confusability(rows: list[dict]) -> dict | None:
     import numpy as np
 
-    from kb_mcp import embeddings
+    from exomem import embeddings
 
     summaries = [r["summary"] for r in rows]
     names = [r["name"] for r in rows]
@@ -473,7 +473,7 @@ def main() -> None:
         load_dotenv(override=True)
     except Exception:
         pass
-    os.environ["KB_MCP_DISABLE_EMBEDDINGS"] = "1"
+    os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
 
     print("M1: introspecting registered tool schemas…")
     m1 = measure_static_surface()
@@ -482,7 +482,7 @@ def main() -> None:
     conf = None
     if not args.skip_confusability:
         print("M2: embedding tool summaries (loading bge-base — first run is slow)…")
-        os.environ.pop("KB_MCP_DISABLE_EMBEDDINGS", None)  # M2 needs the model
+        os.environ.pop("EXOMEM_DISABLE_EMBEDDINGS", None)  # M2 needs the model
         try:
             conf = measure_confusability(m1["rows"])
         except Exception as e:  # noqa: BLE001

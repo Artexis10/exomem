@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import edit as edit_module
-from kb_mcp import get_page as get_page_module
-from kb_mcp import vault as vault_module
+from exomem import edit as edit_module
+from exomem import get_page as get_page_module
+from exomem import vault as vault_module
 
 
 TODAY = dt.date(2026, 6, 1)

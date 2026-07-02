@@ -6,7 +6,7 @@ import math
 
 import pytest
 
-from kb_mcp import eval_metrics as m
+from exomem import eval_metrics as m
 
 
 def test_dcg_known_values() -> None:
