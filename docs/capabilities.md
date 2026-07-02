@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Registry commands: 25
-- Tier 1 commands: 16
-- Tier 2 commands: 9
-- Registry-generated MCP commands: 24
-- REST commands: 25
-- CLI commands: 25
+- Registry commands: 27
+- Tier 1 commands: 17
+- Tier 2 commands: 10
+- Registry-generated MCP commands: 26
+- REST commands: 26
+- CLI commands: 26
 - Hand-registered MCP tools: mint_download_token, mint_upload_token, note
 
 ## Command Registry
@@ -23,6 +23,7 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | add | 1 | MCP, REST, CLI | write | no | - | content*, source_type*, title*, url, tags, why_captured | Capture raw content as an immutable source page in the Knowledge Base. |
 | audit | 1 | MCP, REST, CLI | read | no | - | categories | Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only. |
 | attention | 1 | MCP, REST, CLI | read | no | - | categories, limit | Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only. |
+| overview | 1 | MCP, REST, CLI | read | no | path | path, max_depth, include_hidden, samples | Bounded, read-only structure report of the vault (or a subtree). |
 | evolution | 1 | MCP, REST, CLI | read | no | query | query, limit, scope, projects, tags | How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only. |
 | audit_fix | 1 | MCP, REST, CLI | write | yes | - | dry_run, rebuild_embeddings | Run audit + auto-apply safe fixes; propose-only for risky categories. |
 | reconcile | 1 | MCP, REST, CLI | write | no | - | dry_run | Heal vault drift from out-of-band edits in one pass. |
@@ -43,6 +44,7 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | list_trash | 2 | MCP, REST, CLI | read | no | - | date | Tier 2: enumerate recoverable trash entries. Read-only. |
 | recover_from_trash | 2 | MCP, REST, CLI | write | no | trash_path | trash_path*, restore_path, allow_curated | Tier 2: undo a delete_file/delete_directory. |
 | list_inbound_links | 2 | MCP, REST, CLI | read | no | target | target* | Tier 2: find files whose wikilinks resolve to `target`. Read-only. |
+| get_video_frames | 2 | MCP | read | no | - | path*, max_frames, start_sec, end_sec | View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip. |
 
 ## Hand-registered MCP Tools
 

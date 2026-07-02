@@ -1,6 +1,6 @@
 [project]
 name = "exomem"
-version = "0.2.1"
+version = "0.3.0" # x-release-please-version
 description = "Local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI with multimodal OCR/ASR/CLIP search"
 readme = "README.md"
 requires-python = ">=3.11"
