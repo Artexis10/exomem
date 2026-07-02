@@ -1,5 +1,11 @@
 # exomem — local setup (Claude Code, no cloud)
 
+`exomem setup --vault "/path/to/your/Obsidian"` does steps 1–6 below for you in
+one command — see [Set it up in 5 minutes](README.md#set-it-up-in-5-minutes) in
+the main README. This document is the full-control manual path: each step run
+by hand, plus GPU/media extras, for anyone who wants to see or customize what's
+happening under the hood.
+
 This is the **local-first** path: run exomem as a **local MCP server inside
 Claude Code**, pointed at your own Obsidian vault. No OAuth, no Tailscale, no
 Windows service — none of the remote/mobile machinery in the main
@@ -109,7 +115,7 @@ Before touching your own vault, you can verify the repo against the public sampl
 vault:
 
 ```bash
-uv run python scripts/smoke-sample-vault.py
+uv run exomem demo --json
 ```
 
 That read-only smoke runs the path a new install depends on: `doctor`, keyword

@@ -35,10 +35,8 @@ uv sync
 uv run python -m pytest -q
 uvx ruff check .
 npm exec --yes @fission-ai/openspec -- validate --specs --strict
-uv run python scripts/smoke-sample-vault.py
-uv run python scripts/demo-sample-vault.py
+uv run exomem demo --json
 uv run python scripts/generate-capabilities.py --check
-uv run python -m exomem doctor --vault examples/sample-vault --profile lean
 uv build
 ```
 

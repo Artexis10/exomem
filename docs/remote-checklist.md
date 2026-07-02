@@ -7,7 +7,7 @@ walkthrough and troubleshooting are in [deployment.md](deployment.md).
 
 ```bash
 uv sync
-uv run python scripts/smoke-sample-vault.py
+uv run exomem demo --json
 uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile lean
 ```
 

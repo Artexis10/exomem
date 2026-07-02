@@ -145,3 +145,48 @@ def test_setup_dispatches_from_main(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert called["vault"] == str(tmp_path)
     assert called["profile"] == "hybrid"
     assert called["scope"] == "local"
+
+
+# ============================================================================
+# _server_command — launch command preference order: uv in a repo checkout,
+# then the durable `exomem` console script, then `uvx exomem` as the
+# transient-install fallback.
+# ============================================================================
+
+
+def _no_repo_checkout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Fake setup_wizard.__file__ so its derived repo-root has no
+    pyproject.toml — this test worktree IS a real checkout, so branch 1
+    (uv) would otherwise always fire regardless of which_fn."""
+    fake_file = tmp_path / "elsewhere" / "src" / "exomem" / "setup_wizard.py"
+    monkeypatch.setattr(setup_wizard, "__file__", str(fake_file))
+
+
+def test_server_command_prefers_uv_in_a_repo_checkout() -> None:
+    """This worktree IS a real repo checkout, so branch 1 fires whenever
+    which_fn('uv') is truthy — unchanged behavior from before the branch
+    order was introduced."""
+    repo_root = Path(setup_wizard.__file__).resolve().parents[2]
+    cmd = setup_wizard._server_command(lambda name: "C:/fake/uv.CMD" if name == "uv" else None)
+    assert cmd == [
+        "uv", "--directory", str(repo_root),
+        "run", "python", "-m", "exomem", "--transport", "stdio",
+    ]
+
+
+def test_server_command_falls_back_to_console_script_outside_checkout(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_repo_checkout(monkeypatch, tmp_path)
+    cmd = setup_wizard._server_command(
+        lambda name: "/usr/local/bin/exomem" if name == "exomem" else None
+    )
+    assert cmd == ["/usr/local/bin/exomem", "--transport", "stdio"]
+
+
+def test_server_command_falls_back_to_uvx_when_nothing_found(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _no_repo_checkout(monkeypatch, tmp_path)
+    cmd = setup_wizard._server_command(lambda name: None)
+    assert cmd == ["uvx", "exomem", "--transport", "stdio"]

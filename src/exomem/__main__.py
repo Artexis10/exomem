@@ -6,6 +6,8 @@ Subcommands:
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
+- `demo` — the packaged 30-second proof: doctor → find → get → audit against a
+  bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `doctor` — read-only local install/setup preflight
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -38,6 +40,10 @@ def main(argv: list[str] | None = None) -> int:
         return _install_skill_main(raw[1:])
     if raw and raw[0] == "install-hook":
         return _install_hook_main(raw[1:])
+    if raw and raw[0] == "demo":
+        from .demo import main as demo_main
+
+        return demo_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
     if raw and raw[0] == "warm":
