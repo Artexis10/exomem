@@ -21,6 +21,8 @@ from typing import Any
 import yaml
 from slugify import slugify as _slugify
 
+from . import freshness
+
 
 SLUG_MAX_LENGTH = 100
 
@@ -500,14 +502,113 @@ class _InboundEntry:
 class _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
     stem_counts: dict[str, int]              # basename -> occurrences in walk
+    known_rels: set[str]                     # vault-relative POSIX paths already
+                                              # counted toward stem_counts — lets
+                                              # on_files_changed() tell a rename's
+                                              # "new" side from an in-place edit.
+
+    def on_files_changed(
+        self,
+        vault_root: Path,
+        changed_rels: Iterable[str],
+        deleted_rels: Iterable[str],
+    ) -> None:
+        """Patch this index in place for one batch of file changes.
+
+        For every affected path: drop its existing edges from `buckets` and
+        its stem-count contribution, then — for paths that still exist on
+        disk — re-read just that file and re-add its edges + stem-count
+        contribution. New entries get `seq` values appended after the
+        current max `seq` (design D3): a patched file's relative order vs.
+        entries from OTHER files touched at a different time does not mirror
+        a fresh full-walk order, but the output SET per target always
+        matches a full rebuild.
+        """
+        deleted = set(deleted_rels)
+        changed = set(changed_rels) - deleted
+        affected = changed | deleted
+        if not affected:
+            return
+
+        # 1. Drop every affected file's existing edges from every bucket.
+        for target in list(self.buckets.keys()):
+            kept = [e for e in self.buckets[target] if e.path not in affected]
+            if kept:
+                self.buckets[target] = kept
+            else:
+                del self.buckets[target]
+
+        # 2. A "changed" path that vanished between the event firing and this
+        #    patch running behaves exactly like a delete.
+        still_exists: dict[str, Path] = {}
+        for rel in changed:
+            abs_path = vault_root / rel
+            if abs_path.is_file():
+                still_exists[rel] = abs_path
+            else:
+                deleted.add(rel)
+
+        # 3. Drop the stem-count contribution for every path that is now gone.
+        for rel in deleted:
+            if rel in self.known_rels:
+                stem = Path(rel).stem
+                count = self.stem_counts.get(stem, 0) - 1
+                if count > 0:
+                    self.stem_counts[stem] = count
+                else:
+                    self.stem_counts.pop(stem, None)
+                self.known_rels.discard(rel)
+
+        # 4. Re-read each still-existing changed file and re-add its edges +
+        #    stem-count contribution (only if it's a path we didn't already
+        #    know about — an in-place edit of a known path leaves the count
+        #    alone).
+        next_seq = 1 + max(
+            (e.seq for entries in self.buckets.values() for e in entries),
+            default=-1,
+        )
+        for rel, abs_path in still_exists.items():
+            if rel not in self.known_rels:
+                stem = Path(rel).stem
+                self.stem_counts[stem] = self.stem_counts.get(stem, 0) + 1
+                self.known_rels.add(rel)
+            try:
+                text = abs_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue
+            for lineno, context, raw in _scan_wikilinks(text):
+                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
+                self.buckets.setdefault(normalized, []).append(_InboundEntry(
+                    seq=next_seq,
+                    path=rel,
+                    line_number=lineno,
+                    context=context,
+                    raw_target=raw,
+                ))
+                next_seq += 1
 
 
 _INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
 
 
+def _scan_wikilinks(text: str) -> list[tuple[int, str, str]]:
+    """`(line_number, trimmed_context, raw_target)` for every wikilink match.
+
+    Shared by the full-vault build and the per-file patch so the two stay in
+    lockstep — a patched file's entries are byte-identical to what a fresh
+    full rebuild would produce for that same file content.
+    """
+    out: list[tuple[int, str, str]] = []
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        for m in _WIKILINK_PATTERN.finditer(line):
+            out.append((lineno, line.strip()[:240], m.group(1).strip()))
+    return out
+
+
 def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]] = {}
     stem_counts: dict[str, int] = {}
+    known_rels: set[str] = set()
     vault_resolved = vault_root.resolve()
     seq = 0
     for md in walk_vault_md(vault_root):
@@ -515,35 +616,48 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
         # the historical uniqueness scan, which never opened files.
         stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
         try:
-            text = md.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
-        try:
             md_rel = md.resolve().relative_to(vault_resolved).as_posix()
         except ValueError:
             continue
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            for m in _WIKILINK_PATTERN.finditer(line):
-                raw = m.group(1).strip()
-                # Strip `#anchor` before comparison — anchors are intra-page
-                # jumps, not part of the file path.
-                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
-                buckets.setdefault(normalized, []).append(_InboundEntry(
-                    seq=seq,
-                    path=md_rel,
-                    line_number=lineno,
-                    context=line.strip()[:240],
-                    raw_target=raw,
-                ))
-                seq += 1
-    return _InboundIndexData(buckets=buckets, stem_counts=stem_counts)
+        # Recorded regardless of read success so a later patch can tell this
+        # path was already part of the walk (an in-place edit) from a path
+        # that's genuinely new (a create, or the new side of a rename).
+        known_rels.add(md_rel)
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        for lineno, context, raw in _scan_wikilinks(text):
+            # Strip `#anchor` before comparison — anchors are intra-page
+            # jumps, not part of the file path.
+            normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
+            buckets.setdefault(normalized, []).append(_InboundEntry(
+                seq=seq,
+                path=md_rel,
+                line_number=lineno,
+                context=context,
+                raw_target=raw,
+            ))
+            seq += 1
+    return _InboundIndexData(buckets=buckets, stem_counts=stem_counts, known_rels=known_rels)
+
+
+def _vault_freshness_key(vault_root: Path):
+    """The vault-scope freshness triple — from the event-maintained registry
+    when it is live (syscall-free), else a fresh stat-walk. Byte-identical
+    either way, so the inbound index's staleness check no longer walks the
+    vault per call once the registry is live (P3)."""
+    live = freshness.triple(vault_root, "vault")
+    if live is not None:
+        return live
+    from . import find as find_module
+
+    return find_module._walk_freshness_key(walk_vault_md(vault_root))
 
 
 def _inbound_index(vault_root: Path) -> _InboundIndexData:
-    """The cached index, rebuilt when the vault's walk freshness key moves."""
-    from . import find as find_module
-
-    key = find_module._walk_freshness_key(walk_vault_md(vault_root))
+    """The cached index, rebuilt when the vault's freshness key moves."""
+    key = _vault_freshness_key(vault_root)
     root = str(vault_root.resolve())
     cached = _INBOUND_INDEX.get(root)
     if cached and cached[0] == key:
@@ -553,8 +667,45 @@ def _inbound_index(vault_root: Path) -> _InboundIndexData:
     return data
 
 
+def on_inbound_files_changed(
+    vault_root: Path,
+    changed_rels: Iterable[str],
+    deleted_rels: Iterable[str],
+) -> None:
+    """Patch the process-cached inbound-link index for one batch of changes.
+
+    No-op when `EXOMEM_DISABLE_EVENT_INDEXES` is set (the single kill switch
+    reverts inbound maintenance along with freshness/matrix, per design D5),
+    or when this vault's index has never been built — nothing cached to
+    patch, and the next `find_inbound_wikilinks` call does a full digest-keyed
+    rebuild that already reflects current disk state, so skipping here is
+    correct, not just cheap. This is what makes the patch path "live-only":
+    it only ever mutates an index that already exists.
+
+    After patching, re-syncs the cached freshness key to the patched state's
+    current on-disk key, so the next `_inbound_index` call sees a cache HIT
+    instead of redundantly re-triggering `_build_inbound_index`'s full
+    read-and-reparse pass — the entire point of this patch API (P3).
+    """
+    if not freshness.event_indexes_enabled():
+        return
+    root = str(vault_root.resolve())
+    cached = _INBOUND_INDEX.get(root)
+    if cached is None:
+        return
+    changed_list = list(changed_rels)
+    deleted_list = list(deleted_rels)
+    if not (changed_list or deleted_list):
+        return
+    _, data = cached
+    data.on_files_changed(vault_root, changed_list, deleted_list)
+    _INBOUND_INDEX[root] = (_vault_freshness_key(vault_root), data)
+
+
 def clear_inbound_index() -> None:
-    """Test hook: drop every cached inbound-link index."""
+    """Test hook: drop every cached inbound-link index (patch state included —
+    `known_rels`/`buckets`/`stem_counts` all live inside the cached
+    `_InboundIndexData`, so clearing the outer dict resets everything)."""
     _INBOUND_INDEX.clear()
 
 

@@ -35,11 +35,14 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import embeddings
+from . import embeddings, freshness
 
 log = logging.getLogger(__name__)
 
 DEBOUNCE_SECONDS = 0.5
+# How often the watcher re-walks and reconciles the freshness registry against
+# disk truth, bounding how long a dropped watchdog event can leave it stale.
+RECONCILE_INTERVAL_SECONDS = 300.0
 
 # ---- Self-write suppression registry (module-level: available to writers even
 # when no FileWatcher is running; keyed by (resolved vault root, vault-rel path)) ----
@@ -88,10 +91,38 @@ def _prune_locked(now: float) -> None:
             _SELF_DELETES.pop(k, None)
 
 
+def _publish_registry_change(
+    vault_root: Path, changed: list[Path], deleted_rels: list[str]
+) -> None:
+    """Update freshness + inbound for a server-authored change.
+
+    A self-write's watcher echo is suppressed (redundant re-embed), but the
+    write DID change the vault — so the freshness/inbound registries must still
+    see it, or `find` would serve stale results for that file until the next
+    reconcile. No-op when the registries aren't live (guards inside)."""
+    if not freshness.event_indexes_enabled():
+        # Kill switch on: don't even pay the resolve() syscalls in _rel_posix.
+        return
+    try:
+        deleted_paths = [vault_root / r for r in deleted_rels]
+        freshness.on_files_changed(vault_root, changed=changed, deleted=deleted_paths)
+    except Exception:  # noqa: BLE001 — bookkeeping must never break a write
+        log.debug("self-write freshness publish failed", exc_info=True)
+    try:
+        from . import vault as vault_module
+
+        changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
+        vault_module.on_inbound_files_changed(vault_root, changed_rels, deleted_rels)
+    except Exception:  # noqa: BLE001
+        log.debug("self-write inbound publish failed", exc_info=True)
+
+
 def register_self_write(vault_root: Path, paths: Iterable[Path]) -> None:
     """Record server-authored markdown replacements so their watcher echo is
     dropped. Best-effort: unreadable/gone files are skipped (they simply won't
-    be suppressed)."""
+    be suppressed). Also publishes the change to the freshness/inbound
+    registries, since the suppressed watcher echo won't."""
+    paths = list(paths)
     root = _canon_root(vault_root)
     now = time.monotonic()
     with _SUPPRESS_LOCK:
@@ -112,12 +143,15 @@ def register_self_write(vault_root: Path, paths: Iterable[Path]) -> None:
                 now + UPSERT_SUPPRESS_TTL_SECONDS,
             )
         _prune_locked(now)
+    _publish_registry_change(vault_root, changed=paths, deleted_rels=[])
 
 
 def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
     """Record server-authored markdown removals (delete/trash/move-away) so
     their watcher echo is dropped. TTL-bounded — there is no file left to
-    signature-match."""
+    signature-match. Also publishes the removal to the freshness/inbound
+    registries, since the suppressed watcher echo won't."""
+    rel_paths = list(rel_paths)
     root = _canon_root(vault_root)
     now = time.monotonic()
     with _SUPPRESS_LOCK:
@@ -127,6 +161,9 @@ def register_self_delete(vault_root: Path, rel_paths: Iterable[str]) -> None:
                 continue
             _SELF_DELETES[(root, rel_posix)] = now + DELETE_SUPPRESS_TTL_SECONDS
         _prune_locked(now)
+    _publish_registry_change(
+        vault_root, changed=[], deleted_rels=[str(r).replace("\\", "/") for r in rel_paths]
+    )
 
 
 def _is_self_write_event(vault_root: Path, path: Path, *, deleted: bool) -> bool:
@@ -190,6 +227,21 @@ class FileWatcher:
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._observer = None
+        self._reconcile_thread: threading.Thread | None = None
+
+    def _is_kb(self, path: Path) -> bool:
+        """True when `path` is under Knowledge Base/ — the subset that gets
+        embedded. The watcher observes the whole vault (for freshness/inbound)
+        but only KB markdown is re-embedded into the KB sidecar."""
+        try:
+            path.resolve().relative_to(self._kb_root.resolve())
+            return True
+        except (ValueError, OSError):
+            try:
+                path.relative_to(self._kb_root)
+                return True
+            except ValueError:
+                return False
 
     # ---- change recording (called by the watchdog handler AND by tests) ----
 
@@ -231,18 +283,41 @@ class FileWatcher:
         return ups, del_rels
 
     def _flush(self) -> None:
-        """Dispatch the coalesced batch through the SAME paths the writers use."""
+        """Dispatch the coalesced batch: publish freshness/inbound for every
+        changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         ups, del_rels = self._drain()
-        if ups:
+
+        # Freshness + inbound: the whole vault, since both index sibling folders too.
+        if ups or del_rels:
+            deleted_paths = [self._vault_root / r for r in del_rels]
             try:
-                embeddings.upsert_after_write(self._vault_root, ups)
+                freshness.on_files_changed(self._vault_root, changed=ups, deleted=deleted_paths)
             except Exception:  # noqa: BLE001 — a bad batch must never kill the watcher
-                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(ups))
-        if del_rels:
+                log.exception("file watcher: freshness publish failed")
             try:
-                embeddings.delete_after_remove(self._vault_root, del_rels)
+                from . import vault as vault_module
+
+                vault_module.on_inbound_files_changed(
+                    self._vault_root,
+                    [r for r in (self._rel(p) for p in ups) if r],
+                    del_rels,
+                )
             except Exception:  # noqa: BLE001
-                log.exception("file watcher: delete_after_remove failed for %d file(s)", len(del_rels))
+                log.exception("file watcher: inbound publish failed")
+
+        # Embedding: Knowledge Base markdown only (the KB sidecar).
+        kb_ups = [p for p in ups if self._is_kb(p)]
+        kb_del_rels = [r for r in del_rels if r.startswith("Knowledge Base/")]
+        if kb_ups:
+            try:
+                embeddings.upsert_after_write(self._vault_root, kb_ups)
+            except Exception:  # noqa: BLE001
+                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
+        if kb_del_rels:
+            try:
+                embeddings.delete_after_remove(self._vault_root, kb_del_rels)
+            except Exception:  # noqa: BLE001
+                log.exception("file watcher: delete_after_remove failed for %d file(s)", len(kb_del_rels))
 
     # ---- debounce loop ----
 
@@ -264,6 +339,44 @@ class FileWatcher:
         # Final drain so nothing pending is lost on shutdown.
         self._flush()
 
+    # ---- freshness registry seed + periodic reconcile ----
+
+    def _walk_entries(self, scope: str):
+        """(str(abs_path), mtime_ns) pairs for a scope — the same walks
+        `find`'s fallback uses, so the seeded triple is walk-identical."""
+        from . import find as find_module
+        from .vault import walk_vault_md
+
+        if scope == "vault":
+            paths = walk_vault_md(self._vault_root)
+        else:
+            paths = find_module._walk_md(self._kb_root) if self._kb_root.is_dir() else ()
+        for p in paths:
+            try:
+                yield (str(p), p.stat().st_mtime_ns)
+            except OSError:
+                continue
+
+    def _reconcile_once(self, *, seed: bool) -> None:
+        """Re-derive the freshness maps from a fresh walk. `seed=True` on the
+        first pass installs the maps and marks the scopes live; later passes
+        heal any drift from a missed watchdog event."""
+        for scope in freshness.SCOPES:
+            try:
+                if seed:
+                    freshness.seed(self._vault_root, scope, self._walk_entries(scope))
+                else:
+                    freshness.reconcile(self._vault_root, scope, self._walk_entries(scope))
+            except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
+                log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
+
+    def _run_reconcile(self) -> None:
+        # Seed immediately (off the boot path — this is the watcher's own
+        # daemon thread), then re-walk every RECONCILE_INTERVAL to bound drift.
+        self._reconcile_once(seed=True)
+        while not self._stop.wait(RECONCILE_INTERVAL_SECONDS):
+            self._reconcile_once(seed=False)
+
     # ---- lifecycle ----
 
     def start(self) -> bool:
@@ -281,8 +394,8 @@ class FileWatcher:
                 e,
             )
             return False
-        if not self._kb_root.is_dir():
-            log.info("file watcher: %s not found; not watching", self._kb_root)
+        if not self._vault_root.is_dir():
+            log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
 
         watcher = self
@@ -311,14 +424,22 @@ class FileWatcher:
         self._thread.start()
         try:
             self._observer = Observer()
-            self._observer.schedule(_Handler(), str(self._kb_root), recursive=True)
+            # Watch the whole vault: freshness (vault scope) and inbound links
+            # index sibling folders too. The embed dispatch in _flush stays
+            # KB-filtered, so only Knowledge Base/ markdown is re-embedded.
+            self._observer.schedule(_Handler(), str(self._vault_root), recursive=True)
             self._observer.start()
         except Exception as e:  # noqa: BLE001 — watcher must never break the server
             log.warning("file watcher: observer failed to start (%s); live re-embed disabled", e)
             self._stop.set()
             self._wake.set()
             return False
-        log.info("file watcher started on %s", self._kb_root)
+        if freshness.event_indexes_enabled():
+            self._reconcile_thread = threading.Thread(
+                target=self._run_reconcile, name="kb-freshness-reconcile", daemon=True
+            )
+            self._reconcile_thread.start()
+        log.info("file watcher started on %s", self._vault_root)
         return True
 
     def stop(self) -> None:
@@ -332,3 +453,5 @@ class FileWatcher:
                 log.debug("file watcher: observer stop failed", exc_info=True)
         if self._thread is not None:
             self._thread.join(timeout=2)
+        if self._reconcile_thread is not None:
+            self._reconcile_thread.join(timeout=2)

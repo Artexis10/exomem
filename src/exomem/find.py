@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import copy
 import dataclasses
-import hashlib
 import json
 import logging
 import math
@@ -29,6 +28,7 @@ from typing import Any
 
 import yaml
 
+from . import freshness
 
 log = logging.getLogger(__name__)
 
@@ -655,31 +655,24 @@ def _walk_freshness_key(paths) -> tuple[int, int, str]:
     the whole triple, so those histories now invalidate correctly.
     """
     entries: list[tuple[str, int]] = []
-    latest = 0
     for p in paths:
         try:
-            ns = p.stat().st_mtime_ns
+            entries.append((str(p), p.stat().st_mtime_ns))
         except OSError:
             continue
-        entries.append((str(p), ns))
-        if ns > latest:
-            latest = ns
-    entries.sort()
-    h = hashlib.blake2b(digest_size=16)
-    for sp, ns in entries:
-        h.update(sp.encode("utf-8", "surrogatepass"))
-        h.update(b"\0")
-        h.update(str(ns).encode("ascii"))
-        h.update(b"\0")
-    return len(entries), latest, h.hexdigest()
+    return freshness.triple_from_entries(entries)
 
 
 class FreshnessSnapshot:
-    """Per-request corpus freshness: each markdown scope is stat-walked at
-    most once per `find()` call, and every consumer (hot-cache key, BM25
-    rebuild check, wikilink-resolver reuse, auto-widen's vault BM25) shares
-    the result instead of re-walking. Lazy — a `scope="kb-only"` request
-    never pays the vault walk."""
+    """Per-request corpus freshness: each markdown scope is resolved at most
+    once per `find()` call, and every consumer (hot-cache key, BM25 rebuild
+    check, wikilink-resolver reuse, auto-widen's vault BM25) shares the result
+    instead of recomputing. Lazy — a `scope="kb-only"` request never pays the
+    vault cost.
+
+    Reads the event-maintained `freshness` registry when it is live for the
+    scope (sub-ms, syscall-free); otherwise falls back to a full stat-walk that
+    yields a byte-identical triple."""
 
     def __init__(self, vault_root: Path) -> None:
         self._root = vault_root
@@ -688,15 +681,23 @@ class FreshnessSnapshot:
 
     def kb(self) -> tuple[int, int, str]:
         if self._kb is None:
-            kb = self._root / "Knowledge Base"
-            self._kb = _walk_freshness_key(_walk_md(kb) if kb.is_dir() else ())
+            live = freshness.triple(self._root, "kb")
+            if live is not None:
+                self._kb = live
+            else:
+                kb = self._root / "Knowledge Base"
+                self._kb = _walk_freshness_key(_walk_md(kb) if kb.is_dir() else ())
         return self._kb
 
     def vault(self) -> tuple[int, int, str]:
         if self._vault is None:
-            from .vault import walk_vault_md
+            live = freshness.triple(self._root, "vault")
+            if live is not None:
+                self._vault = live
+            else:
+                from .vault import walk_vault_md
 
-            self._vault = _walk_freshness_key(walk_vault_md(self._root))
+                self._vault = _walk_freshness_key(walk_vault_md(self._root))
         return self._vault
 
     def for_scope(self, scope: str) -> tuple[int, int, str]:
@@ -2534,5 +2535,6 @@ def clear_cache() -> None:
     _RESOLVER_CACHE.clear()
     with _FIND_CACHE_LOCK:
         _FIND_CACHE.clear()
+    freshness.clear()
     from . import vault as vault_module
     vault_module.clear_inbound_index()
