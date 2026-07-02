@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1](https://github.com/Artexis10/exomem/compare/v0.4.0...v0.4.1) (2026-07-02)
+
+
+### Bug Fixes
+
+* diarization soft-fail boundary guard + thread vault_root to named attribution ([c5bc82c](https://github.com/Artexis10/exomem/commit/c5bc82c3667b317799c5a66fe93a68a88ab8f0a7))
+
 ## [0.4.0](https://github.com/Artexis10/exomem/compare/v0.3.0...v0.4.0) (2026-07-02)
 
 
