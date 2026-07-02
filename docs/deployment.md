@@ -286,14 +286,42 @@ The deployments coexist — claude.ai talks to whichever host's connector you in
 and only that host needs to be awake. After editing `.env`, restart the service so
 it reloads.
 
-## GPU / CUDA notes (Blackwell, sm_120)
+## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
 Blackwell GPUs (RTX 50-series, compute capability 12.0 / `sm_120`) need CUDA
 wheels. Default PyPI torch on Windows is **still CPU-only**, so `pyproject.toml`
 pins an explicit CUDA index (`pytorch-cu132`, CUDA 13.2) whose wheel ships
 `sm_120` — `torch.cuda.get_arch_list()` includes it, so any RTX 50-series GPU
 works. The index is scoped to win32/linux via a platform marker; macOS falls back
-to default PyPI.
+to default PyPI — whose arm64 torch wheel **includes the MPS (Metal) backend**, so
+Apple Silicon gets GPU acceleration for the torch models with **no extra wheels**
+(see "Apple Silicon" below).
+
+**Apple Silicon (MPS / Metal).** Device selection is centralized in
+`exomem.accel.select_device` (priority CUDA → MPS → CPU). The torch models — bge
+text embedder, bge reranker, and CLIP — auto-select the Metal GPU when no CUDA is
+present, so interactive `find`, note-write embedding, and CLIP image search run on
+the GPU on an M-series Mac. `PYTORCH_ENABLE_MPS_FALLBACK=1` is set automatically so
+any op MPS lacks degrades to CPU instead of raising.
+
+**ASR on the Metal GPU (`media-mlx` extra).** faster-whisper/ctranslate2 has no Metal
+backend, but ASR runs behind a `TranscriptionBackend` seam (`extract.get_transcriber`)
+with two implementations: `FasterWhisperBackend` (CUDA/CPU) and `MlxWhisperBackend`
+(**mlx-whisper**, Metal GPU). Install the extra — `uv sync --extra media --extra
+media-mlx` — and `get_transcriber()` **auto-selects MLX on Apple Silicon**, putting
+transcription on the GPU too. `EXOMEM_ASR_BACKEND=mlx|faster-whisper` forces the choice;
+`EXOMEM_MLX_WHISPER_MODEL` picks the HF repo (default `mlx-community/whisper-large-v3-mlx`;
+use `mlx-community/whisper-large-v3-turbo` for a lighter, faster run on a fanless Air).
+Without the extra, transcription falls back to CPU faster-whisper — pick a smaller
+`EXOMEM_WHISPER_MODEL` (e.g. `base`) there to cut cost. Audio is decoded via PyAV (the
+shared 16 kHz whisper timebase) when the `media` extra is present, else mlx-whisper
+decodes the file itself (needs `ffmpeg` on PATH).
+
+Two more notes: **Voiceprints** (ECAPA) and **diarization** stay on CPU by default for
+cross-machine numeric parity — opt in per model with `EXOMEM_VOICE_DEVICE=mps` /
+`EXOMEM_DIARIZE_DEVICE=mps`. And you can force every torch model to a device with
+`EXOMEM_TORCH_DEVICE=cpu|mps|cuda` (handy to dodge thermal throttling on a fanless
+MacBook Air during a large `backfill-media`).
 
 The `media` extra adds a wrinkle: `faster-whisper` runs on **ctranslate2**, which
 wants **CUDA-12** cuBLAS/cuDNN/cudart, while torch's `cu132` build ships cuBLAS
@@ -304,9 +332,10 @@ server prepends their `bin` directories to PATH before load (see
 Verify with `uv run python scripts/verify-media-gpu.py`. On Linux, ctranslate2
 resolves CUDA via the wheels' RPATH.
 
-CLIP visual search runs CLIP on **CPU when ASR is active** (whisper's cu12 cuDNN
-PATH-prepend otherwise shadows torch's cuDNN and breaks CLIP's Conv2d). Override
-with `EXOMEM_CLIP_DEVICE=cuda`/`cpu` if needed.
+CLIP visual search runs CLIP on **CPU when ASR is active on CUDA** (whisper's cu12
+cuDNN PATH-prepend otherwise shadows torch's cuDNN and breaks CLIP's Conv2d). This
+clash is CUDA-only, so on Apple Silicon CLIP keeps the **MPS** GPU even with ASR
+running. Override with `EXOMEM_CLIP_DEVICE=cuda`/`mps`/`cpu` if needed.
 
 Zero-shot **image tags** (`EXOMEM_IMAGE_TAGS`, default off) reuse that same loaded
 CLIP model — no extra dependency. When set, each extracted image is cosine-scored
@@ -351,8 +380,9 @@ sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 `uv sync --directory sidecar/diarizer` on Linux/macOS.
 
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
-torch and follows the same precedent: it defaults to **CPU when ASR is active**, with
-a `EXOMEM_VOICE_DEVICE=cuda`/`cpu` override. Enroll voices with
+torch and follows the same precedent: it defaults to **CPU when ASR is active** (and
+to CPU on Apple Silicon for cross-machine voiceprint parity), with a
+`EXOMEM_VOICE_DEVICE=cuda`/`mps`/`cpu` override. Enroll voices with
 `exomem enroll-speaker --name <name> [--self] <sample.wav>` (profiles live in a local
 `.voice_profiles.json` beside the embedding sidecar; `list-speakers` / `remove-speaker`
 manage them). With ≥1 profile enrolled and `EXOMEM_DIARIZE` set, matched clusters render

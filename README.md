@@ -248,9 +248,11 @@ System tools: Tesseract is required for image OCR. On Windows:
 winget install --id UB-Mannheim.TesseractOCR -e
 ```
 
-GPU acceleration is useful but not required. See
-[docs/deployment.md](docs/deployment.md) for CUDA, Blackwell, diarization, and
-remote-service details.
+GPU acceleration is useful but not required, and cross-platform: NVIDIA **CUDA**
+(Linux/Windows) and Apple Silicon **MPS/Metal** (macOS) are both auto-detected for
+the torch models (bge embeddings, reranker, CLIP), with CPU as the fallback. See
+[docs/deployment.md](docs/deployment.md) for CUDA, Blackwell, Apple Silicon,
+diarization, and remote-service details.
 
 ## Configuration
 
@@ -264,11 +266,14 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
 | `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
 | `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
+| `EXOMEM_TORCH_DEVICE` | Force the device for all torch models: `cuda`, `mps`, or `cpu` (default: auto-detect CUDA → MPS → CPU). Pin `cpu` to avoid thermal throttling on a fanless Mac. |
 | `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
 | `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
 | `EXOMEM_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
-| `EXOMEM_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
+| `EXOMEM_WHISPER_MODEL` | faster-whisper model size for ASR, such as `base` or `small`. |
+| `EXOMEM_ASR_BACKEND` | ASR engine: `mlx` (Apple Silicon Metal GPU, needs the `media-mlx` extra) or `faster-whisper` (CUDA/CPU). Default auto-selects MLX on Apple Silicon, else faster-whisper. |
+| `EXOMEM_MLX_WHISPER_MODEL` | HF repo for the MLX ASR model (default `mlx-community/whisper-large-v3-mlx`; use `mlx-community/whisper-large-v3-turbo` for speed). |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 
 Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain

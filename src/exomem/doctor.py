@@ -239,30 +239,73 @@ def _check_torch_cuda() -> DoctorCheck:
         return _check(
             "torch.cuda",
             "fail",
-            "torch is not installed, so CUDA availability cannot be checked.",
+            "torch is not installed, so GPU acceleration cannot be checked.",
             "Install embeddings with `uv sync --extra embeddings`.",
         )
     try:
         import torch
 
-        available = bool(torch.cuda.is_available())
-        if available:
+        if torch.cuda.is_available():
             name = torch.cuda.get_device_name(0)
             arches = ", ".join(torch.cuda.get_arch_list())
             return _check("torch.cuda", "pass", f"CUDA visible to torch: {name} ({arches}).")
+        mps = getattr(torch.backends, "mps", None)
+        if mps is not None and mps.is_available() and mps.is_built():
+            return _check(
+                "torch.cuda",
+                "pass",
+                "Apple Silicon MPS (Metal) backend available — bge/CLIP embeddings will "
+                "use the GPU. Note: faster-whisper (ASR) has no Metal path and stays on CPU.",
+            )
         return _check(
             "torch.cuda",
             "warn",
-            "torch imports but CUDA is not available; embeddings/media will run on CPU.",
-            "This is supported. On NVIDIA GPU hosts, verify the uv torch source and driver.",
+            "torch imports but no GPU (CUDA or MPS) is available; embeddings/media run on CPU.",
+            "This is supported. On NVIDIA hosts verify the uv torch source and driver; on "
+            "Apple Silicon ensure a recent arm64 torch wheel (default PyPI ships MPS).",
         )
     except Exception as e:  # noqa: BLE001
         return _check(
             "torch.cuda",
             "warn",
-            f"torch imports failed during CUDA probe: {e}",
-            "Re-run `uv sync --extra embeddings`; on GPU hosts, verify the CUDA wheel/driver.",
+            f"torch imports failed during GPU probe: {e}",
+            "Re-run `uv sync --extra embeddings`; on GPU hosts, verify the CUDA/torch wheel.",
         )
+
+
+def _check_torch_device() -> DoctorCheck:
+    """Report the device the torch models (bge/CLIP) will actually select — read-only,
+    loads no model."""
+    if not _module_available("torch"):
+        return _check(
+            "torch.device",
+            "warn",
+            "torch not installed; embeddings fall back to lexical/CPU.",
+            "Install with `uv sync --extra embeddings`.",
+        )
+    try:
+        from . import accel
+
+        return _check("torch.device", "pass", f"bge/CLIP embeddings will run on: {accel.select_device()}.")
+    except Exception as e:  # noqa: BLE001
+        return _check("torch.device", "warn", f"torch device probe failed: {e}")
+
+
+def _check_asr_backend() -> DoctorCheck:
+    """Report which ASR backend get_transcriber() selects — read-only, loads no model."""
+    try:
+        from . import extract
+
+        backend = type(extract.get_transcriber()).__name__
+    except Exception as e:  # noqa: BLE001
+        return _check("asr.backend", "warn", f"ASR backend probe failed: {e}")
+    if backend == "MlxWhisperBackend":
+        return _check("asr.backend", "pass", "ASR: mlx-whisper (Apple Silicon Metal GPU).")
+    return _check(
+        "asr.backend",
+        "pass",
+        "ASR: faster-whisper (CUDA/CPU). On Apple Silicon, add `--extra media-mlx` for Metal.",
+    )
 
 
 def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
@@ -522,6 +565,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_dependency("torch", "embeddings"),
             _check_dependency("pillow", "embeddings", import_name="PIL"),
             _check_torch_cuda(),
+            _check_torch_device(),
             _check_models_cache(),
         ])
         sidecar = _check_embedding_sidecar(vault_root)
@@ -535,6 +579,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
             _check_tesseract(),
+            _check_asr_backend(),
         ])
 
     if profile == "remote":

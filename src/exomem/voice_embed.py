@@ -26,6 +26,8 @@ import threading
 
 import numpy as np
 
+from . import accel
+
 log = logging.getLogger(__name__)
 
 # Frozen ECAPA speaker-embedding checkpoint; override for a pinned/local copy.
@@ -42,30 +44,24 @@ _VOICE_LOCK = threading.Lock()
 
 
 def _voice_device() -> str:
-    """Device for ECAPA. Honors EXOMEM_VOICE_DEVICE; otherwise GPU only when ASR is NOT
-    running in this process, else CPU.
+    """Device for ECAPA. Honors EXOMEM_VOICE_DEVICE; otherwise CUDA when available
+    (never under active ASR — the cuDNN-shadow clash), else CPU.
 
-    Same rationale as `embeddings._clip_device()`: faster-whisper's CUDA-12 cuDNN wheels get
-    PATH-prepended (extract._ensure_cuda_dll_path) so ctranslate2 can load, which then shadows
-    torch-cu132's bundled cuDNN 13 and makes torch conv/inference die with
-    CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. Since the media worker prewarms ASR at startup,
-    having extraction enabled means PATH is already poisoned, so ECAPA must run on CPU — a small
-    model, off the request path. A box with media extraction disabled has no conflict and keeps
-    the GPU.
+    Same CUDA rationale as `embeddings._clip_device()`: faster-whisper's CUDA-12 cuDNN
+    wheels get PATH-prepended (extract._ensure_cuda_dll_path) so ctranslate2 can load,
+    which then shadows torch-cu132's bundled cuDNN 13 and makes torch conv/inference die
+    with CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH. So `avoid_cuda_when_asr` keeps ECAPA
+    off CUDA while ASR is active.
+
+    Unlike CLIP, ECAPA does **not** auto-select MPS (`auto_mps=False`): a voiceprint is
+    matched by cosine against profiles that may have been computed on another machine,
+    and MPS float32 kernels differ numerically from CPU — so the parity-safe default is
+    CPU, mirroring `_disable_tf32`. Set `EXOMEM_VOICE_DEVICE=mps` to opt into the Apple
+    GPU on a single-machine setup where parity across hosts doesn't matter.
     """
-    override = os.environ.get("EXOMEM_VOICE_DEVICE")
-    if override:
-        return override
-    # Mirror extract.extraction_enabled() without importing it (avoids a new module edge).
-    asr_active = not os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION")
-    if asr_active:
-        return "cpu"
-    try:
-        import torch
-
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001 — torch absent on a lean box → CPU
-        return "cpu"
+    return accel.select_device(
+        override_env="EXOMEM_VOICE_DEVICE", avoid_cuda_when_asr=True, auto_mps=False
+    )
 
 
 def _disable_tf32() -> None:
