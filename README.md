@@ -218,6 +218,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
 | `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
+| `EXOMEM_SEMANTIC_SEGMENTS` | Set to enable timed transcripts + semantic segment retrieval for audio/video (default off). |
 | `EXOMEM_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
 | `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 

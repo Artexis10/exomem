@@ -229,6 +229,97 @@ def test_transcribe_soft_fails_to_plain_when_diarization_unavailable(
     assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
 
 
+# ---------------- optional: timed transcripts (EXOMEM_SEMANTIC_SEGMENTS, default OFF) ----
+
+
+def test_transcribe_gate_off_is_byte_identical_plain(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    segs = [_FakeSeg("hello there", 0.0, 1.0), _FakeSeg("general kenobi", 1.0, 2.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "hello there general kenobi"
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"
+
+
+def test_transcribe_timed_plain_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    segs = [_FakeSeg("hello there", 5.0, 8.0), _FakeSeg("general kenobi", 3080.0, 3084.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "[0:05] hello there\n[51:20] general kenobi"
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
+    assert r.speakers is None
+
+
+def test_transcribe_timed_diarized_per_segment_lines(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [
+        _FakeSeg("part one", 0.0, 1.0),
+        _FakeSeg("part two", 1.0, 2.0),
+        _FakeSeg("reply", 2.0, 3.0),
+    ]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization",
+        lambda p: [(0.0, 2.0, "SPEAKER_00"), (2.0, 3.0, "SPEAKER_01")],
+    )
+    r = extract._transcribe(Path("x.wav"), "audio")
+    # Per-segment timed lines with the label repeated — NOT merged turns.
+    assert r.text.splitlines() == [
+        "[0:00] [Speaker A]: part one",
+        "[0:01] [Speaker A]: part two",
+        "[0:02] [Speaker B]: reply",
+    ]
+    # Suffix order is load-bearing: _needs_rediarize matches endswith("+diarized").
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed+diarized"
+    # The structured speakers list keeps the MERGED-turn shape (unchanged surface).
+    assert [t["speaker"] for t in r.speakers] == ["Speaker A", "Speaker B"]
+    assert r.speakers[0]["text"] == "part one part two"
+
+
+def test_transcribe_gate_off_diarized_byte_identical(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("part one", 0.0, 1.0), _FakeSeg("part two", 1.0, 2.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(extract, "_run_diarization", lambda p: [(0.0, 2.0, "SPEAKER_00")])
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "[Speaker A]: part one part two"
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}+diarized"
+
+
+def test_transcribe_timed_survives_diarization_soft_fail(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("solo line", 5.0, 6.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "[0:05] solo line"  # timed plain, no speaker labels
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
+
+
+def test_transcribe_timed_render_failure_falls_back_flat(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    segs = [_FakeSeg("hello there", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract.semantic_segments, "render_timed_lines",
+        lambda s: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "hello there"
+    assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"  # no lying +timed marker
+
+
 # ---------------- optional: vision captioning (EXOMEM_VISION_CAPTION, default OFF) ----
 
 

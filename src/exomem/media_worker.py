@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve, scene_frames
+from . import embeddings, extract, preserve, scene_frames, semantic_segments
 from .backfill import iter_kb_files
 
 log = logging.getLogger(__name__)
@@ -38,6 +38,7 @@ class _Job:
     media_type: str
     do_ocr: bool = True    # transcribe/OCR/read → fill the sidecar text
     do_clip: bool = False  # CLIP-embed (images only) → ClipIndex
+    do_reembed: bool = False  # re-embed the sidecar (semantic re-segmentation)
 
 
 class MediaWorker:
@@ -77,6 +78,7 @@ class MediaWorker:
         media_type: str,
         do_ocr: bool = True,
         do_clip: bool = False,
+        do_reembed: bool = False,
     ) -> None:
         self._q.put(
             _Job(
@@ -85,6 +87,7 @@ class MediaWorker:
                 media_type=media_type,
                 do_ocr=do_ocr,
                 do_clip=do_clip,
+                do_reembed=do_reembed,
             )
         )
 
@@ -112,6 +115,21 @@ class MediaWorker:
             self._run_extraction(job)
         if job.do_clip:
             self._run_clip(job)
+        if job.do_reembed:
+            self._run_reembed(job)
+
+    def _run_reembed(self, job: _Job) -> None:
+        """Re-embed a sidecar so semantic segmentation re-runs with late signals.
+
+        Enqueued AFTER a video's frame-OCR jobs (FIFO ⇒ runs once they're done),
+        so segment boundaries can use visual + OCR events. Soft-fails; the
+        earlier embed (transcript+speaker signals only) remains valid.
+        """
+        try:
+            embeddings.upsert_after_write(self._vault_root, [job.sidecar_path])
+            log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
+        except Exception:  # noqa: BLE001 — enrichment, never fatal
+            log.exception("re-embed failed for %s", job.sidecar_path.name)
 
     def _run_extraction(self, job: _Job) -> None:
         try:
@@ -192,6 +210,18 @@ class MediaWorker:
                 do_ocr=True,
                 do_clip=False,
             )
+        if written and semantic_segments.semantic_segments_enabled():
+            # Trailing re-embed of the PARENT sidecar: the FIFO queue guarantees it
+            # runs after every frame OCR above, so semantic segmentation sees the
+            # visual + OCR boundary events.
+            self.enqueue(
+                binary_path=job.binary_path,
+                sidecar_path=job.sidecar_path,
+                media_type=job.media_type,
+                do_ocr=False,
+                do_clip=False,
+                do_reembed=True,
+            )
         if written:
             log.info(
                 "scene frames: wrote %d frame(s) for %s", len(written), job.binary_path.name
@@ -207,6 +237,7 @@ class MediaWorker:
         if not kb.is_dir():
             return 0
         n = 0
+        pending_parents: dict[str, bool] = {}  # insertion-ordered dedup
         for sidecar in iter_kb_files(kb):
             if sidecar.suffix.lower() != ".md":
                 continue
@@ -225,6 +256,26 @@ class MediaWorker:
             if media_type and binary.exists():
                 self.enqueue(binary_path=binary, sidecar_path=sidecar, media_type=media_type)
                 n += 1
+                if _PARENT_MEDIA_MARKER in head:
+                    pm = re.search(r"(?m)^parent_media:\s*(.+?)\s*$", head)
+                    if pm:
+                        pending_parents[pm.group(1).strip()] = True
+        # Deduped parent re-embeds AFTER the pending frame children above, so
+        # semantic segmentation re-runs once their OCR completes (gate on only).
+        if pending_parents and semantic_segments.semantic_segments_enabled():
+            for parent_rel in pending_parents:
+                parent_sidecar = self._vault_root / (parent_rel + ".md")
+                parent_binary = self._vault_root / parent_rel
+                if parent_sidecar.exists() and parent_binary.exists():
+                    self.enqueue(
+                        binary_path=parent_binary,
+                        sidecar_path=parent_sidecar,
+                        media_type=extract.media_type_for(parent_binary) or "video",
+                        do_ocr=False,
+                        do_clip=False,
+                        do_reembed=True,
+                    )
+                    n += 1
         if n:
             log.info("media worker: re-enqueued %d pending extraction(s)", n)
         return n
