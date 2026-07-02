@@ -273,6 +273,41 @@ def _check_torch_cuda() -> DoctorCheck:
         )
 
 
+def _check_torch_device() -> DoctorCheck:
+    """Report the device the torch models (bge/CLIP) will actually select — read-only,
+    loads no model."""
+    if not _module_available("torch"):
+        return _check(
+            "torch.device",
+            "warn",
+            "torch not installed; embeddings fall back to lexical/CPU.",
+            "Install with `uv sync --extra embeddings`.",
+        )
+    try:
+        from . import accel
+
+        return _check("torch.device", "pass", f"bge/CLIP embeddings will run on: {accel.select_device()}.")
+    except Exception as e:  # noqa: BLE001
+        return _check("torch.device", "warn", f"torch device probe failed: {e}")
+
+
+def _check_asr_backend() -> DoctorCheck:
+    """Report which ASR backend get_transcriber() selects — read-only, loads no model."""
+    try:
+        from . import extract
+
+        backend = type(extract.get_transcriber()).__name__
+    except Exception as e:  # noqa: BLE001
+        return _check("asr.backend", "warn", f"ASR backend probe failed: {e}")
+    if backend == "MlxWhisperBackend":
+        return _check("asr.backend", "pass", "ASR: mlx-whisper (Apple Silicon Metal GPU).")
+    return _check(
+        "asr.backend",
+        "pass",
+        "ASR: faster-whisper (CUDA/CPU). On Apple Silicon, add `--extra media-mlx` for Metal.",
+    )
+
+
 def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     if vault_root is None:
         return None
@@ -530,6 +565,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_dependency("torch", "embeddings"),
             _check_dependency("pillow", "embeddings", import_name="PIL"),
             _check_torch_cuda(),
+            _check_torch_device(),
             _check_models_cache(),
         ])
         sidecar = _check_embedding_sidecar(vault_root)
@@ -543,6 +579,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
             _check_tesseract(),
+            _check_asr_backend(),
         ])
 
     if profile == "remote":
