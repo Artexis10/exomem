@@ -16,6 +16,121 @@ server.
 agent -> MCP tools -> exomem -> your Markdown / Obsidian vault
 ```
 
+## Prove it in 30 seconds
+
+```bash
+uvx exomem demo
+```
+
+One command, no install, no config, no vault of your own needed:
+
+```text
+exomem demo — bundled sample vault, keyword mode, fully local
+vault: /tmp/exomem-demo-XXXXXX
+
+1. doctor: PASS (0.8s)
+2. find "retrieval": PASS (0.1s)
+   - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
+   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
+3. get retrieval insight: PASS (0.0s)
+   - title: Retrieval needs owned files
+   - type: insight
+   - excerpt: Local-first knowledge tools should retrieve from files the user already owns.
+4. audit: PASS (0.0s)
+
+demo PASS — total 1.0s. This is your proof: agents search files you own.
+Next: connect your own vault with `exomem setup`
+```
+
+Runs fully local and read-only against a sample vault bundled in the package.
+Add `--keep` to leave that copy on disk afterward and open it in Obsidian.
+
+## Set it up in 5 minutes
+
+```bash
+uv tool install exomem   # or: pip install exomem
+exomem setup --vault "/path/to/your/Obsidian"
+```
+
+One command does the whole local setup: the wizard scans your vault and shows
+what's already there, initializes `Knowledge Base/`, runs the `doctor`
+preflight, registers the server with Claude Code, and installs the skill.
+
+Already have a vault full of notes? That's the normal case: the wizard shows
+what's there first, and exomem only ever writes under `Knowledge Base/` — your
+existing files stay untouched (read-only, still searchable). See
+[SETUP-LOCAL.md § Already have a vault full of notes?](SETUP-LOCAL.md#already-have-a-vault-full-of-notes)
+for the full contract, including daily-notes vaults. Re-running `setup` is
+safe; completed steps report `[skipped]`. Non-interactive:
+`exomem setup --yes --vault "/path" --lean`.
+
+The individual steps (`exomem init` / `doctor` / `install-skill` /
+`install-hook`, plus `claude mcp add`) still exist as the manual path — see
+[SETUP-LOCAL.md](SETUP-LOCAL.md).
+
+The skill installs under the stable Claude Code name `knowledge-base`; Exomem is
+the server and tool layer behind it. The skill is recommended for Claude Code —
+the server gives Claude the tools, the skill is what makes it use them. Hooks
+are Claude Code-only reliability nudges for long sessions: a read-side reminder
+before answers and a write-side reminder at natural stopping points. Other MCP
+clients can still use the server; put the same knowledge-discipline
+instructions in their system/project instructions if they do not support
+skills.
+
+Full local setup is in [SETUP-LOCAL.md](SETUP-LOCAL.md). Remote/mobile setup is
+in [docs/remote-checklist.md](docs/remote-checklist.md) and
+[docs/deployment.md](docs/deployment.md).
+
+For development, or to run the sample vault from a checkout instead of a
+package install:
+
+```bash
+git clone https://github.com/Artexis10/exomem.git
+cd exomem
+uv sync
+uv run exomem demo
+```
+
+## Connect your agent
+
+| Client | How |
+| --- | --- |
+| Claude Code | `exomem setup` registers it for you (see above) |
+| Codex CLI | `codex mcp add` — see below |
+| claude.ai (remote) | Remote server — see [docs/remote-checklist.md](docs/remote-checklist.md) |
+| Any MCP client | Generic stdio config — see below |
+
+<details>
+<summary>Codex CLI</summary>
+
+```bash
+codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
+```
+
+Or add it directly to `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.exomem]
+command = "exomem"
+args = ["--transport", "stdio"]
+env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
+```
+
+</details>
+
+<details>
+<summary>Any MCP client (generic stdio)</summary>
+
+```json
+{"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
+```
+
+</details>
+
+The first start downloads search models in the background — `find` works
+immediately with keyword ranking and upgrades to semantic search automatically
+once the models land. Run `exomem warm` to pre-download them ahead of time.
+
 ## What it does
 
 - **Searches the vault you already own.** Markdown stays in place; exomem does
@@ -43,86 +158,6 @@ store. exomem works the other way around: agents come to your vault.
 
 For a deeper point-in-time comparison, see
 [docs/comparison-engraph.md](docs/comparison-engraph.md).
-
-## Install
-
-From PyPI:
-
-```bash
-pip install exomem
-exomem --help
-```
-
-For development or to run the bundled sample vault:
-
-```bash
-git clone https://github.com/Artexis10/exomem.git
-cd exomem
-uv sync
-uv run python scripts/smoke-sample-vault.py
-```
-
-## Five-minute proof
-
-Run exomem against the bundled sample vault before connecting your own notes:
-
-```bash
-uv run python scripts/demo-sample-vault.py
-```
-
-Expected shape:
-
-```text
-exomem sample-vault demo
-vault: examples/sample-vault
-
-1. doctor: PASS (lean profile)
-2. find "retrieval":
-   - Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md
-   - Knowledge Base/Notes/Insights/retrieval-needs-owned-files.md
-3. get retrieval insight:
-   - title: Retrieval needs owned files
-   - type: insight
-   - excerpt: Local-first knowledge tools should retrieve from files the user already owns.
-4. audit: PASS (broken_wikilink, unprocessed_source)
-
-demo PASS
-```
-
-## Local quickstart
-
-One command does the whole local setup — scans your vault, initializes the
-Knowledge Base, runs the preflight, registers the server with Claude Code, and
-installs the skill:
-
-```bash
-exomem setup --vault "/path/to/your/Obsidian"
-```
-
-Already have a vault full of notes? That's the normal case: the wizard shows
-what's there first, and exomem only ever writes under `Knowledge Base/` — your
-existing files stay untouched (read-only, still searchable). See
-[SETUP-LOCAL.md § Already have a vault full of notes?](SETUP-LOCAL.md#already-have-a-vault-full-of-notes)
-for the full contract, including daily-notes vaults. Re-running `setup` is
-safe; completed steps report `[skipped]`. Non-interactive:
-`exomem setup --yes --vault "/path" --lean`.
-
-The individual steps (`exomem init` / `doctor` / `install-skill` /
-`install-hook`, plus `claude mcp add`) still exist as the manual path — see
-[SETUP-LOCAL.md](SETUP-LOCAL.md).
-
-The skill installs under the stable Claude Code name `knowledge-base`; Exomem is
-the server and tool layer behind it. The skill is recommended for Claude Code —
-the server gives Claude the tools, the skill is what makes it use them. Hooks
-are Claude Code-only reliability nudges for long sessions: a read-side reminder
-before answers and a write-side reminder at natural stopping points. Other MCP
-clients can still use the server; put the same knowledge-discipline
-instructions in their system/project instructions if they do not support
-skills.
-
-Full local setup is in [SETUP-LOCAL.md](SETUP-LOCAL.md). Remote/mobile setup is
-in [docs/remote-checklist.md](docs/remote-checklist.md) and
-[docs/deployment.md](docs/deployment.md).
 
 ## Core tools
 

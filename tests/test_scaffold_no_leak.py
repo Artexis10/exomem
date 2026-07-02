@@ -88,6 +88,9 @@ def _scaffold_files() -> list[Path]:
     return [f for f in sorted(SCAFFOLD.rglob("*")) if f.is_file()]
 
 
+SAMPLE_VAULT = SOURCE / "_sample_vault"
+
+
 def test_scaffold_ships_no_personal_data() -> None:
     """Structural machine-path/personal patterns (shared with the generator)."""
     patterns = [re.compile(p) for p in _leak_patterns()]
@@ -126,6 +129,30 @@ def test_scaffold_ships_no_personal_tokens() -> None:
     assert not offenders, (
         "personal tokens found in the shipped scaffold — genericize before "
         "shipping (the scaffold is the public face of the skill):\n"
+        + "\n".join(offenders)
+    )
+
+
+def test_sample_vault_ships_no_personal_data() -> None:
+    """Structural machine-path/personal patterns (shared with the generator),
+    extended to the packaged demo sample vault: src/exomem/_sample_vault/**
+    ships inside the wheel for `exomem demo`, exactly like the scaffold does,
+    so it needs the same structural guard (mirrors
+    test_scaffold_ships_no_personal_data above)."""
+    patterns = [re.compile(p) for p in _leak_patterns()]
+    offenders: list[str] = []
+    for f in sorted(SAMPLE_VAULT.rglob("*")):
+        if not f.is_file():
+            continue
+        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+            for p in patterns:
+                if p.search(line):
+                    offenders.append(
+                        f"{f.relative_to(SAMPLE_VAULT)}:{i}: /{p.pattern}/ -> {line.strip()[:80]}"
+                    )
+    assert not offenders, (
+        "personal-data patterns found in the packaged demo sample vault — it "
+        "ships inside the wheel; fix it directly and keep it generic:\n"
         + "\n".join(offenders)
     )
 

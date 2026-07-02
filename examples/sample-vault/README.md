@@ -1,12 +1,14 @@
 # exomem sample vault
 
-Tiny public vault for first-run smoke tests and documentation examples.
-
-Run from the repo root:
+The sample vault now ships inside the package (`src/exomem/_sample_vault/`),
+so the first-run proof works from a bare install — no clone needed:
 
 ```bash
-uv run python scripts/smoke-sample-vault.py
+uvx exomem demo
 ```
 
-The smoke is read-only and lean: it disables embeddings/media and verifies
-`doctor`, keyword `find`, `get`, and `audit` against this sample.
+The demo is read-only and lean: it copies the bundled vault to a temp
+directory, disables embeddings/media, and verifies `doctor`, keyword `find`,
+`get`, and `audit` with per-step timings. Use `--keep` to keep the temp copy
+and open it in Obsidian, `--json` for a machine-readable envelope (CI runs
+exactly this).

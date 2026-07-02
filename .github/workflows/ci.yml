@@ -26,8 +26,23 @@ jobs:
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
         run: uv run --python ${{ matrix.python-version }} python -m pytest -q
-      - name: Sample vault smoke
-        run: uv run --python ${{ matrix.python-version }} python scripts/smoke-sample-vault.py
+      - name: Sample vault smoke (the exact command users run)
+        run: uv run --python ${{ matrix.python-version }} exomem demo --json
+
+  onboarding:
+    name: onboarding (wheel path)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Wheel-only time-to-value gate
+        # Proves the onboarding path works from the built wheel alone — the
+        # packaged sample vault ships, `exomem demo` has no repo dependency,
+        # and `exomem setup --yes` completes — with a hard wall-time budget.
+        run: uv run python scripts/time-to-value.py --budget-seconds 120
 
   specs:
     name: OpenSpec validation

@@ -23,7 +23,6 @@ import json
 import os
 import shutil
 import subprocess
-import sys
 from pathlib import Path
 
 from . import doctor as doctor_module
@@ -44,15 +43,24 @@ def _ask_yn(input_fn, prompt: str, default: bool) -> bool:
 
 
 def _server_command(which_fn) -> list[str]:
-    """How Claude Code should launch the server: uv in a repo checkout,
-    the running interpreter for wheel installs."""
+    """How Claude Code should launch the server, most-durable first: uv in a
+    repo checkout; the `exomem` console script for pip/`uv tool` installs;
+    `uvx exomem` as the transient-install escape hatch.
+
+    Never `sys.executable -m exomem` for wheel installs: under `uvx exomem
+    setup`, sys.executable points into uvx's ephemeral cache env, so the
+    registered server silently breaks when that cache is pruned.
+    """
     repo_root = Path(__file__).resolve().parents[2]
     if (repo_root / "pyproject.toml").is_file() and which_fn("uv"):
         return [
             "uv", "--directory", str(repo_root),
             "run", "python", "-m", "exomem", "--transport", "stdio",
         ]
-    return [sys.executable, "-m", "exomem", "--transport", "stdio"]
+    console_script = which_fn("exomem")
+    if console_script:
+        return [console_script, "--transport", "stdio"]
+    return ["uvx", "exomem", "--transport", "stdio"]
 
 
 def run_setup(
@@ -180,6 +188,12 @@ def run_setup(
             env_args += ["--env", "EXOMEM_DISABLE_EMBEDDINGS=1"]
             env_dict["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
         server_cmd = _server_command(which_fn)
+        if server_cmd[0] == "uvx":
+            print_fn(
+                "  Note: exomem is not durably installed, so the server will be "
+                "registered as `uvx exomem`. For a registration that never "
+                "re-resolves, run `uv tool install exomem` first."
+            )
         claude = which_fn("claude")
         if not claude:
             snippet = {
