@@ -124,6 +124,13 @@ def _backfill_media_main(argv: list[str]) -> int:
         "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
         "EXOMEM_DIARIZE set in this shell (the CLI does not read .env).",
     )
+    parser.add_argument(
+        "--retime", action="store_true",
+        help="re-extract audio/video transcribed before timed transcripts (extracted_by "
+        "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
+        "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
+        "does not read .env). One re-extraction serves --retime and --rediarize together.",
+    )
     args = parser.parse_args(argv)
     if not args.vault:
         print("backfill-media: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
@@ -137,6 +144,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         do_ocr=not args.no_ocr,
         do_clip=not args.no_clip,
         rediarize=args.rediarize,
+        retime=args.retime,
         dry_run=args.dry_run,
         log_fn=print,
     )

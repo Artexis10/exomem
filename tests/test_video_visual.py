@@ -271,3 +271,102 @@ def test_backfill_gate_off_writes_no_frames(vault, monkeypatch: pytest.MonkeyPat
     stats = backfill.backfill_media(vault, do_ocr=False, log_fn=lambda *a: None)
     assert stats.scene_frames_written == 0
     assert not scene_frames.frames_dir_for(p).exists()
+
+
+# ---------------- semantic segments: trailing re-embed ordering ----------------
+
+
+def test_worker_gate_on_enqueues_parent_reembed_after_ocr(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    res = preserve.preserve_bytes(
+        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+    )
+    monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(
+        binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
+        media_type="video", do_ocr=False, do_clip=True,
+    ))
+    jobs = []
+    while not w._q.empty():
+        jobs.append(w._q.get_nowait())
+    # FIFO: 2 frame-OCR jobs first, then exactly ONE parent re-embed.
+    assert [j.do_reembed for j in jobs] == [False, False, True]
+    assert jobs[-1].sidecar_path == vault / res.sidecar_path
+    assert not jobs[-1].do_ocr and not jobs[-1].do_clip
+
+
+def test_worker_reembed_gate_off_not_enqueued(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    res = preserve.preserve_bytes(
+        vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
+    )
+    monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(
+        binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
+        media_type="video", do_ocr=False, do_clip=True,
+    ))
+    jobs = []
+    while not w._q.empty():
+        jobs.append(w._q.get_nowait())
+    assert [j.do_reembed for j in jobs] == [False, False]
+
+
+def test_process_reembed_calls_upsert(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    called = {}
+    monkeypatch.setattr(
+        media_worker.embeddings, "upsert_after_write",
+        lambda root, paths: called.setdefault("paths", paths),
+    )
+    sidecar = vault / "Knowledge Base/Evidence/T/clips/demo.mp4.md"
+    sidecar.parent.mkdir(parents=True, exist_ok=True)
+    sidecar.write_text("---\nmedia_type: video\n---\n", encoding="utf-8")
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(
+        binary_path=sidecar.with_suffix(""), sidecar_path=sidecar,
+        media_type="video", do_ocr=False, do_clip=False, do_reembed=True,
+    ))
+    assert called["paths"] == [sidecar]
+
+
+def test_scan_pending_enqueues_deduped_parent_reembed(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    parent_rel = "Knowledge Base/Evidence/T/clips/demo.mp4"
+    parent = vault / parent_rel
+    parent.parent.mkdir(parents=True, exist_ok=True)
+    parent.write_bytes(b"\x00video")
+    (vault / (parent_rel + ".md")).write_text(
+        f"---\nmedia_type: video\nevidence_file: {parent_rel}\nextracted_by: whisper+timed\n---\n",
+        encoding="utf-8",
+    )
+    frames = vault / (parent_rel + ".frames")
+    frames.mkdir()
+    for i, ms in enumerate((5000, 15000)):
+        jpg = frames / f"scene-00{i}-t{ms}ms.jpg"
+        jpg.write_bytes(b"\xff\xd8x")
+        jpg.with_name(jpg.name + ".md").write_text(
+            "---\nmedia_type: image\n"
+            f"evidence_file: {parent_rel}.frames/{jpg.name}\n"
+            "extracted_by: pending\n"
+            f"parent_media: {parent_rel}\n---\n",
+            encoding="utf-8",
+        )
+    w = media_worker.MediaWorker(vault)
+    n = w._scan_pending_ocr()
+    jobs = []
+    while not w._q.empty():
+        jobs.append(w._q.get_nowait())
+    reembeds = [j for j in jobs if j.do_reembed]
+    assert len(reembeds) == 1  # two children, ONE deduped parent re-embed
+    assert reembeds[0].sidecar_path == vault / (parent_rel + ".md")
+    assert jobs.index(reembeds[0]) == len(jobs) - 1  # after the pending children
+    assert n == 3

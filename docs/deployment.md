@@ -334,6 +334,18 @@ and `EXOMEM_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos
 run `exomem backfill-media` with the flag set — idempotent, and it replaces the
 old uniform CLIP rows with scene-aware ones.
 
+**Semantic video segments** (`EXOMEM_SEMANTIC_SEGMENTS`, default off) make the
+moment the retrieval unit for audio/video. Transcripts render as one timed line
+per ASR segment (`[51:20] …`, diarized `[51:20] [Alice]: …`), and the embedding
+chunker segments them at fused topic boundaries — bge similarity valleys plus
+scene-change, speaker-turn, and OCR-change events from the persisted scene
+frames. A transcript match then surfaces `transcript_match_at` on the hit with
+the nearest scene frame attached. Pure measurement, no LLM, no new dependency;
+gate off is byte-identical. The worker re-embeds a video's sidecar once after
+its frame OCRs so segments see all signals (bounded, off the request path).
+Upgrade existing recordings with `exomem backfill-media --retime` (opt-in —
+re-runs ASR; combine with `--rediarize` to gain both markers in one pass).
+
 **Install:** `uv sync --extra media --extra diarization`, then build the isolated
 sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 `uv sync --directory sidecar/diarizer` on Linux/macOS.

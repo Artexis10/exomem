@@ -704,6 +704,53 @@ def chunk_text(title: str, body: str) -> list[str]:
     return out
 
 
+def _chunks_for_page(vault_root: Path, page) -> list[str]:
+    """Chunking router — the single seam every writer/rebuild path goes through.
+
+    Gated (`EXOMEM_SEMANTIC_SEGMENTS`) audio/video sidecars whose transcript is
+    timed get SEMANTIC SEGMENT chunks (each starting with its `[timestamp]`
+    marker — what `find` surfaces as `transcript_match_at`), with the sections
+    before/after `## Extracted text` still paragraph-chunked in document order.
+    Every other page — and the gate-off world — returns `chunk_text` output
+    unchanged (equality-tested).
+    """
+    from . import semantic_segments as ss
+
+    if not (
+        ss.semantic_segments_enabled()
+        and getattr(page, "media_type", None) in ("audio", "video")
+    ):
+        return chunk_text(page.title, page.body)
+    body = page.body or ""
+    idx = body.find("## Extracted text")
+    if idx == -1:
+        return chunk_text(page.title, page.body)
+    head = body[:idx]
+    rest = body[idx + len("## Extracted text"):]
+    nxt = rest.find("\n## ")
+    transcript = (rest if nxt == -1 else rest[:nxt]).strip()
+    tail = "" if nxt == -1 else rest[nxt + 1 :]
+    timed_lines = sum(1 for line in transcript.splitlines() if ss.TIMED_LINE_RE.match(line))
+    if timed_lines < ss.MIN_TIMED_LINES:
+        return chunk_text(page.title, page.body)
+    events = (
+        ss.gather_events(vault_root, page.media_file)
+        if getattr(page, "media_file", None)
+        else ss.Events([], [])
+    )
+    segs = ss.segment_transcript(transcript, events=events)
+    if segs is None:
+        return chunk_text(page.title, page.body)
+    title = (page.title or "").strip()
+    out: list[str] = []
+    if head.strip():
+        out.extend(chunk_text(title, head))
+    out.extend(f"{title}\n\n{s}" if title else s for s in segs)
+    if tail.strip():
+        out.extend(chunk_text(title, tail))
+    return out
+
+
 def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     """Batch-encode texts → float32 `(N, 768)`, L2-normalized for cosine."""
     if not texts:
@@ -869,7 +916,7 @@ class EmbeddingIndex:
                 continue
             if not access.is_indexable(self.vault_root, page.rel_path):
                 continue  # excluded tree (_access.yaml) — keep it out of the index
-            chunks = chunk_text(page.title, page.body)
+            chunks = _chunks_for_page(self.vault_root, page)
             if not chunks:
                 continue
             all_chunks.append((page.rel_path, chunks, page.mtime))
@@ -1158,7 +1205,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
         page = find_module._CACHE.get(md, vault_root)
         if page is None:
             continue
-        chunks = chunk_text(page.title, page.body)
+        chunks = _chunks_for_page(vault_root, page)
         if not chunks:
             # Page has no embeddable content — drop any stale rows for it.
             index.delete_file(page.rel_path)

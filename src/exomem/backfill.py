@@ -24,7 +24,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve, scene_frames
+from . import embeddings, extract, preserve, scene_frames, semantic_segments
 from .vault import VAULT_SCAN_SKIP_DIRS
 
 log = logging.getLogger(__name__)
@@ -99,6 +99,18 @@ def _needs_rediarize(sidecar: Path, media_type: str | None) -> bool:
     return not v.endswith("+diarized")
 
 
+def _needs_retime(sidecar: Path, media_type: str | None) -> bool:
+    """True for an audio/video sidecar transcribed BEFORE timed transcripts: a
+    completed ASR engine (not pending/failed/no-audio) without the `+timed`
+    marker — that marker is the re-time done-state, keeping the pass idempotent."""
+    if media_type not in ("audio", "video"):
+        return False
+    v = _extracted_engine(sidecar)
+    if v is None or v in _NOT_DONE or v.startswith("failed:") or v == "no-audio":
+        return False
+    return "+timed" not in v
+
+
 def _is_frame_child(sidecar: Path) -> bool:
     """True for a scene-frame child sidecar (`parent_media:` set). Such images never
     get their own ClipIndex rows — the parent video's per-scene vectors own visual
@@ -131,6 +143,7 @@ class BackfillStats:
     extracted: int = 0
     extract_failed: int = 0
     rediarized: int = 0
+    retimed: int = 0
     clip_indexed: int = 0
     scene_frames_written: int = 0
     skipped: int = 0
@@ -142,6 +155,7 @@ def backfill_media(
     do_ocr: bool = True,
     do_clip: bool = True,
     rediarize: bool = False,
+    retime: bool = False,
     dry_run: bool = False,
     log_fn=log.info,
 ) -> BackfillStats:
@@ -149,6 +163,9 @@ def backfill_media(
 
     `rediarize` re-extracts audio/video whose transcript predates diarization (a completed
     ASR engine without `+diarized`) so they gain labeled turns + `speakers:` frontmatter.
+    `retime` re-extracts audio/video whose transcript predates timed transcripts (no
+    `+timed` marker) so they gain per-segment `[m:ss]` lines — the substrate for
+    semantic segmentation. One re-extraction serves both flags when both are requested.
     """
     stats = BackfillStats()
     kb = vault_root / "Knowledge Base"
@@ -161,6 +178,12 @@ def backfill_media(
             "skipping re-diarization (set EXOMEM_DIARIZE=1)"
         )
         rediarize = False
+    if retime and not semantic_segments.semantic_segments_enabled():
+        log_fn(
+            "--retime requested but EXOMEM_SEMANTIC_SEGMENTS is not enabled; "
+            "skipping re-timing (set EXOMEM_SEMANTIC_SEGMENTS=1)"
+        )
+        retime = False
     clip_index = embeddings.ClipIndex(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
@@ -203,46 +226,66 @@ def backfill_media(
         need_rediarize = (
             rediarize and do_ocr and not need_ocr and _needs_rediarize(sidecar, media_type)
         )
-        if not (need_sidecar or need_ocr or need_clip or need_scenes or need_rediarize):
+        need_retime = (
+            retime and do_ocr and not need_ocr and _needs_retime(sidecar, media_type)
+        )
+        if not (need_sidecar or need_ocr or need_clip or need_scenes or need_rediarize
+                or need_retime):
             stats.skipped += 1
             continue
         if dry_run:
             todo = " ".join(t for t, on in
                             (("sidecar", need_sidecar), ("ocr", need_ocr), ("clip", need_clip),
-                             ("scenes", need_scenes), ("rediarize", need_rediarize)) if on)
+                             ("scenes", need_scenes), ("rediarize", need_rediarize),
+                             ("retime", need_retime)) if on)
             log_fn(f"  [{i}/{len(files)}] {rel} -> {todo}")
             stats.sidecars_created += need_sidecar
             stats.extracted += need_ocr
             stats.clip_indexed += need_clip
             stats.rediarized += need_rediarize
+            stats.retimed += need_retime
             continue
 
         if need_sidecar:
             sidecar, created = preserve.ensure_media_sidecar(vault_root, f)
             stats.sidecars_created += int(created)
-        if need_ocr or need_rediarize:
+        if need_ocr or need_rediarize or need_retime:
             try:
                 res = extract.extract_text(f, media_type=media_type)
-                if need_rediarize and not res.engine.endswith("+diarized"):
-                    # Diarization soft-failed (extract's contract) — the result is the
-                    # same plain transcript the sidecar already holds. Leave its bytes
-                    # untouched and stop re-diarizing: every further attempt would fail
-                    # the same way. Mirrors the do_ocr/do_clip degradation pattern.
+                # Each requested upgrade is judged by its engine marker (extract's
+                # soft-fail contract). A failed upgrade disables its pass for the rest
+                # (every further attempt would fail the same way); the sidecar is
+                # written when first-time OCR ran or at least one upgrade materialized
+                # — a fully-failed upgrade leaves bytes it already holds untouched.
+                got_diarized = res.engine.endswith("+diarized")
+                got_timed = "+timed" in res.engine
+                if need_rediarize and not got_diarized:
                     log_fn(
                         f"  ! diarization unavailable (engine {res.engine}); "
                         "skipping re-diarization for the rest"
                     )
                     rediarize = False
-                else:
+                if need_retime and not got_timed:
+                    log_fn(
+                        f"  ! timed rendering unavailable (engine {res.engine}); "
+                        "skipping re-timing for the rest"
+                    )
+                    retime = False
+                upgrade_gained = (need_rediarize and got_diarized) or (
+                    need_retime and got_timed
+                )
+                if need_ocr or upgrade_gained:
                     preserve.update_sidecar_extraction(
                         vault_root, sidecar,
                         text=res.text.strip() or "(no text detected)", engine=res.engine,
                         speakers=res.speakers,
                     )
-                    if need_rediarize:
-                        stats.rediarized += 1
-                    else:
+                    if need_ocr:
                         stats.extracted += 1
+                    if need_rediarize and got_diarized:
+                        stats.rediarized += 1
+                    if need_retime and got_timed:
+                        stats.retimed += 1
             except extract.ExtractionUnavailable as e:
                 log_fn(f"  ! extraction engine unavailable ({e}); skipping OCR for the rest")
                 do_ocr = False
@@ -261,6 +304,10 @@ def backfill_media(
                     stats.scene_frames_written += len(written)
                     if do_ocr and written:
                         do_ocr = _ocr_new_scene_frames(vault_root, written, stats, log_fn)
+                    if written and semantic_segments.semantic_segments_enabled():
+                        # Fold the fresh visual/OCR boundary events into the parent's
+                        # semantic segments (mirrors the worker's trailing re-embed).
+                        embeddings.upsert_after_write(vault_root, [sidecar])
                 elif media_type == "video":
                     clip_index.upsert_frames(rel, embeddings.embed_video_frames(f), mtime)
                     stats.clip_indexed += 1

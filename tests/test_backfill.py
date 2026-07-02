@@ -253,3 +253,101 @@ def test_rediarize_dry_run_counts_without_writing(vault, monkeypatch: pytest.Mon
     stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, dry_run=True, log_fn=_quiet)
     assert stats.rediarized == 1
     assert sidecar.read_text("utf-8") == before
+
+
+# ---------------- --retime: re-extract pre-timed-transcript A/V sidecars ----------------
+
+
+def _timed_result(*a, **k):
+    return extract.ExtractResult(
+        text="[0:05] hello there\n[0:12] general kenobi",
+        media_type="audio",
+        engine="faster-whisper:large-v3+timed",
+    )
+
+
+def test_retime_reextracts_flat_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    _, sidecar = _drop_audio_with_plain_transcript(vault)
+    monkeypatch.setattr(extract, "extract_text", _timed_result)
+    stats = backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+    assert stats.retimed == 1
+    assert stats.extracted == 0
+    body = sidecar.read_text("utf-8")
+    assert "extracted_by: faster-whisper:large-v3+timed" in body
+    assert "[0:05] hello there" in body
+
+
+def test_retime_second_run_is_noop(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    _drop_audio_with_plain_transcript(vault)
+    monkeypatch.setattr(extract, "extract_text", _timed_result)
+    backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-extracted a +timed sidecar")),
+    )
+    stats2 = backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+    assert stats2.retimed == 0
+    assert stats2.skipped >= 1
+
+
+def test_needs_retime_classification(vault) -> None:
+    p = vault / "Knowledge Base/Evidence/x/rec2.wav"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"RIFF")
+    sidecar, _ = preserve.ensure_media_sidecar(vault, p)
+    assert backfill._needs_retime(sidecar, "audio") is False  # not extracted yet
+    preserve.update_sidecar_extraction(vault, sidecar, text="t", engine="faster-whisper:large-v3")
+    assert backfill._needs_retime(sidecar, "audio") is True
+    assert backfill._needs_retime(sidecar, "image") is False
+    preserve.update_sidecar_extraction(vault, sidecar, text="t", engine="faster-whisper:large-v3+timed+diarized")
+    assert backfill._needs_retime(sidecar, "audio") is False  # done-marker anywhere in engine
+    preserve.update_sidecar_extraction(vault, sidecar, text="t", engine="no-audio")
+    assert backfill._needs_retime(sidecar, "video") is False
+
+
+def test_retime_guard_when_gate_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    _drop_audio_with_plain_transcript(vault)
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("retime ran with the gate off")),
+    )
+    stats = backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+    assert stats.retimed == 0
+
+
+def test_retime_and_rediarize_share_one_extraction(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    _, sidecar = _drop_audio_with_plain_transcript(vault)
+    calls = {"n": 0}
+
+    def _both(*a, **k):
+        calls["n"] += 1
+        return extract.ExtractResult(
+            text="[0:05] [Hugo]: hello there",
+            media_type="audio",
+            engine="faster-whisper:large-v3+timed+diarized",
+            speakers=[{"speaker": "Hugo", "start": 0.0, "end": 1.5, "text": "hello there"}],
+        )
+
+    monkeypatch.setattr(extract, "extract_text", _both)
+    stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, retime=True, log_fn=_quiet)
+    assert calls["n"] == 1  # ONE extraction served both upgrades
+    assert stats.retimed == 1 and stats.rediarized == 1
+    body = sidecar.read_text("utf-8")
+    assert "+timed+diarized" in body and "[0:05] [Hugo]:" in body
+
+
+def test_retime_partial_win_writes_timed_disables_rediarize(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    _, sidecar = _drop_audio_with_plain_transcript(vault)
+    monkeypatch.setattr(extract, "extract_text", _timed_result)  # +timed but no +diarized
+    stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, retime=True, log_fn=_quiet)
+    assert stats.retimed == 1 and stats.rediarized == 0
+    assert "+timed" in sidecar.read_text("utf-8")  # partial upgrade still landed

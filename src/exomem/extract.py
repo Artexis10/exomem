@@ -42,6 +42,8 @@ import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import semantic_segments
+
 log = logging.getLogger(__name__)
 
 # Media-type buckets by extension. Extension-based is deliberate: no libmagic dep, and
@@ -297,13 +299,49 @@ def _transcribe(path: Path, media_type: str) -> ExtractResult:
         labeled = _diarize(path, seg_list)
         if labeled is not None:
             text, speakers = labeled
+            # `+timed` is detected from the rendered text (not re-checked from the
+            # gate) so a soft-failed timed render can never mislabel the engine —
+            # the marker is backfill's idempotency key. Order matters:
+            # `_needs_rediarize` matches endswith("+diarized").
+            timed = "+timed" if _is_timed_text(text) else ""
             return ExtractResult(
-                text=text, media_type=media_type, engine=f"{engine}+diarized",
+                text=text, media_type=media_type, engine=f"{engine}{timed}+diarized",
                 speakers=speakers,
             )
 
+    # Timed rendering (EXOMEM_SEMANTIC_SEGMENTS, default OFF): one line per ASR
+    # segment with a `[m:ss]` prefix — the substrate for semantic segmentation
+    # and `transcript_match_at`. Soft-fail: any renderer error falls back to the
+    # flat join below; gate unset is byte-identical to it.
+    if semantic_segments.semantic_segments_enabled():
+        try:
+            timed_text = semantic_segments.render_timed_lines(
+                [
+                    (
+                        float(getattr(seg, "start", 0.0) or 0.0),
+                        float(getattr(seg, "end", 0.0) or 0.0),
+                        seg.text,
+                        None,
+                    )
+                    for seg in seg_list
+                ]
+            ).strip()
+            if timed_text:
+                return ExtractResult(
+                    text=timed_text, media_type=media_type, engine=f"{engine}+timed"
+                )
+        except Exception:  # noqa: BLE001 — timed rendering must never block extraction
+            log.warning("timed transcript rendering failed for %s; using flat text", path.name)
+
     text = " ".join(seg.text.strip() for seg in seg_list).strip()
     return ExtractResult(text=text, media_type=media_type, engine=engine)
+
+
+def _is_timed_text(text: str) -> bool:
+    """True when the transcript's first line carries a `[m:ss]` marker."""
+    first = text.split("\n", 1)[0] if text else ""
+    m = semantic_segments.TIMED_LINE_RE.match(first)
+    return bool(m and m.group(2) is not None)
 
 
 # ---------------- optional: ASR speaker diarization (EXOMEM_DIARIZE, default OFF) ----
@@ -552,6 +590,7 @@ def _diarize(
         return _name(raw) if raw is not None else None
 
     merged: list[dict] = []
+    timed_segs: list[tuple[float, float, str, str | None]] = []
     for seg in seg_list:
         seg_text = seg.text.strip()
         if not seg_text:
@@ -559,6 +598,7 @@ def _diarize(
         start = float(getattr(seg, "start", 0.0) or 0.0)
         end = float(getattr(seg, "end", start) or start)
         speaker = _speaker_for(start, end) or "Speaker A"
+        timed_segs.append((start, end, seg_text, speaker))
         if merged and merged[-1]["speaker"] == speaker:
             merged[-1]["text"] += " " + seg_text
             merged[-1]["end"] = end
@@ -567,6 +607,18 @@ def _diarize(
 
     if not merged:
         return None
+    # Timed rendering (EXOMEM_SEMANTIC_SEGMENTS): one line per ASR segment with the
+    # label repeated — merged multi-minute turns would destroy segmentation windows
+    # and match localization. The structured `merged` list keeps the merged-turn
+    # shape either way (speakers: frontmatter + filters are unaffected). Soft-fail
+    # to the merged-turn rendering below.
+    if semantic_segments.semantic_segments_enabled():
+        try:
+            timed_text = semantic_segments.render_timed_lines(timed_segs).strip()
+            if timed_text:
+                return timed_text, merged
+        except Exception:  # noqa: BLE001 — timed rendering must never block diarization
+            log.warning("timed diarized rendering failed for %s; using merged turns", path.name)
     labeled_text = "\n".join(f"[{m['speaker']}]: {m['text']}" for m in merged).strip()
     return labeled_text, merged
 

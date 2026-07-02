@@ -446,6 +446,11 @@ class Hit:
     # visual "why" for the hit. Surfaced as `scene_frame` + `scene_match_at`.
     scene_frame: str | None = None
     scene_frame_ts: float | None = None
+    # Seconds into a TIMED transcript where the text match localizes — the
+    # matched semantic-segment chunk's leading [timestamp] (vector lane) or the
+    # nearest marker preceding the query anchor (BM25/keyword). Surfaced as
+    # `transcript_match_at`. Data-driven: flat sidecars never set it.
+    transcript_ts: float | None = None
     # Lifecycle. `status` is set when a hit is NOT plain `active`, so a reader can
     # tell a superseded tombstone (or draft) from a live conclusion; `superseded_by`
     # carries the forward pointer(s) to the replacement(s). Surfaced in as_dict()
@@ -479,6 +484,8 @@ class Hit:
             out["scene_frame"] = self.scene_frame
             if self.scene_frame_ts is not None:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
+        if self.transcript_ts is not None:
+            out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
         if self.outside_kb:
             out["outside_kb"] = True
         if self.status and self.status != "active":
@@ -535,6 +542,8 @@ class Hit:
             out["scene_frame"] = self.scene_frame
             if self.scene_frame_ts is not None:
                 out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
+        if self.transcript_ts is not None:
+            out["transcript_match_at"] = _format_timestamp(self.transcript_ts)
         if self.outside_kb:
             out["outside_kb"] = True
         if self.status and self.status != "active":
@@ -1004,6 +1013,45 @@ def find(
     return hits
 
 
+def _transcript_ts_for_hit(page: ParsedPage, chunk: str | None, query_norm: str) -> float | None:
+    """Localize a text match inside a TIMED transcript → seconds, or None.
+
+    Vector lane: the matched chunk is a semantic segment whose first timed line
+    carries the segment start. BM25/keyword (no chunk, or a chunk without
+    markers): anchor on the first query token's position in the body and take
+    the nearest PRECEDING timestamp marker. Only timed audio/video sidecars
+    ever return a value — flat pages cost one media_type check.
+    """
+    if page.media_type not in ("audio", "video"):
+        return None
+    from . import semantic_segments as ss
+
+    if chunk:
+        for line in chunk.splitlines():
+            m = ss.TIMED_LINE_RE.match(line)
+            if m and m.group(2) is not None:
+                return ss.ts_from_match(m)
+    tokens = query_norm.split() if query_norm else []
+    if not tokens:
+        return None
+    body = page.body or ""
+    if "[" not in body:
+        return None
+    pos = body.lower().find(tokens[0])
+    if pos == -1:
+        return None
+    offset = 0
+    best: float | None = None
+    for line in body.splitlines(keepends=True):
+        if offset > pos:
+            break
+        m = ss.TIMED_LINE_RE.match(line)
+        if m and m.group(2) is not None:
+            best = ss.ts_from_match(m)
+        offset += len(line)
+    return best
+
+
 def _collapse_frame_children(
     ranking: list[str],
     vault_root: Path,
@@ -1116,6 +1164,12 @@ def _find_keyword(
             scene_frame=scene_frame,
             scene_frame_ts=scene_frame_ts,
         )
+        hit.transcript_ts = _transcript_ts_for_hit(page, None, query_norm)
+        if hit.scene_frame is None and page.media_type == "video" and page.media_file and hit.transcript_ts is not None:
+            from . import scene_frames  # lazy: keyword mode stays import-light
+            nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
+            if nf is not None:
+                hit.scene_frame, hit.scene_frame_ts = nf
         by_path[page.rel_path] = hit
         hits.append((page.updated or "0000-00-00", hit))
 
@@ -1549,17 +1603,16 @@ def _find_semantic(
             scene_frame=attr[0] if attr else None,
             scene_frame_ts=attr[1] if attr else None,
         )
-        if (
-            hit.scene_frame is None
-            and hit.clip_frame_ts is not None
-            and page.media_type == "video"
-            and page.media_file
-        ):
-            # A CLIP keyframe match on a video: attach the nearest PERSISTED frame
-            # (if any exist) so the moment is viewable, not just timestamped.
-            nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.clip_frame_ts)
-            if nf is not None:
-                hit.scene_frame, hit.scene_frame_ts = nf
+        hit.transcript_ts = _transcript_ts_for_hit(page, chunk, query_norm)
+        if hit.scene_frame is None and page.media_type == "video" and page.media_file:
+            # A localized match on a video — CLIP keyframe first (existing), else a
+            # timed-transcript match — attaches the nearest PERSISTED frame so the
+            # moment is viewable, not just timestamped.
+            anchor_ts = hit.clip_frame_ts if hit.clip_frame_ts is not None else hit.transcript_ts
+            if anchor_ts is not None:
+                nf = scene_frames.nearest_frame(vault_root, page.media_file, anchor_ts)
+                if nf is not None:
+                    hit.scene_frame, hit.scene_frame_ts = nf
         hits.append(hit)
         if len(hits) >= target_n:
             break
