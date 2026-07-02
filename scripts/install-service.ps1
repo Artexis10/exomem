@@ -4,7 +4,7 @@
 #   - NSSM installed (https://nssm.cc/download) and on PATH, OR pass -NssmPath.
 #   - uv has been run (`uv sync` in repo root) so .venv exists.
 #   - .env exists in the repo root with the GitHub OAuth vars set
-#     (KB_MCP_BASE_URL, KB_MCP_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET).
+#     (EXOMEM_BASE_URL, EXOMEM_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET).
 #
 # Usage:
 #   pwsh -File scripts/install-service.ps1
@@ -58,7 +58,7 @@ if (-not (Test-Path (Join-Path $repoRoot ".env"))) {
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
 
 # Install
-& $NssmPath install $ServiceName $python "-m" "kb_mcp" "--transport" "streamable-http" "--host" $BindHost "--port" $Port
+& $NssmPath install $ServiceName $python "-m" "exomem" "--transport" "streamable-http" "--host" $BindHost "--port" $Port
 & $NssmPath set $ServiceName AppDirectory $repoRoot
 & $NssmPath set $ServiceName AppStdout (Join-Path $logDir "service.out.log")
 & $NssmPath set $ServiceName AppStderr (Join-Path $logDir "service.err.log")

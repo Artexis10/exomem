@@ -24,7 +24,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 WorkingDirectory=__REPO_ROOT__
-ExecStart=__VENV_PYTHON__ -m kb_mcp --transport streamable-http --host 127.0.0.1 --port 8765
+ExecStart=__VENV_PYTHON__ -m exomem --transport streamable-http --host 127.0.0.1 --port 8765
 Restart=always
 RestartSec=5
 

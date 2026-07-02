@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import evolution
-from kb_mcp import find as find_module
+from exomem import evolution
+from exomem import find as find_module
 
 # --- chain 1: widget-cache  A -> B -> C  (A's date is LATER than C's, on purpose) ---
 

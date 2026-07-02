@@ -7,9 +7,9 @@ import sqlite3
 import numpy as np
 import pytest
 
-from kb_mcp import embeddings
-from kb_mcp import find as find_module
-from kb_mcp import preserve
+from exomem import embeddings
+from exomem import find as find_module
+from exomem import preserve
 
 
 def _unit(i: int) -> np.ndarray:
@@ -40,17 +40,17 @@ class _FakeClip:
 def test_clip_device_env_and_asr_gating(monkeypatch) -> None:
     """GPU CLIP shares a process with faster-whisper, whose cu12 cuDNN PATH-prepend
     breaks CLIP's ViT Conv2d on torch-cu132. So CLIP must run on CPU whenever ASR
-    (media extraction) is enabled; an explicit KB_MCP_CLIP_DEVICE override always wins."""
+    (media extraction) is enabled; an explicit EXOMEM_CLIP_DEVICE override always wins."""
     # Explicit override wins regardless of ASR state.
-    monkeypatch.setenv("KB_MCP_CLIP_DEVICE", "cuda")
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_CLIP_DEVICE", "cuda")
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert embeddings._clip_device() == "cuda"
-    monkeypatch.setenv("KB_MCP_CLIP_DEVICE", "cpu")
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_CLIP_DEVICE", "cpu")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     assert embeddings._clip_device() == "cpu"
     # No override + ASR enabled (the live default) → CPU, dodging the whisper cuDNN clash.
-    monkeypatch.delenv("KB_MCP_CLIP_DEVICE", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_CLIP_DEVICE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert embeddings._clip_device() == "cpu"
 
 
@@ -77,15 +77,15 @@ def test_clip_index_empty_search(vault) -> None:
 
 
 def test_clip_enabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     assert embeddings.clip_enabled() is False
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     assert embeddings.clip_enabled() is True
 
 
 def test_find_clip_surfaces_textless_image(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     """A CLIP visual match surfaces the image sidecar even with ZERO lexical overlap."""
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     # Image + sidecar; the text deliberately does NOT contain the query terms.
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="photos", filename="scene.jpg", data=b"\xff\xd8\xff",
@@ -136,8 +136,8 @@ def test_has_frames_distinguishes_legacy_single_vector_video(vault) -> None:
 
 def test_backfill_reindexes_legacy_single_vector_video(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     """backfill must NOT skip a video that only has a stale single-vector row."""
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    from kb_mcp import backfill
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    from exomem import backfill
     p = vault / "Knowledge Base/Evidence/Old/clips/legacy.mp4"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"\x00video")
@@ -156,7 +156,7 @@ def test_backfill_reindexes_legacy_single_vector_video(vault, monkeypatch: pytes
 
 
 def test_find_clip_skipped_when_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="photos", filename="scene2.jpg", data=b"\xff\xd8\xff",
         text="a calm beach at sunset",
@@ -258,7 +258,7 @@ def test_dedup_keyframes_collapses_static_runs(vault) -> None:
 
 def test_embed_video_frames_caps_and_aligns(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     pytest.importorskip("PIL")  # builds real images for the pHash/dedup path
-    monkeypatch.setenv("KB_MCP_MAX_VIDEO_KEYFRAMES", "3")
+    monkeypatch.setenv("EXOMEM_MAX_VIDEO_KEYFRAMES", "3")
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: _FakeClip())
     # 7 visually-distinct candidate frames (1..7 white rows) → none dedup'd → capped to 3.
     candidates = [(float(i * 10), _img(i)) for i in range(1, 8)]
@@ -284,7 +284,7 @@ def test_embed_video_frames_empty_raises(vault, monkeypatch: pytest.MonkeyPatch)
 def test_find_video_clip_at_timestamp(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     """A text query visually matching ONE keyframe surfaces the video sidecar once,
     with the matching timestamp as `clip_match_at`."""
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="vids", filename="meeting.mp4", data=b"\x00\x00",
         text="quarterly planning meeting",

@@ -7,8 +7,8 @@ import io
 
 import pytest
 
-from kb_mcp import guards
-from kb_mcp import preserve as preserve_module
+from exomem import guards
+from exomem import preserve as preserve_module
 
 
 # ---------------- the base64-blob heuristic ----------------

@@ -8,8 +8,8 @@ from pathlib import Path
 import pytest
 import yaml
 
-from kb_mcp import add as add_module
-from kb_mcp import schema as schema_module
+from exomem import add as add_module
+from exomem import schema as schema_module
 
 
 TODAY = dt.date(2026, 5, 18)

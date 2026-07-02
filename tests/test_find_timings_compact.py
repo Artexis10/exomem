@@ -10,8 +10,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import commands, query_log
-from kb_mcp import find as find_module
+from exomem import commands, query_log
+from exomem import find as find_module
 
 
 def test_default_find_shape_unchanged(vault: Path) -> None:

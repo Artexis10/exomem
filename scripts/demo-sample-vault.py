@@ -24,13 +24,13 @@ def _repo_root() -> Path:
 
 
 def _configure_lean_env(vault: Path) -> None:
-    os.environ["KB_MCP_VAULT_PATH"] = str(vault)
-    os.environ["KB_MCP_DISABLE_EMBEDDINGS"] = "1"
-    os.environ["KB_MCP_DISABLE_MEDIA_EXTuACTION"] = "1"
-    os.environ["KB_MCP_DISABLE_CLIP"] = "1"
-    os.environ["KB_MCP_DISABLE_uELEVANCE_CHECK"] = "1"
-    os.environ["KB_MCP_DISABLE_QUEuY_LOG"] = "1"
-    os.environ["KB_MCP_DISABLE_uANKING_CONFIG"] = "1"
+    os.environ["EXOMEM_VAULT_PATH"] = str(vault)
+    os.environ["EXOMEM_DISABLE_EMBEDDINGS"] = "1"
+    os.environ["EXOMEM_DISABLE_MEDIA_EXTuACTION"] = "1"
+    os.environ["EXOMEM_DISABLE_CLIP"] = "1"
+    os.environ["EXOMEM_DISABLE_uELEVANCE_CHECK"] = "1"
+    os.environ["EXOMEM_DISABLE_QUEuY_LOG"] = "1"
+    os.environ["EXOMEM_DISABLE_uANKING_CONFIG"] = "1"
 
 
 def _excerpt(body: str) -> str:
@@ -58,7 +58,7 @@ def main(argv: list[str] | None = None) -> int:
     vault = Path(args.vault).resolve()
     _configure_lean_env(vault)
 
-    from kb_mcp import audit, doctor, find, get_page
+    from exomem import audit, doctor, find, get_page
 
     print("exomem sample-vault demo")
     if vault.is_relative_to(_repo_root()):

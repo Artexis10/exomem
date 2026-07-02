@@ -5,14 +5,14 @@
 # running service only invokes the sidecar's python.exe by path (extract._diarizer_sidecar_python).
 # pyannote runs here, isolated, on a STANDARD CUDA torch (2.9.1+cu130, Blackwell sm_120) because it
 # is incompatible with the main venv's bleeding-edge torch-2.12+cu132. The sidecar runs on GPU when
-# available (KB_MCP_DIARIZE_DEVICE=auto, default) and falls back to CPU.
+# available (EXOMEM_DIARIZE_DEVICE=auto, default) and falls back to CPU.
 #
 # Usage:
 #   pwsh -File scripts/setup-diarizer.ps1            # build the venv
 #   pwsh -File scripts/setup-diarizer.ps1 -Prewarm   # also download the gated pyannote weights now
 #
 # After this: set HUGGINGFACE_TOKEN (+ accept conditions for pyannote/speaker-diarization-3.1 and
-# pyannote/segmentation-3.0 on huggingface.co), set KB_MCP_DIARIZE=1, and restart the service.
+# pyannote/segmentation-3.0 on huggingface.co), set EXOMEM_DIARIZE=1, and restart the service.
 param([switch]$Prewarm)
 
 $ErrorActionPreference = "Stop"
@@ -38,10 +38,10 @@ if ($Prewarm) {
         Write-Warning "HUGGINGFACE_TOKEN/HF_TOKEN not set - skipping prewarm (gated download would fail)."
     } else {
         Write-Host "Prewarming pyannote weights (downloads to the shared HF cache)..."
-        & $Py -c "import os; from pyannote.audio import Pipeline; m=os.environ.get('KB_MCP_DIARIZE_MODEL','pyannote/speaker-diarization-3.1'); t=os.environ.get('HUGGINGFACE_TOKEN') or os.environ.get('HF_TOKEN'); Pipeline.from_pretrained(m, token=t)"
+        & $Py -c "import os; from pyannote.audio import Pipeline; m=os.environ.get('EXOMEM_DIARIZE_MODEL','pyannote/speaker-diarization-3.1'); t=os.environ.get('HUGGINGFACE_TOKEN') or os.environ.get('HF_TOKEN'); Pipeline.from_pretrained(m, token=t)"
         Write-Host "  weights cached."
     }
 }
 
 Write-Host "Done. Sidecar python: $Py"
-Write-Host "Next: set HUGGINGFACE_TOKEN, KB_MCP_DIARIZE=1, enroll a speaker, then restart.ps1."
+Write-Host "Next: set HUGGINGFACE_TOKEN, EXOMEM_DIARIZE=1, enroll a speaker, then restart.ps1."

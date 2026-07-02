@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import init as init_module
-from kb_mcp import vault as vault_module
+from exomem import init as init_module
+from exomem import vault as vault_module
 
 
 def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
@@ -45,16 +45,16 @@ def test_init_refuses_existing_kb_without_force(tmp_path: Path) -> None:
 
 
 def test_init_makes_a_resolvable_vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """After init, resolve_vault() finds it via KB_MCP_VAULT_PATH."""
+    """After init, resolve_vault() finds it via EXOMEM_VAULT_PATH."""
     init_module.init_vault(tmp_path)
-    monkeypatch.setenv("KB_MCP_VAULT_PATH", str(tmp_path))
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(tmp_path))
     assert vault_module.resolve_vault() == tmp_path
 
 
 def test_init_via_cli(tmp_path: Path) -> None:
-    """`python -m kb_mcp init --vault <path>` scaffolds and returns 0;
+    """`python -m exomem init --vault <path>` scaffolds and returns 0;
     a second run refuses (returns 1)."""
-    from kb_mcp.__main__ import main
+    from exomem.__main__ import main
 
     assert main(["init", "--vault", str(tmp_path)]) == 0
     assert (tmp_path / "Knowledge Base" / "_Schema" / "SKILL.md").exists()
@@ -68,12 +68,12 @@ def test_init_vault_accepts_writes_and_stays_clean(
     """End-to-end: a freshly-init'd vault accepts an `add` and audits clean —
     proves the scaffold ships the sub-indexes (Sources/Notes/Entities/index.md)
     the writers require, not just the folders."""
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     import datetime as dt
 
-    from kb_mcp import add as add_module
-    from kb_mcp import audit as audit_module
-    from kb_mcp import schema
+    from exomem import add as add_module
+    from exomem import audit as audit_module
+    from exomem import schema
 
     init_module.init_vault(tmp_path)
     ss = schema.load_source_schema(tmp_path)

@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from kb_mcp import cli_ops
-from kb_mcp.commands import Param
+from exomem import cli_ops
+from exomem.commands import Param
 
 
 def test_envelope_success_shape() -> None:

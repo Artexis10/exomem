@@ -4,7 +4,7 @@ These guard the one invariant that makes the seam safe to add: the DEFAULT
 config must reproduce the pre-refactor ranking exactly, while a non-default
 config must actually change ranking (proving the knobs are wired, not ignored).
 
-Runs under the suite-wide KB_MCP_DISABLE_EMBEDDINGS — hybrid mode degrades to
+Runs under the suite-wide EXOMEM_DISABLE_EMBEDDINGS — hybrid mode degrades to
 BM25 + keyword + graph (the fixture vault has no sidecar), which still exercises
 candidate_k / graph_seed_cap / rrf_k / type-boost, all of which the config feeds.
 """
@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import find as find_module
+from exomem import find as find_module
 
 
 def test_default_config_matches_legacy_constants() -> None:
@@ -140,13 +140,13 @@ def test_adopted_config_applies_then_reverts(
 ) -> None:
     """find() with no `config` loads an adopted file; deleting it (with a cache
     reset) restores byte-identical DEFAULT behavior. The reversibility guard."""
-    monkeypatch.delenv("KB_MCP_DISABLE_RANKING_CONFIG", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RANKING_CONFIG", raising=False)
     tuned = find_module.RankingConfig(compiled_boost=0.1)  # heavy compiled penalty
     cfg_path = tmp_path / "ranking_config.json"
     cfg_path.write_text(
         json.dumps(find_module.ranking_config_to_jsonable(tuned)), encoding="utf-8"
     )
-    monkeypatch.setenv("KB_MCP_RANKING_CONFIG", str(cfg_path))
+    monkeypatch.setenv("EXOMEM_RANKING_CONFIG", str(cfg_path))
     find_module.reset_active_ranking_cache()
 
     queries = ("egcg", "metabolism", "progressive disclosure")

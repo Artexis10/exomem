@@ -28,7 +28,7 @@ order.
 
 The tool SHALL bound its payload: `max_frames` defaults to 8 and is clamped to
 `[1, cap]` where the cap defaults to 16 and MAY be overridden by
-`KB_MCP_VIDEO_FRAMES_TOOL_CAP` (unparseable or non-positive values fall back to the
+`EXOMEM_VIDEO_FRAMES_TOOL_CAP` (unparseable or non-positive values fall back to the
 default cap). Clamping SHALL be silent, with the effective value reported in the
 metadata. Returned JPEGs SHALL be downscaled to a bounded longest edge (768px) at fixed
 quality; encoding bounds SHALL NOT be client-negotiable parameters.
@@ -87,8 +87,8 @@ surface as structured `CODE: reason` tool errors, never unhandled tracebacks.
 
 The tool SHALL always be registered — no environment gate — and SHALL soft-fail with
 `VIDEO_DEPS_MISSING` naming the missing dependency when PyAV or Pillow is absent.
-On-demand frame decoding SHALL NOT be gated by `KB_MCP_DISABLE_MEDIA_EXTRACTION` (which
-governs background ingestion) nor by `KB_MCP_VIDEO_SCENE_FRAMES` (which governs
+On-demand frame decoding SHALL NOT be gated by `EXOMEM_DISABLE_MEDIA_EXTRACTION` (which
+governs background ingestion) nor by `EXOMEM_VIDEO_SCENE_FRAMES` (which governs
 ingestion-time frame persistence).
 
 #### Scenario: Lean install degrades structurally
@@ -99,7 +99,7 @@ ingestion-time frame persistence).
 
 #### Scenario: Ingestion switches do not affect the tool
 
-- **WHEN** `KB_MCP_DISABLE_MEDIA_EXTRACTION` is set and `KB_MCP_VIDEO_SCENE_FRAMES` is
+- **WHEN** `EXOMEM_DISABLE_MEDIA_EXTRACTION` is set and `EXOMEM_VIDEO_SCENE_FRAMES` is
   unset
 - **THEN** `get_video_frames` still decodes and returns frames normally
 

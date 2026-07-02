@@ -18,7 +18,7 @@ import pytest
 from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 from fastmcp.utilities.token_cache import TokenCache
 
-from kb_mcp.server import SingleUserGitHubVerifier
+from exomem.server import SingleUserGitHubVerifier
 
 ALLOWED = "artexis10"
 
@@ -99,7 +99,7 @@ def test_wrong_login_is_not_cached(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_ttl_zero_disables_cache(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_AUTH_CACHE_TTL", "0")
+    monkeypatch.setenv("EXOMEM_AUTH_CACHE_TTL", "0")
     calls = _stub_super(monkeypatch, login=ALLOWED)
     v = _verifier()
 

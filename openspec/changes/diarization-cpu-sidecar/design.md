@@ -3,7 +3,7 @@
 ## Context
 
 `extract._diarize` runs pyannote `speaker-diarization-3.1` → `[(start,end,raw_label)]` →
-ECAPA named attribution → `[Speaker A]:` / `[Hugo]:` turns, gated by `KB_MCP_DIARIZE`,
+ECAPA named attribution → `[Speaker A]:` / `[Hugo]:` turns, gated by `EXOMEM_DIARIZE`,
 soft-fail to plain transcript. The named-attribution layer works on the main cu132 venv; the
 pyannote pipeline does not load there at all. Six version walls were diagnosed and confirmed
 un-patchable on cu132 (torchcodec, torchaudio API removals, speechbrain LazyModule, hf_hub
@@ -49,17 +49,17 @@ transcript. Never raises.
   gives crash isolation for free. A long-lived worker (amortized load, but health/restart/hang
   plumbing) is a future option, not the MVP.
 - **Child env: merge + device-aware CUDA/PATH.** `_diarizer_child_env()` merges the parent env (a
-  Windows child needs SystemRoot/PATH) and quiets HF. Device from `KB_MCP_DIARIZE_DEVICE`
+  Windows child needs SystemRoot/PATH) and quiets HF. Device from `EXOMEM_DIARIZE_DEVICE`
   (cpu|cuda|auto, default auto): `cpu` sets `CUDA_VISIBLE_DEVICES=""`; otherwise the GPU stays
   visible and the cu12 `nvidia/*/bin` wheel dirs the main process prepended in
   `_ensure_cuda_dll_path` are **stripped from the child PATH** so they can't shadow the sidecar's
-  bundled cu130 cuDNN (the CLIP/cuDNN shadow class of bug). The HF token + `KB_MCP_DIARIZE_MODEL`
+  bundled cu130 cuDNN (the CLIP/cuDNN shadow class of bug). The HF token + `EXOMEM_DIARIZE_MODEL`
   flow through via inheritance.
-- **Duration-scaled timeout.** `max(900, duration×6)` seconds, `KB_MCP_DIARIZE_TIMEOUT` overrides.
+- **Duration-scaled timeout.** `max(900, duration×6)` seconds, `EXOMEM_DIARIZE_TIMEOUT` overrides.
   CPU pyannote is slow and the first call also downloads weights; a hung child blocks the single
   media thread, so we over-budget rather than kill a valid long job. `TimeoutExpired` → `None`.
 - **Locate, never auto-build.** `_diarizer_sidecar_python()` returns the venv interpreter (or the
-  `KB_MCP_DIARIZE_SIDECAR_PYTHON` override), or `None` if unbuilt → plain transcript + a clear log.
+  `EXOMEM_DIARIZE_SIDECAR_PYTHON` override), or `None` if unbuilt → plain transcript + a clear log.
   Runtime never runs `uv` (avoids the fragile-interpreter hazard `restart.ps1` already guards).
 - **Remove pyannote from the main venv.** Leaving it reachable in cu132 is an active hazard: a
   future `uv sync --extra diarization` re-pulls `torchcodec`, which breaks the embedding stack on

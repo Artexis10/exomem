@@ -5,7 +5,7 @@ from pathlib import Path
 
 import numpy as np
 
-from kb_mcp import voice_profiles as vp
+from exomem import voice_profiles as vp
 
 
 def test_store_path_is_operational_infra_not_a_note_tree():

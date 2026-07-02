@@ -15,9 +15,9 @@ import json
 import numpy as np
 import pytest
 
-from kb_mcp import commands as commands_module
-from kb_mcp import embeddings, video_frames
-from kb_mcp import server as server_module
+from exomem import commands as commands_module
+from exomem import embeddings, video_frames
+from exomem import server as server_module
 
 VIDEO = "Knowledge Base/Sources/clip.mp4"
 
@@ -171,7 +171,7 @@ def test_max_frames_floor_is_one(video_vault, monkeypatch) -> None:
 
 def test_cap_env_override(video_vault, monkeypatch) -> None:
     _patch_decode(monkeypatch, duration=100.0)
-    monkeypatch.setenv("KB_MCP_VIDEO_FRAMES_TOOL_CAP", "4")
+    monkeypatch.setenv("EXOMEM_VIDEO_FRAMES_TOOL_CAP", "4")
     result = video_frames.get_frames(video_vault, VIDEO, max_frames=999)
     assert result.max_frames_effective == 4
     assert len(result.frames) == 4
@@ -179,7 +179,7 @@ def test_cap_env_override(video_vault, monkeypatch) -> None:
 
 def test_cap_env_unparseable_falls_back(video_vault, monkeypatch) -> None:
     _patch_decode(monkeypatch, duration=100.0)
-    monkeypatch.setenv("KB_MCP_VIDEO_FRAMES_TOOL_CAP", "many")
+    monkeypatch.setenv("EXOMEM_VIDEO_FRAMES_TOOL_CAP", "many")
     result = video_frames.get_frames(video_vault, VIDEO, max_frames=999)
     assert result.max_frames_effective == 16
 
@@ -277,8 +277,8 @@ def test_real_video_end_to_end(video_vault) -> None:
 
 def _build_server(monkeypatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.delenv("KB_MCP_DISABLE_TIER2", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     return server_module.build_server(require_auth=False)
 
 

@@ -72,12 +72,12 @@ the second endpoint SHALL NOT become its own item unless independently flagged.
 
 The system SHALL cap the surfaced items at `limit` and SHALL report the number of items
 not shown (`truncated`) plus the number of contradiction pairs the upstream
-`corpus_contradictions` cap (`KB_MCP_CONTRADICTION_TOP_N`) itself omitted
+`corpus_contradictions` cap (`EXOMEM_CONTRADICTION_TOP_N`) itself omitted
 (`upstream_truncated`), folding the contradiction queue's trailing summary finding into
 that count rather than surfacing it as a review item. It MUST NOT silently truncate:
 whenever either count is non-zero it SHALL include an explanatory `note`. A `limit` of
 `0` or negative SHALL disable the cap and surface all items (mirroring
-`KB_MCP_CONTRADICTION_TOP_N`'s `0 = uncapped`).
+`EXOMEM_CONTRADICTION_TOP_N`'s `0 = uncapped`).
 
 #### Scenario: Items beyond the limit are counted
 

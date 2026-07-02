@@ -5,9 +5,9 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from kb_mcp import add as add_module
-from kb_mcp import audit as audit_module
-from kb_mcp import schema as schema_module
+from exomem import add as add_module
+from exomem import audit as audit_module
+from exomem import schema as schema_module
 
 
 def test_parse_fm_date_coerces_forms() -> None:

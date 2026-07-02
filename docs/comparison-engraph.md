@@ -37,7 +37,7 @@ exomem has a richer knowledge model than a generic vault CRUD/search server. The
 
 The multimodal path is also materially broader. exomem can extract and index PDFs, Office documents, OCR text from images, CLIP visual embeddings, and ASR from audio/video. That makes the vault searchable across the real files users already keep, not only markdown text.
 
-The registry architecture is a strong maintenance property: one declaration in `src/kb_mcp/commands.py` drives MCP, REST, CLI, and OpenAPI. The generated `docs/capabilities.md` now documents that surface from the registry, and CI checks it for drift.
+The registry architecture is a strong maintenance property: one declaration in `src/exomem/commands.py` drives MCP, REST, CLI, and OpenAPI. The generated `docs/capabilities.md` now documents that surface from the registry, and CI checks it for drift.
 
 ### engraph strengths
 

@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import compile_proposal as cp
-from kb_mcp import corpus_aware
+from exomem import compile_proposal as cp
+from exomem import corpus_aware
 
 _ARTICLE = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements"
 _SESSION = "Knowledge Base/Sources/Sessions/2026-05-05-metabolism-curriculum-design"

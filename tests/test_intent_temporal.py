@@ -13,9 +13,9 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import find as find_module
-from kb_mcp import fusion
-from kb_mcp.find import DEFAULT_RANKING, Hit
+from exomem import find as find_module
+from exomem import fusion
+from exomem.find import DEFAULT_RANKING, Hit
 
 
 # --------------------------------------------------------------------------- #

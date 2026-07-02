@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kb_mcp import embeddings, extract, image_tags
+from exomem import embeddings, extract, image_tags
 
 
 def _unit(i: int) -> np.ndarray:
@@ -45,9 +45,9 @@ def _img_vec(invoice: float, table: float, screenshot: float, dog: float) -> np.
 
 
 def test_image_tags_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS", raising=False)
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS", raising=False)
     assert image_tags.image_tags_enabled() is False
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS", "1")
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
     assert image_tags.image_tags_enabled() is True
 
 
@@ -55,8 +55,8 @@ def test_image_tags_disabled_by_default(monkeypatch: pytest.MonkeyPatch) -> None
 
 
 def test_compute_tags_threshold_and_descending_order(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS_TOPK", raising=False)
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS_THRESHOLD", raising=False)
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS_TOPK", raising=False)
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS_THRESHOLD", raising=False)
     # Scores: invoice=0.9, table=0.5, screenshot=0.1, dog=0.0. Default threshold 0.22 drops
     # screenshot+dog; result is sorted by descending cosine.
     _patch_clip(monkeypatch, _img_vec(0.9, 0.5, 0.1, 0.0))
@@ -64,21 +64,21 @@ def test_compute_tags_threshold_and_descending_order(monkeypatch: pytest.MonkeyP
 
 
 def test_compute_tags_top_k_caps_results(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS_TOPK", "1")
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS_THRESHOLD", raising=False)
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS_TOPK", "1")
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS_THRESHOLD", raising=False)
     _patch_clip(monkeypatch, _img_vec(0.9, 0.5, 0.3, 0.25))
     assert image_tags.compute_tags(Path("x.png")) == ["invoice"]  # only the single best
 
 
 def test_compute_tags_threshold_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS_TOPK", raising=False)
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS_THRESHOLD", "0.05")  # lets screenshot (0.1) through
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS_TOPK", raising=False)
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS_THRESHOLD", "0.05")  # lets screenshot (0.1) through
     _patch_clip(monkeypatch, _img_vec(0.9, 0.5, 0.1, 0.0))
     assert image_tags.compute_tags(Path("x.png")) == ["invoice", "table", "screenshot"]
 
 
 def test_compute_tags_none_above_threshold_returns_empty(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS_THRESHOLD", raising=False)
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS_THRESHOLD", raising=False)
     _patch_clip(monkeypatch, _img_vec(0.1, 0.05, 0.0, 0.0))  # all below 0.22
     assert image_tags.compute_tags(Path("x.png")) == []
 
@@ -120,7 +120,7 @@ def test_format_tags_line() -> None:
 
 
 def test_maybe_image_tags_unchanged_when_flag_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_IMAGE_TAGS", raising=False)
+    monkeypatch.delenv("EXOMEM_IMAGE_TAGS", raising=False)
     called: list = []
     monkeypatch.setattr(image_tags, "compute_tags", lambda p: called.append(p) or ["invoice"])
     text, engine = extract._maybe_image_tags("ocr body", Path("x.png"), "tesseract")
@@ -130,7 +130,7 @@ def test_maybe_image_tags_unchanged_when_flag_off(monkeypatch: pytest.MonkeyPatc
 
 
 def test_maybe_image_tags_appends_when_enabled(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS", "1")
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
     monkeypatch.setattr(image_tags, "compute_tags", lambda p: ["invoice", "table", "screenshot"])
     text, engine = extract._maybe_image_tags("INVOICE 7731", Path("x.png"), "tesseract")
     assert text == "INVOICE 7731\n\nTags: invoice, table, screenshot"
@@ -138,7 +138,7 @@ def test_maybe_image_tags_appends_when_enabled(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_maybe_image_tags_empty_ocr_returns_tags_only(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS", "1")
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
     monkeypatch.setattr(image_tags, "compute_tags", lambda p: ["beach", "ocean"])
     text, engine = extract._maybe_image_tags("", Path("x.png"), "tesseract")
     assert text == "Tags: beach, ocean"
@@ -147,7 +147,7 @@ def test_maybe_image_tags_empty_ocr_returns_tags_only(monkeypatch: pytest.Monkey
 
 def test_maybe_image_tags_preserves_caption_engine(monkeypatch: pytest.MonkeyPatch) -> None:
     """Tags stack on top of a caption: engine becomes `<caption-engine>+tags`."""
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS", "1")
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
     monkeypatch.setattr(image_tags, "compute_tags", lambda p: ["whiteboard"])
     text, engine = extract._maybe_image_tags("a meeting room", Path("x.png"), "tesseract+blip-large")
     assert text == "a meeting room\n\nTags: whiteboard"
@@ -155,7 +155,7 @@ def test_maybe_image_tags_preserves_caption_engine(monkeypatch: pytest.MonkeyPat
 
 
 def test_maybe_image_tags_unchanged_when_no_tags(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_IMAGE_TAGS", "1")
+    monkeypatch.setenv("EXOMEM_IMAGE_TAGS", "1")
     monkeypatch.setattr(image_tags, "compute_tags", lambda p: [])  # soft-fail / nothing clears
     text, engine = extract._maybe_image_tags("ocr body", Path("x.png"), "tesseract")
     assert text == "ocr body"

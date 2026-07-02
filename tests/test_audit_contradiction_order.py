@@ -8,7 +8,7 @@ ordering layer on top of it:
 - priority sorts by cosine (closer first) and by ACT-R dormancy (a forgotten note
   in a close pair lifts the pair),
 - same-family pairs are demoted below cross-family pairs,
-- the surfaced set is capped at KB_MCP_CONTRADICTION_TOP_N with an explicit
+- the surfaced set is capped at EXOMEM_CONTRADICTION_TOP_N with an explicit
   omitted-count summary finding (no silent truncation),
 - nothing is mutated.
 
@@ -27,9 +27,9 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kb_mcp import audit as audit_module
-from kb_mcp import embeddings
-from kb_mcp import find as find_module
+from exomem import audit as audit_module
+from exomem import embeddings
+from exomem import find as find_module
 
 _TODAY = dt.date(2026, 6, 27)
 _BODY = "Zylo narwhal quokka substrate measure-not-judge corpus contradiction body."
@@ -59,9 +59,9 @@ def _install(
     """Seed each pair's two notes and patch `all_vectors` so the planted pair has
     exactly the given cosine (orthonormal per-pair 2-D blocks → zero cross-pair
     cosine). Returns {(rel_a, rel_b): (key_a, key_b)} sorted-key form."""
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_FLOOR", str(floor))
-    monkeypatch.setenv("KB_MCP_DUP_THRESHOLD", str(ceiling))
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_FLOOR", str(floor))
+    monkeypatch.setenv("EXOMEM_DUP_THRESHOLD", str(ceiling))
 
     dim = 2 * len(pairs)
     vecs: dict[str, np.ndarray] = {}
@@ -160,7 +160,7 @@ def test_dormant_note_lifts_equally_close_pair(
                 "top_k": [{"path": f"Knowledge Base/Notes/Insights/{note}"}],
             }))
     (logs / "queries.jsonl").write_text("\n".join(surfacings) + "\n", encoding="utf-8")
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
 
     pf = _pair_findings(_run(vault))
@@ -220,7 +220,7 @@ def test_cap_surfaces_top_n_and_reports_omitted(
         for i in range(5)
     ]
     _install(vault, monkeypatch, pairs, ceiling=0.95)
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_TOP_N", "3")
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_TOP_N", "3")
 
     findings = _run(vault)
     pf = _pair_findings(findings)
@@ -245,7 +245,7 @@ def test_top_n_zero_disables_cap(
         for i in range(5)
     ]
     _install(vault, monkeypatch, pairs, ceiling=0.95)
-    monkeypatch.setenv("KB_MCP_CONTRADICTION_TOP_N", "0")
+    monkeypatch.setenv("EXOMEM_CONTRADICTION_TOP_N", "0")
 
     findings = _run(vault)
     assert len(_pair_findings(findings)) == 5
@@ -290,7 +290,7 @@ def test_audit_does_not_mutate_vault(
 def test_noop_when_embeddings_disabled(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # Suite default KB_MCP_DISABLE_EMBEDDINGS=1 → short-circuit even with vectors
+    # Suite default EXOMEM_DISABLE_EMBEDDINGS=1 → short-circuit even with vectors
     # patched in. The ordering layer never runs.
     _seed(vault, "Notes/Insights/d-a.md")
     _seed(vault, "Notes/Insights/d-b.md")

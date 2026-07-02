@@ -12,9 +12,9 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import context_pack, corpus_aware
-from kb_mcp import find as find_module
-from kb_mcp.find import Hit
+from exomem import context_pack, corpus_aware
+from exomem import find as find_module
+from exomem.find import Hit
 
 # --- a small cluster: Alpha + Beta packed; Hub (co-cited), Charlie, Delta neighbours ---
 
@@ -296,14 +296,14 @@ def test_missing_hit_file_is_reported_not_silent(cluster: Path) -> None:
 # ------------------------------ integration via op_find ------------------------------
 
 def test_op_find_pack_false_returns_bare_list(vault: Path) -> None:
-    from kb_mcp import commands
+    from exomem import commands
 
     result = commands.op_find(vault, query="insulin", pack=False)
     assert isinstance(result, list)
 
 
 def test_op_find_pack_true_returns_hits_and_pack(vault: Path) -> None:
-    from kb_mcp import commands
+    from exomem import commands
 
     result = commands.op_find(vault, query="insulin", pack=True)
     assert isinstance(result, dict)

@@ -49,7 +49,7 @@ uv sync                         # lean: keyword/BM25 search, no heavy deps
 > the extra: `uv sync --extra embeddings` — that's the ~1-2 GB torch
 > download (CUDA build, best on an NVIDIA GPU; CPU works but embeds slowly).
 > Start lean; upgrade anytime by installing the extra and unsetting
-> `KB_MCP_DISABLE_EMBEDDINGS`.
+> `EXOMEM_DISABLE_EMBEDDINGS`.
 
 If you already manage Python environments yourself, `pip install -e .` still
 works as a fallback; the `uv` path is preferred because it honors `uv.lock` and
@@ -74,7 +74,7 @@ contract, and the typed `Sources/ Notes/{…} Entities/{…} Evidence/` tree —
 your vault:
 
 ```bash
-uv run python -m kb_mcp init --vault "/path/to/your/Obsidian"
+uv run python -m exomem init --vault "/path/to/your/Obsidian"
 ```
 
 It refuses if a `Knowledge Base/` already exists, so it won't clobber anything.
@@ -90,7 +90,7 @@ The server finds your vault via one env var — the folder that *contains*
 `Knowledge Base/`:
 
 ```bash
-export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB folder
+export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB folder
 ```
 
 ---
@@ -98,12 +98,12 @@ export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 ## 4. (Choose) hybrid vs lean
 
 - **Lean / keyword-only (default install)** — `uv sync` + set
-  `KB_MCP_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
+  `EXOMEM_DISABLE_EMBEDDINGS=1`. `find` uses BM25 (stemmed substring + ranking).
   Instant, no model load, no GPU, works everywhere. The easiest start. Note it's
   **silent about it** — there's no error when embeddings are off, so "search
   works" on a lean install means keyword/BM25, *not* semantic.
 - **Hybrid** — install the extra (`uv sync --extra embeddings`) and leave
-  `KB_MCP_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
+  `EXOMEM_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
   of BM25 — best recall on natural-language queries. Ideally an NVIDIA GPU; CPU
   works but embeds slowly. The vector index builds as you write (each note is
   embedded on save); to backfill an existing vault, run `kb reconcile` after
@@ -114,9 +114,9 @@ export KB_MCP_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
 Preflight the selected path before wiring Claude:
 
 ```bash
-uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile lean
+uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile lean
 # or, after installing embeddings:
-uv run python -m kb_mcp doctor --vault "/path/to/your/Obsidian" --profile hybrid
+uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile hybrid
 ```
 
 ---
@@ -127,12 +127,12 @@ Easiest — the CLI (run from anywhere):
 
 ```bash
 claude mcp add exomem \
-  --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
-  --env KB_MCP_DISABLE_EMBEDDINGS=1 \
-  -- uv --directory "$PWD" run python -m kb_mcp --transport stdio
+  --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
+  --env EXOMEM_DISABLE_EMBEDDINGS=1 \
+  -- uv --directory "$PWD" run python -m exomem --transport stdio
 ```
 
-(Drop the `KB_MCP_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
+(Drop the `EXOMEM_DISABLE_EMBEDDINGS` line for hybrid. If you use the pip
 fallback instead of uv, use the **full path to your venv's `python`**.)
 
 Or by hand in `.mcp.json` (project) / your Claude Code settings:
@@ -142,10 +142,10 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
   "mcpServers": {
     "exomem": {
       "command": "uv",
-      "args": ["--directory", "/path/to/exomem", "run", "python", "-m", "kb_mcp", "--transport", "stdio"],
+      "args": ["--directory", "/path/to/exomem", "run", "python", "-m", "exomem", "--transport", "stdio"],
       "env": {
-        "KB_MCP_VAULT_PATH": "/path/to/your/Obsidian",
-        "KB_MCP_DISABLE_EMBEDDINGS": "1"
+        "EXOMEM_VAULT_PATH": "/path/to/your/Obsidian",
+        "EXOMEM_DISABLE_EMBEDDINGS": "1"
       }
     }
   }
@@ -153,7 +153,7 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 ```
 
 Restart Claude Code; you should see the `exomem` tools (`find`, `note`, `add`,
-`audit`, `reconcile`, …). Quick test before wiring: `uv run python -m kb_mcp
+`audit`, `reconcile`, …). Quick test before wiring: `uv run python -m exomem
 --transport stdio` should start and wait on stdin without error.
 
 ---
@@ -167,7 +167,7 @@ compile notes under the schema. One command installs it straight from the repo
 into Claude Code's skills folder (no vault path needed — it ships in the package):
 
 ```bash
-uv run python -m kb_mcp install-skill
+uv run python -m exomem install-skill
 ```
 
 That writes the skill to `~/.claude/skills/knowledge-base/`. The stable skill
@@ -201,7 +201,7 @@ Claude tends to forget them, so auto-save quietly never fires (you'll know:
 pulled in. This one command installs two small hooks that fix both directions:
 
 ```bash
-uv run python -m kb_mcp install-hook
+uv run python -m exomem install-hook
 ```
 
 If you maintain alternate Claude settings files with yadm, wire each active
@@ -219,7 +219,7 @@ turns/prompts, plus a per-session cooldown). They write scripts to
 `~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
 Code to activate. Triggers log to `~/.claude/kb-capture-nudge.log` and
 `~/.claude/kb-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
-by hand? `uv run python -m kb_mcp install-hook --print-only` writes the scripts and
+by hand? `uv run python -m exomem install-hook --print-only` writes the scripts and
 prints the snippet to paste.
 
 Tune with `KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_RETRIEVE_NUDGE_MIN_CHARS` (and the

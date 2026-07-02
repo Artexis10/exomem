@@ -11,7 +11,7 @@ Usage:
     uv run python scripts/eval_retrieval.py --sweep          # rrf_k x compiled_boost grid
     uv run python scripts/eval_retrieval.py --sweep --include-rerank --markdown
 
-This is a dev/eval tool: it imports kb_mcp directly and needs the bge model
+This is a dev/eval tool: it imports exomem directly and needs the bge model
 (it force-enables embeddings). It writes nothing to the vault.
 """
 
@@ -31,11 +31,11 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 # The eval MUST run with live vectors — undo any inherited test/service disable.
-os.environ.pop("KB_MCP_DISABLE_EMBEDDINGS", None)
+os.environ.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
 
-from kb_mcp import eval_metrics as metrics  # noqa: E402
-from kb_mcp import find as find_module  # noqa: E402
-from kb_mcp.vault import resolve_vault  # noqa: E402
+from exomem import eval_metrics as metrics  # noqa: E402
+from exomem import find as find_module  # noqa: E402
+from exomem.vault import resolve_vault  # noqa: E402
 
 DEFAULT_GOLDEN = HERE.parent / "tests" / "golden" / "queries.yaml"
 

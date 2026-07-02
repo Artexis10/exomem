@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import find as find_mod
-from kb_mcp import preserve, scene_frames
-from kb_mcp.embeddings import Scene
-from kb_mcp.find import find
+from exomem import find as find_mod
+from exomem import preserve, scene_frames
+from exomem.embeddings import Scene
+from exomem.find import find
 
 
 class _FakeImg:

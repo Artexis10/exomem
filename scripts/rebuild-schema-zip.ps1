@@ -6,7 +6,7 @@
   Rebuilds Knowledge Base/_Schema.zip (the claude.ai `.skill`) from the canonical,
   stripping the canonical's GENERIC markers (keeping your real content) so the zip
   carries no marker comments. Resolves the vault from --vault or
-  $env:KB_MCP_VAULT_PATH. Requires Python (no Compress-Archive needed anymore).
+  $env:EXOMEM_VAULT_PATH. Requires Python (no Compress-Archive needed anymore).
 .EXAMPLE
   pwsh -File scripts/rebuild-schema-zip.ps1
 #>

@@ -7,7 +7,7 @@ is idempotent, and has the sidecar/engine parsing. A `--rediarize` flag composes
 existing walk (ordering, skip-dirs, dry-run) instead of duplicating it. The done-marker is the
 engine's `+diarized` suffix — no new frontmatter or state file.
 
-## Guard: `--rediarize` without `KB_MCP_DIARIZE` is a logged no-op
+## Guard: `--rediarize` without `EXOMEM_DIARIZE` is a logged no-op
 
 Re-extracting without the flag would burn GPU-minutes per recording to produce byte-identical
 plain transcripts. The guard logs and disables rediarize (dry-run included, so counts never
@@ -33,7 +33,7 @@ at INFO so lean installs aren't nagged.
 
 ## `_env_flag` scope: extract.py's two flags only
 
-`KB_MCP_VIDEO_SCENE_FRAMES` (embeddings.py) and `KB_MCP_IMAGE_TAGS` (image_tags.py) share the
+`EXOMEM_VIDEO_SCENE_FRAMES` (embeddings.py) and `EXOMEM_IMAGE_TAGS` (image_tags.py) share the
 presence-check pattern but are out of scope here — flipping them belongs to their own capability
 specs. The helper is module-local (`extract._env_flag`); if a third consumer appears it can move
 to a shared util then.

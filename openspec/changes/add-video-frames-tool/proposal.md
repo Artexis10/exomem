@@ -30,21 +30,21 @@ PyAV, Pillow, and numpy are already in the stack (media extra).
   frame. First tool in the server to return image content — the mechanism
   (`fastmcp.utilities.types.Image(...).to_image_content()`, `ToolResult` passthrough) is
   native FastMCP; `bind_vault` forwards return values untouched.
-- **New backend `src/kb_mcp/video_frames.py`** — typed `VideoFramesError(code, reason)`,
+- **New backend `src/exomem/video_frames.py`** — typed `VideoFramesError(code, reason)`,
   `get_frames()`: `resolve_under_vault` (must_exist, must_be_file) → extension check via
   `extract.media_type_for` → duration probe → evenly-spaced seek-decode through the existing
   `embeddings._decode_frames_at` (window-clamped when `start_sec`/`end_sec` are given;
   `embeddings._sample_video_keyframes` supplies the unknown-duration fallback) →
   `embeddings._dedup_keyframes` → uniform subsample to the cap → bounded JPEG encode.
   `embeddings.py` itself is untouched.
-- **Bounded payload.** Default 8 frames, hard cap 16 (`KB_MCP_VIDEO_FRAMES_TOOL_CAP`
+- **Bounded payload.** Default 8 frames, hard cap 16 (`EXOMEM_VIDEO_FRAMES_TOOL_CAP`
   overrides), out-of-range `max_frames` clamps silently with the effective value reported.
   JPEG longest side ≤768px, quality 80 — fixed server policy, not tool params. Worst case
   ≈16 × ~450 tokens — comparable to a large `find` payload; beyond that the client should
   drill down with a time window instead.
 - **Always-on, soft-fail.** No env gate: the tool is on-demand pure decode, so it does not
-  ride `KB_MCP_DISABLE_MEDIA_EXTRACTION` (which governs the background ingestion worker) nor
-  `KB_MCP_VIDEO_SCENE_FRAMES` (ingestion-time persistence). When PyAV/Pillow are absent the
+  ride `EXOMEM_DISABLE_MEDIA_EXTRACTION` (which governs the background ingestion worker) nor
+  `EXOMEM_VIDEO_SCENE_FRAMES` (ingestion-time persistence). When PyAV/Pillow are absent the
   tool stays registered and fails structurally with `VIDEO_DEPS_MISSING` naming the missing
   extra. Corrupt/streamless files yield `NO_DECODABLE_FRAMES`; bad windows yield `BAD_RANGE`.
 - **No new dependency.**
@@ -65,7 +65,7 @@ fast path when `video-scene-frames` has run; an explicit `timestamps: list[float
 
 ## Impact
 
-- Code: `src/kb_mcp/video_frames.py` (new backend); `src/kb_mcp/commands.py`
+- Code: `src/exomem/video_frames.py` (new backend); `src/exomem/commands.py`
   (`op_get_video_frames` leaf, mcp-only surface set, `_SPEC` row, fastmcp imports —
   measured incremental import cost 0.02s since `mcp.types` already pays for pydantic);
   `tests/fixtures/mcp_tool_schemas.json` (regenerated — one added tool);

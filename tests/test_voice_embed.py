@@ -16,22 +16,22 @@ pytest.importorskip("torch")
 
 import torch  # noqa: E402
 
-from kb_mcp import voice_embed  # noqa: E402
+from exomem import voice_embed  # noqa: E402
 
 
 def test_voice_device_env_and_asr_gating(monkeypatch: pytest.MonkeyPatch) -> None:
     """Mirrors embeddings._clip_device: GPU only when ASR (media extraction) is disabled;
-    an explicit KB_MCP_VOICE_DEVICE override always wins."""
+    an explicit EXOMEM_VOICE_DEVICE override always wins."""
     # Explicit override wins regardless of ASR state.
-    monkeypatch.setenv("KB_MCP_VOICE_DEVICE", "cuda")
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_VOICE_DEVICE", "cuda")
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert voice_embed._voice_device() == "cuda"
-    monkeypatch.setenv("KB_MCP_VOICE_DEVICE", "cpu")
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_VOICE_DEVICE", "cpu")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     assert voice_embed._voice_device() == "cpu"
     # No override + ASR enabled (the live default) → CPU, dodging the whisper cuDNN clash.
-    monkeypatch.delenv("KB_MCP_VOICE_DEVICE", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_VOICE_DEVICE", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     assert voice_embed._voice_device() == "cpu"
 
 

@@ -20,8 +20,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import commands as commands_module
-from kb_mcp import server as server_module
+from exomem import commands as commands_module
+from exomem import server as server_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
@@ -29,12 +29,12 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 def _build_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_RELEVANCE_CHECK", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
-    monkeypatch.delenv("KB_MCP_DISABLE_TIER2", raising=False)
-    monkeypatch.setenv("KB_MCP_VAULT_PATH", str(FIXTURE_VAULT))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(FIXTURE_VAULT))
     return server_module.build_server(require_auth=False)
 
 

@@ -183,7 +183,7 @@ content.
 ### Requirement: Startup Cache Warm-Up
 
 The system SHALL warm the BM25 index (KB and vault scope), the wikilink resolver, and the parsed-page
-cache during server startup, unless disabled by `KB_MCP_DISABLE_WARMUP`, so that a subsequent `find`
+cache during server startup, unless disabled by `EXOMEM_DISABLE_WARMUP`, so that a subsequent `find`
 call does not pay first-call index/resolver/page-parse construction cost. Warm-up SHALL soft-fail
 per stage without preventing server startup and MUST NOT change `find`'s returned results.
 
@@ -196,7 +196,7 @@ per stage without preventing server startup and MUST NOT change `find`'s returne
 
 #### Scenario: Warm-up can be disabled
 
-- **WHEN** the server starts with `KB_MCP_DISABLE_WARMUP` set
+- **WHEN** the server starts with `EXOMEM_DISABLE_WARMUP` set
 - **THEN** no warm-up work is performed at startup
 - **AND** `find` still returns correct results, built lazily on first use as it does today
 

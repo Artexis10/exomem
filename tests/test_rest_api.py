@@ -10,15 +10,15 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
-from kb_mcp import find as find_module
-from kb_mcp import server
+from exomem import find as find_module
+from exomem import server
 
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     for leaky in (
-        "KB_MCP_REST_API_KEY", "KB_MCP_UPLOAD_TOKEN",
-        "KB_MCP_CF_ACCESS_TEAM_DOMAIN", "KB_MCP_CF_ACCESS_AUD",
+        "EXOMEM_REST_API_KEY", "EXOMEM_UPLOAD_TOKEN",
+        "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD",
     ):
         monkeypatch.delenv(leaky, raising=False)
     for key, value in env.items():
@@ -28,21 +28,21 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
 
 
 def test_rest_disabled_without_key(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch)  # no KB_MCP_REST_API_KEY
+    client = _client(vault, monkeypatch)  # no EXOMEM_REST_API_KEY
     r = client.post("/api/find", json={"query": "metabolism", "mode": "keyword"})
     assert r.status_code == 503, r.text
     assert r.json() == {
         "success": False,
         "error": {
             "code": "REST_DISABLED",
-            "message": "REST API is off: set KB_MCP_REST_API_KEY to enable the /api/* facade",
+            "message": "REST API is off: set EXOMEM_REST_API_KEY to enable the /api/* facade",
             "remediation": None,
         },
     }
 
 
 def test_rest_wrong_key_unauthorized(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/find",
         json={"query": "metabolism", "mode": "keyword"},
@@ -52,13 +52,13 @@ def test_rest_wrong_key_unauthorized(vault, monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_rest_missing_key_unauthorized(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post("/api/find", json={"query": "metabolism", "mode": "keyword"})
     assert r.status_code == 401, r.text
 
 
 def test_rest_find_roundtrip_matches_mcp_shape(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/find",
         json={"query": "metabolism", "mode": "keyword"},
@@ -78,9 +78,9 @@ def test_rest_find_roundtrip_matches_mcp_shape(vault, monkeypatch: pytest.Monkey
 
 
 def test_rest_minted_rest_scoped_token_authorizes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kb_mcp import upload_tokens
+    from exomem import upload_tokens
 
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     token = upload_tokens.mint("sekret", scope="rest")
     r = client.post(
         "/api/find",
@@ -91,9 +91,9 @@ def test_rest_minted_rest_scoped_token_authorizes(vault, monkeypatch: pytest.Mon
 
 
 def test_rest_upload_scoped_token_does_not_authorize_rest(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kb_mcp import upload_tokens
+    from exomem import upload_tokens
 
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     token = upload_tokens.mint("sekret", scope="upload")  # wrong scope
     r = client.post(
         "/api/find",
@@ -104,7 +104,7 @@ def test_rest_upload_scoped_token_does_not_authorize_rest(vault, monkeypatch: py
 
 
 def test_rest_get_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/get",
         json={"path": "Notes/Insights/progressive-disclosure-without-mode-fragmentation"},
@@ -118,7 +118,7 @@ def test_rest_get_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_rest_get_not_found(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/get",
         json={"path": "Notes/Insights/does-not-exist"},
@@ -128,7 +128,7 @@ def test_rest_get_not_found(vault, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_rest_note_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/note",
         json={
@@ -145,7 +145,7 @@ def test_rest_note_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_rest_note_validation_error_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/note",
         json={"note_type": "research-note", "title": "no project", "content": "x"},
@@ -159,7 +159,7 @@ def test_rest_note_validation_error_is_400(vault, monkeypatch: pytest.MonkeyPatc
 
 
 def test_rest_malformed_body_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
         "/api/find",
         content=b"[1, 2, 3]",  # valid JSON but not an object
@@ -170,7 +170,7 @@ def test_rest_malformed_body_is_400(vault, monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_rest_openapi_self_doc(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    client = _client(vault, monkeypatch, KB_MCP_REST_API_KEY="sekret")
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.get("/api/openapi.json")
     assert r.status_code == 200, r.text
     doc = r.json()

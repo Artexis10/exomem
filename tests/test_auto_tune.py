@@ -18,7 +18,7 @@ if str(SCRIPTS) not in sys.path:
 
 import auto_tune_ranking as at  # noqa: E402
 
-from kb_mcp.find import DEFAULT_RANKING  # noqa: E402
+from exomem.find import DEFAULT_RANKING  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #

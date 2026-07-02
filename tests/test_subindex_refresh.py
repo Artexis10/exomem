@@ -10,7 +10,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from kb_mcp import indexes, link as link_module, note as note_module
+from exomem import indexes, link as link_module, note as note_module
 
 
 TODAY = dt.date(2026, 5, 27)

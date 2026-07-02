@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import edit as edit_module
-from kb_mcp import find as find_module
+from exomem import edit as edit_module
+from exomem import find as find_module
 
 NOTE_REL = "Knowledge Base/Notes/Insights/heading-test.md"
 

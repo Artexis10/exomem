@@ -56,7 +56,7 @@ if str(SRC) not in sys.path:
 if str(HERE) not in sys.path:
     sys.path.insert(0, str(HERE))  # sibling scripts (derive_relevance_pairs, eval_retrieval)
 
-from kb_mcp.find import (  # noqa: E402
+from exomem.find import (  # noqa: E402
     DEFAULT_RANKING,
     RankingConfig,
     ranking_config_from_jsonable,
@@ -495,7 +495,7 @@ def main() -> int:
 
     import derive_relevance_pairs as drp  # lazy (torch-free)
 
-    from kb_mcp.vault import resolve_vault  # lazy
+    from exomem.vault import resolve_vault  # lazy
 
     vault_root = resolve_vault()
     golden = load_golden(args.golden)

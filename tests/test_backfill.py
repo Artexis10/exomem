@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from kb_mcp import backfill, embeddings, extract, preserve
+from exomem import backfill, embeddings, extract, preserve
 
 REL = "Knowledge Base/Evidence/Old/photos/legacy.jpg"
 
@@ -137,7 +137,7 @@ def _diarized_result(*a, **k):
 
 
 def test_rediarize_reextracts_plain_asr_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     _, sidecar = _drop_audio_with_plain_transcript(vault)
     monkeypatch.setattr(extract, "extract_text", _diarized_result)
     stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=_quiet)
@@ -150,7 +150,7 @@ def test_rediarize_reextracts_plain_asr_sidecar(vault, monkeypatch: pytest.Monke
 
 
 def test_rediarize_second_run_is_noop(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     _drop_audio_with_plain_transcript(vault)
     monkeypatch.setattr(extract, "extract_text", _diarized_result)
     backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=_quiet)
@@ -184,7 +184,7 @@ def test_needs_rediarize_classification(vault) -> None:
 
 
 def test_rediarize_guard_when_diarize_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
     _, sidecar = _drop_audio_with_plain_transcript(vault)
     before = sidecar.read_text("utf-8")
     monkeypatch.setattr(
@@ -195,13 +195,13 @@ def test_rediarize_guard_when_diarize_disabled(vault, monkeypatch: pytest.Monkey
     stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=messages.append)
     assert stats.rediarized == 0
     assert sidecar.read_text("utf-8") == before
-    assert any("KB_MCP_DIARIZE" in m for m in messages)
+    assert any("EXOMEM_DIARIZE" in m for m in messages)
 
 
 def test_rediarize_soft_fail_leaves_sidecar_and_stops(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     # extract_text soft-fails diarization by contract: the result comes back WITHOUT
     # +diarized. The sidecar must keep its exact bytes and the pass must circuit-break.
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     _, s1 = _drop_audio_with_plain_transcript(vault, rel="Knowledge Base/Evidence/r/a.wav")
     _, s2 = _drop_audio_with_plain_transcript(vault, rel="Knowledge Base/Evidence/r/b.wav")
     calls: list = []
@@ -222,7 +222,7 @@ def test_rediarize_soft_fail_leaves_sidecar_and_stops(vault, monkeypatch: pytest
 
 
 def test_rediarize_does_not_rerun_clip(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     rel = "Knowledge Base/Evidence/v/talk.mp4"
     p = vault / rel
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -243,7 +243,7 @@ def test_rediarize_does_not_rerun_clip(vault, monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_rediarize_dry_run_counts_without_writing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     _, sidecar = _drop_audio_with_plain_transcript(vault)
     before = sidecar.read_text("utf-8")
     monkeypatch.setattr(

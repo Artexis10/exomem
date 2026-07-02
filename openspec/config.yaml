@@ -17,16 +17,16 @@ context: |
   (conflict, staleness) MEASURE and SURFACE for review; they never auto-decay or rank.
 
   Surface consistency (engraph/Endstate-style): every core operation should be reachable
-  consistently across the MCP tools, the CLI (`python -m kb_mcp <cmd>`), and the personal
+  consistently across the MCP tools, the CLI (`python -m exomem <cmd>`), and the personal
   REST facade (`/api/<tool>`), all over the SAME leaf functions — one documented contract,
   zero logic duplication.
 
-  Test: `PYTHONPATH=src KB_MCP_DISABLE_EMBEDDINGS=1 python -m pytest -q` (run via `uv run`).
+  Test: `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` (run via `uv run`).
   Lint: `ruff check`. Keep the suite green; torch-backed semantic tests run desk-side.
 
-  The skill scaffold under `src/kb_mcp/_scaffold/` is hand-authored + leak-guarded
+  The skill scaffold under `src/exomem/_scaffold/` is hand-authored + leak-guarded
   (tests/test_scaffold_no_leak.py) — keep it generic; no personal/brand tokens anywhere
-  under `src/kb_mcp/`.
+  under `src/exomem/`.
 
 rules:
   proposal:

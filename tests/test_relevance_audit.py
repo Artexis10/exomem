@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import audit as audit_module
+from exomem import audit as audit_module
 
 
 def _write_logs(tmp: Path) -> tuple[Path, Path]:
@@ -46,7 +46,7 @@ def test_relevance_check_surfaces_new_pairs(
     vault: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     logs, golden = _write_logs(tmp_path)
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
     monkeypatch.setattr(audit_module, "_RELEVANCE_GOLDEN", golden)
 
@@ -58,7 +58,7 @@ def test_relevance_check_surfaces_new_pairs(
 
 
 def test_relevance_check_disabled_by_default_in_tests(vault: Path) -> None:
-    """conftest sets KB_MCP_DISABLE_RELEVANCE_CHECK, so default audits don't read
+    """conftest sets EXOMEM_DISABLE_RELEVANCE_CHECK, so default audits don't read
     repo-global logs (keeps the per-vault suite deterministic)."""
     report = audit_module.audit(vault, categories=["relevance_pairs_pending"])
     assert not [
@@ -75,7 +75,7 @@ def test_relevance_query_already_in_golden_not_flagged(
         "  expect_any_of: [Knowledge Base/Notes/Insights/foo]\n",
         encoding="utf-8",
     )
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
     monkeypatch.setattr(audit_module, "_RELEVANCE_GOLDEN", golden)
 

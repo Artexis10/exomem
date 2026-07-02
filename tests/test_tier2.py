@@ -12,19 +12,19 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import append_to_file as append_module
-from kb_mcp import create_directory as mkdir_module
-from kb_mcp import create_file as create_file_module
-from kb_mcp import delete_directory as rmdir_module
-from kb_mcp import delete_file as delete_module
-from kb_mcp import get_frontmatter as get_fm_module
-from kb_mcp import list_directory as list_dir_module
-from kb_mcp import list_inbound_links as inbound_module
-from kb_mcp import list_trash as list_trash_module
-from kb_mcp import move_file as move_module
-from kb_mcp import recover_from_trash as recover_module
-from kb_mcp import set_frontmatter_field as set_fm_module
-from kb_mcp import get_page as get_module
+from exomem import append_to_file as append_module
+from exomem import create_directory as mkdir_module
+from exomem import create_file as create_file_module
+from exomem import delete_directory as rmdir_module
+from exomem import delete_file as delete_module
+from exomem import get_frontmatter as get_fm_module
+from exomem import list_directory as list_dir_module
+from exomem import list_inbound_links as inbound_module
+from exomem import list_trash as list_trash_module
+from exomem import move_file as move_module
+from exomem import recover_from_trash as recover_module
+from exomem import set_frontmatter_field as set_fm_module
+from exomem import get_page as get_module
 
 
 TODAY = dt.date(2026, 5, 24)
@@ -839,7 +839,7 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
     assert result.count == 0
 
 
-# ---------------- Tier 2 registration gating (KB_MCP_DISABLE_TIER2) ----------------
+# ---------------- Tier 2 registration gating (EXOMEM_DISABLE_TIER2) ----------------
 
 # Post-consolidation Tier 2 surface: create_directory folded into create_file
 # (kind="dir"); delete_file/delete_directory merged into `delete`;
@@ -856,11 +856,11 @@ def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
     """Build the FastMCP server and return the set of registered tool names.
 
     build_server() calls load_dotenv(override=True); neutralize it so the repo
-    `.env` can't clobber the test's KB_MCP_VAULT_PATH / KB_MCP_DISABLE_TIER2.
+    `.env` can't clobber the test's EXOMEM_VAULT_PATH / EXOMEM_DISABLE_TIER2.
     """
     import asyncio
 
-    from kb_mcp import server as server_module
+    from exomem import server as server_module
 
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     mcp = server_module.build_server(require_auth=False)
@@ -871,7 +871,7 @@ def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
 def test_tier2_registered_by_default(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_TIER2", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     names = _registered_tool_names(monkeypatch)
     # Tier 1 read/write ops are always present...
     assert {"find", "get", "note", "add", "edit", "audit"} <= names
@@ -882,7 +882,7 @@ def test_tier2_registered_by_default(
 def test_tier2_dropped_when_disabled(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("KB_MCP_DISABLE_TIER2", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
     names = _registered_tool_names(monkeypatch)
     # Tier 1 stays fully registered — only the escape hatches drop.
     assert {"find", "get", "note", "add", "edit", "audit", "link"} <= names

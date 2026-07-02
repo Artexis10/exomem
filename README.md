@@ -103,8 +103,8 @@ For Claude Code over stdio:
 
 ```bash
 claude mcp add exomem \
-  --env KB_MCP_VAULT_PATH="/path/to/your/Obsidian" \
-  --env KB_MCP_DISABLE_EMBEDDINGS=1 \
+  --env EXOMEM_VAULT_PATH="/path/to/your/Obsidian" \
+  --env EXOMEM_DISABLE_EMBEDDINGS=1 \
   -- exomem --transport stdio
 ```
 
@@ -151,7 +151,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 
 Tier-2 filesystem tools exist for escape hatches such as listing directories,
 creating files, moving pages, trashing files, and recovering from trash. Set
-`KB_MCP_DISABLE_TIER2=1` if you want a smaller tool surface.
+`EXOMEM_DISABLE_TIER2=1` if you want a smaller tool surface.
 
 Every write records durable history in `Knowledge Base/log.md`. Service calls
 also go to `logs/exomem.log`.
@@ -162,7 +162,7 @@ Every operation is declared once and exposed through:
 
 - **MCP** for agents.
 - **CLI** for terminal and scripts.
-- **REST** for personal HTTP integrations when `KB_MCP_REST_API_KEY` is set.
+- **REST** for personal HTTP integrations when `EXOMEM_REST_API_KEY` is set.
 
 Examples:
 
@@ -176,7 +176,7 @@ kb note --note-type insight --title "Agents need durable context" \
 
 ```bash
 curl -s -X POST http://127.0.0.1:8765/api/find \
-  -H "Authorization: Bearer $KB_MCP_REST_API_KEY" \
+  -H "Authorization: Bearer $EXOMEM_REST_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"query": "project handoff", "mode": "keyword"}'
 ```
@@ -217,17 +217,22 @@ The server reads environment variables or a `.env` file. The main ones are:
 
 | Variable | Purpose |
 | --- | --- |
-| `KB_MCP_VAULT_PATH` | Vault root containing `Knowledge Base/`. |
-| `KB_MCP_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
-| `KB_MCP_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
-| `KB_MCP_REST_API_KEY` | Enables authenticated REST routes. |
-| `KB_MCP_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
-| `KB_MCP_DISABLE_CLIP` | `1` disables CLIP image search. |
-| `KB_MCP_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
-| `KB_MCP_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
-| `KB_MCP_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
-| `KB_MCP_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
-| `KB_MCP_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
+| `EXOMEM_VAULT_PATH` | Vault root containing `Knowledge Base/`. |
+| `EXOMEM_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
+| `EXOMEM_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
+| `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
+| `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
+| `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
+| `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
+| `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
+| `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
+| `EXOMEM_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
+| `EXOMEM_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
+
+Legacy `EXOMEM_*` names (from the project's former working name, exomem) remain
+honored: each is promoted to its `EXOMEM_*` equivalent at startup, with an
+explicitly set `EXOMEM_*` value winning on conflict. `import exomem` and
+`python -m exomem` likewise keep working as deprecated aliases.
 
 Remote-only variables and full deployment notes are in
 [docs/deployment.md](docs/deployment.md).

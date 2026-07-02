@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import audit as audit_module
+from exomem import audit as audit_module
 
 
 def _seed(path: Path, content: str) -> None:

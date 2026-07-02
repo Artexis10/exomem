@@ -2,7 +2,7 @@
 #
 # SEED set — hand-authored against the bundled fixture KB (tests/fixtures/) so
 # the baseline number is meaningful and the example runs out of the box. Point
-# the eval at the fixtures with KB_MCP_VAULT_PATH=tests/fixtures, or replace
+# the eval at the fixtures with EXOMEM_VAULT_PATH=tests/fixtures, or replace
 # these with queries against your own vault. The set is meant to GROW:
 # scripts/derive_relevance_pairs.py proposes additions mined from real
 # (query -> cited path) usage, which you confirm.

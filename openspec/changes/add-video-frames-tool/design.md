@@ -23,7 +23,7 @@ means no REST route, CLI subcommand, or OpenAPI path ever materializes. Preceden
 subset surface: `note` (`_RC`). Hand-registration (the `note`/`mint_*` route) would add
 boilerplate for none of the reasons those exceptions exist (per-vault description; no
 `vault_root`). Tier 2: an escape-hatch read alongside `query_data`/`list_directory`,
-dropping out under `KB_MCP_DISABLE_TIER2`.
+dropping out under `EXOMEM_DISABLE_TIER2`.
 
 ## D3. Sampling: reuse the scene-frames decode primitives, touch nothing
 
@@ -54,8 +54,8 @@ follow-up, not v1.
 ## D4. Payload bounds are server policy
 
 Default 8 frames ≈ the CLIP ingestion budget and ≈450 tokens per 768px JPEG for Claude —
-a default call costs about one large `find`. Hard cap 16 (`KB_MCP_VIDEO_FRAMES_TOOL_CAP`
-env override, mirroring `KB_MCP_MAX_VIDEO_KEYFRAMES` parsing: unparseable/non-positive →
+a default call costs about one large `find`. Hard cap 16 (`EXOMEM_VIDEO_FRAMES_TOOL_CAP`
+env override, mirroring `EXOMEM_MAX_VIDEO_KEYFRAMES` parsing: unparseable/non-positive →
 default). `max_frames` outside `[1, cap]` clamps silently and the metadata reports
 `max_frames_effective` — same contract as `find`'s limit cap. JPEG bounds
 (`FRAME_JPEG_MAX_EDGE=768`, `FRAME_JPEG_QUALITY=80`) are module constants, not tool
@@ -77,9 +77,9 @@ Backend raises `VideoFramesError(code, reason)`; the leaf re-raises
 | no video stream / all decodes fail / corrupt container / unknown-duration window | `NO_DECODABLE_FRAMES` |
 | `start_sec < 0`, `end_sec ≤ start_sec`, `start_sec` past end of video | `BAD_RANGE` |
 
-No env gate. `KB_MCP_DISABLE_MEDIA_EXTRACTION` governs the background worker (the test
+No env gate. `EXOMEM_DISABLE_MEDIA_EXTRACTION` governs the background worker (the test
 suite disables it autouse — gating here would also make the tool untestable by default);
-`KB_MCP_VIDEO_SCENE_FRAMES` governs ingestion-time persistence. On-demand deterministic
+`EXOMEM_VIDEO_SCENE_FRAMES` governs ingestion-time persistence. On-demand deterministic
 decode is measurement and needs neither switch; absence of the media extra degrades to a
 structured error naming the extra, never an unregistered tool or an unhandled traceback.
 

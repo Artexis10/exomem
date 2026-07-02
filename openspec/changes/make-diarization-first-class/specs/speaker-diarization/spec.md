@@ -14,7 +14,7 @@ unchanged and stop re-diarizing for the remainder of the pass.
 
 #### Scenario: Pre-diarization recording gains speakers
 
-- **WHEN** `backfill-media --rediarize` runs with `KB_MCP_DIARIZE` enabled over a sidecar with
+- **WHEN** `backfill-media --rediarize` runs with `EXOMEM_DIARIZE` enabled over a sidecar with
   `extracted_by: faster-whisper:large-v3` and no `speakers:`
 - **THEN** the file is re-extracted and the sidecar records the `+diarized` engine, the labeled
   transcript, and a `speakers:` frontmatter list
@@ -26,7 +26,7 @@ unchanged and stop re-diarizing for the remainder of the pass.
 
 #### Scenario: Disabled flag guards the pass
 
-- **WHEN** `--rediarize` is passed but `KB_MCP_DIARIZE` is not enabled
+- **WHEN** `--rediarize` is passed but `EXOMEM_DIARIZE` is not enabled
 - **THEN** re-diarization is skipped with a logged message and the rest of the back-fill
   (sidecars, OCR, CLIP) proceeds unchanged
 
@@ -68,7 +68,7 @@ soft-fail SHALL be logged at WARNING (not DEBUG).
 
 ### Requirement: Default-Off and Anonymous Fallback
 
-The capability SHALL change no behavior unless `KB_MCP_DIARIZE` is set truthy AND at least one
+The capability SHALL change no behavior unless `EXOMEM_DIARIZE` is set truthy AND at least one
 profile is enrolled. The values `""`, `0`, `false`, `no`, and `off` (case-insensitive, after
 trimming whitespace) SHALL be treated as unset. With diarization disabled, or enabled with zero
 enrolled profiles, the system SHALL produce output byte-identical to the current anonymous
@@ -76,16 +76,16 @@ diarization (or plain transcript).
 
 #### Scenario: No profiles enrolled
 
-- **WHEN** `KB_MCP_DIARIZE` is set but no voice profiles are enrolled
+- **WHEN** `EXOMEM_DIARIZE` is set but no voice profiles are enrolled
 - **THEN** diarization runs exactly as today, emitting anonymous `[Speaker A]: …` turns
 - **AND** no voice-embedding model is loaded
 
 #### Scenario: Diarization disabled
 
-- **WHEN** `KB_MCP_DIARIZE` is unset
+- **WHEN** `EXOMEM_DIARIZE` is unset
 - **THEN** extraction emits the plain transcript with no diarization and no profile lookup
 
 #### Scenario: Falsy value counts as unset
 
-- **WHEN** `KB_MCP_DIARIZE` is set to `0`, `false`, `no`, `off`, or `""` (any case)
+- **WHEN** `EXOMEM_DIARIZE` is set to `0`, `false`, `no`, `off`, or `""` (any case)
 - **THEN** extraction behaves exactly as if the variable were unset

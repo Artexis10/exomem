@@ -11,8 +11,8 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-from kb_mcp import edit as edit_module
-from kb_mcp import vault
+from exomem import edit as edit_module
+from exomem import vault
 
 
 def test_escapes_bare_wikilink() -> None:

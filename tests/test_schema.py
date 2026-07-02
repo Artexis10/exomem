@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import schema
+from exomem import schema
 
 
 def test_parses_real_schema_docs(source_schema: schema.SourceSchema) -> None:

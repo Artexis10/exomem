@@ -12,8 +12,8 @@ from __future__ import annotations
 
 import pytest
 
-from kb_mcp import attention as attention_module
-from kb_mcp.audit import AuditFinding
+from exomem import attention as attention_module
+from exomem.audit import AuditFinding
 
 C = "corpus_contradictions"
 S = "stale_review"
@@ -190,7 +190,7 @@ def test_empty_findings():
 
 
 def test_limit_zero_or_negative_surfaces_all():
-    """`limit <= 0` is the uncapped convention (mirrors KB_MCP_CONTRADICTION_TOP_N=0)."""
+    """`limit <= 0` is the uncapped convention (mirrors EXOMEM_CONTRADICTION_TOP_N=0)."""
     findings = [_f(S, f"s{i}") for i in range(1, 6)]
     for lim in (0, -3):
         report = attention_module._rank(findings, limit=lim)

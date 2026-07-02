@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import audit as audit_module
+from exomem import audit as audit_module
 
 
 def test_audit_findings_have_non_empty_path(vault: Path) -> None:

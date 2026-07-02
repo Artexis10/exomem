@@ -3,7 +3,7 @@
 A measurement-only review queue — never decays or down-ranks `find`. Signals
 are derived from frontmatter dates, the wikilink graph, and the query log (no
 new sidecar). AND-gated as a filter (no confidence score). The access signal is
-gated for determinism (`KB_MCP_DISABLE_RELEVANCE_CHECK`, set by the suite) and
+gated for determinism (`EXOMEM_DISABLE_RELEVANCE_CHECK`, set by the suite) and
 treats a missing log as 'unknown', never fabricated zero-access.
 """
 
@@ -16,8 +16,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import audit as audit_module
-from kb_mcp import find as find_module
+from exomem import audit as audit_module
+from exomem import find as find_module
 
 _TODAY = dt.date(2026, 6, 27)
 
@@ -115,7 +115,7 @@ def test_frequently_surfaced_note_not_flagged(
         ) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
     # 3 surfacings > max_access(1) → excluded.
     assert not [x for x in _stale_findings(vault) if "popular" in x.path]
@@ -284,7 +284,7 @@ def test_dormancy_sort_most_dormant_first(
         ]) + "\n",
         encoding="utf-8",
     )
-    monkeypatch.delenv("KB_MCP_DISABLE_RELEVANCE_CHECK", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_RELEVANCE_CHECK", raising=False)
     monkeypatch.setattr(audit_module, "_RELEVANCE_LOGS_DIR", logs)
 
     findings = [
@@ -306,7 +306,7 @@ def test_dormancy_sort_most_dormant_first(
 
 
 def test_gated_fallback_activation_none_and_oldest_first(vault: Path) -> None:
-    # Suite default has KB_MCP_DISABLE_RELEVANCE_CHECK set → no access signal.
+    # Suite default has EXOMEM_DISABLE_RELEVANCE_CHECK set → no access signal.
     # activation/observations are None for all, and findings fall back to the
     # age-based oldest-first sort (no crash).
     _seed_note(vault, "Notes/Insights/g-older.md", type_="insight", updated="2023-01-01")
@@ -333,7 +333,7 @@ def test_gated_fallback_activation_none_and_oldest_first(vault: Path) -> None:
 def test_server_audit_docstring_lists_stale_review_and_drops_five() -> None:
     # The audit tool description now lives in the command registry (op_audit's
     # docstring), which drives the MCP/REST/CLI/OpenAPI surfaces.
-    import kb_mcp.commands as commands
+    import exomem.commands as commands
 
     src = Path(commands.__file__).read_text(encoding="utf-8")
     assert "stale_review" in src

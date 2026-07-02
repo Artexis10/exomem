@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import server as server_module
+from exomem import server as server_module
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
@@ -38,12 +38,12 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 def _build_server(monkeypatch: pytest.MonkeyPatch):
     """Build the server exactly as the fixture was captured (see module docstring)."""
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_RELEVANCE_CHECK", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", "1")
-    monkeypatch.setenv("KB_MCP_DISABLE_CLIP", "1")
-    monkeypatch.delenv("KB_MCP_DISABLE_TIER2", raising=False)
-    monkeypatch.setenv("KB_MCP_VAULT_PATH", str(FIXTURE_VAULT))
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(FIXTURE_VAULT))
     return server_module.build_server(require_auth=False)
 
 
@@ -96,7 +96,7 @@ def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch
     exception — no silent gaps, no overlap. Skips cleanly until the registry exists
     (pre-refactor), so this stays green at every step of the migration."""
     try:
-        from kb_mcp import commands as commands_module
+        from exomem import commands as commands_module
     except ImportError:
         pytest.skip("registry (commands.py) not introduced yet")
 

@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import set_take as set_take_module
+from exomem import set_take as set_take_module
 
 
 TODAY = dt.date(2026, 6, 1)

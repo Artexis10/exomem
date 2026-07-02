@@ -1,4 +1,4 @@
-"""Generate KB_MCP_UPLOAD_TOKEN and write it into .env (idempotent).
+"""Generate EXOMEM_UPLOAD_TOKEN and write it into .env (idempotent).
 
 The /upload endpoint is OFF (returns 503) until this token is set — it's the
 sole credential for out-of-band binary uploads. Run once:
@@ -15,7 +15,7 @@ import secrets
 from pathlib import Path
 
 ENV = Path(__file__).resolve().parents[1] / ".env"
-KEY = "KB_MCP_UPLOAD_TOKEN"
+KEY = "EXOMEM_UPLOAD_TOKEN"
 
 
 def _is_set(text: str) -> bool:

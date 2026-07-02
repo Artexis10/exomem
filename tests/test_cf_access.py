@@ -7,7 +7,7 @@ import datetime as dt
 import jwt
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from kb_mcp import cf_access
+from exomem import cf_access
 
 TEAM = "myteam.cloudflareaccess.com"
 AUD = "abc123aud"

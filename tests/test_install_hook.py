@@ -16,10 +16,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-import kb_mcp
-from kb_mcp import install_hook as hook_module
+import exomem
+from exomem import install_hook as hook_module
 
-_HOOKS = Path(kb_mcp.__file__).parent / "_hooks"
+_HOOKS = Path(exomem.__file__).parent / "_hooks"
 CAPTURE_SCRIPT = _HOOKS / "kb_capture_nudge.py"
 RETRIEVE_SCRIPT = _HOOKS / "kb_retrieve_nudge.py"
 
@@ -114,7 +114,7 @@ def test_install_hook_print_only_leaves_settings(tmp_path: Path) -> None:
 
 
 def test_install_hook_via_cli(tmp_path: Path) -> None:
-    from kb_mcp.__main__ import main
+    from exomem.__main__ import main
 
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     assert main(["install-hook", "--hook-dir", str(hd), "--settings", str(sp)]) == 0

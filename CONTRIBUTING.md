@@ -17,13 +17,13 @@ the other session is using.
 
 ## The skill scaffold is hand-authored — keep it generic
 
-`src/kb_mcp/_scaffold/_Schema/` (the skill shipped to new users via `init` /
+`src/exomem/_scaffold/_Schema/` (the skill shipped to new users via `init` /
 `install-skill`) is a **hand-authored, deliberately-generic starter** — a lean
 example schema, not a copy of any private vault. Edit it directly.
 
 **The one rule: keep it generic.** `tests/test_scaffold_no_leak.py` fails if any
 personal name, product, podcast, domain, or vault-structure label appears in the
-scaffold — or anywhere under `src/kb_mcp/`. That test is the hard wall against the
+scaffold — or anywhere under `src/exomem/`. That test is the hard wall against the
 leak class that once shipped a maintainer's real names into a friend's clone. If
 it flags a token, genericize it (don't add it to an allowlist).
 

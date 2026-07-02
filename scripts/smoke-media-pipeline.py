@@ -36,19 +36,19 @@ def _wait(predicate, *, timeout=120.0, what="condition"):
 
 def main() -> int:
     # Real engines on; throwaway vault from the test fixtures.
-    for flag in ("KB_MCP_DISABLE_MEDIA_EXTRACTION", "KB_MCP_DISABLE_CLIP", "KB_MCP_DISABLE_EMBEDDINGS"):
+    for flag in ("EXOMEM_DISABLE_MEDIA_EXTRACTION", "EXOMEM_DISABLE_CLIP", "EXOMEM_DISABLE_EMBEDDINGS"):
         os.environ.pop(flag, None)
     vault = Path(tempfile.mkdtemp()) / "vault"
     shutil.copytree(REPO / "tests" / "fixtures", vault)
-    os.environ["KB_MCP_VAULT_PATH"] = str(vault)
-    os.environ["KB_MCP_UPLOAD_TOKEN"] = TOKEN
+    os.environ["EXOMEM_VAULT_PATH"] = str(vault)
+    os.environ["EXOMEM_UPLOAD_TOKEN"] = TOKEN
 
     from PIL import Image, ImageDraw
     from starlette.testclient import TestClient
 
-    from kb_mcp import embeddings
-    from kb_mcp import find as find_module
-    from kb_mcp import server, upload_tokens
+    from exomem import embeddings
+    from exomem import find as find_module
+    from exomem import server, upload_tokens
 
     server.load_dotenv = lambda *a, **k: None  # don't let repo .env clobber the smoke vault
     print("building server (loads bge + CLIP; first time is slow)…")

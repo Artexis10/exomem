@@ -79,8 +79,8 @@ byte-identical, duplicate-free file and is safe to run on a schedule.
 ### Requirement: find Loads an Adopted RankingConfig From Disk
 
 When its `config` argument is omitted, `find` SHALL resolve the active
-`RankingConfig` from disk — honoring `KB_MCP_DISABLE_RANKING_CONFIG` (force default),
-then `KB_MCP_RANKING_CONFIG` (explicit path), then a repo-root `ranking_config.json`,
+`RankingConfig` from disk — honoring `EXOMEM_DISABLE_RANKING_CONFIG` (force default),
+then `EXOMEM_RANKING_CONFIG` (explicit path), then a repo-root `ranking_config.json`,
 and otherwise `DEFAULT_RANKING` — and SHALL parse the file field-by-field, ignoring
 unknown keys and defaulting missing keys. A file that is malformed, wrong-typed, or
 has a bad lane-weight tuple length SHALL fail loud (logged at error) and fall back to

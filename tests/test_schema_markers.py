@@ -8,9 +8,9 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
-import kb_mcp
+import exomem
 
-REPO = Path(kb_mcp.__file__).resolve().parent.parent.parent  # src/kb_mcp -> repo root
+REPO = Path(exomem.__file__).resolve().parent.parent.parent  # src/exomem -> repo root
 
 
 def _load(name: str, filename: str):

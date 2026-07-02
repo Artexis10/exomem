@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from kb_mcp import upload_tokens
+from exomem import upload_tokens
 
 SECRET = "s3cret-long-lived"
 

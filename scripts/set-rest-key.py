@@ -1,4 +1,4 @@
-"""Generate KB_MCP_REST_API_KEY and write it into .env (idempotent).
+"""Generate EXOMEM_REST_API_KEY and write it into .env (idempotent).
 
 The personal REST facade (`/api/<tool>` POST endpoints) returns 503 until this
 key is set — it's the single bearer credential for your own multi-client use
@@ -17,7 +17,7 @@ import secrets
 from pathlib import Path
 
 ENV = Path(__file__).resolve().parents[1] / ".env"
-KEY = "KB_MCP_REST_API_KEY"
+KEY = "EXOMEM_REST_API_KEY"
 
 
 def _is_set(text: str) -> bool:

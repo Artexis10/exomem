@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import access
+from exomem import access
 
 
 def _write_cfg(vault: Path, text: str) -> Path:
@@ -63,7 +63,7 @@ def test_config_live_reloads_on_mtime_change(vault: Path) -> None:
 
 def test_batch_write_refuses_readonly_tree(vault: Path) -> None:
     # The central enforcement: a content write into a readonly tree is refused.
-    from kb_mcp.vault import PlannedWrite, batch_atomic_write
+    from exomem.vault import PlannedWrite, batch_atomic_write
     _write_cfg(vault, "readonly:\n  - Reference\n")
     blocked = vault / "Knowledge Base" / "Reference" / "x.md"
     blocked.parent.mkdir(parents=True, exist_ok=True)
@@ -77,7 +77,7 @@ def test_batch_write_refuses_readonly_tree(vault: Path) -> None:
 
 
 def test_find_hides_excluded_tree(vault: Path) -> None:
-    from kb_mcp import find as find_module
+    from exomem import find as find_module
     secret = vault / "Knowledge Base" / "Private" / "secret.md"
     secret.parent.mkdir(parents=True, exist_ok=True)
     secret.write_text("---\ntype: source\n---\nzzqqxx unique marker\n", encoding="utf-8")

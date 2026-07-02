@@ -2,7 +2,7 @@
 
 ### Requirement: Visual-Change Scene Detection
 
-The system SHALL, when scene frames are enabled (`KB_MCP_VIDEO_SCENE_FRAMES`), choose a video's
+The system SHALL, when scene frames are enabled (`EXOMEM_VIDEO_SCENE_FRAMES`), choose a video's
 CLIP keyframes by visual-change scene detection instead of uniform-interval sampling: a cheap
 I-frame-only metrics pass (perceptual average-hash + normalized grayscale histogram) SHALL feed
 an anchor-based boundary detector with a minimum scene duration, and each detected scene SHALL
@@ -108,13 +108,13 @@ SHALL surface as an ordinary standalone image hit.
 
 ### Requirement: Default-Off and Byte-Identical When Unset
 
-Scene detection and frame persistence SHALL change no behavior unless `KB_MCP_VIDEO_SCENE_FRAMES`
+Scene detection and frame persistence SHALL change no behavior unless `EXOMEM_VIDEO_SCENE_FRAMES`
 is set. With the flag unset, video CLIP indexing SHALL be byte-identical to the current
 uniform-sampling path, no files SHALL be written, and `find` output SHALL be unchanged.
 
 #### Scenario: Flag unset leaves the video path unchanged
 
-- **WHEN** a video is processed with `KB_MCP_VIDEO_SCENE_FRAMES` unset
+- **WHEN** a video is processed with `EXOMEM_VIDEO_SCENE_FRAMES` unset
 - **THEN** keyframe selection, ClipIndex rows, and find results are exactly today's, and no
   `.frames/` directory is created
 
@@ -123,8 +123,8 @@ uniform-sampling path, no files SHALL be written, and `find` output SHALL be unc
 The scene-frame path SHALL soft-fail. A frame-write failure (unwritable directory, encode error)
 SHALL be logged and MUST NOT prevent the video's CLIP vectors from being indexed; a total
 detection failure SHALL fall back to the uniform sampler. Scene processing SHALL only run when
-the CLIP path is available (`KB_MCP_DISABLE_CLIP` unset and CLIP importable). Configuration
-overrides (`KB_MCP_VIDEO_SCENE_THRESHOLD`, `KB_MCP_VIDEO_SCENE_MIN_SECS`) SHALL fall back to
+the CLIP path is available (`EXOMEM_DISABLE_CLIP` unset and CLIP importable). Configuration
+overrides (`EXOMEM_VIDEO_SCENE_THRESHOLD`, `EXOMEM_VIDEO_SCENE_MIN_SECS`) SHALL fall back to
 built-in defaults when unparseable.
 
 #### Scenario: Frame write fails but vectors persist

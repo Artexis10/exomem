@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import doctor as doctor_module
-from kb_mcp.__main__ import main
+from exomem import doctor as doctor_module
+from exomem.__main__ import main
 
 
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
@@ -46,7 +46,7 @@ def test_doctor_json_cli(vault: Path, capsys) -> None:
 
 
 def test_doctor_missing_vault_fails(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_VAULT_PATH", raising=False)
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
 
     report = doctor_module.doctor()
 
@@ -67,7 +67,7 @@ def test_doctor_profile_missing_dependency_fails(
             return None
         return real_find_spec(name)
 
-    monkeypatch.delenv("KB_MCP_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setattr(doctor_module.importlib.util, "find_spec", fake_find_spec)
 
     report = doctor_module.doctor(vault=str(vault), profile="hybrid")
@@ -82,7 +82,7 @@ def test_doctor_human_output_includes_remediation(
     monkeypatch: pytest.MonkeyPatch,
     capsys,
 ) -> None:
-    monkeypatch.delenv("KB_MCP_VAULT_PATH", raising=False)
+    monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)
 
     code, out, err = _run(["doctor"], capsys)
 

@@ -10,7 +10,7 @@ them at read time:
 - Piece A: `vault.read_log_entries` / `get(include_history=True)` return a
   page's edit-`why` history from the append-only `log.md`.
 
-Runs under the suite-wide KB_MCP_DISABLE_EMBEDDINGS (see conftest): hybrid
+Runs under the suite-wide EXOMEM_DISABLE_EMBEDDINGS (see conftest): hybrid
 degrades to BM25 + keyword + graph, which still exercises the fusion + the new
 demotion pass. The conflict-pair notes match a rare token, so the keyword
 contribution carries them even if the BM25 index is stale.
@@ -25,11 +25,11 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import edit as edit_module
-from kb_mcp import find as find_module
-from kb_mcp import get_page as get_module
-from kb_mcp import server as server_module
-from kb_mcp import vault as vault_module
+from exomem import edit as edit_module
+from exomem import find as find_module
+from exomem import get_page as get_module
+from exomem import server as server_module
+from exomem import vault as vault_module
 
 
 TODAY = dt.date(2026, 6, 23)
@@ -189,7 +189,7 @@ def test_read_log_entries_missing_log_returns_empty(tmp_path: Path) -> None:
 
 def _build_server(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
-    monkeypatch.setenv("KB_MCP_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     return server_module.build_server(require_auth=False)
 
 

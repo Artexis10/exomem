@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from kb_mcp import embeddings, file_watcher
+from exomem import embeddings, file_watcher
 
 
 def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
@@ -204,7 +204,7 @@ def test_unregistered_external_events_still_dispatch(vault, monkeypatch: pytest.
 
 
 def test_batch_atomic_write_registers_suppression(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    from kb_mcp.vault import PlannedWrite, batch_atomic_write
+    from exomem.vault import PlannedWrite, batch_atomic_write
 
     ups, _dels = _stub_embeddings(monkeypatch)
     file_watcher.clear_self_write_registry()

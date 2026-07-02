@@ -7,8 +7,8 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from kb_mcp import backfill, embeddings, extract, media_worker, preserve, scene_frames
-from kb_mcp.embeddings import Scene
+from exomem import backfill, embeddings, extract, media_worker, preserve, scene_frames
+from exomem.embeddings import Scene
 
 
 def test_transcribe_silent_video_is_not_a_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -30,8 +30,8 @@ def _three_frames():
 
 
 def test_worker_clip_embeds_video_via_keyframes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00\x00video", text="x",
     )
@@ -80,8 +80,8 @@ def _two_scenes():
 def test_worker_gate_on_writes_frames_and_queues_ocr(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
@@ -113,8 +113,8 @@ def test_worker_gate_on_writes_frames_and_queues_ocr(
 def test_worker_gate_off_never_touches_scene_path(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.delenv("KB_MCP_VIDEO_SCENE_FRAMES", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
@@ -136,8 +136,8 @@ def test_worker_gate_off_never_touches_scene_path(
 def test_worker_frame_write_failure_still_upserts_vectors(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     res = preserve.preserve_bytes(
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
@@ -158,7 +158,7 @@ def test_worker_frame_write_failure_still_upserts_vectors(
 
 
 def test_startup_scan_skips_frame_children(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     kb = vault / "Knowledge Base/Evidence/Test/clips"
     kb.mkdir(parents=True, exist_ok=True)
     # A normal image with a plain sidecar → should be CLIP-queued.
@@ -184,7 +184,7 @@ def test_startup_scan_skips_frame_children(vault, monkeypatch: pytest.MonkeyPatc
 
 
 def test_backfill_clip_indexes_video(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     p = vault / "Knowledge Base/Evidence/Old/clips/legacy.mp4"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_bytes(b"\x00video")
@@ -217,8 +217,8 @@ def _legacy_video(vault) -> tuple[Path, str]:
 def test_backfill_upgrades_legacy_video_to_scene_frames(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.setenv("KB_MCP_VIDEO_SCENE_FRAMES", "1")
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
     p, rel = _legacy_video(vault)
     calls = {"scenes": 0}
 
@@ -261,8 +261,8 @@ def test_backfill_upgrades_legacy_video_to_scene_frames(
 
 
 def test_backfill_gate_off_writes_no_frames(vault, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("KB_MCP_DISABLE_CLIP", raising=False)
-    monkeypatch.delenv("KB_MCP_VIDEO_SCENE_FRAMES", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
     p, rel = _legacy_video(vault)
     monkeypatch.setattr(
         embeddings, "embed_video_scenes",

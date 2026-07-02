@@ -9,12 +9,12 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from kb_mcp import audit as audit_module
-from kb_mcp import reconcile as reconcile_module
+from exomem import audit as audit_module
+from exomem import reconcile as reconcile_module
 
 
 def test_reconcile_reports_embeddings_disabled_in_test_env(vault: Path) -> None:
-    """The suite runs with KB_MCP_DISABLE_EMBEDDINGS=1, so reconcile reports the
+    """The suite runs with EXOMEM_DISABLE_EMBEDDINGS=1, so reconcile reports the
     embedding pass as disabled (no sidecar touched) rather than failing."""
     rep = reconcile_module.reconcile(vault)
     assert rep.embeddings_status == "disabled"

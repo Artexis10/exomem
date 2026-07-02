@@ -9,7 +9,7 @@ and optional capability profiles.
 ### Requirement: Uv-First Local Setup
 
 The system SHALL document `uv sync` as the canonical local setup path and
-`uv run python -m kb_mcp ...` as the canonical source-checkout execution path.
+`uv run python -m exomem ...` as the canonical source-checkout execution path.
 It SHALL keep `pip install -e .` documented only as a fallback for users who
 manage Python environments manually.
 
@@ -17,7 +17,7 @@ manage Python environments manually.
 
 - **WHEN** a new user reads the README or local setup guide
 - **THEN** the first install commands use `uv sync`
-- **AND** the first exomem commands use `uv run python -m kb_mcp`
+- **AND** the first exomem commands use `uv run python -m exomem`
 - **AND** pip appears only as a fallback path
 
 ### Requirement: Read-Only Doctor Command
@@ -30,7 +30,7 @@ profile before wiring a client or optional capability.
 
 #### Scenario: Lean doctor over a valid vault
 
-- **WHEN** `python -m kb_mcp doctor --vault <valid-vault> --json` is run
+- **WHEN** `python -m exomem doctor --vault <valid-vault> --json` is run
 - **THEN** it returns JSON containing `success`, `profile`, and a `checks` list
 - **AND** each check contains `id`, `status`, `message`, and `remediation`
 - **AND** no vault file is created, modified, moved, or deleted
@@ -39,7 +39,7 @@ profile before wiring a client or optional capability.
 
 - **WHEN** `doctor` cannot resolve a vault containing `Knowledge Base/_Schema/SKILL.md`
 - **THEN** it exits non-zero
-- **AND** it reports a remediation that tells the user to set `KB_MCP_VAULT_PATH`
+- **AND** it reports a remediation that tells the user to set `EXOMEM_VAULT_PATH`
   or pass `--vault` and run `init` if needed
 
 ### Requirement: Profile-Specific Readiness

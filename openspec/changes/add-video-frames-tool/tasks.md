@@ -10,7 +10,7 @@
       `start_sec` past probed duration → `BAD_RANGE`; unknown duration + window →
       `NO_DECODABLE_FRAMES` with the retry hint.
 - [x] 1.2 Bounding tests: `max_frames=999` clamps to 16 with
-      `max_frames_effective == 16`; `KB_MCP_VIDEO_FRAMES_TOOL_CAP` override honored and
+      `max_frames_effective == 16`; `EXOMEM_VIDEO_FRAMES_TOOL_CAP` override honored and
       unparseable value falls back; timestamps evenly spaced inside `[start_sec, end_sec]`
       and strictly increasing; near-dup candidates collapse (fake frames with controlled
       `_avg_hash` behavior) and `dedup_dropped` reported; uniform subsample preserves
@@ -21,7 +21,7 @@
 
 ## 2. Backend implementation
 
-- [x] 2.1 `src/kb_mcp/video_frames.py`: `VideoFramesError`, `Frame`, `FramesResult`,
+- [x] 2.1 `src/exomem/video_frames.py`: `VideoFramesError`, `Frame`, `FramesResult`,
       `_tool_frames_cap()` (env override), `_probe_duration()`, `_encode_jpeg()`,
       `get_frames()` composing `resolve_under_vault` → `media_type_for` →
       probe → `embeddings._decode_frames_at` (windowed midpoints, 2×cap candidates) /
@@ -38,7 +38,7 @@
       the fake bytes, ordered by `frames[].index`; error path `../escape.mp4` raises
       `ToolError` carrying `INVALID_PATH`; tool absent from `commands_for("rest")` /
       `commands_for("cli")`; `readOnlyHint` true.
-- [x] 3.2 `src/kb_mcp/commands.py`: imports (`json`, `TextContent`, `ToolResult`,
+- [x] 3.2 `src/exomem/commands.py`: imports (`json`, `TextContent`, `ToolResult`,
       `fastmcp.utilities.types.Image`, `video_frames_module`), `op_get_video_frames`
       leaf with full Google-style docstring (summary, Args, Returns, Errors),
       `_M = frozenset({"mcp"})`, `_SPEC` row
@@ -55,7 +55,7 @@
 
 ## 5. Verify
 
-- [x] 5.1 `PYTHONPATH=src KB_MCP_DISABLE_EMBEDDINGS=1 python -m pytest -q` green
+- [x] 5.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green
       (via `uv run`).
 - [x] 5.2 `ruff check` clean; leak guard green (all labels generic).
 - [x] 5.3 `openspec validate add-video-frames-tool --strict` passes.

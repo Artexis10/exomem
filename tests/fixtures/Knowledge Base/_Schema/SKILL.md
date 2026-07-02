@@ -101,7 +101,7 @@ questions. Capture at the landing, not during the flight.
 ```
 
 `<vault>` resolves to your Obsidian vault root — the folder that contains
-`Knowledge Base/`, set via `KB_MCP_VAULT_PATH`. Verify allowed filesystem paths
+`Knowledge Base/`, set via `EXOMEM_VAULT_PATH`. Verify allowed filesystem paths
 before writing.
 
 The research scopes are an open set you grow over time, registered in
@@ -124,7 +124,7 @@ resolves to the right tool. `find` is the read-only hybrid (semantic + keyword)
 search and your default entry point.
 
 The Tier 2 filesystem ops below may be turned off on lean deployments
-(`KB_MCP_DISABLE_TIER2`), in which case only the Tier 1 ops are registered.
+(`EXOMEM_DISABLE_TIER2`), in which case only the Tier 1 ops are registered.
 
 ## Operations
 

@@ -16,7 +16,7 @@ Cross-platform (pure stdlib; no `zip` CLI / Compress-Archive). SKILL.md lands at
 archive root, mirroring the on-disk skill layout claude.ai expects.
 
 Usage: python scripts/rebuild-schema-zip.py [--vault <root>]
-  --vault   vault root containing "Knowledge Base/" (default: $KB_MCP_VAULT_PATH)
+  --vault   vault root containing "Knowledge Base/" (default: $EXOMEM_VAULT_PATH)
 """
 
 from __future__ import annotations
@@ -59,12 +59,12 @@ def strip_markers_keep_real(text: str) -> str:
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="rebuild-schema-zip")
-    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $KB_MCP_VAULT_PATH)")
+    ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)")
     args = ap.parse_args()
 
-    vault = args.vault or os.environ.get("KB_MCP_VAULT_PATH")
+    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
     if not vault:
-        print("rebuild-schema-zip: set --vault or KB_MCP_VAULT_PATH (vault root containing 'Knowledge Base/').", file=sys.stderr)
+        print("rebuild-schema-zip: set --vault or EXOMEM_VAULT_PATH (vault root containing 'Knowledge Base/').", file=sys.stderr)
         return 2
     kb = Path(vault).expanduser() / "Knowledge Base"
     canon = kb / "_Schema"
