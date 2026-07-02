@@ -53,7 +53,7 @@ In non-interactive mode a failed doctor preflight SHALL abort with exit code 1.
 ### Requirement: Claude Code registration with fallback
 When the `claude` CLI is found, the wizard SHALL register the server via
 `claude mcp add` as an argv list (never a shell string), carrying
-`KB_MCP_VAULT_PATH` (and `KB_MCP_DISABLE_EMBEDDINGS=1` for the lean profile) in
+`EXOMEM_VAULT_PATH` (and `EXOMEM_DISABLE_EMBEDDINGS=1` for the lean profile) in
 the registration env, using `uv --directory <repo>` in a repo checkout and the
 running interpreter otherwise. When the CLI is absent, the wizard SHALL print a
 valid `.mcp.json` snippet produced by JSON serialization.

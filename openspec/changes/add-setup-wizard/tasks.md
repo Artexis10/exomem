@@ -8,15 +8,15 @@
       preserve, no-CLI snippet path, doctor-fail `--yes` → exit 1,
       registration argv shape (scope/env/`--` separator), `--yes` without
       `--vault` → exit 2.
-- [ ] 1.2 Implement `src/kb_mcp/setup_wizard.py`: `run_setup(...)` with the
+- [ ] 1.2 Implement `src/exomem/setup_wizard.py`: `run_setup(...)` with the
       injected seams, converger steps per design, utf-8 subprocess handling.
 
 ## 2. CLI dispatch + docs
 
-- [ ] 2.1 Wire `setup` into `src/kb_mcp/__main__.py` (dispatch + module
+- [ ] 2.1 Wire `setup` into `src/exomem/__main__.py` (dispatch + module
       docstring subcommand list) with `_setup_main` argparse (`exomem setup`).
 - [ ] 2.2 README "Local quickstart": three-line path ending in
-      `uv run python -m kb_mcp setup`.
+      `uv run python -m exomem setup`.
 - [ ] 2.3 SETUP-LOCAL.md: "One command" section on top; retitle existing steps
       2–7 as the manual path ("what `setup` does under the hood").
 

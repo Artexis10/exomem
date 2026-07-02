@@ -47,12 +47,12 @@ is untouched)
 
 ## Impact
 
-- New module `src/kb_mcp/overview.py`; registry row + `op_overview` leaf in
-  `src/kb_mcp/commands.py`.
-- `src/kb_mcp/_scaffold/_Schema/SKILL.md` (guidance), `README.md` (tools table).
+- New module `src/exomem/overview.py`; registry row + `op_overview` leaf in
+  `src/exomem/commands.py`.
+- `src/exomem/_scaffold/_Schema/SKILL.md` (guidance), `README.md` (tools table).
 - Tests: new `tests/test_overview.py`; CLI-door case; REST route covered by the
   registry-driven machinery; regenerated `tests/fixtures/mcp_tool_schemas.json`
   (via `scripts/dump-tool-schemas.py`) so `test_mcp_schema_fidelity` stays green;
   `test_scaffold_no_leak.py` guards the SKILL.md wording.
-- No API/dependency changes elsewhere; `KB_MCP_DISABLE_TIER2=1` deployments keep
+- No API/dependency changes elsewhere; `EXOMEM_DISABLE_TIER2=1` deployments keep
   the op (Tier 1 — the tool that prevents bulk reads must not be hideable).

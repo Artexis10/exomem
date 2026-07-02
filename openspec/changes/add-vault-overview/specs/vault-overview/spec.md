@@ -48,7 +48,7 @@ underlying core function SHALL accept a raw directory path and produce a report
 for vaults with no initialized `Knowledge Base/`.
 
 #### Scenario: Tier 2 disabled deployments keep overview
-- **WHEN** the server runs with `KB_MCP_DISABLE_TIER2=1`
+- **WHEN** the server runs with `EXOMEM_DISABLE_TIER2=1`
 - **THEN** the `overview` MCP tool is still registered
 
 #### Scenario: Pre-init scan

@@ -44,8 +44,8 @@ the wizard composes them)
 
 ## Impact
 
-- New `src/kb_mcp/setup_wizard.py`; dispatch line + docstring entry in
-  `src/kb_mcp/__main__.py`.
+- New `src/exomem/setup_wizard.py`; dispatch line + docstring entry in
+  `src/exomem/__main__.py`.
 - Reuses `init.init_vault`, `overview.overview`, `doctor.doctor`/`render_human`,
   `install_skill.install_skill`, `install_hook.install_hook`.
 - Docs: `README.md`, `SETUP-LOCAL.md`.

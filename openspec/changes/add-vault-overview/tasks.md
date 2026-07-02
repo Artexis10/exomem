@@ -7,13 +7,13 @@
       `note 2.md` beside `note.md`, oversized md) — assert exact totals,
       frontmatter %, junk detection, `kb.present` false pre-init, POSIX paths,
       determinism, and cap behavior (depth/breadth/list caps with exact totals).
-- [ ] 1.2 Implement `src/kb_mcp/overview.py`: single `os.walk`, own skip-set
+- [ ] 1.2 Implement `src/exomem/overview.py`: single `os.walk`, own skip-set
       (design §3), markdown-only capped content reads, shape-bucketed naming
       patterns, junk/largest/oldest summaries, bounded tree assembly.
 
 ## 2. Registry wiring
 
-- [ ] 2.1 Add `op_overview` leaf to `src/kb_mcp/commands.py` (Google-style
+- [ ] 2.1 Add `op_overview` leaf to `src/exomem/commands.py` (Google-style
       docstring — it IS the MCP/CLI/REST contract) and the `_SPEC` row
       `("overview", op_overview, 1, False, False, "path", _MCRC)`.
 - [ ] 2.2 CLI-door test (`kb overview --json` pattern) + REST route smoke via the

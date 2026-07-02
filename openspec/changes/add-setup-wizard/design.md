@@ -24,7 +24,7 @@ that exomem leaves their current files alone.
 ## Decisions
 
 1. **CLI-only subcommand dispatched in `__main__.py`**, module
-   `src/kb_mcp/setup_wizard.py` (not `setup.py` — avoids setuptools-shadowing
+   `src/exomem/setup_wizard.py` (not `setup.py` — avoids setuptools-shadowing
    confusion). The registry's leaves are `leaf(vault_root, **kwargs)` wired to
    REST; a prompting, subprocess-spawning wizard doesn't fit that contract.
 
@@ -44,8 +44,8 @@ that exomem leaves their current files alone.
 4. **Registration command is argv-list, never `shell=True`.** Locate the CLI
    with `which_fn("claude")` (resolves `.cmd`/`.exe` shims on Windows). Server
    command: repo checkout (`pyproject.toml` at the package's repo root, `uv` on
-   PATH) → `uv --directory <repo> run python -m kb_mcp --transport stdio`;
-   otherwise (wheel install) → `sys.executable -m kb_mcp --transport stdio`.
+   PATH) → `uv --directory <repo> run python -m exomem --transport stdio`;
+   otherwise (wheel install) → `sys.executable -m exomem --transport stdio`.
    Default `--scope user` (a `local`-scope registration silently applies only
    to the cwd — a foot-gun for a user-level memory tool). No CLI → print the
    `.mcp.json` snippet via `json.dumps` (correct Windows backslash escaping for
@@ -54,7 +54,7 @@ that exomem leaves their current files alone.
 5. **Profile detection**: `--lean`/`--hybrid` override; otherwise
    `importlib.util.find_spec("sentence_transformers")` decides the offered
    default (present → hybrid, absent → lean with a one-line upgrade note).
-   Lean adds `KB_MCP_DISABLE_EMBEDDINGS=1` to the registration env.
+   Lean adds `EXOMEM_DISABLE_EMBEDDINGS=1` to the registration env.
 
 6. **Doctor gate**: run after `init` (schema files must exist). On FAIL:
    interactive → show `render_human` + ask continue/abort (default abort);

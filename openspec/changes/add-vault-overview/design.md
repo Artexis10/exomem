@@ -30,7 +30,7 @@ so the scanning core cannot go through the usual vault resolution.
    `audit`'s spec, docstring, and tests all define it as KB-only lint with
    proposals; overloading it muddies both contracts. `doctor` is CLI-only install
    preflight and not MCP-reachable — but MCP reachability is the point (agents are
-   the ones bulk-reading). Tier 1 (not 2) so `KB_MCP_DISABLE_TIER2` cannot hide
+   the ones bulk-reading). Tier 1 (not 2) so `EXOMEM_DISABLE_TIER2` cannot hide
    the very tool that prevents full-vault scans; precedent: `find scope="vault"`
    is Tier 1 and already walks the whole vault.
 
