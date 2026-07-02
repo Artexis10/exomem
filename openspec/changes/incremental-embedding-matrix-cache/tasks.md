@@ -6,7 +6,9 @@
       torch): matrix loads once and is reused; in-process writes never force a
       reload (new file, chunk-count up/down, delete); spliced result equals a full
       reload; external write triggers exactly one reload; delete-to-empty keeps the
-      zero-row shape; WAL is on; concurrent readers+writer stay correct.
+      zero-row shape; WAL is on; concurrent readers+writer stay correct; and an
+      END-TO-END `find(mode="vector")` test (stubbed embedder) that asserts the
+      vector lane actually ran and three distinct finds share one matrix load.
 - [x] 1.2 `all_vectors()` reader-snapshot fix + extract the full load into
       `_load_all_rows()` (both `EmbeddingIndex` and `ClipIndex`).
 - [x] 1.3 Per-index `RLock`; `upsert_file`/`delete_file` (and CLIP

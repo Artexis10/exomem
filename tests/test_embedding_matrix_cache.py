@@ -272,6 +272,59 @@ def test_concurrent_readers_and_writer_stay_correct(tmp_path):
     assert sorted({m[0] for m in meta}) == [f"f{i:02d}.md" for i in range(20)]
 
 
+def test_find_vector_lane_reuses_shared_matrix(tmp_path, monkeypatch):
+    """End-to-end through the REAL `find()` entry point (deterministic fake
+    embedder, no torch): three distinct finds share ONE matrix load, and the
+    vector lane genuinely ran — guarding against a silent BM25 fallback that
+    would make the reuse assertion pass for the wrong reason."""
+    from exomem import find as find_module
+    from exomem import readiness
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")  # bypass the hot result cache
+    readiness.reset()
+
+    vault = _fresh_vault(tmp_path)
+    rel_a = "Knowledge Base/Notes/Insights/alpha.md"
+    rel_b = "Knowledge Base/Notes/Insights/beta.md"
+    for rel, title in ((rel_a, "Alpha"), (rel_b, "Beta")):
+        p = vault / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_text(
+            f"---\ntype: insight\nstatus: active\ncreated: 2026-01-01\n"
+            f"updated: 2026-01-01\n---\n\n# {title}\n\nbody text {title}\n",
+            encoding="utf-8",
+        )
+
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file(rel_a, ["alpha chunk"], _mat([1, 0]), 1.0)
+    idx.upsert_file(rel_b, ["beta chunk"], _mat([0, 1]), 2.0)
+
+    # Query embedder → deterministic vector aligned to note A (no model needed).
+    monkeypatch.setattr(
+        embeddings,
+        "embed_texts",
+        lambda texts, *, is_query=False: np.stack([_pad([1, 0]) for _ in texts]),
+    )
+
+    find_module.clear_cache()
+    count = _count_loads(monkeypatch, idx)
+
+    first_hits = None
+    for q in ("first query", "second query", "third query"):
+        timings = find_module.FindTimings()
+        hits = find_module.find(vault, query=q, mode="vector", limit=5, timings=timings)
+        stage = timings.as_dict()["stages"].get("vector", {})
+        assert stage and not stage.get("skipped") and not stage.get("error"), (
+            f"vector lane did not run cleanly: {stage!r}"
+        )
+        if first_hits is None:
+            first_hits = hits
+
+    assert first_hits and first_hits[0].path == rel_a  # query-aligned note ranks first
+    assert count["n"] == 1  # one sqlite load served all three distinct finds
+
+
 # --------------------------------------------------------------------------- #
 # ClipIndex (visual matrix) — structural twin
 # --------------------------------------------------------------------------- #
