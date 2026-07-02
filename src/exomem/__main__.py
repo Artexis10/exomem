@@ -129,7 +129,9 @@ def _backfill_media_main(argv: list[str]) -> int:
         help="re-extract audio/video transcribed before timed transcripts (extracted_by "
         "without '+timed') so they gain per-segment [m:ss] lines — the substrate for "
         "semantic segments. Requires EXOMEM_SEMANTIC_SEGMENTS set in this shell (the CLI "
-        "does not read .env). One re-extraction serves --retime and --rediarize together.",
+        "does not read .env). One re-extraction serves --retime and --rediarize together. "
+        "Already-diarized recordings are SKIPPED unless EXOMEM_DIARIZE is also set, so "
+        "re-timing never drops their speaker labels.",
     )
     args = parser.parse_args(argv)
     if not args.vault:
