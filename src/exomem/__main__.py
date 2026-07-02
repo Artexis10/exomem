@@ -227,13 +227,20 @@ def _warm_main(argv: list[str]) -> int:
     from . import embeddings
 
     failed = False
+    missing_extra = False
 
     def _step(label: str, fn) -> None:
-        nonlocal failed
+        nonlocal failed, missing_extra
         t0 = time.perf_counter()
         try:
             fn()
             print(f"  {label}: ready ({time.perf_counter() - t0:.1f}s)")
+        except ImportError as e:
+            # A lean install has no ML stack — that's a missing extra, not a
+            # download problem, and the remediation must say so.
+            failed = True
+            missing_extra = True
+            print(f"  {label}: FAILED ({e})", file=sys.stderr)
         except Exception as e:  # noqa: BLE001 — report every model, then exit non-zero
             failed = True
             print(f"  {label}: FAILED ({e})", file=sys.stderr)
@@ -254,6 +261,14 @@ def _warm_main(argv: list[str]) -> int:
         print(f"  lexical caches: warmed ({time.perf_counter() - t0:.1f}s)")
 
     if failed:
+        if missing_extra:
+            print(
+                "warm: the ML stack is not installed — this is a lean install. "
+                "Add it with `uv sync --extra embeddings` (source checkout) or "
+                "`pip install 'exomem[embeddings]'`, then re-run `exomem warm`.",
+                file=sys.stderr,
+            )
+            return 1
         print("warm: one or more models failed — check network/proxy and retry.", file=sys.stderr)
         return 1
     print("warm: done. Server starts will now warm from disk in seconds.")
