@@ -7,7 +7,8 @@ stdio, no cloud) is in [../SETUP-LOCAL.md](../SETUP-LOCAL.md); start there if yo
 don't need mobile access.
 
 Throughout, replace `<your-host>` / `example.com` with your own hostname.
-For the short bring-up list, use [remote-checklist.md](remote-checklist.md).
+For the guided ≤15-minute bring-up, start with
+[remote-quickstart.md](remote-quickstart.md); this document is the reference.
 
 ## Architecture
 
@@ -92,19 +93,7 @@ images. Idempotent. Flags: `--no-ocr` (sidecar + CLIP only), `--no-clip`,
 
 You need a hostname for step 3. Pick **one**:
 
-**Option A — Tailscale Funnel.** No domain needed; free
-`<device>.<tailnet>.ts.net` host; simplest. Best if you don't own a domain. In the
-Tailscale admin console enable HTTPS for the tailnet + Funnel for this node, then:
-
-```powershell
-tailscale funnel --bg --https=443 http://127.0.0.1:8765
-tailscale funnel status        # note the URL, e.g. https://<device>.<tailnet>.ts.net
-```
-
-Funnel's shared relay can throttle bursty reconnects under heavy use; if that
-bites, restart Tailscale or switch to Option B.
-
-**Option B — Cloudflare Tunnel.** Needs a domain you own in Cloudflare; more
+**Option A — Cloudflare Tunnel.** Needs a domain you own in Cloudflare; more
 burst-tolerant under load. Prereq:
 `winget install --id Cloudflare.cloudflared`.
 
@@ -116,6 +105,33 @@ pwsh -File scripts/setup-cloudflared.ps1 -Hostname kb.example.com -TunnelName ex
 
 In the Cloudflare dashboard for this hostname: Bot Fight Mode **OFF** + no WAF
 managed ruleset (Security Level low); the edge caps requests at ~100s.
+
+**Option B — ngrok.** No domain needed; every ngrok account gets one free static
+dev domain. Claim it in the ngrok dashboard, then:
+
+```powershell
+ngrok config add-authtoken <your-authtoken>
+ngrok http 8765 --url https://<you>.ngrok-free.dev
+```
+
+For an always-on Windows service instead of a foreground process, use
+`pwsh -File scripts/setup-ngrok.ps1 -Domain <you>.ngrok-free.dev -Port 8765`.
+
+Free-tier limits: 120 requests/min, ~20k requests/month, and a one-time browser
+interstitial on first visit (click through once; it does not recur). Fine for
+one person; upgrade or switch to Cloudflare if you outgrow the cap.
+
+**Why not Tailscale Funnel?** Funnel is beta, has non-configurable bandwidth
+caps, and its shared relay throttles claude.ai's connector request bursts —
+producing a "looks disconnected" failure that has nothing to do with exomem
+itself. It is no longer the recommended no-domain default (ngrok's static
+domain is more burst-tolerant), but existing Funnel deployments keep working.
+If you're already running it:
+
+```powershell
+tailscale funnel --bg --https=443 http://127.0.0.1:8765
+tailscale funnel status        # note the URL, e.g. https://<device>.<tailnet>.ts.net
+```
 
 ## 3. Create a GitHub OAuth App (one-time, ~3 min)
 
@@ -169,6 +185,11 @@ uv run python -m exomem --transport streamable-http --host 127.0.0.1 --port 8765
 #   curl.exe -i http://127.0.0.1:8765/.well-known/oauth-authorization-server
 #                                                              → expect JSON metadata
 ```
+
+Once the tunnel is up (step 2) and `.env` is populated (step 4), `exomem doctor
+--profile remote --probe` runs the equivalent checks above — plus the public
+OAuth-discovery and bare well-known endpoints through the live tunnel — in one
+command.
 
 ## 6. Install as a service (auto-start on boot)
 
@@ -231,6 +252,8 @@ host's *own* values. The non-obvious parts:
   automatically (`tailscale funnel status`); for Cloudflare, give each host a
   distinct subdomain (e.g. `kb.example.com`, `kb-laptop.example.com`) via
   `pwsh -File scripts/setup-cloudflared.ps1 -Hostname <this-host> -TunnelName <unique-name>`.
+  ngrok's free tier gives one static dev domain **per account**, not per host —
+  a second host needs Cloudflare (or a paid ngrok domain) for its own hostname.
 - **Its own GitHub OAuth App.** A GitHub OAuth App allows exactly **one**
   Authorization callback URL, so you *cannot* reuse another host's app — its
   callback points at the other host and GitHub rejects the redirect with "The
@@ -375,7 +398,7 @@ sc.exe start exomem
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON. If 404, the OAuthProxy isn't mounted — most likely `EXOMEM_BASE_URL` has a trailing slash or includes `/mcp`. |
+| claude.ai "Couldn't reach the MCP server" during connector add | OAuth discovery failed | `curl.exe -i https://<your-host>/.well-known/oauth-authorization-server` should return JSON (or run `exomem doctor --profile remote --probe`, which checks this plus the bare well-known path). If 404, the OAuthProxy isn't mounted — most likely `EXOMEM_BASE_URL` has a trailing slash or includes `/mcp`. |
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
@@ -384,6 +407,8 @@ sc.exe start exomem
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
 | `KB vault not found` on startup | vault path moved or `EXOMEM_VAULT_PATH` wrong | set `EXOMEM_VAULT_PATH` to the absolute vault root in `.env`. |
 | Schema parse error on startup | `_Schema/references/frontmatter.md` shape changed | diff against the version that was working; the parser is conservative on purpose. |
+| Connector setup stalls mid-burst behind ngrok | Free-tier rate limit (120 req/min) | Check the ngrok agent console for `429`s. Wait and retry, or upgrade / switch to Cloudflare Tunnel. |
+| OAuth redirect hangs the first time behind ngrok free | The one-time browser interstitial | Open the public URL once in a browser and click through the interstitial; it does not recur. |
 | `add` fails with `INVALID_SOURCE` | missing required field (url for article/paper/video; non-empty content/title) | the error payload names the missing field; fix and retry. |
 
 ## Out of scope

@@ -4,6 +4,12 @@
 environment, vault path, optional dependency imports, and environment variables.
 It never initializes a vault, writes `.env`, starts services, downloads models,
 or mutates the embedding sidecar.
+
+The one network exception is explicit opt-in: `--probe` (remote profile only)
+performs three read-only GETs to verify the live connector endpoints — local
+/mcp expects 401, OAuth discovery expects 200, and the bare
+oauth-protected-resource path expects 200 (the claude.ai registration gate).
+Without the flag, doctor performs zero network calls.
 """
 
 from __future__ import annotations
@@ -365,7 +371,135 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
-def doctor(*, vault: str | None = None, profile: Profile = "lean") -> DoctorReport:
+def _probe_get(url: str) -> tuple[int, object]:
+    """GET `url` with a short timeout; returns (status, parsed-JSON-or-text).
+
+    Module-level seam so tests fake the transport. httpx rides in via the
+    fastmcp dependency; imported lazily to keep doctor's import cost nil.
+    """
+    import httpx
+
+    resp = httpx.get(url, timeout=5.0, follow_redirects=False)
+    try:
+        body: object = resp.json()
+    except Exception:  # noqa: BLE001 — non-JSON bodies are fine for probes
+        body = resp.text
+    return resp.status_code, body
+
+
+def _check_probe_local(port: int = 8765) -> DoctorCheck:
+    url = f"http://127.0.0.1:{port}/mcp"
+    try:
+        status, _ = _probe_get(url)
+    except Exception as e:  # noqa: BLE001 — any transport error = server not reachable
+        return _check(
+            "probe.local_mcp",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Start the server (`exomem --transport http`) or the installed service, then re-run.",
+        )
+    if status == 401:
+        return _check("probe.local_mcp", "pass", "Local /mcp answers 401 — server up, auth enforced.")
+    if status == 200:
+        return _check(
+            "probe.local_mcp",
+            "fail",
+            "Local /mcp answered 200 without auth — the HTTP transport must require OAuth.",
+            "Serve with the http transport (auth is mandatory there); check what is bound to the port.",
+        )
+    return _check(
+        "probe.local_mcp",
+        "fail",
+        f"Local /mcp answered {status}, expected 401.",
+        "Check the service log (logs/exomem.log) for startup errors.",
+    )
+
+
+def _check_probe_oauth_discovery(base_url: str) -> DoctorCheck:
+    url = f"{base_url}/.well-known/oauth-authorization-server"
+    try:
+        status, _ = _probe_get(url)
+    except Exception as e:  # noqa: BLE001
+        return _check(
+            "probe.oauth_discovery",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Is the tunnel running and forwarding to 127.0.0.1:8765?",
+        )
+    if status == 200:
+        return _check("probe.oauth_discovery", "pass", "OAuth discovery answers 200 through the tunnel.")
+    return _check(
+        "probe.oauth_discovery",
+        "fail",
+        f"{url} answered {status}, expected 200.",
+        "Verify the tunnel forwards to the server port and EXOMEM_BASE_URL matches the public hostname.",
+    )
+
+
+def _check_probe_protected_resource(base_url: str) -> DoctorCheck:
+    """The claude.ai registration gate: the connector probes the BARE
+    /.well-known/oauth-protected-resource path, and a 404 there aborts the
+    connect flow with `mcp_registration_failed`. exomem serves the path; this
+    proves it is live through the actual tunnel."""
+    url = f"{base_url}/.well-known/oauth-protected-resource"
+    try:
+        status, body = _probe_get(url)
+    except Exception as e:  # noqa: BLE001
+        return _check(
+            "probe.protected_resource",
+            "fail",
+            f"Could not reach {url}: {e}",
+            "Is the tunnel running and forwarding to 127.0.0.1:8765?",
+        )
+    if status == 404:
+        return _check(
+            "probe.protected_resource",
+            "fail",
+            "The bare oauth-protected-resource path 404s — claude.ai aborts connector "
+            "registration with mcp_registration_failed when this happens.",
+            "Update exomem (the server ships this route) and confirm the tunnel points at this server.",
+        )
+    if status != 200:
+        return _check(
+            "probe.protected_resource",
+            "fail",
+            f"{url} answered {status}, expected 200.",
+            "Check the tunnel and the service log.",
+        )
+    expected = f"{base_url}/mcp"
+    resource = body.get("resource") if isinstance(body, dict) else None
+    if resource != expected:
+        return _check(
+            "probe.protected_resource",
+            "fail",
+            f"resource metadata is {resource!r}, expected {expected!r}.",
+            "EXOMEM_BASE_URL must exactly match the public origin the connector uses (scheme + host).",
+        )
+    return _check(
+        "probe.protected_resource",
+        "pass",
+        "Bare oauth-protected-resource metadata is live and points at /mcp.",
+    )
+
+
+def _check_remote_probes() -> list[DoctorCheck]:
+    checks = [_check_probe_local()]
+    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    if base_url:
+        checks.append(_check_probe_oauth_discovery(base_url))
+        checks.append(_check_probe_protected_resource(base_url))
+    else:
+        for check_id in ("probe.oauth_discovery", "probe.protected_resource"):
+            checks.append(_check(
+                check_id,
+                "fail",
+                "EXOMEM_BASE_URL is not set; cannot probe the public endpoint.",
+                "Set EXOMEM_BASE_URL to the public HTTPS origin, e.g. https://kb.example.com.",
+            ))
+    return checks
+
+
+def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool = False) -> DoctorReport:
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
@@ -405,6 +539,11 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean") -> DoctorRepo
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        # Opt-in live-endpoint verification (three read-only GETs). The
+        # default stays fully offline — doctor never touches the network
+        # unless --probe is passed explicitly.
+        if probe:
+            checks.extend(_check_remote_probes())
 
     return DoctorReport(profile=profile, checks=checks)
 

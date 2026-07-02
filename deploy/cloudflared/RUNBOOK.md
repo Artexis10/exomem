@@ -6,8 +6,12 @@ unchanged (the public URL is env-driven via `KB_MCP_BASE_URL`); this is purely
 ingress + `.env` + GitHub OAuth App + the claude.ai connector.
 
 > **No domain?** Cloudflare Tunnel needs a domain you own in Cloudflare. If you don't
-> have one, use **Tailscale Funnel** instead (free `*.ts.net`, no domain) — see the
-> README "Option A". This runbook is for the Cloudflare path.
+> have one, use **ngrok** instead (free static dev domain, no domain needed) — see
+> [docs/remote-quickstart.md](../../docs/remote-quickstart.md) or
+> [docs/deployment.md](../../docs/deployment.md) Option B. Tailscale Funnel also
+> still works as a no-domain fallback, but its shared relay throttles claude.ai's
+> connector bursts — see deployment.md's "Why not Tailscale Funnel?" note. This
+> runbook is for the Cloudflare path.
 
 Substitute throughout:
 - `<HOST>` = `kb.example.com` (desktop) / `kb-laptop.example.com` (laptop)
