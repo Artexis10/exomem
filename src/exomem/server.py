@@ -342,13 +342,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
             log.warning("media worker startup scan failed: %s", e)
 
     # Live file-watcher: re-embed out-of-band Obsidian/mobile/filesystem `.md` edits in
-    # ~1s instead of waiting for a manual `reconcile`. Off when EXOMEM_DISABLE_FILE_WATCHER
-    # is set, and also when embeddings are disabled (no point watching if we can't embed —
-    # the test suite sets EXOMEM_DISABLE_EMBEDDINGS, so the watcher never starts in tests).
+    # ~1s, AND maintain the event-driven freshness/inbound registries so `find` never
+    # walks the vault per request. Off only when EXOMEM_DISABLE_FILE_WATCHER is set — no
+    # longer coupled to embeddings, because it now has registry-maintenance work even on
+    # a lexical-only install; the embed dispatch inside the watcher already no-ops when
+    # embeddings are disabled. The suite sets EXOMEM_DISABLE_FILE_WATCHER so it never
+    # spawns a real observer.
     file_watcher = None
-    if not os.environ.get("EXOMEM_DISABLE_FILE_WATCHER") and not os.environ.get(
-        "EXOMEM_DISABLE_EMBEDDINGS"
-    ):
+    if not os.environ.get("EXOMEM_DISABLE_FILE_WATCHER"):
         from . import file_watcher as file_watcher_module
 
         file_watcher = file_watcher_module.FileWatcher(vault_root)
