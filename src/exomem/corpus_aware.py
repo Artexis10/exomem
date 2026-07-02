@@ -230,7 +230,7 @@ def _best_cosine_per_file(
         if not chunks:
             return {}
         vecs = embeddings.embed_texts(chunks, is_query=False)
-        idx = embeddings.EmbeddingIndex(vault_root)
+        idx = embeddings.get_embedding_index(vault_root)
         best_per_file: dict[str, float] = {}
         for v in vecs:
             for fp, _cidx, _ctext, score in idx.search(v, k=k):

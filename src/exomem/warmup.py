@@ -76,13 +76,13 @@ def warm_caches(vault_root: Path) -> dict[str, float]:
         def _warm_matrix() -> None:
             from . import embeddings
 
-            embeddings.EmbeddingIndex(vault_root).all_vectors()
+            embeddings.get_embedding_index(vault_root).all_vectors()
 
         def _warm_clip() -> None:
             from . import embeddings
 
             if embeddings.clip_enabled():
-                embeddings.ClipIndex(vault_root).all_vectors()
+                embeddings.get_clip_index(vault_root).all_vectors()
 
         _step("embedding_matrix", _warm_matrix)
         _step("clip_matrix", _warm_clip)

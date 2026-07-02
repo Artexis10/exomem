@@ -184,7 +184,7 @@ def backfill_media(
             "skipping re-timing (set EXOMEM_SEMANTIC_SEGMENTS=1)"
         )
         retime = False
-    clip_index = embeddings.ClipIndex(vault_root) if do_clip else None
+    clip_index = embeddings.get_clip_index(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
     _order = {"image": 0, "pdf": 1, "audio": 2, "video": 3}

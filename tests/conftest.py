@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import embeddings as embeddings_module
 from exomem import find as find_module
 from exomem import schema as schema_module
 
@@ -47,6 +48,9 @@ def vault(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(dest))
     # Clear find's in-process cache so previous test runs don't bleed in.
     find_module.clear_cache()
+    # Drop the process-shared embedding index memo — a stale instance keyed by a
+    # prior tmp vault's path would otherwise persist across tests.
+    embeddings_module.clear_embedding_indexes()
     return dest
 
 

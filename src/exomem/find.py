@@ -1249,7 +1249,7 @@ def _find_semantic(
     else:
         try:
             with _span(timings, "vector"):
-                idx = embeddings.EmbeddingIndex(vault_root)
+                idx = embeddings.get_embedding_index(vault_root)
                 query_vec = embeddings.embed_texts([query], is_query=True)[0]
                 chunk_hits = idx.search(query_vec, k=candidate_k * 3)  # over-fetch chunks
                 # Collapse chunks → file-level: keep the best-scoring chunk per file.
@@ -1295,7 +1295,7 @@ def _find_semantic(
     elif embeddings.clip_enabled() and query.strip():
         try:
             with _span(timings, "clip"):
-                clip_idx = embeddings.ClipIndex(vault_root)
+                clip_idx = embeddings.get_clip_index(vault_root)
                 clip_qvec = embeddings.embed_clip_text(query)
                 # A video contributes N keyframe rows; over-fetch so distinct videos
                 # aren't crowded out, then dedup to best-per-file (rows are score-desc,
