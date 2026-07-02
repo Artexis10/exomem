@@ -368,3 +368,70 @@ def test_retime_partial_win_writes_timed_disables_rediarize(
     stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, retime=True, log_fn=_quiet)
     assert stats.retimed == 1 and stats.rediarized == 0
     assert "+timed" in sidecar.read_text("utf-8")  # partial upgrade still landed
+
+
+# ---------------- retime hardening: don't strip diarization, warm bge first ----------
+
+
+def test_needs_retime_skips_diarized_when_diarize_off(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    p = vault / "Knowledge Base/Evidence/x/meeting.wav"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_bytes(b"RIFF")
+    sidecar, _ = preserve.ensure_media_sidecar(vault, p)
+    # A completed diarized-but-untimed transcript.
+    preserve.update_sidecar_extraction(
+        vault, sidecar, text="[Hugo]: hi", engine="faster-whisper:large-v3+diarized"
+    )
+    # Diarize OFF → refuse (retiming would strip the [Hugo] label).
+    assert backfill._needs_retime(sidecar, "audio") is False
+    # Diarize ON → allowed (re-extraction regenerates labels + timestamps).
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    assert backfill._needs_retime(sidecar, "audio") is True
+
+
+def test_retime_alone_does_not_touch_diarized_recording(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    _, sidecar = _drop_audio_with_plain_transcript(
+        vault, engine="faster-whisper:large-v3+diarized"
+    )
+    before = sidecar.read_text("utf-8")
+    monkeypatch.setattr(
+        extract, "extract_text",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("re-extracted a diarized file")),
+    )
+    stats = backfill.backfill_media(vault, do_clip=False, retime=True, log_fn=_quiet)
+    assert stats.retimed == 0
+    assert sidecar.read_text("utf-8") == before  # labels untouched
+
+
+def test_backfill_warms_bge_before_extraction(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    order: list[str] = []
+    monkeypatch.setattr(embeddings, "get_model", lambda: order.append("bge"))
+    _, sidecar = _drop_audio_with_plain_transcript(vault)
+
+    def _extract(*a, **k):
+        order.append("extract")
+        return extract.ExtractResult(text="x", media_type="audio", engine="faster-whisper:x")
+
+    monkeypatch.setattr(extract, "extract_text", _extract)
+    # do_ocr path re-extracts a not-done sidecar; warm must precede it.
+    preserve.update_sidecar_extraction(vault, sidecar, text="", engine="pending")
+    backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)
+    assert order and order[0] == "bge"  # bge imported BEFORE any extraction
+
+
+def test_backfill_skips_warmup_when_embeddings_disabled(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(
+        embeddings, "get_model",
+        lambda: (_ for _ in ()).throw(AssertionError("warmed bge with embeddings disabled")),
+    )
+    _drop_audio_with_plain_transcript(vault)
+    backfill.backfill_media(vault, do_clip=False, log_fn=_quiet)  # must not raise

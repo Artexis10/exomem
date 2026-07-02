@@ -70,7 +70,7 @@
       deployment.md note (cost, worker ordering, backfill upgrade path).
 - [x] 8.2 Full suite green; ruff no net-new; leak guard;
       `openspec validate add-semantic-video-segments --strict`.
-- [ ] 8.3 Desk-side e2e (Hugo/desk, GPU + gate on): upload a talking-head+slides
+- [x] 8.3 Desk-side e2e (Hugo/desk, GPU + gate on): upload a talking-head+slides
       recording → timed sidecar bytes → segment chunks in `.embeddings.sqlite` →
       `find("<phrase said>")` returns the video with `transcript_match_at` + a
       `scene_frame` → `backfill-media --retime --dry-run` then real run on one

@@ -20,6 +20,7 @@ one-shot pass over content that predates the feature — or for a friend's exist
 from __future__ import annotations
 
 import logging
+import os
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -108,7 +109,15 @@ def _needs_retime(sidecar: Path, media_type: str | None) -> bool:
     v = _extracted_engine(sidecar)
     if v is None or v in _NOT_DONE or v.startswith("failed:") or v == "no-audio":
         return False
-    return "+timed" not in v
+    if "+timed" in v:
+        return False  # already timed — the done-marker
+    # A diarized transcript can only be re-timed with diarization ACTIVE: a plain
+    # re-extraction would DROP the speaker labels the sidecar already holds.
+    # Refuse rather than silently downgrade — the user re-runs with EXOMEM_DIARIZE
+    # (or --rediarize), which regenerates the labels alongside the timestamps.
+    if v.endswith("+diarized") and not extract._diarize_enabled():
+        return False
+    return True
 
 
 def _is_frame_child(sidecar: Path) -> bool:
@@ -184,6 +193,17 @@ def backfill_media(
             "skipping re-timing (set EXOMEM_SEMANTIC_SEGMENTS=1)"
         )
         retime = False
+    # Warm the text-embedding model BEFORE any A/V extraction runs. Diarization
+    # loads speechbrain, whose import poisons a LATER first-import of bge
+    # (sentence-transformers) in the same process — flipping embeddings to
+    # soft-disabled so the re-embed (and semantic-segment chunks) silently never
+    # happens. Establishing bge's import first (as the service does at boot)
+    # sidesteps the ordering hazard. Best-effort: embeddings stay soft.
+    if (do_ocr or rediarize or retime) and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        try:
+            embeddings.get_model()
+        except Exception:  # noqa: BLE001 — warm-up is best-effort
+            log.warning("embedding warm-up failed; re-embedding may be skipped this run")
     clip_index = embeddings.get_clip_index(vault_root) if do_clip else None
     # Fast media first (image/pdf OCR is quick) so screenshots/docs are searchable in
     # minutes; slow A/V transcription (Whisper) runs last instead of starving the queue.
