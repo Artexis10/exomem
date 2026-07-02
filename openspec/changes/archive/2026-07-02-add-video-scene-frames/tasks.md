@@ -75,7 +75,7 @@
 - [x] 8.1 `PYTHONPATH=src EXOMEM_DISABLE_EMBEDDINGS=1 python -m pytest -q` green.
 - [x] 8.2 `ruff check` clean.
 - [x] 8.3 `openspec validate add-video-scene-frames --strict` passes; leak guard green.
-- [ ] 8.4 Desk-side smoke (GPU box, media extra, gate on): upload a real screen recording →
+- [x] 8.4 Desk-side smoke (GPU box, media extra, gate on): upload a real screen recording →
       `.frames/` JPEGs + sidecars appear → after OCR, `find("<on-slide text>")` returns ONE
       video hit with `scene_frame`/`scene_match_at` → `/download` renders the frame; tune
       thresholds on real recordings. **(Hugo runs — needs GPU + real videos.)**
