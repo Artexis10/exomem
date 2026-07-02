@@ -1,0 +1,67 @@
+# exomem — remote compose deployment.
+#
+# Usage (see docs/docker.md for the full walkthrough):
+#
+#   Local/debug, no public ingress:
+#     docker compose up -d
+#     # uncomment the `ports:` line below first if you want 127.0.0.1:8765 bound
+#
+#   Public ingress via Cloudflare Tunnel:
+#     docker compose --profile cloudflared up -d
+#
+#   Public ingress via ngrok:
+#     docker compose --profile ngrok up -d
+#
+# With no --profile flag, only the `exomem` service starts: no host port
+# published, no tunnel sidecar running (design.md D9).
+
+services:
+  exomem:
+    image: ghcr.io/artexis10/exomem:latest
+    # Uncomment to build locally instead of pulling the published image:
+    # build: {context: ., target: lean}
+    env_file: .env
+    environment:
+      # Container-internal path — always /vault, regardless of what EXOMEM_VAULT_PATH
+      # is set to in .env for a non-container install.
+      EXOMEM_VAULT_PATH: /vault
+    volumes:
+      - "${EXOMEM_VAULT_HOST_PATH:?set in .env}:/vault"
+      - exomem-data:/data
+    # Uncomment for local/debug access at 127.0.0.1:8765. No host port is
+    # published by default — a tunnel profile (below) or this line are the
+    # only ways to reach the service. Note: the http transport ALWAYS requires
+    # the GitHub OAuth env vars, tunnel or not — without them the container
+    # exits at boot (and `restart: unless-stopped` will loop it).
+    # ports:
+    #   - "127.0.0.1:8765:8765"
+    healthcheck:
+      # Reuses the existing unauthenticated OAuth-discovery route (design.md
+      # D4) — no dedicated /health endpoint exists anywhere in the system.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import sys,urllib.request; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8765/.well-known/oauth-protected-resource', timeout=5).status == 200 else 1)",
+        ]
+      interval: 30s
+      start_period: 15s
+    restart: unless-stopped
+
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    command: tunnel run --token ${CLOUDFLARE_TUNNEL_TOKEN}
+    depends_on:
+      - exomem
+    profiles: ["cloudflared"]
+
+  ngrok:
+    image: ngrok/ngrok:latest
+    command: http exomem:8765 --url https://${NGROK_DOMAIN}
+    environment:
+      NGROK_AUTHTOKEN: ${NGROK_AUTHTOKEN}
+    profiles: ["ngrok"]
+
+volumes:
+  exomem-data:

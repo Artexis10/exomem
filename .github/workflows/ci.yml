@@ -44,6 +44,45 @@ jobs:
         # and `exomem setup --yes` completes — with a hard wall-time budget.
         run: uv run python scripts/time-to-value.py --budget-seconds 120
 
+  docker:
+    name: docker (lean build + smoke)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build lean image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: lean
+          load: true
+          tags: exomem:pr-smoke
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: In-container demo smoke (packaged sample vault, no mounts)
+        run: docker run --rm exomem:pr-smoke demo --json
+      - name: HTTP boot + claude.ai discovery-route smoke (dummy OAuth env, no GitHub calls)
+        run: |
+          trap 'docker rm -f exomem-smoke >/dev/null 2>&1 || true' EXIT
+          mkdir -p /tmp/vault
+          docker run --rm -v /tmp/vault:/vault exomem:pr-smoke init --vault /vault
+          docker run -d --name exomem-smoke -p 8765:8765 \
+            -v /tmp/vault:/vault -e EXOMEM_VAULT_PATH=/vault \
+            -e EXOMEM_BASE_URL=http://127.0.0.1:8765 \
+            -e GITHUB_CLIENT_ID=dummy -e GITHUB_CLIENT_SECRET=dummy \
+            -e EXOMEM_GITHUB_USERNAME=dummy -e EXOMEM_JWT_SIGNING_KEY=dummy \
+            exomem:pr-smoke
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp || true)
+            [ "$code" = "401" ] && break
+            sleep 1
+          done
+          test "$code" = "401"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/.well-known/oauth-authorization-server)" = "200"
+          test "$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/.well-known/oauth-protected-resource)" = "200"
+          docker logs exomem-smoke | tail -5
+          docker stop exomem-smoke
+
   specs:
     name: OpenSpec validation
     runs-on: ubuntu-latest

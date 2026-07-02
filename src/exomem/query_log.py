@@ -29,10 +29,30 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+# Module-level defaults (patchable in tests). $EXOMEM_LOG_DIR is consulted
+# PER CALL via `_target`/`current_log_dir` — never frozen at import — so a
+# container or test can flip the env var without reloading the module.
 _LOG_DIR = Path(__file__).resolve().parents[2] / "logs"
 QUERIES_PATH = _LOG_DIR / "queries.jsonl"
 WRITES_PATH = _LOG_DIR / "writes.jsonl"
 READS_PATH = _LOG_DIR / "reads.jsonl"
+
+
+def current_log_dir() -> Path:
+    """Per-call log dir: $EXOMEM_LOG_DIR when set, else the module default."""
+    env = os.environ.get("EXOMEM_LOG_DIR", "").strip()
+    if env:
+        return Path(env)
+    return _LOG_DIR
+
+
+def _target(default_path: Path, filename: str) -> Path:
+    """Where a record lands: $EXOMEM_LOG_DIR/<filename> when the env var is
+    set, else the module-level default path (which tests monkeypatch)."""
+    env = os.environ.get("EXOMEM_LOG_DIR", "").strip()
+    if env:
+        return Path(env) / filename
+    return default_path
 
 
 def _disabled() -> bool:
@@ -106,7 +126,7 @@ def log_find_call(
         }
         if timing_summary:
             record["timings"] = timing_summary
-        _append(QUERIES_PATH, record)
+        _append(_target(QUERIES_PATH, "queries.jsonl"), record)
     except Exception as e:  # noqa: BLE001
         log.debug("log_find_call failed: %s", e)
 
@@ -119,7 +139,7 @@ def log_write_call(
         return
     try:
         _append(
-            WRITES_PATH,
+            _target(WRITES_PATH, "writes.jsonl"),
             {
                 "ts": _now_iso(),
                 "tool": tool,
@@ -147,7 +167,7 @@ def log_get_call(
         return
     try:
         _append(
-            READS_PATH,
+            _target(READS_PATH, "reads.jsonl"),
             {
                 "ts": _now_iso(),
                 "tool": "get",

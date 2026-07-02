@@ -193,6 +193,12 @@ command.
 
 ## 6. Install as a service (auto-start on boot)
 
+**Option 0 (container):** `docker compose --profile cloudflared up -d` (or
+`--profile ngrok`) runs the server plus the tunnel as one supervised unit —
+see [docker.md](docker.md). The native services below suit hosts where Docker
+isn't wanted, Windows vaults (WSL2 bind mounts miss live file-watch events),
+and GPU setups.
+
 Pick your platform — all three run the same `streamable-http` server and differ
 only in the OS service manager.
 
