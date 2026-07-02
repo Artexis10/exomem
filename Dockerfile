@@ -15,14 +15,17 @@
 
 ARG UV_VERSION=0.9.7
 
+# COPY --from does not support ARG expansion; a global-scope FROM alias does
+# (buildx's documented workaround), so the pin lives in one place above.
+FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv
+
 ########################################################################
 # builder-lean — base dependencies only, installed from local source.
 # Never touches pyproject.toml's cu132 (CUDA) torch index: `uv sync` here
 # only resolves the base `dependencies = [...]` list, which has no torch.
 ########################################################################
 FROM python:3.12-slim AS builder-lean
-ARG UV_VERSION
-COPY --from=ghcr.io/astral-sh/uv:${UV_VERSION} /uv /usr/local/bin/uv
+COPY --from=uv /uv /usr/local/bin/uv
 
 WORKDIR /app
 # Deterministic, reproducible build: install the venv at a fixed path, never
