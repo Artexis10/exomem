@@ -101,8 +101,10 @@ exomem setup --vault "/path/to/your/Obsidian"
 
 Already have a vault full of notes? That's the normal case: the wizard shows
 what's there first, and exomem only ever writes under `Knowledge Base/` — your
-existing files stay untouched (read-only, still searchable). Re-running `setup`
-is safe; completed steps report `[skipped]`. Non-interactive:
+existing files stay untouched (read-only, still searchable). See
+[SETUP-LOCAL.md § Already have a vault full of notes?](SETUP-LOCAL.md#already-have-a-vault-full-of-notes)
+for the full contract, including daily-notes vaults. Re-running `setup` is
+safe; completed steps report `[skipped]`. Non-interactive:
 `exomem setup --yes --vault "/path" --lean`.
 
 The individual steps (`exomem init` / `doctor` / `install-skill` /

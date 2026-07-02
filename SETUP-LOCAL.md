@@ -44,6 +44,32 @@ steps.
 
 ---
 
+## Already have a vault full of notes?
+
+That's the normal case, and it's safe:
+
+- **Your existing files are never touched.** All writes go under
+  `Knowledge Base/` — a new folder that `setup`/`init` creates *next to* your
+  existing ones. Everything else in the vault is read-only input; `init`
+  refuses to run if `Knowledge Base/` already exists, so re-running can't
+  clobber anything.
+- **Your notes stay searchable.** `find` reaches sibling folders (the default
+  scope auto-widens; `scope="vault"` always walks everything), and `overview`
+  gives Claude a bounded structural report of the whole vault — one call, not
+  one read per file.
+- **Daily-notes vaults** (a `Daily/` or `Journal/` tree of dated logs): leave
+  them exactly as they are. The Knowledge Base is a *compiled* layer beside
+  your log, not a migration target — exomem never requires frontmatter, links,
+  or restructuring from existing notes. A good first prompt after setup:
+  *"what does this vault look like?"* — Claude answers with `overview`, and you
+  decide together what, if anything, to change.
+- **Same vault or a separate one?** Same vault is the default: notes and KB in
+  one Obsidian window, cross-search included. Pick a separate vault only when
+  you want hard isolation (e.g. a shared or team-synced vault where a new
+  top-level folder would bother other tooling).
+
+---
+
 ## What you need
 
 - **Python 3.11+** — check with `python3 --version`. On macOS, `brew install
