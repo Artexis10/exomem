@@ -72,7 +72,8 @@ class BM25Index:
     """
 
     def __init__(self) -> None:
-        self._cache: dict[tuple[Path, str], tuple[float, object, list[str]]] = {}
+        # (vault_root, scope) -> (freshness key triple, bm25, paths)
+        self._cache: dict[tuple[Path, str], tuple[tuple, object, list[str]]] = {}
         # Per-doc token cache, shared across scopes (a file's tokens don't depend
         # on scope; KB ⊆ vault). Mirrors find.FrontmatterCache's mtime
         # invalidation: a doc is Snowball-tokenized once and reused until its
@@ -97,14 +98,12 @@ class BM25Index:
         self.last_tokenized += 1
         return tokens
 
-    def _build(
-        self, vault_root: Path, scope: str
-    ) -> tuple[float, object, list[str]]:
+    def _build(self, vault_root: Path, scope: str) -> tuple[object, list[str]]:
         """Walk the KB (or full vault), tokenize each file, build BM25Okapi.
 
-        Returns (max_mtime, bm25, paths) where `paths` is parallel to the
-        BM25 document index. Reuses cached per-doc tokens for unchanged files
-        (see `_doc_tokens`), so only changed docs are re-tokenized.
+        Returns (bm25, paths) where `paths` is parallel to the BM25 document
+        index. Reuses cached per-doc tokens for unchanged files (see
+        `_doc_tokens`), so only changed docs are re-tokenized.
         """
         # Lazy import — rank_bm25 isn't on the keyword-only hot path.
         from rank_bm25 import BM25Okapi
@@ -120,7 +119,6 @@ class BM25Index:
         self.last_reused = 0
         paths: list[str] = []
         corpus: list[list[str]] = []
-        max_mtime = 0.0
         for md in walk:
             page = find_module._CACHE.get(md, vault_root)
             if page is None:
@@ -130,28 +128,48 @@ class BM25Index:
                 continue
             paths.append(page.rel_path)
             corpus.append(tokens)
-            if page.mtime > max_mtime:
-                max_mtime = page.mtime
         if not corpus:
             # rank_bm25 chokes on empty corpora; return a sentinel.
-            return max_mtime, None, []
+            return None, []
         bm25 = BM25Okapi(corpus)
-        return max_mtime, bm25, paths
+        return bm25, paths
+
+    def _fresh_corpus(
+        self, vault_root: Path, scope: str, freshness: tuple | None
+    ) -> tuple[object, list[str]]:
+        """The cached (bm25, paths) pair, rebuilt when the freshness key moved.
+
+        The key is find's digest-strength `_walk_freshness_key` triple — the
+        historical `current_max > cached_max` comparison missed deletes,
+        renames, and replacements carrying an older mtime, all of which now
+        rebuild correctly. Callers inside a `find` request pass the request
+        snapshot's key so this never re-walks; `freshness=None` computes it
+        here for out-of-request callers.
+        """
+        if freshness is None:
+            freshness = corpus_key(vault_root, scope)
+        cache_key = (vault_root, scope)
+        cached = self._cache.get(cache_key)
+        if cached is None or cached[0] != freshness:
+            log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
+            bm25, paths = self._build(vault_root, scope)
+            cached = (freshness, bm25, paths)
+            self._cache[cache_key] = cached
+        return cached[1], cached[2]
 
     def search(
-        self, vault_root: Path, query: str, k: int, *, scope: str = "kb"
+        self,
+        vault_root: Path,
+        query: str,
+        k: int,
+        *,
+        scope: str = "kb",
+        freshness: tuple | None = None,
     ) -> list[tuple[str, float]]:
         """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → []."""
         if not query.strip():
             return []
-        cache_key = (vault_root, scope)
-        cached = self._cache.get(cache_key)
-        current_max = _current_max_mtime(vault_root, scope)
-        if cached is None or current_max > cached[0]:
-            log.debug("bm25: rebuilding index for %s scope=%s", vault_root, scope)
-            cached = self._build(vault_root, scope)
-            self._cache[cache_key] = cached
-        max_mtime, bm25, paths = cached
+        bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []
         tokens = _tokenize(query)
@@ -164,6 +182,12 @@ class BM25Index:
         # Drop zero-score hits — they aren't really matches.
         return [(p, float(s)) for p, s in ranked if s > 0]
 
+    def warm(self, vault_root: Path, scope: str = "kb") -> None:
+        """Build (or freshness-check) the corpus without a query — the
+        startup warm-up hook, so the first hybrid find doesn't pay the
+        first-build stemming cliff."""
+        self._fresh_corpus(vault_root, scope, None)
+
     def clear(self) -> None:
         self._cache.clear()
         self._tokens.clear()
@@ -171,35 +195,37 @@ class BM25Index:
         self.last_reused = 0
 
 
-def _current_max_mtime(vault_root: Path, scope: str) -> float:
-    """Walk the tree once to get the most-recent file mtime. Cheap at this scale."""
+def corpus_key(vault_root: Path, scope: str) -> tuple:
+    """Digest-strength corpus freshness key for a scope (one stat walk)."""
     if scope == "vault":
         from .vault import walk_vault_md
         walk = walk_vault_md(vault_root)
     else:
         kb = vault_root / "Knowledge Base"
         if not kb.is_dir():
-            return 0.0
+            return (0, 0, "")
         walk = find_module._walk_md(kb)
-    m = 0.0
-    for p in walk:
-        try:
-            t = p.stat().st_mtime
-        except OSError:
-            continue
-        if t > m:
-            m = t
-    return m
+    return find_module._walk_freshness_key(walk)
 
 
 _INDEX = BM25Index()
 
 
 def search(
-    vault_root: Path, query: str, k: int, *, scope: str = "kb"
+    vault_root: Path,
+    query: str,
+    k: int,
+    *,
+    scope: str = "kb",
+    freshness: tuple | None = None,
 ) -> list[tuple[str, float]]:
     """Module-level convenience using the per-process singleton."""
-    return _INDEX.search(vault_root, query, k, scope=scope)
+    return _INDEX.search(vault_root, query, k, scope=scope, freshness=freshness)
+
+
+def warm(vault_root: Path, scope: str = "kb") -> None:
+    """Module-level warm-up hook using the per-process singleton."""
+    _INDEX.warm(vault_root, scope)
 
 
 def clear_cache() -> None:

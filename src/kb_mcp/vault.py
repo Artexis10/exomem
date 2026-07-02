@@ -478,6 +478,86 @@ class InboundLink:
         }
 
 
+# ---------------- inbound-link index ----------------
+# One full-vault read pass builds normalized-target -> entry buckets plus a
+# basename count map; `find_inbound_wikilinks` becomes a lookup with output
+# identical (content AND order) to the historical per-call scan. Freshness is
+# the digest-strength walk key from find._walk_freshness_key — deliberately
+# stronger than count/max-mtime because move_file/delete_file SAFETY checks
+# consume this and a pure rename changes neither count nor any mtime.
+
+
+@dataclass
+class _InboundEntry:
+    seq: int           # global scan order: (file walk order, line, match)
+    path: str          # vault-relative POSIX of the file containing the link
+    line_number: int
+    context: str
+    raw_target: str
+
+
+@dataclass
+class _InboundIndexData:
+    buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
+    stem_counts: dict[str, int]              # basename -> occurrences in walk
+
+
+_INBOUND_INDEX: dict[str, tuple[tuple, _InboundIndexData]] = {}
+
+
+def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
+    buckets: dict[str, list[_InboundEntry]] = {}
+    stem_counts: dict[str, int] = {}
+    vault_resolved = vault_root.resolve()
+    seq = 0
+    for md in walk_vault_md(vault_root):
+        # Basename counts cover every walked file, readable or not — matching
+        # the historical uniqueness scan, which never opened files.
+        stem_counts[md.stem] = stem_counts.get(md.stem, 0) + 1
+        try:
+            text = md.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        try:
+            md_rel = md.resolve().relative_to(vault_resolved).as_posix()
+        except ValueError:
+            continue
+        for lineno, line in enumerate(text.splitlines(), start=1):
+            for m in _WIKILINK_PATTERN.finditer(line):
+                raw = m.group(1).strip()
+                # Strip `#anchor` before comparison — anchors are intra-page
+                # jumps, not part of the file path.
+                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
+                buckets.setdefault(normalized, []).append(_InboundEntry(
+                    seq=seq,
+                    path=md_rel,
+                    line_number=lineno,
+                    context=line.strip()[:240],
+                    raw_target=raw,
+                ))
+                seq += 1
+    return _InboundIndexData(buckets=buckets, stem_counts=stem_counts)
+
+
+def _inbound_index(vault_root: Path) -> _InboundIndexData:
+    """The cached index, rebuilt when the vault's walk freshness key moves."""
+    from . import find as find_module
+
+    key = find_module._walk_freshness_key(walk_vault_md(vault_root))
+    root = str(vault_root.resolve())
+    cached = _INBOUND_INDEX.get(root)
+    if cached and cached[0] == key:
+        return cached[1]
+    data = _build_inbound_index(vault_root)
+    _INBOUND_INDEX[root] = (key, data)
+    return data
+
+
+def clear_inbound_index() -> None:
+    """Test hook: drop every cached inbound-link index."""
+    _INBOUND_INDEX.clear()
+
+
 def find_inbound_wikilinks(
     vault_root: Path, target_rel_path: str
 ) -> list[InboundLink]:
@@ -492,58 +572,43 @@ def find_inbound_wikilinks(
     The bare-basename match only fires if the target's basename is unique
     across the vault — otherwise an inbound `[[foo]]` could mean any
     same-named file, so we don't claim it.
+
+    Served from the process-cached inbound-link index (one read pass per
+    vault revision) — results identical to scanning every file per call.
     """
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
     target_full = target if target.startswith("Knowledge Base/") else "Knowledge Base/" + target
     target_stripped = target_full.removeprefix("Knowledge Base/")
     target_basename = target.rsplit("/", 1)[-1]
 
-    # Check basename uniqueness across the vault.
-    basename_count = 0
-    for md in walk_vault_md(vault_root):
-        if md.stem == target_basename:
-            basename_count += 1
-            if basename_count > 1:
-                break
-    basename_unique = basename_count == 1
+    data = _inbound_index(vault_root)
+    basename_unique = data.stem_counts.get(target_basename, 0) == 1
 
-    matches: list[InboundLink] = []
-    for md in walk_vault_md(vault_root):
-        try:
-            text = md.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
-            continue
+    candidates: list[_InboundEntry] = []
+    candidates.extend(data.buckets.get(target_full, ()))
+    if target_stripped != target_full:
+        candidates.extend(data.buckets.get(target_stripped, ()))
+    # The basename bucket only contributes when it isn't already one of the
+    # path-form buckets (e.g. a KB-root file where stripped == basename).
+    if (
+        basename_unique
+        and "/" not in target_basename
+        and target_basename not in (target_full, target_stripped)
+    ):
+        candidates.extend(data.buckets.get(target_basename, ()))
+
+    self_keys = (target_full, target_stripped)
+    return [
+        InboundLink(
+            path=e.path,
+            line_number=e.line_number,
+            context=e.context,
+            raw_target=e.raw_target,
+        )
+        for e in sorted(candidates, key=lambda e: e.seq)
         # Skip the target file itself (self-references aren't inbound).
-        try:
-            md_rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-        except ValueError:
-            continue
-        if md_rel.removesuffix(".md") in (target_full, target_stripped):
-            continue
-
-        for lineno, line in enumerate(text.splitlines(), start=1):
-            for m in _WIKILINK_PATTERN.finditer(line):
-                raw = m.group(1).strip()
-                # Strip `#anchor` before comparison — anchors are intra-page
-                # jumps, not part of the file path. Without this, refs like
-                # `[[Knowledge Base/Foo#section]]` would never match
-                # `Knowledge Base/Foo`.
-                normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
-                if normalized == target_full or normalized == target_stripped:
-                    matches.append(InboundLink(
-                        path=md_rel,
-                        line_number=lineno,
-                        context=line.strip()[:240],
-                        raw_target=raw,
-                    ))
-                elif basename_unique and "/" not in normalized and normalized == target_basename:
-                    matches.append(InboundLink(
-                        path=md_rel,
-                        line_number=lineno,
-                        context=line.strip()[:240],
-                        raw_target=raw,
-                    ))
-    return matches
+        if e.path.removesuffix(".md") not in self_keys
+    ]
 
 
 # ---------------- wikilink normalization ----------------

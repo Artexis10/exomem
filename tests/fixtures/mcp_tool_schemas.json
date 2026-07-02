@@ -663,6 +663,11 @@
           "type": "boolean",
           "description": "When true (default), soft-demotes `status:\nsuperseded` pages so a replaced conclusion can't outrank the\npage that superseded it. The tombstone stays findable and its\nhit still carries `status` + `superseded_by` (the forward\npointer) so you can see it's superseded. Set false to rank a\nsuperseded page on its content alone (e.g. \"what did I used to\nthink about X\")."
         },
+        "prefer_used": {
+          "default": false,
+          "type": "boolean",
+          "description": "When true (OFF by default — default ranking is\nusage-blind), applies a bounded, positive-only usage boost:\npages you actually read (`get`) and cite in written notes rank\nslightly higher, from ACT-R activation over the server's own\naccess logs. Capped below the compiled boost so usage breaks\nties but never overrides the epistemic hierarchy; never a\npenalty; never ADDS results — it only reorders pages the\ncontent lanes already matched. Boosted hits expose\n`signals.activation` + `signals.usage_boost` so you can see\nexactly why. Reading and citing pages IS the feedback loop —\nno separate feedback call exists or is needed. Use for \"what\nhave I been working with lately\" recall; leave off for\nneutral knowledge lookup."
+        },
         "pack": {
           "default": false,
           "type": "boolean",
@@ -683,7 +688,7 @@
     }
   },
   "get": {
-    "description": "Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body + raw content.\n\nReads anywhere under the vault root — not just `Knowledge Base/`.\nThis lets you cite from curated, read-only sibling folders (e.g.\n`Reference/`) kept outside Knowledge Base/ when compiling. Those are\nread-only by convention (marked in `_access.yaml`); `get` honors that\nby only reading.\n\nUse this when `find` gives you a path and you need the whole page\n(to cite, build on, or rewrite). `find` only returns excerpts.",
+    "description": "Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).\n\nReads anywhere under the vault root — not just `Knowledge Base/`.\nThis lets you cite from curated, read-only sibling folders (e.g.\n`Reference/`) kept outside Knowledge Base/ when compiling. Those are\nread-only by convention (marked in `_access.yaml`); `get` honors that\nby only reading.\n\nUse this when `find` gives you a path and you need the whole page\n(to cite, build on, or rewrite). `find` only returns excerpts.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -705,6 +710,11 @@
           "default": false,
           "type": "boolean",
           "description": "If true, attach a `links` summary —\n`{inbound: [...], outbound: [...]}`. `inbound` lists files whose\nwikilinks resolve to this page (each\n`{path, line_number, context, raw_target}`); `outbound` lists\nthe distinct wikilink targets in this page's body. Use it to\nsee a note's graph neighbourhood in one call. Default off (no\nbehaviour change)."
+        },
+        "include_raw": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, ALSO return `content` — the raw file text\nincluding the frontmatter delimiters. Off by default because it\nduplicates `frontmatter` + `body` (double the tokens on every\nread) and nothing in the normal workflow needs it: edits\nround-trip `body`, and the drift guard uses `content_hash`,\nwhich the server always computes over the raw bytes for you."
         }
       },
       "required": [

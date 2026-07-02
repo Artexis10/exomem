@@ -69,6 +69,7 @@ def log_find_call(
     graph: bool,
     hits: list[Any],
     timing_summary: dict | None = None,
+    prefer_used: bool = False,
 ) -> None:
     """Append one structured record for a find() call. Best-effort.
 
@@ -98,6 +99,7 @@ def log_find_call(
             "limit": limit,
             "rerank": rerank,
             "prefer_compiled": prefer_compiled,
+            "prefer_used": prefer_used,
             "graph": graph,
             "n_results": len(hits),
             "top_k": top_k,

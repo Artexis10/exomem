@@ -37,15 +37,22 @@ class GetResult:
     content_hash: str   # sha256 of `content` — echo to edit(expected_hash=...)
     mtime: float        # file mtime (advisory; hash is the real guard)
 
-    def as_dict(self) -> dict:
-        return {
+    def as_dict(self, include_raw: bool = False) -> dict:
+        """Wire shape. `content` (the raw file text) ships only on request —
+        it duplicates `body` + `frontmatter`, roughly doubling the payload of
+        every read for a field the edit drift-guard never needs: the server
+        always computes `content_hash` over the raw bytes here, so callers
+        echo the hash without ever reconstructing the hashed text."""
+        out = {
             "path": self.path,
             "frontmatter": self.frontmatter,
             "body": self.body,
-            "content": self.content,
             "content_hash": self.content_hash,
             "mtime": self.mtime,
         }
+        if include_raw:
+            out["content"] = self.content
+        return out
 
 
 @dataclass
