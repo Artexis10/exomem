@@ -1400,7 +1400,7 @@ def _check_corpus_contradictions(
         log.debug("corpus_contradictions sweep unavailable (%s)", e)
         return []
 
-    idx = embeddings_module.EmbeddingIndex(vault_root)
+    idx = embeddings_module.get_embedding_index(vault_root)
     metadata, matrix = idx.all_vectors()  # cached by sidecar mtime
     if not metadata or matrix.shape[0] == 0:
         return []

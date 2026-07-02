@@ -413,7 +413,7 @@ def audit_fix(
     if rebuild_embeddings and not dry_run:
         try:
             from . import embeddings
-            count = embeddings.EmbeddingIndex(vault_root).rebuild_all()
+            count = embeddings.get_embedding_index(vault_root).rebuild_all()
             report.summary["embeddings_chunks"] = count
             log.info("audit_fix: rebuilt embedding sidecar (%d chunks)", count)
         except ImportError as e:

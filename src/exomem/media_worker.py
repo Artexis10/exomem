@@ -49,7 +49,7 @@ class MediaWorker:
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
-        self._clip_index = embeddings.ClipIndex(vault_root)
+        self._clip_index = embeddings.get_clip_index(vault_root)
 
     def start(self) -> None:
         with self._lock:

@@ -54,6 +54,16 @@ _CLIP_LOCK = threading.Lock()
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
 _CLIP_IMPORT_FAILED = False
 
+# Process-lifetime memo of the per-vault index objects. Sharing ONE instance per
+# vault is what makes the in-memory matrix cache survive across find() calls (and
+# lets warm-up actually prime it) — previously every call site built a throwaway
+# instance whose cache started empty, so all_vectors() paid a full O(vault) reload
+# on every find. Keyed by the resolved vault path; guarded for the worker-thread
+# pool + file-watcher/media-worker threads that touch these concurrently.
+_INDEX_CACHE: dict[str, EmbeddingIndex] = {}
+_CLIP_INDEX_CACHE: dict[str, ClipIndex] = {}
+_INDEX_CACHE_LOCK = threading.Lock()
+
 
 def sidecar_path(vault_root: Path) -> Path:
     return vault_root / "Knowledge Base" / ".embeddings.sqlite"
@@ -768,6 +778,53 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     return vecs.astype(np.float32, copy=False)
 
 
+def _apply_sidecar_pragmas(conn: sqlite3.Connection) -> None:
+    """WAL + relaxed sync on a sidecar connection.
+
+    WAL lets a find (reader) proceed WITHOUT blocking a concurrent backfill
+    (writer) and vice-versa — the whole point of this change: find latency stops
+    tracking sidecar write churn. `synchronous=NORMAL` collapses the per-write
+    fsync cost (the 37-42s note-writes were writer↔writer fsync contention).
+    Safe here because the sidecar is a LOCAL, per-machine dotfile Obsidian Sync
+    ignores (WAL's shared-memory requirement rules out network filesystems, which
+    this sidecar is designed never to live on). The `-wal`/`-shm` siblings inherit
+    the leading dot, so Sync ignores them too. SQLite's automatic checkpoint
+    (wal_autocheckpoint, ~1000 pages) bounds the WAL under a long backfill.
+    """
+    try:
+        conn.execute("PRAGMA journal_mode=WAL")
+        conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
+    except sqlite3.Error as e:  # pragma: no cover — WAL unavailable (e.g. odd FS)
+        log.warning("sidecar WAL pragmas failed (%s); continuing on default journal", e)
+
+
+def _file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
+    """Locate `rel_path`'s rows in a `(file_path, …)`-sorted key list.
+
+    Returns `(lo, hi)` for the contiguous block of rows whose file_path equals
+    `rel_path` (rows for one file are always contiguous under the load ordering).
+    When the file is absent, returns `(ins, ins)` — the sorted insertion point —
+    so a splice keeps the array ordered the same way a full reload would.
+    """
+    lo = hi = None
+    for i, k in enumerate(keys):
+        if k == rel_path:
+            if lo is None:
+                lo = i
+            hi = i + 1
+        elif hi is not None:
+            break  # block ended — rows for one file are contiguous
+    if lo is not None:
+        return lo, hi
+    ins = len(keys)
+    for i, k in enumerate(keys):
+        if k > rel_path:
+            ins = i
+            break
+    return ins, ins
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
@@ -780,10 +837,14 @@ class EmbeddingIndex:
         self.vault_root = vault_root
         self.path = sidecar_path(vault_root)
         self._cache: tuple[float, list[tuple[str, int, str]], np.ndarray] | None = None
+        # Guards in-memory cache mutation only (never held across a sqlite write).
+        # Reentrant so rebuild_all()-style nesting can't self-deadlock.
+        self._lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
+        _apply_sidecar_pragmas(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS chunks (
@@ -828,7 +889,11 @@ class EmbeddingIndex:
                     )
         finally:
             conn.close()
-        self._cache = None  # invalidate in-memory matrix
+        # Patch the shared in-memory matrix in place instead of nulling it, so a
+        # concurrent find() doesn't pay a full O(vault) reload for this one write.
+        new_meta = [(rel_path, i, chunks[i]) for i in range(len(chunks))]
+        new_vecs = np.asarray(vectors, dtype=np.float32) if chunks else None
+        self._patch_cache(rel_path, new_meta, new_vecs)
 
     def delete_file(self, rel_path: str) -> None:
         conn = self._connect()
@@ -837,7 +902,53 @@ class EmbeddingIndex:
                 conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
         finally:
             conn.close()
-        self._cache = None
+        self._patch_cache(rel_path, [], None)
+
+    def _patch_cache(
+        self,
+        rel_path: str,
+        new_meta: list[tuple[str, int, str]],
+        new_vecs: np.ndarray | None,
+    ) -> None:
+        """Splice one file's rows into the cached matrix (copy-on-write).
+
+        Builds fresh `metadata`/`matrix` and atomically swaps `self._cache`; never
+        mutates the arrays a concurrent reader may be holding. Best-effort: any
+        inconsistency drops the cache to None so the next `all_vectors()` does a
+        safe full reload. Leaves a cold (`None`) cache cold — the next read loads.
+        """
+        with self._lock:
+            c = self._cache
+            if c is None:
+                return
+            try:
+                new_mtime = self.path.stat().st_mtime
+            except OSError:
+                self._cache = None
+                return
+            try:
+                _, metadata, matrix = c
+                lo, hi = _file_block([m[0] for m in metadata], rel_path)
+                new_metadata = metadata[:lo] + list(new_meta) + metadata[hi:]
+                parts = [matrix[:lo]]
+                if new_vecs is not None and new_vecs.shape[0]:
+                    parts.append(new_vecs)
+                parts.append(matrix[hi:])
+                parts = [p for p in parts if p.shape[0]]
+                new_matrix = (
+                    np.concatenate(parts, axis=0)
+                    if parts
+                    else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+                )
+                if len(new_metadata) != new_matrix.shape[0]:
+                    raise ValueError(
+                        f"splice invariant broken for {rel_path}: "
+                        f"{len(new_metadata)} meta rows vs {new_matrix.shape[0]} vectors"
+                    )
+                self._cache = (new_mtime, new_metadata, new_matrix)
+            except Exception as e:  # noqa: BLE001 — self-heal, never break a write
+                log.warning("embedding matrix splice failed (%s); dropping cache", e)
+                self._cache = None
 
     def all_vectors(self) -> tuple[list[tuple[str, int, str]], np.ndarray]:
         """Return `(metadata, matrix)` cached until the sidecar mtime advances.
@@ -848,8 +959,27 @@ class EmbeddingIndex:
             sidecar_mtime = self.path.stat().st_mtime
         except FileNotFoundError:
             return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
-        if self._cache and self._cache[0] == sidecar_mtime:
-            return self._cache[1], self._cache[2]
+        # Snapshot the cache tuple ONCE: another thread may swap or null it between
+        # reads, and `self._cache[0]` then `self._cache[1]` would race (TypeError on
+        # a mid-flight None). This fast path takes no lock — the common case.
+        c = self._cache
+        if c is not None and c[0] == sidecar_mtime:
+            return c[1], c[2]
+        with self._lock:
+            c = self._cache  # re-check under the lock; another thread may have loaded
+            if c is not None and c[0] == sidecar_mtime:
+                return c[1], c[2]
+            metadata, matrix = self._load_all_rows()
+            self._cache = (sidecar_mtime, metadata, matrix)
+            return metadata, matrix
+
+    def _load_all_rows(self) -> tuple[list[tuple[str, int, str]], np.ndarray]:
+        """Full reload of every row from the sidecar → `(metadata, matrix)`.
+
+        This is the O(vault) `SELECT` + `np.stack` the incremental cache exists to
+        avoid paying per find. Isolated as a named method so tests can count how
+        often a genuine full reload happens.
+        """
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -859,16 +989,13 @@ class EmbeddingIndex:
         finally:
             conn.close()
         if not rows:
-            self._cache = (sidecar_mtime, [], np.zeros((0, VECTOR_DIM), dtype=np.float32))
-            return self._cache[1], self._cache[2]
+            return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
         metadata: list[tuple[str, int, str]] = []
         vectors: list[np.ndarray] = []
         for fp, idx, txt, blob in rows:
             metadata.append((fp, idx, txt))
             vectors.append(np.frombuffer(blob, dtype=np.float32))
-        matrix = np.stack(vectors, axis=0)
-        self._cache = (sidecar_mtime, metadata, matrix)
-        return metadata, matrix
+        return metadata, np.stack(vectors, axis=0)
 
     def search(
         self, query_vec: np.ndarray, k: int
@@ -932,14 +1059,34 @@ class EmbeddingIndex:
                  len(flat_texts), len(all_chunks))
         vectors = embed_texts(flat_texts, is_query=False)
 
-        # Slice back per-file and write.
+        # Bulk write in ONE transaction. Per-file upsert_file() calls would each
+        # open a connection, fsync, and splice the in-memory matrix — O(N²) copies
+        # plus N fsyncs. Build every row, wipe + executemany once, then leave the
+        # cache null (set at the top) so the next all_vectors() does ONE full load.
+        insert_rows: list[tuple[str, int, str, bytes, float]] = []
         offset = 0
         total = 0
         for rel_path, chunks, mtime in all_chunks:
-            n = len(chunks)
-            self.upsert_file(rel_path, chunks, vectors[offset:offset + n], mtime)
-            offset += n
-            total += n
+            for i, ch in enumerate(chunks):
+                insert_rows.append(
+                    (rel_path, i, ch, vectors[offset + i].astype(np.float32).tobytes(), mtime)
+                )
+            offset += len(chunks)
+            total += len(chunks)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute("DELETE FROM chunks")
+                conn.executemany(
+                    "INSERT INTO chunks "
+                    "(file_path, chunk_idx, chunk_text, vector, file_mtime) "
+                    "VALUES (?, ?, ?, ?, ?)",
+                    insert_rows,
+                )
+        finally:
+            conn.close()
+        with self._lock:
+            self._cache = None
         return total
 
 
@@ -956,10 +1103,12 @@ class ClipIndex:
         self.path = clip_sidecar_path(vault_root)
         # (sidecar_mtime, file_paths, frame_ts_list, matrix) — frame_ts is None for images.
         self._cache: tuple[float, list[str], list[float | None], np.ndarray] | None = None
+        self._lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
+        _apply_sidecar_pragmas(conn)
         # Multi-vector schema: one row per image (frame_ts NULL) OR one row per
         # video keyframe (frame_ts = seconds). Composite PK keys frames within a
         # file. NOTE: SQLite treats NULL as DISTINCT in a PRIMARY KEY/UNIQUE index,
@@ -1030,7 +1179,15 @@ class ClipIndex:
                 )
         finally:
             conn.close()
-        self._cache = None
+        # Mirror the partial DELETE: replace only the image (NULL-ts) row, keep any
+        # existing video keyframe rows for this file.
+        self._patch_cache(
+            rel_path,
+            [rel_path],
+            [None],
+            np.asarray(vector, dtype=np.float32).reshape(1, -1),
+            images_only=True,
+        )
 
     def upsert_frames(
         self, rel_path: str, frames: list[tuple[float, np.ndarray]], mtime: float
@@ -1057,7 +1214,15 @@ class ClipIndex:
                 )
         finally:
             conn.close()
-        self._cache = None
+        # Whole-file DELETE + re-insert → block-replace with the frames, ordered by
+        # timestamp to match the load's `ORDER BY file_path, frame_ts`.
+        ordered = sorted(frames, key=lambda f: f[0])
+        self._patch_cache(
+            rel_path,
+            [rel_path] * len(ordered),
+            [float(ts) for ts, _ in ordered],
+            np.stack([np.asarray(vec, dtype=np.float32) for _, vec in ordered], axis=0),
+        )
 
     def delete(self, rel_path: str) -> None:
         conn = self._connect()
@@ -1066,7 +1231,70 @@ class ClipIndex:
                 conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
         finally:
             conn.close()
-        self._cache = None
+        self._patch_cache(rel_path, [], [], None)
+
+    def _patch_cache(
+        self,
+        rel_path: str,
+        new_paths: list[str],
+        new_frame_ts: list[float | None],
+        new_vecs: np.ndarray | None,
+        *,
+        images_only: bool = False,
+    ) -> None:
+        """Splice one file's CLIP rows into the cached matrix (copy-on-write).
+
+        `images_only=True` keeps existing video keyframe rows (frame_ts NOT NULL)
+        and replaces only the image (NULL-ts) row, mirroring `upsert()`'s partial
+        DELETE. Otherwise the file's whole block is replaced. Best-effort: any
+        inconsistency drops the cache to None for a safe full reload next read.
+        """
+        with self._lock:
+            c = self._cache
+            if c is None:
+                return
+            try:
+                new_mtime = self.path.stat().st_mtime
+            except OSError:
+                self._cache = None
+                return
+            try:
+                _, paths, frame_ts, matrix = c
+                lo, hi = _file_block(paths, rel_path)
+                if images_only and hi > lo:
+                    keep = [j for j in range(lo, hi) if frame_ts[j] is not None]
+                    block_paths = [paths[j] for j in keep] + list(new_paths)
+                    block_ts = [frame_ts[j] for j in keep] + list(new_frame_ts)
+                    keep_mat = (
+                        matrix[keep] if keep else np.zeros((0, CLIP_DIM), dtype=np.float32)
+                    )
+                    block_parts = [keep_mat]
+                    if new_vecs is not None and new_vecs.shape[0]:
+                        block_parts.append(new_vecs)
+                else:
+                    block_paths = list(new_paths)
+                    block_ts = list(new_frame_ts)
+                    block_parts = (
+                        [new_vecs] if (new_vecs is not None and new_vecs.shape[0]) else []
+                    )
+                out_paths = paths[:lo] + block_paths + paths[hi:]
+                out_ts = frame_ts[:lo] + block_ts + frame_ts[hi:]
+                parts = [matrix[:lo], *block_parts, matrix[hi:]]
+                parts = [p for p in parts if p.shape[0]]
+                out_matrix = (
+                    np.concatenate(parts, axis=0)
+                    if parts
+                    else np.zeros((0, CLIP_DIM), dtype=np.float32)
+                )
+                if not (len(out_paths) == len(out_ts) == out_matrix.shape[0]):
+                    raise ValueError(
+                        f"CLIP splice invariant broken for {rel_path}: "
+                        f"{len(out_paths)} paths / {len(out_ts)} ts / {out_matrix.shape[0]} vecs"
+                    )
+                self._cache = (new_mtime, out_paths, out_ts, out_matrix)
+            except Exception as e:  # noqa: BLE001 — self-heal, never break a write
+                log.warning("CLIP matrix splice failed (%s); dropping cache", e)
+                self._cache = None
 
     def has(self, rel_path: str) -> bool:
         """True if this file has ANY vector row (image or video). Correct idempotency
@@ -1110,8 +1338,19 @@ class ClipIndex:
             sidecar_mtime = self.path.stat().st_mtime
         except FileNotFoundError:
             return [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
-        if self._cache and self._cache[0] == sidecar_mtime:
-            return self._cache[1], self._cache[2], self._cache[3]
+        c = self._cache  # snapshot once — a concurrent writer may swap/null it
+        if c is not None and c[0] == sidecar_mtime:
+            return c[1], c[2], c[3]
+        with self._lock:
+            c = self._cache
+            if c is not None and c[0] == sidecar_mtime:
+                return c[1], c[2], c[3]
+            paths, frame_ts, matrix = self._load_all_rows()
+            self._cache = (sidecar_mtime, paths, frame_ts, matrix)
+            return paths, frame_ts, matrix
+
+    def _load_all_rows(self) -> tuple[list[str], list[float | None], np.ndarray]:
+        """Full reload of every CLIP row from the sidecar (the O(vault) path)."""
         conn = self._connect()
         try:
             rows = conn.execute(
@@ -1120,12 +1359,10 @@ class ClipIndex:
         finally:
             conn.close()
         if not rows:
-            self._cache = (sidecar_mtime, [], [], np.zeros((0, CLIP_DIM), dtype=np.float32))
-            return self._cache[1], self._cache[2], self._cache[3]
+            return [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
         paths = [r[0] for r in rows]
         frame_ts = [r[1] for r in rows]
         matrix = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows], axis=0)
-        self._cache = (sidecar_mtime, paths, frame_ts, matrix)
         return paths, frame_ts, matrix
 
     def search(self, query_vec: np.ndarray, k: int) -> list[tuple[str, float | None, float]]:
@@ -1143,6 +1380,42 @@ class ClipIndex:
         top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         return [(paths[i], frame_ts[i], float(scores[i])) for i in top_idx]
+
+
+def get_embedding_index(vault_root: Path) -> EmbeddingIndex:
+    """Return the process-shared `EmbeddingIndex` for this vault.
+
+    ALL production call sites (find, warm-up, writers, audit) must go through this
+    so the in-memory matrix cache is shared and survives across calls — the whole
+    reason find() stops paying a full reload per query. Tests may still construct
+    `EmbeddingIndex` directly to exercise the class in isolation.
+    """
+    key = str(Path(vault_root).resolve())
+    with _INDEX_CACHE_LOCK:
+        idx = _INDEX_CACHE.get(key)
+        if idx is None:
+            idx = EmbeddingIndex(vault_root)
+            _INDEX_CACHE[key] = idx
+        return idx
+
+
+def get_clip_index(vault_root: Path) -> ClipIndex:
+    """Return the process-shared `ClipIndex` for this vault (see get_embedding_index)."""
+    key = str(Path(vault_root).resolve())
+    with _INDEX_CACHE_LOCK:
+        idx = _CLIP_INDEX_CACHE.get(key)
+        if idx is None:
+            idx = ClipIndex(vault_root)
+            _CLIP_INDEX_CACHE[key] = idx
+        return idx
+
+
+def clear_embedding_indexes() -> None:
+    """Drop the shared index memo (and its in-memory matrices). Test hook — the
+    per-test tmp vault would otherwise leave a stale instance keyed by its path."""
+    with _INDEX_CACHE_LOCK:
+        _INDEX_CACHE.clear()
+        _CLIP_INDEX_CACHE.clear()
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
@@ -1189,7 +1462,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
 
     from . import find as find_module
 
-    index = EmbeddingIndex(vault_root)
+    index = get_embedding_index(vault_root)
     per_file: list[tuple[str, list[str], float]] = []
     for md in md_paths:
         try:
@@ -1241,7 +1514,7 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
     if not removed_rel_paths:
         return
     try:
-        index = EmbeddingIndex(vault_root)
+        index = get_embedding_index(vault_root)
     except Exception as e:
         log.warning("could not open embedding sidecar for delete: %s", e)
         return
