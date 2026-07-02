@@ -289,6 +289,22 @@ absent. Tune with `KB_MCP_IMAGE_TAGS_TOPK` (default 5) and
 `KB_MCP_IMAGE_TAGS_THRESHOLD` (raw cosine, default 0.22); only newly-extracted
 images are tagged.
 
+**Video scene frames** (`KB_MCP_VIDEO_SCENE_FRAMES`, default off) upgrade video
+indexing from uniform-interval keyframes to visual-change scene detection, and
+persist one representative JPEG per scene in a `<video>.frames/` directory next to
+the video (each with a sidecar pointing back at the parent + timestamp). Frames
+ride the normal image OCR path, so on-screen text (slides, stack traces) becomes
+keyword-findable at its timestamp; `find` groups frame matches under the parent
+video's hit and surfaces `scene_frame` + `scene_match_at`. Detection is a cheap
+I-frame-only metrics pass (PyAV `skip_frame NONKEY`, 64×64 grayscale hash +
+histogram) — no new dependency, and it soft-fails back to the uniform sampler.
+The worker budget stays modest: decoding I-frames of an hour-long 1080p video
+takes seconds, plus at most `KB_MCP_MAX_VIDEO_KEYFRAMES` (40) full-res seeks.
+Tune boundaries with `KB_MCP_VIDEO_SCENE_THRESHOLD` (hash bits of 64, default 10)
+and `KB_MCP_VIDEO_SCENE_MIN_SECS` (default 4). To upgrade already-indexed videos,
+run `exomem backfill-media` with the flag set — idempotent, and it replaces the
+old uniform CLIP rows with scene-aware ones.
+
 **Install:** `uv sync --extra media --extra diarization`, then build the isolated
 sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
 `uv sync --directory sidecar/diarizer` on Linux/macOS.

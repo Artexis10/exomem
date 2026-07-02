@@ -20,6 +20,7 @@ import math
 import os
 import sqlite3
 import threading
+from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -237,6 +238,20 @@ def _max_video_keyframes() -> int:
     return MAX_VIDEO_KEYFRAMES
 
 
+def _hash_bits(arr: np.ndarray) -> int:
+    """Pack a small grayscale array into an average-hash int: bit per pixel vs mean.
+
+    Shared core between the PIL path (`_avg_hash`) and the ndarray path used by the
+    scene-detection metrics pass, so both produce comparable hashes.
+    """
+    flat = np.asarray(arr, dtype=np.float32).ravel()
+    bits = flat >= flat.mean()
+    val = 0
+    for b in bits:
+        val = (val << 1) | int(b)
+    return val
+
+
 def _avg_hash(img, *, size: int = 8) -> int:
     """64-bit perceptual average-hash: downscale → grayscale → bit per pixel vs mean.
 
@@ -246,12 +261,27 @@ def _avg_hash(img, *, size: int = 8) -> int:
     pathologically flat video simply keeps fewer keyframes.
     """
     small = img.convert("L").resize((size, size))
-    arr = np.asarray(small, dtype=np.float32).ravel()
-    bits = arr >= arr.mean()
-    val = 0
-    for b in bits:
-        val = (val << 1) | int(b)
-    return val
+    return _hash_bits(np.asarray(small, dtype=np.float32))
+
+
+def _pool_gray(arr: np.ndarray, *, size: int = 8) -> np.ndarray:
+    """Mean-pool a grayscale array down to size×size (hash input for ndarray frames)."""
+    a = np.asarray(arr, dtype=np.float32)
+    h, w = a.shape
+    return a[: h - h % size, : w - w % size].reshape(
+        size, h // size, size, w // size
+    ).mean(axis=(1, 3))
+
+
+def _gray_hist(arr: np.ndarray, *, bins: int = 32) -> np.ndarray:
+    """Normalized grayscale histogram (sums to 1) — a global-luminance signature that
+    catches shifts the structural average-hash is blind to (two flat frames of
+    differing brightness)."""
+    h, _ = np.histogram(np.asarray(arr).ravel(), bins=bins, range=(0, 256))
+    total = h.sum()
+    if not total:
+        return np.zeros(bins, dtype=np.float32)
+    return (h / total).astype(np.float32)
 
 
 def _hamming(a: int, b: int) -> int:
@@ -324,6 +354,276 @@ def _dedup_keyframes(
         return frames
 
 
+# --- Visual-change scene detection (KB_MCP_VIDEO_SCENE_FRAMES) --------------
+# Boundary thresholds sit deliberately ABOVE the near-dup band: dedup collapses
+# frames within PHASH_DEDUP_DISTANCE (5), a scene boundary needs a hash change
+# > SCENE_HASH_THRESHOLD (10) — a hysteresis gap so jitter never becomes a scene.
+SCENE_HASH_THRESHOLD = 10  # hamming bits (of 64); KB_MCP_VIDEO_SCENE_THRESHOLD overrides
+SCENE_HIST_THRESHOLD = 0.35  # L1 distance between normalized 32-bin histograms (max 2.0)
+SCENE_MIN_SECS = 4.0  # boundaries closer than this merge; KB_MCP_VIDEO_SCENE_MIN_SECS overrides
+
+
+def scene_frames_enabled() -> bool:
+    """KB_MCP_VIDEO_SCENE_FRAMES gates scene detection + persisted scene frames.
+
+    Default OFF: video keyframe selection stays the uniform sampler and no frame
+    files are written — byte-identical to the pre-feature behavior.
+    """
+    return bool(os.environ.get("KB_MCP_VIDEO_SCENE_FRAMES"))
+
+
+def _scene_hash_threshold() -> int:
+    raw = os.environ.get("KB_MCP_VIDEO_SCENE_THRESHOLD")
+    if raw:
+        try:
+            v = int(raw)
+            if 0 < v <= 64:
+                return v
+        except ValueError:
+            pass
+    return SCENE_HASH_THRESHOLD
+
+
+def _scene_min_secs() -> float:
+    raw = os.environ.get("KB_MCP_VIDEO_SCENE_MIN_SECS")
+    if raw:
+        try:
+            v = float(raw)
+            if v >= 0:
+                return v
+        except ValueError:
+            pass
+    return SCENE_MIN_SECS
+
+
+@dataclass(frozen=True)
+class Scene:
+    """One detected scene: `[start_ts, end_ts]` with a representative timestamp.
+
+    `boundary_score` is the normalized change score of the boundary that OPENED the
+    scene (0.0 for the first scene, which has no opening boundary) — used to merge
+    the weakest boundaries first when detection exceeds the keyframe cap.
+    """
+
+    start_ts: float
+    end_ts: float
+    rep_ts: float
+    boundary_score: float
+
+
+def detect_scenes(
+    series: list[tuple[float, int, np.ndarray]],
+    *,
+    hash_threshold: int | None = None,
+    hist_threshold: float | None = None,
+    min_scene_secs: float | None = None,
+    max_scenes: int | None = None,
+) -> list[Scene]:
+    """Pure scene-boundary detection over `[(ts, hash64, hist)]` candidate metrics.
+
+    Anchor-based (the `_dedup_keyframes` pattern generalized): each candidate is
+    compared to the CURRENT scene's anchor, not the previous frame, so slow drift
+    doesn't fragment a scene and static runs collapse. A boundary opens when the
+    hash hamming distance exceeds `hash_threshold` OR the histogram L1 distance
+    exceeds `hist_threshold`. A boundary within `min_scene_secs` of the previous
+    one merges into it (the anchor re-points at the newest content, so A→B→A
+    flicker and fades yield one boundary). When more than `max_scenes` result, the
+    adjacent pair with the weakest opening boundary merges first. Representative
+    timestamp = candidate nearest the scene's temporal midpoint.
+    """
+    if not series:
+        return []
+    if hash_threshold is None:
+        hash_threshold = _scene_hash_threshold()
+    if hist_threshold is None:
+        hist_threshold = SCENE_HIST_THRESHOLD
+    if min_scene_secs is None:
+        min_scene_secs = _scene_min_secs()
+    if max_scenes is None:
+        max_scenes = _max_video_keyframes()
+
+    ts0, h0, hist0 = series[0]
+    # Working form: candidate timestamps + the anchor metrics + opening-boundary score.
+    scenes: list[dict] = [
+        {"ts": [ts0], "anchor": (h0, np.asarray(hist0, dtype=np.float32)), "score": math.inf}
+    ]
+    last_boundary_ts = ts0
+    for ts, h, hist in series[1:]:
+        hist = np.asarray(hist, dtype=np.float32)
+        anchor_h, anchor_hist = scenes[-1]["anchor"]
+        d_hash = _hamming(h, anchor_h)
+        d_hist = float(np.abs(hist - anchor_hist).sum())
+        if d_hash <= hash_threshold and d_hist <= hist_threshold:
+            scenes[-1]["ts"].append(ts)
+            continue
+        score = max(d_hash / 64.0, d_hist / 2.0)
+        if ts - last_boundary_ts < min_scene_secs:
+            # Same transition (flicker/fade): absorb, re-anchor to the newest content.
+            scenes[-1]["ts"].append(ts)
+            scenes[-1]["anchor"] = (h, hist)
+            scenes[-1]["score"] = max(scenes[-1]["score"], score)
+            last_boundary_ts = ts
+            continue
+        scenes.append({"ts": [ts], "anchor": (h, hist), "score": score})
+        last_boundary_ts = ts
+
+    # Over the cap: merge the scene whose OPENING boundary is weakest into its
+    # predecessor — keeps the strongest boundaries (better than uniform subsampling).
+    while len(scenes) > max(1, max_scenes) and len(scenes) > 1:
+        i = min(range(1, len(scenes)), key=lambda k: scenes[k]["score"])
+        scenes[i - 1]["ts"].extend(scenes[i]["ts"])
+        del scenes[i]
+
+    out: list[Scene] = []
+    for sc in scenes:
+        ts_list = sc["ts"]
+        start, end = ts_list[0], ts_list[-1]
+        mid = (start + end) / 2.0
+        rep = min(ts_list, key=lambda t: abs(t - mid))
+        score = 0.0 if sc["score"] is math.inf else float(sc["score"])
+        out.append(Scene(start_ts=start, end_ts=end, rep_ts=rep, boundary_score=score))
+    return out
+
+
+SCENE_CANDIDATE_MIN_GAP_SECS = 2.0  # pass-1 thinning: at most one candidate per this
+SCENE_CANDIDATE_CAP = 900  # hard bound on pass-1 candidates (all-intra screen captures)
+
+
+def _iter_iframe_metrics(path: Path) -> list[tuple[float, int, np.ndarray]]:
+    """Pass 1 of scene detection: I-frame-only metrics scan → `[(ts, hash64, hist)]`.
+
+    Decodes ONLY keyframes (`skip_frame NONKEY`), reformatted libav-side to 64×64
+    grayscale — no full-res frame is ever materialized here. Encoder scenecut logic
+    already concentrates I-frames at hard cuts, so candidate density adapts to the
+    content. Thinned to one candidate per `SCENE_CANDIDATE_MIN_GAP_SECS`, with the
+    gap widened so a pathological all-intra stream stays under `SCENE_CANDIDATE_CAP`.
+    """
+    try:
+        import av
+    except ImportError as e:
+        raise ClipUnavailable(f"PyAV not installed: {e}") from e
+    out: list[tuple[float, int, np.ndarray]] = []
+    with av.open(str(path)) as container:
+        if not container.streams.video:
+            return out
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        stream.codec_context.skip_frame = "NONKEY"
+        total_secs = 0.0
+        if stream.duration and stream.time_base:
+            total_secs = float(stream.duration * stream.time_base)
+        elif container.duration:
+            total_secs = container.duration / av.time_base
+        min_gap = SCENE_CANDIDATE_MIN_GAP_SECS
+        if total_secs:
+            min_gap = max(min_gap, total_secs / SCENE_CANDIDATE_CAP)
+        last_ts: float | None = None
+        for frame in container.decode(stream):
+            if frame.time is None:
+                continue
+            ts = float(frame.time)
+            if last_ts is not None and ts - last_ts < min_gap:
+                continue
+            gray = frame.reformat(width=64, height=64, format="gray8").to_ndarray()
+            out.append((ts, _hash_bits(_pool_gray(gray)), _gray_hist(gray)))
+            last_ts = ts
+            if len(out) >= SCENE_CANDIDATE_CAP:
+                break
+    return out
+
+
+def _decode_frames_at(path: Path, ts_list: list[float]) -> list[object]:
+    """Pass 2 of scene detection: seek+decode ONE full-res frame per timestamp.
+
+    Same O(1) seek pattern as `_sample_video_keyframes`. Returns one entry per
+    requested timestamp; a failed seek/decode yields None at that position.
+    """
+    try:
+        import av
+    except ImportError as e:
+        raise ClipUnavailable(f"PyAV not installed: {e}") from e
+    images: list[object] = []
+    with av.open(str(path)) as container:
+        if not container.streams.video:
+            return [None] * len(ts_list)
+        stream = container.streams.video[0]
+        stream.thread_type = "AUTO"
+        for t in ts_list:
+            try:
+                container.seek(int(t / float(stream.time_base)), stream=stream, backward=True)
+                images.append(next(container.decode(stream)).to_image())
+            except Exception:  # noqa: BLE001 — best-effort; a bad seek skips one frame
+                images.append(None)
+    return images
+
+
+def _metrics_from_frames(frames: list[tuple[float, object]]) -> list[tuple[float, int, np.ndarray]]:
+    """Scene metrics for already-decoded PIL frames (the uniform-sampler fallback)."""
+    out: list[tuple[float, int, np.ndarray]] = []
+    for ts, img in frames:
+        arr = np.asarray(img.convert("L").resize((64, 64)), dtype=np.uint8)
+        out.append((ts, _hash_bits(_pool_gray(arr)), _gray_hist(arr)))
+    return out
+
+
+def sample_video_scenes(path: Path) -> list[tuple[Scene, object]]:
+    """Scene-aware sampling → `[(Scene, full-res PIL representative frame)]`.
+
+    Cheap I-frame metrics pass → `detect_scenes` → decode only the winners. Falls
+    back to the uniform seek-sampler's frames (metrics computed from the already-
+    decoded images — no second decode) when the I-frame pass fails or yields fewer
+    than `MIN_VIDEO_KEYFRAMES` candidates (unknown duration, sparse-keyframe encodes).
+    """
+    candidates: list[tuple[float, int, np.ndarray]] = []
+    try:
+        candidates = _iter_iframe_metrics(path)
+    except ClipUnavailable:
+        raise
+    except Exception as e:  # noqa: BLE001 — pass 1 is an optimisation; fall back
+        log.warning("I-frame metrics pass failed for %s: %s; falling back", path.name, e)
+        candidates = []
+    if len(candidates) >= MIN_VIDEO_KEYFRAMES:
+        scenes = detect_scenes(candidates)
+        images = _decode_frames_at(path, [s.rep_ts for s in scenes])
+        pairs = [(s, img) for s, img in zip(scenes, images, strict=True) if img is not None]
+        if pairs:
+            return pairs
+    frames = _sample_video_keyframes(path)
+    if not frames:
+        return []
+    scenes = detect_scenes(_metrics_from_frames(frames))
+    by_ts = dict(frames)
+    return [(s, by_ts[s.rep_ts]) for s in scenes if s.rep_ts in by_ts]
+
+
+def embed_video_scenes(
+    path: Path,
+) -> tuple[list[tuple[float, np.ndarray]], list[tuple[Scene, object]]]:
+    """Scene-aware variant of `embed_video_frames`: ONE decode pass yields both the
+    per-scene CLIP vectors (at representative timestamps) and the full-res
+    representative images for persistence. Raises ClipUnavailable like its sibling.
+    """
+    try:
+        from PIL import Image  # noqa: F401 — decoded frames are PIL images
+    except ImportError as e:
+        raise ClipUnavailable(f"Pillow not installed: {e}") from e
+    try:
+        model = get_clip_model()
+    except ImportError as e:
+        raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
+    pairs = sample_video_scenes(path)
+    if not pairs:
+        raise ClipUnavailable(f"no decodable video frames in {path.name}")
+    vecs = model.encode(
+        [img for _, img in pairs], convert_to_numpy=True, normalize_embeddings=True
+    )
+    vectors = [
+        (float(s.rep_ts), vecs[i].astype(np.float32, copy=False))
+        for i, (s, _) in enumerate(pairs)
+    ]
+    return vectors, pairs
+
+
 def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
     """Encode a video → `[(timestamp_seconds, CLIP vector)]`, one per keyframe.
 
@@ -332,7 +632,14 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
     `MAX_VIDEO_KEYFRAMES`) so a long/multi-scene video is findable at the SPECIFIC moment.
     Each vector is 512-d, L2-normalized. Raises ClipUnavailable if CLIP/PyAV/Pillow are
     missing or no frame decodes.
+
+    With `KB_MCP_VIDEO_SCENE_FRAMES` set, keyframes are chosen by visual-change scene
+    detection (`embed_video_scenes`) instead of the uniform sampler; unset keeps this
+    path byte-identical to the pre-feature behavior.
     """
+    if scene_frames_enabled():
+        vectors, _ = embed_video_scenes(path)
+        return vectors
     try:
         from PIL import Image  # noqa: F401 — frame.to_image() returns a PIL image
     except ImportError as e:

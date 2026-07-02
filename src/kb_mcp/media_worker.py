@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve
+from . import embeddings, extract, preserve, scene_frames
 from .backfill import iter_kb_files
 
 log = logging.getLogger(__name__)
@@ -28,6 +28,7 @@ log = logging.getLogger(__name__)
 _MEDIA_TYPE_RE = re.compile(r"(?m)^media_type:\s*(\S+)\s*$")
 _EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
 _PENDING_MARKER = "extracted_by: pending"
+_PARENT_MEDIA_MARKER = "\nparent_media:"
 
 
 @dataclass
@@ -136,8 +137,13 @@ class MediaWorker:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
         findable by visual content — video at the specific moment, not as one blur."""
         is_video = job.media_type == "video"
+        scene_pairs: list | None = None
         try:
-            if is_video:
+            if is_video and scene_frames.scene_frames_enabled():
+                # One decode pass yields both the per-scene vectors AND the full-res
+                # representative images to persist (KB_MCP_VIDEO_SCENE_FRAMES).
+                frames, scene_pairs = embeddings.embed_video_scenes(job.binary_path)
+            elif is_video:
                 frames = embeddings.embed_video_frames(job.binary_path)
             else:
                 vec = embeddings.embed_image(job.binary_path)
@@ -156,9 +162,37 @@ class MediaWorker:
         if is_video:
             self._clip_index.upsert_frames(rel, frames, mtime)
             log.info("CLIP-indexed %s (%d keyframes)", job.binary_path.name, len(frames))
+            if scene_pairs:
+                self._persist_scene_frames(job, scene_pairs)
         else:
             self._clip_index.upsert(rel, vec, mtime)
             log.info("CLIP-indexed %s", job.binary_path.name)
+
+    def _persist_scene_frames(self, job: _Job, pairs: list) -> None:
+        """Write scene JPEGs + pending sidecars, then queue each frame for OCR only.
+
+        Soft-fails entirely: the video's vectors are already upserted, so a frame
+        persistence failure only costs the viewable frames, never the search index.
+        OCR jobs go through the normal queue (`do_clip=False` — frame children never
+        get their own ClipIndex rows; the parent video's vectors own visual search).
+        """
+        try:
+            written = scene_frames.write_scene_frames(self._vault_root, job.binary_path, pairs)
+        except Exception:  # noqa: BLE001 — persistence is strictly additive
+            log.exception("scene frame persistence failed for %s", job.binary_path.name)
+            return
+        for jpg, sidecar in written:
+            self.enqueue(
+                binary_path=jpg,
+                sidecar_path=sidecar,
+                media_type="image",
+                do_ocr=True,
+                do_clip=False,
+            )
+        if written:
+            log.info(
+                "scene frames: wrote %d frame(s) for %s", len(written), job.binary_path.name
+            )
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
@@ -210,7 +244,8 @@ class MediaWorker:
             mt = extract.media_type_for(f)
             if mt not in ("image", "video"):  # video is CLIP-able too (keyframes)
                 continue
-            if not f.with_name(f.name + ".md").exists():
+            sidecar = f.with_name(f.name + ".md")
+            if not sidecar.exists():
                 continue  # no sidecar → not findable; backfill-media handles these
             try:
                 rel = f.resolve().relative_to(self._vault_root.resolve()).as_posix()
@@ -219,6 +254,13 @@ class MediaWorker:
             # Video keys on per-keyframe rows so a legacy single-vector video
             # (frame_ts NULL) is re-queued for per-keyframe indexing; image = any row.
             if (self._clip_index.has_frames(rel) if mt == "video" else self._clip_index.has(rel)):
+                continue
+            # Scene-frame children (sidecar carries `parent_media:`) never get their own
+            # ClipIndex rows — the parent video's per-scene vectors own visual search.
+            try:
+                if _PARENT_MEDIA_MARKER in sidecar.read_text(encoding="utf-8")[:800]:
+                    continue
+            except OSError:
                 continue
             self.enqueue(
                 binary_path=f,

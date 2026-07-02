@@ -316,6 +316,24 @@ class ParsedPage:
         return str(ef) if ef else None
 
     @property
+    def parent_media(self) -> str | None:
+        """Vault-relative path of the parent video for a scene-frame child sidecar
+        (written by scene_frames). None for every other page."""
+        pm = self.frontmatter.get("parent_media")
+        return str(pm) if pm else None
+
+    @property
+    def frame_ts(self) -> float | None:
+        """Seconds into the parent video for a scene-frame child (defensive parse)."""
+        v = self.frontmatter.get("frame_ts")
+        if v is None:
+            return None
+        try:
+            return float(v)
+        except (TypeError, ValueError):
+            return None
+
+    @property
     def file_kind(self) -> str:
         """Coarse artifact kind for file-type filtering: a dataset's underlying
         format (csv/json/tsv), a binary companion's media_type (pdf/image/audio/
@@ -421,6 +439,13 @@ class Hit:
     # on video visual hits (multi-vector index); None for images. Surfaced as a
     # human-readable `clip_match_at` ("14:32") so the caller can deep-link the moment.
     clip_frame_ts: float | None = None
+    # Persisted scene frame backing this hit (vault-relative JPEG path) + its
+    # timestamp. Set when the hit matched via a scene frame's OCR text (frame
+    # children group under the parent video) or resolved as the nearest persisted
+    # frame to a CLIP keyframe match. The JPEG is directly downloadable — the
+    # visual "why" for the hit. Surfaced as `scene_frame` + `scene_match_at`.
+    scene_frame: str | None = None
+    scene_frame_ts: float | None = None
     # Lifecycle. `status` is set when a hit is NOT plain `active`, so a reader can
     # tell a superseded tombstone (or draft) from a live conclusion; `superseded_by`
     # carries the forward pointer(s) to the replacement(s). Surfaced in as_dict()
@@ -450,6 +475,10 @@ class Hit:
             out["media_file"] = self.media_file
         if self.clip_frame_ts is not None:
             out["clip_match_at"] = _format_timestamp(self.clip_frame_ts)
+        if self.scene_frame:
+            out["scene_frame"] = self.scene_frame
+            if self.scene_frame_ts is not None:
+                out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
         if self.outside_kb:
             out["outside_kb"] = True
         if self.status and self.status != "active":
@@ -502,6 +531,10 @@ class Hit:
             out["media_file"] = self.media_file
         if self.clip_frame_ts is not None:
             out["clip_match_at"] = _format_timestamp(self.clip_frame_ts)
+        if self.scene_frame:
+            out["scene_frame"] = self.scene_frame
+            if self.scene_frame_ts is not None:
+                out["scene_match_at"] = _format_timestamp(self.scene_frame_ts)
         if self.outside_kb:
             out["outside_kb"] = True
         if self.status and self.status != "active":
@@ -954,6 +987,48 @@ def find(
     return hits
 
 
+def _collapse_frame_children(
+    ranking: list[str],
+    vault_root: Path,
+    attribution: dict[str, tuple[str, float | None]],
+    *aux_maps: dict,
+) -> list[str]:
+    """Remap scene-frame sidecar candidates onto their parent video's sidecar
+    (pre-fusion) so one video = one candidate.
+
+    A persisted scene frame (frontmatter `parent_media`, written by scene_frames)
+    must never compete with its parent in ranking — RRF would count the same
+    content twice and a multi-scene video could flood a lane with near-duplicate
+    frames. Each frame child is replaced by `<parent_media>.md` at the frame's
+    lane position (keep-first = keep-best in a rank-ordered lane); the best-ranked
+    frame per parent is recorded in `attribution[parent] = (jpg_rel, frame_ts)`
+    for hit enrichment. Keys in `aux_maps` (scores/chunk texts) move to the
+    parent keep-best. An orphan frame (parent sidecar gone) passes through and
+    surfaces standalone. Non-frame candidates cost one cached frontmatter lookup.
+    """
+    if not ranking:
+        return ranking
+    out: list[str] = []
+    seen: set[str] = set()
+    for rel in ranking:
+        page = _CACHE.get(vault_root / rel, vault_root)
+        parent = page.parent_media if page is not None else None
+        if parent:
+            parent_sidecar = parent + ".md"
+            if (vault_root / parent_sidecar).exists():
+                attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
+                for m in aux_maps:
+                    if rel in m:
+                        v = m.pop(rel)
+                        m.setdefault(parent_sidecar, v)
+                rel = parent_sidecar
+        if rel in seen:
+            continue
+        seen.add(rel)
+        out.append(rel)
+    return out
+
+
 def _find_keyword(
     vault_root: Path,
     *,
@@ -979,35 +1054,53 @@ def _find_keyword(
         walk = walk_vault_md(vault_root)
 
     hits: list[tuple[str, Hit]] = []
+    by_path: dict[str, Hit] = {}
     for path in walk:
         if path.name.lower() in _NAVIGATION_BASENAMES:
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
             continue
-        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
-                               file_types=file_types, exclude_file_types=exclude_file_types):
-            continue
         excerpt = _make_excerpt(page, query_norm)
         if query_norm and excerpt is None:
             continue
-        hits.append(
-            (
-                page.updated or "0000-00-00",
-                Hit(
-                    path=page.rel_path,
-                    type=page.page_type,
-                    scope=page.scope,
-                    title=page.title,
-                    updated=page.updated,
-                    excerpt=excerpt or "",
-                    media_type=page.media_type,
-                    media_file=page.media_file,
-                    status=page.status,
-                    superseded_by=page.superseded_by,
-                ),
-            )
+        # A scene-frame child groups under its parent video: the parent becomes
+        # the hit (carrying the matched frame + timestamp); an orphan frame
+        # (parent gone) surfaces standalone. Filters apply to the EMITTED page.
+        scene_frame: str | None = None
+        scene_frame_ts: float | None = None
+        if page.parent_media:
+            parent_page = _CACHE.get(vault_root / (page.parent_media + ".md"), vault_root)
+            if parent_page is not None:
+                existing = by_path.get(parent_page.rel_path)
+                if existing is not None:
+                    if existing.scene_frame is None:
+                        existing.scene_frame = page.media_file
+                        existing.scene_frame_ts = page.frame_ts
+                    continue
+                scene_frame, scene_frame_ts = page.media_file, page.frame_ts
+                page = parent_page
+        if page.rel_path in by_path:
+            continue
+        if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
+                               file_types=file_types, exclude_file_types=exclude_file_types):
+            continue
+        hit = Hit(
+            path=page.rel_path,
+            type=page.page_type,
+            scope=page.scope,
+            title=page.title,
+            updated=page.updated,
+            excerpt=excerpt or "",
+            media_type=page.media_type,
+            media_file=page.media_file,
+            status=page.status,
+            superseded_by=page.superseded_by,
+            scene_frame=scene_frame,
+            scene_frame_ts=scene_frame_ts,
         )
+        by_path[page.rel_path] = hit
+        hits.append((page.updated or "0000-00-00", hit))
 
     hits.sort(key=lambda t: (t[0], t[1].path), reverse=True)
     return [h for _, h in hits[:limit]]
@@ -1042,7 +1135,7 @@ def _find_semantic(
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import bm25, embeddings, fusion
+    from . import bm25, embeddings, fusion, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
@@ -1063,6 +1156,10 @@ def _find_semantic(
 
     # Pull more than we need so post-filter losses don't starve the result.
     candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
+
+    # Scene-frame children collapse onto their parent video per lane (pre-fusion);
+    # this records parent sidecar → (best matching frame jpg, frame_ts) for hits.
+    frame_attribution: dict[str, tuple[str, float | None]] = {}
 
     # ---- Vector contribution ----
     vector_ranking: list[str] = []
@@ -1095,6 +1192,9 @@ def _find_semantic(
         log.warning("vector search failed: %s; falling back to BM25-only", e)
         if timings is not None:
             timings.error("vector", e)
+    vector_ranking = _collapse_frame_children(
+        vector_ranking, vault_root, frame_attribution, chunk_text_by_path, vector_score_by_path
+    )
 
     # ---- CLIP contribution: text→image visual search ----
     # Lets a text query match a (possibly textless) Evidence photo by visual content.
@@ -1130,6 +1230,11 @@ def _find_semantic(
                 timings.error("clip", e)
     elif timings is not None:
         timings.skipped("clip")
+    # Defensive: frame children get no ClipIndex rows, but a stray row (e.g. from a
+    # pre-exclusion index) must still group under the parent.
+    clip_ranking = _collapse_frame_children(
+        clip_ranking, vault_root, frame_attribution, clip_score_by_path, clip_frame_ts_by_path
+    )
 
     bm25_ranking: list[str] = []
     keyword_ranking: list[str] = []
@@ -1155,6 +1260,7 @@ def _find_semantic(
             log.warning("BM25 search failed: %s; using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
+        bm25_ranking = _collapse_frame_children(bm25_ranking, vault_root, frame_attribution)
 
         # ---- Keyword contribution: literal all-tokens-present matches ----
         # Walking the KB for substring matches makes hybrid a strict superset
@@ -1165,6 +1271,9 @@ def _find_semantic(
         # under Q marketing pages on the "market" stem).
         with _span(timings, "keyword"):
             keyword_ranking = _keyword_match_paths(vault_root, query_norm, scope)
+        keyword_ranking = _collapse_frame_children(
+            keyword_ranking, vault_root, frame_attribution
+        )
         rankings = [
             r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
         ]
@@ -1336,6 +1445,7 @@ def _find_semantic(
             and rel_path not in graph_set
             and rel_path not in keyword_set
             and rel_path not in clip_set
+            and rel_path not in frame_attribution
             and keyword_excerpt is None
         ):
             # No literal match, not a graph hop, not vector-ranked, not in
@@ -1344,12 +1454,24 @@ def _find_semantic(
             if not _stem_tokens_present(page, query_norm):
                 continue
             keyword_excerpt = _stem_anchored_excerpt(page, query_norm)
-        elif (rel_path in graph_set or rel_path in clip_set) and keyword_excerpt is None:
-            # Graph-hop neighbour or CLIP visual match: no all-tokens-present
-            # requirement (the reason for surfacing is connectivity / visual
-            # similarity, not lexical overlap). Use the sidecar's leading body.
-            body = page.body.strip()
-            keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
+        elif (
+            rel_path in graph_set
+            or rel_path in clip_set
+            or rel_path in frame_attribution
+        ) and keyword_excerpt is None:
+            # Graph-hop neighbour, CLIP visual match, or frame-collapsed parent:
+            # no all-tokens-present requirement (the reason for surfacing is
+            # connectivity / visual similarity / a child frame's text, not this
+            # page's lexical overlap). Prefer the matched frame's OCR text as the
+            # "why", else the sidecar's leading body.
+            attr = frame_attribution.get(rel_path)
+            if attr is not None:
+                fpage = _CACHE.get(vault_root / (attr[0] + ".md"), vault_root)
+                if fpage is not None:
+                    keyword_excerpt = _make_excerpt(fpage, query_norm)
+            if keyword_excerpt is None:
+                body = page.body.strip()
+                keyword_excerpt = _collapse(body[:EXCERPT_MAX_LEN]) if body else ""
         chunk = chunk_text_by_path.get(rel_path)
         excerpt = _semantic_excerpt(page, query_norm, chunk, keyword_excerpt)
         is_graph_only = (
@@ -1366,7 +1488,8 @@ def _find_semantic(
                 hit_usage_mult = usage_module.usage_multiplier(
                     hit_activation, config
                 )
-        hits.append(Hit(
+        attr = frame_attribution.get(rel_path)
+        hit = Hit(
             path=page.rel_path,
             type=page.page_type,
             scope=page.scope,
@@ -1388,7 +1511,21 @@ def _find_semantic(
             keyword_rank=keyword_rank_by_path.get(rel_path),
             activation=hit_activation,
             usage_boost_applied=hit_usage_mult,
-        ))
+            scene_frame=attr[0] if attr else None,
+            scene_frame_ts=attr[1] if attr else None,
+        )
+        if (
+            hit.scene_frame is None
+            and hit.clip_frame_ts is not None
+            and page.media_type == "video"
+            and page.media_file
+        ):
+            # A CLIP keyframe match on a video: attach the nearest PERSISTED frame
+            # (if any exist) so the moment is viewable, not just timestamped.
+            nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.clip_frame_ts)
+            if nf is not None:
+                hit.scene_frame, hit.scene_frame_ts = nf
+        hits.append(hit)
         if len(hits) >= target_n:
             break
     if timings is not None:

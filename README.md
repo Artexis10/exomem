@@ -223,6 +223,9 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `KB_MCP_REST_API_KEY` | Enables authenticated REST routes. |
 | `KB_MCP_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
 | `KB_MCP_DISABLE_CLIP` | `1` disables CLIP image search. |
+| `KB_MCP_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
+| `KB_MCP_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
+| `KB_MCP_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |
 | `KB_MCP_WHISPER_MODEL` | Whisper model size for ASR, such as `base` or `small`. |
 | `KB_MCP_TESSERACT_CMD` | Path to the `tesseract` binary if not auto-discovered. |
 
