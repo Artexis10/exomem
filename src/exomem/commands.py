@@ -60,6 +60,7 @@ from . import preserve as preserve_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, vault
+from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
@@ -402,12 +403,19 @@ def op_find(
         `detail` (no excerpt/signals) — same paths, same order.
         With include_timings on: {"hits": [...], ["pack": {...},]
         "timings": {total_ms, cache, stages}}.
+        Right after a server start, while models are still warming in the
+        background, semantic lanes are skipped rather than blocked on — the
+        result is then the envelope {"hits": [...], "warming": {"components":
+        [...], "since_s": N}} and the hits are lexical-only ranking. If
+        recall quality matters for the query, retry once "warming" stops
+        appearing (typically well under a minute).
     """
     if detail not in ("full", "compact"):
         raise ValueError(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
     timings = find_module.FindTimings() if include_timings else None
+    degraded: list[str] = []
     hits = find_module.find(
         vault_root,
         query=query,
@@ -426,6 +434,7 @@ def op_find(
         prefer_active=prefer_active,
         prefer_used=prefer_used,
         timings=timings,
+        degraded_out=degraded,
     )
     pack_obj: dict | None = None
     if pack:
@@ -447,14 +456,28 @@ def op_find(
         graph=graph, hits=hits,
         timing_summary=_timing_log_summary(timings_dict),
     )
-    if timings_dict is None:
+    # Warming marker: the server just started and the background warm-up is
+    # still loading models, so one or more semantic lanes were skipped —
+    # these hits are lexical-only ranking. Present only during that window
+    # (~30s per process start; minutes on a first-ever model download).
+    warming: dict | None = None
+    if degraded:
+        info = readiness_module.warming_info() or {}
+        warming = {
+            "components": sorted(set(degraded)),
+            "since_s": info.get("since_s", 0.0),
+        }
+    if timings_dict is None and warming is None:
         if not pack:
             return hit_dicts
         return {"hits": hit_dicts, "pack": pack_obj}
     out: dict = {"hits": hit_dicts}
     if pack:
         out["pack"] = pack_obj
-    out["timings"] = timings_dict
+    if timings_dict is not None:
+        out["timings"] = timings_dict
+    if warming is not None:
+        out["warming"] = warming
     return out
 
 

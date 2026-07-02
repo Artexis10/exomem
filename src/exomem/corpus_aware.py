@@ -216,6 +216,13 @@ def _best_cosine_per_file(
     """
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return {}
+    # While the background warm-up is loading the model, embedding the draft
+    # would BLOCK on the singleton lock (minutes on a first-ever download) —
+    # and this runs inline on every add/note/edit and pack assembly. Skip the
+    # sweep; {} is the same no-op contract used for torch-less deploys.
+    from . import readiness
+    if readiness.should_defer("embeddings"):
+        return {}
     try:
         from . import embeddings
 

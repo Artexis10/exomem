@@ -752,8 +752,17 @@ def find(
     prefer_used: bool = False,
     config: RankingConfig | None = None,
     timings: FindTimings | None = None,
+    degraded_out: list[str] | None = None,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
+
+    `degraded_out`: optional caller-owned list. While the background warm-up
+    is in flight (see `readiness`), model-touching lanes (vector, CLIP,
+    rerank) are skipped instead of blocking on a model load; each skipped
+    lane appends its component name here so the caller can mark the response
+    as warming. Empty after the call = full ranking ran. Degradation is
+    tracked internally even when the caller passes None, so a lexical-only
+    ranking produced mid-warm is never stored in the hot cache.
 
     `scope` controls the walk root:
     - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
@@ -889,6 +898,11 @@ def find(
                 timings.cache["hit"] = True
             return copy.deepcopy(cached)
 
+    # Track warm-window degradation even when the caller passed no list —
+    # internal callers (suggest_links, evolution, note/add sweeps) must never
+    # cache a lexical-only ranking that would outlive the warm.
+    degraded = degraded_out if degraded_out is not None else []
+
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
     # map to a KB-only walk in the underlying rankers.
@@ -921,6 +935,7 @@ def find(
             timings=timings,
             snapshot=snapshot,
             page_memo=page_memo,
+            degraded_out=degraded,
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
@@ -978,7 +993,9 @@ def find(
         )
 
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
-    if cache_key is not None:
+    # A result produced with warm-deferred lanes is lexical-only — caching it
+    # would keep serving the degraded ranking after the warm completes.
+    if cache_key is not None and not degraded:
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             _FIND_CACHE.move_to_end(cache_key)
@@ -1132,10 +1149,11 @@ def _find_semantic(
     timings: FindTimings | None = None,
     snapshot: FreshnessSnapshot | None = None,
     page_memo: dict[str, ParsedPage | None] | None = None,
+    degraded_out: list[str] | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode."""
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import bm25, embeddings, fusion, scene_frames
+    from . import bm25, embeddings, fusion, readiness, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
@@ -1165,33 +1183,43 @@ def _find_semantic(
     vector_ranking: list[str] = []
     chunk_text_by_path: dict[str, str] = {}
     vector_score_by_path: dict[str, float] = {}
-    try:
-        with _span(timings, "vector"):
-            idx = embeddings.EmbeddingIndex(vault_root)
-            query_vec = embeddings.embed_texts([query], is_query=True)[0]
-            chunk_hits = idx.search(query_vec, k=candidate_k * 3)  # over-fetch chunks
-            # Collapse chunks → file-level: keep the best-scoring chunk per file.
-            best_per_file: dict[str, tuple[float, str]] = {}
-            for fp, _idx, ctext, score in chunk_hits:
-                existing = best_per_file.get(fp)
-                if existing is None or score > existing[0]:
-                    best_per_file[fp] = (score, ctext)
-            vector_ranking = sorted(
-                best_per_file.keys(), key=lambda p: -best_per_file[p][0]
-            )[:candidate_k]
-            chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
-            vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
-    except ImportError as e:
-        log.warning(
-            "vector search unavailable (%s); falling back to BM25-only ranking",
-            e,
-        )
+    if readiness.should_defer("embeddings"):
+        # Background warm-up owns the model lock right now — calling
+        # embed_texts here would BLOCK on it (minutes on a first-ever
+        # download), and the except-fallback below would never fire. Skip
+        # the lane; the caller marks the response as warming.
         if timings is not None:
-            timings.error("vector", e)
-    except Exception as e:
-        log.warning("vector search failed: %s; falling back to BM25-only", e)
-        if timings is not None:
-            timings.error("vector", e)
+            timings.skipped("vector")
+        if degraded_out is not None:
+            degraded_out.append("embeddings")
+    else:
+        try:
+            with _span(timings, "vector"):
+                idx = embeddings.EmbeddingIndex(vault_root)
+                query_vec = embeddings.embed_texts([query], is_query=True)[0]
+                chunk_hits = idx.search(query_vec, k=candidate_k * 3)  # over-fetch chunks
+                # Collapse chunks → file-level: keep the best-scoring chunk per file.
+                best_per_file: dict[str, tuple[float, str]] = {}
+                for fp, _idx, ctext, score in chunk_hits:
+                    existing = best_per_file.get(fp)
+                    if existing is None or score > existing[0]:
+                        best_per_file[fp] = (score, ctext)
+                vector_ranking = sorted(
+                    best_per_file.keys(), key=lambda p: -best_per_file[p][0]
+                )[:candidate_k]
+                chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
+                vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
+        except ImportError as e:
+            log.warning(
+                "vector search unavailable (%s); falling back to BM25-only ranking",
+                e,
+            )
+            if timings is not None:
+                timings.error("vector", e)
+        except Exception as e:
+            log.warning("vector search failed: %s; falling back to BM25-only", e)
+            if timings is not None:
+                timings.error("vector", e)
     vector_ranking = _collapse_frame_children(
         vector_ranking, vault_root, frame_attribution, chunk_text_by_path, vector_score_by_path
     )
@@ -1203,7 +1231,14 @@ def _find_semantic(
     clip_ranking: list[str] = []
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
-    if embeddings.clip_enabled() and query.strip():
+    if embeddings.clip_enabled() and query.strip() and readiness.should_defer("clip"):
+        # Same lock-blocking hazard as the vector lane: never touch the CLIP
+        # getter while the background warm is loading it.
+        if timings is not None:
+            timings.skipped("clip")
+        if degraded_out is not None:
+            degraded_out.append("clip")
+    elif embeddings.clip_enabled() and query.strip():
         try:
             with _span(timings, "clip"):
                 clip_idx = embeddings.ClipIndex(vault_root)
@@ -1540,6 +1575,14 @@ def _find_semantic(
         do_rerank = auto_rerank and should_rerank(hits, query, config)
     else:
         do_rerank = rerank
+
+    if do_rerank and hits and readiness.should_defer("reranker"):
+        # Background warm-up owns the reranker load right now — calling
+        # rerank_pairs would block on the singleton lock. Skip; caller marks
+        # the response as warming.
+        if degraded_out is not None:
+            degraded_out.append("reranker")
+        do_rerank = False
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
@@ -2154,6 +2197,7 @@ def _outbound_wikilink_paths(
 
 
 _RESOLVER_CACHE: dict[Path, tuple[tuple, "object"]] = {}
+_RESOLVER_LOCK = threading.Lock()
 
 
 def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
@@ -2164,6 +2208,9 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     stem/title maps without touching count or any mtime. Pass `freshness`
     (from the request's FreshnessSnapshot) to skip the walk; None computes it
     here for out-of-request callers.
+
+    The build is serialized by a double-checked lock so the background warm
+    thread and a racing request build the resolver once, not twice.
     """
     from .vault import WikilinkResolver
     if freshness is None:
@@ -2171,8 +2218,12 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     cached = _RESOLVER_CACHE.get(vault_root)
     if cached and cached[0] == freshness:
         return cached[1]
-    resolver = WikilinkResolver(vault_root)
-    _RESOLVER_CACHE[vault_root] = (freshness, resolver)
+    with _RESOLVER_LOCK:
+        cached = _RESOLVER_CACHE.get(vault_root)
+        if cached and cached[0] == freshness:
+            return cached[1]
+        resolver = WikilinkResolver(vault_root)
+        _RESOLVER_CACHE[vault_root] = (freshness, resolver)
     return resolver
 
 

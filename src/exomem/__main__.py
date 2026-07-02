@@ -7,6 +7,9 @@ Subcommands:
 - `install-skill` — install the Exomem knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
 - `doctor` — read-only local install/setup preflight
+- `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
+  server start doesn't pay the download in the background; optional `--vault`
+  also warms the lexical caches
 - `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
 - `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
   for opt-in diarization (desk-side admin; never an MCP tool)
@@ -37,6 +40,8 @@ def main(argv: list[str] | None = None) -> int:
         return _install_hook_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
+    if raw and raw[0] == "warm":
+        return _warm_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
     if raw and raw[0] == "enroll-speaker":
@@ -159,6 +164,78 @@ def _doctor_main(argv: list[str]) -> int:
     else:
         print(doctor_module.render_human(report))
     return 0 if report.success else 1
+
+
+def _warm_main(argv: list[str]) -> int:
+    """`exomem warm` — pre-download/load the search models on the user's terms.
+
+    The server warms these in the background by default; this command exists
+    so a user (or a deploy/provisioning script) can pay the GB-scale first
+    download explicitly, with HF progress bars on the TTY, instead of having
+    the first server start do it silently behind lexical-only results.
+    """
+    import logging
+    import time
+
+    parser = argparse.ArgumentParser(
+        prog="exomem warm",
+        description=(
+            "Pre-download and load the search models (bge embedder, reranker, "
+            "CLIP when enabled) into the local Hugging Face cache. Optional "
+            "--vault also warms that vault's lexical caches. Run once after "
+            "install; every later server start then warms from disk in seconds."
+        ),
+    )
+    parser.add_argument(
+        "--vault",
+        default=None,
+        help="also warm this vault's lexical caches (default: models only)",
+    )
+    args = parser.parse_args(argv)
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        print(
+            "warm: EXOMEM_DISABLE_EMBEDDINGS is set — this install runs lexical-only, "
+            "so there are no models to warm. Unset it (and `uv sync --extra embeddings`) "
+            "for hybrid search."
+        )
+        return 0
+
+    from . import embeddings
+
+    failed = False
+
+    def _step(label: str, fn) -> None:
+        nonlocal failed
+        t0 = time.perf_counter()
+        try:
+            fn()
+            print(f"  {label}: ready ({time.perf_counter() - t0:.1f}s)")
+        except Exception as e:  # noqa: BLE001 — report every model, then exit non-zero
+            failed = True
+            print(f"  {label}: FAILED ({e})", file=sys.stderr)
+
+    print("exomem warm — downloading/loading search models (first run can take minutes)")
+    _step(f"embedding model {embeddings.MODEL_NAME}", embeddings.get_model)
+    _step(f"reranker {embeddings.RERANKER_NAME}", embeddings.get_reranker)
+    if embeddings.clip_enabled():
+        _step(f"CLIP model {embeddings.CLIP_MODEL_NAME}", embeddings.get_clip_model)
+    else:
+        print("  CLIP: skipped (EXOMEM_DISABLE_CLIP)")
+
+    if args.vault:
+        from . import warmup
+
+        t0 = time.perf_counter()
+        warmup.warm_caches(Path(args.vault).expanduser())
+        print(f"  lexical caches: warmed ({time.perf_counter() - t0:.1f}s)")
+
+    if failed:
+        print("warm: one or more models failed — check network/proxy and retry.", file=sys.stderr)
+        return 1
+    print("warm: done. Server starts will now warm from disk in seconds.")
+    return 0
 
 
 def _speaker_vault(args) -> Path | None:

@@ -273,6 +273,44 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     )
 
 
+def _check_models_cache() -> DoctorCheck:
+    """Local HF-cache presence for the three search models. Read-only: this
+    inspects directories only — doctor never downloads anything."""
+    from . import embeddings
+
+    if os.environ.get("HF_HUB_CACHE"):
+        hub = Path(os.environ["HF_HUB_CACHE"])
+    elif os.environ.get("HF_HOME"):
+        hub = Path(os.environ["HF_HOME"]) / "hub"
+    else:
+        hub = Path.home() / ".cache" / "huggingface" / "hub"
+
+    expected = {
+        embeddings.MODEL_NAME: "models--" + embeddings.MODEL_NAME.replace("/", "--"),
+        embeddings.RERANKER_NAME: "models--" + embeddings.RERANKER_NAME.replace("/", "--"),
+        # sentence-transformers resolves bare names under its org.
+        embeddings.CLIP_MODEL_NAME: "models--sentence-transformers--" + embeddings.CLIP_MODEL_NAME,
+    }
+
+    def _cached(dirname: str) -> bool:
+        snapshots = hub / dirname / "snapshots"
+        try:
+            return snapshots.is_dir() and any(snapshots.iterdir())
+        except OSError:
+            return False
+
+    missing = [name for name, dirname in expected.items() if not _cached(dirname)]
+    if not missing:
+        return _check("models.cache", "pass", "Search models are present in the local HF cache.")
+    return _check(
+        "models.cache",
+        "warn",
+        f"Not yet in the local HF cache: {', '.join(missing)}. The first server "
+        "start downloads them in the background; hybrid finds are lexical-only meanwhile.",
+        "Run `exomem warm` to pre-download them now (~1-2 GB).",
+    )
+
+
 def _check_tesseract() -> DoctorCheck:
     configured = os.environ.get("EXOMEM_TESSERACT_CMD")
     if configured and Path(configured).exists():
@@ -350,6 +388,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean") -> DoctorRepo
             _check_dependency("torch", "embeddings"),
             _check_dependency("pillow", "embeddings", import_name="PIL"),
             _check_torch_cuda(),
+            _check_models_cache(),
         ])
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:

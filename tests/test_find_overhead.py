@@ -186,6 +186,9 @@ def test_single_pass_all_off_returns_input_unchanged(vault: Path) -> None:
 
 
 def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
+    # The suite disables warm-up globally (conftest) so build_server never
+    # spawns the warm thread; this test exercises the warm path explicitly.
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     warmup.warm_caches(vault)
     assert find_module._CACHE.entries  # pages parsed
     assert (vault, "kb") in bm25._INDEX._cache

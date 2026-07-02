@@ -24,6 +24,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
     """
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
+    # Never spawn the background warm thread from build_server in tests — it
+    # would outlive the per-test tmp vault. Warm/readiness tests manage their
+    # own env + readiness.reset().
+    monkeypatch.setenv("EXOMEM_DISABLE_WARMUP", "1")
     # A committed repo-root ranking_config.json must never perturb the suite:
     # force find()'s adopted-config seam to DEFAULT_RANKING. Tests that exercise
     # the load seam delete this var via their own monkeypatch.

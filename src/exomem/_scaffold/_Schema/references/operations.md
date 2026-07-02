@@ -246,6 +246,10 @@ Search for modes, scope, and ranking knobs.
 ### Edge cases
 - **No filesystem MCP available.** This skill cannot run without a connected KB server. Surface this and stop — don't fake search.
 - **Very large vault.** Hybrid search is indexed; the first query after a cold start may pay a one-time build cost.
+- **Result carries a `warming` key.** The server just started and is still loading its
+  semantic models in the background; the hits are keyword/BM25-only ranking. Usable as-is
+  for exact-term lookups; if semantic recall matters for the query, retry once `warming`
+  stops appearing (typically well under a minute).
 
 ### Writes performed
 None.

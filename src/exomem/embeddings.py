@@ -1116,6 +1116,15 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     if not md_paths:
         return
 
+    # While the background warm-up is loading the model, don't block this
+    # write on the singleton lock — park the batch; the warm thread drains it
+    # right after the model lands (readiness.mark_ready("embeddings")). If the
+    # process dies before draining, audit/reconcile recover the stale sidecar.
+    from . import readiness
+    if readiness.defer("embeddings", (vault_root, tuple(md_paths))):
+        log.info("write-embed deferred until the embedding model is warm (%d file(s))", len(md_paths))
+        return
+
     try:
         get_model()  # triggers the heavy import; cheap thereafter.
     except ImportError as e:
