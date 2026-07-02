@@ -76,7 +76,10 @@ def test_prewarm_skipped_when_extraction_disabled(monkeypatch: pytest.MonkeyPatc
 
 
 def test_extract_text_routes_by_media_type(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(extract, "_transcribe", lambda p, mt: extract.ExtractResult("T", mt, "whisper"))
+    monkeypatch.setattr(
+        extract, "_transcribe",
+        lambda p, mt, vault_root=None: extract.ExtractResult("T", mt, "whisper"),
+    )
     monkeypatch.setattr(extract, "_ocr_image", lambda p: extract.ExtractResult("O", "image", "tesseract"))
     monkeypatch.setattr(extract, "_extract_pdf", lambda p: extract.ExtractResult("P", "pdf", "pymupdf"))
     monkeypatch.setattr(extract, "_extract_document", lambda p, mt: extract.ExtractResult("D", mt, "markitdown"))
@@ -445,3 +448,52 @@ def test_readiness_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
     monkeypatch.setattr(voice_profiles, "load_profiles", _boom)
     extract.log_diarization_readiness(tmp_path)  # must not raise (prewarm contract)
+
+
+def test_transcribe_soft_fails_when_diarize_raises(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Spec: Soft-Fail Degradation — an exception ANYWHERE in the optional diarization
+    # layer must degrade to the plain transcript, never break extraction. (A mid-run
+    # source change once escaped via an unguarded import inside _diarize.)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("solo line", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+
+    def _boom(path, seg_list, vault_root=None):
+        raise RuntimeError("import exploded mid-run")
+
+    monkeypatch.setattr(extract, "_diarize", _boom)
+    with caplog.at_level(logging.WARNING, logger="exomem.extract"):
+        r = extract._transcribe(Path("x.wav"), "audio")
+    assert r.text == "solo line"
+    assert not r.engine.endswith("+diarized")
+    assert r.speakers is None
+    assert any("diarization failed" in rec.getMessage() for rec in caplog.records)
+
+
+def test_resolve_named_labels_prefers_explicit_vault_root(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # A caller-supplied vault_root must reach the profile store WITHOUT env resolution —
+    # a CLI back-fill run with only --vault has no EXOMEM_VAULT_PATH exported.
+    from exomem import vault as vault_module
+
+    seen: list[Path] = []
+
+    def _env_resolve_must_not_run():
+        raise AssertionError("env vault resolution must not be consulted")
+
+    monkeypatch.setattr(vault_module, "resolve_vault", _env_resolve_must_not_run)
+
+    def _spy_path(root):
+        seen.append(root)
+        return root / "Knowledge Base" / ".voice_profiles.json"
+
+    monkeypatch.setattr(voice_profiles, "voice_profiles_path", _spy_path)
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda p: {})
+    out = extract._resolve_named_labels(
+        Path("x.wav"), [(0.0, 1.0, "SPEAKER_00")], vault_root=tmp_path
+    )
+    assert out is None  # no profiles → anonymous
+    assert seen == [tmp_path]

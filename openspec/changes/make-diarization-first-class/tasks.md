@@ -18,3 +18,16 @@
       readiness).
 - [x] 5. Full suite green (989 passed, 8 optional-dep skips); `ruff check` clean on all touched
       files; `openspec validate make-diarization-first-class --strict` passes.
+
+Hardening follow-ups from the live smoke (2026-07-02):
+
+- [x] 6. Soft-fail boundary guard: wrap the `_diarize` call in `_transcribe` so ANY exception in
+      the optional layer degrades to the plain transcript with a WARNING (a mid-run source
+      change escaped via `_diarize`'s unguarded `speaker_assignment` import, violating the
+      Soft-Fail Degradation requirement). Test: `_diarize` raising → plain transcript + warning.
+- [x] 7. Thread `vault_root` through `extract_text → _transcribe → _diarize →
+      _resolve_named_labels` and pass it from `MediaWorker._run_extraction` and
+      `backfill_media` — a CLI back-fill run with only `--vault` no longer silently degrades to
+      anonymous because `EXOMEM_VAULT_PATH` wasn't exported (env resolution stays as fallback).
+      Tests: attribution uses the explicit vault_root without consulting env; worker and
+      backfill pass their vault. (Suite: 1106 passed, 11 optional-dep skips.)

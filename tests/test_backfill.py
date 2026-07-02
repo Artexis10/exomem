@@ -45,7 +45,7 @@ def test_backfill_creates_sidecar_ocr_clip(vault, monkeypatch: pytest.MonkeyPatc
     img = _drop_image(vault)
     monkeypatch.setattr(
         extract, "extract_text",
-        lambda p, media_type=None: extract.ExtractResult(text="legacy invoice acme", media_type="image", engine="tesseract"),
+        lambda p, media_type=None, vault_root=None: extract.ExtractResult(text="legacy invoice acme", media_type="image", engine="tesseract"),
     )
     monkeypatch.setattr(embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
 
@@ -73,7 +73,7 @@ def test_backfill_covers_non_evidence_kb_subtree(vault, monkeypatch: pytest.Monk
     p.write_bytes(b"\xff\xd8\xffINV")
     monkeypatch.setattr(
         extract, "extract_text",
-        lambda p, media_type=None: extract.ExtractResult(
+        lambda p, media_type=None, vault_root=None: extract.ExtractResult(
             text="ugreen nexode 100w charger", media_type="image", engine="tesseract"
         ),
     )
@@ -206,7 +206,7 @@ def test_rediarize_soft_fail_leaves_sidecar_and_stops(vault, monkeypatch: pytest
     _, s2 = _drop_audio_with_plain_transcript(vault, rel="Knowledge Base/Evidence/r/b.wav")
     calls: list = []
 
-    def _plain(p, media_type=None):
+    def _plain(p, media_type=None, vault_root=None):
         calls.append(p)
         return extract.ExtractResult(
             text="plain again", media_type="audio", engine="faster-whisper:large-v3"
@@ -253,6 +253,23 @@ def test_rediarize_dry_run_counts_without_writing(vault, monkeypatch: pytest.Mon
     stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, dry_run=True, log_fn=_quiet)
     assert stats.rediarized == 1
     assert sidecar.read_text("utf-8") == before
+
+
+def test_backfill_passes_vault_root_to_extraction(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The --vault the back-fill was invoked with must reach named attribution — env
+    # resolution (EXOMEM_VAULT_PATH) isn't populated by the CLI.
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    _drop_audio_with_plain_transcript(vault, rel="Knowledge Base/Evidence/vr/c.wav")
+    seen: dict = {}
+
+    def _spy(p, media_type=None, vault_root=None):
+        seen["vault_root"] = vault_root
+        return _diarized_result()
+
+    monkeypatch.setattr(extract, "extract_text", _spy)
+    stats = backfill.backfill_media(vault, do_clip=False, rediarize=True, log_fn=_quiet)
+    assert stats.rediarized == 1
+    assert seen["vault_root"] == vault
 
 
 # ---------------- --retime: re-extract pre-timed-transcript A/V sidecars ----------------

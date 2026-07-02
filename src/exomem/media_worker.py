@@ -133,7 +133,9 @@ class MediaWorker:
 
     def _run_extraction(self, job: _Job) -> None:
         try:
-            result = extract.extract_text(job.binary_path, media_type=job.media_type)
+            result = extract.extract_text(
+                job.binary_path, media_type=job.media_type, vault_root=self._vault_root
+            )
         except extract.ExtractionUnavailable as e:
             # Engine not installed on this box right now — leave the sidecar `pending`
             # so a properly-provisioned box picks it up on its next restart scan.

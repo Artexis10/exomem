@@ -251,7 +251,7 @@ def backfill_media(
             stats.sidecars_created += int(created)
         if need_ocr or need_rediarize or need_retime:
             try:
-                res = extract.extract_text(f, media_type=media_type)
+                res = extract.extract_text(f, media_type=media_type, vault_root=vault_root)
                 # Each requested upgrade is judged by its engine marker (extract's
                 # soft-fail contract). A failed upgrade disables its pass for the rest
                 # (every further attempt would fail the same way); the sidecar is

@@ -38,7 +38,7 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
         extract, "extract_text",
-        lambda p, media_type=None: extract.ExtractResult(
+        lambda p, media_type=None, vault_root=None: extract.ExtractResult(
             text="discussion of the broken sink and water damage", media_type="audio", engine="faster-whisper:test"
         ),
     )
@@ -59,7 +59,7 @@ def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.Monke
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
         extract, "extract_text",
-        lambda p, media_type=None: extract.ExtractResult(
+        lambda p, media_type=None, vault_root=None: extract.ExtractResult(
             text="[Speaker A]: we shipped it\n[Speaker B]: nice work",
             media_type="audio",
             engine="faster-whisper:test+diarized",
@@ -84,7 +84,7 @@ def test_worker_marks_failed_on_extraction_error(vault, monkeypatch: pytest.Monk
     result = _preserve_media_stub(vault, filename="bad.mp3")
     sidecar = vault / result.sidecar_path
 
-    def boom(p, media_type=None):
+    def boom(p, media_type=None, vault_root=None):
         raise RuntimeError("corrupt container")
 
     monkeypatch.setattr(extract, "extract_text", boom)
@@ -120,12 +120,32 @@ def test_start_logs_diarization_readiness(vault, monkeypatch: pytest.MonkeyPatch
         w.stop()
 
 
+def test_run_extraction_passes_vault_root(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Named attribution matches against the worker's vault profile store — the vault
+    # must flow through extract_text, not be re-resolved from env.
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="vaulted.mp3")
+    seen: dict = {}
+
+    def _spy(p, media_type=None, vault_root=None):
+        seen["vault_root"] = vault_root
+        return extract.ExtractResult(text="t", media_type="audio", engine="faster-whisper:test")
+
+    monkeypatch.setattr(extract, "extract_text", _spy)
+    w = media_worker.MediaWorker(vault)
+    w._process(media_worker._Job(
+        binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path,
+        media_type="audio",
+    ))
+    assert seen["vault_root"] == vault
+
+
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="later.mp3")
     sidecar = vault / result.sidecar_path
 
-    def unavailable(p, media_type=None):
+    def unavailable(p, media_type=None, vault_root=None):
         raise extract.ExtractionUnavailable("engine not installed")
 
     monkeypatch.setattr(extract, "extract_text", unavailable)

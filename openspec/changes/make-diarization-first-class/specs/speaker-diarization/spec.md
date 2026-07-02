@@ -37,6 +37,14 @@ unchanged and stop re-diarizing for the remainder of the pass.
 - **THEN** the existing sidecar bytes are unchanged and re-diarization stops for the remaining
   files in the pass
 
+#### Scenario: Attribution uses the invoked vault's profiles
+
+- **WHEN** `backfill-media --rediarize --vault <root>` runs without `EXOMEM_VAULT_PATH`
+  exported in the shell
+- **THEN** named attribution matches against `<root>`'s voice-profile store (the vault is
+  threaded through extraction; env resolution is only a fallback for callers without one)
+- **AND** the media worker likewise attributes against its own vault's store
+
 ### Requirement: Startup Readiness Diagnostics
 
 The system SHALL log one diarization-readiness summary when the media worker starts, reporting:

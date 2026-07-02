@@ -124,12 +124,19 @@ def extraction_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION")
 
 
-def extract_text(path: str | Path, *, media_type: str | None = None) -> ExtractResult:
-    """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed."""
+def extract_text(
+    path: str | Path, *, media_type: str | None = None, vault_root: Path | None = None
+) -> ExtractResult:
+    """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
+
+    `vault_root` (optional) tells named-speaker attribution which vault's voice-profile
+    store to match against; without it attribution falls back to env resolution
+    (`EXOMEM_VAULT_PATH`), which the CLI does not populate from `--vault`.
+    """
     p = Path(path)
     mt = media_type or media_type_for(p)
     if mt in ("audio", "video"):
-        return _transcribe(p, mt)
+        return _transcribe(p, mt, vault_root=vault_root)
     if mt == "image":
         return _ocr_image(p)
     if mt == "pdf":
@@ -277,7 +284,7 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         log.debug("diarization readiness check failed", exc_info=True)
 
 
-def _transcribe(path: Path, media_type: str) -> ExtractResult:
+def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
@@ -296,7 +303,17 @@ def _transcribe(path: Path, media_type: str) -> ExtractResult:
     # or diarization errors, fall back to the plain transcript below — extraction with
     # the flag off (or unavailable) is byte-for-byte unchanged.
     if _diarize_enabled():
-        labeled = _diarize(path, seg_list)
+        # Boundary guard for the WHOLE optional layer: the spec's Soft-Fail Degradation
+        # requirement says a diarization failure MUST NOT break extraction, and inner
+        # guards can't cover everything (a mid-run source change once escaped via an
+        # unguarded import). Any exception here degrades to the plain transcript.
+        try:
+            labeled = _diarize(path, seg_list, vault_root=vault_root)
+        except Exception:  # noqa: BLE001 — diarization must never break extraction
+            log.warning(
+                "diarization failed for %s; using plain transcript", path.name, exc_info=True
+            )
+            labeled = None
         if labeled is not None:
             text, speakers = labeled
             # `+timed` is detected from the rendered text (not re-checked from the
@@ -505,7 +522,7 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
 
 
 def _resolve_named_labels(
-    path: Path, turns: list[tuple[float, float, str]]
+    path: Path, turns: list[tuple[float, float, str]], vault_root: Path | None = None
 ) -> dict[str, str] | None:
     """Resolve raw diarization labels → enrolled speaker names, or None to stay anonymous.
 
@@ -521,7 +538,12 @@ def _resolve_named_labels(
         from . import vault, voice_embed, voice_profiles
         from .speaker_attribution import attribute_clusters
 
-        store_path = voice_profiles.voice_profiles_path(vault.resolve_vault())
+        # Prefer the caller's vault (worker/backfill know it); env resolution is the
+        # fallback for callers that don't — a CLI run with only --vault would otherwise
+        # silently degrade to anonymous when EXOMEM_VAULT_PATH isn't exported.
+        store_path = voice_profiles.voice_profiles_path(
+            vault_root if vault_root is not None else vault.resolve_vault()
+        )
         profiles = voice_profiles.load_profiles(store_path)
         if not profiles:
             return None  # nobody enrolled → anonymous, no embedding model loaded
@@ -550,7 +572,7 @@ def _resolve_named_labels(
 
 
 def _diarize(
-    path: Path, seg_list: list
+    path: Path, seg_list: list, vault_root: Path | None = None
 ) -> tuple[str, list[dict]] | None:
     """Label ASR segments with speakers and render `[Speaker A]: …` (or `[<name>]: …`) turns.
 
@@ -567,7 +589,7 @@ def _diarize(
         return None
 
     # Optional named layer: raw cluster label → enrolled name (or None → stay anonymous).
-    resolved = _resolve_named_labels(path, turns)
+    resolved = _resolve_named_labels(path, turns, vault_root=vault_root)
 
     # First-appearance map of raw pyannote labels → "Speaker A", "Speaker B", …
     label_names: dict[str, str] = {}
