@@ -166,6 +166,7 @@ and index updates are determined by the operation, not the caller.
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (echo `content_hash` to `edit` via `expected_hash`). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
+| **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
 | **reconcile** | Heal drift from out-of-band edits (Obsidian/mobile/manual): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
@@ -259,6 +260,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
+- "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
 - "I edited the vault directly / on my phone — sync it up," "heal the drift" → **reconcile**
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
@@ -324,6 +326,19 @@ Vector embeddings live in a per-machine sidecar at
 `<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile Obsidian Sync ignores).
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
+
+### Assessing a vault you didn't build
+
+For structural questions — "what does this vault look like," "how is this vault
+organized," "is there junk in here" — run **overview** first: one bounded,
+read-only report of folder structure, counts, frontmatter coverage, naming
+patterns, and junk candidates (zero-byte files, sync-conflict duplicates). It
+works on any folder under the vault root, including trees outside
+`Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
+all. Drill down from there: `list_directory` on folders of interest,
+`find scope="vault"` for content, targeted `get` for individual files. **Never
+bulk-read a vault file-by-file to answer a structural question** — the report
+answers in one call what would otherwise cost hundreds of reads.
 
 ## Activity log
 

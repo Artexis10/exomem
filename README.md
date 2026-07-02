@@ -148,6 +148,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 | `preserve` | Store binary or text evidence append-only. |
 | `audit` | Check graph and corpus health. |
 | `attention` | Surface review queues such as stale notes, close-by claims, and unprocessed sources. |
+| `overview` | Bounded, read-only structure report of the vault or a subtree — works outside `Knowledge Base/` and before `init`. |
 
 Tier-2 filesystem tools exist for escape hatches such as listing directories,
 creating files, moving pages, trashing files, and recovering from trash. Set

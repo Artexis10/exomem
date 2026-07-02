@@ -55,6 +55,7 @@ from . import list_trash as list_trash_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
+from . import overview as overview_module
 from . import preserve as preserve_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
@@ -1719,6 +1720,51 @@ def op_create_file(
     return result.as_dict()
 
 
+def op_overview(
+    vault_root: Path,
+    path: str = "",
+    max_depth: int = 3,
+    include_hidden: bool = False,
+    samples: int = 5,
+) -> dict:
+    """Bounded, read-only structure report of the vault (or a subtree).
+
+    Answers "what does this vault look like?" in ONE call — use this instead
+    of reading files one by one for structural questions. Reports totals,
+    whether a `Knowledge Base/` tree is present, a depth/breadth-capped folder
+    tree (per-folder file counts, frontmatter coverage %, wikilink/md-link
+    counts, dominant filename patterns, sample names), junk candidates
+    (zero-byte files, sync-conflict duplicates like `note 2.md`), largest and
+    oldest-unmodified files, and exactly what was skipped. Lists are capped;
+    counts are always exact. Works on vaults with no initialized
+    `Knowledge Base/` (`kb.present` false).
+
+    Args:
+        path: Vault-relative subtree to report on. Empty string (default)
+            reports the whole vault. Auto-handles forward/back slashes.
+        max_depth: Tree depth cap; deeper folders roll up into their
+            ancestors (counts stay exact). Default 3.
+        include_hidden: If true, include dot-directories/dotfiles and
+            `_trash`/`_attachments`. Default false.
+        samples: Filename samples listed per folder. Default 5.
+
+    Returns: {scope_note, root, totals, kb, tree, junk, largest,
+             oldest_unmodified, skipped, warnings}.
+
+    Errors: INVALID_PATH; NOT_FOUND; NOT_A_DIR.
+    """
+    try:
+        return overview_module.overview(
+            vault_root,
+            path=path,
+            max_depth=max_depth,
+            include_hidden=include_hidden,
+            samples=samples,
+        )
+    except overview_module.OverviewError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+
+
 def op_list_directory(
     vault_root: Path,
     path: str = "",
@@ -2199,6 +2245,7 @@ _SPEC: tuple[tuple, ...] = (
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
     ("attention", op_attention, 1, False, False, None, _MCRC),
+    ("overview", op_overview, 1, False, False, "path", _MCRC),
     ("evolution", op_evolution, 1, False, False, "query", _MCRC),
     ("audit_fix", op_audit_fix, 1, True, False, None, _MCRC),
     ("reconcile", op_reconcile, 1, True, False, None, _MCRC),

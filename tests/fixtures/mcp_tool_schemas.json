@@ -1319,6 +1319,35 @@
       "type": "object"
     }
   },
+  "overview": {
+    "description": "Bounded, read-only structure report of the vault (or a subtree).\n\nAnswers \"what does this vault look like?\" in ONE call — use this instead\nof reading files one by one for structural questions. Reports totals,\nwhether a `Knowledge Base/` tree is present, a depth/breadth-capped folder\ntree (per-folder file counts, frontmatter coverage %, wikilink/md-link\ncounts, dominant filename patterns, sample names), junk candidates\n(zero-byte files, sync-conflict duplicates like `note 2.md`), largest and\noldest-unmodified files, and exactly what was skipped. Lists are capped;\ncounts are always exact. Works on vaults with no initialized\n`Knowledge Base/` (`kb.present` false).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "",
+          "type": "string",
+          "description": "Vault-relative subtree to report on. Empty string (default)\nreports the whole vault. Auto-handles forward/back slashes."
+        },
+        "max_depth": {
+          "default": 3,
+          "type": "integer",
+          "description": "Tree depth cap; deeper folders roll up into their\nancestors (counts stay exact). Default 3."
+        },
+        "include_hidden": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, include dot-directories/dotfiles and\n`_trash`/`_attachments`. Default false."
+        },
+        "samples": {
+          "default": 5,
+          "type": "integer",
+          "description": "Filename samples listed per folder. Default 5."
+        }
+      },
+      "type": "object"
+    }
+  },
   "preserve": {
     "description": "Capture a TEXT artifact to Evidence/<scope>/<category>/.\n\nFor raw factual artifacts that are text — transcripts, pasted letters,\nemail bodies — preserved as-received with no analytical processing. Per\nSKILL.md rule 2, Evidence is append-only; analytical takes go in compiled\nnotes that link to the evidence file.\n\nBINARY artifacts (PDFs, images, .docx — any non-text file) are delivered\nout-of-band, not through this tool: call `mint_upload_token` and POST the\nbytes to `/upload`, or drop the file into Evidence/ desk-side via Obsidian\nSync. The bytes never pass through the model.",
     "inputSchema": {
