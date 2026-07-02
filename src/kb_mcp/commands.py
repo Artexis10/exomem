@@ -20,13 +20,16 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 from __future__ import annotations
 
 import inspect
+import json
 import types
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
-from mcp.types import ToolAnnotations
+from fastmcp.tools import ToolResult
+from fastmcp.utilities.types import Image as FastMCPImage
+from mcp.types import TextContent, ToolAnnotations
 
 from . import add as add_module
 from . import append_to_file as append_to_file_module
@@ -61,6 +64,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import video_frames as video_frames_module
 from .vault import (
     VaultPathError,
     find_body_wikilinks,
@@ -2009,6 +2013,84 @@ def op_list_inbound_links(
     return result.as_dict()
 
 
+def op_get_video_frames(
+    vault_root: Path,
+    path: str,
+    max_frames: int = 8,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> ToolResult:
+    """View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.
+
+    Use this to see what a video actually contains (slides, screen
+    recordings, whiteboards, meetings) directly in the tool result. Frames
+    are sampled evenly across the video (or the requested window),
+    near-duplicates are collapsed, and each frame comes back as a JPEG
+    image content block, preceded by one metadata block with per-frame
+    timestamps. Typical loop: overview call first, then zoom into a moment
+    with `start_sec`/`end_sec` — e.g. around a `find` hit's
+    `clip_match_at`/`scene_match_at` timestamp.
+
+    Args:
+        path: Vault-relative path to a video file
+            (`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`).
+        max_frames: Maximum frames to return. Default 8, hard-capped
+            server-side (16); out-of-range values clamp silently and the
+            metadata reports `max_frames_effective`. Each frame costs
+            image tokens — prefer a time window over raising this.
+        start_sec: Optional window start in seconds — sample at/after this
+            timestamp only.
+        end_sec: Optional window end in seconds — sample before this
+            timestamp only (clamped to the video's duration).
+
+    Returns:
+        A metadata block {path, duration_sec, start_sec, end_sec,
+        frame_count, frames: [{index, timestamp_sec}], candidates,
+        dedup_dropped, max_frames_effective} followed by one JPEG image
+        content block per frame in `frames[].index` order (longest side
+        ≤768px).
+
+    Errors:
+        INVALID_PATH (escapes vault or empty); NOT_FOUND (no such file);
+        NOT_A_VIDEO (not a video extension); BAD_RANGE (invalid window);
+        VIDEO_DEPS_MISSING (server installed without the media extra);
+        NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
+        video of unknown duration).
+    """
+    try:
+        result = video_frames_module.get_frames(
+            vault_root,
+            path,
+            max_frames=max_frames,
+            start_sec=start_sec,
+            end_sec=end_sec,
+        )
+    except video_frames_module.VideoFramesError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    meta = {
+        "path": result.path,
+        "duration_sec": result.duration_sec,
+        "start_sec": start_sec,
+        "end_sec": end_sec,
+        "frame_count": len(result.frames),
+        "frames": [
+            {"index": i, "timestamp_sec": f.timestamp_sec}
+            for i, f in enumerate(result.frames)
+        ],
+        "candidates": result.candidates,
+        "dedup_dropped": result.dedup_dropped,
+        "max_frames_effective": result.max_frames_effective,
+    }
+    return ToolResult(
+        content=[TextContent(type="text", text=json.dumps(meta, ensure_ascii=False))]
+        + [
+            FastMCPImage(data=f.jpeg, format="jpeg").to_image_content()
+            for f in result.frames
+        ],
+        structured_content=meta,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Param derivation — the declarative Param specs come straight from each leaf's
 # signature (the single source) + its docstring Args (for help text), so they can
@@ -2108,6 +2190,9 @@ def note_description(project_keys_hint: str) -> str:
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
+# `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
+# meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
+_M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
@@ -2136,6 +2221,7 @@ _SPEC: tuple[tuple, ...] = (
     ("list_trash", op_list_trash, 2, False, False, None, _MCRC),
     ("recover_from_trash", op_recover_from_trash, 2, True, False, "trash_path", _MCRC),
     ("list_inbound_links", op_list_inbound_links, 2, False, False, "target", _MCRC),
+    ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
 )
 
 

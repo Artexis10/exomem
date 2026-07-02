@@ -723,6 +723,51 @@
       "type": "object"
     }
   },
+  "get_video_frames": {
+    "description": "View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.\n\nUse this to see what a video actually contains (slides, screen\nrecordings, whiteboards, meetings) directly in the tool result. Frames\nare sampled evenly across the video (or the requested window),\nnear-duplicates are collapsed, and each frame comes back as a JPEG\nimage content block, preceded by one metadata block with per-frame\ntimestamps. Typical loop: overview call first, then zoom into a moment\nwith `start_sec`/`end_sec` — e.g. around a `find` hit's\n`clip_match_at`/`scene_match_at` timestamp.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path to a video file\n(`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`)."
+        },
+        "max_frames": {
+          "default": 8,
+          "type": "integer",
+          "description": "Maximum frames to return. Default 8, hard-capped\nserver-side (16); out-of-range values clamp silently and the\nmetadata reports `max_frames_effective`. Each frame costs\nimage tokens — prefer a time window over raising this."
+        },
+        "start_sec": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional window start in seconds — sample at/after this\ntimestamp only."
+        },
+        "end_sec": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional window end in seconds — sample before this\ntimestamp only (clamped to the video's duration)."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
   "link": {
     "description": "Create a typed entity under Entities/<Folder>/<Name>.md.\n\nEntities are the typed nodes of the KB graph — people, concepts,\nlibraries, decisions. Name them after the thing they are (Title Case,\nnot slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.\n\nFour entity types with conditional frontmatter:\n- `person`   → Entities/People/. Optional: `affiliation`, `relationship`.\n- `concept`  → Entities/Concepts/. Optional: `domain` (e.g.\n  \"retrieval\", \"workflow\", \"infrastructure\").\n- `library`  → Entities/Libraries/. Optional: `language`, `repo`,\n  `license`, `used_in` (list of projects).\n- `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),\n  `project` (project key — any slug; unknown keys auto-register on first\n  use, same as `note`), `decision_status` ∈ {proposed, accepted,\n  superseded}.\n\nv1 is create-only. If the entity file already exists, returns\nENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index\n(e.g. Entities/Concepts/index.md categorization) is NOT auto-updated;\nreconcile via desk audit.",
     "inputSchema": {

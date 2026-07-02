@@ -60,6 +60,7 @@ def main() -> None:
     FIXTURE_PATH.write_text(
         json.dumps(schemas, ensure_ascii=False, indent=2, sort_keys=False) + "\n",
         encoding="utf-8",
+        newline="\n",  # keep the committed fixture LF even when run on Windows
     )
     print(f"wrote {len(schemas)} tool schemas to {FIXTURE_PATH.relative_to(REPO_ROOT)}")
 
