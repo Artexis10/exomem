@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import logging
+import sys
 from pathlib import Path
 
 import pytest
 
-from kb_mcp import extract
+from kb_mcp import extract, voice_profiles
 
 
 @pytest.mark.parametrize(
@@ -275,3 +277,80 @@ def test_maybe_caption_soft_fails_to_ocr_only(monkeypatch: pytest.MonkeyPatch) -
     text, engine = extract._maybe_caption("ocr body", Path("x.png"))
     assert text == "ocr body"
     assert engine == "tesseract"
+
+
+# ---------------- opt-in env-flag parse + diarization readiness diagnostics ----------
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        ("1", True), ("true", True), ("yes", True), ("on", True), ("anything", True),
+        ("0", False), ("false", False), ("FALSE", False), ("no", False),
+        ("off", False), ("Off", False), ("", False), ("  ", False),
+    ],
+)
+def test_env_flag_truthy_parse(monkeypatch: pytest.MonkeyPatch, value: str, expected: bool) -> None:
+    # A bare presence check would read `KB_MCP_DIARIZE=0` as opted IN — falsy values
+    # must count as unset, for both opt-in flags.
+    monkeypatch.setenv("KB_MCP_DIARIZE", value)
+    assert extract._diarize_enabled() is expected
+    monkeypatch.setenv("KB_MCP_VISION_CAPTION", value)
+    assert extract._vision_caption_enabled() is expected
+
+
+def _readiness_record(caplog: pytest.LogCaptureFixture) -> logging.LogRecord:
+    return next(r for r in caplog.records if "diarization readiness" in r.getMessage())
+
+
+def test_readiness_healthy_logs_info_with_profiles(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "hf_secret_value_123")
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: Path(sys.executable))
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda p: {"Hugo": object(), "Maria": object()})
+    with caplog.at_level(logging.INFO, logger="kb_mcp.extract"):
+        extract.log_diarization_readiness(tmp_path)
+    rec = _readiness_record(caplog)
+    assert rec.levelno == logging.INFO
+    msg = rec.getMessage()
+    assert "enabled=True" in msg and "sidecar_venv=True" in msg and "hf_token=True" in msg
+    assert "profiles=2" in msg and "Hugo" in msg and "Maria" in msg
+    assert "hf_secret_value_123" not in caplog.text  # token presence only, never the value
+
+
+def test_readiness_warns_when_enabled_but_venv_missing(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+    monkeypatch.setenv("HUGGINGFACE_TOKEN", "x")
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+    with caplog.at_level(logging.INFO, logger="kb_mcp.extract"):
+        extract.log_diarization_readiness(tmp_path)
+    assert _readiness_record(caplog).levelno == logging.WARNING
+
+
+def test_readiness_disabled_logs_info(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    # A lean box with diarization off must not be nagged with warnings.
+    monkeypatch.delenv("KB_MCP_DIARIZE", raising=False)
+    monkeypatch.delenv("HUGGINGFACE_TOKEN", raising=False)
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+    with caplog.at_level(logging.INFO, logger="kb_mcp.extract"):
+        extract.log_diarization_readiness(tmp_path)
+    rec = _readiness_record(caplog)
+    assert rec.levelno == logging.INFO
+    assert "enabled=False" in rec.getMessage()
+
+
+def test_readiness_never_raises(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("KB_MCP_DIARIZE", "1")
+
+    def _boom(p):
+        raise RuntimeError("profile store exploded")
+
+    monkeypatch.setattr(voice_profiles, "load_profiles", _boom)
+    extract.log_diarization_readiness(tmp_path)  # must not raise (prewarm contract)

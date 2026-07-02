@@ -65,6 +65,9 @@ class MediaWorker:
             threading.Thread(
                 target=extract.prewarm, name="kb-asr-prewarm", daemon=True
             ).start()
+            # Boot-time diarization readiness line (cheap: a path check + small JSON
+            # read) — the soft-fail design otherwise hides a broken stack entirely.
+            extract.log_diarization_readiness(self._vault_root)
 
     def enqueue(
         self,

@@ -102,6 +102,12 @@ def _backfill_media_main(argv: list[str]) -> int:
     parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
     parser.add_argument("--no-ocr", action="store_true", help="skip text extraction (sidecar + CLIP only)")
     parser.add_argument("--no-clip", action="store_true", help="skip CLIP image embedding")
+    parser.add_argument(
+        "--rediarize", action="store_true",
+        help="re-extract audio/video transcribed before diarization (extracted_by without "
+        "'+diarized') so they gain speaker turns + a speakers: frontmatter list. Requires "
+        "KB_MCP_DIARIZE set in this shell (the CLI does not read .env).",
+    )
     args = parser.parse_args(argv)
     if not args.vault:
         print("backfill-media: set --vault or KB_MCP_VAULT_PATH", file=sys.stderr)
@@ -114,6 +120,7 @@ def _backfill_media_main(argv: list[str]) -> int:
         Path(args.vault).expanduser(),
         do_ocr=not args.no_ocr,
         do_clip=not args.no_clip,
+        rediarize=args.rediarize,
         dry_run=args.dry_run,
         log_fn=print,
     )

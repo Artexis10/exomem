@@ -11,6 +11,7 @@ plain transcript and never raises.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import subprocess
 import sys
@@ -34,6 +35,15 @@ def test_sidecar_absent_returns_none_without_spawning(monkeypatch) -> None:
 
     monkeypatch.setattr(extract.subprocess, "run", _boom)
     assert extract._run_diarization(Path("x.wav")) is None
+
+
+def test_sidecar_absent_logs_warning(monkeypatch, caplog) -> None:
+    # _run_diarization only runs when KB_MCP_DIARIZE is on, so a missing venv is a
+    # misconfiguration the operator must see — WARNING, not DEBUG (it hid for days).
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+    with caplog.at_level(logging.WARNING, logger="kb_mcp.extract"):
+        assert extract._run_diarization(Path("x.wav")) is None
+    assert any("sidecar venv is not provisioned" in r.getMessage() for r in caplog.records)
 
 
 def test_nonzero_exit_returns_none(monkeypatch) -> None:

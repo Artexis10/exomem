@@ -109,6 +109,17 @@ def test_start_prewarms_asr_off_the_request_path(vault, monkeypatch: pytest.Monk
         w.stop()
 
 
+def test_start_logs_diarization_readiness(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list = []
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda v=None: calls.append(v))
+    w = media_worker.MediaWorker(vault)
+    w.start()
+    try:
+        assert calls == [vault]
+    finally:
+        w.stop()
+
+
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("KB_MCP_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="later.mp3")
