@@ -24,12 +24,13 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve
+from . import embeddings, extract, preserve, scene_frames
 from .vault import VAULT_SCAN_SKIP_DIRS
 
 log = logging.getLogger(__name__)
 
 _EXTRACTED_BY_RE = re.compile(r"(?m)^extracted_by:\s*(.+?)\s*$")
+_PARENT_MEDIA_RE = re.compile(r"(?m)^parent_media:\s*\S")
 _NOT_DONE = {"none", "pending"}
 
 
@@ -83,6 +84,31 @@ def _ocr_done(sidecar: Path) -> bool:
     return v not in _NOT_DONE and not v.startswith("failed:")
 
 
+def _is_frame_child(sidecar: Path) -> bool:
+    """True for a scene-frame child sidecar (`parent_media:` set). Such images never
+    get their own ClipIndex rows — the parent video's per-scene vectors own visual
+    search — but they DO get sidecars/OCR like any image."""
+    try:
+        head = sidecar.read_text("utf-8")[:800]
+    except OSError:
+        return False
+    return bool(_PARENT_MEDIA_RE.search(head))
+
+
+def _scenes_done(video: Path) -> bool:
+    """True when the video already has at least one persisted scene frame + sidecar."""
+    d = scene_frames.frames_dir_for(video)
+    if not d.is_dir():
+        return False
+    for f in d.glob("scene-*.jpg"):
+        if (
+            scene_frames.parse_frame_ts(f.name) is not None
+            and f.with_name(f.name + ".md").exists()
+        ):
+            return True
+    return False
+
+
 @dataclass
 class BackfillStats:
     scanned: int = 0
@@ -90,6 +116,7 @@ class BackfillStats:
     extracted: int = 0
     extract_failed: int = 0
     clip_indexed: int = 0
+    scene_frames_written: int = 0
     skipped: int = 0
 
 
@@ -129,17 +156,27 @@ def backfill_media(
         need_ocr = do_ocr and not _ocr_done(sidecar)
         # Video idempotency keys on per-keyframe rows (has_frames), so a legacy
         # single-vector video (frame_ts NULL) is re-indexed per-keyframe, not skipped.
-        # Images stay on has() (one row = done).
+        # Images stay on has() (one row = done). Scene-frame children are excluded:
+        # the parent video's per-scene vectors own visual search.
         need_clip = (
             do_clip and clip_index is not None and media_type in ("image", "video")
             and not (clip_index.has_frames(rel) if media_type == "video" else clip_index.has(rel))
+            and not (media_type == "image" and _is_frame_child(sidecar))
         )
-        if not (need_sidecar or need_ocr or need_clip):
+        # Scene frames (KB_MCP_VIDEO_SCENE_FRAMES): a video without persisted frames
+        # re-processes once — one decode pass replaces its CLIP rows with scene-aware
+        # vectors AND writes the representative JPEGs. Idempotent via _scenes_done.
+        need_scenes = (
+            do_clip and clip_index is not None and media_type == "video"
+            and scene_frames.scene_frames_enabled() and not _scenes_done(f)
+        )
+        if not (need_sidecar or need_ocr or need_clip or need_scenes):
             stats.skipped += 1
             continue
         if dry_run:
             todo = " ".join(t for t, on in
-                            (("sidecar", need_sidecar), ("ocr", need_ocr), ("clip", need_clip)) if on)
+                            (("sidecar", need_sidecar), ("ocr", need_ocr), ("clip", need_clip),
+                             ("scenes", need_scenes)) if on)
             log_fn(f"  [{i}/{len(files)}] {rel} -> {todo}")
             stats.sidecars_created += need_sidecar
             stats.extracted += need_ocr
@@ -162,14 +199,24 @@ def backfill_media(
             except Exception:  # noqa: BLE001 — one bad file shouldn't abort the pass
                 log.exception("backfill: extraction failed for %s", f.name)
                 stats.extract_failed += 1
-        if need_clip:
+        if need_clip or need_scenes:
             try:
                 mtime = f.stat().st_mtime
-                if media_type == "video":
+                if media_type == "video" and need_scenes:
+                    vectors, pairs = embeddings.embed_video_scenes(f)
+                    clip_index.upsert_frames(rel, vectors, mtime)
+                    if need_clip:
+                        stats.clip_indexed += 1
+                    written = scene_frames.write_scene_frames(vault_root, f, pairs)
+                    stats.scene_frames_written += len(written)
+                    if do_ocr and written:
+                        do_ocr = _ocr_new_scene_frames(vault_root, written, stats, log_fn)
+                elif media_type == "video":
                     clip_index.upsert_frames(rel, embeddings.embed_video_frames(f), mtime)
+                    stats.clip_indexed += 1
                 else:
                     clip_index.upsert(rel, embeddings.embed_image(f), mtime)
-                stats.clip_indexed += 1
+                    stats.clip_indexed += 1
             except embeddings.ClipUnavailable as e:
                 log_fn(f"  ! CLIP unavailable ({e}); skipping CLIP for the rest")
                 do_clip = False
@@ -180,3 +227,30 @@ def backfill_media(
 
     log_fn(f"backfill done: {asdict(stats)}")
     return stats
+
+
+def _ocr_new_scene_frames(
+    vault_root: Path,
+    written: list[tuple[Path, Path]],
+    stats: BackfillStats,
+    log_fn,
+) -> bool:
+    """OCR freshly written scene frames in-line (they postdate this run's file
+    snapshot). Returns the updated `do_ocr` flag — False when the engine is
+    unavailable, leaving the remaining sidecars `pending` for the live worker's
+    restart scan to heal."""
+    for jpg, frame_sidecar in written:
+        try:
+            res = extract.extract_text(jpg, media_type="image")
+            preserve.update_sidecar_extraction(
+                vault_root, frame_sidecar,
+                text=res.text.strip() or "(no text detected)", engine=res.engine,
+            )
+            stats.extracted += 1
+        except extract.ExtractionUnavailable as e:
+            log_fn(f"  ! extraction engine unavailable ({e}); scene frames left pending")
+            return False
+        except Exception:  # noqa: BLE001 — one bad frame shouldn't abort the pass
+            log.exception("backfill: frame OCR failed for %s", jpg.name)
+            stats.extract_failed += 1
+    return True

@@ -463,6 +463,8 @@ def _render_sidecar(
     media_type: str | None = None,
     evidence_file: str | None = None,
     extracted_by: str | None = None,
+    parent_media: str | None = None,
+    frame_ts: float | None = None,
 ) -> str:
     """Sidecar .md describing a preserved binary artifact.
 
@@ -480,6 +482,11 @@ def _render_sidecar(
     original), and `extracted_by` (`pending` until the extraction worker fills
     the text, then the engine string; `upload` when the uploader supplied it).
     These make the binary a first-class `find()` result that points at the file.
+
+    `parent_media` + `frame_ts` mark a derived artifact — a scene frame extracted
+    from a video at `frame_ts` seconds. `find` groups such children under the
+    parent's hit, and CLIP-enqueue points skip them (the parent's per-scene
+    vectors own visual search).
     """
     lines = ["---"]
     lines.append("type: source")
@@ -491,7 +498,15 @@ def _render_sidecar(
         lines.append(f"evidence_file: {evidence_file}")
     if extracted_by:
         lines.append(f"extracted_by: {extracted_by}")
-    lines.append(f"tags: [evidence, {scope.lower().replace(' ', '-')}, {category.lower().replace(' ', '-')}]")
+    if parent_media:
+        lines.append(f"parent_media: {parent_media}")
+    if frame_ts is not None:
+        lines.append(f"frame_ts: {frame_ts}")
+    extra_tag = ", scene-frame" if parent_media else ""
+    lines.append(
+        f"tags: [evidence, {scope.lower().replace(' ', '-')}, "
+        f"{category.lower().replace(' ', '-')}{extra_tag}]"
+    )
     lines.append("ingested_into: []")
     lines.append("---")
     lines.append("")
