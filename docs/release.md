@@ -40,6 +40,12 @@ uv run python scripts/generate-capabilities.py --check
 uv build
 ```
 
+After a release with GHCR publishing enabled, smoke the published image:
+
+```bash
+docker run --rm ghcr.io/artexis10/exomem:latest demo --json
+```
+
 Optional host-specific checks:
 
 ```bash

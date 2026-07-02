@@ -1,0 +1,14 @@
+# Allowlist style: deny everything, then explicitly allow only what the
+# Dockerfile's COPY instructions need (pyproject.toml uv.lock README.md LICENSE
+# src/). This fails SAFE — a forgotten new source directory is excluded from
+# the build, causing an obvious ModuleNotFoundError at build/run time — rather
+# than UNSAFE, where a denylist that misses a newly-added sensitive file type
+# would silently leak it into the image. `.env`, `logs/`, and vault leftovers
+# can never enter the build context by construction: they simply aren't in the
+# allowlist below, regardless of what a contributor's working tree contains.
+*
+!src/
+!pyproject.toml
+!uv.lock
+!README.md
+!LICENSE

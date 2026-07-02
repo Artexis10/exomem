@@ -90,7 +90,7 @@ def access_events(
     """
     if os.environ.get("EXOMEM_DISABLE_RELEVANCE_CHECK"):
         return None
-    logs_dir = logs_dir or query_log._LOG_DIR
+    logs_dir = logs_dir or query_log.current_log_dir()
     today = today or dt.date.today()
 
     queries = read_jsonl(logs_dir / "queries.jsonl")
@@ -218,7 +218,7 @@ def activation_map(
     global _SNAPSHOT
     if boost_disabled():
         return {}
-    logs_dir = logs_dir or query_log._LOG_DIR
+    logs_dir = logs_dir or query_log.current_log_dir()
     today = today or dt.date.today()
     params = (
         str(logs_dir), today.toordinal(), float(config.usage_decay),

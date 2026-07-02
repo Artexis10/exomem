@@ -938,11 +938,12 @@ def run(
     EXOMEM_HOST=0.0.0.0 to also serve a non-Cloudflare route (e.g. a direct Tailscale
     connection to the origin) for uploads larger than the Cloudflare edge cap.
     """
-    from .logging_config import configure_logging
+    from .logging_config import configure_logging, resolve_log_dir
 
-    if log_dir is None:
-        log_dir = Path(__file__).resolve().parents[2] / "logs"
-    configure_logging(log_dir)
+    # Precedence: an explicit `log_dir` argument (programmatic callers, tests)
+    # wins; otherwise $EXOMEM_LOG_DIR (containers, non-root installs); else
+    # the checkout-derived <repo>/logs.
+    configure_logging(log_dir if log_dir is not None else resolve_log_dir())
 
     require_auth = transport != "stdio"
     mcp = build_server(require_auth=require_auth)  # loads .env (EXOMEM_HOST, etc.)

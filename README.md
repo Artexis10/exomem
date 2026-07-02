@@ -99,6 +99,7 @@ uv run exomem demo
 | Codex CLI | `codex mcp add` — see below |
 | claude.ai (remote) | Remote server — see [docs/remote-quickstart.md](docs/remote-quickstart.md) |
 | Any MCP client | Generic stdio config — see below |
+| Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
 
 <details>
 <summary>Codex CLI</summary>
@@ -124,6 +125,19 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 ```json
 {"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
+
+</details>
+
+<details>
+<summary>Docker (no Python on the host)</summary>
+
+```bash
+claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/exomem:latest --transport stdio
+```
+
+The image also runs as an always-on remote server via `docker compose` with a
+tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users: prefer
+the native install (WSL2 bind mounts miss live file-watch events).
 
 </details>
 
