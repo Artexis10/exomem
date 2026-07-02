@@ -160,11 +160,19 @@ def _doctor_main(argv: list[str]) -> int:
         help="capability profile to validate (default: lean)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="with --profile remote: also verify the live endpoints (three "
+        "read-only GETs — local /mcp expects 401, OAuth discovery expects 200, "
+        "the bare oauth-protected-resource path expects 200; the last one is "
+        "the claude.ai registration gate). Default is fully offline.",
+    )
     args = parser.parse_args(argv)
 
     from . import doctor as doctor_module
 
-    report = doctor_module.doctor(vault=args.vault, profile=args.profile)
+    report = doctor_module.doctor(vault=args.vault, profile=args.profile, probe=args.probe)
     if args.json:
         print(json.dumps(report.as_dict(), ensure_ascii=False, default=str))
     else:

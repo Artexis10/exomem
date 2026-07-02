@@ -78,7 +78,7 @@ instructions in their system/project instructions if they do not support
 skills.
 
 Full local setup is in [SETUP-LOCAL.md](SETUP-LOCAL.md). Remote/mobile setup is
-in [docs/remote-checklist.md](docs/remote-checklist.md) and
+in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 [docs/deployment.md](docs/deployment.md).
 
 For development, or to run the sample vault from a checkout instead of a
@@ -97,7 +97,7 @@ uv run exomem demo
 | --- | --- |
 | Claude Code | `exomem setup` registers it for you (see above) |
 | Codex CLI | `codex mcp add` — see below |
-| claude.ai (remote) | Remote server — see [docs/remote-checklist.md](docs/remote-checklist.md) |
+| claude.ai (remote) | Remote server — see [docs/remote-quickstart.md](docs/remote-quickstart.md) |
 | Any MCP client | Generic stdio config — see below |
 
 <details>
