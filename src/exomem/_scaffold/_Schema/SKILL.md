@@ -227,6 +227,15 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.
+- **View a video's frames on demand — `get_video_frames`.** To *see* what a vault
+  video shows (slides, screen recordings, meetings), call
+  `get_video_frames(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
+  sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
+  preceded by per-frame timestamps. The comprehension companion to visual search:
+  `find` locates the moment (`clip_match_at`), `get_video_frames` shows it — an
+  overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
+  Bounded and read-only (default 8 frames, hard cap 16, JPEG ≤768px); soft-fails
+  with a clear code when the server lacks the media extra.
 - **Read-only subtrees are write-protected.** Any vault subtree marked read-only
   (see `references/write-scope.md`) refuses Tier 2 writes by default; reads are
   unrestricted.
