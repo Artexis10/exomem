@@ -244,13 +244,13 @@ def delete_file(
             reason=f"could not move {rel_path} to trash: {e}",
         ) from e
 
-    # Drop the file's rows from the embedding sidecar. Soft no-op if
-    # sentence-transformers isn't installed.
+    # Drop the file's rows from the index sidecars (embedding + lexical).
+    # Soft no-op wherever a backend is unavailable.
     try:
-        from . import embeddings
-        embeddings.delete_after_remove(vault_root, [rel_path])
-    except Exception:  # noqa: BLE001 — embeddings are best-effort
-        log.exception("embedding delete failed for %s; sidecar may be stale", rel_path)
+        from . import index_sync
+        index_sync.delete_after_remove(vault_root, [rel_path])
+    except Exception:  # noqa: BLE001 — sidecars are best-effort
+        log.exception("index delete failed for %s; sidecar may be stale", rel_path)
 
     # Write metadata sidecar capturing what we know at trash time.
     meta = {

@@ -227,11 +227,11 @@ def delete_directory(
 
     if md_rels_to_unindex:
         try:
-            from . import embeddings
-            embeddings.delete_after_remove(vault_root, md_rels_to_unindex)
-        except Exception:  # noqa: BLE001 — embeddings are best-effort
+            from . import index_sync
+            index_sync.delete_after_remove(vault_root, md_rels_to_unindex)
+        except Exception:  # noqa: BLE001 — sidecars are best-effort
             log.exception(
-                "embedding delete failed for trashed tree %s; sidecar may be stale",
+                "index delete failed for trashed tree %s; sidecar may be stale",
                 rel_path,
             )
 

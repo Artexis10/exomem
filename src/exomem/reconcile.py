@@ -114,6 +114,17 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         report.embeddings_refreshed = len(drifted_abs)
         report.embeddings_status = "refreshed" if drifted_abs else "current"
 
+    # ---- 2b. Lexical sidecar (count/mtime reconcile against the walk) ----
+    # NOT behind the embeddings gate: the lexical index is a lean-install
+    # artifact. The store's own sync check is the heal; forcing it here means
+    # "reconcile" leaves the sidecar verified-fresh, not lazily healed later.
+    if not dry_run:
+        try:
+            from . import lexstore
+            lexstore.ensure_fresh(vault_root)
+        except Exception:  # noqa: BLE001 — best-effort, lanes soft-fail anyway
+            log.exception("lexical sidecar reconcile failed; next use self-heals")
+
     # ---- 3. Remaining drift report ----
     post = audit_module.audit(
         vault_root, categories=["index_drift", "embedding_drift"]

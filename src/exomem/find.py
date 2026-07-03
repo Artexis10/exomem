@@ -770,6 +770,15 @@ def _freshness_key(
                 parts.append((name, (kb / name).stat().st_mtime_ns))
             except OSError:
                 parts.append((name, 0))
+    if mode in ("hybrid", "keyword"):
+        # Which lexical backend serves (fts5 vs python) changes bm25-lane
+        # scores, so a mid-process flip must not hit entries cached under the
+        # other scorer. Index CONTENT changes always ride the walk triples
+        # above; lexstore.cache_token explains why the sidecar's file mtime
+        # is deliberately not used here.
+        from . import lexstore
+
+        parts.append(("lexical", lexstore.cache_token(vault_root)))
     return tuple(parts)
 
 
@@ -1435,7 +1444,9 @@ def _find_semantic(
         # high TF on a shared common token (e.g. "Borough Market" buried
         # under Q marketing pages on the "market" stem).
         with _span(timings, "keyword"):
-            keyword_ranking = _keyword_match_paths(vault_root, query_norm, scope)
+            keyword_ranking = _keyword_match_paths(
+                vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
+            )
         keyword_ranking = _collapse_frame_children(
             keyword_ranking, vault_root, frame_attribution
         )
@@ -2249,16 +2260,31 @@ def should_rerank(
     return disagreement > 0.5
 
 
-def _keyword_match_paths(vault_root: Path, query_norm: str, scope: str) -> list[str]:
+def _keyword_match_paths(
+    vault_root: Path, query_norm: str, scope: str, freshness: tuple | None = None
+) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
     Sorted by `updated:` desc to mirror keyword-mode's ordering, so RRF's
     rank reflects keyword's own preference. Walks the same tree the keyword
     flow would, honors the navigation-file filter, and skips pages that
     can't be parsed.
+
+    Backend ladder: the trigram index in the lexical sidecar serves the lane
+    at posting-list cost when available; its gate is EXACT parity with this
+    function's scan (the parity suite), so falling through changes nothing
+    but latency. The scan below remains the reference implementation and the
+    `EXOMEM_LEXICAL_BACKEND=python` target.
     """
     if not query_norm:
         return []
+    from . import lexstore
+
+    indexed = lexstore.search_substring(
+        vault_root, query_norm, scope=scope, freshness=freshness
+    )
+    if indexed is not None:
+        return indexed
     if scope == "kb":
         kb = vault_root / "Knowledge Base"
         if not kb.is_dir():

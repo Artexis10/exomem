@@ -20,7 +20,7 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve, scene_frames, semantic_segments
+from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
 from .backfill import iter_kb_files
 
 log = logging.getLogger(__name__)
@@ -126,7 +126,7 @@ class MediaWorker:
         earlier embed (transcript+speaker signals only) remains valid.
         """
         try:
-            embeddings.upsert_after_write(self._vault_root, [job.sidecar_path])
+            index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
             log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
