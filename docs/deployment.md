@@ -337,6 +337,12 @@ Without the extra, transcription falls back to CPU faster-whisper — pick a sma
 shared 16 kHz whisper timebase) when the `media` extra is present, else mlx-whisper
 decodes the file itself (needs `ffmpeg` on PATH).
 
+On MPS, bge/CLIP also run in **fp16** by default (`EXOMEM_MPS_FP16`, set `0` to keep
+fp32) — roughly half the memory and faster encodes, which these retrieval models
+tolerate well. Storage is unchanged (vectors are upcast to float32 before the sqlite
+blob); existing fp32 vectors differ from new fp16 ones by ~1e-3, harmless for ranking,
+and `audit_fix(rebuild_embeddings=True)` re-embeds for exact consistency if wanted.
+
 Two more notes: **Voiceprints** (ECAPA) and **diarization** stay on CPU by default for
 cross-machine numeric parity — opt in per model with `EXOMEM_VOICE_DEVICE=mps` /
 `EXOMEM_DIARIZE_DEVICE=mps`. And you can force every torch model to a device with

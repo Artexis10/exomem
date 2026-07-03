@@ -23,6 +23,7 @@ _ENV_KEYS = (
     "PYTORCH_ENABLE_MPS_FALLBACK",
     "EXOMEM_ASR_BACKEND",
     "EXOMEM_MLX_WHISPER_MODEL",
+    "EXOMEM_MPS_FP16",
 )
 
 
@@ -258,3 +259,40 @@ def test_get_transcriber_selection(monkeypatch: pytest.MonkeyPatch) -> None:
     assert isinstance(extract.get_transcriber(), extract.MlxWhisperBackend)
     monkeypatch.setattr(extract, "_mlx_available", lambda: False)
     assert isinstance(extract.get_transcriber(), extract.FasterWhisperBackend)
+
+
+# ---- fp16 on MPS (embeddings._maybe_half) ----
+
+def test_maybe_half_only_on_mps_and_respects_toggle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """bge/CLIP run fp16 on MPS only (CPU fp16 is emulated; CUDA keeps fp32 for parity),
+    and EXOMEM_MPS_FP16=0 opts out."""
+    from exomem import embeddings
+
+    class _Model:
+        def __init__(self):
+            self.halved = False
+
+        def half(self):
+            self.halved = True
+            return self
+
+    monkeypatch.delenv("EXOMEM_MPS_FP16", raising=False)
+    assert embeddings._maybe_half(_Model(), "mps").halved is True
+    assert embeddings._maybe_half(_Model(), "cpu").halved is False
+    assert embeddings._maybe_half(_Model(), "cuda").halved is False
+
+    monkeypatch.setenv("EXOMEM_MPS_FP16", "0")
+    assert embeddings._maybe_half(_Model(), "mps").halved is False
+
+
+def test_maybe_half_swallows_conversion_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A failing .half() must never break model load — return the original model, fp32."""
+    from exomem import embeddings
+
+    class _Boom:
+        def half(self):
+            raise RuntimeError("mps fp16 unsupported for this op")
+
+    monkeypatch.delenv("EXOMEM_MPS_FP16", raising=False)
+    m = _Boom()
+    assert embeddings._maybe_half(m, "mps") is m  # original returned, no raise
