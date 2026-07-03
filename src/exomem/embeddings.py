@@ -1584,6 +1584,18 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
         index.upsert_file(rel_path, chunks, vectors[offset:offset + n], mtime)
         offset += n
 
+    # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
+    # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
+    # (claims imports embeddings at load; embeddings reaches claims only here, at
+    # runtime). Best-effort: a claim-sidecar miss must never fail a vector write.
+    try:
+        from . import claims
+
+        if claims.claim_level_enabled():
+            claims.upsert_claims_after_write(vault_root, md_paths)
+    except Exception as e:  # noqa: BLE001
+        log.debug("claim sidecar upsert skipped (%s)", e)
+
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
     """Drop sidecar rows for files that were trashed. No-op if torch missing."""
