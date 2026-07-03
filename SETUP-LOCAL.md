@@ -100,12 +100,12 @@ uv sync                         # lean: keyword/BM25 search, no heavy deps
 ```
 
 > **Lean by default.** `uv sync` is the light path — search runs on
-> keyword/BM25, no torch, no GPU, works everywhere (incl. Mac / no-GPU). For
-> hybrid semantic search (better recall on natural-language queries), install
-> the extra: `uv sync --extra embeddings` — that's the ~1-2 GB torch
-> download (CUDA build, best on an NVIDIA GPU; CPU works but embeds slowly).
-> Start lean; upgrade anytime by installing the extra and unsetting
-> `EXOMEM_DISABLE_EMBEDDINGS`.
+> keyword/BM25, no torch, works everywhere. For hybrid semantic search (better
+> recall on natural-language queries), install the extra: `uv sync --extra
+> embeddings` — a ~1-2 GB torch download. It's **GPU-accelerated on both NVIDIA
+> (CUDA) and Apple Silicon (Metal/MPS)**, auto-detected; CPU-only boxes work too,
+> just slower. Start lean; upgrade anytime by installing the extra and unsetting
+> `EXOMEM_DISABLE_EMBEDDINGS`. **On a Mac, see "Apple Silicon" in step 4 below.**
 
 If you already manage Python environments yourself, `pip install -e .` still
 works as a fallback; the `uv` path is preferred because it honors `uv.lock` and
@@ -160,12 +160,33 @@ export EXOMEM_VAULT_PATH="/path/to/your/Obsidian"   # the vault root, not the KB
   works" on a lean install means keyword/BM25, *not* semantic.
 - **Hybrid** — install the extra (`uv sync --extra embeddings`) and leave
   `EXOMEM_DISABLE_EMBEDDINGS` unset. Adds local vector embeddings + graph on top
-  of BM25 — best recall on natural-language queries. Ideally an NVIDIA GPU; CPU
-  works but embeds slowly. The vector index builds as you write (each note is
-  embedded on save); to backfill an existing vault, run `kb reconcile` after
-  installing the extra. Quick check that semantic is live: ask for something
-  using words that *don't* appear in the note — if it still surfaces, embeddings
-  are on.
+  of BM25 — best recall on natural-language queries. GPU-accelerated on NVIDIA
+  (CUDA) or Apple Silicon (Metal/MPS), auto-detected; CPU works but embeds
+  slowly. The vector index builds as you write (each note is embedded on save);
+  to backfill an existing vault, run `kb reconcile` after installing the extra.
+  Quick check that semantic is live: ask for something using words that *don't*
+  appear in the note — if it still surfaces, embeddings are on.
+
+**Apple Silicon (Mac) — full GPU acceleration.** On an M-series Mac exomem uses
+the **Metal GPU automatically** — no config. bge/CLIP embeddings run on MPS (in
+fp16), and audio/video transcription runs on Metal via `mlx-whisper` once you add
+its extra:
+
+```bash
+uv sync --extra embeddings --extra media --extra media-mlx
+```
+
+`select_device()` picks MPS and `get_transcriber()` picks MLX on Apple Silicon on
+their own. Confirm the accelerated stack is live:
+
+```bash
+uv run python scripts/verify-mlx.py     # expect: GATE: PASS
+uv run exomem doctor --profile media    # torch.device: mps, asr.backend: mlx-whisper
+```
+
+Optional knobs: `EXOMEM_MPS_FP16=0` keeps embeddings in fp32; `EXOMEM_TORCH_DEVICE=cpu`
+forces CPU (e.g. to avoid thermal throttling on a fanless Air during a big backfill);
+`EXOMEM_MLX_WHISPER_MODEL=mlx-community/whisper-large-v3-turbo` picks a lighter ASR model.
 
 Preflight the selected path before wiring Claude:
 
