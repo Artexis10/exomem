@@ -115,6 +115,24 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         finally:
             durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
 
+    def _preload(step: str, loader, warm) -> bool:
+        """Preload a model (readiness gates on this) then run a best-effort throwaway
+        encode on the loaded object. Loading the weights isn't enough: the backend compiles
+        its compute kernels on the FIRST forward pass (most visibly the Metal/MPS graph on
+        Apple Silicon; CUDA/CPU pay a smaller first-call cost too), so warming a dummy input
+        here moves that one-time compile onto the boot/idle path instead of the user's first
+        query. The warm runs on the already-loaded model (loader is called exactly once) and
+        is never load-bearing — readiness gates on the preload, and a warm failure (e.g. an
+        MPS op gap) is swallowed. Cross-platform, not a Mac-only tweak."""
+        box: dict = {}
+        if not _model_step(step, lambda: box.update(m=loader())):
+            return False
+        try:
+            warm(box["m"])
+        except Exception:  # noqa: BLE001 — a warm-encode is a latency nicety, never a gate
+            log.debug("%s warm-encode skipped", step, exc_info=True)
+        return True
+
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # Lexical-only install: there are no models to wait for, so mark the
         # model components ready immediately — otherwise finds during the
@@ -127,7 +145,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         from . import embeddings
 
         log.info("preloading embedding model %s", embeddings.MODEL_NAME)
-        if _model_step("model_bge", embeddings.get_model):
+        if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
             for item_vault, paths in drained:
@@ -139,13 +157,13 @@ def warm_all(vault_root: Path) -> dict[str, float]:
                 log.info("drained %d deferred write-embed batch(es)", len(drained))
 
         log.info("preloading reranker %s", embeddings.RERANKER_NAME)
-        if _model_step("model_reranker", embeddings.get_reranker):
+        if _preload("model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])):
             log.info("reranker model ready")
             readiness.mark_ready("reranker")
 
         if embeddings.clip_enabled():
             log.info("preloading CLIP model %s", embeddings.CLIP_MODEL_NAME)
-            if _model_step("model_clip", embeddings.get_clip_model):
+            if _preload("model_clip", embeddings.get_clip_model, lambda m: m.encode(["warm"])):
                 log.info("CLIP model ready")
                 readiness.mark_ready("clip")
 

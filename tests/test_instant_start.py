@@ -304,6 +304,61 @@ def test_warm_all_drains_deferred_write_embeds_after_embeddings_ready(
     assert drained_calls == [(tmp_path, list(some_paths))]
 
 
+def test_warm_all_runs_a_throwaway_encode_after_each_preload(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Loading weights isn't enough — the backend compiles its kernels on the first
+    forward pass (Metal/MPS especially), so warm_all runs one throwaway encode/predict on
+    each loaded model, moving that one-time compile off the user's first query. The loader
+    is called exactly once — the warm runs on the returned model object."""
+    warmed: list[str] = []
+
+    class _FakeST:  # SentenceTransformer-like (bge + CLIP)
+        def encode(self, texts, *a, **kw):
+            warmed.append("encode")
+
+    class _FakeCE:  # CrossEncoder-like (reranker)
+        def predict(self, pairs, *a, **kw):
+            warmed.append("predict")
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(embeddings, "get_model", _FakeST)
+    monkeypatch.setattr(embeddings, "get_reranker", _FakeCE)
+    monkeypatch.setattr(embeddings, "get_clip_model", _FakeST)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+
+    warmup.warm_all(tmp_path)
+
+    assert warmed == ["encode", "predict", "encode"]  # bge, reranker, CLIP
+
+
+def test_warm_encode_failure_is_swallowed_and_does_not_block_readiness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A warm-encode is a latency nicety, never a gate: if the dummy encode raises (e.g. an
+    unimplemented MPS op with fallback off), the component still marks ready because the
+    preload itself succeeded."""
+
+    class _Boom:
+        def encode(self, *a, **kw):
+            raise RuntimeError("mps kernel compile failed")
+
+        def predict(self, *a, **kw):
+            raise RuntimeError("mps kernel compile failed")
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(embeddings, "get_model", _Boom)
+    monkeypatch.setattr(embeddings, "get_reranker", _Boom)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
+
+    warmup.warm_all(tmp_path)
+
+    assert readiness.is_ready("embeddings") is True
+    assert readiness.is_ready("reranker") is True
+
+
 # ============================================================================
 # exomem.warmup.start_background — the daemon-thread wrapper
 # ============================================================================
