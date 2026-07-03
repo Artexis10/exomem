@@ -3,6 +3,8 @@
 Subcommands:
 - (default) serve the MCP server — `python -m exomem [--transport ...]`
 - `setup` — guided one-command local onboarding (scan → init → doctor → register → skill)
+- `setup --remote` — guided remote-connector onboarding (tunnel → .env + GitHub OAuth
+  → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
@@ -13,6 +15,8 @@ Subcommands:
   server start doesn't pay the download in the background; optional `--vault`
   also warms the lexical caches
 - `backfill-media` — make pre-existing Evidence binaries searchable (sidecar + OCR/ASR/PDF + CLIP)
+- `index` — build/refresh the semantic (bge) vector index incrementally; `--scope vault`
+  (or EXOMEM_INDEX_SCOPE=vault) makes notes OUTSIDE Knowledge Base/ semantically searchable
 - `enroll-speaker` / `list-speakers` / `remove-speaker` — manage named-speaker voice profiles
   for opt-in diarization (desk-side admin; never an MCP tool)
 """
@@ -50,6 +54,8 @@ def main(argv: list[str] | None = None) -> int:
         return _warm_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
+    if raw and raw[0] == "index":
+        return _index_main(raw[1:])
     if raw and raw[0] == "enroll-speaker":
         return _enroll_speaker_main(raw[1:])
     if raw and raw[0] == "list-speakers":
@@ -150,6 +156,76 @@ def _backfill_media_main(argv: list[str]) -> int:
         dry_run=args.dry_run,
         log_fn=print,
     )
+    return 0
+
+
+def _index_main(argv: list[str]) -> int:
+    import logging
+
+    parser = argparse.ArgumentParser(
+        prog="exomem index",
+        description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
+        "skip files already up to date, embed new/changed ones in batches, prune "
+        "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
+        "it never wipes the sidecar first. Covers Knowledge Base/ by default, or "
+        "the whole vault with --scope vault (so notes outside Knowledge Base/ "
+        "become semantically searchable).",
+    )
+    parser.add_argument(
+        "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
+        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+    )
+    parser.add_argument(
+        "--scope", choices=("kb", "vault"), default=None,
+        help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
+        "'vault' indexes the whole vault, not just Knowledge Base/.",
+    )
+    parser.add_argument(
+        "--batch-size", type=int, default=256,
+        help="chunks per embedding batch (default: 256)",
+    )
+    parser.add_argument(
+        "--dry-run", action="store_true",
+        help="report what would be (re)embedded and pruned; write nothing",
+    )
+    args = parser.parse_args(argv)
+    if not args.vault:
+        print("index: set --vault or EXOMEM_VAULT_PATH", file=sys.stderr)
+        return 2
+    # Scope override flows through the env var the whole stack reads, so a single
+    # source of truth governs the walk, the drift check, and freshness.
+    if args.scope:
+        os.environ["EXOMEM_INDEX_SCOPE"] = args.scope
+
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+    from . import embeddings
+
+    # A real run needs the model; --dry-run only walks + reads the sidecar, so it
+    # stays fast and works in stripped/embeddings-disabled environments.
+    if not args.dry_run:
+        if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+            print(
+                "index: EXOMEM_DISABLE_EMBEDDINGS is set; nothing to embed",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            embeddings.get_model()
+        except Exception as e:  # noqa: BLE001 — surface a clean CLI error
+            print(
+                f"index: embedding model unavailable ({e}); "
+                "install the 'embeddings' extra (uv sync --extra embeddings)",
+                file=sys.stderr,
+            )
+            return 1
+
+    stats = embeddings.index_incremental(
+        Path(args.vault).expanduser(),
+        batch_size=max(1, args.batch_size),
+        dry_run=args.dry_run,
+        log_fn=print,
+    )
+    print(json.dumps(stats))
     return 0
 
 

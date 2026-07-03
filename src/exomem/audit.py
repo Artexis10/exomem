@@ -832,30 +832,45 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     # above only compares existing rows, so out-of-band *creates* (Obsidian /
     # mobile / filesystem writes that bypass the writer's embed hook) stay
     # vector-invisible until caught here. Mirror the embedder's selection
-    # (_walk_md + _is_embeddable_path + non-empty chunks) so we never flag a
+    # (_index_walk + _is_embeddable_path + non-empty chunks) so we never flag a
     # file the rebuild itself would skip — that would be perpetual drift.
+    #
+    # LOCKSTEP with the index scope (EXOMEM_INDEX_SCOPE): under "vault" the
+    # embedder covers the whole vault, so the never-embedded scan must too —
+    # else out-of-KB creates would never be flagged and never get reconciled.
+    # The "kb" branch is byte-identical to the historical KB-only scan.
     from . import embeddings as embeddings_module
-    kb = vault_root / "Knowledge Base"
-    if kb.is_dir():
-        for md in find_module._walk_md(kb):
-            if not embeddings_module._is_embeddable_path(md):
-                continue
-            try:
-                rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            except (ValueError, OSError):
-                continue
-            if rel in seen:
-                continue
-            page = find_module._CACHE.get(md, vault_root)
-            if page is None or not embeddings_module.chunk_text(page.title, page.body):
-                continue  # empty / no-chunk file — the embedder skips it too
-            findings.append(AuditFinding(
-                category="embedding_drift",
-                severity="info",
-                path=rel,
-                detail="file has no sidecar row — never embedded (out-of-band create).",
-                proposed_fix="Run `reconcile` to embed it incrementally.",
-            ))
+    scope = embeddings_module.index_scope()
+    if scope == "vault":
+        from .vault import walk_vault_md
+        never_walk = walk_vault_md(vault_root)
+    else:
+        kb = vault_root / "Knowledge Base"
+        never_walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    for md in never_walk:
+        if not embeddings_module._is_embeddable_path(md):
+            continue
+        try:
+            rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            continue
+        if rel in seen:
+            continue
+        # Vault scope walks trees the KB scan never reached; honor is_indexable
+        # so an `excluded` out-of-KB subtree isn't flagged as perpetual drift
+        # (the embedder skips it). KB scope keeps its historical behavior.
+        if scope == "vault" and not access.is_indexable(vault_root, rel):
+            continue
+        page = find_module._CACHE.get(md, vault_root)
+        if page is None or not embeddings_module.chunk_text(page.title, page.body):
+            continue  # empty / no-chunk file — the embedder skips it too
+        findings.append(AuditFinding(
+            category="embedding_drift",
+            severity="info",
+            path=rel,
+            detail="file has no sidecar row — never embedded (out-of-band create).",
+            proposed_fix="Run `reconcile` to embed it incrementally.",
+        ))
     return findings
 
 
@@ -1340,6 +1355,39 @@ def _is_active_compiled_rw(vault_root: Path, page: find_module.ParsedPage) -> bo
     return True
 
 
+def _claim_level_enabled() -> bool:
+    """EXOMEM_CLAIM_LEVEL gate for the claim-level polarity enrichment. Isolated
+    so a claims-import problem can't disable the whole sweep."""
+    try:
+        from . import claims
+
+        return claims.claim_level_enabled()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _pair_polarity(vault_root: Path, a: str, b: str) -> dict | None:
+    """Claim-level polarity for one flagged pair, or None (best-effort).
+
+    Pulls each page's stored/live claim (`claims.claim_text_for_page`) and runs
+    `claims.classify_polarity`. Returns `{label, score, method}` or None when a
+    claim is missing / the check fails — the audit finding then degrades to the
+    proximity-only detail. Never raises into the sweep.
+    """
+    try:
+        from . import claims
+
+        claim_a = claims.claim_text_for_page(vault_root, a)
+        claim_b = claims.claim_text_for_page(vault_root, b)
+        if not claim_a or not claim_b:
+            return None
+        res = claims.classify_polarity(claim_a, claim_b)
+        return {"label": res.label, "score": res.score, "method": res.method}
+    except Exception as e:  # noqa: BLE001
+        log.debug("audit pair polarity failed for (%s, %s): %s", a, b, e)
+        return None
+
+
 def _check_corpus_contradictions(
     vault_root: Path,
     pages: list[find_module.ParsedPage],
@@ -1462,12 +1510,33 @@ def _check_corpus_contradictions(
     capped = top_n > 0 and len(scored) > top_n
     shown = scored[:top_n] if capped else scored
 
+    # Sharpen PROXIMITY → POLARITY on the surfaced (already-capped) pairs. Opt-in
+    # via EXOMEM_CLAIM_LEVEL; off → `_pair_polarity` returns None so every finding
+    # is byte-identical to baseline. Bounded by top_n (shown is already capped).
+    claim_level = _claim_level_enabled()
+
     findings: list[AuditFinding] = []
     for same_family, priority, a, b, cos, dormancy in shown:
         family_note = (
             " Same-family adjacency (likely architecture-cluster noise) — demoted."
             if same_family else ""
         )
+        polarity = _pair_polarity(vault_root, a, b) if claim_level else None
+        polarity_note = (
+            f" Claim-level check: likely {polarity['label'].upper()}"
+            f" (via {polarity['method']})."
+            if polarity else ""
+        )
+        meta = {
+            "cosine": round(cos, 4),
+            "priority": round(priority, 4),
+            "dormancy": round(dormancy, 4),
+            "same_family": same_family,
+        }
+        if polarity:
+            meta["polarity"] = polarity["label"]
+            meta["polarity_score"] = polarity["score"]
+            meta["polarity_method"] = polarity["method"]
         findings.append(AuditFinding(
             category="corpus_contradictions",
             severity="info",
@@ -1475,7 +1544,7 @@ def _check_corpus_contradictions(
             detail=(
                 f"Active conclusion overlaps active conclusion {b!r} "
                 f"(cosine {round(cos, 4)}) — close enough to restate, refine, or "
-                f"contradict. Do they conflict?{family_note}"
+                f"contradict. Do they conflict?{family_note}{polarity_note}"
             ),
             proposed_fix=(
                 "Surfaced for REVIEW only — a proximity measurement, not an asserted "
@@ -1484,12 +1553,7 @@ def _check_corpus_contradictions(
                 "Never auto-acted."
             ),
             paths=[a, b],
-            meta={
-                "cosine": round(cos, 4),
-                "priority": round(priority, 4),
-                "dormancy": round(dormancy, 4),
-                "same_family": same_family,
-            },
+            meta=meta,
         ))
 
     if capped:

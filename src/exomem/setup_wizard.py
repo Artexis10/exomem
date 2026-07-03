@@ -282,13 +282,22 @@ def run_setup(
 
 
 def setup_main(argv: list[str]) -> int:
+    # `exomem setup --remote` is a distinct wizard (tunnel + GitHub OAuth + .env
+    # + live probe) with its own flags; route to it before the local parser so
+    # the two flag sets never collide.
+    if "--remote" in argv:
+        from .remote_setup_wizard import remote_setup_main
+
+        return remote_setup_main([a for a in argv if a != "--remote"])
+
     parser = argparse.ArgumentParser(
         prog="exomem setup",
         description=(
             "Guided local setup: scan the vault, init the Knowledge Base, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            "touched; exomem writes only under Knowledge Base/."
+            "touched; exomem writes only under Knowledge Base/. For remote "
+            "connector setup (claude.ai / iOS), use `exomem setup --remote`."
         ),
     )
     parser.add_argument("--vault", help="Vault root (default: prompt, or $EXOMEM_VAULT_PATH).")

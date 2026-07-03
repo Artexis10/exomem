@@ -121,6 +121,12 @@ packages = ["src/exomem", "src/kb_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+markers = [
+    # Heavy tests that load the real bge/reranker models (needs `--extra embeddings`
+    # and the HF model cache). Excluded from the lean matrix; run in the dedicated
+    # `retrieval-eval` CI job via `pytest -m embeddings`.
+    "embeddings: loads live vector models; run only in the retrieval-eval job",
+]
 
 # Blackwell (RTX 50-series, sm_120 / compute capability 12.0) needs CUDA wheels.
 # Default PyPI torch on Windows is STILL CPU-only (verified 2026-05 against uv's

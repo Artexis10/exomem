@@ -108,13 +108,19 @@ def _publish_registry_change(
         freshness.on_files_changed(vault_root, changed=changed, deleted=deleted_paths)
     except Exception:  # noqa: BLE001 — bookkeeping must never break a write
         log.debug("self-write freshness publish failed", exc_info=True)
+    changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
     try:
         from . import vault as vault_module
 
-        changed_rels = [r for r in (_rel_posix(vault_root, p) for p in changed) if r]
         vault_module.on_inbound_files_changed(vault_root, changed_rels, deleted_rels)
     except Exception:  # noqa: BLE001
         log.debug("self-write inbound publish failed", exc_info=True)
+    try:
+        from . import find as find_module
+
+        find_module.on_resolver_files_changed(vault_root, changed_rels, deleted_rels)
+    except Exception:  # noqa: BLE001
+        log.debug("self-write resolver publish failed", exc_info=True)
 
 
 def register_self_write(vault_root: Path, paths: Iterable[Path]) -> None:
@@ -294,16 +300,23 @@ class FileWatcher:
                 freshness.on_files_changed(self._vault_root, changed=ups, deleted=deleted_paths)
             except Exception:  # noqa: BLE001 — a bad batch must never kill the watcher
                 log.exception("file watcher: freshness publish failed")
+            up_rels = [r for r in (self._rel(p) for p in ups) if r]
             try:
                 from . import vault as vault_module
 
                 vault_module.on_inbound_files_changed(
-                    self._vault_root,
-                    [r for r in (self._rel(p) for p in ups) if r],
-                    del_rels,
+                    self._vault_root, up_rels, del_rels
                 )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: inbound publish failed")
+            try:
+                from . import find as find_module
+
+                find_module.on_resolver_files_changed(
+                    self._vault_root, up_rels, del_rels
+                )
+            except Exception:  # noqa: BLE001
+                log.exception("file watcher: resolver publish failed")
 
         # Embedding: Knowledge Base markdown only (the KB sidecar).
         kb_ups = [p for p in ups if self._is_kb(p)]

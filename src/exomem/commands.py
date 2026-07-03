@@ -416,6 +416,7 @@ def op_find(
         )
     timings = find_module.FindTimings() if include_timings else None
     degraded: list[str] = []
+    failed: list[str] = []
     hits = find_module.find(
         vault_root,
         query=query,
@@ -435,6 +436,7 @@ def op_find(
         prefer_used=prefer_used,
         timings=timings,
         degraded_out=degraded,
+        failed_out=failed,
     )
     pack_obj: dict | None = None
     if pack:
@@ -467,7 +469,13 @@ def op_find(
             "components": sorted(set(degraded)),
             "since_s": info.get("since_s", 0.0),
         }
-    if timings_dict is None and warming is None:
+    # Degraded marker: a semantic lane FAILED post-warm (not merely deferred) so
+    # the hits are a silently weaker ranking — vector→BM25, or every-lane-empty→
+    # keyword. Distinct from `warming`: warming is the transient, expected boot
+    # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
+    # a crashing model) and the fallback should be investigated, not waited out.
+    degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
+    if timings_dict is None and warming is None and degraded_marker is None:
         if not pack:
             return hit_dicts
         return {"hits": hit_dicts, "pack": pack_obj}
@@ -478,6 +486,8 @@ def op_find(
         out["timings"] = timings_dict
     if warming is not None:
         out["warming"] = warming
+    if degraded_marker is not None:
+        out["degraded"] = degraded_marker
     return out
 
 

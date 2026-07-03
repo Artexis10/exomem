@@ -777,6 +777,23 @@ class AmbiguousWikilinkError(WikilinkError):
     """A bare-name wikilink matches more than one file."""
 
 
+def _discard_from_list(mapping: dict[str, list[str]], key: str, value: str) -> None:
+    """Remove `value` from `mapping[key]`'s list; drop the key if it empties.
+
+    Shared by the resolver's stem/title patch paths — keeps a multi-match
+    bucket (e.g. two files with the same stem) correct when only one side is
+    edited or deleted.
+    """
+    lst = mapping.get(key)
+    if not lst:
+        return
+    remaining = [v for v in lst if v != value]
+    if remaining:
+        mapping[key] = remaining
+    else:
+        mapping.pop(key, None)
+
+
 class WikilinkResolver:
     """In-memory index of vault paths + frontmatter titles for wikilink resolution.
 
@@ -802,6 +819,10 @@ class WikilinkResolver:
         self.kb_stripped: set[str] = set()
         self.stems: dict[str, list[str]] = {}
         self.titles: dict[str, list[str]] = {}
+        # no_ext rel path -> the (lower-cased) frontmatter title it contributed
+        # to `titles`, so an incremental patch can drop the OLD title edge
+        # before re-adding the new one (a title-only edit still needs fixing).
+        self._title_by_rel: dict[str, str] = {}
         self._build()
 
     def _build(self) -> None:
@@ -811,18 +832,84 @@ class WikilinkResolver:
                 rel = md.resolve().relative_to(vault_resolved).as_posix()
             except ValueError:
                 continue
-            no_ext = rel.removesuffix(".md")
-            self.full_paths.add(no_ext)
-            self.kb_stripped.add(no_ext.removeprefix("Knowledge Base/"))
-            self.stems.setdefault(md.stem, []).append(no_ext)
-            try:
-                text = md.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
-                continue
-            fm, _, _ = parse_frontmatter(text)
-            title = fm.get("title") if isinstance(fm, dict) else None
-            if isinstance(title, str) and title.strip():
-                self.titles.setdefault(title.strip().lower(), []).append(no_ext)
+            self._add_entry(rel.removesuffix(".md"), self._read_title_lower(md))
+
+    # ---- shared add/remove primitives -------------------------------------
+    # The full build AND the incremental patch both go through these, so a
+    # patched resolver's maps are byte-identical to a fresh rebuild's for the
+    # same on-disk state (parity is what keeps the graph lane's recall
+    # unchanged — only the cost model differs).
+
+    def _add_entry(self, no_ext: str, title_lower: str | None) -> None:
+        """Index one file's path/stem (always) and title (when present).
+
+        Mirrors `_build`'s historical per-file body exactly: the path + stem
+        edges are added even for an unreadable file (title read failed), the
+        title edge only when a non-empty frontmatter `title:` was read.
+        """
+        self.full_paths.add(no_ext)
+        self.kb_stripped.add(no_ext.removeprefix("Knowledge Base/"))
+        stem = no_ext.rsplit("/", 1)[-1]
+        self.stems.setdefault(stem, []).append(no_ext)
+        if title_lower:
+            self.titles.setdefault(title_lower, []).append(no_ext)
+            self._title_by_rel[no_ext] = title_lower
+
+    def _remove_entry(self, no_ext: str) -> None:
+        """Drop every edge a file contributed (path, stem, title)."""
+        self.full_paths.discard(no_ext)
+        self.kb_stripped.discard(no_ext.removeprefix("Knowledge Base/"))
+        _discard_from_list(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
+        old_title = self._title_by_rel.pop(no_ext, None)
+        if old_title is not None:
+            _discard_from_list(self.titles, old_title, no_ext)
+
+    @staticmethod
+    def _read_title_lower(abs_path: Path) -> str | None:
+        try:
+            text = abs_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return None
+        fm, _, _ = parse_frontmatter(text)
+        title = fm.get("title") if isinstance(fm, dict) else None
+        if isinstance(title, str) and title.strip():
+            return title.strip().lower()
+        return None
+
+    def on_files_changed(
+        self,
+        vault_root: Path,
+        changed_rels: Iterable[str],
+        deleted_rels: Iterable[str],
+    ) -> None:
+        """Patch this resolver in place for one batch of file changes.
+
+        Mirrors `_InboundIndexData.on_files_changed`: drop every affected
+        path's edges, then re-read + re-add path/stem/title for the changed
+        paths that still exist on disk. The resulting maps equal a full
+        rebuild's for the same on-disk state — so wikilink resolution (and thus
+        the graph lane's 1-hop recall) is byte-for-byte unchanged; only the
+        cost is (patch a handful of files vs. re-read + YAML-parse the whole
+        vault). `*_rels` are vault-relative POSIX, with or without `.md`.
+        """
+        def _norm(rels: Iterable[str]) -> set[str]:
+            out: set[str] = set()
+            for r in rels:
+                s = str(r).replace("\\", "/")
+                if s.lower().endswith(".md"):
+                    out.add(s[:-3])
+            return out
+
+        deleted = _norm(deleted_rels)
+        changed = _norm(changed_rels) - deleted
+        if not (deleted or changed):
+            return
+        for no_ext in deleted | changed:
+            self._remove_entry(no_ext)
+        for no_ext in changed:
+            abs_path = vault_root / (no_ext + ".md")
+            if abs_path.is_file():
+                self._add_entry(no_ext, self._read_title_lower(abs_path))
 
     def add_pending(self, no_ext_path: str, *, title: str | None = None) -> None:
         """Register a file the writer is about to create.
@@ -831,12 +918,9 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self.full_paths.add(no_ext)
-        self.kb_stripped.add(no_ext.removeprefix("Knowledge Base/"))
-        stem = no_ext.rsplit("/", 1)[-1]
-        self.stems.setdefault(stem, []).append(no_ext)
-        if title and title.strip():
-            self.titles.setdefault(title.strip().lower(), []).append(no_ext)
+        self._add_entry(
+            no_ext, title.strip().lower() if title and title.strip() else None
+        )
 
 
 def _strip_wikilink_brackets(s: str) -> str:

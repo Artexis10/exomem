@@ -5,6 +5,14 @@ environment, vault path, optional dependency imports, and environment variables.
 It never initializes a vault, writes `.env`, starts services, downloads models,
 or mutates the embedding sidecar.
 
+One deliberate exception to the "imports only" rule: on the hybrid/media
+profiles the embedding-sidecar check runs a LIVE embed+search probe, which loads
+the embedding model into memory to prove the vector lane actually works (a
+presence check passes on an empty or model-mismatched sidecar). It stays within
+the other guarantees — it loads only an ALREADY-CACHED model (skips the probe
+rather than trigger a download) and the search is read-only (never mutates the
+sidecar).
+
 The one network exception is explicit opt-in: `--probe` (remote profile only)
 performs three read-only GETs to verify the live connector endpoints — local
 /mcp expects 401, OAuth discovery expects 200, and the bare
@@ -176,7 +184,7 @@ def _check_repo_env() -> DoctorCheck:
         "warn",
         "No .env file found in the current directory or repo root.",
         "This is fine for stdio if env vars are passed by the client. For service/remote use, "
-        "copy .env.example to .env and fill it in.",
+        "copy env.example to .env and fill it in (or run `exomem setup --remote`).",
     )
 
 
@@ -309,17 +317,103 @@ def _check_asr_backend() -> DoctorCheck:
 
 
 def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
+    """LIVE embed+search probe of the embedding sidecar.
+
+    A static file-existence check passes on a sidecar that is empty, schema-
+    drifted, or was built by an incompatible model — the exact silent-degradation
+    states in which hybrid search quietly falls back to BM25. So when the sidecar
+    is present AND probing is possible without a model DOWNLOAD (doctor never
+    downloads), this actually embeds a query and searches the index: a real hit
+    proves the whole vector lane works end to end; an exception (fail) or an empty
+    result (warn) surfaces the broken-but-present case a presence check missed.
+    The probe is read-only — it never writes or rebuilds the sidecar.
+    """
     if vault_root is None:
         return None
     sidecar = vault_root / "Knowledge Base" / ".embeddings.sqlite"
-    if sidecar.exists():
-        return _check("embeddings.sidecar", "pass", "Embedding sidecar exists.")
+    if not sidecar.exists():
+        return _check(
+            "embeddings.sidecar",
+            "warn",
+            "Embedding sidecar is missing; hybrid search will degrade until vectors are built.",
+            "After installing embeddings, run `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+        )
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return _check(
+            "embeddings.sidecar",
+            "warn",
+            "Embedding sidecar exists but EXOMEM_DISABLE_EMBEDDINGS is set, so the live "
+            "probe was skipped.",
+            "Unset EXOMEM_DISABLE_EMBEDDINGS to run the embed+search probe against it.",
+        )
+    if not (_module_available("sentence_transformers") and _module_available("torch")):
+        return _check(
+            "embeddings.sidecar",
+            "warn",
+            "Embedding sidecar exists but the vector stack isn't installed, so it can't "
+            "be probed.",
+            "Install it with `uv sync --extra embeddings` to enable hybrid search.",
+        )
+    from . import embeddings
+
+    bge_dir = "models--" + embeddings.MODEL_NAME.replace("/", "--")
+    if not _model_cached(_hf_hub_dir(), bge_dir):
+        # doctor must never trigger a download — skip the live probe rather than
+        # let embed_texts() fetch the model over the network.
+        return _check(
+            "embeddings.sidecar",
+            "warn",
+            f"Embedding sidecar exists but {embeddings.MODEL_NAME} is not in the local HF "
+            "cache, so the live probe was skipped (doctor never downloads).",
+            "Run `exomem warm` to fetch the model, then re-run doctor for the live probe.",
+        )
+    try:
+        index = embeddings.get_embedding_index(vault_root)
+        query_vec = embeddings.embed_texts(["knowledge"], is_query=True)[0]
+        hits = index.search(query_vec, k=1)
+    except Exception as e:  # noqa: BLE001 — diagnostic boundary
+        return _check(
+            "embeddings.sidecar",
+            "fail",
+            f"Embedding sidecar is present but a live embed+search probe failed: {e}",
+            "Rebuild vectors: `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+        )
+    if not hits:
+        return _check(
+            "embeddings.sidecar",
+            "warn",
+            "Embedding sidecar loads and the model embeds, but a probe query returned no "
+            "vectors — the index is empty.",
+            "Build vectors: `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+        )
     return _check(
         "embeddings.sidecar",
-        "warn",
-        "Embedding sidecar is missing; hybrid search will degrade until vectors are built.",
-        "After installing embeddings, run `kb reconcile` or `kb audit_fix --rebuild-embeddings true`.",
+        "pass",
+        f"Embedding sidecar live: embed+search returned {len(hits)} hit(s).",
     )
+
+
+def _hf_hub_dir() -> Path:
+    """The local HuggingFace hub cache directory (honors HF_HUB_CACHE / HF_HOME).
+
+    Directory resolution only — never touches the network.
+    """
+    if os.environ.get("HF_HUB_CACHE"):
+        return Path(os.environ["HF_HUB_CACHE"])
+    if os.environ.get("HF_HOME"):
+        return Path(os.environ["HF_HOME"]) / "hub"
+    return Path.home() / ".cache" / "huggingface" / "hub"
+
+
+def _model_cached(hub: Path, dirname: str) -> bool:
+    """True if a model's snapshot dir exists and is non-empty — a pure directory
+    check, so a caller can gate model-loading work on it WITHOUT risking a
+    download (doctor never fetches)."""
+    snapshots = hub / dirname / "snapshots"
+    try:
+        return snapshots.is_dir() and any(snapshots.iterdir())
+    except OSError:
+        return False
 
 
 def _check_models_cache() -> DoctorCheck:
@@ -327,12 +421,7 @@ def _check_models_cache() -> DoctorCheck:
     inspects directories only — doctor never downloads anything."""
     from . import embeddings
 
-    if os.environ.get("HF_HUB_CACHE"):
-        hub = Path(os.environ["HF_HUB_CACHE"])
-    elif os.environ.get("HF_HOME"):
-        hub = Path(os.environ["HF_HOME"]) / "hub"
-    else:
-        hub = Path.home() / ".cache" / "huggingface" / "hub"
+    hub = _hf_hub_dir()
 
     expected = {
         embeddings.MODEL_NAME: "models--" + embeddings.MODEL_NAME.replace("/", "--"),
@@ -341,14 +430,7 @@ def _check_models_cache() -> DoctorCheck:
         embeddings.CLIP_MODEL_NAME: "models--sentence-transformers--" + embeddings.CLIP_MODEL_NAME,
     }
 
-    def _cached(dirname: str) -> bool:
-        snapshots = hub / dirname / "snapshots"
-        try:
-            return snapshots.is_dir() and any(snapshots.iterdir())
-        except OSError:
-            return False
-
-    missing = [name for name, dirname in expected.items() if not _cached(dirname)]
+    missing = [name for name, dirname in expected.items() if not _model_cached(hub, dirname)]
     if not missing:
         return _check("models.cache", "pass", "Search models are present in the local HF cache.")
     return _check(

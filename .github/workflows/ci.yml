@@ -29,6 +29,31 @@ jobs:
       - name: Sample vault smoke (the exact command users run)
         run: uv run --python ${{ matrix.python-version }} exomem demo --json
 
+  retrieval-eval:
+    name: retrieval eval (golden gate, embeddings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      # Cache the downloaded bge model between runs — the first run downloads
+      # ~0.5 GB, later runs restore it so the gate stays fast. Keyed on the
+      # model rev pinned in eval_retrieval.py so a model bump busts the cache.
+      - name: Cache HuggingFace models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-bge-base-en-v1.5-reranker-base
+      - name: Golden retrieval quality gate (hybrid ranking, live vectors)
+        # Runs the embeddings-marked suite (tests/test_retrieval_golden.py):
+        # builds the sidecar over the fixture KB and asserts hybrid NDCG@10 / MRR
+        # / recall@10 clear their floors. Kept OFF the fast 3-version matrix so
+        # lean CI never pays the torch download. EXOMEM_DISABLE_EMBEDDINGS is
+        # deliberately unset here — the test lifts it and loads the real model.
+        run: uv run --extra embeddings python -m pytest -m embeddings -v
+
   onboarding:
     name: onboarding (wheel path)
     runs-on: ubuntu-latest

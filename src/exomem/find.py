@@ -44,6 +44,43 @@ H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
 
+# --- Silent-degradation counter (process-scoped observability) --------------
+# Every semantic lane has a soft-fallback, and a POST-WARM failure historically
+# dropped the request to a weaker ranking (vector→BM25, or every-lane-empty→
+# keyword) emitting nothing but a log line — so a persistently broken sidecar or
+# a flapping model was invisible in aggregate. These counters make the fallbacks
+# countable: doctor (and any future health endpoint) can read them, and each
+# find carries a per-request `degraded` envelope marker built from `failed_out`
+# below (distinct from the `warming` marker, which means "lane deferred while a
+# model preload is still in flight", not "lane failed"). Thread-safe — find runs
+# on FastMCP/REST worker + file-watcher threads concurrently.
+_DEGRADATION_LOCK = threading.Lock()
+_DEGRADATION_COUNTS: dict[str, int] = {}
+
+
+def _record_degradation(lane: str) -> None:
+    """Increment the process-lifetime silent-degradation counter for `lane`."""
+    with _DEGRADATION_LOCK:
+        _DEGRADATION_COUNTS[lane] = _DEGRADATION_COUNTS.get(lane, 0) + 1
+
+
+def degradation_counts() -> dict[str, int]:
+    """Snapshot of per-lane post-warm silent-degradation counts (process-scoped).
+
+    Keys: "vector" (vector lane failed post-warm → BM25-only ranking), "clip"
+    (CLIP image lane failed → image search skipped), "no_candidates" (every lane
+    produced nothing → keyword fallback). Empty when nothing degraded this
+    process. These count genuine fallbacks, NOT warm-time deferrals.
+    """
+    with _DEGRADATION_LOCK:
+        return dict(_DEGRADATION_COUNTS)
+
+
+def reset_degradation_counts() -> None:
+    """Test hook: zero the degradation counters (process-reset, like clear_cache)."""
+    with _DEGRADATION_LOCK:
+        _DEGRADATION_COUNTS.clear()
+
 
 @dataclass(frozen=True)
 class RankingConfig:
@@ -763,6 +800,7 @@ def find(
     config: RankingConfig | None = None,
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
+    failed_out: list[str] | None = None,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -773,6 +811,13 @@ def find(
     as warming. Empty after the call = full ranking ran. Degradation is
     tracked internally even when the caller passes None, so a lexical-only
     ranking produced mid-warm is never stored in the hot cache.
+
+    `failed_out`: optional caller-owned list, the POST-WARM sibling of
+    `degraded_out`. A lane that FAILED (vector/CLIP `except`, or the
+    all-lanes-empty keyword fallback) — not merely deferred — appends its lane
+    name here and bumps `degradation_counts()`. The caller surfaces this as a
+    `degraded` envelope marker, distinct from `warming`. A failed result is also
+    never cached (a transient sidecar/model failure must not stick).
 
     `scope` controls the walk root:
     - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
@@ -912,6 +957,10 @@ def find(
     # internal callers (suggest_links, evolution, note/add sweeps) must never
     # cache a lexical-only ranking that would outlive the warm.
     degraded = degraded_out if degraded_out is not None else []
+    # Same rationale for POST-WARM lane failures: a BM25-only result produced
+    # because the vector lane threw must not be cached and served after the
+    # sidecar/model recovers. Tracked internally even when the caller passes None.
+    failed = failed_out if failed_out is not None else []
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -946,6 +995,7 @@ def find(
             snapshot=snapshot,
             page_memo=page_memo,
             degraded_out=degraded,
+            failed_out=failed,
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
@@ -1004,8 +1054,10 @@ def find(
 
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
     # A result produced with warm-deferred lanes is lexical-only — caching it
-    # would keep serving the degraded ranking after the warm completes.
-    if cache_key is not None and not degraded:
+    # would keep serving the degraded ranking after the warm completes. A
+    # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
+    # failure may be transient, so don't pin a BM25-only result in the cache.
+    if cache_key is not None and not degraded and not failed:
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             _FIND_CACHE.move_to_end(cache_key)
@@ -1205,8 +1257,16 @@ def _find_semantic(
     snapshot: FreshnessSnapshot | None = None,
     page_memo: dict[str, ParsedPage | None] | None = None,
     degraded_out: list[str] | None = None,
+    failed_out: list[str] | None = None,
 ) -> list[Hit]:
-    """Hybrid (BM25+vector) or vector-only mode."""
+    """Hybrid (BM25+vector) or vector-only mode.
+
+    `failed_out` (distinct from `degraded_out`): a POST-WARM lane FAILURE — the
+    vector or CLIP `except`, or the all-lanes-empty keyword fallback — appends
+    the failed lane name here and bumps the process degradation counter. This is
+    the "the lane broke and we silently served a weaker ranking" signal, versus
+    `degraded_out`'s "the lane was deferred while a model preload is warming".
+    """
     # Lazy imports — keep keyword-mode users out of the torch import path.
     from . import bm25, embeddings, fusion, readiness, scene_frames
 
@@ -1265,14 +1325,23 @@ def _find_semantic(
                 chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
                 vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
         except ImportError as e:
-            log.warning(
-                "vector search unavailable (%s); falling back to BM25-only ranking",
-                e,
+            # The embedding library isn't installed (lean deployment, no
+            # `embeddings` extra). This is a DEPLOYMENT SHAPE, not a runtime
+            # failure — keyword/BM25 is the intended mode here — so it is NOT a
+            # degradation and must not flip op_find's return shape to a
+            # `degraded` envelope. Fall back silently. A genuine runtime failure
+            # (model present but errored at query time) is the `except Exception`
+            # branch below, which DOES record degradation.
+            log.info(
+                "vector search unavailable (%s); keyword/BM25-only ranking", e
             )
             if timings is not None:
                 timings.error("vector", e)
         except Exception as e:
             log.warning("vector search failed: %s; falling back to BM25-only", e)
+            _record_degradation("vector")
+            if failed_out is not None:
+                failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
     vector_ranking = _collapse_frame_children(
@@ -1312,10 +1381,16 @@ def _find_semantic(
                         clip_frame_ts_by_path[sidecar_rel] = frame_ts
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP search unavailable (%s); skipping image search", e)
+            _record_degradation("clip")
+            if failed_out is not None:
+                failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
         except Exception as e:  # noqa: BLE001 — image search is best-effort
             log.warning("CLIP search failed: %s; skipping image search", e)
+            _record_degradation("clip")
+            if failed_out is not None:
+                failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
     elif timings is not None:
@@ -1443,6 +1518,9 @@ def _find_semantic(
     if not rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
         log.info("semantic search produced no candidates; falling back to keyword")
+        _record_degradation("no_candidates")
+        if failed_out is not None:
+            failed_out.append("keyword")
         return _find_keyword(
             vault_root,
             query_norm=query_norm,
@@ -1715,7 +1793,9 @@ def _find_outside_kb(
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
 
-    Recall is BM25-only by design (the vector sidecar is KB-scoped), with a
+    Recall here is BM25-only (the vector lane already searches the WHOLE sidecar,
+    so under `EXOMEM_INDEX_SCOPE=vault` out-of-KB notes surface semantically via
+    that lane — this widener adds lexical out-of-KB recall on top), with a
     RELAXED gate: a candidate survives when at least one query stem is present,
     not the strict all-tokens-present gate the KB path enforces. Terse,
     frontmatter-less files (e.g. a numbers-heavy workout tracker) would
@@ -2264,7 +2344,12 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     here for out-of-request callers.
 
     The build is serialized by a double-checked lock so the background warm
-    thread and a racing request build the resolver once, not twice.
+    thread and a racing request build the resolver once, not twice. Once built,
+    the file watcher keeps it warm across vault edits via
+    `on_resolver_files_changed` (incremental patch), so a single note change no
+    longer forces a full-vault re-read + YAML reparse on the next graph-lane
+    query — the ~14s-per-query cost this used to pay on a large, actively-synced
+    vault (every edit moved the freshness digest and invalidated this cache).
     """
     from .vault import WikilinkResolver
     if freshness is None:
@@ -2279,6 +2364,48 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         resolver = WikilinkResolver(vault_root)
         _RESOLVER_CACHE[vault_root] = (freshness, resolver)
     return resolver
+
+
+def on_resolver_files_changed(
+    vault_root: Path,
+    changed_rels,
+    deleted_rels,
+) -> None:
+    """Patch the process-cached wikilink resolver for one batch of changes.
+
+    This is the resolver's arm of the event-maintained index family (it sits
+    beside `freshness.on_files_changed` and `vault.on_inbound_files_changed`,
+    and the file watcher calls all three for the same batch). Mirrors the
+    inbound index:
+
+    - **Live-only.** If no resolver is cached for this vault, this is a no-op —
+      the next `_get_query_resolver` builds one from current disk state, so
+      skipping here is correct, not just cheap. It only ever mutates an index
+      that already exists.
+    - **Re-syncs the freshness key.** After patching the maps in place it
+      restamps the cache entry with the vault's current freshness triple, so
+      the next graph-lane query sees a cache HIT instead of re-triggering a
+      full-vault rebuild. Without this restamp the incremental patch would be
+      pointless — the moved digest would still force a rebuild.
+
+    Keyed on `vault_root` exactly like `_get_query_resolver`, so the watcher's
+    patch and a request's lookup share one cache entry. No-op when the
+    event-index kill switch is set (reverts to pure digest-keyed
+    rebuild-on-change, matching freshness/inbound rollback).
+    """
+    if not freshness.event_indexes_enabled():
+        return
+    changed_list = list(changed_rels)
+    deleted_list = list(deleted_rels)
+    if not (changed_list or deleted_list):
+        return
+    with _RESOLVER_LOCK:
+        cached = _RESOLVER_CACHE.get(vault_root)
+        if cached is None:
+            return
+        _, resolver = cached
+        resolver.on_files_changed(vault_root, changed_list, deleted_list)
+        _RESOLVER_CACHE[vault_root] = (FreshnessSnapshot(vault_root).vault(), resolver)
 
 
 def _stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
