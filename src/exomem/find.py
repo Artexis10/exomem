@@ -1486,12 +1486,14 @@ def _find_semantic(
                     or _stem_tokens_present(page, query_norm)
                 ):
                     graph_seeds.append(p)
+        _graph_t_seeds = time.perf_counter()
         # One resolver for the whole request, freshness-checked against the
         # request's own vault snapshot (no extra walk).
         resolver = (
             _get_query_resolver(vault_root, freshness=snapshot.vault())
             if graph_seeds else None
         )
+        _graph_t_resolver = time.perf_counter()
         seen_target: set[str] = set()
         for seed_rel in graph_seeds:
             page = _page_of(seed_rel)
@@ -1513,9 +1515,19 @@ def _find_semantic(
         if graph_ranking:
             rankings.append(graph_ranking)
         if timings is not None:
+            # Sub-spans partition the stage so a scaling regression names its
+            # phase (seed gating vs resolver freshness vs link expansion)
+            # instead of hiding inside one opaque number.
+            _graph_t_end = time.perf_counter()
             timings.stages.setdefault("graph", {})["ms"] = round(
-                (time.perf_counter() - _graph_t0) * 1000.0, 3
+                (_graph_t_end - _graph_t0) * 1000.0, 3
             )
+            for name, t0, t1 in (
+                ("graph.seeds", _graph_t0, _graph_t_seeds),
+                ("graph.resolver", _graph_t_seeds, _graph_t_resolver),
+                ("graph.expand", _graph_t_resolver, _graph_t_end),
+            ):
+                timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
 
     # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
     vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}

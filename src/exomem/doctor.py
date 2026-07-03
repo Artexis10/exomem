@@ -231,6 +231,62 @@ def _check_dependency(module: str, extra: str, *, import_name: str | None = None
     )
 
 
+def _check_lexical(vault_root: Path | None) -> DoctorCheck:
+    """Lexical FTS5 backend availability + sidecar health.
+
+    `warn`, never `fail` — every unavailable case soft-falls back to the
+    in-process rank-bm25/substring paths with unchanged results. Runs on the
+    lean profile: the bm25/keyword lanes this serves are lean-install lanes.
+    """
+    from . import lexstore
+
+    if lexstore.backend() == "python":
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            "EXOMEM_LEXICAL_BACKEND=python: the indexed lexical backend is "
+            "switched off; bm25/keyword lanes scan in-process (O(N) per query).",
+            "Unset EXOMEM_LEXICAL_BACKEND (or set it to `auto`) to re-enable.",
+        )
+    if not lexstore.fts5_available():
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            "This Python's SQLite lacks FTS5/trigram; bm25/keyword lanes scan "
+            "in-process (O(N) per query).",
+            "Use a CPython build with the standard bundled SQLite (3.34+).",
+        )
+    if vault_root is None:
+        return _check("dep.fts5-lexical", "pass", "FTS5 + trigram are available.")
+    side = lexstore.lexical_path(vault_root)
+    if not side.exists():
+        return _check(
+            "dep.fts5-lexical",
+            "pass",
+            "FTS5 + trigram are available; the lexical sidecar will be built "
+            "on first search (or by warm-up).",
+        )
+    try:
+        conn = sqlite3.connect(side)
+        try:
+            n = conn.execute("SELECT count(*) FROM pages").fetchone()[0]
+        finally:
+            conn.close()
+    except sqlite3.Error as e:
+        return _check(
+            "dep.fts5-lexical",
+            "warn",
+            f"Lexical sidecar exists but is unreadable ({e}); lanes fall back "
+            "to the in-process paths.",
+            f"Delete {side.name} — it is rebuilt from markdown on next use.",
+        )
+    return _check(
+        "dep.fts5-lexical",
+        "pass",
+        f"FTS5 lexical sidecar healthy ({n} pages indexed).",
+    )
+
+
 def _check_sqlite_vec() -> DoctorCheck:
     """vec0 backend availability: package import + a live loadability probe.
 
@@ -677,6 +733,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
         *_check_schema_files(vault_root),
         _check_repo_env(),
         _check_registry(),
+        _check_lexical(vault_root),
     ]
 
     if profile in ("hybrid", "media"):

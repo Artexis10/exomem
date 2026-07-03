@@ -129,6 +129,35 @@ from the post-fix measurement, not hand-tuned) so linear warm cost cannot
 return unnoticed. The fix lands in this change; only its precise target awaits
 the profile.
 
+**PROFILE VERDICT (2026-07-04, sub-spans over the cached 2k/10k/50k corpora).**
+The identified per-query recompute is NOT in the graph lane's own work — it is
+`FreshnessSnapshot.vault()`'s O(N) stat-walk FALLBACK, billed to the
+`graph.resolver` sub-span because the resolver's freshness check is the first
+consumer of the vault triple when the hot-cache key doesn't compute it
+(`EXOMEM_FIND_CACHE_SIZE=0`, the harness's own setting). It fired on every
+query because `scripts/latency_curve.py` seeded the freshness registry and
+then immediately wiped it (`find_module.clear_cache()` calls
+`freshness.clear()`) — every published pass ran registry-COLD. Measured:
+registry-cold 10k (python backends): graph 1130.7 ms, of which
+`graph.resolver` 1126.7 ms; registry-live: graph 3.8 ms @ 2k → 8.6 ms @ 10k →
+8.9 ms @ 50k (live vector lane, warm) — flat and seed-capped, exactly as the
+code reads. The bm25 lane's historical ~8.2 s @ 50k was the same walk (its
+scope triple) plus true O(N) python scoring; the keyword lane's ~8.7 s was its
+genuinely O(N) scan (per-page stat + substring inside the span) — the lane
+this change's trigram index eliminates.
+
+The event-maintained index the reserved fix called for ALREADY EXISTS — the
+freshness registry — so the fix is to stop defeating it and to pin the shape:
+(a) the harness now seeds the registry AFTER each pass's cache clear (the
+production shape a live watcher maintains; the ordering bug was the "wall");
+(b) the graph stage exposes `graph.seeds` / `graph.resolver` / `graph.expand`
+sub-spans so any scaling regression names its phase; (c) the latency gate
+gains the 2k→8k warm-graph ratio bound (1.5× + a 25 ms noise floor for
+millisecond-scale medians, set from the measured flat curve). Registry-cold
+one-shot processes (CLI `find`) still pay one honest walk per request — the
+freshness contract doing its job, not a regression; long-lived servers ride
+the watcher-maintained registry.
+
 ### What "done" looks like, measured
 
 On the cached corpora: bm25 and keyword lanes drop from ~8 s to low tens of ms

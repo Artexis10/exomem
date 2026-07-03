@@ -70,6 +70,20 @@ _REPEAT = 3  # passes over the query set → ~9 samples per lane for a stable me
 CEIL_GRAPH_MS = 1000.0   # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
 CEIL_TOTAL_MS = 5000.0   # warm ~805ms; catastrophic-blowup backstop, CI-robust
 
+# --- Warm-graph scaling bound (the anti-O(N) gate from the FTS5 change).
+# MEASURED BASIS (2026-07-04, same box as the module baseline, registry LIVE):
+# warm graph median 3.8ms @ 2k → 4.2ms @ 10k → 8.9ms @ 50k — flat, because the
+# per-query cost is seed-capped expansion, not corpus size. The historical
+# 226ms/1.1s/7.8s "graph wall" was a registry-COLD artifact: FreshnessSnapshot's
+# O(N) stat-walk fallback billed to the graph span (the harness seeded the
+# registry and then wiped it via clear_cache). A linear warm cost returning at
+# N_NOTES_LARGE would add the walk back (~800ms at 8k on the reference box) and
+# blow this bound by an order of magnitude; timing jitter on millisecond-scale
+# medians is absorbed by the absolute slack. Re-measure, don't hand-tune.
+N_NOTES_LARGE = 8000     # 4x the base corpus
+CEIL_GRAPH_RATIO = 1.5   # warm graph median at 4x corpus must stay within 1.5x
+GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
+
 
 def _seed_freshness_live(vault: Path) -> None:
     """Seed the event-maintained freshness registry the way the watcher does, so
@@ -85,9 +99,21 @@ def _seed_freshness_live(vault: Path) -> None:
     )
 
 
+def _build_dense_vault(root: Path, n: int) -> Path:
+    """Generate, freshness-seed, and lane-warm an n-note dense vault."""
+    vault = root / f"vault-{n}"
+    gen_dense_vault(vault, n)
+    _seed_freshness_live(vault)
+    # Warm every lane once so the measured passes reflect steady state, not the
+    # first-touch lexical-sidecar / bm25-corpus / resolver build.
+    for q in _QUERIES:
+        find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
+    return vault
+
+
 @pytest.fixture
-def dense_vault_2k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """A warm, freshness-seeded 2000-note dense vault with model lanes OFF.
+def model_free(monkeypatch: pytest.MonkeyPatch):
+    """Model lanes OFF + caches clean — the deterministic lean-CI shape.
 
     The vector/CLIP lanes are forced off (CLIP via env, vector by making the
     embedding getter raise ImportError — find() treats that as a lean-deployment
@@ -106,19 +132,15 @@ def dense_vault_2k(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         raise ImportError("model-free latency gate: vector lane disabled")
 
     monkeypatch.setattr(embeddings_module, "get_embedding_index", _raise)
-
-    vault = tmp_path / "vault"
-    gen_dense_vault(vault, N_NOTES)
-    _seed_freshness_live(vault)
-
-    # Warm every lane once so the measured passes reflect steady state, not the
-    # first-touch bm25-corpus / resolver build.
-    for q in _QUERIES:
-        find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
-
-    yield vault
+    yield
     find_module.clear_cache()
     freshness.clear()
+
+
+@pytest.fixture
+def dense_vault_2k(tmp_path: Path, model_free) -> Path:
+    """A warm, freshness-seeded 2000-note dense vault with model lanes OFF."""
+    return _build_dense_vault(tmp_path, N_NOTES)
 
 
 def _measure(vault: Path) -> tuple[dict[str, float], float]:
@@ -169,4 +191,33 @@ def test_no_lane_exceeds_ceiling_at_scale(dense_vault_2k: Path) -> None:
         f"total find() median {total_ms:.0f}ms >= ceiling {CEIL_TOTAL_MS:.0f}ms at "
         f"{N_NOTES} notes (warm baseline ~805ms). Dominant lane: {worst[0]} "
         f"({worst[1]:.0f}ms). all medians: {rounded}"
+    )
+
+
+def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> None:
+    """Warm graph median at 4x the corpus stays within CEIL_GRAPH_RATIO (plus an
+    absolute ms-scale noise floor) — so a linear-in-N warm cost cannot return
+    silently, whatever its mechanism (the last one was FreshnessSnapshot's
+    O(N) stat-walk fallback billed to the graph span; see the bound's comment).
+
+    A ceiling alone cannot catch this: 8.9ms at 50k passes CEIL_GRAPH_MS with
+    two orders of magnitude to spare, so an O(N) regression would hide under
+    the ceiling for years of corpus growth. The RATIO pins the shape.
+    """
+    small = _build_dense_vault(tmp_path, N_NOTES)
+    small_medians, _ = _measure(small)
+    large = _build_dense_vault(tmp_path, N_NOTES_LARGE)
+    large_medians, _ = _measure(large)
+
+    assert "graph" in small_medians and "graph" in large_medians, (
+        f"graph lane did not run at both sizes: "
+        f"{small_medians.keys()} / {large_medians.keys()}"
+    )
+    g_small, g_large = small_medians["graph"], large_medians["graph"]
+    bound = max(g_small * CEIL_GRAPH_RATIO, g_small + GRAPH_RATIO_SLACK_MS)
+    assert g_large < bound, (
+        f"warm graph median scaled {g_small:.1f}ms @ {N_NOTES} → {g_large:.1f}ms "
+        f"@ {N_NOTES_LARGE} notes (bound {bound:.1f}ms): a linear-in-N per-query "
+        f"cost is back in the graph lane. Sub-spans: "
+        f"{ {k: round(v, 1) for k, v in large_medians.items() if k.startswith('graph')} }"
     )
