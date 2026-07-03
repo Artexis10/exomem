@@ -80,6 +80,47 @@ def clip_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_CLIP")
 
 
+# Which markdown scope the semantic (bge) text index covers.
+INDEX_SCOPES = ("kb", "vault")
+
+
+def index_scope() -> str:
+    """Return the semantic-index scope: `"kb"` (default) or `"vault"`.
+
+    `EXOMEM_INDEX_SCOPE=vault` opts the whole Obsidian vault into the vector
+    index, so a user's existing notes OUTSIDE `Knowledge Base/` become
+    semantically searchable (not keyword-only). Any other/unset value is `"kb"`
+    — the historical behavior, which MUST stay byte-identical. The sidecar path
+    is unchanged either way (`<vault>/Knowledge Base/.embeddings.sqlite`); only
+    the set of files walked into it widens.
+    """
+    raw = (os.environ.get("EXOMEM_INDEX_SCOPE") or "").strip().lower()
+    return "vault" if raw == "vault" else "kb"
+
+
+def _index_walk(vault_root: Path):
+    """Yield the markdown paths the semantic index should cover, per `index_scope`.
+
+    - `"kb"`   → `find._walk_md(<vault>/Knowledge Base)` — byte-identical to the
+      historical KB-only walk (empty when there is no `Knowledge Base/`).
+    - `"vault"`→ `vault.walk_vault_md(<vault>)` — the whole vault.
+
+    Only the WALK differs by scope; every caller still applies the shared
+    `_is_embeddable_path` + `access.is_indexable` + `_chunks_for_page` filtering,
+    so the chunk/embed path is identical for a KB file whichever scope is active.
+    """
+    from . import find as find_module
+
+    if index_scope() == "vault":
+        from .vault import walk_vault_md
+
+        yield from walk_vault_md(vault_root)
+    else:
+        kb = vault_root / "Knowledge Base"
+        if kb.is_dir():
+            yield from find_module._walk_md(kb)
+
+
 # Navigation files that aren't real content — their bodies are
 # auto-generated summaries / activity feeds and would just add noise to
 # vector search ("find recent activity" should surface the activity, not
@@ -1027,13 +1068,42 @@ class EmbeddingIndex:
             for i in top_idx
         ]
 
+    def file_mtimes(self) -> dict[str, float]:
+        """Map each indexed `file_path` → its max stored `file_mtime` (one query).
+
+        The idempotency oracle for `index_incremental`: a file whose on-disk mtime
+        does not exceed this value is already current in the sidecar and is skipped.
+        Empty dict when the sidecar has not been created yet.
+        """
+        if not self.path.exists():
+            return {}
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT file_path, MAX(file_mtime) FROM chunks GROUP BY file_path"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
+
     def rebuild_all(self) -> int:
-        """Wipe + re-embed every compiled .md under Knowledge Base/. Returns row count."""
+        """Wipe + re-embed every compiled .md the index scope covers. Returns row count.
+
+        Scope is `index_scope()` (`EXOMEM_INDEX_SCOPE`): `"kb"` (default) walks
+        `Knowledge Base/` only — byte-identical to the historical behavior;
+        `"vault"` walks the whole vault (`vault.walk_vault_md`) so notes outside
+        `Knowledge Base/` become semantically searchable. Both honor
+        `access.is_indexable` and the shared `_is_embeddable_path` /
+        `_chunks_for_page` filtering, so only the walked file SET differs.
+        """
         from . import access
         from . import find as find_module
 
+        scope = index_scope()
         kb = self.vault_root / "Knowledge Base"
-        if not kb.is_dir():
+        # KB scope with no Knowledge Base/ is a no-op that must NOT wipe (historical
+        # early return). Vault scope always proceeds — it indexes the wider tree.
+        if scope == "kb" and not kb.is_dir():
             return 0
         # Wipe whole table — easier than per-file diff for a one-shot rebuild.
         conn = self._connect()
@@ -1045,7 +1115,7 @@ class EmbeddingIndex:
         self._cache = None
 
         all_chunks: list[tuple[str, list[str], float]] = []
-        for md in find_module._walk_md(kb):
+        for md in _index_walk(self.vault_root):
             if not _is_embeddable_path(md):
                 continue
             page = find_module._CACHE.get(md, self.vault_root)
@@ -1533,3 +1603,112 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
             index.delete_file(rel)
         except Exception as e:
             log.warning("delete_file(%s) failed in sidecar: %s", rel, e)
+
+
+def index_incremental(
+    vault_root: Path,
+    *,
+    batch_size: int = 256,
+    dry_run: bool = False,
+    log_fn=log.info,
+) -> dict:
+    """Incrementally (re)embed the markdown the index scope covers — idempotent, no wipe.
+
+    Unlike `EmbeddingIndex.rebuild_all` (wipe-then-rebuild), this is the reconcile-
+    style path the `exomem index` CLI drives: it SKIPS files whose sidecar rows are
+    already current (stored `file_mtime` >= on-disk mtime, 1s slack for FS jitter),
+    embeds only the new/changed ones in batches of ~`batch_size` chunks (progress
+    logged between batches), and prunes rows for files that are gone or no longer
+    indexable. Re-running after a clean pass embeds nothing.
+
+    Scope is `index_scope()`: `"kb"` (default) or `"vault"`. Honors
+    `access.is_indexable`, `_is_embeddable_path`, and `_chunks_for_page` — the same
+    selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
+    Returns a small stats dict (also the CLI's machine-readable output).
+    """
+    from . import access
+    from . import find as find_module
+
+    scope = index_scope()
+    index = get_embedding_index(vault_root)
+    row_mtimes = index.file_mtimes()
+
+    pending: list[tuple[str, list[str], float]] = []
+    seen_on_disk: set[str] = set()
+    scanned = 0
+    for md in _index_walk(vault_root):
+        if not _is_embeddable_path(md):
+            continue
+        page = find_module._CACHE.get(md, vault_root)
+        if page is None:
+            continue
+        if not access.is_indexable(vault_root, page.rel_path):
+            continue  # excluded tree (_access.yaml) — keep it out of the index
+        chunks = _chunks_for_page(vault_root, page)
+        if not chunks:
+            continue
+        scanned += 1
+        seen_on_disk.add(page.rel_path)
+        prior = row_mtimes.get(page.rel_path)
+        if prior is not None and page.mtime <= prior + 1.0:
+            continue  # sidecar already current for this file
+        pending.append((page.rel_path, chunks, page.mtime))
+
+    # Rows for files no longer walked (deleted or newly excluded) → prune, so the
+    # incremental index stays a faithful reflection of the scope without a full wipe.
+    stale = [rp for rp in row_mtimes if rp not in seen_on_disk]
+
+    stats = {
+        "scope": scope,
+        "scanned": scanned,
+        "files_to_embed": len(pending),
+        "chunks_embedded": 0,
+        "files_pruned": len(stale),
+        "dry_run": dry_run,
+    }
+    log_fn(
+        f"index({scope}): {scanned} indexable file(s); {len(pending)} to (re)embed, "
+        f"{len(stale)} stale row-set(s) to prune (dry_run={dry_run})"
+    )
+    if dry_run:
+        return stats
+
+    for rp in stale:
+        index.delete_file(rp)
+
+    total_files = len(pending)
+    done_files = 0
+
+    def _flush(group: list[tuple[str, list[str], float]]) -> None:
+        nonlocal done_files
+        if not group:
+            return
+        flat: list[str] = []
+        for _rp, chs, _m in group:
+            flat.extend(chs)
+        vectors = embed_texts(flat, is_query=False)
+        offset = 0
+        for rp, chs, m in group:
+            n = len(chs)
+            index.upsert_file(rp, chs, vectors[offset:offset + n], m)
+            offset += n
+            done_files += 1
+        stats["chunks_embedded"] += len(flat)
+        log_fn(
+            f"  …{done_files}/{total_files} file(s) embedded "
+            f"({stats['chunks_embedded']} chunk(s))"
+        )
+
+    batch: list[tuple[str, list[str], float]] = []
+    batch_chunks = 0
+    for item in pending:
+        batch.append(item)
+        batch_chunks += len(item[1])
+        if batch_chunks >= batch_size:
+            _flush(batch)
+            batch = []
+            batch_chunks = 0
+    _flush(batch)
+
+    log_fn(f"index done: {stats}")
+    return stats
