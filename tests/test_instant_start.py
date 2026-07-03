@@ -111,6 +111,22 @@ def test_mark_ready_drains_deferred_items_atomically_exactly_once() -> None:
     assert readiness.defer("embeddings", "c") is False  # ready now; caller proceeds inline
 
 
+def test_drain_deferred_empties_queue_without_marking_ready() -> None:
+    """drain_deferred returns and clears the parked items but, unlike mark_ready,
+    leaves the component NOT ready — the failed-preload drain path, where a model
+    that never loaded must keep deferring/inline-degrading yet its parked writes
+    must not be stranded."""
+    readiness.begin_warm()
+    assert readiness.defer("embeddings", "x") is True
+    assert readiness.defer("embeddings", "y") is True
+
+    drained = readiness.drain_deferred("embeddings")
+
+    assert drained == ["x", "y"]
+    assert readiness.is_ready("embeddings") is False  # NOT marked ready
+    assert readiness.drain_deferred("embeddings") == []  # queue emptied exactly once
+
+
 def test_warming_info_shape_and_transitions() -> None:
     """None outside a warm; {"components": [unready...], "since_s": >=0}
     while warming, shrinking as components land; None again after finish."""
@@ -302,6 +318,43 @@ def test_warm_all_drains_deferred_write_embeds_after_embeddings_ready(
     warmup.warm_all(tmp_path)
 
     assert drained_calls == [(tmp_path, list(some_paths))]
+
+
+def test_warm_all_drains_deferred_write_embeds_even_when_bge_preload_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A FAILED bge preload must STILL drain the writes parked during the warm.
+
+    Regression: the drain used to be nested inside the preload-success branch, so
+    a failed preload stranded every deferred write forever — mark_ready (the only
+    drainer) never ran. The fix drains via readiness.drain_deferred() on failure,
+    WITHOUT marking the component ready: request paths keep their inline
+    lazy-load + soft-degrade fallback, but the parked writes are replayed."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+
+    def _boom() -> None:
+        raise RuntimeError("network unreachable")
+
+    monkeypatch.setattr(embeddings, "get_model", _boom)
+    monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
+    drained_calls: list[tuple] = []
+    monkeypatch.setattr(
+        embeddings, "upsert_after_write",
+        lambda vr, paths: drained_calls.append((vr, list(paths))),
+    )
+
+    readiness.begin_warm()  # so the manual defer() below actually records
+    some_paths = (tmp_path / "a.md", tmp_path / "b.md")
+    assert readiness.defer("embeddings", (tmp_path, some_paths)) is True
+
+    warmup.warm_all(tmp_path)
+
+    # Parked batch replayed despite the preload failure...
+    assert drained_calls == [(tmp_path, list(some_paths))]
+    # ...and embeddings stays NOT ready (failed preload → inline lazy-load fallback).
+    assert readiness.is_ready("embeddings") is False
 
 
 def test_warm_all_runs_a_throwaway_encode_after_each_preload(
