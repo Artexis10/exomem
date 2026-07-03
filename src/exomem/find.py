@@ -44,6 +44,43 @@ H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
 
+# --- Silent-degradation counter (process-scoped observability) --------------
+# Every semantic lane has a soft-fallback, and a POST-WARM failure historically
+# dropped the request to a weaker ranking (vector→BM25, or every-lane-empty→
+# keyword) emitting nothing but a log line — so a persistently broken sidecar or
+# a flapping model was invisible in aggregate. These counters make the fallbacks
+# countable: doctor (and any future health endpoint) can read them, and each
+# find carries a per-request `degraded` envelope marker built from `failed_out`
+# below (distinct from the `warming` marker, which means "lane deferred while a
+# model preload is still in flight", not "lane failed"). Thread-safe — find runs
+# on FastMCP/REST worker + file-watcher threads concurrently.
+_DEGRADATION_LOCK = threading.Lock()
+_DEGRADATION_COUNTS: dict[str, int] = {}
+
+
+def _record_degradation(lane: str) -> None:
+    """Increment the process-lifetime silent-degradation counter for `lane`."""
+    with _DEGRADATION_LOCK:
+        _DEGRADATION_COUNTS[lane] = _DEGRADATION_COUNTS.get(lane, 0) + 1
+
+
+def degradation_counts() -> dict[str, int]:
+    """Snapshot of per-lane post-warm silent-degradation counts (process-scoped).
+
+    Keys: "vector" (vector lane failed post-warm → BM25-only ranking), "clip"
+    (CLIP image lane failed → image search skipped), "no_candidates" (every lane
+    produced nothing → keyword fallback). Empty when nothing degraded this
+    process. These count genuine fallbacks, NOT warm-time deferrals.
+    """
+    with _DEGRADATION_LOCK:
+        return dict(_DEGRADATION_COUNTS)
+
+
+def reset_degradation_counts() -> None:
+    """Test hook: zero the degradation counters (process-reset, like clear_cache)."""
+    with _DEGRADATION_LOCK:
+        _DEGRADATION_COUNTS.clear()
+
 
 @dataclass(frozen=True)
 class RankingConfig:
@@ -763,6 +800,7 @@ def find(
     config: RankingConfig | None = None,
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
+    failed_out: list[str] | None = None,
 ) -> list[Hit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -773,6 +811,13 @@ def find(
     as warming. Empty after the call = full ranking ran. Degradation is
     tracked internally even when the caller passes None, so a lexical-only
     ranking produced mid-warm is never stored in the hot cache.
+
+    `failed_out`: optional caller-owned list, the POST-WARM sibling of
+    `degraded_out`. A lane that FAILED (vector/CLIP `except`, or the
+    all-lanes-empty keyword fallback) — not merely deferred — appends its lane
+    name here and bumps `degradation_counts()`. The caller surfaces this as a
+    `degraded` envelope marker, distinct from `warming`. A failed result is also
+    never cached (a transient sidecar/model failure must not stick).
 
     `scope` controls the walk root:
     - "kb" (default): only `Knowledge Base/`. Compiled material + sources.
@@ -912,6 +957,10 @@ def find(
     # internal callers (suggest_links, evolution, note/add sweeps) must never
     # cache a lexical-only ranking that would outlive the warm.
     degraded = degraded_out if degraded_out is not None else []
+    # Same rationale for POST-WARM lane failures: a BM25-only result produced
+    # because the vector lane threw must not be cached and served after the
+    # sidecar/model recovers. Tracked internally even when the caller passes None.
+    failed = failed_out if failed_out is not None else []
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -946,6 +995,7 @@ def find(
             snapshot=snapshot,
             page_memo=page_memo,
             degraded_out=degraded,
+            failed_out=failed,
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
@@ -1004,8 +1054,10 @@ def find(
 
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
     # A result produced with warm-deferred lanes is lexical-only — caching it
-    # would keep serving the degraded ranking after the warm completes.
-    if cache_key is not None and not degraded:
+    # would keep serving the degraded ranking after the warm completes. A
+    # post-warm lane FAILURE (`failed`) is skipped for the same reason: the
+    # failure may be transient, so don't pin a BM25-only result in the cache.
+    if cache_key is not None and not degraded and not failed:
         with _FIND_CACHE_LOCK:
             _FIND_CACHE[cache_key] = copy.deepcopy(hits)
             _FIND_CACHE.move_to_end(cache_key)
@@ -1205,8 +1257,16 @@ def _find_semantic(
     snapshot: FreshnessSnapshot | None = None,
     page_memo: dict[str, ParsedPage | None] | None = None,
     degraded_out: list[str] | None = None,
+    failed_out: list[str] | None = None,
 ) -> list[Hit]:
-    """Hybrid (BM25+vector) or vector-only mode."""
+    """Hybrid (BM25+vector) or vector-only mode.
+
+    `failed_out` (distinct from `degraded_out`): a POST-WARM lane FAILURE — the
+    vector or CLIP `except`, or the all-lanes-empty keyword fallback — appends
+    the failed lane name here and bumps the process degradation counter. This is
+    the "the lane broke and we silently served a weaker ranking" signal, versus
+    `degraded_out`'s "the lane was deferred while a model preload is warming".
+    """
     # Lazy imports — keep keyword-mode users out of the torch import path.
     from . import bm25, embeddings, fusion, readiness, scene_frames
 
@@ -1269,10 +1329,16 @@ def _find_semantic(
                 "vector search unavailable (%s); falling back to BM25-only ranking",
                 e,
             )
+            _record_degradation("vector")
+            if failed_out is not None:
+                failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
         except Exception as e:
             log.warning("vector search failed: %s; falling back to BM25-only", e)
+            _record_degradation("vector")
+            if failed_out is not None:
+                failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
     vector_ranking = _collapse_frame_children(
@@ -1312,10 +1378,16 @@ def _find_semantic(
                         clip_frame_ts_by_path[sidecar_rel] = frame_ts
         except embeddings.ClipUnavailable as e:
             log.warning("CLIP search unavailable (%s); skipping image search", e)
+            _record_degradation("clip")
+            if failed_out is not None:
+                failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
         except Exception as e:  # noqa: BLE001 — image search is best-effort
             log.warning("CLIP search failed: %s; skipping image search", e)
+            _record_degradation("clip")
+            if failed_out is not None:
+                failed_out.append("clip")
             if timings is not None:
                 timings.error("clip", e)
     elif timings is not None:
@@ -1443,6 +1515,9 @@ def _find_semantic(
     if not rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
         log.info("semantic search produced no candidates; falling back to keyword")
+        _record_degradation("no_candidates")
+        if failed_out is not None:
+            failed_out.append("keyword")
         return _find_keyword(
             vault_root,
             query_norm=query_norm,

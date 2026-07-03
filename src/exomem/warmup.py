@@ -145,16 +145,27 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         from . import embeddings
 
         log.info("preloading embedding model %s", embeddings.MODEL_NAME)
-        if _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"])):
+        bge_ok = _preload("model_bge", embeddings.get_model, lambda m: m.encode(["warm"]))
+        # Drain the parked write-embed work REGARDLESS of preload outcome. This
+        # drain used to be nested inside the success branch, so a failed preload
+        # stranded every write deferred during the warm — mark_ready is the only
+        # drainer, and it never ran. Now: on success mark_ready() sets the event
+        # AND drains atomically; on FAILURE the component must stay not-ready (so
+        # request paths keep their inline lazy-load + soft-degrade fallback for the
+        # rest of the warm), but drain_deferred() still empties the queue so those
+        # writes are replayed instead of lost.
+        if bge_ok:
             log.info("embedding model ready")
             drained = readiness.mark_ready("embeddings")
-            for item_vault, paths in drained:
-                try:
-                    embeddings.upsert_after_write(item_vault, list(paths))
-                except Exception:  # noqa: BLE001 — drain is best-effort
-                    log.warning("deferred embed drain failed", exc_info=True)
-            if drained:
-                log.info("drained %d deferred write-embed batch(es)", len(drained))
+        else:
+            drained = readiness.drain_deferred("embeddings")
+        for item_vault, paths in drained:
+            try:
+                embeddings.upsert_after_write(item_vault, list(paths))
+            except Exception:  # noqa: BLE001 — drain is best-effort
+                log.warning("deferred embed drain failed", exc_info=True)
+        if drained:
+            log.info("drained %d deferred write-embed batch(es)", len(drained))
 
         log.info("preloading reranker %s", embeddings.RERANKER_NAME)
         if _preload("model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])):

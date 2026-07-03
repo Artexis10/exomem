@@ -98,3 +98,104 @@ def test_doctor_unknown_profile_exits_2(capsys) -> None:
 
     assert code == 2
     assert "invalid choice" in err
+
+
+# ---------------------------------------------------------------------------
+# _check_embedding_sidecar — LIVE embed+search probe (upgraded from a presence
+# check). The guard branches below stay model-free; the real probe is heavy and
+# marked `embeddings`.
+# ---------------------------------------------------------------------------
+
+
+def _sidecar(vault: Path) -> Path:
+    p = vault / "Knowledge Base" / ".embeddings.sqlite"
+    p.touch()
+    return p
+
+
+def test_sidecar_missing_warns(vault: Path) -> None:
+    check = doctor_module._check_embedding_sidecar(vault)
+    assert check is not None
+    assert check.status == "warn"
+    assert "missing" in check.message
+
+
+def test_sidecar_present_but_embeddings_disabled_skips_probe(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sidecar(vault)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")  # conftest default, explicit here
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "warn"
+    assert "EXOMEM_DISABLE_EMBEDDINGS" in check.message
+
+
+def test_sidecar_present_but_stack_missing_skips_probe(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _m: False)
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "warn"
+    assert "vector stack" in check.message
+
+
+def test_sidecar_present_but_model_not_cached_skips_probe(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """doctor never downloads: an uncached model → skip the live probe, not fetch."""
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
+    monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: False)
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "warn"
+    assert "HF cache" in check.message
+
+
+def test_sidecar_present_but_probe_raises_fails(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A present-but-broken sidecar (embed/search raises) → fail, not a false pass."""
+    from exomem import embeddings as embeddings_module
+
+    _sidecar(vault)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _m: True)
+    monkeypatch.setattr(doctor_module, "_model_cached", lambda _hub, _dir: True)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("dimension mismatch")
+
+    monkeypatch.setattr(embeddings_module, "embed_texts", _boom)
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "fail"
+    assert "probe failed" in check.message
+
+
+@pytest.mark.embeddings
+def test_sidecar_live_probe_passes_on_built_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: build real vectors, then the live embed+search probe passes."""
+    from exomem import embeddings as embeddings_module
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    embeddings_module._IMPORT_FAILED = False
+    embeddings_module.clear_embedding_indexes()
+    rows = embeddings_module.get_embedding_index(vault).rebuild_all()
+    assert rows > 0
+
+    check = doctor_module._check_embedding_sidecar(vault)
+
+    assert check.status == "pass", check.message
+    assert "live" in check.message

@@ -74,6 +74,24 @@ def mark_ready(component: str) -> list:
         return drained
 
 
+def drain_deferred(component: str) -> list:
+    """Atomically drain and return `component`'s deferred items WITHOUT marking
+    it ready.
+
+    For the FAILED-preload path: a model whose load raised must stay not-ready
+    (so request paths keep their inline lazy-load + soft-degrade fallback for the
+    rest of the warm), but the write-embed work parked during the warm must not
+    be stranded in the deferred queue forever. This empties the queue so the
+    caller can replay (or discard) it, leaving the readiness event untouched.
+    Shares `_lock` with `defer`/`mark_ready` so a racing `defer` can't be lost.
+    """
+    _check(component)
+    with _lock:
+        drained = _deferred[component]
+        _deferred[component] = []
+        return drained
+
+
 def is_ready(component: str) -> bool:
     _check(component)
     return _events[component].is_set()
