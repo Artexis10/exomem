@@ -45,6 +45,21 @@ Next: connect your own vault with `exomem setup`
 Runs fully local and read-only against a sample vault bundled in the package.
 Add `--keep` to leave that copy on disk afterward and open it in Obsidian.
 
+## Install on Mac (one line)
+
+Not comfortable with a terminal? Paste this into the macOS **Terminal** app —
+it installs `uv`, installs exomem, and walks you through `exomem setup`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Artexis10/exomem/main/scripts/install.sh | sh
+```
+
+Also works on Linux. Safe to run again later — it skips whatever's already
+done. If it can't prompt you interactively (e.g. run from another script), it
+prints the exact command to run next instead of guessing. Prefer to run each
+step yourself? See below or the full manual walkthrough in
+[SETUP-LOCAL.md](SETUP-LOCAL.md).
+
 ## Set it up in 5 minutes
 
 ```bash
