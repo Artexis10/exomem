@@ -1325,13 +1325,16 @@ def _find_semantic(
                 chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
                 vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
         except ImportError as e:
-            log.warning(
-                "vector search unavailable (%s); falling back to BM25-only ranking",
-                e,
+            # The embedding library isn't installed (lean deployment, no
+            # `embeddings` extra). This is a DEPLOYMENT SHAPE, not a runtime
+            # failure — keyword/BM25 is the intended mode here — so it is NOT a
+            # degradation and must not flip op_find's return shape to a
+            # `degraded` envelope. Fall back silently. A genuine runtime failure
+            # (model present but errored at query time) is the `except Exception`
+            # branch below, which DOES record degradation.
+            log.info(
+                "vector search unavailable (%s); keyword/BM25-only ranking", e
             )
-            _record_degradation("vector")
-            if failed_out is not None:
-                failed_out.append("vector")
             if timings is not None:
                 timings.error("vector", e)
         except Exception as e:
