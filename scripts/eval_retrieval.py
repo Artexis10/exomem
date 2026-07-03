@@ -18,9 +18,13 @@ This is a dev/eval tool: it imports exomem directly and needs the bge model
 from __future__ import annotations
 
 import argparse
+import math
 import os
+import statistics
 import sys
+import time
 from dataclasses import replace
+from datetime import date
 from pathlib import Path
 
 import yaml
@@ -33,9 +37,15 @@ if str(SRC) not in sys.path:
 # The eval MUST run with live vectors — undo any inherited test/service disable.
 os.environ.pop("EXOMEM_DISABLE_EMBEDDINGS", None)
 
+from exomem import __version__ as EXOMEM_VERSION  # noqa: E402
 from exomem import eval_metrics as metrics  # noqa: E402
+from exomem import eval_report  # noqa: E402
 from exomem import find as find_module  # noqa: E402
 from exomem.vault import resolve_vault  # noqa: E402
+
+# Model names the harness runs against (the shipped default vector stack).
+EMBEDDING_MODEL = "BAAI/bge-base-en-v1.5"
+RERANKER_MODEL = "BAAI/bge-reranker-base"
 
 DEFAULT_GOLDEN = HERE.parent / "tests" / "golden" / "queries.yaml"
 
@@ -74,16 +84,21 @@ def _evaluate(
     config: find_module.RankingConfig,
     *,
     rerank: bool,
+    mode: str = "hybrid",
     k_max: int = 10,
 ) -> dict:
-    """Run every golden query under `config`; return mean metrics + per-query rows."""
+    """Run every golden query under `config`; return mean metrics + per-query rows.
+
+    `mode` defaults to "hybrid" so every existing caller (sweep, baseline) is
+    byte-identical; the `--report markdown` path passes "keyword"/"hybrid".
+    """
     rows: list[dict] = []
     for g in golden:
         hits = find_module.find(
             vault_root,
             query=g["query"],
             limit=k_max,
-            mode="hybrid",
+            mode=mode,
             # The golden targets are all KB paths, so evaluate KB-only: this skips
             # the scope="kb" auto-widen scan over the ~20-folder wider vault, which
             # dominates eval wall-time per query (the tuner makes hundreds of calls).
@@ -186,13 +201,102 @@ def _sweep(
 
     if markdown:
         print("\n=== markdown (file via note(note_type='pattern', pattern_type='governance')) ===\n")
-        print(f"| config | NDCG@5 | NDCG@10 | MRR | recall@10 |")
-        print(f"|---|---|---|---|---|")
+        print("| config | NDCG@5 | NDCG@10 | MRR | recall@10 |")
+        print("|---|---|---|---|---|")
         for label, res, _cfg, _rr in results:
             print(
                 f"| {label} | {res['ndcg5']:.4f} | {res['ndcg10']:.4f} | "
                 f"{res['mrr']:.4f} | {res['recall10']:.4f} |"
             )
+
+
+# Modes for the published benchmark: (label, find mode, rerank flag). The third
+# is mode="hybrid" with rerank on — reranking is orthogonal to mode, not a mode.
+_REPORT_MODES: tuple[tuple[str, str, bool], ...] = (
+    ("keyword", "keyword", False),
+    ("hybrid", "hybrid", False),
+    ("hybrid+rerank", "hybrid", True),
+)
+
+
+def _percentile(sorted_vals: list[float], pct: float) -> float:
+    """Nearest-rank percentile of an already-sorted list (dependency-free).
+
+    Nearest-rank: the value at ceil(pct/100 * N), 1-based, clamped into range.
+    Cheap and adequate for a p90 over a few dozen latency samples; no interpolation.
+    """
+    if not sorted_vals:
+        return 0.0
+    rank = math.ceil(pct / 100.0 * len(sorted_vals))
+    idx = min(max(rank, 1), len(sorted_vals)) - 1
+    return sorted_vals[idx]
+
+
+def _sample_latencies(
+    vault_root: Path,
+    golden: list[dict],
+    config: find_module.RankingConfig,
+    *,
+    mode: str,
+    rerank: bool,
+    repeat: int,
+    k: int = 10,
+) -> list[float]:
+    """Time every find() call over `repeat` passes of the golden set (ms each).
+
+    Wraps each find() in time.perf_counter() — the same lightweight span pattern
+    find.py uses internally — and returns a flat list of per-call latencies. No
+    FindTimings recorder: the report needs end-to-end latency, not a per-stage
+    breakdown, which a bare perf_counter delta already gives.
+    """
+    latencies: list[float] = []
+    for _ in range(max(repeat, 1)):
+        for g in golden:
+            t0 = time.perf_counter()
+            find_module.find(
+                vault_root, query=g["query"], limit=k, mode=mode,
+                scope="kb-only", rerank=rerank, config=config,
+            )
+            latencies.append((time.perf_counter() - t0) * 1000.0)
+    return latencies
+
+
+def _report_markdown(vault_root: Path, golden: list[dict], *, repeat: int) -> None:
+    """Emit the aggregate-only benchmark report markdown to stdout."""
+    per_mode: dict[str, dict] = {}
+    for label, mode, rerank in _REPORT_MODES:
+        res = _evaluate(
+            vault_root, golden, find_module.DEFAULT_RANKING, rerank=rerank, mode=mode
+        )
+        lat = sorted(_sample_latencies(
+            vault_root, golden, find_module.DEFAULT_RANKING,
+            mode=mode, rerank=rerank, repeat=repeat,
+        ))
+        per_mode[label] = {
+            "ndcg5": res["ndcg5"],
+            "ndcg10": res["ndcg10"],
+            "mrr": res["mrr"],
+            "recall10": res["recall10"],
+            "latency_median_ms": statistics.median(lat) if lat else 0.0,
+            "latency_p90_ms": _percentile(lat, 90),
+        }
+
+    corpus = eval_report.count_corpus_stats(vault_root)
+    meta = {
+        "exomem_version": EXOMEM_VERSION,
+        "embedding_model": EMBEDDING_MODEL,
+        "reranker_model": RERANKER_MODEL,
+        # Fill via EXOMEM_BENCH_HARDWARE at invocation; generic placeholder otherwise.
+        "hardware": os.environ.get(
+            "EXOMEM_BENCH_HARDWARE", "(fill in: CPU / GPU / RAM)"
+        ),
+        # Script-side date so the pure renderer never calls datetime.now().
+        "date": date.today().isoformat(),
+    }
+    print()
+    print(eval_report.render_benchmark_report(
+        corpus=corpus, per_mode=per_mode, golden_n=len(golden), meta=meta
+    ))
 
 
 def main() -> int:
@@ -202,6 +306,15 @@ def main() -> int:
     ap.add_argument("--include-rerank", action="store_true", help="add the rerank axis to --sweep (slow)")
     ap.add_argument("--rerank", action="store_true", help="baseline run with rerank on")
     ap.add_argument("--markdown", action="store_true", help="emit a markdown results table")
+    ap.add_argument(
+        "--report", choices=["markdown"], default=None,
+        help="emit the aggregate-only per-mode benchmark report (keyword/hybrid/"
+             "hybrid+rerank) with latency percentiles and rounded corpus counts",
+    )
+    ap.add_argument(
+        "--repeat", type=int, default=3,
+        help="golden-set passes per mode for latency sampling under --report (default 3)",
+    )
     args = ap.parse_args()
 
     vault_root = resolve_vault()
@@ -212,7 +325,9 @@ def main() -> int:
     print(f"vault={vault_root}")
     print(f"golden set: {len(golden)} queries from {args.golden}")
 
-    if args.sweep:
+    if args.report == "markdown":
+        _report_markdown(vault_root, golden, repeat=args.repeat)
+    elif args.sweep:
         _sweep(vault_root, golden, include_rerank=args.include_rerank, markdown=args.markdown)
     else:
         result = _evaluate(

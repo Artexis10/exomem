@@ -176,6 +176,10 @@ store. exomem works the other way around: agents come to your vault.
 For a deeper point-in-time comparison, see
 [docs/comparison-engraph.md](docs/comparison-engraph.md).
 
+**Measured retrieval quality.** Retrieval is graded by a reproducible golden-set
+eval harness, not asserted — methodology and numbers in
+[docs/benchmarks.md](docs/benchmarks.md).
+
 ## Core tools
 
 exomem exposes typed MCP tools for common knowledge-base work:
