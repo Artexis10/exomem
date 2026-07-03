@@ -236,6 +236,26 @@ pwsh -File scripts/install-service.ps1
 #   Start-Process -Verb RunAs -Wait sc.exe -ArgumentList 'start','exomem'
 ```
 
+### Renaming an existing `kb-mcp` service
+
+Boxes provisioned **before the `kb-mcp` → `exomem` rename** still run the Windows
+service under the old name `kb-mcp`. The code (and `install-service.ps1` /
+`restart.ps1`, which now default to `exomem`) are renamed, but the installed NSSM
+service isn't — it must be re-registered once per box. `restart.ps1` falls back to
+the legacy `kb-mcp` name automatically so it keeps working until you migrate; to
+finish the rename, run these in an **elevated** PowerShell (the old service must be
+removed first or it collides with the new one on port 8765):
+
+```powershell
+sc.exe stop kb-mcp
+nssm remove kb-mcp confirm
+pwsh -File scripts/install-service.ps1   # installs + starts 'exomem', re-grants no-UAC rights
+```
+
+The cloudflared tunnel/funnel targets the **port** (127.0.0.1:8765), not the
+service name, so it keeps working across the rename. Verify with
+`sc.exe query exomem` (RUNNING) and `sc.exe query kb-mcp` (should not exist).
+
 ## 7. Add to claude.ai
 
 1. claude.ai → Settings → Connectors → **Add custom connector**
@@ -424,6 +444,11 @@ Get-Content logs\exomem.log -Tail 6
 If you skipped the grant (or installed from an older version of the script),
 re-run the install script — it's idempotent and will only add the ACE if it's
 missing.
+
+On a box still running the pre-rename `kb-mcp` service, `scripts/restart.ps1`
+auto-falls back to that name; use `sc.exe stop/start kb-mcp` for the manual form,
+and see [Renaming an existing `kb-mcp` service](#renaming-an-existing-kb-mcp-service)
+to migrate it to `exomem`.
 
 For a stuck restart (orphan python processes holding port 8765), force-clean:
 
