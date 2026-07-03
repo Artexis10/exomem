@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/Artexis10/exomem/compare/v0.4.1...v0.5.0) (2026-07-03)
+
+
+### Features
+
+* add-tunnel-hostname.ps1 — alias a second hostname onto a live tunnel ([c27c74e](https://github.com/Artexis10/exomem/commit/c27c74e5d7107f331fca1a6e199963d10729a721))
+* claim-level contradiction hygiene (proximity -&gt; polarity), off by default ([681ed16](https://github.com/Artexis10/exomem/commit/681ed16a7a3d17e3fc072e01b430b6f48ae38b66))
+* event-maintained freshness + inbound index — kill the per-request vault walk ([#96](https://github.com/Artexis10/exomem/issues/96)) ([6dc883c](https://github.com/Artexis10/exomem/commit/6dc883c24040542062258fa6149ad071bc0c5e96))
+* exomem E monogram — brand the MCP icon + serve a domain favicon ([88e11f5](https://github.com/Artexis10/exomem/commit/88e11f5fdb7c99ad50896a8ac590f5eabe10a07a))
+* exomem setup --remote guided remote-connector wizard ([e161b50](https://github.com/Artexis10/exomem/commit/e161b50edba578c7df90c8c64676bc27bdca729c))
+* first-class macOS GPU acceleration — MPS embeddings + mlx-whisper ASR ([#95](https://github.com/Artexis10/exomem/issues/95)) ([f5e69ab](https://github.com/Artexis10/exomem/commit/f5e69ab2c18582baec6b60e9063c014442ed13e3))
+* golden retrieval regression gate + silent-degradation alarm ([55e61fd](https://github.com/Artexis10/exomem/commit/55e61fd99dbd4c7f5b0d9519b33c04cb88314a58))
+* one-line macOS/Linux bootstrap script (scripts/install.sh) ([bd9e2c3](https://github.com/Artexis10/exomem/commit/bd9e2c34fb14d00bc215638ba3a40fd81bef9648))
+* opt-in retrieve-and-inject hook (KB_RETRIEVE_INJECT) ([#99](https://github.com/Artexis10/exomem/issues/99)) ([7dad3ae](https://github.com/Artexis10/exomem/commit/7dad3ae8761f84cd36fa50434c2479a2e33904ac))
+* opt-in whole-vault semantic index (EXOMEM_INDEX_SCOPE) ([8b9e89e](https://github.com/Artexis10/exomem/commit/8b9e89e649ffdc06af212891c5bdfa552a824d68))
+* publish reproducible retrieval benchmark report ([#100](https://github.com/Artexis10/exomem/issues/100)) ([d783a87](https://github.com/Artexis10/exomem/commit/d783a87ae7409601ee7d818b4caa0bc7c9fabdad))
+
+
+### Bug Fixes
+
+* **find:** a missing embeddings extra is a deployment shape, not a degradation ([cd10117](https://github.com/Artexis10/exomem/commit/cd101176ffb851dc6d3605b161aaa46a6f9c7d58))
+* harden backfill --retime — warm bge before diarization, never strip speaker labels ([#97](https://github.com/Artexis10/exomem/issues/97)) ([c4950b8](https://github.com/Artexis10/exomem/commit/c4950b83a968984ed1ae19b96ecd53c50ddd84ef))
+
+
+### Performance
+
+* event-maintain the wikilink resolver so the graph lane stays warm ([20b4a31](https://github.com/Artexis10/exomem/commit/20b4a3122c50652245675419b53a5f37e4367000))
+* **find:** decouple vector-lane latency from sidecar write churn ([#93](https://github.com/Artexis10/exomem/issues/93)) ([bbe9ec6](https://github.com/Artexis10/exomem/commit/bbe9ec68b8568f8e303128b7fd477b8ffe749742))
+* run bge/CLIP in fp16 on Apple Silicon (MPS) ([#104](https://github.com/Artexis10/exomem/issues/104)) ([8552835](https://github.com/Artexis10/exomem/commit/85528357506a952b94527a9358db3a4306116fac))
+* warm an encode at boot so the first query doesn't pay kernel compile ([#101](https://github.com/Artexis10/exomem/issues/101)) ([420e1c4](https://github.com/Artexis10/exomem/commit/420e1c4a74dfb47cf385cd57e6b34dfcb4f4b9a7))
+
 ## [0.4.1](https://github.com/Artexis10/exomem/compare/v0.4.0...v0.4.1) (2026-07-02)
 
 
