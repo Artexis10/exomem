@@ -1,19 +1,28 @@
 # Golden query set for retrieval eval (scripts/eval_retrieval.py).
 #
-# SEED set — hand-authored against the bundled fixture KB (tests/fixtures/) so
-# the baseline number is meaningful and the example runs out of the box. Point
-# the eval at the fixtures with EXOMEM_VAULT_PATH=tests/fixtures, or replace
-# these with queries against your own vault. The set is meant to GROW:
-# scripts/derive_relevance_pairs.py proposes additions mined from real
-# (query -> cited path) usage, which you confirm.
+# Hand-authored against the bundled fixture KB (tests/fixtures/) so the baseline
+# number is meaningful and the example runs out of the box. Point the eval at the
+# fixtures with EXOMEM_VAULT_PATH=tests/fixtures, or replace these with queries
+# against your own vault. The set is meant to GROW: scripts/derive_relevance_pairs.py
+# proposes additions mined from real (query -> cited path) usage, which you confirm.
 #
 # Each entry:
 #   query:         the search string (natural language, not a title echo)
 #   expect_any_of: [vault paths] treated as binary-relevant (grade 1), OR
 #   graded:        {path: grade 0..3} for NDCG grading (3=ideal, 1=marginal)
+#   scope:         optional retrieval scope, default "kb-only". Set "kb" for an
+#                  entry whose target lives OUTSIDE Knowledge Base/, to exercise
+#                  find()'s auto-widen reserve (see the incident-severity entry).
 #
 # Paths are matched leniently: leading "Knowledge Base/" and ".md" optional,
 # case-insensitive (see _canon in eval_retrieval.py).
+#
+# Beyond breadth, several entries each PIN one specific ranking behavior; those
+# are grouped and labelled below so a regression points at the behavior it broke.
+
+# --------------------------------------------------------------------------- #
+# General natural-language recall (one clear target each).
+# --------------------------------------------------------------------------- #
 
 - query: "do single behavioural modes beat basic/advanced toggles for mixed-skill tools"
   expect_any_of:
@@ -47,8 +56,117 @@
   expect_any_of:
     - "Knowledge Base/Sources/Books/2026-05-03-elimination-diet"
 
+- query: "which internal Go packages and CLI subcommands does the alpha engine binary expose"
+  expect_any_of:
+    - "Knowledge Base/Notes/Research/Project Alpha/engine-architecture"
+
+- query: "the ML educator known for the Software 3.0 framing and minimal-dependency engineering"
+  expect_any_of:
+    - "Knowledge Base/Entities/People/Ada Lovelace"
+
+- query: "EGCG hepatotoxicity risk above 800 mg per day from concentrated extracts"
+  expect_any_of:
+    - "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements"
+
+- query: "single-flight request coalescing so only one caller recomputes an expired cache key"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start"
+
+- query: "thundering herd when a hot cache key expires under peak load"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start"
+
+- query: "why reciprocal rank fusion is more robust than normalizing retriever scores"
+  expect_any_of:
+    - "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization"
+
+- query: "who built one of the first compilers and popularized the term debugging"
+  expect_any_of:
+    - "Knowledge Base/Entities/People/Grace Hopper"
+
+- query: "trip a breaker to stop calling a failing downstream service and fail fast"
+  expect_any_of:
+    - "Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures"
+
+- query: "the append-only log a database writes before applying changes for durability"
+  expect_any_of:
+    - "Knowledge Base/Entities/Concepts/Write-Ahead Log"
+
+- query: "tuning HNSW graph degree and ef_search for recall versus query latency"
+  expect_any_of:
+    - "Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited"
+
+- query: "what a kill switch gives you that a rollback deploy does not"
+  expect_any_of:
+    - "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases"
+
+# --------------------------------------------------------------------------- #
+# PIN: compiled-over-source (prefer_compiled). A raw source and the compiled
+# insight distilled from it both answer the query; the compiled note is the ideal
+# hit (grade 3), the source marginal (grade 1). A regression that stops boosting
+# compiled pages lets the source outrank the insight and drops NDCG.
+# --------------------------------------------------------------------------- #
+- query: "how to tune postgres autovacuum to stop table bloat on a write-heavy table"
+  graded:
+    "Knowledge Base/Notes/Insights/autovacuum-thresholds-prevent-table-bloat": 3
+    "Knowledge Base/Sources/Articles/2026-06-02-postgres-autovacuum-tuning": 1
+
+# --------------------------------------------------------------------------- #
+# PIN: supersession demotion (prefer_active). The active pattern is the ideal
+# hit; its superseded predecessor is marginal and must not outrank it. A
+# regression that stops demoting `status: superseded` pages inverts the order.
+# --------------------------------------------------------------------------- #
+- query: "recommended client retry backoff strategy for failed requests under load"
+  graded:
+    "Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff": 3
+    "Knowledge Base/Notes/Patterns/retry-with-fixed-interval": 1
+
+# --------------------------------------------------------------------------- #
+# PIN: graph-hop target. The direct lexical/vector hit is the rollout insight
+# (grade 3). The kill-switch pattern (grade 1) shares no query vocabulary — it
+# surfaces ONLY because the insight wikilinks to it, via the graph lane. If the
+# graph lane regresses, the kill-switch drops out of top-10 and per-query recall
+# falls from 1.0 to 0.5.
+# --------------------------------------------------------------------------- #
+- query: "gradual percentage rollout of new features behind flags"
+  graded:
+    "Knowledge Base/Notes/Insights/percentage-based-feature-flag-rollout": 3
+    "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases": 1
+
+# --------------------------------------------------------------------------- #
+# PIN: temporal recency. Two research notes on the same topic; the "latest"
+# query must surface the newer (updated 2026-06-25) above the older
+# (2026-03-10). A regression in the temporal/recency lane inverts them.
+# --------------------------------------------------------------------------- #
+- query: "latest notes on tuning vector database indexes"
+  graded:
+    "Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning-revisited": 3
+    "Knowledge Base/Notes/Research/Infrastructure/vector-index-tuning": 1
+
+# --------------------------------------------------------------------------- #
+# PIN: exact/quoted lookup. The quoted phrase appears verbatim in exactly one
+# page; the exact-intent path must surface it. Quotes in the query signal exact
+# intent to find()'s classifier.
+# --------------------------------------------------------------------------- #
+- query: '"Idempotency-Key header"'
+  expect_any_of:
+    - "Knowledge Base/Entities/Concepts/Idempotency Key"
+
+# --------------------------------------------------------------------------- #
+# PIN: scope="kb" auto-widen reserve. The answer lives OUTSIDE Knowledge Base/
+# (a curated Reference/ handbook). Under the default kb scope, find() reserves a
+# few result slots for out-of-KB lexical matches; this entry protects that
+# reserve. scope: kb (NOT kb-only) is required for the widen to fire.
+# --------------------------------------------------------------------------- #
+- query: "incident severity level definitions sev1 sev2 sev3"
+  scope: kb
+  expect_any_of:
+    - "Handbooks/incident-severity-levels"
+
+# --------------------------------------------------------------------------- #
 # Graded example: the curriculum research-note is the ideal hit; the production
 # log that applies it is marginally relevant to the same query.
+# --------------------------------------------------------------------------- #
 - query: "the metabolism reels batch curriculum and how it was produced"
   graded:
     "Knowledge Base/Notes/Productions/Reels/2026-05-metabolism-basics": 3

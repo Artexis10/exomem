@@ -57,7 +57,7 @@ def test_note_updates_top_index_notes_count(vault: Path) -> None:
     """Writing a new insight bumps `- Notes (insight): N` in the top index."""
     top = vault / "Knowledge Base" / "index.md"
     before = top.read_text(encoding="utf-8")
-    assert "- Notes (insight): 1" in before
+    assert "- Notes (insight): 4" in before
 
     note_module.note(
         vault,
@@ -67,14 +67,14 @@ def test_note_updates_top_index_notes_count(vault: Path) -> None:
         today=TODAY,
     )
     after = top.read_text(encoding="utf-8")
-    assert "- Notes (insight): 2" in after, after
+    assert "- Notes (insight): 5" in after, after
 
 
 def test_link_updates_top_index_entities_count(vault: Path) -> None:
     """Writing a new person bumps `- Entities (person): N` in the top index."""
     top = vault / "Knowledge Base" / "index.md"
     before = top.read_text(encoding="utf-8")
-    assert "- Entities (person): 1" in before
+    assert "- Entities (person): 2" in before
 
     link_module.link(
         vault,
@@ -84,7 +84,7 @@ def test_link_updates_top_index_entities_count(vault: Path) -> None:
         today=TODAY,
     )
     after = top.read_text(encoding="utf-8")
-    assert "- Entities (person): 2" in after, after
+    assert "- Entities (person): 3" in after, after
 
 
 def test_note_updates_notes_subindex_h3_count(vault: Path) -> None:
@@ -99,7 +99,7 @@ def test_note_updates_notes_subindex_h3_count(vault: Path) -> None:
         today=TODAY,
     )
     text = notes_idx.read_text(encoding="utf-8")
-    assert "### Insights — distilled cross-cutting lessons (2)" in text, text
+    assert "### Insights — distilled cross-cutting lessons (5)" in text, text
 
 
 def test_note_updates_notes_subindex_subfolder_count(vault: Path) -> None:
@@ -116,8 +116,9 @@ def test_note_updates_notes_subindex_subfolder_count(vault: Path) -> None:
     )
     text = notes_idx.read_text(encoding="utf-8")
     assert "- [[Knowledge Base/Notes/Research/Project Alpha/|Project Alpha]] (2) — engine stuff" in text, text
-    # The Research H3 header also bumps to (3).
-    assert "### Research — project-or-domain-scoped synthesis (3)" in text, text
+    # The Research H3 header recounts all research notes from disk (4 fixtures +
+    # this new one = 5).
+    assert "### Research — project-or-domain-scoped synthesis (5)" in text, text
 
 
 def test_link_updates_entities_subindex_bullet(vault: Path) -> None:
@@ -132,7 +133,7 @@ def test_link_updates_entities_subindex_bullet(vault: Path) -> None:
         today=TODAY,
     )
     text = entities_idx.read_text(encoding="utf-8")
-    assert "- [[Knowledge Base/Entities/Concepts/|Concepts]] (2)" in text, text
+    assert "- [[Knowledge Base/Entities/Concepts/|Concepts]] (4)" in text, text
 
 
 def test_subindex_preserves_hand_curated_descriptions(vault: Path) -> None:
@@ -171,20 +172,21 @@ def test_subindex_skip_when_missing(vault: Path) -> None:
 def test_count_entities_helper(vault: Path) -> None:
     """`_count_entities` should mirror `_count_sources`'s shape."""
     counts = indexes._count_entities(vault / "Knowledge Base" / "Entities")
-    # Fixture has 1 person + 1 concept; libraries/decisions folders may not exist.
-    assert counts.get("person", 0) == 1
-    assert counts.get("concept", 0) == 1
+    # Fixture has 2 people + 3 concepts; libraries/decisions folders may not exist.
+    assert counts.get("person", 0) == 2
+    assert counts.get("concept", 0) == 3
 
 
 def test_count_notes_by_subfolder_helper(vault: Path) -> None:
     """Nested counts for Research/Experiments/Productions; flat for others."""
     counts = indexes._count_notes_by_subfolder(vault / "Knowledge Base" / "Notes")
-    # Fixture has Research/Project Alpha (1), Research/Health (1).
+    # Fixture has Research/Project Alpha (1), Research/Health (1), Research/Infrastructure (2).
     assert counts.get("Research", {}).get("Project Alpha") == 1
     assert counts.get("Research", {}).get("Health") == 1
+    assert counts.get("Research", {}).get("Infrastructure") == 2
     # Flat types: Insights, Failures, Patterns — single "" key.
     assert "Insights" in counts
-    assert counts["Insights"].get("") == 1
+    assert counts["Insights"].get("") == 4
 
 
 def test_no_obsolete_counts_warning_on_note(vault: Path) -> None:

@@ -53,6 +53,13 @@ jobs:
         # lean CI never pays the torch download. EXOMEM_DISABLE_EMBEDDINGS is
         # deliberately unset here — the test lifts it and loads the real model.
         run: uv run --extra embeddings python -m pytest -m embeddings -v
+      - name: Per-lane latency ceiling gate (2000-note synthetic vault, model-free)
+        # The anti-"hidden 14s" gate (tests/test_latency_gate.py): generates a
+        # realistic densely-wikilinked 2000-note vault and asserts NO retrieval
+        # lane exceeds its ceiling (graph rebuild → ~1.9s trips it). Model-free,
+        # so it ALSO runs in the lean matrix; pinned here as the benchmark gate's
+        # home next to the golden quality gate.
+        run: uv run python -m pytest tests/test_latency_gate.py -q
 
   onboarding:
     name: onboarding (wheel path)

@@ -113,6 +113,9 @@ def test_non_media_page_never_localizes(vault: Path) -> None:
         "tags: [x]\n---\n\n# Timed looking\n\n[0:05] this note quotes a transcript line\n",
         encoding="utf-8",
     )
-    hits = find(vault, query="quotes a transcript", mode="hybrid")
+    # scope="kb-only": this test is about a KB note's (non-)localization, not the
+    # default scope's auto-widen — which can add an out-of-KB lexical match on a
+    # broad query and is exercised elsewhere. kb-only keeps the assertion focused.
+    hits = find(vault, query="quotes a transcript", mode="hybrid", scope="kb-only")
     assert len(hits) == 1
     assert "transcript_match_at" not in hits[0].as_dict()

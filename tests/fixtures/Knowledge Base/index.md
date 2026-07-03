@@ -25,11 +25,11 @@ Compiled, structured layer of the Obsidian vault. Governed by [[Knowledge Base/_
 
 <!-- Reconciled against disk. -->
 
-- Sources: 3 (articles: 1, books: 1, sessions: 1)
-- Notes (research): 2
-- Notes (insight): 1
-- Notes (failure): 1
-- Notes (pattern): 1
+- Sources: 4 (articles: 2, books: 1, sessions: 1)
+- Notes (research): 4
+- Notes (insight): 4
+- Notes (failure): 2
+- Notes (pattern): 5
 - Notes (production-log): 1
-- Entities (person): 1
-- Entities (concept): 1
+- Entities (person): 2
+- Entities (concept): 3
