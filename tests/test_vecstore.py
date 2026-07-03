@@ -354,6 +354,27 @@ def test_quant_off_never_touches_bin_tables(tmp_path):
         conn.close()
 
 
+def test_knn_k_above_vec0_cap_is_clamped_not_fatal(tmp_path, monkeypatch):
+    """vec0 hard-caps KNN k at 4096 and ERRORS above it. find() legitimately asks
+    for k up to ~4000 (CLIP candidate over-fetch), and binary mode multiplies by 8 —
+    an unclamped k would trip the failure ladder and silently retire the backend.
+    Both modes must clamp and answer."""
+    rng = np.random.default_rng(24)
+    idx, vecs_by_file = _build_text_index(tmp_path, rng, files=3, chunks_per_file=2)
+    query = vecs_by_file["Knowledge Base/Notes/note-001.md"][0]
+
+    hits = idx.search(query, k=5000)  # > 4096: f32 MATCH must clamp
+    assert len(hits) == 6  # every row, still served by vec (no fallback)
+    assert hits[0][0] == "Knowledge Base/Notes/note-001.md"
+    assert not idx._vec_failed
+
+    monkeypatch.setenv("EXOMEM_VEC_QUANT", "binary")
+    quant_idx = EmbeddingIndex(tmp_path)
+    hits = quant_idx.search(query, k=1000)  # 1000*8 > 4096: over-fetch must clamp
+    assert len(hits) == 6
+    assert not quant_idx._vec_failed
+
+
 def test_vec_backend_leaves_matrix_cold(tmp_path):
     """When vec0 serves search, the numpy matrix is never loaded — not holding
     the (N, dim) matrix resident in Python is the backend's memory win."""

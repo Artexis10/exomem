@@ -42,6 +42,13 @@ log = logging.getLogger(__name__)
 # golden gate).
 RESCORE_MULTIPLIER = 8
 
+# vec0 hard-caps KNN k at 4096 and ERRORS above it. find()'s candidate over-fetch
+# legitimately reaches ~4000 (CLIP) and binary mode multiplies by RESCORE_MULTIPLIER,
+# so every MATCH clamps to this — an unclamped k would trip the failure ladder and
+# silently retire the backend for the process (the worst kind of regression: search
+# still "works", just slower). Top-4096 is far beyond anything fusion consumes.
+VEC0_MAX_K = 4096
+
 _LOAD_FAILED = False  # process-global one-time soft-fail (embeddings._IMPORT_FAILED idiom)
 _LOAD_LOCK = threading.Lock()
 
@@ -235,14 +242,14 @@ class SqliteVecStore:
             rows = conn.execute(
                 f"SELECT rowid, distance FROM {self.vec_table} "
                 f"WHERE embedding MATCH ? AND k = ? ORDER BY distance",
-                (blob, k),
+                (blob, min(k, VEC0_MAX_K)),
             ).fetchall()
             return [(rid, 1.0 - float(dist)) for rid, dist in rows]
 
         rows = conn.execute(
             f"SELECT rowid FROM {self.bin_table} "
             f"WHERE embedding MATCH vec_quantize_binary(?) AND k = ? ORDER BY distance",
-            (blob, k * RESCORE_MULTIPLIER),
+            (blob, min(k * RESCORE_MULTIPLIER, VEC0_MAX_K)),
         ).fetchall()
         if not rows:
             return []
