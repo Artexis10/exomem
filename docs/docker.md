@@ -64,24 +64,19 @@ documented in [deployment.md](deployment.md).
    ```bash
    git clone https://github.com/Artexis10/exomem.git
    cd exomem
-   cp .env.example .env
+   cp env.example .env
    ```
 
-2. Fill in `.env`:
+2. Fill in `.env` (`env.example` documents every key, including the
+   compose-only ones below — uncomment the ones you need):
    - The OAuth vars from [deployment.md](deployment.md): `EXOMEM_BASE_URL`,
      `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `EXOMEM_GITHUB_USERNAME`,
      `EXOMEM_JWT_SIGNING_KEY`.
-   - The compose-only keys (not yet in `.env.example` — append them):
-
-     ```bash
-     printf '\nEXOMEM_VAULT_HOST_PATH=/path/to/your/vault\n' >> .env
-     ```
-
-     `EXOMEM_VAULT_HOST_PATH` is the **host** path bind-mounted to `/vault`
+   - `EXOMEM_VAULT_HOST_PATH` is the **host** path bind-mounted to `/vault`
      (`compose.yaml` maps it in; the container always sees `/vault`). Compose
      fails fast with `set in .env` if it is missing.
-   - Whichever tunnel credential you're using, appended the same way:
-     `CLOUDFLARE_TUNNEL_TOKEN`, or `NGROK_AUTHTOKEN` + `NGROK_DOMAIN`.
+   - Whichever tunnel credential you're using: `CLOUDFLARE_TUNNEL_TOKEN`, or
+     `NGROK_AUTHTOKEN` + `NGROK_DOMAIN`.
 
 3. Bring it up with the tunnel profile you have an account for:
 

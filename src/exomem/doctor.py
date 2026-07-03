@@ -176,7 +176,7 @@ def _check_repo_env() -> DoctorCheck:
         "warn",
         "No .env file found in the current directory or repo root.",
         "This is fine for stdio if env vars are passed by the client. For service/remote use, "
-        "copy .env.example to .env and fill it in.",
+        "copy env.example to .env and fill it in (or run `exomem setup --remote`).",
     )
 
 
