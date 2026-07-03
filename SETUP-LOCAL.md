@@ -284,6 +284,21 @@ matching `_COOLDOWN_SEC`), or disable either with `KB_CAPTURE_NUDGE_DISABLE=1` /
 Lower the `MIN_CHARS` values — those scripts pack more meaning per character, so
 the defaults (tuned for English) can under-fire.
 
+**Opt-in: upgrade the read-side reminder to real retrieved content.** By default
+the `UserPromptSubmit` hook only reminds Claude to run `find` — set
+`KB_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
+(keyword mode, no embeddings) for the same gated prompt and appends them to the
+reminder, so relevant prior KB pages are already in context before Claude
+decides whether to search. It tries a short transport ladder and never blocks
+on a slow path: REST first (one `POST /api/find`, ~2s timeout) — only attempted
+when `EXOMEM_REST_API_KEY` is set **in the shell that launches Claude Code**
+(not just the server's service environment — the hook can't read another
+process's env, so export it in the same profile Claude Code inherits from);
+then, only if you also set `KB_RETRIEVE_INJECT_CLI=1`, an `exomem find --json`
+subprocess call (~5s timeout, slower — cold Python start). If neither is
+configured or reachable, it falls straight back to the plain reminder — no
+network call is ever attempted unless `KB_RETRIEVE_INJECT` is on.
+
 (Hooks are Claude Code only — claude.ai web/mobile can't run them, so there the
 skill stays best-effort: nudge it with *"save that to kb"* or *"check the kb."*)
 
