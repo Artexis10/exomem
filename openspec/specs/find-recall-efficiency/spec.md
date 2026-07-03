@@ -124,12 +124,17 @@ The system SHALL compute markdown freshness for a single `find` request at most 
 most one KB markdown stat-walk and at most one vault markdown stat-walk per request, shared by every
 consumer that needs that scope's freshness within the same request (the BM25 index and the wikilink
 resolver). A `scope="kb-only"` request that triggers no vault-scope work MUST NOT perform a
-vault-wide stat-walk.
+vault-wide stat-walk. When the event-maintained freshness registry for a scope is live, the request
+SHALL consult the registry instead of walking — satisfying this requirement's "at most one walk"
+bound with zero walks for that scope — and the freshness triple obtained from the registry MUST be
+identical to the triple a walk would have produced. When the registry is not live, the request
+SHALL fall back to the walk-based computation exactly as before, still bounded to at most one walk
+per scope per request.
 
 #### Scenario: One KB walk and one vault walk per request
 
 - **WHEN** `find` is called with `scope="kb"` and a non-empty query that also triggers auto-widen's
-  vault-scope check
+  vault-scope check, and the event-maintained freshness registry is not live
 - **THEN** the KB markdown tree is stat-walked at most once for that request
 - **AND** the vault markdown tree is stat-walked at most once for that request, shared between
   auto-widen and any other vault-scope freshness check
@@ -139,6 +144,13 @@ vault-wide stat-walk.
 
 - **WHEN** `find` is called with `scope="kb-only"`
 - **THEN** no vault-wide markdown stat-walk occurs for that request
+
+#### Scenario: A live registry answers freshness with no walk and identical results
+
+- **WHEN** `find` is called for a scope whose event-maintained freshness registry is live
+- **THEN** that scope's freshness is obtained from the registry with no filesystem stat-walk
+- **AND** the returned hits are identical to the same request served by a walk-based freshness
+  computation over the same vault state
 
 ### Requirement: Corpus Freshness Keys Detect Deletes, Renames, And Backdated Replacements
 
@@ -292,4 +304,68 @@ the mode is unavailable.
 - **WHEN** the concurrency journaling mode cannot be enabled on a sidecar connection
 - **THEN** the connection falls back to the default journal
 - **AND** the operation still succeeds
+
+### Requirement: Reproducible Benchmark Report
+
+The retrieval eval harness (`scripts/eval_retrieval.py`) SHALL provide a `--report markdown` mode
+that runs the existing golden query set once per retrieval mode — keyword, hybrid, and hybrid with
+reranking — and emits a single markdown artifact containing, per mode, the harness's existing
+aggregate ranking-quality metrics (NDCG@5, NDCG@10, MRR, recall@10) and median/p90 `find()`
+wall-clock latency measured over repeated runs of the golden set. The report generation MUST be
+reproducible: re-running the command against any vault and golden set that follow the documented
+harness contract (a `tests/golden/queries.yaml`-shaped golden set and a resolvable vault) MUST
+produce a report in the same shape, including against the bundled `tests/fixtures` sample vault as
+a deterministic smoke path.
+
+#### Scenario: Report includes per-mode metrics and latency
+
+- **WHEN** `scripts/eval_retrieval.py --report markdown` is run
+- **THEN** the emitted markdown includes one row for each of keyword, hybrid, and hybrid-with-rerank
+- **AND** each row includes NDCG@5, NDCG@10, MRR, and recall@10
+- **AND** each row includes median and p90 `find()` latency measured over the run
+
+#### Scenario: Report is reproducible against the bundled sample vault
+
+- **WHEN** `scripts/eval_retrieval.py --report markdown` is run against the bundled
+  `tests/fixtures` sample vault instead of a private vault
+- **THEN** the harness produces a report in the same shape as against any other vault
+- **AND** no private-vault content is required to produce a smoke-scale report
+
+#### Scenario: Existing sweep and baseline markdown modes are unchanged
+
+- **WHEN** `scripts/eval_retrieval.py` is run with `--sweep` or the existing baseline `--markdown`
+  flag without `--report markdown`
+- **THEN** the output matches the harness's existing behavior before this requirement existed
+
+### Requirement: Aggregate-Only Publication
+
+The markdown report produced by `--report markdown` SHALL contain only aggregate values: per-mode
+mean metrics, per-mode latency percentiles, and rounded corpus counts (files, notes, media). It
+MUST NOT contain per-query rows, golden query text, vault-relative paths, excerpts, or any other
+content that could reveal what a private vault contains. The report-rendering logic MUST accept
+only plain aggregate data as input (no vault path, no query text argument) so this constraint is
+structural rather than a formatting convention.
+
+#### Scenario: No golden query text appears in the report
+
+- **WHEN** `--report markdown` is generated from the golden set in `tests/golden/queries.yaml`
+- **THEN** none of the golden set's query strings appear anywhere in the emitted markdown
+
+#### Scenario: No vault-relative path appears in the report
+
+- **WHEN** `--report markdown` is generated from the golden set in `tests/golden/queries.yaml`
+- **THEN** none of the golden set's `expect_any_of` or `graded` target paths appear anywhere in the
+  emitted markdown
+
+#### Scenario: Corpus stats are rounded counts only
+
+- **WHEN** the report includes corpus statistics
+- **THEN** the statistics are rounded integer counts of files, notes, and media
+- **AND** no exact file name, path, or content excerpt is included
+
+#### Scenario: Report has one row per mode, not one row per query
+
+- **WHEN** the report is rendered for N modes over a golden set of any size
+- **THEN** the report contains exactly N result rows, one per mode
+- **AND** the row count does not scale with the number of golden queries
 
