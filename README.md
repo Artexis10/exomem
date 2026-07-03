@@ -72,8 +72,11 @@ The skill installs under the stable Claude Code name `knowledge-base`; Exomem is
 the server and tool layer behind it. The skill is recommended for Claude Code —
 the server gives Claude the tools, the skill is what makes it use them. Hooks
 are Claude Code-only reliability nudges for long sessions: a read-side reminder
-before answers and a write-side reminder at natural stopping points. Other MCP
-clients can still use the server; put the same knowledge-discipline
+before answers and a write-side reminder at natural stopping points. The
+read-side hook can optionally upgrade that reminder to real retrieved KB
+content (`KB_RETRIEVE_INJECT=1`, opt-in) — see
+[SETUP-LOCAL.md § 7](SETUP-LOCAL.md#7-recommended-make-the-kb-automatic-both-directions).
+Other MCP clients can still use the server; put the same knowledge-discipline
 instructions in their system/project instructions if they do not support
 skills.
 
