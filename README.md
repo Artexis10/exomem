@@ -274,6 +274,7 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
 | `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
 | `EXOMEM_TORCH_DEVICE` | Force the device for all torch models: `cuda`, `mps`, or `cpu` (default: auto-detect CUDA → MPS → CPU). Pin `cpu` to avoid thermal throttling on a fanless Mac. |
+| `EXOMEM_MPS_FP16` | On Apple Silicon, run bge/CLIP in fp16 on the Metal GPU — ~half the memory, faster encodes (default on; set `0` to keep fp32). |
 | `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |
 | `EXOMEM_VIDEO_SCENE_MIN_SECS` | Minimum scene duration in seconds; closer boundaries merge (default 4). |

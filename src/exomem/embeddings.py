@@ -107,7 +107,7 @@ def get_model():
 
         device = accel.select_device()
         log.info("loading embedding model %s on %s", MODEL_NAME, device)
-        _MODEL = SentenceTransformer(MODEL_NAME, device=device)
+        _MODEL = _maybe_half(SentenceTransformer(MODEL_NAME, device=device), device)
     return _MODEL
 
 
@@ -125,6 +125,26 @@ def get_reranker():
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
         _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
     return _RERANKER
+
+
+def _maybe_half(model, device: str):
+    """Run bge/CLIP in fp16 on Apple Silicon (MPS): ~half the memory and faster encodes,
+    and these retrieval models tolerate half precision well. Gated to MPS only — CPU fp16
+    is emulated (slower) and the CUDA path stays fp32 for cross-run/voiceprint parity.
+    Disable with EXOMEM_MPS_FP16=0.
+
+    Storage is unaffected: every vector is upcast to float32 before it hits the sqlite blob
+    (the astype(np.float32) guards in embed_*/upsert_*), so the on-disk format is identical —
+    only the computed precision changes. Existing fp32 vectors differ from new fp16 ones by
+    ~1e-3 (harmless for ranking); `audit_fix(rebuild_embeddings=True)` re-embeds for exact
+    consistency if wanted."""
+    if device != "mps" or os.environ.get("EXOMEM_MPS_FP16", "1") == "0":
+        return model
+    try:
+        return model.half()
+    except Exception:  # noqa: BLE001 — a precision tweak must never break model load
+        log.warning("fp16 (MPS) conversion failed; staying fp32", exc_info=True)
+        return model
 
 
 class ClipUnavailable(Exception):
@@ -162,7 +182,7 @@ def get_clip_model():
 
         device = _clip_device()
         log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
-        _CLIP_MODEL = SentenceTransformer(CLIP_MODEL_NAME, device=device)
+        _CLIP_MODEL = _maybe_half(SentenceTransformer(CLIP_MODEL_NAME, device=device), device)
     return _CLIP_MODEL
 
 
