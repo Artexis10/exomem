@@ -64,27 +64,43 @@ _MEAN_RECALL10_FLOOR = 0.88
 
 
 @pytest.mark.embeddings
-@pytest.mark.parametrize("vec_quant", ["off", "binary"])
+@pytest.mark.parametrize(
+    ("vec_quant", "lexical_backend"),
+    [
+        ("off", "fts5"),     # the shipped default: vec0-f32 + FTS5 lexical lanes
+        ("off", "python"),   # lexical kill switch: yesterday's ranking wholesale
+        ("binary", "fts5"),  # promotion gate for opt-in binary quantization
+    ],
+)
 def test_golden_hybrid_ranking_clears_floors(
-    vault: Path, monkeypatch: pytest.MonkeyPatch, vec_quant: str
+    vault: Path, monkeypatch: pytest.MonkeyPatch, vec_quant: str, lexical_backend: str
 ) -> None:
     """Hybrid ranking over the golden set must clear the measured floors.
 
-    Parametrized over the vector backend's quantization mode: `off` exercises the
-    default configuration (vec0 full-precision when sqlite-vec is installed — exact,
-    so the floors are the same regression gate they always were), and `binary` is the
-    PROMOTION GATE for the opt-in quantized mode — quantized recall must clear the
-    same floors and the same per-query cliff guard before the mode can be recommended.
+    Parametrized over the vector backend's quantization mode AND the lexical
+    backend: `off` exercises vec0 full-precision (exact, so the floors are the
+    same regression gate they always were); `binary` is the PROMOTION GATE for
+    the opt-in quantized mode. `fts5` is the PROMOTION GATE for the FTS5
+    lexical backend — its bm25() scorer differs from BM25Okapi, so it is
+    floors-gated (including the stemming pin), not rank-identical; `python`
+    proves the kill switch still clears the same floors. The gates compose.
 
     `vault` (conftest) copies tests/fixtures → a tmp dir and points
     EXOMEM_VAULT_PATH at it; the repo fixtures are never mutated and the sidecar
     lands in the throwaway copy.
     """
+    from exomem import lexstore
+
     if vec_quant == "binary":
         pytest.importorskip("sqlite_vec")
         monkeypatch.setenv("EXOMEM_VEC_QUANT", "binary")
     else:
         monkeypatch.delenv("EXOMEM_VEC_QUANT", raising=False)
+    if lexical_backend == "fts5" and not lexstore.fts5_available():
+        pytest.skip("this SQLite build lacks FTS5/trigram")
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", lexical_backend)
+    lexstore.reset_memo()
+    lexstore.clear_stores()
     # Live vectors: lift the suite-wide disable (conftest autouse) and any
     # KB_MCP_ alias; leave CLIP off — the golden targets are all text notes.
     for var in ("EXOMEM_DISABLE_EMBEDDINGS", "KB_MCP_DISABLE_EMBEDDINGS"):

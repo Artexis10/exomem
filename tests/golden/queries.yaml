@@ -134,6 +134,19 @@
     "Knowledge Base/Notes/Patterns/kill-switch-for-risky-releases": 1
 
 # --------------------------------------------------------------------------- #
+# PIN: stemming (morphological variant). The query says "cached ... stampedes";
+# the target page says "cache ... stampede" — neither query token appears as a
+# raw substring in the page, so recall reaches it only through the shared
+# Snowball stems (cach / stamped). Guards the tokenization contract across
+# lexical backends: the FTS5 index stores PRE-STEMMED text via the same
+# bm25.tokenize(), so this pin must hold identically under
+# EXOMEM_LEXICAL_BACKEND=fts5 and =python.
+# --------------------------------------------------------------------------- #
+- query: "preventing cached stampedes when a hot key expires"
+  expect_any_of:
+    - "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start"
+
+# --------------------------------------------------------------------------- #
 # PIN: temporal recency. Two research notes on the same topic; the "latest"
 # query must surface the newer (updated 2026-06-25) above the older
 # (2026-03-10). A regression in the temporal/recency lane inverts them.

@@ -12,7 +12,7 @@
       returns the SAME match set as the reference substring scan — including
       mid-word substrings, multi-token all-present semantics, title-vs-body hits,
       and 1-/2-char needles (the trigram floor cases).
-- [ ] 1.4 Add the stemming pin: a query whose target page uses a morphological
+- [x] 1.4 Add the stemming pin: a query whose target page uses a morphological
       variant ("regulation" → "regulator") ranks under the FTS5 backend as it
       does under rank-bm25 (byte-identical pre-stemming makes this hold).
 - [x] 1.5 Add graph-lane sub-span timing tests: the graph stage exposes
@@ -61,13 +61,13 @@
 
 ## 6. Validation
 
-- [ ] 6.1 Lean suite green: `uv run python -m pytest -q` with
+- [x] 6.1 Lean suite green: `uv run python -m pytest -q` with
       `KB_MCP_DISABLE_EMBEDDINGS=1` — the lexical backend runs and is exercised
       on lean installs (no extras involved).
-- [ ] 6.2 Retrieval eval: golden floors + per-query pins hold under
+- [x] 6.2 Retrieval eval: golden floors + per-query pins hold under
       `EXOMEM_LEXICAL_BACKEND=fts5` (and the vec backend's two modes remain
       green — the gates compose).
-- [ ] 6.3 Keyword parity suite exact; `ruff check`; `openspec validate --strict`.
+- [x] 6.3 Keyword parity suite exact; `ruff check`; `openspec validate --strict`.
 - [ ] 6.4 End-to-end at scale: 50k-note cached corpus, bm25/keyword lanes at
       low-tens-of-ms, warm graph within the scaling bound, end-to-end `find()`
       total recorded in docs.
