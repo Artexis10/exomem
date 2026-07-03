@@ -30,7 +30,7 @@ hybrid search with the `ml` tag (`ghcr.io/artexis10/exomem:ml`); the first
 
 **GPU is out of scope for both variants.** `ml` runs CPU-only torch — no CUDA
 runtime is bundled, and none is documented for this image. If you need GPU
-throughput, use the native install instead ([../SETUP-LOCAL.md](../SETUP-LOCAL.md),
+throughput, use the native install instead ([../QUICKSTART.md](../QUICKSTART.md),
 [deployment.md](deployment.md)'s CUDA/GPU notes).
 
 ## Volume contract
@@ -128,7 +128,7 @@ your host's volume ownership.
 ## Windows caveat
 
 If you're on Windows, prefer the native install
-([../SETUP-LOCAL.md](../SETUP-LOCAL.md)) over Docker for day-to-day editing.
+([../QUICKSTART.md](../QUICKSTART.md)) over Docker for day-to-day editing.
 Docker Desktop bind-mounts a `C:\` path through WSL2, and that path does
 **not** propagate `inotify` events — exomem's live file-watcher (which
 re-embeds out-of-band `.md` edits) will silently miss changes made outside the
