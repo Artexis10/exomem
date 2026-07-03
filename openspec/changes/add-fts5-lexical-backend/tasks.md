@@ -55,7 +55,7 @@
       (sync check + one query), soft-fail as ever.
 - [x] 5.2 Doctor: lexical sidecar presence/health probe + FTS5/trigram
       availability check (warn, not fail — the in-process paths exist).
-- [ ] 5.3 Extend `scripts/latency_curve.py` with `--lexical-backend
+- [x] 5.3 Extend `scripts/latency_curve.py` with `--lexical-backend
       python,fts5` passes; re-run 10k/50k (and the cached 100k) tiers; publish
       before/after + the graph-lane fix in `docs/benchmarks.md`.
 
@@ -68,6 +68,6 @@
       `EXOMEM_LEXICAL_BACKEND=fts5` (and the vec backend's two modes remain
       green — the gates compose).
 - [x] 6.3 Keyword parity suite exact; `ruff check`; `openspec validate --strict`.
-- [ ] 6.4 End-to-end at scale: 50k-note cached corpus, bm25/keyword lanes at
+- [x] 6.4 End-to-end at scale: 50k-note cached corpus, bm25/keyword lanes at
       low-tens-of-ms, warm graph within the scaling bound, end-to-end `find()`
       total recorded in docs.
