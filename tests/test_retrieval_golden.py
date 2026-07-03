@@ -64,13 +64,27 @@ _MEAN_RECALL10_FLOOR = 0.88
 
 
 @pytest.mark.embeddings
-def test_golden_hybrid_ranking_clears_floors(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("vec_quant", ["off", "binary"])
+def test_golden_hybrid_ranking_clears_floors(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, vec_quant: str
+) -> None:
     """Hybrid ranking over the golden set must clear the measured floors.
+
+    Parametrized over the vector backend's quantization mode: `off` exercises the
+    default configuration (vec0 full-precision when sqlite-vec is installed — exact,
+    so the floors are the same regression gate they always were), and `binary` is the
+    PROMOTION GATE for the opt-in quantized mode — quantized recall must clear the
+    same floors and the same per-query cliff guard before the mode can be recommended.
 
     `vault` (conftest) copies tests/fixtures → a tmp dir and points
     EXOMEM_VAULT_PATH at it; the repo fixtures are never mutated and the sidecar
     lands in the throwaway copy.
     """
+    if vec_quant == "binary":
+        pytest.importorskip("sqlite_vec")
+        monkeypatch.setenv("EXOMEM_VEC_QUANT", "binary")
+    else:
+        monkeypatch.delenv("EXOMEM_VEC_QUANT", raising=False)
     # Live vectors: lift the suite-wide disable (conftest autouse) and any
     # KB_MCP_ alias; leave CLIP off — the golden targets are all text notes.
     for var in ("EXOMEM_DISABLE_EMBEDDINGS", "KB_MCP_DISABLE_EMBEDDINGS"):

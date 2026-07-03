@@ -26,6 +26,7 @@ import importlib
 import importlib.util
 import os
 import shutil
+import sqlite3
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -228,6 +229,44 @@ def _check_dependency(module: str, extra: str, *, import_name: str | None = None
         f"{module} is not installed.",
         f"Install the requested capability with `uv sync --extra {extra}`.",
     )
+
+
+def _check_sqlite_vec() -> DoctorCheck:
+    """vec0 backend availability: package import + a live loadability probe.
+
+    `warn`, never `fail` — an importable package can still be unloadable when this
+    Python's sqlite3 was compiled without loadable-extension support, and in every
+    unavailable case vector search soft-falls back to the exact in-memory scan.
+    """
+    if not _module_available("sqlite_vec"):
+        return _check(
+            "dep.sqlite-vec",
+            "warn",
+            "sqlite-vec is not installed; vector search uses the in-memory scan.",
+            "Install with `uv sync --extra embeddings` for SQL-native vector KNN "
+            "inside the sidecars.",
+        )
+    try:
+        import sqlite_vec
+
+        conn = sqlite3.connect(":memory:")
+        try:
+            conn.enable_load_extension(True)
+            sqlite_vec.load(conn)
+            conn.enable_load_extension(False)
+            version = conn.execute("SELECT vec_version()").fetchone()[0]
+        finally:
+            conn.close()
+    except (AttributeError, sqlite3.Error) as e:
+        return _check(
+            "dep.sqlite-vec",
+            "warn",
+            f"sqlite-vec is installed but this Python cannot load it ({e}); "
+            "vector search uses the in-memory scan.",
+            "This Python's sqlite3 lacks loadable-extension support; use a CPython "
+            "build with extension loading enabled.",
+        )
+    return _check("dep.sqlite-vec", "pass", f"sqlite-vec loads (vec_version {version}).")
 
 
 def _check_embeddings_disabled() -> DoctorCheck:
@@ -649,6 +688,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_torch_cuda(),
             _check_torch_device(),
             _check_models_cache(),
+            _check_sqlite_vec(),
         ])
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:

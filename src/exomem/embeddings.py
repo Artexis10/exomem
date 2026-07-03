@@ -25,7 +25,7 @@ from pathlib import Path
 
 import numpy as np
 
-from . import accel
+from . import accel, vecstore
 
 log = logging.getLogger(__name__)
 
@@ -876,12 +876,46 @@ def _file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
     return ins, ins
 
 
+def _vec_gate(index, conn: sqlite3.Connection) -> bool:
+    """Shared vec0 policy ladder for EmbeddingIndex/ClipIndex on one connection.
+
+    Duck-typed over the index's vec state (`_vec`, `_vec_failed`, `_vec_ready`,
+    `_vec_quant_synced`): kill switch → extension loadable on this connection →
+    tables created + blob↔vec counts synced (memoized per instance; re-run once
+    more when binary quant turns on later, to synthesize the bin table). Any sync
+    failure retires vec for this instance — the numpy scan serves from then on.
+    """
+    if index._vec_failed or vecstore.backend() == "numpy":
+        return False
+    if not index._vec.try_load(conn):
+        return False
+    quant = vecstore.quant_mode() == "binary"
+    if index._vec_ready is None or (quant and not index._vec_quant_synced):
+        try:
+            index._vec.ensure_synced(conn, quant=quant)
+            index._vec_ready = True
+            if quant:
+                index._vec_quant_synced = True
+        except sqlite3.Error as e:
+            log.warning(
+                "vec sync failed for %s (%s); in-memory scan serves this process",
+                index.path, e,
+            )
+            index._vec_failed = True
+            return False
+    return True
+
+
 class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
     The matrix returned by `all_vectors()` is cached per-process and
     invalidated by the sidecar's own mtime — any writer that ran
     `upsert_file()` advances the mtime, so the next search call reloads.
+    When the vec0 backend is active (`vecstore`), `search()` is served by a
+    SQL-native KNN over shadow tables in the same sidecar instead, and this
+    matrix stays cold — `all_vectors()` remains for audit's all-pairs sweep
+    and the numpy fallback.
     """
 
     def __init__(self, vault_root: Path):
@@ -891,6 +925,11 @@ class EmbeddingIndex:
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
+        # vec0 backend state (see _vec_gate): sync memo + per-instance retirement.
+        self._vec = vecstore.SqliteVecStore("chunks", "vector", VECTOR_DIM, "vec_chunks")
+        self._vec_ready: bool | None = None
+        self._vec_quant_synced = False
+        self._vec_failed = False
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -925,7 +964,11 @@ class EmbeddingIndex:
             )
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    # BEFORE the blob delete — the subquery needs the old rowids.
+                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
                 if chunks:
                     rows = [
@@ -938,6 +981,8 @@ class EmbeddingIndex:
                         "VALUES (?, ?, ?, ?, ?)",
                         rows,
                     )
+                    if vec_on:
+                        self._vec.dual_insert(conn, "file_path = ?", (rel_path,))
         finally:
             conn.close()
         # Patch the shared in-memory matrix in place instead of nulling it, so a
@@ -949,7 +994,10 @@ class EmbeddingIndex:
     def delete_file(self, rel_path: str) -> None:
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
         finally:
             conn.close()
@@ -1051,7 +1099,16 @@ class EmbeddingIndex:
     def search(
         self, query_vec: np.ndarray, k: int
     ) -> list[tuple[str, int, str, float]]:
-        """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`."""
+        """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
+
+        Backend ladder: vec0 KNN in the sidecar when available (full-precision by
+        default — exact, rank-identical to the scan below; binary+rescore when
+        `EXOMEM_VEC_QUANT=binary`), otherwise the in-memory numpy scan. Every vec
+        failure mode falls through to the scan — search never breaks on vec0.
+        """
+        vec_hits = self._vec_search(query_vec, k)
+        if vec_hits is not None:
+            return vec_hits
         metadata, matrix = self.all_vectors()
         if not metadata:
             return []
@@ -1067,6 +1124,51 @@ class EmbeddingIndex:
             (metadata[i][0], metadata[i][1], metadata[i][2], float(scores[i]))
             for i in top_idx
         ]
+
+    def _vec_search(
+        self, query_vec: np.ndarray, k: int
+    ) -> list[tuple[str, int, str, float]] | None:
+        """vec0 KNN, or None when the backend can't serve (the scan takes over).
+
+        Never creates the sidecar file on a read path (a missing sidecar keeps the
+        historical `[]`-via-scan semantics), and never raises: a runtime vec
+        failure logs, retires vec for this instance, and returns None.
+        """
+        if self._vec_failed or vecstore.backend() == "numpy" or vecstore.load_failed():
+            return None
+        if not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+            try:
+                if not _vec_gate(self, conn):
+                    return None
+                quant = vecstore.quant_mode() == "binary"
+                pairs = self._vec.knn(conn, query_vec, k, quant=quant)
+                if not pairs:
+                    return []
+                ids = [rid for rid, _ in pairs]
+                placeholders = ",".join("?" * len(ids))
+                rows = conn.execute(
+                    "SELECT rowid, file_path, chunk_idx, chunk_text FROM chunks "
+                    f"WHERE rowid IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                by_id = {r[0]: r for r in rows}
+                return [
+                    (by_id[rid][1], by_id[rid][2], by_id[rid][3], score)
+                    for rid, score in pairs
+                    if rid in by_id
+                ]
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001 — vec failure must never break search
+            log.warning(
+                "vec search failed for %s (%s); falling back to the in-memory scan",
+                self.path, e,
+            )
+            self._vec_failed = True
+            return None
 
     def file_mtimes(self) -> dict[str, float]:
         """Map each indexed `file_path` → its max stored `file_mtime` (one query).
@@ -1108,7 +1210,10 @@ class EmbeddingIndex:
         # Wipe whole table — easier than per-file diff for a one-shot rebuild.
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    self._vec.wipe(conn)
                 conn.execute("DELETE FROM chunks")
         finally:
             conn.close()
@@ -1155,6 +1260,7 @@ class EmbeddingIndex:
             total += len(chunks)
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
                 conn.execute("DELETE FROM chunks")
                 conn.executemany(
@@ -1163,6 +1269,11 @@ class EmbeddingIndex:
                     "VALUES (?, ?, ?, ?, ?)",
                     insert_rows,
                 )
+                if vec_on:
+                    # One whole-table INSERT..SELECT from the fresh blobs — the
+                    # bulk analog of the per-file dual-write.
+                    self._vec.wipe(conn)
+                    self._vec.repopulate_all(conn)
         finally:
             conn.close()
         with self._lock:
@@ -1184,6 +1295,11 @@ class ClipIndex:
         # (sidecar_mtime, file_paths, frame_ts_list, matrix) — frame_ts is None for images.
         self._cache: tuple[float, list[str], list[float | None], np.ndarray] | None = None
         self._lock = threading.RLock()
+        # vec0 backend state (see _vec_gate) — mirrors EmbeddingIndex.
+        self._vec = vecstore.SqliteVecStore("images", "vector", CLIP_DIM, "vec_images")
+        self._vec_ready: bool | None = None
+        self._vec_quant_synced = False
+        self._vec_failed = False
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1247,7 +1363,14 @@ class ClipIndex:
         DISTINCT in the PK, so INSERT OR REPLACE would duplicate the row."""
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    # The vec delete carries the SAME partial predicate: replace
+                    # only the image (NULL-ts) row, keep the keyframe rows.
+                    self._vec.dual_delete(
+                        conn, "file_path = ? AND frame_ts IS NULL", (rel_path,)
+                    )
                 conn.execute(
                     "DELETE FROM images WHERE file_path = ? AND frame_ts IS NULL",
                     (rel_path,),
@@ -1257,6 +1380,10 @@ class ClipIndex:
                     "VALUES (?, NULL, ?, ?)",
                     (rel_path, vector.astype(np.float32).tobytes(), mtime),
                 )
+                if vec_on:
+                    self._vec.dual_insert(
+                        conn, "file_path = ? AND frame_ts IS NULL", (rel_path,)
+                    )
         finally:
             conn.close()
         # Mirror the partial DELETE: replace only the image (NULL-ts) row, keep any
@@ -1282,7 +1409,10 @@ class ClipIndex:
             return
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
                 conn.executemany(
                     "INSERT INTO images (file_path, frame_ts, vector, file_mtime) "
@@ -1292,6 +1422,8 @@ class ClipIndex:
                         for ts, vec in frames
                     ],
                 )
+                if vec_on:
+                    self._vec.dual_insert(conn, "file_path = ?", (rel_path,))
         finally:
             conn.close()
         # Whole-file DELETE + re-insert → block-replace with the frames, ordered by
@@ -1307,7 +1439,10 @@ class ClipIndex:
     def delete(self, rel_path: str) -> None:
         conn = self._connect()
         try:
+            vec_on = _vec_gate(self, conn)
             with conn:
+                if vec_on:
+                    self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
         finally:
             conn.close()
@@ -1445,11 +1580,56 @@ class ClipIndex:
         matrix = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows], axis=0)
         return paths, frame_ts, matrix
 
+    def _vec_search(
+        self, query_vec: np.ndarray, k: int
+    ) -> list[tuple[str, float | None, float]] | None:
+        """vec0 KNN, or None when the backend can't serve — mirrors
+        `EmbeddingIndex._vec_search` (no sidecar creation on read, never raises)."""
+        if self._vec_failed or vecstore.backend() == "numpy" or vecstore.load_failed():
+            return None
+        if not self.path.exists():
+            return None
+        try:
+            conn = self._connect()
+            try:
+                if not _vec_gate(self, conn):
+                    return None
+                quant = vecstore.quant_mode() == "binary"
+                pairs = self._vec.knn(conn, query_vec, k, quant=quant)
+                if not pairs:
+                    return []
+                ids = [rid for rid, _ in pairs]
+                placeholders = ",".join("?" * len(ids))
+                rows = conn.execute(
+                    "SELECT rowid, file_path, frame_ts FROM images "
+                    f"WHERE rowid IN ({placeholders})",
+                    ids,
+                ).fetchall()
+                by_id = {r[0]: r for r in rows}
+                return [
+                    (by_id[rid][1], by_id[rid][2], score)
+                    for rid, score in pairs
+                    if rid in by_id
+                ]
+            finally:
+                conn.close()
+        except Exception as e:  # noqa: BLE001 — vec failure must never break search
+            log.warning(
+                "vec search failed for %s (%s); falling back to the in-memory scan",
+                self.path, e,
+            )
+            self._vec_failed = True
+            return None
+
     def search(self, query_vec: np.ndarray, k: int) -> list[tuple[str, float | None, float]]:
         """Top-k visual hits: `(file_path, frame_ts, score)` by cosine similarity,
         sorted by score desc. `frame_ts` is None for images, seconds for video frames.
         Returns one row per stored vector — a multi-keyframe video yields several rows;
-        callers dedup to best-per-file as needed."""
+        callers dedup to best-per-file as needed. Served by the vec0 backend when
+        available (same ladder as `EmbeddingIndex.search`)."""
+        vec_hits = self._vec_search(query_vec, k)
+        if vec_hits is not None:
+            return vec_hits
         paths, frame_ts, matrix = self.all_vectors()
         if not paths:
             return []
@@ -1460,6 +1640,25 @@ class ClipIndex:
         top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
         return [(paths[i], frame_ts[i], float(scores[i])) for i in top_idx]
+
+
+def vector_backend_active(vault_root: Path) -> bool:
+    """True when the vec0 backend would serve vector search for this vault now.
+
+    Consults the same ladder `search()` uses (kill switch, load memo, per-instance
+    sync state) without running a query. Warm-up branches on this: prime the vec
+    tables when True, the in-memory matrix when False. Never creates the sidecar.
+    """
+    if vecstore.backend() == "numpy" or vecstore.load_failed():
+        return False
+    idx = get_embedding_index(vault_root)
+    if idx._vec_failed or not idx.path.exists():
+        return False
+    conn = idx._connect()
+    try:
+        return _vec_gate(idx, conn)
+    finally:
+        conn.close()
 
 
 def get_embedding_index(vault_root: Path) -> EmbeddingIndex:

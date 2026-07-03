@@ -30,6 +30,10 @@ embeddings = [
     "sentence-transformers>=2.7",
     "torch>=2.12",
     "pillow>=10.0",  # CLIP image encoding opens images via PIL (sentence-transformers)
+    # SQL-native vector KNN (vec0 virtual tables inside the .embeddings/.clip sidecars).
+    # Pure C extension, plain PyPI wheel. Search soft-falls back to the in-memory numpy
+    # scan when absent or when this Python's sqlite3 can't load extensions.
+    "sqlite-vec>=0.1.6",
 ]
 # Server-side media extraction (transduction, not a brain): ASR for audio/video,
 # OCR for images, text for PDFs, MarkItDown for office/html docs. Optional so a lean box

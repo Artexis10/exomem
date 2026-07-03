@@ -276,12 +276,19 @@ def test_find_vector_lane_reuses_shared_matrix(tmp_path, monkeypatch):
     """End-to-end through the REAL `find()` entry point (deterministic fake
     embedder, no torch): three distinct finds share ONE matrix load, and the
     vector lane genuinely ran — guarding against a silent BM25 fallback that
-    would make the reuse assertion pass for the wrong reason."""
+    would make the reuse assertion pass for the wrong reason.
+
+    Pinned to the in-memory scan (`EXOMEM_VEC_BACKEND=numpy`): the shared-matrix
+    contract this asserts is scoped to that backend — when the vec0 backend
+    serves search the matrix deliberately never loads (asserted in
+    tests/test_vecstore.py), which would make the one-load count read 0 wherever
+    sqlite-vec happens to be installed."""
     from exomem import find as find_module
     from exomem import readiness
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")  # bypass the hot result cache
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "numpy")
     readiness.reset()
 
     vault = _fresh_vault(tmp_path)

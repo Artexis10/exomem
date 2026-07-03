@@ -72,17 +72,36 @@ def warm_caches(vault_root: Path) -> dict[str, float]:
     _step("bm25_vault", lambda: bm25.warm(vault_root, "vault"))
     _step("resolver", lambda: find._get_query_resolver(vault_root))
     if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        # One tiny search warms WHICHEVER backend serves vector search: the vec0
+        # backend (sync check + first KNN faults in the vec tables; the numpy
+        # matrix stays cold — not holding it resident is the backend's point) or
+        # the in-memory scan (search loads the matrix via all_vectors(), the
+        # historical warm). A missing sidecar is a no-op either way.
 
         def _warm_matrix() -> None:
+            import numpy as np
+
             from . import embeddings
 
-            embeddings.get_embedding_index(vault_root).all_vectors()
+            q = np.full(
+                embeddings.VECTOR_DIM,
+                1.0 / (embeddings.VECTOR_DIM ** 0.5),
+                dtype=np.float32,
+            )
+            embeddings.get_embedding_index(vault_root).search(q, k=1)
 
         def _warm_clip() -> None:
+            import numpy as np
+
             from . import embeddings
 
             if embeddings.clip_enabled():
-                embeddings.get_clip_index(vault_root).all_vectors()
+                q = np.full(
+                    embeddings.CLIP_DIM,
+                    1.0 / (embeddings.CLIP_DIM ** 0.5),
+                    dtype=np.float32,
+                )
+                embeddings.get_clip_index(vault_root).search(q, k=1)
 
         _step("embedding_matrix", _warm_matrix)
         _step("clip_matrix", _warm_clip)
