@@ -832,30 +832,45 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     # above only compares existing rows, so out-of-band *creates* (Obsidian /
     # mobile / filesystem writes that bypass the writer's embed hook) stay
     # vector-invisible until caught here. Mirror the embedder's selection
-    # (_walk_md + _is_embeddable_path + non-empty chunks) so we never flag a
+    # (_index_walk + _is_embeddable_path + non-empty chunks) so we never flag a
     # file the rebuild itself would skip — that would be perpetual drift.
+    #
+    # LOCKSTEP with the index scope (EXOMEM_INDEX_SCOPE): under "vault" the
+    # embedder covers the whole vault, so the never-embedded scan must too —
+    # else out-of-KB creates would never be flagged and never get reconciled.
+    # The "kb" branch is byte-identical to the historical KB-only scan.
     from . import embeddings as embeddings_module
-    kb = vault_root / "Knowledge Base"
-    if kb.is_dir():
-        for md in find_module._walk_md(kb):
-            if not embeddings_module._is_embeddable_path(md):
-                continue
-            try:
-                rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
-            except (ValueError, OSError):
-                continue
-            if rel in seen:
-                continue
-            page = find_module._CACHE.get(md, vault_root)
-            if page is None or not embeddings_module.chunk_text(page.title, page.body):
-                continue  # empty / no-chunk file — the embedder skips it too
-            findings.append(AuditFinding(
-                category="embedding_drift",
-                severity="info",
-                path=rel,
-                detail="file has no sidecar row — never embedded (out-of-band create).",
-                proposed_fix="Run `reconcile` to embed it incrementally.",
-            ))
+    scope = embeddings_module.index_scope()
+    if scope == "vault":
+        from .vault import walk_vault_md
+        never_walk = walk_vault_md(vault_root)
+    else:
+        kb = vault_root / "Knowledge Base"
+        never_walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    for md in never_walk:
+        if not embeddings_module._is_embeddable_path(md):
+            continue
+        try:
+            rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
+        except (ValueError, OSError):
+            continue
+        if rel in seen:
+            continue
+        # Vault scope walks trees the KB scan never reached; honor is_indexable
+        # so an `excluded` out-of-KB subtree isn't flagged as perpetual drift
+        # (the embedder skips it). KB scope keeps its historical behavior.
+        if scope == "vault" and not access.is_indexable(vault_root, rel):
+            continue
+        page = find_module._CACHE.get(md, vault_root)
+        if page is None or not embeddings_module.chunk_text(page.title, page.body):
+            continue  # empty / no-chunk file — the embedder skips it too
+        findings.append(AuditFinding(
+            category="embedding_drift",
+            severity="info",
+            path=rel,
+            detail="file has no sidecar row — never embedded (out-of-band create).",
+            proposed_fix="Run `reconcile` to embed it incrementally.",
+        ))
     return findings
 
 

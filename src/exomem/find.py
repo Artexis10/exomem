@@ -1715,7 +1715,9 @@ def _find_outside_kb(
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
 
-    Recall is BM25-only by design (the vector sidecar is KB-scoped), with a
+    Recall here is BM25-only (the vector lane already searches the WHOLE sidecar,
+    so under `EXOMEM_INDEX_SCOPE=vault` out-of-KB notes surface semantically via
+    that lane — this widener adds lexical out-of-KB recall on top), with a
     RELAXED gate: a candidate survives when at least one query stem is present,
     not the strict all-tokens-present gate the KB path enforces. Terse,
     frontmatter-less files (e.g. a numbers-heavy workout tracker) would
