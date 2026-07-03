@@ -165,7 +165,7 @@ def test_add_updates_sources_index_count(
 ) -> None:
     sources_index = vault / "Knowledge Base" / "Sources" / "index.md"
     before = _read(sources_index)
-    assert "Articles]] — captured web/PDF content (1)" in before
+    assert "Articles]] — captured web/PDF content (2)" in before
 
     add_module.add(
         vault,
@@ -177,7 +177,7 @@ def test_add_updates_sources_index_count(
         today=TODAY,
     )
     after = _read(sources_index)
-    assert "Articles]] — captured web/PDF content (2)" in after
+    assert "Articles]] — captured web/PDF content (3)" in after
     assert "2026-05-18 — [[Knowledge Base/Sources/Articles/2026-05-18-new-article]]" in after
 
 
@@ -234,9 +234,9 @@ def test_add_updates_top_index_counts(
         today=TODAY,
     )
     text = _read(vault / "Knowledge Base" / "index.md")
-    # Original was: Sources: 3 (articles: 1, books: 1, sessions: 1)
-    # After adding one session: total 4, sessions 2
-    assert "- Sources: 4" in text
+    # Fixture baseline: Sources: 4 (articles: 2, books: 1, sessions: 1)
+    # After adding one session: total 5, sessions 2
+    assert "- Sources: 5" in text
     assert "sessions: 2" in text
 
 

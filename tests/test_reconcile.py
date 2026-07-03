@@ -26,7 +26,7 @@ def test_reconcile_heals_index_count_drift(vault: Path) -> None:
     """An out-of-band edit that desyncs a count row is detected and restored."""
     top = vault / "Knowledge Base" / "index.md"
     original = top.read_text(encoding="utf-8")
-    drifted = original.replace("- Notes (insight): 1", "- Notes (insight): 9")
+    drifted = original.replace("- Notes (insight): 4", "- Notes (insight): 9")
     assert drifted != original, "fixture index.md changed shape; update the test"
     top.write_text(drifted, encoding="utf-8")
 
@@ -37,7 +37,7 @@ def test_reconcile_heals_index_count_drift(vault: Path) -> None:
     rep = reconcile_module.reconcile(vault)
 
     assert "Knowledge Base/index.md" in rep.indexes_updated, rep.as_dict()
-    assert "- Notes (insight): 1" in top.read_text(encoding="utf-8")
+    assert "- Notes (insight): 4" in top.read_text(encoding="utf-8")
     assert not any(
         f["category"] == "index_drift" for f in rep.remaining_drift
     ), rep.as_dict()

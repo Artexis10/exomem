@@ -16,15 +16,18 @@ lean 3-version matrix collects nothing here.
 
 BASELINE — how the floors were produced (do NOT hand-tune; re-measure):
     Model rev BAAI/bge-base-en-v1.5 (frozen), exomem 0.4.1, measured 2026-07-03
-    on a sidecar-built copy of tests/fixtures (77 chunk vectors) via:
+    on a sidecar-built copy of tests/fixtures (198 chunk vectors) via:
         EXOMEM_VAULT_PATH=<tmp copy of tests/fixtures> \
           uv run --extra embeddings python scripts/eval_retrieval.py --report markdown
     (the copy's sidecar built first with get_embedding_index(vault).rebuild_all()).
-    Measured hybrid, rerank OFF (exactly what this test evaluates):
-        NDCG@5=0.9590  NDCG@10=0.9590  MRR=0.9444  recall@10=1.0000
-        per-query recall@10 minimum = 1.0  (every golden target surfaces top-10)
-        vs keyword-only NDCG@10=0.2222 — the gap this gate protects.
-    Floors sit ~0.10-0.14 below the measured means: a genuine ranking regression
+    Measured hybrid, rerank OFF (exactly what this test evaluates), 26 golden queries:
+        NDCG@5=0.9142  NDCG@10=0.9270  MRR=0.9154  recall@10=0.9615
+        per-query recall@10 minimum = 0.5 — two entries deliberately grade a
+        marginal page that prefer_compiled / prefer_active DEMOTES out of top-10
+        (the compiled-over-source and supersession pins); their grade-3 ideal is
+        always found, so no query drops to recall@10 == 0.
+        vs keyword-only NDCG@10=0.3430 — the gap this gate protects.
+    Floors sit ~0.08-0.14 below the measured means: a genuine ranking regression
     trips them, but run-to-run / CPU-vs-GPU fp noise does not.
 """
 
@@ -54,10 +57,10 @@ import eval_retrieval  # noqa: E402
 _GOLDEN = _REPO_ROOT / "tests" / "golden" / "queries.yaml"
 
 # --- Floors, WITH MARGIN. See the module docstring for how these were measured.
-_MEASURED = {"ndcg10": 0.9590, "mrr": 0.9444, "recall10": 1.0000}  # 2026-07-03
+_MEASURED = {"ndcg10": 0.9270, "mrr": 0.9154, "recall10": 0.9615}  # 2026-07-03, 26 queries
 _MEAN_NDCG10_FLOOR = 0.85
 _MEAN_MRR_FLOOR = 0.80
-_MEAN_RECALL10_FLOOR = 0.90
+_MEAN_RECALL10_FLOOR = 0.88
 
 
 @pytest.mark.embeddings

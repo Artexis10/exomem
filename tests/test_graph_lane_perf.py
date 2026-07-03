@@ -26,7 +26,7 @@ blows the sub-second graph-stage budget, failing loudly.
 
 from __future__ import annotations
 
-import random
+import sys
 from pathlib import Path
 
 import pytest
@@ -36,51 +36,18 @@ from exomem import freshness
 from exomem import vault as vault_module
 from exomem.vault import WikilinkResolver, normalize_wikilink, walk_vault_md
 
+# The densely-wikilinked corpus generator lives in scripts/synth_vault.py so this
+# regression test, the latency-ceiling gate, and the latency-curve harness all
+# generate a byte-identical vault from one place (see that module's docstring).
+_SCRIPTS = Path(__file__).resolve().parents[1] / "scripts"
+if str(_SCRIPTS) not in sys.path:
+    sys.path.insert(0, str(_SCRIPTS))
+from synth_vault import gen_dense_vault as _gen_dense_vault  # noqa: E402
+
 # Large enough that a full resolver rebuild (read + YAML-parse every note)
 # clearly overshoots the 1s graph-stage budget by several-fold, so the guard
 # is robust rather than marginal, but small enough to keep the suite quick.
 N_NOTES = 1000
-_FOLDERS = (
-    "Notes/Insights", "Notes/Patterns", "Notes/Failures",
-    "Entities/Concepts", "Entities/People", "Sources", "Experiments",
-)
-
-
-def _gen_dense_vault(root: Path, n: int, links_per_note: int = 25, seed: int = 7) -> list[str]:
-    """Write `n` densely-cross-linked KB notes; return their vault-relative rels."""
-    rng = random.Random(seed)
-    kb = root / "Knowledge Base"
-    for f in _FOLDERS:
-        (kb / f).mkdir(parents=True, exist_ok=True)
-    rels: list[str] = []
-    names: list[str] = []
-    for i in range(n):
-        folder = _FOLDERS[i % len(_FOLDERS)]
-        name = f"note-{i:05d}-topic-{rng.randint(0, 99999)}"
-        names.append(name)
-        rels.append(f"Knowledge Base/{folder}/{name}.md")
-    for i, rel in enumerate(rels):
-        targets = rng.sample(range(n), min(links_per_note, n))
-        link_lines = []
-        for t in targets:
-            if t % 3 == 0:  # mix full-path and bare-stem link forms
-                link_lines.append(f"- see [[{rels[t][:-3]}]] for context")
-            else:
-                link_lines.append(f"- ref [[{names[t]}]] inline")
-        (root / rel).write_text(
-            "---\n"
-            "type: insight\n"
-            f"title: Note {i} about topic {names[i]}\n"
-            "tags: [synthetic, graph, dense]\n"
-            f"updated: 2026-02-{(i % 28) + 1:02d}\n"
-            "---\n\n"
-            f"# Note {i}\n\n"
-            "Prose paragraph so the note is realistically sized and body text "
-            "gives BM25 something to rank on. topic topic topic.\n\n"
-            "## Related\n\n" + "\n".join(link_lines) + "\n",
-            encoding="utf-8",
-        )
-    return rels
 
 
 def _seed_freshness_live(vault: Path) -> None:
