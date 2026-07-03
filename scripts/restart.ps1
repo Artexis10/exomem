@@ -57,6 +57,18 @@ if (-not (Test-VenvInterpreter)) {
     Write-Host "  interpreter restored."
 }
 
+# Back-compat with the kb-mcp -> exomem rename: boxes provisioned before the
+# rename still run the service under the OLD name. If the requested service isn't
+# installed but the legacy 'kb-mcp' is, fall back so restart keeps working until
+# the box is re-registered under the new name (scripts/install-service.ps1). See
+# docs/deployment.md "Renaming an existing kb-mcp service".
+if (-not (Get-Service -Name $ServiceName -ErrorAction SilentlyContinue)) {
+    if (Get-Service -Name "kb-mcp" -ErrorAction SilentlyContinue) {
+        Write-Warning "Service '$ServiceName' not found; falling back to legacy 'kb-mcp'. Re-register under the new name with scripts/install-service.ps1 (see docs/deployment.md)."
+        $ServiceName = "kb-mcp"
+    }
+}
+
 Write-Host "Stopping $ServiceName..."
 sc.exe stop $ServiceName | Out-Null
 Wait-ServiceState -Name $ServiceName -Target 'Stopped'
