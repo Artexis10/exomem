@@ -187,6 +187,10 @@ def test_sidecar_live_probe_passes_on_built_sidecar(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """End-to-end: build real vectors, then the live embed+search probe passes."""
+    # Skip on lean installs (no `embeddings` extra) — the lean CI `tests` job
+    # runs every test, so the @pytest.mark.embeddings marker alone doesn't
+    # deselect this; the importorskip is what its siblings use to skip cleanly.
+    pytest.importorskip("sentence_transformers")
     from exomem import embeddings as embeddings_module
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
