@@ -147,6 +147,123 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
     return sorted_vals[idx]
 
 
+# Vector-lane backend passes (--vec-backend). "binary" = sqlite-vec + binary
+# quantization (EXOMEM_VEC_QUANT=binary). "numpy" is the reference pass: when
+# present it runs first and the other backends report top-10 overlap against it.
+VEC_BACKENDS = ("numpy", "sqlite-vec", "binary")
+
+
+def _apply_vec_backend(name: str) -> None:
+    """Point the vector lane at one backend via the env seam `search()` reads."""
+    if name == "binary":
+        os.environ["EXOMEM_VEC_BACKEND"] = "sqlite-vec"
+        os.environ["EXOMEM_VEC_QUANT"] = "binary"
+    else:
+        os.environ["EXOMEM_VEC_BACKEND"] = name
+        os.environ.pop("EXOMEM_VEC_QUANT", None)
+
+
+def _rss_mb() -> float | None:
+    """Resident set size in MB via psutil, or None when psutil is absent."""
+    try:
+        import psutil  # noqa: PLC0415 — optional, desk-side diagnostics only
+    except ImportError:
+        return None
+    return psutil.Process().memory_info().rss / (1024 * 1024)
+
+
+def _sidecar_chunk_count(vault: Path) -> int:
+    """Row count of an existing sidecar (corpus-cache reuse path)."""
+    import sqlite3
+
+    from exomem import embeddings as embeddings_module
+
+    sidecar = embeddings_module.sidecar_path(vault)
+    if not sidecar.exists():
+        return 0
+    conn = sqlite3.connect(sidecar)
+    try:
+        return conn.execute("SELECT count(*) FROM chunks").fetchone()[0]
+    except sqlite3.Error:
+        return 0
+    finally:
+        conn.close()
+
+
+def _measure_pass(
+    vault: Path,
+    *,
+    queries: list[str],
+    repeat: int,
+    limit: int,
+    rerank: bool,
+) -> tuple[dict[str, dict], dict, list[list[str]]]:
+    """Warm every lane, then time the query set. Returns `(lanes, total, top10s)`
+    where `top10s` is the ordered top-10 path list per query (for cross-backend
+    overlap)."""
+    lane_samples: dict[str, list[float]] = {lane: [] for lane in LANES}
+    total_samples: list[float] = []
+
+    # Warm every lane once (bm25 corpus, resolver, model/sidecar/vec tables) so
+    # the measured passes reflect steady-state, not first-touch build cost.
+    for q in queries:
+        find_module.find(
+            vault, query=q, limit=limit, mode="hybrid",
+            graph=True, rerank=rerank,
+        )
+
+    top10s: list[list[str]] = []
+    for q in queries:
+        hits = find_module.find(vault, query=q, limit=10, mode="hybrid", graph=True)
+        top10s.append([h.path for h in hits])
+
+    for _ in range(max(repeat, 1)):
+        for q in queries:
+            t = find_module.FindTimings()
+            find_module.find(
+                vault, query=q, limit=limit, mode="hybrid",
+                graph=True, rerank=rerank, timings=t,
+            )
+            d = t.as_dict()
+            total_samples.append(d["total_ms"])
+            for lane in LANES:
+                stage = d["stages"].get(lane, {})
+                # A lane's `_span` finally-block records `ms` even when the
+                # lane body raised (e.g. the model-free vector ImportError),
+                # so exclude any lane that errored or was skipped — it did not
+                # actually run to completion and its ~0ms is not a lane cost.
+                if "ms" in stage and "error" not in stage and "skipped" not in stage:
+                    lane_samples[lane].append(stage["ms"])
+
+    lanes: dict[str, dict] = {}
+    for lane, vals in lane_samples.items():
+        if not vals:
+            continue
+        sv = sorted(vals)
+        lanes[lane] = {
+            "median": statistics.median(sv),
+            "p90": _percentile(sv, 90),
+            "samples": len(sv),
+        }
+    total_sorted = sorted(total_samples)
+    total = {
+        "median": statistics.median(total_sorted) if total_sorted else 0.0,
+        "p90": _percentile(total_sorted, 90),
+    }
+    return lanes, total, top10s
+
+
+def _overlap_at_10(reference: list[list[str]], candidate: list[list[str]]) -> float:
+    """Mean per-query overlap fraction of two top-10 path lists."""
+    if not reference or len(reference) != len(candidate):
+        return 0.0
+    fracs = []
+    for ref, cand in zip(reference, candidate, strict=True):
+        denom = max(len(ref), 1)
+        fracs.append(len(set(ref) & set(cand)) / denom)
+    return sum(fracs) / len(fracs)
+
+
 def measure_size(
     n: int,
     *,
@@ -156,80 +273,85 @@ def measure_size(
     limit: int,
     embeddings_on: bool,
     rerank: bool,
+    vec_backends: list[str] | None = None,
+    corpus_cache: Path | None = None,
 ) -> dict:
-    """Generate an n-note vault and return per-lane + total latency aggregates.
+    """Measure an n-note vault; per-lane + total latency, per vector backend.
 
-    Returns `{"n", "chunks", "lanes": {lane: {"median","p90","samples"}},
-    "total": {"median","p90"}}`. Lanes that never produced a timing (skipped /
-    errored, e.g. vector in model-free mode) are absent from `lanes`.
+    Returns `{"n", "chunks", "backends": {backend: {"lanes", "total",
+    "overlap10", "rss_mb"}}}`. Model-free mode uses the single pseudo-backend
+    `"off"`. `overlap10` is the mean top-10 overlap vs the `numpy` pass (None
+    for the reference itself and when numpy wasn't requested).
+
+    With `corpus_cache`, the generated vault (and its embedding sidecar) persists
+    under `corpus_cache/n<k>-l<links>-s7/` and is reused on the next run — the
+    embed-once/measure-many contract that makes 100k-note tiers re-runnable.
+    Without it, the corpus lives in a throwaway temp dir, as before.
     """
-    tmp = Path(tempfile.mkdtemp(prefix=f"exomem-latcurve-{n}-"))
+    backends = list(vec_backends or ["numpy"]) if embeddings_on else ["off"]
+    if "numpy" in backends:  # reference pass first
+        backends.sort(key=lambda b: b != "numpy")
+
+    if corpus_cache is not None:
+        root = corpus_cache / f"n{n}-l{links_per_note}-s7"
+        root.mkdir(parents=True, exist_ok=True)
+        cleanup = False
+    else:
+        root = Path(tempfile.mkdtemp(prefix=f"exomem-latcurve-{n}-"))
+        cleanup = True
+
     chunks = 0
     try:
-        vault = tmp / "vault"
-        gen_dense_vault(vault, n, links_per_note=links_per_note)
+        vault = root / "vault"
+        # A marker guards cache reuse: a run killed mid-generation must not leave a
+        # partial vault that a later run silently measures as the full corpus.
+        marker = root / "vault.ok"
+        if not (vault.exists() and marker.exists()):
+            if vault.exists():
+                shutil.rmtree(vault, ignore_errors=True)
+            gen_dense_vault(vault, n, links_per_note=links_per_note)
+            marker.write_text(str(n), encoding="utf-8")
         _seed_freshness_live(vault)
 
         find_module.clear_cache()
         if embeddings_on:
-            # Real sidecar so the vector lane searches actual chunks at scale.
             from exomem import embeddings as embeddings_module
             embeddings_module.clear_embedding_indexes()
-            chunks = embeddings_module.get_embedding_index(vault).rebuild_all()
+            chunks = _sidecar_chunk_count(vault)
+            if not chunks:
+                # Real sidecar so the vector lane searches actual chunks at scale.
+                chunks = embeddings_module.get_embedding_index(vault).rebuild_all()
 
-        lane_samples: dict[str, list[float]] = {lane: [] for lane in LANES}
-        total_samples: list[float] = []
-
-        # Warm every lane once (bm25 corpus, resolver, model/sidecar) so the
-        # measured passes reflect steady-state, not first-touch build cost.
-        for q in queries:
-            find_module.find(
-                vault, query=q, limit=limit, mode="hybrid",
-                graph=True, rerank=rerank,
+        results: dict[str, dict] = {}
+        reference_top10: list[list[str]] | None = None
+        for backend in backends:
+            if backend != "off":
+                _apply_vec_backend(backend)
+                from exomem import embeddings as embeddings_module
+                embeddings_module.clear_embedding_indexes()
+            find_module.clear_cache()
+            lanes, total, top10s = _measure_pass(
+                vault, queries=queries, repeat=repeat, limit=limit, rerank=rerank
             )
-
-        for _ in range(max(repeat, 1)):
-            for q in queries:
-                t = find_module.FindTimings()
-                find_module.find(
-                    vault, query=q, limit=limit, mode="hybrid",
-                    graph=True, rerank=rerank, timings=t,
-                )
-                d = t.as_dict()
-                total_samples.append(d["total_ms"])
-                for lane in LANES:
-                    stage = d["stages"].get(lane, {})
-                    # A lane's `_span` finally-block records `ms` even when the
-                    # lane body raised (e.g. the model-free vector ImportError),
-                    # so exclude any lane that errored or was skipped — it did not
-                    # actually run to completion and its ~0ms is not a lane cost.
-                    if "ms" in stage and "error" not in stage and "skipped" not in stage:
-                        lane_samples[lane].append(stage["ms"])
-
-        lanes: dict[str, dict] = {}
-        for lane, vals in lane_samples.items():
-            if not vals:
-                continue
-            sv = sorted(vals)
-            lanes[lane] = {
-                "median": statistics.median(sv),
-                "p90": _percentile(sv, 90),
-                "samples": len(sv),
+            overlap = None
+            if backend == "numpy":
+                reference_top10 = top10s
+            elif reference_top10 is not None:
+                overlap = _overlap_at_10(reference_top10, top10s)
+            results[backend] = {
+                "lanes": lanes,
+                "total": total,
+                "overlap10": overlap,
+                "rss_mb": _rss_mb(),
             }
-        total_sorted = sorted(total_samples)
-        return {
-            "n": n,
-            "chunks": chunks,
-            "lanes": lanes,
-            "total": {
-                "median": statistics.median(total_sorted) if total_sorted else 0.0,
-                "p90": _percentile(total_sorted, 90),
-            },
-        }
+        return {"n": n, "chunks": chunks, "backends": results}
     finally:
+        os.environ.pop("EXOMEM_VEC_BACKEND", None)
+        os.environ.pop("EXOMEM_VEC_QUANT", None)
         find_module.clear_cache()
         freshness.clear()
-        shutil.rmtree(tmp, ignore_errors=True)
+        if cleanup:
+            shutil.rmtree(root, ignore_errors=True)
 
 
 def _fmt_cell(agg: dict | None) -> str:
@@ -240,22 +362,57 @@ def _fmt_cell(agg: dict | None) -> str:
 
 
 def render_markdown(results: list[dict], *, embeddings_on: bool, rerank: bool) -> str:
-    """Render the per-lane latency-vs-size curve as a markdown table (ms, median / p90)."""
+    """Render the per-lane latency-vs-size curve as markdown tables (ms, median / p90).
+
+    One per-lane table per vector backend, plus (when more than one backend ran) a
+    vector-lane summary table comparing backends side by side with top-10 overlap
+    vs the numpy reference and process RSS after each pass.
+    """
     lines: list[str] = []
     mode = "hybrid + embeddings" if embeddings_on else "model-free (BM25/keyword/graph/fusion)"
     if embeddings_on and rerank:
         mode += " + rerank"
-    lines.append(f"Per-lane latency (ms, median / p90) — mode: {mode}")
-    lines.append("")
-    header = ["Notes", *LANES, "total"]
-    lines.append("| " + " | ".join(header) + " |")
-    lines.append("|" + "|".join(["---"] * len(header)) + "|")
-    for r in results:
-        cells = [str(r["n"])]
-        for lane in LANES:
-            cells.append(_fmt_cell(r["lanes"].get(lane)))
-        cells.append(_fmt_cell(r["total"]))
-        lines.append("| " + " | ".join(cells) + " |")
+    backends = list(results[0]["backends"].keys()) if results else []
+    for backend in backends:
+        label = f" — vector backend: {backend}" if backend != "off" else ""
+        lines.append(f"Per-lane latency (ms, median / p90) — mode: {mode}{label}")
+        lines.append("")
+        header = ["Notes", *LANES, "total"]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "|".join(["---"] * len(header)) + "|")
+        for r in results:
+            b = r["backends"][backend]
+            cells = [str(r["n"])]
+            for lane in LANES:
+                cells.append(_fmt_cell(b["lanes"].get(lane)))
+            cells.append(_fmt_cell(b["total"]))
+            lines.append("| " + " | ".join(cells) + " |")
+        lines.append("")
+
+    if len(backends) > 1:
+        lines.append("Vector lane by backend (ms, median / p90; overlap@10 vs numpy; RSS MB)")
+        lines.append("")
+        header = ["Notes", "chunks"]
+        for backend in backends:
+            header.append(f"vector {backend}")
+            if backend != "numpy":
+                header.append(f"overlap@10 {backend}")
+        header.append("RSS " + "/".join(backends))
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "|".join(["---"] * len(header)) + "|")
+        for r in results:
+            cells = [str(r["n"]), str(r["chunks"])]
+            for backend in backends:
+                b = r["backends"][backend]
+                cells.append(_fmt_cell(b["lanes"].get("vector")))
+                if backend != "numpy":
+                    ov = b["overlap10"]
+                    cells.append(f"{ov:.2f}" if ov is not None else "—")
+            rss = [r["backends"][b]["rss_mb"] for b in backends]
+            cells.append(
+                " / ".join(f"{v:.0f}" if v is not None else "—" for v in rss)
+            )
+            lines.append("| " + " | ".join(cells) + " |")
     return "\n".join(lines)
 
 
@@ -277,7 +434,31 @@ def main() -> int:
         "--max-embeddings-size", type=int, default=2000,
         help="skip sizes above this when --embeddings (sidecar build is expensive); default 2000",
     )
+    ap.add_argument(
+        "--vec-backend", type=str, default="numpy",
+        help="comma-separated vector backends to measure per size: "
+             "numpy,sqlite-vec,binary (binary = sqlite-vec + EXOMEM_VEC_QUANT=binary). "
+             "Only meaningful with --embeddings; numpy runs first as the overlap reference.",
+    )
+    ap.add_argument(
+        "--corpus-cache", type=str, default=None,
+        help="directory to persist generated vaults+sidecars per (size, links, seed) and "
+             "reuse across runs — embed once, measure many (the 100k-tier contract). "
+             "Omit for throwaway temp corpora.",
+    )
     args = ap.parse_args()
+
+    vec_backends = [b.strip() for b in args.vec_backend.split(",") if b.strip()]
+    bad = [b for b in vec_backends if b not in VEC_BACKENDS]
+    if bad:
+        print(f"unknown --vec-backend value(s): {bad} (choose from {VEC_BACKENDS})",
+              file=sys.stderr)
+        return 1
+    if not args.embeddings and vec_backends != ["numpy"]:
+        print("--vec-backend requires --embeddings (the vector lane is off without it)",
+              file=sys.stderr)
+        return 1
+    corpus_cache = Path(args.corpus_cache) if args.corpus_cache else None
 
     sizes = [int(s) for s in args.sizes.split(",") if s.strip()]
     if args.embeddings:
@@ -291,7 +472,9 @@ def main() -> int:
     print(
         f"latency curve: sizes={sizes} repeat={args.repeat} "
         f"links/note={args.links_per_note} queries={len(DEFAULT_QUERIES)} "
-        f"embeddings={'on' if args.embeddings else 'off'} rerank={'on' if args.rerank else 'off'}",
+        f"embeddings={'on' if args.embeddings else 'off'} rerank={'on' if args.rerank else 'off'} "
+        f"vec-backends={vec_backends if args.embeddings else 'n/a'} "
+        f"corpus-cache={corpus_cache or 'off'}",
         file=sys.stderr,
     )
     results: list[dict] = []
@@ -305,12 +488,15 @@ def main() -> int:
             limit=args.limit,
             embeddings_on=args.embeddings,
             rerank=args.rerank or args.embeddings,
+            vec_backends=vec_backends,
+            corpus_cache=corpus_cache,
         )
         results.append(r)
         chunk_note = f" chunks={r['chunks']}" if args.embeddings else ""
+        first = next(iter(r["backends"].values()))
         print(
-            f"  n={n:>5}{chunk_note}  graph={_fmt_cell(r['lanes'].get('graph'))}  "
-            f"total={_fmt_cell(r['total'])}  ({time.perf_counter() - t0:.1f}s)",
+            f"  n={n:>6}{chunk_note}  graph={_fmt_cell(first['lanes'].get('graph'))}  "
+            f"total={_fmt_cell(first['total'])}  ({time.perf_counter() - t0:.1f}s)",
             file=sys.stderr,
         )
 

@@ -25,6 +25,7 @@ after), regardless of whether the test itself also calls finish_warm().
 
 from __future__ import annotations
 
+import os
 import sys
 import threading
 from pathlib import Path
@@ -728,15 +729,32 @@ def test_upsert_after_write_defer_after_embeddable_filter_logmd_defers_nothing(
 # ============================================================================
 
 
-def test_warm_cli_skip_message_when_embeddings_disabled(capsys: pytest.CaptureFixture) -> None:
+def test_warm_cli_skip_message_when_embeddings_disabled() -> None:
     """With EXOMEM_DISABLE_EMBEDDINGS set (the suite default), `exomem warm`
-    must print a skip message, exit 0, and never import torch."""
-    code = main(["warm"])
-    out = capsys.readouterr().out
+    must print a skip message, exit 0, and never import torch.
 
-    assert code == 0
-    assert "EXOMEM_DISABLE_EMBEDDINGS" in out
-    assert "torch" not in sys.modules
+    Runs the CLI in a SUBPROCESS and asserts torch-absence THERE: the contract
+    is about the warm CLI's own process, and asserting on this pytest process's
+    `sys.modules` is corrupted by suite collection state — on a box with the
+    embeddings extra installed, any module-level `pytest.importorskip("torch")`
+    (e.g. test_retrieval_golden.py) imports torch at collection time and made
+    this test fail for reasons unrelated to the CLI under test."""
+    import subprocess
+
+    probe = (
+        "import sys; from exomem.__main__ import main; rc = main(['warm']); "
+        "assert 'torch' not in sys.modules, 'warm CLI imported torch'; "
+        "sys.exit(rc)"
+    )
+    proc = subprocess.run(  # noqa: S603 — sys.executable + literal code, no user input
+        [sys.executable, "-c", probe],
+        capture_output=True,
+        text=True,
+        timeout=120,
+        env={**os.environ, "EXOMEM_DISABLE_EMBEDDINGS": "1"},
+    )
+    assert proc.returncode == 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "EXOMEM_DISABLE_EMBEDDINGS" in proc.stdout
 
 
 def test_warm_cli_success_with_faked_models_clip_left_disabled(

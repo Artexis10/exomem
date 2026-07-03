@@ -162,6 +162,70 @@ uv run python scripts/latency_curve.py --sizes 100,500,1000,2000,5000
 uv run --extra embeddings python scripts/latency_curve.py --embeddings --rerank --sizes 100,500,1000,2000
 ```
 
+## Vector backend at scale (10k–50k notes, sqlite-vec vs in-memory scan)
+
+The `add-sqlite-vec-backend` change moved the vector lane's default onto vec0
+virtual tables inside the embedding sidecar (`EXOMEM_VEC_BACKEND=auto`), with the
+in-memory numpy scan as kill switch and fallback. That swap was gated on measured
+evidence, per the find-recall-efficiency spec. This section is that evidence and
+the decision record.
+
+Method: same dense synthetic generator as the curve above, with a REAL bge
+sidecar per size (`--embeddings`), measured once per backend over the same built
+corpus via `--vec-backend numpy,sqlite-vec,binary` and reused across runs via
+`--corpus-cache` (embed once, measure many). `binary` is `sqlite-vec` with
+`EXOMEM_VEC_QUANT=binary`. Measured 2026-07-03 on the reference host (AMD Ryzen 7
+5800X3D / RTX 5080 / 32 GB / Windows 11); 10k tier `--repeat 3`, 50k tier
+`--repeat 2`. Vector lane only (ms, median / p90); `overlap@10` is the mean
+top-10 overlap of end-to-end `find()` results against the numpy pass; RSS is the
+process resident set after the pass (psutil; not captured for the 10k run).
+
+| Notes | chunk vectors | vector numpy | vector vec0-f32 | overlap@10 f32 | vector vec0-binary | overlap@10 binary | RSS numpy / f32 / binary (MB) |
+|---|---|---|---|---|---|---|---|
+| 10000 | 40,000 | 17.5 / 21.8 | 130.5 / 137.2 | 1.00 | 59.7 / 74.3 | 0.86 | — |
+| 50000 | 200,000 | 31.2 / 36.8 | 544.5 / 550.0 | 1.00 | 253.3 / 357.6 | 0.68 | 3491 / 1707 / 1234 |
+
+Reading it honestly:
+
+- **The warm lane race goes to numpy, 7–17×.** BLAS over a RAM-resident
+  contiguous matrix runs at memory bandwidth; the vec0 f32 scan re-reads every
+  vector byte per query through SQLite's page layer (~614 MB at 200k chunks →
+  ~545 ms). Both are brute force — neither is sub-linear — so the gap grows
+  with N.
+- **What numpy pays for that speed is the point of the swap:** at 200k chunks
+  the numpy pass holds ~1.8 GB more resident (the float32 matrix plus every
+  chunk's text in the metadata cache), and any out-of-process sidecar change
+  costs it a full O(N) reload. The vec0 backend holds essentially nothing
+  between queries.
+- **vec0-f32 is exact.** overlap@10 = 1.00 at both tiers, end-to-end through
+  `find()` — matching the unit-level parity tests. The default-backend swap
+  changes no ranking.
+- **Binary quantization diverges at scale.** overlap@10 fell from 0.86 (10k) to
+  0.68 (50k) on this corpus. It stays strictly opt-in
+  (`EXOMEM_VEC_QUANT=binary`, default off); the golden retrieval floors are its
+  promotion gate (it clears them on the fixture corpus — both parametrized
+  passes of `tests/test_retrieval_golden.py`).
+- **The loudest finding is about a different lane entirely:** at 50k notes the
+  whole `find()` costs ~25 s under EVERY backend, because bm25 / keyword / graph
+  are each ~8 s of O(N) work. The vector lane is under 2.2% of the total in its
+  slowest configuration. "Sub-second search at 100k notes" is gated on the
+  lexical/graph lanes, not on vector search — that is the next scaling build.
+
+**Decision record.** `auto` defaults to vec0-f32: the lane-latency delta is
+invisible end-to-end today, while the residency and reload wins are large and
+grow with corpus size. `EXOMEM_VEC_BACKEND=numpy` restores the previous behavior
+wholesale. If a future build makes the vector lane the visible bottleneck (e.g.
+after the lexical lanes are fixed), the recorded next step is a real ANN index —
+hnswlib, or sqlite-vec's ANN once it leaves alpha — behind the same `vecstore`
+seam, recall-gated by the same golden floors.
+
+The 100k-note tier (400k chunk vectors) is generated, embedded, and cached; its
+measurement pass is pending. Complete it desk-side with:
+
+```
+uv run python scripts/latency_curve.py --embeddings --sizes 100000 --max-embeddings-size 100000 --repeat 1 --vec-backend numpy,sqlite-vec,binary --corpus-cache <cache-dir>
+```
+
 ## Reproduction
 
 The report reproduces in the same shape against any vault + golden set that
