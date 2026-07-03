@@ -1,6 +1,6 @@
 """`exomem setup` — one-command guided local onboarding.
 
-Collapses the manual SETUP-LOCAL steps (init → profile → doctor → Claude Code
+Collapses the manual QUICKSTART steps (init → profile → doctor → Claude Code
 registration → skill → hooks) into a single interactive, idempotent wizard.
 Every step is a converger: it detects the current state and reports `[done]`,
 `[skipped: …]`, or `[failed: …]`, so re-running is always safe.

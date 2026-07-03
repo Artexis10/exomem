@@ -407,7 +407,7 @@ def _init_main(argv: list[str]) -> int:
     print(f"Initialized Knowledge Base at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
-    print("  1. Point Claude Code at this vault (see SETUP-LOCAL.md).")
+    print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
     print("  2. Install the Exomem Knowledge Base skill so Claude knows how to use it: python -m exomem install-skill")
     print("  3. Adapt Knowledge Base/_Schema/project-keys.yaml to your own projects.")
     return 0
