@@ -3,6 +3,8 @@
 Subcommands:
 - (default) serve the MCP server — `python -m exomem [--transport ...]`
 - `setup` — guided one-command local onboarding (scan → init → doctor → register → skill)
+- `setup --remote` — guided remote-connector onboarding (tunnel → .env + GitHub OAuth
+  → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem knowledge-base skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
