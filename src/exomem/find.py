@@ -2264,7 +2264,12 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     here for out-of-request callers.
 
     The build is serialized by a double-checked lock so the background warm
-    thread and a racing request build the resolver once, not twice.
+    thread and a racing request build the resolver once, not twice. Once built,
+    the file watcher keeps it warm across vault edits via
+    `on_resolver_files_changed` (incremental patch), so a single note change no
+    longer forces a full-vault re-read + YAML reparse on the next graph-lane
+    query — the ~14s-per-query cost this used to pay on a large, actively-synced
+    vault (every edit moved the freshness digest and invalidated this cache).
     """
     from .vault import WikilinkResolver
     if freshness is None:
@@ -2279,6 +2284,48 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
         resolver = WikilinkResolver(vault_root)
         _RESOLVER_CACHE[vault_root] = (freshness, resolver)
     return resolver
+
+
+def on_resolver_files_changed(
+    vault_root: Path,
+    changed_rels,
+    deleted_rels,
+) -> None:
+    """Patch the process-cached wikilink resolver for one batch of changes.
+
+    This is the resolver's arm of the event-maintained index family (it sits
+    beside `freshness.on_files_changed` and `vault.on_inbound_files_changed`,
+    and the file watcher calls all three for the same batch). Mirrors the
+    inbound index:
+
+    - **Live-only.** If no resolver is cached for this vault, this is a no-op —
+      the next `_get_query_resolver` builds one from current disk state, so
+      skipping here is correct, not just cheap. It only ever mutates an index
+      that already exists.
+    - **Re-syncs the freshness key.** After patching the maps in place it
+      restamps the cache entry with the vault's current freshness triple, so
+      the next graph-lane query sees a cache HIT instead of re-triggering a
+      full-vault rebuild. Without this restamp the incremental patch would be
+      pointless — the moved digest would still force a rebuild.
+
+    Keyed on `vault_root` exactly like `_get_query_resolver`, so the watcher's
+    patch and a request's lookup share one cache entry. No-op when the
+    event-index kill switch is set (reverts to pure digest-keyed
+    rebuild-on-change, matching freshness/inbound rollback).
+    """
+    if not freshness.event_indexes_enabled():
+        return
+    changed_list = list(changed_rels)
+    deleted_list = list(deleted_rels)
+    if not (changed_list or deleted_list):
+        return
+    with _RESOLVER_LOCK:
+        cached = _RESOLVER_CACHE.get(vault_root)
+        if cached is None:
+            return
+        _, resolver = cached
+        resolver.on_files_changed(vault_root, changed_list, deleted_list)
+        _RESOLVER_CACHE[vault_root] = (FreshnessSnapshot(vault_root).vault(), resolver)
 
 
 def _stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
