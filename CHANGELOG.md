@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0](https://github.com/Artexis10/exomem/compare/v0.5.0...v0.6.0) (2026-07-04)
+
+
+### Features
+
+* **bench:** per-lane latency-vs-scale curve + regression gate + golden set 9→26 ([e3f77f6](https://github.com/Artexis10/exomem/commit/e3f77f6dbda0272d4df901f59f3a1c85d9524392))
+* FTS5 lexical backend — indexed bm25/keyword lanes + graph-lane scaling fix (OpenSpec: add-fts5-lexical-backend) ([#113](https://github.com/Artexis10/exomem/issues/113)) ([ba846a6](https://github.com/Artexis10/exomem/commit/ba846a60b37a913daa397c1801346be8d26c5c9c))
+* sqlite-vec vec0 vector backend inside the embedding sidecars (OpenSpec: add-sqlite-vec-backend) ([#111](https://github.com/Artexis10/exomem/issues/111)) ([40fc0dd](https://github.com/Artexis10/exomem/commit/40fc0dd1b0b87bc31abd776350ef3fbd41281227))
+
 ## [0.5.0](https://github.com/Artexis10/exomem/compare/v0.4.1...v0.5.0) (2026-07-03)
 
 
