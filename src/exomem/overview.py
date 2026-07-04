@@ -26,6 +26,8 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 
+from .kbdir import kb_dirname
+
 DEFAULT_MAX_DEPTH = 3
 BREADTH_CAP = 12           # tree entries per parent folder
 JUNK_LIST_CAP = 20         # listed junk paths per category (counts stay exact)
@@ -256,10 +258,10 @@ def overview(
         )
 
     kb: dict = {"present": False}
-    if (root / "Knowledge Base").is_dir():
-        kb = {"present": True, "path": "Knowledge Base"}
+    if (root / kb_dirname()).is_dir():
+        kb = {"present": True, "path": kb_dirname()}
         if not rel:
-            kb_stat = dirstats.get("Knowledge Base")
+            kb_stat = dirstats.get(kb_dirname())
             kb["files"] = kb_stat.files_rec if kb_stat else 0
 
     root_stat = dirstats[""]

@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import BinaryIO
 
 from . import extract, indexes
+from .kbdir import kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, kb_root
 
 
@@ -258,7 +259,7 @@ def preserve(
                 sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
         # Index + log updates.
-        rel_artifact_for_summary = rel_artifact.replace("Knowledge Base/", "")
+        rel_artifact_for_summary = rel_artifact.replace(kb_prefix(), "")
         activity_summary = (
             f"`{rel_artifact_for_summary}` (evidence, {scope_safe}/{category_safe}, "
             f"mobile via exomem)"
@@ -292,7 +293,7 @@ def preserve(
             writes.append(PlannedWrite(path=top_index, content=new_top))
             writes.extend(sub_writes)
         else:
-            warnings.append("Knowledge Base/index.md missing; skipped Recent activity bump")
+            warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
         log_file = kb / "log.md"
         if log_file.exists():
@@ -304,7 +305,7 @@ def preserve(
             )
             writes.append(PlannedWrite(path=log_file, content=new_log))
         else:
-            warnings.append("Knowledge Base/log.md missing; skipped log entry")
+            warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
         if writes:
             # Pass vault_root so the sidecar (a real `.md`) is embedded on write
@@ -636,7 +637,7 @@ def _prepend_log_entry(
     text: str, *, date_iso: str, rel_path: str, body: str
 ) -> str:
     """Insert `## [<date>] preserve | <kb-relative-path>` after the `---` separator."""
-    title = rel_path.replace("Knowledge Base/", "", 1)
+    title = rel_path.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] preserve | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

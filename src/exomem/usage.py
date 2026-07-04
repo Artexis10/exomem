@@ -34,6 +34,7 @@ import time
 from pathlib import Path
 
 from . import query_log
+from .kbdir import kb_prefix
 
 log = logging.getLogger(__name__)
 
@@ -44,8 +45,8 @@ def canon(path: str) -> str:
     p = (path or "").strip().replace("\\", "/")
     if p.lower().endswith(".md"):
         p = p[:-3]
-    if p.startswith("Knowledge Base/"):
-        p = p[len("Knowledge Base/"):]
+    if p.startswith(kb_prefix()):
+        p = p[len(kb_prefix()):]
     return p.lower()
 
 

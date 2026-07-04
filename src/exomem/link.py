@@ -25,6 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import indexes
+from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -229,7 +230,7 @@ def link(
         writes.append(PlannedWrite(path=top_index, content=new_top))
         writes.extend(sub_writes)
     else:
-        warnings.append("Knowledge Base/index.md missing; skipped Recent activity bump")
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
     log_file = kb / "log.md"
     if log_file.exists():
@@ -241,7 +242,7 @@ def link(
         )
         writes.append(PlannedWrite(path=log_file, content=new_log))
     else:
-        warnings.append("Knowledge Base/log.md missing; skipped log entry")
+        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
     try:
         batch_atomic_write(writes, vault_root=vault_root)
@@ -452,7 +453,7 @@ def _activity_summary(
     domain: str | None,
     project: str | None,
 ) -> str:
-    path_part = rel_entity_no_ext.replace("Knowledge Base/", "")
+    path_part = rel_entity_no_ext.replace(kb_prefix(), "")
     modifier_parts: list[str] = [entity_type]
     if entity_type == "concept" and domain:
         modifier_parts.append(domain)
@@ -493,7 +494,7 @@ def _prepend_log_entry(
     text: str, *, date_iso: str, rel_path: str, body: str
 ) -> str:
     """Insert `## [<date>] link | <kb-relative-path>` after the `---` separator."""
-    title = rel_path.replace("Knowledge Base/", "", 1)
+    title = rel_path.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] link | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

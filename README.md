@@ -287,7 +287,8 @@ The server reads environment variables or a `.env` file. The main ones are:
 
 | Variable | Purpose |
 | --- | --- |
-| `EXOMEM_VAULT_PATH` | Vault root containing `Knowledge Base/`. |
+| `EXOMEM_VAULT_PATH` | Vault root containing the governed folder (default `Knowledge Base/`). |
+| `EXOMEM_KB_DIRNAME` | Name of the governed folder inside the vault (default `Knowledge Base`). |
 | `EXOMEM_DISABLE_EMBEDDINGS` | `1` forces keyword/BM25-only search. |
 | `EXOMEM_DISABLE_TIER2` | `1` hides Tier-2 filesystem tools. |
 | `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |

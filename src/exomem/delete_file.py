@@ -27,6 +27,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
     find_inbound_wikilinks,
@@ -90,7 +91,7 @@ def delete_file(
             code="UNCONFIRMED",
             reason=(
                 "delete_file requires `confirm=true` explicitly. "
-                "Deletes go to Knowledge Base/_trash/ (recoverable) but the "
+                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
                 "action is still deliberate. Supersession via `replace` is "
                 "the preferred path for compiled material (SKILL.md rule 6)."
             ),
@@ -105,7 +106,7 @@ def delete_file(
 
     # Trash items can't be re-trashed.
     parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[0] == "Knowledge Base" and parts[1] == TRASH_SUBPATH:
+    if len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH:
         raise DeleteFileError(
             code="ALREADY_TRASHED",
             reason=(
@@ -165,8 +166,8 @@ def delete_file(
             n = str(raw).strip().replace("\\", "/").lstrip("/")
             if not n.endswith(".md"):
                 n = n + ".md"
-            if not n.startswith("Knowledge Base/"):
-                n = "Knowledge Base/" + n
+            if not n.startswith(kb_prefix()):
+                n = kb_prefix() + n
             expected_set.add(n)
 
     # Inbound-link check (with `expected_dead_inbound` filtering).
@@ -205,7 +206,7 @@ def delete_file(
     today = today or now.date()
     date_dir = now.strftime("%Y-%m-%d")
     time_prefix = now.strftime("%H%M%S")
-    sanitized = rel_path.replace("Knowledge Base/", "", 1).replace("/", "__")
+    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
     trash_filename = f"{time_prefix}-{sanitized}"
     trash_dir = kb_root(vault_root) / TRASH_SUBPATH / date_dir
     trash_dir.mkdir(parents=True, exist_ok=True)

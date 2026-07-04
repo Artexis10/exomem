@@ -16,6 +16,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname
 
 SOURCE_TYPE_FIELD_PATTERN = re.compile(
     r"\|\s*`source_type`\s*\|\s*yes\s*\|\s*(.+?)\s*\|", re.IGNORECASE
@@ -53,7 +54,7 @@ def load_source_schema(vault_path: Path) -> SourceSchema:
 
     Raises SchemaParseError if anything looks wrong.
     """
-    schema_dir = vault_path / "Knowledge Base" / "_Schema" / "references"
+    schema_dir = vault_path / kb_dirname() / "_Schema" / "references"
     frontmatter_doc = schema_dir / "frontmatter.md"
     page_types_doc = schema_dir / "page-types.md"
 

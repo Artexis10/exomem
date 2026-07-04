@@ -34,6 +34,8 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_prefix
+
 log = logging.getLogger(__name__)
 
 # Tunable knobs — intuition-seeded like find.RankingConfig; revisit against the
@@ -128,8 +130,8 @@ def _canon(path: str) -> str:
     p = (path or "").strip().replace("\\", "/").split("#", 1)[0].strip()
     if p.lower().endswith(".md"):
         p = p[:-3]
-    if p.startswith("Knowledge Base/"):
-        p = p[len("Knowledge Base/"):]
+    if p.startswith(kb_prefix()):
+        p = p[len(kb_prefix()):]
     return p.lower()
 
 

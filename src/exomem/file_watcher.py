@@ -37,6 +37,7 @@ from collections.abc import Iterable
 from pathlib import Path
 
 from . import freshness, index_sync
+from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
 
@@ -224,7 +225,7 @@ class FileWatcher:
 
     def __init__(self, vault_root: Path, *, debounce_seconds: float = DEBOUNCE_SECONDS) -> None:
         self._vault_root = vault_root
-        self._kb_root = vault_root / "Knowledge Base"
+        self._kb_root = vault_root / kb_dirname()
         self._debounce = debounce_seconds
         self._lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
@@ -321,7 +322,7 @@ class FileWatcher:
 
         # Index sidecars (embedding + lexical): Knowledge Base markdown only.
         kb_ups = [p for p in ups if self._is_kb(p)]
-        kb_del_rels = [r for r in del_rels if r.startswith("Knowledge Base/")]
+        kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
         if kb_ups:
             try:
                 index_sync.upsert_after_write(self._vault_root, kb_ups)

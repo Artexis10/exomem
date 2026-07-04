@@ -11,6 +11,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname
 from .vault import (
     PlannedWrite,
     VaultPathError,
@@ -70,7 +71,7 @@ def append_to_file(
     # description files (description.md style); the raw artifacts there are
     # binary and wouldn't be markdown-appended anyway.
     parts = rel_path.split("/")
-    head = parts[1] if parts[0] == "Knowledge Base" and len(parts) > 1 else parts[0]
+    head = parts[1] if parts[0] == kb_dirname() and len(parts) > 1 else parts[0]
     if head == "Sources":
         raise AppendError(
             code="APPEND_ONLY",

@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
+from .kbdir import kb_prefix
 from .vault import PlannedWrite, escape_wikilinks_for_log, kb_root
 
 
@@ -196,7 +198,7 @@ def _replace_by_type_section(
 
     for name in sorted(counts.keys()):
         desc = known_descriptions.get(name, "captured material")
-        rows.append(f"- [[Knowledge Base/Sources/{name}/|{name}]] — {desc} ({counts[name]})")
+        rows.append(f"- [[{kb_prefix()}Sources/{name}/|{name}]] — {desc} ({counts[name]})")
 
     new_block = SOURCES_BY_TYPE_HEADER + "\n\n" + "\n".join(rows) + "\n"
     return _replace_section(text, SOURCES_BY_TYPE_HEADER, new_block, next_h2_or_end=True)
@@ -396,20 +398,26 @@ _NOTES_H3_COUNT = re.compile(
 )
 
 # Subfolder bullet in Notes/index.md:
-# `- [[Knowledge Base/Notes/Research/Project Alpha/|Project Alpha]] (2) — desc`
-_NOTES_SUBFOLDER_BULLET = re.compile(
-    r"^(- \[\[Knowledge Base/Notes/(?P<typef>[A-Za-z]+)/(?P<sub>[^|\]/]+)/?(?:\|[^\]]+)?\]\])"
-    r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
-    re.MULTILINE,
-)
+# `- [[<KB>/Notes/Research/Project Alpha/|Project Alpha]] (2) — desc`
+@cache
+def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
+    return re.compile(
+        r"^(- \[\[" + re.escape(kb_prefix_str)
+        + r"Notes/(?P<typef>[A-Za-z]+)/(?P<sub>[^|\]/]+)/?(?:\|[^\]]+)?\]\])"
+        r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
+        re.MULTILINE,
+    )
 
 # Entities/index.md top-level bullet:
-# `- [[Knowledge Base/Entities/People/|People]] (12)` (optional description)
-_ENTITIES_BULLET = re.compile(
-    r"^(- \[\[Knowledge Base/Entities/(?P<folder>People|Concepts|Libraries|Decisions)/?(?:\|[^\]]+)?\]\])"
-    r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
-    re.MULTILINE,
-)
+# `- [[<KB>/Entities/People/|People]] (12)` (optional description)
+@cache
+def _entities_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
+    return re.compile(
+        r"^(- \[\[" + re.escape(kb_prefix_str)
+        + r"Entities/(?P<folder>People|Concepts|Libraries|Decisions)/?(?:\|[^\]]+)?\]\])"
+        r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
+        re.MULTILINE,
+    )
 
 
 def _count_notes_by_subfolder(notes_dir: Path) -> dict[str, dict[str, int]]:
@@ -498,7 +506,7 @@ def _refresh_notes_subindex_text(
         return f"{m.group(1)} ({actual}){rest}"
 
     text = _NOTES_H3_COUNT.sub(_h3, text)
-    text = _NOTES_SUBFOLDER_BULLET.sub(_bullet, text)
+    text = _notes_subfolder_bullet_re(kb_prefix()).sub(_bullet, text)
     return text
 
 
@@ -524,7 +532,7 @@ def _refresh_entities_subindex_text(
         rest = m.group("rest") or ""
         return f"{m.group(1)} ({actual}){rest}"
 
-    return _ENTITIES_BULLET.sub(_bullet, text)
+    return _entities_bullet_re(kb_prefix()).sub(_bullet, text)
 
 
 def compute_subindex_writes(
@@ -563,7 +571,7 @@ def compute_subindex_writes(
     # Virtually count each pending path so the index shows post-write state.
     for raw_path in pending_paths or []:
         rel = raw_path.removesuffix(".md").replace("\\", "/")
-        rel = rel.removeprefix("Knowledge Base/").lstrip("/")
+        rel = rel.removeprefix(kb_prefix()).lstrip("/")
         parts = rel.split("/")
         if len(parts) < 2:
             continue
@@ -644,7 +652,7 @@ def _update_log(
     log_entry_body: str,
 ) -> str:
     """Prepend `## [<date>] add | <path>` entry right after the `---` separator."""
-    title = rel_source_path.replace("Knowledge Base/", "", 1)
+    title = rel_source_path.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] add | {title}\n\n{escape_wikilinks_for_log(log_entry_body)}\n"
 
     sep_idx = text.find(LOG_SEPARATOR)

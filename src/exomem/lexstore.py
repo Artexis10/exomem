@@ -60,6 +60,8 @@ import sqlite3
 import threading
 from pathlib import Path
 
+from .kbdir import kb_dirname
+
 log = logging.getLogger(__name__)
 
 _NAV_BASENAMES = frozenset({"index.md", "log.md"})
@@ -122,7 +124,7 @@ def reset_memo() -> None:
 
 
 def lexical_path(vault_root: Path) -> Path:
-    return vault_root / "Knowledge Base" / ".lexical.sqlite"
+    return vault_root / kb_dirname() / ".lexical.sqlite"
 
 
 def get_store(vault_root: Path) -> LexicalStore:
@@ -389,7 +391,7 @@ class LexicalStore:
         from . import find as find_module
         from .vault import walk_vault_md
 
-        kb = self.vault_root / "Knowledge Base"
+        kb = self.vault_root / kb_dirname()
         members: dict[Path, list[bool]] = {}  # abs path -> [in_kb, in_vault]
         if kb.is_dir():
             for p in find_module._walk_md(kb):
@@ -516,7 +518,7 @@ class LexicalStore:
         in_vault = not any(d in VAULT_SCAN_SKIP_DIRS for d in dirs)
         in_kb = (
             len(rel_parts) > 1
-            and rel_parts[0] == "Knowledge Base"
+            and rel_parts[0] == kb_dirname()
             and not any(d in find_module.EXCLUDED_DIR_NAMES for d in dirs[1:])
         )
         return in_kb, in_vault

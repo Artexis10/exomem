@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import corpus_aware, indexes, schema
+from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
     batch_atomic_write,
@@ -254,7 +255,7 @@ def _compute_updates_with_counts(
             source_type=folder_name.lower(),
             folder_title=folder_name,
             folder_description=FOLDER_DESCRIPTIONS.get(folder_name, "captured material"),
-            rel_source_path=f"Knowledge Base/Sources/{folder_name}/{rel_source_no_ext.rsplit('/', 1)[-1]}",
+            rel_source_path=f"{kb_prefix()}Sources/{folder_name}/{rel_source_no_ext.rsplit('/', 1)[-1]}",
             date_iso=date_iso,
             activity_summary=activity_summary,
             log_entry_body=log_entry_body,
@@ -322,7 +323,7 @@ def _activity_summary(
     tags: list[str],
 ) -> str:
     """One-liner for the top index's Recent activity bullet."""
-    base = f"`{rel_source_no_ext.replace('Knowledge Base/', '')}` (source, {source_type}, mobile capture via exomem)"
+    base = f"`{rel_source_no_ext.replace(kb_prefix(), '')}` (source, {source_type}, mobile capture via exomem)"
     excerpt = f"\"{title.strip()}\""
     tags_part = f"; tags: {tags}" if tags else ""
     return f"{base} — {excerpt}{tags_part}"

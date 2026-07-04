@@ -27,7 +27,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import find as find_module
-
+from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -115,7 +115,7 @@ class BM25Index:
             from .vault import walk_vault_md
             walk = walk_vault_md(vault_root)
         else:
-            kb = vault_root / "Knowledge Base"
+            kb = vault_root / kb_dirname()
             walk = find_module._walk_md(kb)
 
         self.last_tokenized = 0
@@ -234,7 +234,7 @@ def corpus_key(vault_root: Path, scope: str) -> tuple:
         from .vault import walk_vault_md
         walk = walk_vault_md(vault_root)
     else:
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         if not kb.is_dir():
             return (0, 0, "")
         walk = find_module._walk_md(kb)

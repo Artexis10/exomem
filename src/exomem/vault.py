@@ -22,6 +22,7 @@ import yaml
 from slugify import slugify as _slugify
 
 from . import freshness
+from .kbdir import kb_dirname, kb_prefix
 
 
 SLUG_MAX_LENGTH = 100
@@ -64,7 +65,7 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not override:
         raise RuntimeError(
             f"{env_var} is not set. Point it at your vault root — the folder "
-            f"that contains 'Knowledge Base/'. For example:\n"
+            f"that contains '{kb_prefix()}'. For example:\n"
             f'  macOS/Linux:  export {env_var}="/path/to/your/Obsidian"\n'
             f'  Windows:      setx {env_var} "C:\\path\\to\\your\\Obsidian"'
         )
@@ -72,17 +73,17 @@ def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
     if not _is_vault(path):
         raise RuntimeError(
             f"{env_var}={override!r} does not look like a vault "
-            f"(no Knowledge Base/_Schema/SKILL.md found)"
+            f"(no {kb_prefix()}_Schema/SKILL.md found)"
         )
     return path
 
 
 def _is_vault(path: Path) -> bool:
-    return (path / "Knowledge Base" / "_Schema" / "SKILL.md").exists()
+    return (path / kb_dirname() / "_Schema" / "SKILL.md").exists()
 
 
 def kb_root(vault: Path) -> Path:
-    return vault / "Knowledge Base"
+    return vault / kb_dirname()
 
 
 def content_hash(content: str) -> str:
@@ -361,7 +362,7 @@ def in_append_only_tree(rel_path: str) -> str | None:
     parts = rel_path.split("/")
     if not parts:
         return None
-    if parts[0] == "Knowledge Base" and len(parts) > 1:
+    if parts[0] == kb_dirname() and len(parts) > 1:
         head = parts[1]
     else:
         head = parts[0]
@@ -728,8 +729,8 @@ def find_inbound_wikilinks(
     vault revision) — results identical to scanning every file per call.
     """
     target = target_rel_path.replace("\\", "/").removesuffix(".md")
-    target_full = target if target.startswith("Knowledge Base/") else "Knowledge Base/" + target
-    target_stripped = target_full.removeprefix("Knowledge Base/")
+    target_full = target if target.startswith(kb_prefix()) else kb_prefix() + target
+    target_stripped = target_full.removeprefix(kb_prefix())
     target_basename = target.rsplit("/", 1)[-1]
 
     data = _inbound_index(vault_root)
@@ -848,7 +849,7 @@ class WikilinkResolver:
         title edge only when a non-empty frontmatter `title:` was read.
         """
         self.full_paths.add(no_ext)
-        self.kb_stripped.add(no_ext.removeprefix("Knowledge Base/"))
+        self.kb_stripped.add(no_ext.removeprefix(kb_prefix()))
         stem = no_ext.rsplit("/", 1)[-1]
         self.stems.setdefault(stem, []).append(no_ext)
         if title_lower:
@@ -858,7 +859,7 @@ class WikilinkResolver:
     def _remove_entry(self, no_ext: str) -> None:
         """Drop every edge a file contributed (path, stem, title)."""
         self.full_paths.discard(no_ext)
-        self.kb_stripped.discard(no_ext.removeprefix("Knowledge Base/"))
+        self.kb_stripped.discard(no_ext.removeprefix(kb_prefix()))
         _discard_from_list(self.stems, no_ext.rsplit("/", 1)[-1], no_ext)
         old_title = self._title_by_rel.pop(no_ext, None)
         if old_title is not None:
@@ -975,22 +976,22 @@ def normalize_wikilink(
     # canonicalize beyond ensuring the Knowledge Base/ prefix.
     if cleaned.endswith("/"):
         canonical = (
-            cleaned if cleaned.startswith("Knowledge Base/")
-            else "Knowledge Base/" + cleaned
+            cleaned if cleaned.startswith(kb_prefix())
+            else kb_prefix() + cleaned
         )
         return canonical + anchor, None
 
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
     if cleaned in resolver.full_paths:
         return cleaned + anchor, None
-    if not cleaned.startswith("Knowledge Base/"):
-        candidate = "Knowledge Base/" + cleaned
+    if not cleaned.startswith(kb_prefix()):
+        candidate = kb_prefix() + cleaned
         if candidate in resolver.full_paths:
             return candidate + anchor, None
 
     # 2. KB-stripped match (target looks like KB-relative).
     if cleaned in resolver.kb_stripped:
-        return "Knowledge Base/" + cleaned + anchor, None
+        return kb_prefix() + cleaned + anchor, None
 
     # 3. Bare name (no `/`): stem match first, then frontmatter title.
     if "/" not in cleaned:
@@ -1032,12 +1033,12 @@ def normalize_wikilink(
         raise UnresolvedWikilinkError(
             f"wikilink {target!r} does not resolve to any file in the vault"
         )
-    if cleaned.startswith("Knowledge Base/"):
+    if cleaned.startswith(kb_prefix()):
         fallback = cleaned
     elif "/" in cleaned and _is_curated_top_level(vault_root, cleaned.split("/", 1)[0]):
         fallback = cleaned
     elif "/" in cleaned:
-        fallback = "Knowledge Base/" + cleaned
+        fallback = kb_prefix() + cleaned
     else:
         fallback = cleaned
     return fallback + anchor, (
@@ -1169,8 +1170,8 @@ def prepend_log_entry(
     full vault-relative form so curated-tree writes stay traceable.
     """
     title = rel_path_no_ext
-    if title.startswith("Knowledge Base/"):
-        title = title[len("Knowledge Base/"):]
+    if title.startswith(kb_prefix()):
+        title = title[len(kb_prefix()):]
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     # Reuse the same separator the indexes module emits.
     separator = "\n---\n"
@@ -1196,7 +1197,7 @@ def write_log_entry(
     """
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.exists():
-        return "Knowledge Base/log.md missing; skipped log entry"
+        return f"{kb_prefix()}log.md missing; skipped log entry"
     text = log_file.read_text(encoding="utf-8")
     new_text = prepend_log_entry(
         text,
@@ -1234,8 +1235,8 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     title = rel_path_no_ext
     if title.endswith(".md"):
         title = title[: -len(".md")]
-    if title.startswith("Knowledge Base/"):
-        title = title[len("Knowledge Base/"):]
+    if title.startswith(kb_prefix()):
+        title = title[len(kb_prefix()):]
 
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.exists():

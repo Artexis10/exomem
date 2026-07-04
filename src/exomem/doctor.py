@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from .kbdir import kb_dirname, kb_prefix
+
 Status = Literal["pass", "warn", "fail"]
 Profile = Literal["lean", "hybrid", "media", "remote"]
 VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "media", "remote")
@@ -97,13 +99,13 @@ def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
         )
 
     path = Path(raw).expanduser()
-    skill = path / "Knowledge Base" / "_Schema" / "SKILL.md"
+    skill = path / kb_dirname() / "_Schema" / "SKILL.md"
     if not skill.exists():
         return path, _check(
             "vault.path",
             "fail",
-            f"{path} does not contain Knowledge Base/_Schema/SKILL.md.",
-            "Pass the vault root, not the Knowledge Base folder. For a new vault, run "
+            f"{path} does not contain {kb_prefix()}_Schema/SKILL.md.",
+            f"Pass the vault root, not the {kb_dirname()} folder. For a new vault, run "
             "`uv run python -m exomem init --vault <path>`.",
         )
     return path, _check("vault.path", "pass", f"Vault found at {path}.")
@@ -192,12 +194,12 @@ def _check_repo_env() -> DoctorCheck:
 def _check_schema_files(vault_root: Path | None) -> list[DoctorCheck]:
     if vault_root is None:
         return []
-    kb = vault_root / "Knowledge Base"
+    kb = vault_root / kb_dirname()
     checks: list[DoctorCheck] = []
     required = [
-        ("vault.schema", kb / "_Schema" / "SKILL.md", "Knowledge Base schema contract"),
-        ("vault.index", kb / "index.md", "Knowledge Base/index.md"),
-        ("vault.log", kb / "log.md", "Knowledge Base/log.md"),
+        ("vault.schema", kb / "_Schema" / "SKILL.md", f"{kb_dirname()} schema contract"),
+        ("vault.index", kb / "index.md", f"{kb_prefix()}index.md"),
+        ("vault.log", kb / "log.md", f"{kb_prefix()}log.md"),
         (
             "vault.project_keys",
             kb / "_Schema" / "project-keys.yaml",
@@ -425,7 +427,7 @@ def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     """
     if vault_root is None:
         return None
-    sidecar = vault_root / "Knowledge Base" / ".embeddings.sqlite"
+    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
     if not sidecar.exists():
         return _check(
             "embeddings.sidecar",

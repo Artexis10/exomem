@@ -26,6 +26,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
+from .kbdir import kb_dirname, kb_prefix
 from .vault import VAULT_SCAN_SKIP_DIRS
 
 log = logging.getLogger(__name__)
@@ -177,9 +178,9 @@ def backfill_media(
     semantic segmentation. One re-extraction serves both flags when both are requested.
     """
     stats = BackfillStats()
-    kb = vault_root / "Knowledge Base"
+    kb = vault_root / kb_dirname()
     if not kb.is_dir():
-        log_fn("no Knowledge Base/ directory; nothing to back-fill")
+        log_fn(f"no {kb_prefix()} directory; nothing to back-fill")
         return stats
     if rediarize and not extract._diarize_enabled():
         log_fn(
@@ -213,7 +214,7 @@ def backfill_media(
         key=lambda p: (_order.get(extract.media_type_for(p), 9), p.as_posix()),
     )
     stats.scanned = len(files)
-    log_fn(f"scanning {len(files)} media file(s) under Knowledge Base/ (dry_run={dry_run})")
+    log_fn(f"scanning {len(files)} media file(s) under {kb_prefix()} (dry_run={dry_run})")
 
     for i, f in enumerate(files, 1):
         media_type = extract.media_type_for(f)

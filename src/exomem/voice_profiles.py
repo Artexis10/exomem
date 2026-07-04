@@ -22,12 +22,14 @@ import numpy as np
 
 from exomem.speaker_attribution import Profile
 
+from .kbdir import kb_dirname
+
 DEFAULT_THRESHOLD = 0.40
 
 
 def voice_profiles_path(vault_root: Path) -> Path:
     """Per-machine voice-profile store, beside the embedding sidecars (operational infra)."""
-    return vault_root / "Knowledge Base" / ".voice_profiles.json"
+    return vault_root / kb_dirname() / ".voice_profiles.json"
 
 
 def load_store(path: Path) -> dict[str, dict[str, Any]]:

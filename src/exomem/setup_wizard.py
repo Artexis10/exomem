@@ -31,6 +31,7 @@ from . import install_hook as hook_module
 from . import install_skill as install_module
 from . import overview as overview_module
 from . import personalize as personalize_module
+from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
 
@@ -138,7 +139,7 @@ def run_setup(
     if junk_total:
         print_fn(f"    {junk_total} junk candidate(s) — zero-byte or sync-conflict copies.")
     kb_state = "already present" if scan["kb"]["present"] else "not present yet"
-    print_fn(f"    Knowledge Base/: {kb_state}")
+    print_fn(f"    {kb_prefix()}: {kb_state}")
     print_fn("")
     print_fn(f"  Contract: {overview_module.SCOPE_NOTE}")
     print_fn("")
@@ -147,9 +148,9 @@ def run_setup(
     # 3. init — never forced from the wizard
     try:
         init_module.init_vault(vault_path)
-        report("init", "[done] Knowledge Base/ scaffold created")
+        report("init", f"[done] {kb_prefix()} scaffold created")
     except FileExistsError:
-        report("init", "[skipped: Knowledge Base/ already exists]")
+        report("init", f"[skipped: {kb_prefix()} already exists]")
 
     # 3b. personalize — propose per-subtree access governance for sibling folders
     try:
@@ -323,10 +324,11 @@ def setup_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem setup",
         description=(
-            "Guided local setup: scan the vault, init the Knowledge Base, pick a "
+            "Guided local setup: scan the vault, init the "
+            f"{kb_dirname()}, pick a "
             "search profile, run doctor, register with Claude Code, and install "
             "the skill — one idempotent command. Existing vault content is never "
-            "touched; exomem writes only under Knowledge Base/. For remote "
+            f"touched; exomem writes only under {kb_prefix()}. For remote "
             "connector setup (claude.ai / iOS), use `exomem setup --remote`."
         ),
     )

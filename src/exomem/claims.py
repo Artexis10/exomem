@@ -48,6 +48,7 @@ from pathlib import Path
 import numpy as np
 
 from . import embeddings
+from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -267,7 +268,7 @@ def sidecar_path(vault_root: Path) -> Path:
     """Per-machine claim sidecar. Same dotfile placement rules as
     `.embeddings.sqlite`: outside `_Schema/`, ignored by Obsidian Sync, never
     bundled into a schema upload, rebuildable from the markdown source of truth."""
-    return vault_root / "Knowledge Base" / ".claims.sqlite"
+    return vault_root / kb_dirname() / ".claims.sqlite"
 
 
 # Only compiled CONCLUSIONS carry a claim worth comparing — mirror the exact
@@ -437,7 +438,7 @@ class ClaimIndex:
         lost/stale sidecar; safe to call from an audit-fix lane."""
         from . import access, find as find_module
 
-        kb = self.vault_root / "Knowledge Base"
+        kb = self.vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
         conn = self._connect()

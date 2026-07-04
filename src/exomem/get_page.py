@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import find as find_module
+from .kbdir import kb_prefix
 from .vault import content_hash
 
 
@@ -90,8 +91,8 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
     # Back-compat shortcut: if the literal path doesn't exist but the same
     # path under Knowledge Base/ does, use that. Lets callers write
     # `Notes/Insights/foo` without the leading prefix.
-    if not candidate.exists() and not rel.startswith("Knowledge Base/"):
-        kb_rel = "Knowledge Base/" + rel
+    if not candidate.exists() and not rel.startswith(kb_prefix()):
+        kb_rel = kb_prefix() + rel
         kb_candidate = vault_root / kb_rel
         if kb_candidate.exists():
             candidate = kb_candidate
