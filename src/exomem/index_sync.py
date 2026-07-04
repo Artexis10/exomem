@@ -44,13 +44,36 @@ def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
-    """Fan a writer's markdown change out to every index sidecar."""
-    from . import embeddings, find, lexstore
+    """Fan a writer's markdown change out to every index sidecar.
 
-    lexstore.upsert_after_write(vault_root, written_paths)
-    embeddings.upsert_after_write(vault_root, written_paths)
+    Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, …) are
+    dropped first: every index's FULL rebuild skips them, so the incremental
+    path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
+    events the same way; this belt covers direct writer calls.
+    """
+    from . import embeddings, find, lexstore
+    from .vault import in_excluded_scan_dir
+
+    vr = vault_root.resolve()
+
+    def _rel(p: Path) -> str | None:
+        try:
+            return p.resolve().relative_to(vr).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    eligible: list[Path] = []
+    for p in written_paths:
+        rel = _rel(p)
+        if rel is not None and in_excluded_scan_dir(rel):
+            continue
+        eligible.append(p)
+    if not eligible:
+        return
+    lexstore.upsert_after_write(vault_root, eligible)
+    embeddings.upsert_after_write(vault_root, eligible)
     try:
-        rels = _rel_md_paths(vault_root, written_paths)
+        rels = _rel_md_paths(vault_root, eligible)
         if rels:
             find.on_resolver_files_changed(vault_root, rels, [])
     except Exception:  # noqa: BLE001 — resolver sync must never fail a write

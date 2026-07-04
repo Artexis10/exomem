@@ -48,6 +48,24 @@ VAULT_SCAN_SKIP_DIRS = frozenset({
     "_Schema",
 })
 
+def in_excluded_scan_dir(rel_path: str) -> bool:
+    """True when any segment of `rel_path` is one of VAULT_SCAN_SKIP_DIRS.
+
+    The incremental-path counterpart of the exclusion every FULL walk applies
+    (walk_vault_md, find's walker, the inbound scan): event-driven patchers
+    must not index a path their index's full rebuild would skip. The concrete
+    bug this guards: `delete_file` moves a note into `Knowledge Base/_trash/`,
+    the watcher sees that as a fresh markdown file, and the trashed content
+    gets re-embedded under its trash path — invisible to find (walks exclude
+    `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
+    sidecar (observed 2026-07-04: dup warnings flagging trash entries).
+    """
+    return any(
+        seg in VAULT_SCAN_SKIP_DIRS
+        for seg in rel_path.replace("\\", "/").split("/")
+    )
+
+
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)

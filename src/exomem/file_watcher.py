@@ -257,6 +257,13 @@ class FileWatcher:
         """Record a `.md` change. Coalesces rapid events for the same path."""
         if path.suffix.lower() != ".md":
             return  # only markdown is embedded; ignore attachments / sidecars-of-binaries churn
+        from .vault import in_excluded_scan_dir
+        rel = self._rel(path)
+        if rel is not None and in_excluded_scan_dir(rel):
+            # _trash/_archive/_Schema/…: every full walk skips these, so the
+            # event path must too — else a delete's move-to-trash re-embeds
+            # the trashed note under its trash path.
+            return
         if _is_self_write_event(self._vault_root, path, deleted=deleted):
             log.debug("file watcher: suppressed self-write echo for %s", path)
             return
