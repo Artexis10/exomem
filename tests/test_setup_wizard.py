@@ -122,6 +122,21 @@ def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
     assert "removed stale" in out
 
 
+def test_setup_generates_access_policy(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    code, out = _setup(vault, home, Recorder())
+    assert code == 0
+    # `Daily/` is a markdown sibling → classified read-only in a generated _access.yaml.
+    access_yaml = vault / "Knowledge Base" / "_access.yaml"
+    assert access_yaml.is_file()
+    assert "Daily" in access_yaml.read_text(encoding="utf-8")
+    assert "personalize" in out
+    # Re-run converges — nothing left to govern.
+    code2, out2 = _setup(vault, home, Recorder(results={"mcp add": (1, "", "already exists")}))
+    assert code2 == 0
+    assert "[skipped: no sibling folders need governing]" in out2
+
+
 def test_no_claude_cli_prints_snippet(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     recorder = Recorder()

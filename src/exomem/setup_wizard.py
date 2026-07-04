@@ -30,6 +30,7 @@ from . import init as init_module
 from . import install_hook as hook_module
 from . import install_skill as install_module
 from . import overview as overview_module
+from . import personalize as personalize_module
 
 _SKILL_NAME_MARKER = "name: exomem"
 
@@ -149,6 +150,28 @@ def run_setup(
         report("init", "[done] Knowledge Base/ scaffold created")
     except FileExistsError:
         report("init", "[skipped: Knowledge Base/ already exists]")
+
+    # 3b. personalize — propose per-subtree access governance for sibling folders
+    try:
+        prep = personalize_module.scan_and_classify(vault_path)
+    except personalize_module.PersonalizeError as e:
+        report("personalize", f"[failed: {e}]")
+        prep = None
+    if prep is not None:
+        if not prep.needs_write:
+            report("personalize", "[skipped: no sibling folders need governing]")
+        else:
+            for p in prep.proposals:
+                if p.already_configured is None and p.classification != personalize_module.CLASS_UNMANAGED:
+                    print_fn(f"    {p.folder}/  -> {p.classification}  ({p.reason})")
+            if yes or _ask_yn(input_fn, "Write these entries to _access.yaml?", True):
+                done = personalize_module.write_access_yaml(prep)
+                report(
+                    "personalize",
+                    f"[done] +{len(done.add_readonly)} readonly, +{len(done.add_excluded)} excluded",
+                )
+            else:
+                report("personalize", "[skipped: declined]")
 
     # 4. profile
     if profile is None:

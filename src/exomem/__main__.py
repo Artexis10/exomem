@@ -7,6 +7,7 @@ Subcommands:
   → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem skill into Claude Code
+- `personalize` — scan a vault and generate a starter `_access.yaml` (readonly/excluded siblings)
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
@@ -42,6 +43,10 @@ def main(argv: list[str] | None = None) -> int:
         return _init_main(raw[1:])
     if raw and raw[0] == "install-skill":
         return _install_skill_main(raw[1:])
+    if raw and raw[0] == "personalize":
+        from .personalize import personalize_main
+
+        return personalize_main(raw[1:])
     if raw and raw[0] == "install-hook":
         return _install_hook_main(raw[1:])
     if raw and raw[0] == "demo":
