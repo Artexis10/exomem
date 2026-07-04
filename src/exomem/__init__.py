@@ -11,4 +11,4 @@ from .env_compat import promote_legacy as _promote_legacy
 
 _promote_legacy()
 
-__version__ = "0.7.0"  # x-release-please-version
+__version__ = "0.8.0"  # x-release-please-version
