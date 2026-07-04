@@ -191,9 +191,13 @@ store. exomem works the other way around: agents come to your vault.
 For a deeper point-in-time comparison, see
 [docs/comparison-engraph.md](docs/comparison-engraph.md).
 
-**Measured retrieval quality.** Retrieval is graded by a reproducible golden-set
-eval harness, not asserted — methodology and numbers in
-[docs/benchmarks.md](docs/benchmarks.md).
+**Measured retrieval quality — and speed.** Retrieval is graded by a
+reproducible golden-set eval harness, not asserted, and latency is measured
+per lane at corpus scale: hybrid `find()` runs sub-second end-to-end at
+50,000 notes (864 ms on the reference desktop, hot cache off), with the
+keyword/BM25 lanes served from an FTS5 sidecar index in milliseconds —
+built into stdlib SQLite, so it works on the lean install too. Methodology
+and numbers in [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Core tools
 
