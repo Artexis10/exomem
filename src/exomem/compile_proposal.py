@@ -20,7 +20,7 @@ from pathlib import Path
 
 from . import corpus_aware
 from . import find as find_module
-from .vault import WikilinkResolver, normalize_wikilink
+from .vault import normalize_wikilink
 
 log = logging.getLogger(__name__)
 
@@ -44,7 +44,7 @@ def propose_compilation(
     if not sources:
         raise ProposeError("INVALID_PROPOSE", "provide at least one source path")
 
-    resolver = WikilinkResolver(vault_root)
+    resolver = find_module.shared_resolver(vault_root)
     resolved: list[str] = []          # canonical "Knowledge Base/..." (no .md)
     source_types: list[str] = []
     titles: list[str] = []

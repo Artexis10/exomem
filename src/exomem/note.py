@@ -227,10 +227,13 @@ def note(
     rel_note_no_ext = note_path.relative_to(vault_root).with_suffix("").as_posix()
     new_note_wikilink = f"[[{rel_note_no_ext}]]"
 
-    # Resolver: built once per write so every wikilink lookup hits the same
-    # in-memory index. We register the new note's own path so any body
-    # reference back to itself resolves cleanly.
-    resolver = WikilinkResolver(vault_root)
+    # Resolver: the process-shared, freshness-checked instance (find's graph-
+    # lane cache) — a fresh build reads + YAML-parses the whole vault per
+    # write. We register the new note's own path so any body reference back to
+    # itself resolves cleanly; index_sync re-syncs the entry from disk after
+    # the batch write, and the except-path below purges it on failure.
+    from . import find as find_module
+    resolver = find_module.shared_resolver(vault_root)
     resolver.add_pending(rel_note_no_ext, title=title)
 
     sources_norm, source_warnings = _normalize_sources(
@@ -417,6 +420,15 @@ def note(
     except Exception as e:
         log.exception("partial write during note(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
+        # Purge this write's add_pending registration from the SHARED resolver
+        # — the note never landed, and a phantom entry would resolve wikilinks
+        # to a nonexistent page until the next full rebuild.
+        try:
+            find_module.on_resolver_files_changed(
+                vault_root, [rel_note_no_ext + ".md"], []
+            )
+        except Exception:  # noqa: BLE001 — purge is best-effort cleanup
+            log.debug("resolver pending-purge failed", exc_info=True)
         raise
 
     return NoteResult(

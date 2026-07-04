@@ -2405,6 +2405,27 @@ def _get_query_resolver(vault_root: Path, freshness: tuple | None = None):
     return resolver
 
 
+def shared_resolver(vault_root: Path):
+    """The process-shared, freshness-checked WikilinkResolver — for WRITERS.
+
+    The same instance the graph lane uses (`_get_query_resolver`), exposed
+    under a public name so write ops stop constructing a fresh
+    `WikilinkResolver(vault_root)` per call — a full vault read + YAML parse
+    that measured ~2.1s of a 4.6s note() on a ~1,900-file vault (cProfile,
+    2026-07-04) and dominated every write tool's latency.
+
+    Contract for writers:
+    - `resolver.add_pending(...)` MAY be called for about-to-land paths; after
+      the batch write, `index_sync.upsert_after_write` re-syncs those entries
+      from disk (and restamps the freshness key, closing the async watcher
+      window where the next query would miss the cache and rebuild).
+    - A FAILED write must purge its pending registration via
+      `on_resolver_files_changed(vault_root, [rel + ".md"], [])` — the file
+      never landed, so the disk re-read drops the phantom entry.
+    """
+    return _get_query_resolver(vault_root)
+
+
 def on_resolver_files_changed(
     vault_root: Path,
     changed_rels,

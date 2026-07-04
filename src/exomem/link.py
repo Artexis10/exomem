@@ -147,7 +147,11 @@ def link(
     folder.mkdir(parents=True, exist_ok=True)
 
     rel_entity_no_ext = entity_path.relative_to(vault_root).with_suffix("").as_posix()
-    resolver = WikilinkResolver(vault_root)
+    # Shared, freshness-checked resolver (see find.shared_resolver) — never a
+    # fresh O(vault) build per write. Pending entry re-synced by index_sync
+    # post-write; purged in the except-path below on failure.
+    from . import find as find_module
+    resolver = find_module.shared_resolver(vault_root)
     resolver.add_pending(rel_entity_no_ext, title=name_safe)
 
     connections_norm, conn_warnings = _normalize_connections(
@@ -249,6 +253,12 @@ def link(
     except Exception as e:
         log.exception("partial write during link(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
+        try:  # purge the add_pending phantom — the entity never landed
+            find_module.on_resolver_files_changed(
+                vault_root, [rel_entity_no_ext + ".md"], []
+            )
+        except Exception:  # noqa: BLE001 — purge is best-effort cleanup
+            log.debug("resolver pending-purge failed", exc_info=True)
         raise
 
     return LinkResult(path=rel_entity, warnings=warnings)

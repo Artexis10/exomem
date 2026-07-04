@@ -27,7 +27,6 @@ from .edit import (
     commit_edit,
     load_editable,
 )
-from .vault import WikilinkResolver
 
 
 @dataclass
@@ -130,7 +129,8 @@ def multi_edit(
         )
 
     # ---- apply sequentially in memory; any failure raises before the write ----
-    resolver = WikilinkResolver(vault_root)
+    from . import find as find_module
+    resolver = find_module.shared_resolver(vault_root)
     body = editable.body
     warnings: list[str] = []
     for i, e in enumerate(edits):

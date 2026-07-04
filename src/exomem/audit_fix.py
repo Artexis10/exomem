@@ -299,7 +299,7 @@ def audit_fix(
     report = AuditFixReport(dry_run=dry_run)
 
     # ---- Pass 1: canonicalize wikilinks across all compiled material ----
-    resolver = WikilinkResolver(vault_root)
+    resolver = find_module.shared_resolver(vault_root)
     writes: list[PlannedWrite] = []
     pending_paths: list[str] = []
 

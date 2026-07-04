@@ -27,7 +27,6 @@ from . import access
 from .vault import (
     PlannedWrite,
     VaultPathError,
-    WikilinkResolver,
     batch_atomic_write,
     in_append_only_tree,
     in_curated_tree,
@@ -127,7 +126,8 @@ def create_file(
     warnings: list[str] = []
     is_markdown = rel_path.endswith(".md")
     if is_markdown:
-        resolver = WikilinkResolver(vault_root)
+        from . import find as find_module
+        resolver = find_module.shared_resolver(vault_root)
         content, body_warnings = normalize_body_wikilinks(
             content, vault_root, resolver=resolver
         )

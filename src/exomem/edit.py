@@ -255,7 +255,7 @@ def edit(
     elif new_body is not None:
         # Normalize wikilinks to canonical full form. Existing body is left
         # alone to preserve user-intended legacy forms in untouched files.
-        resolver = WikilinkResolver(vault_root)
+        resolver = find_module.shared_resolver(vault_root)
         new_body_final, body_warnings = normalize_body_wikilinks(
             new_body, vault_root, resolver=resolver
         )
@@ -478,7 +478,7 @@ def apply_surgical_replace(
     # Normalize wikilinks only in the inserted snippet — the rest of the body
     # is left byte-for-byte untouched (no incidental legacy rewrites).
     if resolver is None:
-        resolver = WikilinkResolver(vault_root)
+        resolver = find_module.shared_resolver(vault_root)
     new_string_norm, warnings = normalize_body_wikilinks(
         new_string, vault_root, resolver=resolver
     )
@@ -544,7 +544,7 @@ def apply_section_edit(
             break
 
     if resolver is None:
-        resolver = WikilinkResolver(vault_root)
+        resolver = find_module.shared_resolver(vault_root)
     content_norm, warnings = normalize_body_wikilinks(
         content, vault_root, resolver=resolver
     )
