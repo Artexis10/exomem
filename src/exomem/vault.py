@@ -389,6 +389,24 @@ def in_append_only_tree(rel_path: str) -> str | None:
     return None
 
 
+# libyaml's CSafeLoader is the same safe schema as SafeLoader at ~7x the parse
+# speed (measured 609ms -> 89ms over 1,730 frontmatter blocks, 2026-07-04).
+# PyYAML wheels bundle libyaml on all supported platforms; fall back silently
+# on a custom build without it. Used by the HOT parse seams only (this module's
+# parse_frontmatter + find's page parser) — one-off config loads keep safe_load.
+_YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def yaml_safe_load(text: str):
+    """`yaml.safe_load` via libyaml when available (hot-path frontmatter seam).
+
+    SAFETY: `_YAML_SAFE_LOADER` is CSafeLoader or SafeLoader — both the safe
+    schema; `!!python/*` tags raise ConstructorError instead of constructing.
+    Pinned by tests/test_yaml_loader_safety.py — do not widen the loader.
+    """
+    return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
+
+
 def parse_frontmatter(text: str) -> tuple[dict[str, Any], str, str | None]:
     """Split a markdown file into (frontmatter_dict, body, frontmatter_text).
 
@@ -403,7 +421,7 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str, str | None]:
     if body.startswith("\n"):
         body = body[1:]
     try:
-        fm = yaml.safe_load(fm_text) or {}
+        fm = yaml_safe_load(fm_text) or {}
         if not isinstance(fm, dict):
             fm = {}
     except yaml.YAMLError:

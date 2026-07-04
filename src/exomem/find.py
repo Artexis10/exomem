@@ -2573,7 +2573,10 @@ def _parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None
     fm_match = FRONTMATTER_PATTERN.match(text)
     if fm_match:
         try:
-            frontmatter = yaml.safe_load(fm_match.group(1)) or {}
+            # Hot path: every page-cache miss parses here (warm-up walks the
+            # whole vault through it). libyaml loader via the vault seam.
+            from .vault import yaml_safe_load
+            frontmatter = yaml_safe_load(fm_match.group(1)) or {}
             if not isinstance(frontmatter, dict):
                 frontmatter = {}
         except yaml.YAMLError as e:
