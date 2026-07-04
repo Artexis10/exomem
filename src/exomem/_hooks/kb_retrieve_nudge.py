@@ -49,8 +49,8 @@ import urllib.request
 from pathlib import Path
 
 REMINDER = (
-    "[KB retrieval check] Before answering: if this prompt touches a topic the "
-    "Knowledge Base might hold — a project, a past decision, a domain you've taken "
+    "[KB retrieval check] Before answering: if this prompt touches a topic your "
+    "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
     "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
     "`find` FIRST and fold any hits into the answer (cite them). The KB is the "
     "source of truth for prior conclusions; a miss means 'not found in what I "
