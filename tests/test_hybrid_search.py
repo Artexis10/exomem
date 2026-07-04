@@ -78,7 +78,7 @@ def test_audit_flags_embedding_drift(tmp_path) -> None:
     (vault / "Knowledge Base" / "_Schema").mkdir(parents=True)
     # Minimal SKILL.md so resolve_vault wouldn't reject (we call audit directly).
     (vault / "Knowledge Base" / "_Schema" / "SKILL.md").write_text(
-        "---\nname: knowledge-base\n---\n", encoding="utf-8"
+        "---\nname: exomem\n---\n", encoding="utf-8"
     )
     page = vault / "Knowledge Base" / "Notes" / "Insights" / "probe.md"
     page.parent.mkdir(parents=True, exist_ok=True)

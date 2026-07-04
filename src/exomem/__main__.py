@@ -6,7 +6,7 @@ Subcommands:
 - `setup --remote` — guided remote-connector onboarding (tunnel → .env + GitHub OAuth
   → `doctor --profile remote --probe` gate → connector URL) for claude.ai / iOS access
 - `init` — bootstrap a fresh Knowledge Base into a vault
-- `install-skill` — install the Exomem knowledge-base skill into Claude Code
+- `install-skill` — install the Exomem skill into Claude Code
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
@@ -493,14 +493,14 @@ def _install_skill_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-skill",
         description=(
-            "Install the Exomem knowledge-base skill into Claude Code's skills folder. "
+            "Install the Exomem skill into Claude Code's skills folder. "
             "The MCP server is the hands; the skill is the brain that tells Claude "
             "when to capture and how to file — without it, the tools sit unused."
         ),
     )
     parser.add_argument(
         "--target",
-        help="Skill folder to install into (default: ~/.claude/skills/knowledge-base).",
+        help="Skill folder to install into (default: ~/.claude/skills/exomem).",
     )
     parser.add_argument(
         "--force",
@@ -524,10 +524,16 @@ def _install_skill_main(argv: list[str]) -> int:
         print(f"exomem install-skill: {e}", file=sys.stderr)
         return 1
     print(
-        f"Installed the Exomem knowledge-base skill ({report['mode']}, "
+        f"Installed the Exomem skill ({report['mode']}, "
         f"{report['files']} files):"
     )
     print(f"  {report['target']}")
+    # Installing to the default location supersedes any pre-rename `knowledge-base`
+    # skill; retire it so Claude Code doesn't load both.
+    if target is None:
+        removed = install_module.remove_legacy_skill()
+        if removed is not None:
+            print(f"  Removed the pre-rename skill at {removed}.")
     print("Restart Claude Code to load it. Then just talk - it captures at")
     print('natural stopping points, or say "find my notes on X".')
     return 0

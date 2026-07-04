@@ -1,14 +1,15 @@
 ---
-name: knowledge-base
-description: Exomem-powered skill for operating on your personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when you want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively — it consults the KB for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Do NOT write outside the Knowledge Base folder; any sibling folders in the vault are read-only inputs.
-version: 0.31.0
+name: exomem
+description: Use when working with Exomem — your personal knowledge base (an Obsidian vault of raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts). Triggers whenever you name Exomem (the connector/MCP you talk to) or want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in Exomem, your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this," "what does Exomem have on X"). Also engages proactively — it consults Exomem for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Governed writes stay inside the folder Exomem manages; the rest of your vault is read-only input.
+version: 0.32.0
 ---
 
-# Knowledge Base
+# Exomem
 
-This skill is the Exomem Knowledge Base contract. It keeps the stable
-`knowledge-base` skill identity while teaching agents how to use Exomem's MCP
-tools over your vault.
+This skill is the Exomem contract. "Exomem" is the connector/MCP you talk to;
+your Knowledge Base is the governed set of folders it manages inside your Obsidian
+vault. This file pins the `exomem` skill identity while teaching agents how to use
+Exomem's MCP tools over that vault.
 
 The compiled, structured layer of your Obsidian vault. Everything in
 `Knowledge Base/` is either a raw source (immutable), compiled material under

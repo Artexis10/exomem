@@ -31,7 +31,7 @@ from . import install_hook as hook_module
 from . import install_skill as install_module
 from . import overview as overview_module
 
-_SKILL_NAME_MARKER = "name: knowledge-base"
+_SKILL_NAME_MARKER = "name: exomem"
 
 
 def _ask_yn(input_fn, prompt: str, default: bool) -> bool:
@@ -232,7 +232,7 @@ def run_setup(
                 report("register", f"[failed: {detail}]")
 
     # 7. skill — the brain; without it the tools sit unused
-    skill_target = (home / "skills" / "knowledge-base") if home else None
+    skill_target = (home / "skills" / "exomem") if home else None
     try:
         install_module.install_skill(skill_target)
         report("skill", "[done] installed")
@@ -252,6 +252,13 @@ def run_setup(
             report("skill", "[skipped: already installed]")
     except FileNotFoundError as e:
         report("skill", f"[failed: {e}]")
+
+    # 7b. migrate: a pre-rename `knowledge-base` install lingers as a stale duplicate
+    # skill now that the skill is `exomem`; retire it, but only when it's ours.
+    legacy_dir = (home / "skills" / "knowledge-base") if home else None
+    removed = install_module.remove_legacy_skill(legacy_dir)
+    if removed is not None:
+        report("migrate", f"[done] removed stale {removed}")
 
     # 8. hooks — optional reliability nudges
     do_hooks = with_hooks
