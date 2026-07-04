@@ -297,20 +297,21 @@ Both are **language-agnostic** (no keyword matching — they work the same in an
 language you write in) and cheap (gated so they stay quiet on ordinary
 turns/prompts, plus a per-session cooldown). They write scripts to
 `~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
-Code to activate. Triggers log to `~/.claude/kb-capture-nudge.log` and
-`~/.claude/kb-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
+Code to activate. Triggers log to `~/.claude/exomem-capture-nudge.log` and
+`~/.claude/exomem-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
 by hand? `uv run python -m exomem install-hook --print-only` writes the scripts and
 prints the snippet to paste.
 
-Tune with `KB_CAPTURE_NUDGE_MIN_CHARS` / `KB_RETRIEVE_NUDGE_MIN_CHARS` (and the
-matching `_COOLDOWN_SEC`), or disable either with `KB_CAPTURE_NUDGE_DISABLE=1` /
-`KB_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
+Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
+matching `_COOLDOWN_SEC`), or disable either with `EXOMEM_CAPTURE_NUDGE_DISABLE=1` /
+`EXOMEM_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
 Lower the `MIN_CHARS` values — those scripts pack more meaning per character, so
-the defaults (tuned for English) can under-fire.
+the defaults (tuned for English) can under-fire. (These tunables were renamed from
+`KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
 the `UserPromptSubmit` hook only reminds Claude to run `find` — set
-`KB_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
+`EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
 (keyword mode, no embeddings) for the same gated prompt and appends them to the
 reminder, so relevant prior KB pages are already in context before Claude
 decides whether to search. It tries a short transport ladder and never blocks
@@ -318,10 +319,11 @@ on a slow path: REST first (one `POST /api/find`, ~2s timeout) — only attempte
 when `EXOMEM_REST_API_KEY` is set **in the shell that launches Claude Code**
 (not just the server's service environment — the hook can't read another
 process's env, so export it in the same profile Claude Code inherits from);
-then, only if you also set `KB_RETRIEVE_INJECT_CLI=1`, an `exomem find --json`
+then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem find --json`
 subprocess call (~5s timeout, slower — cold Python start). If neither is
 configured or reachable, it falls straight back to the plain reminder — no
-network call is ever attempted unless `KB_RETRIEVE_INJECT` is on.
+network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. (The legacy
+`KB_RETRIEVE_INJECT` / `KB_RETRIEVE_INJECT_CLI` names still work too.)
 
 (Hooks are Claude Code only — claude.ai web/mobile can't run them, so there the
 skill stays best-effort: nudge it with *"save that to kb"* or *"check the kb."*)

@@ -13,21 +13,23 @@ keywords. By default it injects only a *reminder* — Claude still runs the real
 start until the hook returns, so the hook must be fast: stdlib only, no search
 here by default.)
 
-Opt-in **inject mode** (`KB_RETRIEVE_INJECT`) upgrades the reminder to real
+Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
 stubs (`find(detail="compact")`, keyword mode only — no embeddings, no GPU) via a
 short transport ladder — REST first (`EXOMEM_REST_API_KEY` in this env), then an
-opt-in CLI fallback (`KB_RETRIEVE_INJECT_CLI`) — and appends them to the
+opt-in CLI fallback (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the
 reminder. Any transport failure (or the flag being off) falls straight through to
 the reminder-only floor; the hook never blocks or raises past that point.
 
-Tunables (env): KB_RETRIEVE_NUDGE_DISABLE=1 (off), KB_RETRIEVE_NUDGE_MIN_CHARS
+Tunables (env): EXOMEM_RETRIEVE_NUDGE_DISABLE=1 (off), EXOMEM_RETRIEVE_NUDGE_MIN_CHARS
 (default 20 — short, since prompts are short and a dense script like Japanese
-packs more per char), KB_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300),
-KB_RETRIEVE_INJECT (opt-in, default off — truthy-parsed: unset/""/"0"/"false"/
+packs more per char), EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300),
+EXOMEM_RETRIEVE_INJECT (opt-in, default off — truthy-parsed: unset/""/"0"/"false"/
 "no"/"off", any case, count as off) to turn on retrieve-and-inject, and
-KB_RETRIEVE_INJECT_CLI (opt-in, same truthy parse) to additionally allow the
-slower CLI transport when REST isn't configured or fails.
+EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same truthy parse) to additionally allow the
+slower CLI transport when REST isn't configured or fails. The legacy KB_RETRIEVE_*
+names (including KB_RETRIEVE_INJECT / KB_RETRIEVE_INJECT_CLI) are still accepted for
+back-compat, aliased to the EXOMEM_* names at startup.
 
 Contract (Claude Code UserPromptSubmit hook): read the event JSON on stdin (incl.
 `prompt`); on exit 0, print
@@ -49,7 +51,7 @@ import urllib.request
 from pathlib import Path
 
 REMINDER = (
-    "[KB retrieval check] Before answering: if this prompt touches a topic your "
+    "[Exomem retrieval check] Before answering: if this prompt touches a topic your "
     "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
     "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
     "`find` FIRST and fold any hits into the answer (cite them). The KB is the "
@@ -72,10 +74,29 @@ _FALSY_ENV = {"", "0", "false", "no", "off"}
 def _env_flag(name: str) -> bool:
     """Truthy opt-in parse: unset, '', '0', 'false', 'no', 'off' (any case) → False.
 
-    A bare presence/truthiness check would read `KB_RETRIEVE_INJECT=0` as opted in —
+    A bare presence/truthiness check would read `EXOMEM_RETRIEVE_INJECT=0` as opted in —
     the same bug class fixed elsewhere in this repo (extract.py::_env_flag).
     """
     return os.environ.get(name, "").strip().lower() not in _FALSY_ENV
+
+
+# Back-compat: the tunables were renamed KB_RETRIEVE_* -> EXOMEM_RETRIEVE_* with the
+# knowledge-base -> exomem rename. The OLD names still work — normalized to the new
+# names at startup so the rest of the hook reads only EXOMEM_* everywhere.
+_ENV_ALIASES = (
+    ("EXOMEM_RETRIEVE_NUDGE_DISABLE", "KB_RETRIEVE_NUDGE_DISABLE"),
+    ("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", "KB_RETRIEVE_NUDGE_MIN_CHARS"),
+    ("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "KB_RETRIEVE_NUDGE_COOLDOWN_SEC"),
+    ("EXOMEM_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT"),
+    ("EXOMEM_RETRIEVE_INJECT_CLI", "KB_RETRIEVE_INJECT_CLI"),
+)
+
+
+def _normalize_env_aliases() -> None:
+    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+    for new, old in _ENV_ALIASES:
+        if new not in os.environ and old in os.environ:
+            os.environ[new] = os.environ[old]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -88,7 +109,7 @@ def _env_int(name: str, default: int) -> int:
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     """Per-session timestamp file (mtime-based). Namespaced so it never collides
     with the capture hook's cooldown stamp for the same session."""
-    state_dir = Path.home() / ".claude" / ".cache" / "kb-nudge"
+    state_dir = Path.home() / ".claude" / ".cache" / "exomem-nudge"
     key = "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
     stamp = state_dir / key
     try:
@@ -109,7 +130,7 @@ def _touch(stamp: Path) -> None:
 
 def _log(prompt: str) -> None:
     try:
-        logp = Path.home() / ".claude" / "kb-retrieve-nudge.log"
+        logp = Path.home() / ".claude" / "exomem-retrieve-nudge.log"
         logp.parent.mkdir(parents=True, exist_ok=True)
         snippet = re.sub(r"\s+", " ", prompt)[:160]
         with open(logp, "a", encoding="utf-8") as f:
@@ -200,7 +221,7 @@ def _fetch_via_cli(prompt: str, limit: int = 3, timeout: float = 5.0) -> list[di
 
 def _gather_hits(prompt: str) -> list[dict]:
     """Transport ladder decision: REST first (only when `EXOMEM_REST_API_KEY` is
-    set), CLI only when REST wasn't attempted/failed AND `KB_RETRIEVE_INJECT_CLI`
+    set), CLI only when REST wasn't attempted/failed AND `EXOMEM_RETRIEVE_INJECT_CLI`
     is truthy. Returns [] when neither rung is usable, or when the resolved
     transport itself reports zero hits (caller renders that as "nothing extra")."""
     api_key = os.environ.get("EXOMEM_REST_API_KEY", "").strip()
@@ -208,7 +229,7 @@ def _gather_hits(prompt: str) -> list[dict]:
         hits = _fetch_via_rest(prompt, api_key)
         if hits is not None:  # REST reachable (even with 0 hits) -> CLI never tried
             return hits
-    if _env_flag("KB_RETRIEVE_INJECT_CLI"):
+    if _env_flag("EXOMEM_RETRIEVE_INJECT_CLI"):
         hits = _fetch_via_cli(prompt)
         if hits is not None:
             return hits
@@ -238,7 +259,8 @@ def _format_inject_block(hits: list[dict]) -> str:
 
 
 def main() -> int:
-    if os.environ.get("KB_RETRIEVE_NUDGE_DISABLE"):
+    _normalize_env_aliases()
+    if os.environ.get("EXOMEM_RETRIEVE_NUDGE_DISABLE"):
         return 0
     try:
         raw = sys.stdin.read()
@@ -250,8 +272,8 @@ def main() -> int:
     if not isinstance(prompt, str):
         return 0
 
-    min_chars = _env_int("KB_RETRIEVE_NUDGE_MIN_CHARS", 20)
-    cooldown = _env_int("KB_RETRIEVE_NUDGE_COOLDOWN_SEC", 300)
+    min_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", 20)
+    cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", 300)
 
     if len(prompt.strip()) < min_chars:  # trivial prompt ("yes", "go", "thanks")
         return 0
@@ -264,7 +286,7 @@ def main() -> int:
     _log(prompt)
 
     additional_context = REMINDER
-    if _env_flag("KB_RETRIEVE_INJECT"):
+    if _env_flag("EXOMEM_RETRIEVE_INJECT"):
         # Inject mode is a payload upgrade on this same gate, not a second
         # trigger — REST/CLI are only ever attempted past this point. Any
         # unanticipated failure here must still fall through to the

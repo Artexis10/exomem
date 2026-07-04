@@ -17,12 +17,13 @@ it to do nothing if it isn't one).
 
 Cheap and safe: the script itself is free (stdlib only); the only token cost is a
 real capture (the feature). Self-disarms via `stop_hook_active` (no loops); the
-cooldown caps frequency; every trigger is logged to ~/.claude/kb-capture-nudge.log
+cooldown caps frequency; every trigger is logged to ~/.claude/exomem-capture-nudge.log
 for tuning.
 
-Tunables (env): KB_CAPTURE_NUDGE_DISABLE=1 (off), KB_CAPTURE_NUDGE_MIN_CHARS
+Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_CHARS
 (default 300 — lower it for a dense script like Japanese, which packs more meaning
-per char), KB_CAPTURE_NUDGE_COOLDOWN_SEC (default 300).
+per char), EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
+names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
 Contract (Claude Code Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
@@ -44,7 +45,7 @@ from pathlib import Path
 _KB_WRITE = re.compile(r"(?:exomem|knowledge[_-]?base).*(note|add|edit|append|create_file|replace)", re.I)
 
 REMINDER = (
-    "[KB capture check] This turn did substantial work. If your Exomem knowledge-base "
+    "[Exomem capture check] This turn did substantial work. If your Exomem knowledge-base "
     "skill is available and the turn reached a durable conclusion — a decision, a "
     "solved problem, a diagnosed failure, or a recognized pattern, in whatever "
     "language you were working in — capture it now as a *compiled note* (the "
@@ -54,6 +55,23 @@ REMINDER = (
     "configured here, do nothing and stop — that is the common case, and skipping "
     "is correct and free."
 )
+
+
+# Back-compat: the tunables were renamed KB_CAPTURE_NUDGE_* -> EXOMEM_CAPTURE_NUDGE_*
+# with the knowledge-base -> exomem rename. The OLD names still work — normalized to
+# the new names at startup so the rest of the hook reads only EXOMEM_* everywhere.
+_ENV_ALIASES = (
+    ("EXOMEM_CAPTURE_NUDGE_DISABLE", "KB_CAPTURE_NUDGE_DISABLE"),
+    ("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", "KB_CAPTURE_NUDGE_MIN_CHARS"),
+    ("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", "KB_CAPTURE_NUDGE_COOLDOWN_SEC"),
+)
+
+
+def _normalize_env_aliases() -> None:
+    """Map any legacy KB_* tunable onto its EXOMEM_* name (new wins if both set)."""
+    for new, old in _ENV_ALIASES:
+        if new not in os.environ and old in os.environ:
+            os.environ[new] = os.environ[old]
 
 
 def _env_int(name: str, default: int) -> int:
@@ -120,7 +138,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
 
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     """Per-session timestamp file (mtime-based, so we never parse content)."""
-    state_dir = Path.home() / ".claude" / ".cache" / "kb-nudge"
+    state_dir = Path.home() / ".claude" / ".cache" / "exomem-nudge"
     key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128]
     stamp = state_dir / key
     try:
@@ -141,7 +159,7 @@ def _touch(stamp: Path) -> None:
 
 def _log(text: str) -> None:
     try:
-        logp = Path.home() / ".claude" / "kb-capture-nudge.log"
+        logp = Path.home() / ".claude" / "exomem-capture-nudge.log"
         logp.parent.mkdir(parents=True, exist_ok=True)
         snippet = re.sub(r"\s+", " ", text)[-160:]
         with open(logp, "a", encoding="utf-8") as f:
@@ -151,7 +169,8 @@ def _log(text: str) -> None:
 
 
 def main() -> int:
-    if os.environ.get("KB_CAPTURE_NUDGE_DISABLE"):
+    _normalize_env_aliases()
+    if os.environ.get("EXOMEM_CAPTURE_NUDGE_DISABLE"):
         return 0
     try:
         raw = sys.stdin.read()
@@ -165,8 +184,8 @@ def main() -> int:
     if not tpath:
         return 0
 
-    min_chars = _env_int("KB_CAPTURE_NUDGE_MIN_CHARS", 300)
-    cooldown = _env_int("KB_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
+    min_chars = _env_int("EXOMEM_CAPTURE_NUDGE_MIN_CHARS", 300)
+    cooldown = _env_int("EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC", 300)
 
     assistant_text, tools = _latest_turn(tpath)
     if any(_KB_WRITE.search(t) for t in tools):  # already captured this turn

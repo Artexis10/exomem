@@ -1,4 +1,4 @@
-"""`kb_retrieve_nudge.py`'s opt-in retrieve-and-inject upgrade (KB_RETRIEVE_INJECT).
+"""`exomem_retrieve_nudge.py`'s opt-in retrieve-and-inject upgrade (EXOMEM_RETRIEVE_INJECT).
 
 The hook is a standalone, stdlib-only script — not a package member — so it is
 loaded via `importlib.util.spec_from_file_location` (matching how
@@ -28,11 +28,11 @@ import pytest
 
 import exomem
 
-RETRIEVE_SCRIPT = Path(exomem.__file__).parent / "_hooks" / "kb_retrieve_nudge.py"
+RETRIEVE_SCRIPT = Path(exomem.__file__).parent / "_hooks" / "exomem_retrieve_nudge.py"
 
 
 def _load_hook_module():
-    spec = importlib.util.spec_from_file_location("kb_retrieve_nudge_under_test", RETRIEVE_SCRIPT)
+    spec = importlib.util.spec_from_file_location("exomem_retrieve_nudge_under_test", RETRIEVE_SCRIPT)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
@@ -44,15 +44,23 @@ hook_mod = _load_hook_module()
 @pytest.fixture(autouse=True)
 def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Every test starts from a known-clean env — a real EXOMEM_REST_API_KEY or
-    KB_RETRIEVE_INJECT already set on the host machine must never leak in."""
+    EXOMEM_RETRIEVE_INJECT already set on the host machine must never leak in. The
+    legacy KB_RETRIEVE_* names are cleared too: they still alias onto the EXOMEM_*
+    names at startup (back-compat), so a host-set old name would leak just the same."""
     for var in (
+        "EXOMEM_RETRIEVE_NUDGE_DISABLE",
+        "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS",
+        "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC",
+        "EXOMEM_RETRIEVE_INJECT",
+        "EXOMEM_RETRIEVE_INJECT_CLI",
+        "EXOMEM_REST_API_KEY",
+        "EXOMEM_HOST",
+        # Legacy aliases (still honored via _normalize_env_aliases).
         "KB_RETRIEVE_NUDGE_DISABLE",
         "KB_RETRIEVE_NUDGE_MIN_CHARS",
         "KB_RETRIEVE_NUDGE_COOLDOWN_SEC",
         "KB_RETRIEVE_INJECT",
         "KB_RETRIEVE_INJECT_CLI",
-        "EXOMEM_REST_API_KEY",
-        "EXOMEM_HOST",
     ):
         monkeypatch.delenv(var, raising=False)
 
@@ -97,18 +105,18 @@ def _call_main(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, e
 
 @pytest.mark.parametrize("value", ["", "0", "false", "FALSE", "No", "OFF", "off"])
 def test_env_flag_falsy_values_are_disabled(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", value)
-    assert hook_mod._env_flag("KB_RETRIEVE_INJECT") is False
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", value)
+    assert hook_mod._env_flag("EXOMEM_RETRIEVE_INJECT") is False
 
 
 def test_env_flag_unset_is_disabled() -> None:
-    assert hook_mod._env_flag("KB_RETRIEVE_INJECT_DOES_NOT_EXIST") is False
+    assert hook_mod._env_flag("EXOMEM_RETRIEVE_INJECT_DOES_NOT_EXIST") is False
 
 
 @pytest.mark.parametrize("value", ["1", "true", "TRUE", "yes", "on", "anything"])
 def test_env_flag_truthy_values_are_enabled(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
-    monkeypatch.setenv("KB_RETRIEVE_INJECT_CLI", value)
-    assert hook_mod._env_flag("KB_RETRIEVE_INJECT_CLI") is True
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", value)
+    assert hook_mod._env_flag("EXOMEM_RETRIEVE_INJECT_CLI") is True
 
 
 # --- _format_inject_block ---------------------------------------------------------
@@ -343,7 +351,7 @@ def test_gather_hits_rest_failing_cli_unset_is_nudge_only(monkeypatch: pytest.Mo
     monkeypatch.setattr(hook_mod, "_fetch_via_rest", lambda prompt, api_key, **kw: None)
 
     def _boom(*a, **kw):
-        raise AssertionError("_fetch_via_cli must not be called when KB_RETRIEVE_INJECT_CLI is unset")
+        raise AssertionError("_fetch_via_cli must not be called when EXOMEM_RETRIEVE_INJECT_CLI is unset")
 
     monkeypatch.setattr(hook_mod, "_fetch_via_cli", _boom)
     assert hook_mod._gather_hits("prompt") == []
@@ -351,7 +359,7 @@ def test_gather_hits_rest_failing_cli_unset_is_nudge_only(monkeypatch: pytest.Mo
 
 def test_gather_hits_rest_unconfigured_cli_opted_in_uses_cli(monkeypatch: pytest.MonkeyPatch) -> None:
     hits = [{"path": "Notes/b.md", "type": "insight", "updated": "2026-01-02"}]
-    monkeypatch.setenv("KB_RETRIEVE_INJECT_CLI", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
 
     def _boom(*a, **kw):
         raise AssertionError("_fetch_via_rest must not be called when EXOMEM_REST_API_KEY is unset")
@@ -383,10 +391,10 @@ def test_default_off_no_network_or_subprocess_attempted(
     home.mkdir()
 
     def _boom_url(req, timeout=None):
-        raise AssertionError("urlopen must not be called when KB_RETRIEVE_INJECT is unset")
+        raise AssertionError("urlopen must not be called when EXOMEM_RETRIEVE_INJECT is unset")
 
     def _boom_run(cmd, **kwargs):
-        raise AssertionError("subprocess.run must not be called when KB_RETRIEVE_INJECT is unset")
+        raise AssertionError("subprocess.run must not be called when EXOMEM_RETRIEVE_INJECT is unset")
 
     monkeypatch.setattr(urllib_request, "urlopen", _boom_url)
     monkeypatch.setattr(hook_mod.subprocess, "run", _boom_run)
@@ -408,7 +416,7 @@ def test_inject_rest_configured_and_reachable_appends_stubs(
     home.mkdir()
     hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
     monkeypatch.setattr(urllib_request, "urlopen", lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
 
@@ -424,13 +432,32 @@ def test_inject_rest_configured_and_reachable_appends_stubs(
     assert "excerpt" not in ctx.lower()
 
 
+def test_legacy_kb_retrieve_inject_env_still_activates_inject(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
+) -> None:
+    # Back-compat: the OLD env name (KB_RETRIEVE_INJECT, no EXOMEM_ prefix) must
+    # still turn inject mode on, aliased onto EXOMEM_RETRIEVE_INJECT at startup.
+    home = tmp_path / "home"
+    home.mkdir()
+    hits = [{"path": "Notes/a.md", "type": "note", "updated": "2026-01-01"}]
+
+    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")  # legacy name only — NOT EXOMEM_RETRIEVE_INJECT
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
+    monkeypatch.setattr(urllib_request, "urlopen", lambda req, timeout=None: _FakeResponse(200, _envelope_bytes(hits)))
+
+    out = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "e2e-legacy-inject"}, home)
+    ctx = json.loads(out)["hookSpecificOutput"]["additionalContext"]
+    assert ctx.startswith(hook_mod.REMINDER + "\n\n")            # inject mode activated
+    assert "- Notes/a.md (note, 2026-01-01)" in ctx
+
+
 def test_inject_rest_unreachable_cli_not_opted_in_is_nudge_only(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
 
     def _boom_url(req, timeout=None):
@@ -450,8 +477,8 @@ def test_inject_cli_opt_in_which_resolves_appends_stubs(
     home.mkdir()
     hits = [{"path": "Notes/b.md", "type": "insight", "updated": "2026-01-02"}]
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
-    monkeypatch.setenv("KB_RETRIEVE_INJECT_CLI", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
     monkeypatch.setattr(hook_mod.shutil, "which", lambda name: "/usr/local/bin/exomem" if name == "exomem" else None)
     monkeypatch.setattr(
         hook_mod.subprocess, "run",
@@ -469,8 +496,8 @@ def test_inject_cli_opt_in_but_unresolvable_is_nudge_only(
     home = tmp_path / "home"
     home.mkdir()
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
-    monkeypatch.setenv("KB_RETRIEVE_INJECT_CLI", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", "1")
     monkeypatch.setattr(hook_mod.shutil, "which", lambda name: None)
 
     def _boom_run(cmd, **kwargs):
@@ -489,7 +516,7 @@ def test_min_chars_gate_short_circuits_before_any_transport(
     home = tmp_path / "home"
     home.mkdir()
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
 
     def _boom_url(req, timeout=None):
@@ -507,7 +534,7 @@ def test_cooldown_gate_short_circuits_second_transport_attempt(
     home = tmp_path / "home"
     home.mkdir()
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
     call_count = {"n": 0}
 
@@ -526,17 +553,17 @@ def test_cooldown_gate_short_circuits_second_transport_attempt(
     assert call_count["n"] == 1
 
 
-def test_kb_retrieve_inject_zero_is_disabled_end_to_end(
+def test_exomem_retrieve_inject_zero_is_disabled_end_to_end(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
 ) -> None:
     home = tmp_path / "home"
     home.mkdir()
 
-    monkeypatch.setenv("KB_RETRIEVE_INJECT", "0")
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "0")
     monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
 
     def _boom_url(req, timeout=None):
-        raise AssertionError("urlopen must not be called when KB_RETRIEVE_INJECT=0 (falsy)")
+        raise AssertionError("urlopen must not be called when EXOMEM_RETRIEVE_INJECT=0 (falsy)")
 
     monkeypatch.setattr(urllib_request, "urlopen", _boom_url)
 
@@ -550,7 +577,10 @@ def test_kb_retrieve_inject_zero_is_disabled_end_to_end(
 
 def _run_subprocess(event: dict, home: Path) -> subprocess.CompletedProcess:
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
-    for key in ("KB_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT_CLI", "EXOMEM_REST_API_KEY", "EXOMEM_HOST"):
+    for key in (
+        "EXOMEM_RETRIEVE_INJECT", "EXOMEM_RETRIEVE_INJECT_CLI", "EXOMEM_REST_API_KEY", "EXOMEM_HOST",
+        "KB_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT_CLI",  # legacy aliases, cleared too
+    ):
         env.pop(key, None)
     return subprocess.run(
         [sys.executable, str(RETRIEVE_SCRIPT)],

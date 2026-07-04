@@ -90,7 +90,8 @@ the server gives Claude the tools, the skill is what makes it use them. Hooks
 are Claude Code-only reliability nudges for long sessions: a read-side reminder
 before answers and a write-side reminder at natural stopping points. The
 read-side hook can optionally upgrade that reminder to real retrieved KB
-content (`KB_RETRIEVE_INJECT=1`, opt-in) — see
+content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy `KB_RETRIEVE_INJECT`
+name still works) — see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
 Other MCP clients can still use the server; put the same knowledge-discipline
 instructions in their system/project instructions if they do not support
