@@ -2,8 +2,8 @@
 
 Every file in `Knowledge Base/` (except `index.md` files; sources also carry
 frontmatter) carries YAML frontmatter at the top. The frontmatter is the metadata
-layer; without it, audit cannot do its job and Obsidian queries (Dataview, base
-files) cannot scope.
+layer; without it, audit cannot do its job (and optional Obsidian tooling — Dataview, base
+files — can't scope). Frontmatter is required regardless of viewer; Dataview/bases are a nicety on top.
 
 ## Common fields
 
@@ -125,7 +125,7 @@ sources:
   - "[[Knowledge Base/Sources/Sessions/2026-05-04-architecture-debate]]"
 ```
 
-This format is Obsidian-compatible and survives Dataview queries. The exomem
+This is plain-markdown wikilink syntax; it is also Obsidian-compatible and survives optional Dataview queries. The exomem
 writer normalizes any input form (bare names, KB-relative, with `.md`, with
 `[[ ]]` wrappers, with `|alias`, with `#anchor`) to this canonical form on every
 write. You can paste in any shape; the file on disk lands canonical.

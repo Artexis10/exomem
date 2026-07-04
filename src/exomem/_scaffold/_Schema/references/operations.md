@@ -185,7 +185,7 @@ Binaries are delivered out-of-band — never inline as a tool argument (the
   `Authorization: Bearer $EXOMEM_UPLOAD_TOKEN` (the token is **always** required).
   Lands straight in `Evidence/<scope>/<category>/`, zero token cost.
 - **Claude Code / desk-side:** the file is already on local disk — write it
-  straight into `Evidence/<scope>/<category>/`, or drop it via Obsidian Sync.
+  straight into `Evidence/<scope>/<category>/`, or drop it via file sync (e.g. Obsidian Sync).
 - **`preserve`** is text-only; binaries always go via the channels above. Every
   write tool rejects inline byte blobs outright (`BINARY_BLOB_REJECTED`).
 

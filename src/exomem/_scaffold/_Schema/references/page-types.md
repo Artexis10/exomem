@@ -480,7 +480,7 @@ across the graph without information gain.
 Any location holding compiled notes or source captures may have a sibling
 `_attachments/` folder for binary outputs or originals that need to live near the
 parent note. The underscore prefix marks it as not-a-primary-content folder
-(Obsidian convention).
+(a common convention; Obsidian also treats `_`-prefixed folders this way).
 
 **Discipline:**
 

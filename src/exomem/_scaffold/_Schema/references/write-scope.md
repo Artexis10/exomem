@@ -41,7 +41,7 @@ as-received guarantee. Keep the layers honest and the categories stay useful.
 *where* a binary lands; delivery is a separate question of *how*. Encoding a file
 into a tool argument is billed as model output tokens, so always deliver
 out-of-band — the upload endpoint (or the prefilled upload page when you're on
-claude.ai web), an Obsidian Sync drop, or a direct disk write from Claude Code.
+claude.ai web), a file-sync drop (e.g. Obsidian Sync), or a direct disk write from Claude Code.
 Full detail: `references/operations.md` § preserve.
 
 ## Writeable paths (Knowledge Base only)
@@ -79,6 +79,40 @@ The single exception: an explicit, unambiguous override in the conversation
 must (1) show the proposed diff first, (2) note that this bypasses the standard
 rule, and (3) wait for an explicit second confirmation. The rule prevents
 accidental modification, not deliberate human intent.
+
+## Per-subtree access overrides (`_access.yaml`)
+
+The location rules above are the defaults. To carve out **exceptions** — a curated
+hand-thinking folder you keep inside `Knowledge Base/` but never want the skill to
+write, a specific read-only sibling outside it, or a private subtree that shouldn't
+even be searchable — add an optional `Knowledge Base/_access.yaml`:
+
+```yaml
+# Both lists are optional. Each entry is a subtree prefix — a top-level sibling
+# folder, or a KB-relative path (a leading "Knowledge Base/" is allowed and ignored).
+readonly:          # findable + indexed, but every write is refused
+  - Reference
+  - Notes/Research/Frozen Report
+excluded:          # hidden from find + embeddings AND unwritable (truly private)
+  - Personal/Journal
+```
+
+- **`readonly:`** — pages stay searchable and readable, but any write (Tier 1 or
+  Tier 2) is a **hard refusal with no conversational override**. Use it to fold a
+  curated folder into the KB without exposing it to edits.
+- **`excluded:`** — the subtree is removed from `find` and the embedding index *and*
+  write-protected. Use it for genuinely private material.
+- **Hot-reloaded.** Edit the file desk-side; the next call sees the new policy — no
+  restart (same as `project-keys.yaml`).
+- **Absent by default.** `init` does not ship this file; with no `_access.yaml`, only
+  `Sources/` / `Evidence/` (append-only) differ from ordinary read-write. Run
+  `exomem personalize` to generate a starter policy from a scan of your vault.
+- **Resolution order** for any path: `excluded` → `readonly` → append-only
+  (`Sources/` / `Evidence/`) → read-write.
+
+This is the config behind the "read-only / excluded subtrees are write-protected" line
+in SKILL.md — it gives a subtree the same write-refusal that everything outside
+`Knowledge Base/` gets by location.
 
 ## Why hand-authored paths are read-only
 
