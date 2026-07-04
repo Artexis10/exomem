@@ -58,7 +58,7 @@ Also works on Linux. Safe to run again later — it skips whatever's already
 done. If it can't prompt you interactively (e.g. run from another script), it
 prints the exact command to run next instead of guessing. Prefer to run each
 step yourself? See below or the full manual walkthrough in
-[SETUP-LOCAL.md](SETUP-LOCAL.md).
+[QUICKSTART.md](https://github.com/Artexis10/exomem/blob/main/QUICKSTART.md).
 
 ## Set it up in 5 minutes
 

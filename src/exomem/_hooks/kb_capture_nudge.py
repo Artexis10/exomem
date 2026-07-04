@@ -39,11 +39,12 @@ import sys
 import time
 from pathlib import Path
 
-# KB write tools — if one ran this turn, the capture already happened.
-_KB_WRITE = re.compile(r"knowledge_base.*(note|add|edit|append|create_file|replace)", re.I)
+# KB write tools — if an Exomem write tool ran this turn (e.g. mcp__…_Exomem__note/add;
+# legacy `knowledge_base` names still matched for back-compat), the capture already happened.
+_KB_WRITE = re.compile(r"(?:exomem|knowledge[_-]?base).*(note|add|edit|append|create_file|replace)", re.I)
 
 REMINDER = (
-    "[KB capture check] This turn did substantial work. If your Knowledge Base "
+    "[KB capture check] This turn did substantial work. If your Exomem knowledge-base "
     "skill is available and the turn reached a durable conclusion — a decision, a "
     "solved problem, a diagnosed failure, or a recognized pattern, in whatever "
     "language you were working in — capture it now as a *compiled note* (the "

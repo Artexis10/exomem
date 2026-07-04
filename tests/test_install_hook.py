@@ -175,8 +175,10 @@ def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
 
 def test_capture_silent_when_already_saved(tmp_path: Path) -> None:
     home = tmp_path / "home"; home.mkdir()
+    # Real post-rename connector tool name is Exomem (not Knowledge_Base) — the guard
+    # regex must recognise it, or the nudge misfires after every real capture.
     t = _transcript(tmp_path, "q?", "Big conclusion. " + "x" * 450,
-                    assistant_tool="mcp__claude_ai_Knowledge_Base__note")
+                    assistant_tool="mcp__claude_ai_Exomem__note")
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s3"}, home)
     assert r.stdout.strip() == ""
 
