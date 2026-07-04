@@ -589,8 +589,8 @@ def _install_hook_main(argv: list[str]) -> int:
     if report["wired"]:
         print(f"Wired into {report['settings']}.")
         print("Restart Claude Code to activate. Triggers log to:")
-        print("  ~/.claude/kb-capture-nudge.log   (write / capture)")
-        print("  ~/.claude/kb-retrieve-nudge.log  (read / retrieval)")
+        print("  ~/.claude/exomem-capture-nudge.log   (write / capture)")
+        print("  ~/.claude/exomem-retrieve-nudge.log  (read / retrieval)")
     else:
         print("Add this to your settings.json (merge into hooks):")
         print(hook_module.snippet(report["installed"]))

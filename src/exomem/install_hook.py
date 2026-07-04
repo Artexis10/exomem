@@ -4,9 +4,9 @@ Ships two bundled hooks (each a Python script + a bash wrapper) and registers th
 in `~/.claude/settings.json`, so a friend gets the full reliable KB loop with one
 command:
 
-- `_hooks/kb_capture_nudge.py`  (via `kb-capture-nudge.sh`)  → a `Stop` hook (WRITE):
+- `_hooks/exomem_capture_nudge.py`  (via `exomem-capture-nudge.sh`)  → a `Stop` hook (WRITE):
   captures durable conclusions at stepping-stones instead of waiting to be told.
-- `_hooks/kb_retrieve_nudge.py` (via `kb-retrieve-nudge.sh`) → a `UserPromptSubmit`
+- `_hooks/exomem_retrieve_nudge.py` (via `exomem-retrieve-nudge.sh`) → a `UserPromptSubmit`
   hook (READ): reminds Claude to consult the KB before answering.
 
 The registered command is **machine-agnostic** — `bash ~/.claude/hooks/<name>.sh`,
@@ -29,15 +29,20 @@ from pathlib import Path
 _HOOK_DIR_SRC = Path(__file__).parent / "_hooks"
 # (python script, bash wrapper, Claude Code event) — the hooks this installs.
 _HOOK_SPECS = (
-    ("kb_capture_nudge.py", "kb-capture-nudge.sh", "Stop"),
-    ("kb_retrieve_nudge.py", "kb-retrieve-nudge.sh", "UserPromptSubmit"),
+    ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "Stop"),
+    ("exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh", "UserPromptSubmit"),
 )
 DEFAULT_HOOK_DIR = Path.home() / ".claude" / "hooks"
 DEFAULT_SETTINGS = Path.home() / ".claude" / "settings.json"
 
-# Substrings identifying a previously-installed kb nudge entry, so re-running is
+# Substrings identifying a previously-installed nudge entry, so re-running is
 # idempotent and supersedes older entries (incl. the absolute-python-path form).
-_MARKERS = ("kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge")
+# BOTH the legacy `kb_*`/`kb-*` names AND the current `exomem_*`/`exomem-*` names are
+# listed, so re-running install-hook cleanly migrates a machine off the old kb entry.
+_MARKERS = (
+    "kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge",
+    "exomem_capture_nudge", "exomem_retrieve_nudge", "exomem-capture-nudge", "exomem-retrieve-nudge",
+)
 
 
 def _command_for(wrapper: str, hook_dir: Path) -> str:
@@ -103,8 +108,9 @@ def install_hook(
 
 def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> None:
     """Add each hook to its event in settings.json, preserving every other key and
-    hook. Idempotent: strips any prior kb nudge entry from the target event first
-    (so re-running, or superseding the old absolute-path command, never duplicates)."""
+    hook. Idempotent: strips any prior exomem/kb nudge entry from the target event
+    first (so re-running, migrating off the legacy `kb-*` names, or superseding the
+    old absolute-path command, never duplicates)."""
     data: dict = {}
     if path.exists():
         try:

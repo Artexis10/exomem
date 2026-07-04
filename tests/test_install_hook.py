@@ -20,8 +20,8 @@ import exomem
 from exomem import install_hook as hook_module
 
 _HOOKS = Path(exomem.__file__).parent / "_hooks"
-CAPTURE_SCRIPT = _HOOKS / "kb_capture_nudge.py"
-RETRIEVE_SCRIPT = _HOOKS / "kb_retrieve_nudge.py"
+CAPTURE_SCRIPT = _HOOKS / "exomem_capture_nudge.py"
+RETRIEVE_SCRIPT = _HOOKS / "exomem_retrieve_nudge.py"
 
 
 def _stop_cmds(data: dict) -> list[str]:
@@ -37,22 +37,22 @@ def _ups_cmds(data: dict) -> list[str]:
 def test_install_hook_copies_scripts_and_wrappers_and_wires_both(tmp_path: Path) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     r = hook_module.install_hook(hook_dir=hd, settings_path=sp)
-    for f in ("kb_capture_nudge.py", "kb-capture-nudge.sh", "kb_retrieve_nudge.py", "kb-retrieve-nudge.sh"):
+    for f in ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh"):
         assert (hd / f).exists(), f
     assert r["wired"] is True
     data = json.loads(sp.read_text(encoding="utf-8"))
-    assert any("kb-capture-nudge.sh" in c for c in _stop_cmds(data))     # write -> Stop, via wrapper
-    assert any("kb-retrieve-nudge.sh" in c for c in _ups_cmds(data))     # read -> UserPromptSubmit
+    assert any("exomem-capture-nudge.sh" in c for c in _stop_cmds(data))     # write -> Stop, via wrapper
+    assert any("exomem-retrieve-nudge.sh" in c for c in _ups_cmds(data))     # read -> UserPromptSubmit
 
 
 def test_command_is_machine_agnostic(tmp_path: Path) -> None:
     # Default location -> ~-relative bash command (no abs path / interpreter / backslash),
     # so the same settings.json works on every machine after a yadm sync.
-    cmd = hook_module._command_for("kb-capture-nudge.sh", hook_module.DEFAULT_HOOK_DIR)
-    assert cmd == "bash ~/.claude/hooks/kb-capture-nudge.sh"
+    cmd = hook_module._command_for("exomem-capture-nudge.sh", hook_module.DEFAULT_HOOK_DIR)
+    assert cmd == "bash ~/.claude/hooks/exomem-capture-nudge.sh"
     assert "\\" not in cmd and "python" not in cmd.lower() and ":" not in cmd
     # Custom dir -> POSIX (forward-slash) bash command, never Windows backslashes.
-    custom = hook_module._command_for("kb-capture-nudge.sh", tmp_path / "hooks")
+    custom = hook_module._command_for("exomem-capture-nudge.sh", tmp_path / "hooks")
     assert custom.startswith('bash "') and custom.endswith('.sh"') and "\\" not in custom
 
 
@@ -61,8 +61,8 @@ def test_install_hook_idempotent(tmp_path: Path) -> None:
     hook_module.install_hook(hook_dir=hd, settings_path=sp)
     hook_module.install_hook(hook_dir=hd, settings_path=sp)
     data = json.loads(sp.read_text(encoding="utf-8"))
-    assert sum("kb-capture-nudge" in c for c in _stop_cmds(data)) == 1
-    assert sum("kb-retrieve-nudge" in c for c in _ups_cmds(data)) == 1
+    assert sum("exomem-capture-nudge" in c for c in _stop_cmds(data)) == 1
+    assert sum("exomem-retrieve-nudge" in c for c in _ups_cmds(data)) == 1
 
 
 def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> None:
@@ -78,8 +78,30 @@ def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> No
     hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
     data = json.loads(sp.read_text(encoding="utf-8"))
     stop = _stop_cmds(data)
-    assert not any("python.exe" in c for c in stop)            # absolute-path form gone
-    assert sum("kb-capture-nudge" in c for c in stop) == 1     # exactly one, the wrapper
+    assert not any("python.exe" in c for c in stop)             # absolute-path form gone
+    assert sum("exomem-capture-nudge" in c for c in stop) == 1  # exactly one, the wrapper
+
+
+def test_install_hook_migrates_old_kb_entry(tmp_path: Path) -> None:
+    # A machine that installed the pre-rename hook has a `kb-capture-nudge.sh`
+    # wrapper command wired in. Re-running install-hook must STRIP that legacy entry
+    # (via the retained old _MARKERS) and leave only the new `exomem-capture-nudge`
+    # one — a clean migration, not a duplicate.
+    sp = tmp_path / "settings.json"
+    sp.write_text(
+        json.dumps({"hooks": {
+            "Stop": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-capture-nudge.sh"}]}],
+            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh"}]}],
+        }}),
+        encoding="utf-8",
+    )
+    hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    stop, ups = _stop_cmds(data), _ups_cmds(data)
+    assert not any("kb-capture-nudge" in c for c in stop)        # legacy entry gone
+    assert not any("kb-retrieve-nudge" in c for c in ups)
+    assert sum("exomem-capture-nudge" in c for c in stop) == 1   # new entry present, once
+    assert sum("exomem-retrieve-nudge" in c for c in ups) == 1
 
 
 def test_install_hook_preserves_other_hooks_and_keys(tmp_path: Path) -> None:
@@ -98,15 +120,15 @@ def test_install_hook_preserves_other_hooks_and_keys(tmp_path: Path) -> None:
     data = json.loads(sp.read_text(encoding="utf-8"))
     assert data["theme"] == "dark"
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "bash guard.sh"
-    assert "bash other-stop.sh" in _stop_cmds(data)                 # unrelated Stop hook kept
-    assert any("kb-capture-nudge" in c for c in _stop_cmds(data))   # ours added
-    assert any("kb-retrieve-nudge" in c for c in _ups_cmds(data))
+    assert "bash other-stop.sh" in _stop_cmds(data)                     # unrelated Stop hook kept
+    assert any("exomem-capture-nudge" in c for c in _stop_cmds(data))   # ours added
+    assert any("exomem-retrieve-nudge" in c for c in _ups_cmds(data))
 
 
 def test_install_hook_print_only_leaves_settings(tmp_path: Path) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     r = hook_module.install_hook(hook_dir=hd, settings_path=sp, wire=False)
-    assert (hd / "kb_capture_nudge.py").exists() and (hd / "kb-capture-nudge.sh").exists()
+    assert (hd / "exomem_capture_nudge.py").exists() and (hd / "exomem-capture-nudge.sh").exists()
     assert r["wired"] is False
     assert not sp.exists()
     snip = hook_module.snippet(r["installed"])
@@ -118,7 +140,7 @@ def test_install_hook_via_cli(tmp_path: Path) -> None:
 
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     assert main(["install-hook", "--hook-dir", str(hd), "--settings", str(sp)]) == 0
-    assert (hd / "kb_capture_nudge.py").exists() and (hd / "kb-retrieve-nudge.sh").exists()
+    assert (hd / "exomem_capture_nudge.py").exists() and (hd / "exomem-retrieve-nudge.sh").exists()
     data = json.loads(sp.read_text(encoding="utf-8"))
     assert data["hooks"]["Stop"] and data["hooks"]["UserPromptSubmit"]
 
