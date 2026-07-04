@@ -181,6 +181,32 @@ def test_graph_stage_stays_under_budget_after_edit(dense_vault) -> None:
     assert hits, "expected the dense vault to produce hits"
 
 
+def test_graph_stage_exposes_sub_spans(dense_vault, monkeypatch) -> None:
+    """The graph stage exposes sub-spans (seeds, resolver, expand) in
+    FindTimings — the profiling surface the scaling work reads — without
+    changing results. Cache disabled so both runs compute fresh."""
+    vault, _rels = dense_vault
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+
+    bare = find_module.find(vault, query="topic", limit=10, graph=True)
+    timings = find_module.FindTimings()
+    timed = find_module.find(vault, query="topic", limit=10, graph=True, timings=timings)
+    assert [h.path for h in timed] == [h.path for h in bare]
+
+    stages = timings.as_dict()["stages"]
+    assert "ms" in stages.get("graph", {}), f"graph lane did not run: {stages}"
+    for sub in ("graph.seeds", "graph.resolver", "graph.expand"):
+        assert "ms" in stages.get(sub, {}), f"missing sub-span {sub}: {stages}"
+    parts = sum(
+        stages[s]["ms"] for s in ("graph.seeds", "graph.resolver", "graph.expand")
+    )
+    assert parts <= stages["graph"]["ms"] + 1.0, "sub-spans exceed the stage total"
+
+    off = find_module.FindTimings()
+    find_module.find(vault, query="topic", limit=10, graph=False, timings=off)
+    assert "graph.seeds" not in off.as_dict()["stages"]
+
+
 def test_kill_switch_falls_back_to_rebuild(dense_vault, monkeypatch) -> None:
     """With the event-index kill switch set, the resolver patch is a no-op and
     the getter falls back to a digest-keyed rebuild (the rollback contract)."""

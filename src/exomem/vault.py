@@ -218,8 +218,8 @@ def batch_atomic_write(
                 "self-write suppression registration failed", exc_info=True
             )
         try:
-            from . import embeddings
-            embeddings.upsert_after_write(vault_root, replaced)
+            from . import index_sync
+            index_sync.upsert_after_write(vault_root, replaced)
         except Exception:  # noqa: BLE001 — embeddings are best-effort
             import logging
             logging.getLogger(__name__).exception(

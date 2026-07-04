@@ -25,7 +25,7 @@ import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import embeddings, extract, preserve, scene_frames, semantic_segments
+from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
 from .vault import VAULT_SCAN_SKIP_DIRS
 
 log = logging.getLogger(__name__)
@@ -327,7 +327,7 @@ def backfill_media(
                     if written and semantic_segments.semantic_segments_enabled():
                         # Fold the fresh visual/OCR boundary events into the parent's
                         # semantic segments (mirrors the worker's trailing re-embed).
-                        embeddings.upsert_after_write(vault_root, [sidecar])
+                        index_sync.upsert_after_write(vault_root, [sidecar])
                 elif media_type == "video":
                     clip_index.upsert_frames(rel, embeddings.embed_video_frames(f), mtime)
                     stats.clip_indexed += 1

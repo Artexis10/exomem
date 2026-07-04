@@ -200,14 +200,14 @@ def move_file(
             f"Delete it manually on the desk."
         )
     else:
-        # Old path is gone; purge its embedding sidecar rows. The new path
+        # Old path is gone; purge its index sidecar rows. The new path
         # was already re-indexed by batch_atomic_write above.
         try:
-            from . import embeddings
-            embeddings.delete_after_remove(vault_root, [old_rel])
-        except Exception:  # noqa: BLE001 — embeddings are best-effort
+            from . import index_sync
+            index_sync.delete_after_remove(vault_root, [old_rel])
+        except Exception:  # noqa: BLE001 — sidecars are best-effort
             log.exception(
-                "embedding delete failed for moved %s; sidecar may be stale", old_rel
+                "index delete failed for moved %s; sidecar may be stale", old_rel
             )
 
     # If we just moved a file out of `_trash/`, its `.meta.json` sidecar (if

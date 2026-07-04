@@ -641,10 +641,16 @@ def test_op_find_warming_envelope_mid_warm_then_bare_list_after_finish(
 # ============================================================================
 
 
-def test_bm25_build_lock_serializes_concurrent_cold_builds(vault: Path) -> None:
+def test_bm25_build_lock_serializes_concurrent_cold_builds(
+    vault: Path, monkeypatch
+) -> None:
     """Two threads racing .search() on a cold BM25Index must produce exactly
     ONE _build() call — the loser waits on the build lock and reuses the
-    winner's freshly-cached corpus instead of rebuilding."""
+    winner's freshly-cached corpus instead of rebuilding.
+
+    Pinned to the in-process rung: this lock is a python-rung internal (the
+    FTS5 backend has no corpus build to serialize)."""
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     idx = bm25.BM25Index()
     real_build = idx._build
     call_count = {"n": 0}

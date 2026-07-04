@@ -226,6 +226,87 @@ measurement pass is pending. Complete it desk-side with:
 uv run python scripts/latency_curve.py --embeddings --sizes 100000 --max-embeddings-size 100000 --repeat 1 --vec-backend numpy,sqlite-vec,binary --corpus-cache <cache-dir>
 ```
 
+## Lexical backend at scale (10k–50k notes, FTS5 vs in-process)
+
+The `add-fts5-lexical-backend` change moved the bm25 and keyword lanes onto an
+FTS5 inverted index + trigram table in a per-vault `.lexical.sqlite` sidecar
+(`EXOMEM_LEXICAL_BACKEND=auto`, kill switch `=python`), built from the same
+pre-stemmed tokens the in-process scorer uses. This section is the measured
+before/after — and a correction to how the earlier curve's numbers should be
+read.
+
+**Correction: the registry-cold walk artifact.** The per-lane curve above (and
+the 10k/50k lane numbers quoted from it in the FTS5 change's proposal) was
+measured with the event-maintained freshness registry accidentally WIPED
+between seeding and measurement (`latency_curve` seeded, then `clear_cache()`
+cleared the registry too — fixed in this change). Registry-cold, every request
+re-derives its corpus freshness triples by a full stat walk, and with the hot
+cache disabled that walk lands inside the first lane that asks: the graph
+lane's `graph.resolver` sub-span (vault triple) and the bm25 lane (scope
+triple). Measured at 10k notes, python backends: registry-cold graph =
+1130.7ms of which `graph.resolver` = 1126.7ms; registry-live graph = 4.6ms.
+That is why bm25/keyword/graph tracked each other so closely in the historical
+curve (each ≈ the walk): **the "graph wall" was the walk, not graph work** —
+the resolver itself was event-maintained and warm all along, as the new
+`graph.seeds` / `graph.resolver` / `graph.expand` sub-spans in FindTimings now
+show directly. Production servers run registry-live (the watcher maintains
+it); one-shot CLI processes still pay one honest walk per request — the
+freshness contract, not a regression.
+
+Method: same cached dense corpora and query set as the curve above,
+model-free, registry-live, hot cache off, `--lexical-backend python,fts5`
+(median / p90 ms; repeat=2 at 10k, repeat=1 at 50k so the p90 column at 50k is
+effectively the first, cache-cold query of a pass):
+
+| Notes | backend | bm25 | keyword | graph | total |
+|---|---|---|---|---|---|
+| 10000 | python | 15.4 / 18.0 | 1322.7 / 1519.3 | 4.0 / 4.4 | 1389.1 / 2798.6 |
+| 10000 | **fts5** | 17.6 / 20.8 | **3.7** / 73.9 | 4.3 / 4.7 | **82.1** / 1360.4 |
+| 50000 | python | 96.9 / 113.8 | 6552.9 / 7473.4 | 4.4 / 4.5 | 6760.3 / 13929.0 |
+| 50000 | **fts5** | 74.0 / 78.6 | **4.8** / 376.3 | 4.3 / 5.6 | **198.1** / 6700.0 |
+
+With the full stack live (real bge sidecar, vec0-f32 vector lane, rerank off,
+hot cache off, registry-live; measured via the graph-lane profile over the
+same 50k cached corpus): end-to-end `find()` median **864ms at 50k notes** —
+vector 592.9, bm25 81.4, keyword 8.7, graph 8.9, fusion 61.3. The whole call
+cost ~25s under every backend when this change was specced.
+
+Reading it:
+
+- **The keyword lane stops being O(N):** 6.55s → 4.8ms at 50k (trigram
+  postings instead of a per-page stat + substring scan), at EXACT parity with
+  the reference scan (the parity suite asserts identical match sets, including
+  mid-word and sub-trigram needles).
+- **bm25 python was never the 8s monster the registry-cold curve suggested**
+  (~97ms warm at 50k once the walk artifact is removed), but the FTS5 rung
+  still wins (74ms at 50k), needs no per-process token-list residency, and
+  keeps no rebuild cliff on corpus change. Its `bm25()` scorer differs from
+  BM25Okapi, so promotion was gated on the golden floors + per-query pins
+  (including the new morphological-variant stemming pin) — all green under
+  both backends.
+- **The warm graph lane is flat** — 3.8ms @ 2k → 8.9ms @ 50k (live vector
+  lane) — and `tests/test_latency_gate.py` now pins that shape with a 2k→8k
+  scaling-ratio bound (1.5× + 25ms noise floor) plus the absolute ceilings,
+  so a linear warm cost cannot return silently whatever its mechanism.
+- **Sub-second at 50k is a measurement** (864ms full-stack, dominated by the
+  vector lane's query embed + KNN); the 100k story rides the same sub-linear
+  lanes and the pending 100k pass above (add `--lexical-backend python,fts5`
+  to its one-liner to capture both backends).
+
+Decision record: `auto` defaults to FTS5 for both lexical lanes.
+`EXOMEM_LEXICAL_BACKEND=python` restores the in-process paths wholesale; every
+FTS5 unavailability (SQLite without FTS5/trigram, unreadable sidecar, runtime
+error) soft-fails to them silently. The sidecar rebuilds from markdown on
+count/mtime drift (deleting it is always safe), writer/watcher/reconcile keep
+it in lockstep through the shared `index_sync` dispatch, and lean installs
+maintain it — FTS5 ships in CPython's bundled SQLite, no extra, no extension.
+
+Reproduce:
+
+```
+uv run python scripts/latency_curve.py --sizes 10000,50000 --repeat 2 --lexical-backend python,fts5 --corpus-cache <cache-dir>
+```
+
 ## Reproduction
 
 The report reproduces in the same shape against any vault + golden set that

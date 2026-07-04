@@ -163,6 +163,22 @@ def _apply_vec_backend(name: str) -> None:
         os.environ.pop("EXOMEM_VEC_QUANT", None)
 
 
+# Lexical-lane backend passes (--lexical-backend): fts5 = the .lexical.sqlite
+# sidecar (product default); python = the in-process rank-bm25 + substring
+# scan (kill-switch shape, the before-side of the FTS5 change's evidence).
+LEX_BACKENDS = ("fts5", "python", "auto")
+
+
+def _apply_lexical_backend(name: str) -> None:
+    """Point the bm25/keyword lanes at one lexical backend and reset the
+    per-process lexstore state so each pass starts clean."""
+    from exomem import lexstore
+
+    os.environ["EXOMEM_LEXICAL_BACKEND"] = name
+    lexstore.reset_memo()
+    lexstore.clear_stores()
+
+
 def _rss_mb() -> float | None:
     """Resident set size in MB via psutil, or None when psutil is absent."""
     try:
@@ -274,6 +290,7 @@ def measure_size(
     embeddings_on: bool,
     rerank: bool,
     vec_backends: list[str] | None = None,
+    lexical_backends: list[str] | None = None,
     corpus_cache: Path | None = None,
 ) -> dict:
     """Measure an n-note vault; per-lane + total latency, per vector backend.
@@ -311,7 +328,6 @@ def measure_size(
                 shutil.rmtree(vault, ignore_errors=True)
             gen_dense_vault(vault, n, links_per_note=links_per_note)
             marker.write_text(str(n), encoding="utf-8")
-        _seed_freshness_live(vault)
 
         find_module.clear_cache()
         if embeddings_on:
@@ -322,32 +338,45 @@ def measure_size(
                 # Real sidecar so the vector lane searches actual chunks at scale.
                 chunks = embeddings_module.get_embedding_index(vault).rebuild_all()
 
+        lex_backends = list(lexical_backends or ["fts5"])
         results: dict[str, dict] = {}
         reference_top10: list[list[str]] | None = None
-        for backend in backends:
-            if backend != "off":
-                _apply_vec_backend(backend)
-                from exomem import embeddings as embeddings_module
-                embeddings_module.clear_embedding_indexes()
-            find_module.clear_cache()
-            lanes, total, top10s = _measure_pass(
-                vault, queries=queries, repeat=repeat, limit=limit, rerank=rerank
-            )
-            overlap = None
-            if backend == "numpy":
-                reference_top10 = top10s
-            elif reference_top10 is not None:
-                overlap = _overlap_at_10(reference_top10, top10s)
-            results[backend] = {
-                "lanes": lanes,
-                "total": total,
-                "overlap10": overlap,
-                "rss_mb": _rss_mb(),
-            }
+        for lex in lex_backends:
+            _apply_lexical_backend(lex)
+            for backend in backends:
+                if backend != "off":
+                    _apply_vec_backend(backend)
+                    from exomem import embeddings as embeddings_module
+                    embeddings_module.clear_embedding_indexes()
+                find_module.clear_cache()
+                # AFTER the cache clear (clear_cache wipes the freshness
+                # registry): the seed is the production shape — a live watcher
+                # keeps these triples event-maintained. Seeding before the
+                # clear silently measured every lane registry-COLD, adding a
+                # per-query O(N) full-vault stat walk that landed in whichever
+                # lane derived its triple first (the historical 2k/10k/50k
+                # graph "wall" of 226ms/1.1s/7.8s was exactly this walk).
+                _seed_freshness_live(vault)
+                lanes, total, top10s = _measure_pass(
+                    vault, queries=queries, repeat=repeat, limit=limit, rerank=rerank
+                )
+                key = backend if len(lex_backends) == 1 else f"{backend}+{lex}"
+                overlap = None
+                if reference_top10 is None:
+                    reference_top10 = top10s
+                else:
+                    overlap = _overlap_at_10(reference_top10, top10s)
+                results[key] = {
+                    "lanes": lanes,
+                    "total": total,
+                    "overlap10": overlap,
+                    "rss_mb": _rss_mb(),
+                }
         return {"n": n, "chunks": chunks, "backends": results}
     finally:
         os.environ.pop("EXOMEM_VEC_BACKEND", None)
         os.environ.pop("EXOMEM_VEC_QUANT", None)
+        os.environ.pop("EXOMEM_LEXICAL_BACKEND", None)
         find_module.clear_cache()
         freshness.clear()
         if cleanup:
@@ -441,6 +470,12 @@ def main() -> int:
              "Only meaningful with --embeddings; numpy runs first as the overlap reference.",
     )
     ap.add_argument(
+        "--lexical-backend", type=str, default="fts5",
+        help="comma-separated lexical backends to measure per size: fts5,python "
+             "(python = the in-process rank-bm25 + substring scan, the FTS5 "
+             "change's before-side). Works model-free and with --embeddings.",
+    )
+    ap.add_argument(
         "--corpus-cache", type=str, default=None,
         help="directory to persist generated vaults+sidecars per (size, links, seed) and "
              "reuse across runs — embed once, measure many (the 100k-tier contract). "
@@ -452,6 +487,12 @@ def main() -> int:
     bad = [b for b in vec_backends if b not in VEC_BACKENDS]
     if bad:
         print(f"unknown --vec-backend value(s): {bad} (choose from {VEC_BACKENDS})",
+              file=sys.stderr)
+        return 1
+    lexical_backends = [b.strip() for b in args.lexical_backend.split(",") if b.strip()]
+    bad = [b for b in lexical_backends if b not in LEX_BACKENDS]
+    if bad:
+        print(f"unknown --lexical-backend value(s): {bad} (choose from {LEX_BACKENDS})",
               file=sys.stderr)
         return 1
     if not args.embeddings and vec_backends != ["numpy"]:
@@ -474,6 +515,7 @@ def main() -> int:
         f"links/note={args.links_per_note} queries={len(DEFAULT_QUERIES)} "
         f"embeddings={'on' if args.embeddings else 'off'} rerank={'on' if args.rerank else 'off'} "
         f"vec-backends={vec_backends if args.embeddings else 'n/a'} "
+        f"lexical-backends={lexical_backends} "
         f"corpus-cache={corpus_cache or 'off'}",
         file=sys.stderr,
     )
@@ -489,6 +531,7 @@ def main() -> int:
             embeddings_on=args.embeddings,
             rerank=args.rerank or args.embeddings,
             vec_backends=vec_backends,
+            lexical_backends=lexical_backends,
             corpus_cache=corpus_cache,
         )
         results.append(r)

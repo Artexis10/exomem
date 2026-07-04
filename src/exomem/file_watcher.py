@@ -4,8 +4,9 @@ The vault is edited *around* the server — directly in Obsidian, on mobile, or 
 filesystem write (Obsidian Sync, a git pull). Those bypass the writer hooks, so the
 embedding sidecar drifts until someone runs `reconcile`. This watcher closes that gap:
 it watches `<vault>/Knowledge Base/` for `.md` changes and re-embeds them through the
-SAME `embeddings.upsert_after_write` path the writers (and `reconcile`) use — deletes
-go through `embeddings.delete_after_remove`.
+SAME `index_sync.upsert_after_write` dispatch the writers (and `reconcile`) use —
+deletes go through `index_sync.delete_after_remove`. The dispatch fans out to every
+index sidecar (embedding AND lexical), each behind its own availability gates.
 
 Mirrors `MediaWorker`'s thread+queue shape: a single daemon dispatch thread coalesces
 rapid events behind a ~500ms debounce (a single Obsidian save fires several FS events;
@@ -35,7 +36,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import embeddings, freshness
+from . import freshness, index_sync
 
 log = logging.getLogger(__name__)
 
@@ -318,17 +319,17 @@ class FileWatcher:
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: resolver publish failed")
 
-        # Embedding: Knowledge Base markdown only (the KB sidecar).
+        # Index sidecars (embedding + lexical): Knowledge Base markdown only.
         kb_ups = [p for p in ups if self._is_kb(p)]
         kb_del_rels = [r for r in del_rels if r.startswith("Knowledge Base/")]
         if kb_ups:
             try:
-                embeddings.upsert_after_write(self._vault_root, kb_ups)
+                index_sync.upsert_after_write(self._vault_root, kb_ups)
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
         if kb_del_rels:
             try:
-                embeddings.delete_after_remove(self._vault_root, kb_del_rels)
+                index_sync.delete_after_remove(self._vault_root, kb_del_rels)
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: delete_after_remove failed for %d file(s)", len(kb_del_rels))
 

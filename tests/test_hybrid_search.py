@@ -204,16 +204,20 @@ def _write_md(path, body: str) -> None:
     )
 
 
-def test_bm25_incremental_build_only_tokenizes_changed_doc(vault) -> None:
+def test_bm25_incremental_build_only_tokenizes_changed_doc(vault, monkeypatch) -> None:
     """After a single new write, the rebuild re-tokenizes ONLY the new doc.
 
     The whole point of the per-doc token cache: a write (which advances the
     vault's max mtime and so forces the next search to rebuild) must not
     re-stem the entire corpus — only the document that changed.
+
+    Pinned to the in-process rung: the token cache is a python-rung internal
+    (the FTS5 backend maintains its index per page, not per corpus build).
     """
     import os
     import time
 
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     bm25.clear_cache()
     find_module.clear_cache()
     # Cold build over the whole fixture corpus.
@@ -240,16 +244,18 @@ def test_bm25_incremental_build_only_tokenizes_changed_doc(vault) -> None:
     )
 
 
-def test_bm25_edit_retokenizes_only_changed_file(vault) -> None:
+def test_bm25_edit_retokenizes_only_changed_file(vault, monkeypatch) -> None:
     """Editing one existing file re-tokenizes only that file, not the corpus.
 
     Bumps the file's mtime explicitly via os.utime so the assertion doesn't
     depend on the filesystem's mtime resolution (a real edit advances mtime
-    too — that's the cache key).
+    too — that's the cache key). Pinned to the in-process rung (python-rung
+    internal — see test_bm25_incremental_build_only_tokenizes_changed_doc).
     """
     import os
     import time
 
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     bm25.clear_cache()
     find_module.clear_cache()
     bm25.search(vault, "insulin", k=5)  # cold build
@@ -266,17 +272,19 @@ def test_bm25_edit_retokenizes_only_changed_file(vault) -> None:
     )
 
 
-def test_bm25_cached_tokens_match_fresh_tokenization(vault) -> None:
+def test_bm25_cached_tokens_match_fresh_tokenization(vault, monkeypatch) -> None:
     """Ranking parity: cached-token scores equal cold-rebuild scores exactly.
 
     Cached tokens are byte-identical to freshly stemmed tokens, so the BM25
     corpus — and therefore every score — must be identical whether a doc was
     reused from cache or re-tokenized from scratch. This is the deterministic
     parity proof the handoff asks for (stronger than NDCG drift on a golden set).
+    Pinned to the in-process rung (python-rung internal).
     """
     import os
     import time
 
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
     bm25.clear_cache()
     find_module.clear_cache()
     bm25.search(vault, "insulin", k=50)  # cold over the original corpus

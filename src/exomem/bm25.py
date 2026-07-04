@@ -174,9 +174,24 @@ class BM25Index:
         scope: str = "kb",
         freshness: tuple | None = None,
     ) -> list[tuple[str, float]]:
-        """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → []."""
+        """Return top-k `(rel_path, bm25_score)` for `query`. Empty query → [].
+
+        Backend ladder: the FTS5 lexical sidecar serves the lane when
+        available (posting-list cost instead of scoring all N docs); any
+        unavailability — kill switch, FTS5 absent, sidecar failure — falls
+        through to the in-process BM25Okapi rung below, which remains the
+        reference implementation and the `EXOMEM_LEXICAL_BACKEND=python`
+        target. Interface identical either way.
+        """
         if not query.strip():
             return []
+        from . import lexstore
+
+        indexed = lexstore.search_bm25(
+            vault_root, query, k, scope=scope, freshness=freshness
+        )
+        if indexed is not None:
+            return indexed
         bm25, paths = self._fresh_corpus(vault_root, scope, freshness)
         if bm25 is None or not paths:
             return []
@@ -191,9 +206,18 @@ class BM25Index:
         return [(p, float(s)) for p, s in ranked if s > 0]
 
     def warm(self, vault_root: Path, scope: str = "kb") -> None:
-        """Build (or freshness-check) the corpus without a query — the
-        startup warm-up hook, so the first hybrid find doesn't pay the
-        first-build stemming cliff."""
+        """Build (or freshness-check) whichever backend serves this lane —
+        the startup warm-up hook, so the first hybrid find doesn't pay the
+        first-build cliff (sidecar sync/population under FTS5; the corpus
+        stemming build on the in-process rung)."""
+        from . import lexstore
+
+        if lexstore.search_bm25(vault_root, "warm", 1, scope=scope) is not None:
+            # FTS5 serves: the probe query ran the sync check and faulted the
+            # index in. The rank-bm25 corpus stays cold on purpose — not
+            # holding N token lists resident is part of the backend's win;
+            # a mid-process FTS5 retirement pays one rebuild, lazily.
+            return
         self._fresh_corpus(vault_root, scope, None)
 
     def clear(self) -> None:

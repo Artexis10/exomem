@@ -20,7 +20,7 @@ import logging
 import re
 from pathlib import Path
 
-from . import embeddings
+from . import embeddings, index_sync
 from .preserve import _render_sidecar
 from .vault import PlannedWrite, batch_atomic_write
 
@@ -88,7 +88,7 @@ def clear_scene_frames(vault_root: Path, video_path: Path) -> int:
             if rel and victim.suffix.lower() == ".md":
                 removed_sidecars.append(rel)
     if removed_sidecars:
-        embeddings.delete_after_remove(vault_root, removed_sidecars)
+        index_sync.delete_after_remove(vault_root, removed_sidecars)
     return n
 
 

@@ -188,11 +188,20 @@ def test_single_pass_all_off_returns_input_unchanged(vault: Path) -> None:
 def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
     # The suite disables warm-up globally (conftest) so build_server never
     # spawns the warm thread; this test exercises the warm path explicitly.
+    # Warm builds WHICHEVER backend serves the bm25 lane: under FTS5 the
+    # lexical sidecar is synced/populated and the rank-bm25 corpus stays cold
+    # on purpose (not holding N token lists resident is the backend's win);
+    # on the python rung the corpus cache is built as it always was.
+    from exomem import lexstore
+
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     warmup.warm_caches(vault)
     assert find_module._CACHE.entries  # pages parsed
-    assert (vault, "kb") in bm25._INDEX._cache
-    assert (vault, "vault") in bm25._INDEX._cache
+    if lexstore.backend() != "python" and lexstore.fts5_available():
+        assert lexstore.lexical_path(vault).exists()  # sidecar built by warm
+    else:
+        assert (vault, "kb") in bm25._INDEX._cache
+        assert (vault, "vault") in bm25._INDEX._cache
     assert vault in find_module._RESOLVER_CACHE
     # Warmed state means the first query pays no corpus build.
     bm25._INDEX.last_tokenized = 0
