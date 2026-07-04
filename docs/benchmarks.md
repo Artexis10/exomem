@@ -219,11 +219,44 @@ after the lexical lanes are fixed), the recorded next step is a real ANN index �
 hnswlib, or sqlite-vec's ANN once it leaves alpha — behind the same `vecstore`
 seam, recall-gated by the same golden floors.
 
-The 100k-note tier (400k chunk vectors) is generated, embedded, and cached; its
-measurement pass is pending. Complete it desk-side with:
+**ANN decision record (2026-07-04).** The "recorded next step" above was
+evaluated and is deliberately **not shipping**. Candidates: **hnswlib** 0.8.0
+publishes no binary wheels (source-only install, no release since 2023; the
+chroma-hnswlib fork's wheels stop at cp312 while exomem supports 3.13) —
+disqualified on packaging before recall was ever measured. **sqlite-vec's ANN**
+exists only in 0.1.10 alphas whose DiskANN DELETEs are documented as expensive —
+fatal for a write path that deletes + reinserts a file's rows on every note
+write (stable PyPI 0.1.9 remains brute-force-only). **usearch** 2.25 passes the
+packaging and incremental-upsert bars (tombstone remove/add keyed by blob
+rowid; save/restore to bytes, so the index could persist as chunked blobs
+inside the sidecar), but shipping it means a new dependency plus several
+hundred lines of snapshot+journal persistence machinery. What decided it is
+scale evidence, not candidate quality: on a real ~1,700-note production vault
+the vector lane is 16–19ms of a ~125ms `find()` (see the real-vault section
+below); at the measured 50k stress tier the shipped vec0 default still holds
+`find()` sub-second (864ms); and the only regime where ANN clearly wins —
+100k+ — is far beyond any observed real vault, where the numpy kill switch
+already buys a ~60ms lane at a RAM cost that a ~50-line "numpy-lite" fix
+(drop `chunk_text` from the cached tuple and join metadata by rowid like the
+vec0 path already does; optionally hold the matrix bf16) would cut to well
+under 1GB with zero new dependencies. Verdict: **brute force is fine at
+realistic scale.** Revisit when sqlite-vec's ANN reaches a stable release with
+cheap deletes (it keeps the zero-residency, in-sidecar model for free), or if
+real vaults approach the 50k–100k tier. Any future ANN backend stays gated by
+the golden floors PLUS an at-scale recall-vs-exact-scan test with a mistuned
+negative control — an undersized HNSW search parameter caps recall silently
+while search still "works" (that exact failure mode is on record from a
+sibling project at ef_search=40).
+
+The 100k-note tier (400k chunk vectors) stays generated, embedded, and cached.
+A full 6-pass measurement (3 vector × 2 lexical backends) was attempted
+2026-07-04 and killed at the 72-minute mark by owner decision — the
+`--lexical-backend python` passes dominate wall-time at 100k (each rebuilds
+the in-process token corpus over 100k notes per pass). If re-attempted, run
+it overnight, or drop the python passes:
 
 ```
-uv run python scripts/latency_curve.py --embeddings --sizes 100000 --max-embeddings-size 100000 --repeat 1 --vec-backend numpy,sqlite-vec,binary --corpus-cache <cache-dir>
+uv run python scripts/latency_curve.py --embeddings --sizes 100000 --max-embeddings-size 100000 --repeat 1 --vec-backend numpy,sqlite-vec,binary --lexical-backend fts5 --corpus-cache <cache-dir>
 ```
 
 ## Lexical backend at scale (10k–50k notes, FTS5 vs in-process)
@@ -290,8 +323,8 @@ Reading it:
   so a linear warm cost cannot return silently whatever its mechanism.
 - **Sub-second at 50k is a measurement** (864ms full-stack, dominated by the
   vector lane's query embed + KNN); the 100k story rides the same sub-linear
-  lanes and the pending 100k pass above (add `--lexical-backend python,fts5`
-  to its one-liner to capture both backends).
+  lanes. The dedicated 100k measurement pass was descoped 2026-07-04 (see the
+  vector section's ANN decision record for what was measured instead and why).
 
 Decision record: `auto` defaults to FTS5 for both lexical lanes.
 `EXOMEM_LEXICAL_BACKEND=python` restores the in-process paths wholesale; every
@@ -306,6 +339,79 @@ Reproduce:
 ```
 uv run python scripts/latency_curve.py --sizes 10000,50000 --repeat 2 --lexical-backend python,fts5 --corpus-cache <cache-dir>
 ```
+
+## Real-vault check: the same lanes on a production vault (2026-07-04)
+
+Synthetic curves are a relative-grade instrument; this section is the absolute
+check against a real, media-heavy ~1,700-note production vault (the same class
+of vault as the historical ~14s graph event). Method: fresh, unique
+natural-language queries — cache misses — through the running server's
+`find(include_timings=True)`, reading the server-side per-lane milliseconds.
+Four varied queries; per this page's no-query-text rule they are not
+reproduced here. The "before" side was measured against a service process
+started 2026-07-03, BEFORE the FTS5 lexical backend (#113) had landed on its
+checkout; the "after" side minutes after restarting that service onto 0.7.0,
+same vault, same four queries (the two sides were probed by different
+sessions at different result limits, so read orders of magnitude, not small
+deltas). Ranges are min–max across the four queries:
+
+| Lane (ms) | before: stale pre-#113 process | after: 0.7.0 |
+|---|---|---|
+| keyword | 565 – 1,016 | 5.1 – 7.3 |
+| graph | 13 – 2,550 | 21 – 30 |
+| outside-KB widen | 550 – 599 | 3.0 – 15.8 |
+| bm25 | 8 – 806 | 3.0 – 3.2 |
+| vector | 28 – 68 | 16 – 19 |
+| clip | 38 – 88 | 21 – 24 |
+| **find() total** | **1,700 – 4,600** | **94 – 159** |
+
+Reading it:
+
+- **A ~25× total win from a restart, not a code change.** Every millisecond of
+  it had already shipped; the running process simply predated its own
+  checkout's fixes. Benchmark-vs-production gaps have TWO failure modes —
+  instrument mismatch and deployment staleness — and this one was staleness:
+  the synthetic curve had correctly caught the O(N) keyword scan (that is why
+  FTS5 exists), and the production service wasn't running it.
+- **The graph "wall" collapses to 21–30ms flat**, with `graph.resolver` at
+  ~0.01ms. The wild 13→2,550ms variance on the stale build matches missed-
+  filesystem-event freshness re-walks landing inside the request that trips
+  them (the same walk artifact documented in the correction above), not
+  uncapped fan-out — seed expansion is capped (`graph_seed_cap`).
+- **The outside-KB auto-widen was the one genuinely invisible lane**: the
+  synthetic corpus puts every note inside `Knowledge Base/` (the lane costs ~0
+  by construction) and the harness didn't report its stage. The `outside_kb`
+  column is reported as of 2026-07-04; corpus-shape realism (outside-KB
+  siblings, hub-degree, note-size distribution) is recorded follow-up work.
+- **Vector is a footnote at real scale** — 16–19ms under the vec0 default —
+  which is the load-bearing evidence in the ANN decision record above.
+
+### Whole-tool latency (server call log, real usage)
+
+Per-lane `find()` numbers miss the rest of the tool surface. From the server's
+own call log (`event=tool_success … duration_ms=…`) over the stale build's
+final ~36h of real usage, plus post-restart probe samples on 0.7.0:
+
+| tool | n | median ms | p90 ms | max ms | 0.7.0 probe |
+|---|---|---|---|---|---|
+| replace | 1 | 19,792 | — | 19,792 | — |
+| note | 51 | 7,743 | 21,877 | 55,753 | 15,237 (1 cold sample) |
+| find | 69 | 3,704 | 16,876 | 50,974 | 94 – 159 |
+| edit | 46 | 2,872 | 18,943 | 65,059 | — |
+| link | 3 | 2,606 | 2,692 | 2,692 | — |
+| delete | 1 | 1,493 | — | 1,493 | 1,078 |
+| suggest_links | 5 | 762 | 3,886 | 3,886 | — |
+| append_to_file | 4 | 482 | 1,080 | 1,080 | 429 |
+| get | 75 | 4 | 8 | 64 | — |
+
+The read path (`get`, 4ms) was never a problem, and the raw write/upsert path
+is fine (`append_to_file` ~0.4s includes re-embed + index sync). The compiled-
+write path is the one tool family still paying double-digit seconds on 0.7.0:
+the single post-restart `note` sample cost 15.2s, dominated by work the tool
+does by design — an inline link-suggestion pass (several find-class probes),
+source-graph maintenance, re-embed. One cold sample is not a distribution;
+instrumenting `note`'s stages (the FindTimings treatment) and re-measuring is
+the recorded next investigation on the tool surface.
 
 ## Reproduction
 
@@ -355,3 +461,14 @@ in the report's methodology line.
 - **Hardware-dependent latency.** The median/p90 numbers reflect one host's
   CPU/GPU. A third party's latency will differ; the published p90 is not a
   portable guarantee.
+- **Synthetic corpus shape.** The dense synthetic vault matches real vaults on
+  corpus SIZE but not on every cost-driving axis: link degree is uniform
+  (25/note, no hub notes), note bodies are uniform (no transcript-sized
+  pages), and every file lives inside `Knowledge Base/` — so the `outside_kb`
+  auto-widen lane costs ~0 by construction (its column exists in the harness
+  as of 2026-07-04 so the omission is at least visible). A synthetic ranking
+  transfers only when a shape mismatch hits both arms of a comparison equally;
+  the real-vault section above is the absolute check. Opt-in corpus axes
+  (outside-KB sibling folders, hub-degree, heavy-tailed note sizes) are the
+  recorded follow-up — as NEW cached tiers, because the existing corpora and
+  published curves depend on byte-identical regeneration.

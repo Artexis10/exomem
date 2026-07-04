@@ -94,8 +94,12 @@ DEFAULT_QUERIES = [
 ]
 
 # The lanes we report, in a fixed column order. Names must match FindTimings'
-# stage keys (see find.FindTimings / the _span(...) call sites).
-LANES = ("vector", "bm25", "keyword", "graph", "fusion", "rerank")
+# stage keys (see find.FindTimings / the _span(...) call sites). NOTE:
+# `outside_kb` (the scope="kb" auto-widen) costs ~0 on this synthetic corpus —
+# every generated note lives inside Knowledge Base/ — but the column keeps the
+# lane visible; on a real vault it was a per-query cost the harness silently
+# omitted (see docs/benchmarks.md, real-vault section).
+LANES = ("vector", "bm25", "keyword", "graph", "outside_kb", "fusion", "rerank")
 
 
 class _NoEmbeddingIndex:
