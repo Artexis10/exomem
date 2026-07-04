@@ -149,7 +149,7 @@ def main() -> int:
         return 0
 
     DOC_PATH.parent.mkdir(parents=True, exist_ok=True)
-    DOC_PATH.write_text(generated, encoding="utf-8")
+    DOC_PATH.write_text(generated, encoding="utf-8", newline="\n")
     print(f"wrote {DOC_PATH.relative_to(REPO_ROOT)}")
     return 0
 
