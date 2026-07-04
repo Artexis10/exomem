@@ -6,6 +6,29 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "AGPL-3.0-or-later" }
 authors = [{ name = "Hugo Ander", email = "founder@substratesystems.io" }]
+keywords = [
+    "mcp",
+    "mcp-server",
+    "ai-agents",
+    "agent-memory",
+    "knowledge-base",
+    "obsidian",
+    "markdown",
+    "rag",
+    "semantic-search",
+    "hybrid-search",
+    "claude",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Text Processing :: Indexing",
+]
 
 dependencies = [
     "fastmcp>=2.10",
