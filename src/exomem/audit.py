@@ -1464,7 +1464,7 @@ def _check_corpus_contradictions(
         return []
 
     rows_by_file: dict[str, list[int]] = {}
-    for i, (fp, _cidx, _ctext) in enumerate(metadata):
+    for i, (fp, _cidx) in enumerate(metadata):
         rows_by_file.setdefault(fp, []).append(i)
 
     # max chunk-cosine per deduped unordered file pair, both endpoints eligible.

@@ -81,7 +81,7 @@ def _install(
                 order.append(key)
         out[tuple(sorted((key_a, key_b)))] = (key_a, key_b)
 
-    metadata = [(key, 0, "chunk") for key in order]
+    metadata = [(key, 0) for key in order]  # numpy-lite: (file_path, chunk_idx)
     matrix = np.array([vecs[key] for key in order], dtype=np.float32)
     monkeypatch.setattr(
         embeddings.EmbeddingIndex, "all_vectors", lambda self: (metadata, matrix)

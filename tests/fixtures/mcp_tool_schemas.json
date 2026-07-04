@@ -649,9 +649,16 @@
           "description": "When true (default) and mode is hybrid/vector, outbound\nwikilinks of top BM25/vector candidates contribute a third\nranking — surfaces 1-hop neighbours of strong matches."
         },
         "rerank": {
-          "default": false,
-          "type": "boolean",
-          "description": "When true (off by default), runs the top fused\ncandidates through bge-reranker-base (a CrossEncoder) for\nhigher-precision ordering. Adds ~50ms/candidate; useful\nwhen ambiguous queries float topically-off vector matches\nto the top."
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is AUTO: the server reranks only when the ranking\nlanes disagree or the query is long — the cases where it\nmeasurably helps — and skips the ~100-200ms cost otherwise.\nPass true to force it on every query, false to disable\nentirely (yesterday's default)."
         },
         "prefer_compiled": {
           "default": true,
@@ -1298,6 +1305,11 @@
           ],
           "default": null,
           "description": "production-log only. Producer/editor name."
+        },
+        "suggestions": {
+          "default": true,
+          "type": "boolean",
+          "description": "When true (default), the result carries a `suggestions`\nblock — existing pages this note should probably link to, ranked\nby the retrieval stack. Set false for a faster write when you\nalready know the note's links; the near-duplicate/overlap\nwarnings stay ON either way (dedupe is a guardrail, not a\nsuggestion)."
         },
         "project_category": {
           "anyOf": [

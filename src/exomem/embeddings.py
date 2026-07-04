@@ -19,6 +19,7 @@ import logging
 import math
 import os
 import sqlite3
+import sys
 import threading
 from dataclasses import dataclass
 from pathlib import Path
@@ -917,12 +918,19 @@ class EmbeddingIndex:
     SQL-native KNN over shadow tables in the same sidecar instead, and this
     matrix stays cold — `all_vectors()` remains for audit's all-pairs sweep
     and the numpy fallback.
+
+    numpy-lite (2026-07-04): the cache holds ONLY `(file_path, chunk_idx)`
+    metadata + the float32 matrix — chunk TEXT is never resident. Text was
+    most of the numpy backend's memory bill at scale (~2GB of a ~3.5GB RSS at
+    200k chunks); the top-k winners' texts are point-lookups on the
+    `(file_path, chunk_idx)` PRIMARY KEY at search time, exactly how the vec0
+    path already hydrates metadata by rowid.
     """
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
         self.path = sidecar_path(vault_root)
-        self._cache: tuple[float, list[tuple[str, int, str]], np.ndarray] | None = None
+        self._cache: tuple[float, list[tuple[str, int]], np.ndarray] | None = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
@@ -988,7 +996,8 @@ class EmbeddingIndex:
             conn.close()
         # Patch the shared in-memory matrix in place instead of nulling it, so a
         # concurrent find() doesn't pay a full O(vault) reload for this one write.
-        new_meta = [(rel_path, i, chunks[i]) for i in range(len(chunks))]
+        # numpy-lite: metadata rows carry no chunk text (see class docstring).
+        new_meta = [(rel_path, i) for i in range(len(chunks))]
         new_vecs = np.asarray(vectors, dtype=np.float32) if chunks else None
         self._patch_cache(rel_path, new_meta, new_vecs)
 
@@ -1050,10 +1059,12 @@ class EmbeddingIndex:
                 log.warning("embedding matrix splice failed (%s); dropping cache", e)
                 self._cache = None
 
-    def all_vectors(self) -> tuple[list[tuple[str, int, str]], np.ndarray]:
+    def all_vectors(self) -> tuple[list[tuple[str, int]], np.ndarray]:
         """Return `(metadata, matrix)` cached until the sidecar mtime advances.
 
-        metadata[i] = (file_path, chunk_idx, chunk_text); matrix[i] = vector.
+        metadata[i] = (file_path, chunk_idx); matrix[i] = vector. Chunk text
+        is deliberately NOT here (numpy-lite — see class docstring); fetch the
+        winners' texts via `_texts_for` when needed.
         """
         try:
             sidecar_mtime = self.path.stat().st_mtime
@@ -1073,27 +1084,30 @@ class EmbeddingIndex:
             self._cache = (sidecar_mtime, metadata, matrix)
             return metadata, matrix
 
-    def _load_all_rows(self) -> tuple[list[tuple[str, int, str]], np.ndarray]:
+    def _load_all_rows(self) -> tuple[list[tuple[str, int]], np.ndarray]:
         """Full reload of every row from the sidecar → `(metadata, matrix)`.
 
         This is the O(vault) `SELECT` + `np.stack` the incremental cache exists to
         avoid paying per find. Isolated as a named method so tests can count how
-        often a genuine full reload happens.
+        often a genuine full reload happens. numpy-lite: chunk text is neither
+        SELECTed nor retained (it dominated both the reload I/O and the resident
+        cost at scale); file_path strings are interned so N rows of one file
+        share a single str object.
         """
         conn = self._connect()
         try:
             rows = conn.execute(
-                "SELECT file_path, chunk_idx, chunk_text, vector FROM chunks "
+                "SELECT file_path, chunk_idx, vector FROM chunks "
                 "ORDER BY file_path, chunk_idx"
             ).fetchall()
         finally:
             conn.close()
         if not rows:
             return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
-        metadata: list[tuple[str, int, str]] = []
+        metadata: list[tuple[str, int]] = []
         vectors: list[np.ndarray] = []
-        for fp, idx, txt, blob in rows:
-            metadata.append((fp, idx, txt))
+        for fp, idx, blob in rows:
+            metadata.append((sys.intern(fp), idx))
             vectors.append(np.frombuffer(blob, dtype=np.float32))
         return metadata, np.stack(vectors, axis=0)
 
@@ -1121,10 +1135,46 @@ class EmbeddingIndex:
         # argpartition is O(N), then sort the top-k slice.
         top_idx = np.argpartition(-scores, k_eff - 1)[:k_eff]
         top_idx = top_idx[np.argsort(-scores[top_idx])]
-        return [
-            (metadata[i][0], metadata[i][1], metadata[i][2], float(scores[i]))
-            for i in top_idx
-        ]
+        top = [(metadata[i][0], metadata[i][1], float(scores[i])) for i in top_idx]
+        # numpy-lite: hydrate only the winners' texts (PK point-lookups).
+        try:
+            texts = self._texts_for([(fp, ci) for fp, ci, _ in top])
+        except Exception as e:  # noqa: BLE001 — text hydration must never break search
+            log.warning("chunk-text fetch failed (%s); returning hits without text", e)
+            texts = {}
+        return [(fp, ci, texts.get((fp, ci), ""), score) for fp, ci, score in top]
+
+    def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
+        """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.
+
+        The in-memory cache holds no chunk text (numpy-lite), so the numpy
+        rung hydrates its winners here: point-lookups on the table's
+        `(file_path, chunk_idx)` PRIMARY KEY, batched to stay far under
+        SQLite's bound-variable cap.
+        """
+        out: dict[tuple[str, int], str] = {}
+        if not pairs:
+            return out
+        conn = self._connect()
+        try:
+            batch_size = 150  # 2 bound params per pair
+            for s in range(0, len(pairs), batch_size):
+                batch = pairs[s:s + batch_size]
+                where = " OR ".join(
+                    "(file_path = ? AND chunk_idx = ?)" for _ in batch
+                )
+                params: list = []
+                for fp, ci in batch:
+                    params.extend((fp, ci))
+                rows = conn.execute(
+                    f"SELECT file_path, chunk_idx, chunk_text FROM chunks WHERE {where}",
+                    params,
+                ).fetchall()
+                for fp, ci, txt in rows:
+                    out[(fp, ci)] = txt
+        finally:
+            conn.close()
+        return out
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int
