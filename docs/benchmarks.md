@@ -395,23 +395,31 @@ final ~36h of real usage, plus post-restart probe samples on 0.7.0:
 | tool | n | median ms | p90 ms | max ms | 0.7.0 probe |
 |---|---|---|---|---|---|
 | replace | 1 | 19,792 | — | 19,792 | — |
-| note | 51 | 7,743 | 21,877 | 55,753 | 15,237 (1 cold sample) |
+| note | 51 | 7,743 | 21,877 | 55,753 | 15,237 cold → **2,578** after the resolver fix |
 | find | 69 | 3,704 | 16,876 | 50,974 | 94 – 159 |
 | edit | 46 | 2,872 | 18,943 | 65,059 | — |
 | link | 3 | 2,606 | 2,692 | 2,692 | — |
-| delete | 1 | 1,493 | — | 1,493 | 1,078 |
+| delete | 1 | 1,493 | — | 1,493 | 1,078 – 1,563 |
 | suggest_links | 5 | 762 | 3,886 | 3,886 | — |
 | append_to_file | 4 | 482 | 1,080 | 1,080 | 429 |
 | get | 75 | 4 | 8 | 64 | — |
 
 The read path (`get`, 4ms) was never a problem, and the raw write/upsert path
 is fine (`append_to_file` ~0.4s includes re-embed + index sync). The compiled-
-write path is the one tool family still paying double-digit seconds on 0.7.0:
-the single post-restart `note` sample cost 15.2s, dominated by work the tool
-does by design — an inline link-suggestion pass (several find-class probes),
-source-graph maintenance, re-embed. One cold sample is not a distribution;
-instrumenting `note`'s stages (the FindTimings treatment) and re-measuring is
-the recorded next investigation on the tool surface.
+write family's cost was root-caused the same day: **every write op rebuilt the
+`WikilinkResolver` from scratch per call** — a full vault read + YAML parse of
+every .md file, cProfiled at ~2.1s of a 4.6s `note()` on a ~1,900-file copy of
+this vault. This is the same failure class as the embedding-matrix cache bug
+("holder rebuilt per call"): find()'s graph lane got the freshness-checked
+shared-resolver cache long ago, and the write path never did. Fixed by routing
+all seven writer sites through `find.shared_resolver` with post-write re-sync
+via `index_sync` (also closing the async watcher window that invalidated the
+cache after every write) — pinned by `tests/test_write_resolver_reuse.py`.
+Measured: harness `note()` 4.6s → 3.2s (registry-cold; the residual is the
+tool's *designed* inline work — a link-suggestion find pass + draft
+near-dup/contradiction embedding); live cold-probe `note` **15.2s → 2.6s**.
+`edit`/`replace` ride the same fix; fresh live distributions accumulate in the
+call log.
 
 ## Reproduction
 
