@@ -8,7 +8,9 @@ list_directory, etc.).
 
 from __future__ import annotations
 
+import datetime as _dt
 import hashlib
+import logging
 import os
 import re
 import tempfile
@@ -23,6 +25,8 @@ from slugify import slugify as _slugify
 
 from . import freshness
 from .kbdir import kb_dirname, kb_prefix
+
+log = logging.getLogger(__name__)
 
 
 SLUG_MAX_LENGTH = 100
@@ -1218,6 +1222,86 @@ def prepend_log_entry(
     return log_text[:insertion_point] + "\n" + new_entry + "\n" + log_text[insertion_point:]
 
 
+# ---- log.md rotation (scale-proper activity log) ---------------------------
+
+LOG_ROTATE_BYTES_DEFAULT = 2_000_000  # rotate when the live log exceeds ~2MB
+LOG_ROTATE_KEEP_ENTRIES = 200  # newest entries kept live (>= index.md's cap-50)
+
+_LOG_ENTRY_START_RE = re.compile(r"^## \[", re.MULTILINE)
+
+
+def _log_rotate_bytes() -> int:
+    raw = os.environ.get("EXOMEM_LOG_ROTATE_BYTES")
+    if raw:
+        try:
+            v = int(raw)
+            if v > 0:
+                return v
+        except ValueError:
+            pass
+    return LOG_ROTATE_BYTES_DEFAULT
+
+
+def rotate_log_if_needed(vault_root: Path) -> str | None:
+    """Size-triggered rotation of `Knowledge Base/log.md`.
+
+    Every write op reads + rewrites log.md WHOLE (append-only feed, newest
+    first), so an unbounded log makes every write O(log size). Past
+    `EXOMEM_LOG_ROTATE_BYTES` (default 2MB) the tail beyond the newest
+    `LOG_ROTATE_KEEP_ENTRIES` entries moves — byte-exact — to
+    `Knowledge Base/_archive/logs/log-<utc-stamp>.md`. `_archive/` is excluded
+    from find/index walks AND from every incremental index path (the
+    exclusion-parity guard), so archives are inert; nothing is ever deleted.
+    Keeping the newest 200 entries preserves index.md's cap-50
+    Recent-activity derivation and recent `get(include_history)` reads; older
+    history lives on in the archive files.
+
+    Returns a one-line note when rotation ran (callers may surface it), None
+    otherwise. Best-effort by contract: any failure logs and leaves log.md
+    untouched — rotation must never break the write that triggered it.
+    """
+    log_file = kb_root(vault_root) / "log.md"
+    try:
+        if not log_file.exists() or log_file.stat().st_size <= _log_rotate_bytes():
+            return None
+        text = log_file.read_text(encoding="utf-8")
+        sep = "\n---\n"  # == indexes.LOG_SEPARATOR (header/entries boundary)
+        sep_idx = text.find(sep)
+        if sep_idx == -1:
+            return None  # unrecognized shape — never rotate what we can't parse
+        head_end = sep_idx + len(sep)
+        head, entries_text = text[:head_end], text[head_end:]
+        starts = [m.start() for m in _LOG_ENTRY_START_RE.finditer(entries_text)]
+        if len(starts) <= LOG_ROTATE_KEEP_ENTRIES:
+            return None  # entry-count floor reached; size is as small as it gets
+        cut = starts[LOG_ROTATE_KEEP_ENTRIES]
+        live_entries, tail = entries_text[:cut], entries_text[cut:]
+        stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+        archive_dir = kb_root(vault_root) / "_archive" / "logs"
+        archive_dir.mkdir(parents=True, exist_ok=True)
+        archive_path = archive_dir / f"log-{stamp}.md"
+        n = 2
+        while archive_path.exists():  # same-second rotations must not clobber
+            archive_path = archive_dir / f"log-{stamp}-{n}.md"
+            n += 1
+        n_moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
+        archive_text = (
+            f"# log.md archive segment ({stamp})\n\n"
+            f"Rotated out of `{kb_prefix()}log.md` — {n_moved} entrie(s), newest "
+            f"first, byte-exact.\n{sep}{tail}"
+        )
+        batch_atomic_write([
+            PlannedWrite(path=archive_path, content=archive_text),
+            PlannedWrite(path=log_file, content=head + live_entries),
+        ])
+        rel_archive = archive_path.resolve().relative_to(vault_root.resolve()).as_posix()
+        log.info("log.md rotated: %d entrie(s) -> %s", n_moved, rel_archive)
+        return f"log.md rotated: {n_moved} older entrie(s) → {rel_archive}"
+    except Exception as e:  # noqa: BLE001 — rotation must never break a write
+        log.warning("log rotation skipped (%s)", e)
+        return None
+
+
 def write_log_entry(
     vault_root: Path,
     *,
@@ -1243,6 +1327,7 @@ def write_log_entry(
         body=body,
     )
     batch_atomic_write([PlannedWrite(path=log_file, content=new_text)])
+    rotate_log_if_needed(vault_root)  # size cap; best-effort, logs its own action
     return None
 
 

@@ -47,6 +47,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    rotate_log_if_needed,
     slugify_with_truncation_check,
     unique_path,
 )
@@ -448,6 +449,10 @@ def note(
         except Exception:  # noqa: BLE001 — purge is best-effort cleanup
             log.debug("resolver pending-purge failed", exc_info=True)
         raise
+
+    rotate_note = rotate_log_if_needed(vault_root)
+    if rotate_note:
+        warnings.append(rotate_note)
 
     return NoteResult(
         path=note_path.relative_to(vault_root).as_posix(),

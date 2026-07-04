@@ -34,6 +34,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    rotate_log_if_needed,
 )
 
 log = logging.getLogger(__name__)
@@ -260,6 +261,10 @@ def link(
         except Exception:  # noqa: BLE001 — purge is best-effort cleanup
             log.debug("resolver pending-purge failed", exc_info=True)
         raise
+
+    rotate_note = rotate_log_if_needed(vault_root)
+    if rotate_note:
+        warnings.append(rotate_note)
 
     return LinkResult(path=rel_entity, warnings=warnings)
 
