@@ -58,7 +58,9 @@ That's the normal case, and it's safe:
   `Knowledge Base/` — a new folder that `setup`/`init` creates *next to* your
   existing ones. Everything else in the vault is read-only input; `init`
   refuses to run if `Knowledge Base/` already exists, so re-running can't
-  clobber anything.
+  clobber anything. *(The governed folder is named `Knowledge Base/` by default;
+  set `EXOMEM_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
+  your vault already uses.)*
 - **Your notes stay searchable.** `find` reaches sibling folders (the default
   scope auto-widens; `scope="vault"` always walks everything), and `overview`
   gives Claude a bounded structural report of the whole vault — one call, not
