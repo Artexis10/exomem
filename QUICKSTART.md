@@ -360,14 +360,17 @@ in your pocket.
 ### Make the KB proactive in the Claude app (custom instructions)
 
 claude.ai (web/mobile) can't run hooks — those are Claude Code only — so the
-skill's proactive find/capture is best-effort there. To nudge it reliably across
-*all* your chats, paste this into the Claude app at **Settings → Profile → "What
-personal preferences should Claude consider in responses?"**:
+skill's proactive find/capture is best-effort there. This vault is served by
+Exomem, an MCP server (formerly kb-mcp). Once added as a connector, its tools
+appear under whatever name you assign it (e.g. "Knowledge Base"). To nudge it
+reliably across *all* your chats, paste this into the Claude app at
+**Settings → Profile → "What personal preferences should Claude consider in
+responses?"**:
 
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 
-I keep a personal Knowledge Base, connected as the "Knowledge Base" connector (exomem). Use it proactively: search it first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search means a gap, not a dead end). Capture durable conclusions on your own (a decision, solved problem, diagnosed failure, or recognized pattern) as a short compiled note, not a transcript, whether or not the topic exists yet, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat and don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. Use it proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 The first paragraph is general response style (trim to taste); the second is the KB
