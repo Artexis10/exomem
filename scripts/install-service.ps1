@@ -84,9 +84,23 @@ try {
         Write-Host "User SID already in service ACL; skipping no-UAC grant."
     } else {
         $newAcl = $currentAcl + "(A;;RPWPCR;;;$sid)"
-        & sc.exe sdset $ServiceName $newAcl | Out-Null
-        Write-Host "Granted no-UAC start/stop rights on '$ServiceName' to $env:USERDOMAIN\$env:USERNAME."
-        Write-Host "  Future restarts: sc.exe stop $ServiceName; sc.exe start $ServiceName  (no elevation needed)"
+        # sc.exe reports failure via exit code + stderr text, not an exception —
+        # piping to Out-Null used to swallow both and this script then claimed
+        # success while the SD was unchanged (observed 2026-07-04). Check the
+        # exit code AND verify the ACE actually landed before claiming it.
+        $sdsetOut = & sc.exe sdset $ServiceName $newAcl 2>&1
+        $sdsetExit = $LASTEXITCODE  # capture BEFORE sdshow below overwrites it
+        $verifyAcl = (& sc.exe sdshow $ServiceName | Where-Object { $_ -match '^D:' } | Select-Object -First 1)
+        if ($sdsetExit -ne 0) {
+            Write-Warning "sc.exe sdset failed (exit ${sdsetExit}): $sdsetOut"
+            Write-Warning "No-UAC grant NOT applied. Grant manually from an elevated shell: sc.exe sdset $ServiceName `"$newAcl`""
+        } elseif ($verifyAcl -notmatch [Regex]::Escape($sid)) {
+            Write-Warning "sc.exe sdset reported success but the ACE did not appear in sdshow; no-UAC grant NOT applied."
+            Write-Warning "Grant manually from an elevated shell: sc.exe sdset $ServiceName `"$newAcl`""
+        } else {
+            Write-Host "Granted no-UAC start/stop rights on '$ServiceName' to $env:USERDOMAIN\$env:USERNAME."
+            Write-Host "  Future restarts: sc.exe stop $ServiceName; sc.exe start $ServiceName  (no elevation needed)"
+        }
     }
 } catch {
     Write-Warning "Failed to grant no-UAC rights on '$ServiceName': $_"
