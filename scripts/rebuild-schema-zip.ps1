@@ -3,10 +3,9 @@
 .SYNOPSIS
   Thin wrapper -> the cross-platform Python builder, scripts/rebuild-schema-zip.py.
 .DESCRIPTION
-  Rebuilds Knowledge Base/_Schema.zip (the claude.ai `.skill`) from the canonical,
-  stripping the canonical's GENERIC markers (keeping your real content) so the zip
-  carries no marker comments. Resolves the vault from --vault or
-  $env:EXOMEM_VAULT_PATH. Requires Python (no Compress-Archive needed anymore).
+  Assembles the claude.ai `.skill` zip from the public scaffold
+  (src/exomem/_scaffold/_Schema), overlaying your real project-keys.yaml when --vault
+  or $env:EXOMEM_VAULT_PATH is set. Requires Python (no Compress-Archive needed).
 .EXAMPLE
   pwsh -File scripts/rebuild-schema-zip.ps1
 #>

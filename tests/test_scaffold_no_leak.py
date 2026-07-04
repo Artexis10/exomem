@@ -6,8 +6,7 @@ starter (not derived from any private vault). This test scans the COMMITTED
 scaffold two ways:
 
 1. `test_scaffold_ships_no_personal_data` — structural machine-path/personal
-   patterns (the `LEAK_PATTERNS` shared with the retired genericize script + the
-   still-live rebuild-schema-zip tooling), so the structural guard never drifts.
+   patterns (the in-file `LEAK_PATTERNS` list), so the structural guard never drifts.
 2. `test_scaffold_ships_no_personal_tokens` — an explicit denylist of the
    synthetic private names, products, domains, and vault-structure labels. This
    is the hard wall: the leak class (shipping private tenant/product/collaborator
@@ -18,7 +17,6 @@ Both run without the vault, so they work in CI.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 from pathlib import Path
 
@@ -29,7 +27,19 @@ import exomem
 SCAFFOLD = Path(exomem.__file__).resolve().parent / "_scaffold"
 SCAFFOLD_SCHEMA = SCAFFOLD / "_Schema"
 SOURCE = Path(exomem.__file__).resolve().parent  # src/exomem/
-REPO = Path(exomem.__file__).resolve().parent.parent.parent  # src/exomem -> repo root
+
+# Structural machine-path / personal-data patterns. Formerly imported from the
+# retired scripts/genericize-schema.py; now owned here (the sole consumer). Patterns,
+# NOT sensitive literals, so this file itself stays clean.
+LEAK_PATTERNS = [
+    r"/mnt/[a-z]/",                                              # WSL drive mounts
+    r"[A-Za-z]:\\Users\\(?!<)",                                  # Windows user paths (real, not <placeholder>)
+    r"[A-Za-z]:\\[A-Za-z0-9 _-]+\\(?:Personal|Archive|Documents)",  # Windows abs paths
+    r"/Users/(?!<)[^/\s<]+/",                                    # macOS home (real, not <placeholder>)
+    r"/home/(?!<)[^/\s<]+/",                                     # Linux home (real, not <placeholder>)
+    r"~/\.claude/hooks/",                                        # author's hook wiring
+    r"\bQ_MNT_ALLOWLIST\b",                                      # author's allowlist env
+]
 
 
 # Explicit synthetic private-token denylist. Each entry is (label, regex, case_insensitive).
@@ -73,17 +83,6 @@ def _source_files() -> list[Path]:
     return [f for f in sorted(SOURCE.rglob("*")) if f.is_file()]
 
 
-def _leak_patterns() -> list[str]:
-    """Import the structural pattern list from the (hyphenated) genericize script
-    by path, so the test and the generator never drift."""
-    spec = importlib.util.spec_from_file_location(
-        "genericize_schema", REPO / "scripts" / "genericize-schema.py"
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod.LEAK_PATTERNS
-
-
 def _scaffold_files() -> list[Path]:
     return [f for f in sorted(SCAFFOLD.rglob("*")) if f.is_file()]
 
@@ -93,7 +92,7 @@ SAMPLE_VAULT = SOURCE / "_sample_vault"
 
 def test_scaffold_ships_no_personal_data() -> None:
     """Structural machine-path/personal patterns (shared with the generator)."""
-    patterns = [re.compile(p) for p in _leak_patterns()]
+    patterns = [re.compile(p) for p in LEAK_PATTERNS]
     offenders: list[str] = []
     for f in sorted(SCAFFOLD_SCHEMA.rglob("*")):
         if not f.is_file():
@@ -139,7 +138,7 @@ def test_sample_vault_ships_no_personal_data() -> None:
     ships inside the wheel for `exomem demo`, exactly like the scaffold does,
     so it needs the same structural guard (mirrors
     test_scaffold_ships_no_personal_data above)."""
-    patterns = [re.compile(p) for p in _leak_patterns()]
+    patterns = [re.compile(p) for p in LEAK_PATTERNS]
     offenders: list[str] = []
     for f in sorted(SAMPLE_VAULT.rglob("*")):
         if not f.is_file():

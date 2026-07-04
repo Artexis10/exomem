@@ -18,7 +18,7 @@ dist/
 build/
 *.egg-info/
 
-# Local-only genericize inputs for genericize-schema.py (real personal tokens).
+# Local-only maintainer scratch that may hold real personal tokens — never commit.
 scripts/generic/leakguard.txt
 scripts/generic/substitutions.txt
 

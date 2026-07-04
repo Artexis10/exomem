@@ -36,18 +36,18 @@ the rule above is the guardrail for when you must operate on the primary.
 
 The skill shipped to new users lives at `src/exomem/_scaffold/_Schema/`
 (SKILL.md + `references/*.md` + `project-keys.yaml`). It is a **hand-authored,
-deliberately-generic starter** — edit it directly. It is NOT generated from a
-private vault; `scripts/genericize-schema.py` is retired as a generator (running
-it would clobber the hand-authored scaffold).
+deliberately-generic starter** and the **single source of the skill** — edit it
+directly. It is NOT generated from a private vault, and there is no marker canonical
+to keep in sync.
 
 The hard rule: **keep it generic.** `tests/test_scaffold_no_leak.py` fails if any
 personal name, product, or vault-structure label appears in the scaffold — or
 anywhere under `src/exomem/`. If a test flags a token, genericize it; don't add it
 to an allowlist.
 
-(Maintainer-only: a private claude.ai `.skill` zip is still derived from a private
-canonical via `scripts/rebuild-schema-zip.py`; that's separate from the public
-scaffold and needs no version bump here.)
+(Maintainer-only: the personal claude.ai `.skill` zip is built by
+`scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real
+`project-keys.yaml` — no private canonical, no markers. Needs no version bump here.)
 
 ## Connector triage ("MCP not working" / forced reconnect)
 
