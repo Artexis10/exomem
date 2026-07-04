@@ -262,7 +262,7 @@ def op_find(
     scope: str = "kb",
     mode: str = "hybrid",
     graph: bool = True,
-    rerank: bool = False,
+    rerank: bool | None = None,
     prefer_compiled: bool = True,
     prefer_active: bool = True,
     prefer_used: bool = False,
@@ -320,11 +320,13 @@ def op_find(
         graph: When true (default) and mode is hybrid/vector, outbound
             wikilinks of top BM25/vector candidates contribute a third
             ranking — surfaces 1-hop neighbours of strong matches.
-        rerank: When true (off by default), runs the top fused
-            candidates through bge-reranker-base (a CrossEncoder) for
-            higher-precision ordering. Adds ~50ms/candidate; useful
-            when ambiguous queries float topically-off vector matches
-            to the top.
+        rerank: Cross-encoder re-sort of the top fused candidates
+            (bge-reranker-base) for higher-precision ordering. Default
+            (unset) is AUTO: the server reranks only when the ranking
+            lanes disagree or the query is long — the cases where it
+            measurably helps — and skips the ~100-200ms cost otherwise.
+            Pass true to force it on every query, false to disable
+            entirely (yesterday's default).
         prefer_compiled: When true (default), applies a small boost to
             compiled types (insight, pattern, failure, research-note,
             entity) and a small penalty to raw `source` after fusion
@@ -431,6 +433,10 @@ def op_find(
         mode=mode,
         graph=graph,
         rerank=rerank,
+        # rerank=None defers to the engine's per-query heuristic
+        # (should_rerank: lane disagreement / long query). Explicit
+        # true/false from the caller always wins over auto.
+        auto_rerank=rerank is None,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
@@ -1486,6 +1492,7 @@ def op_note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
+    suggestions: bool = True,
     project_category: str | None = None,
 ) -> dict:
     """Create a compiled note in the Knowledge Base.
@@ -1559,6 +1566,13 @@ def op_note(
         host: production-log only. Creator/talent name.
         editor: production-log only. Producer/editor name.
 
+        suggestions: When true (default), the result carries a `suggestions`
+            block — existing pages this note should probably link to, ranked
+            by the retrieval stack. Set false for a faster write when you
+            already know the note's links; the near-duplicate/overlap
+            warnings stay ON either way (dedupe is a guardrail, not a
+            suggestion).
+
     Returns:
         {path, warnings}. On validation failure, raises a structured error
         with code=INVALID_NOTE, the missing fields, and the reason.
@@ -1587,6 +1601,7 @@ def op_note(
             published=published,
             host=host,
             editor=editor,
+            suggestions=suggestions,
             project_category=project_category,
         )
     except note_module.NoteError as e:

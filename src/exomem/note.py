@@ -134,6 +134,7 @@ def note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
+    suggestions: bool = True,
     today: dt.date | None = None,
     project_category: str | None = None,
 ) -> NoteResult:
@@ -261,19 +262,36 @@ def note(
                 inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
                 if inner:
                     existing_links.add(inner)
-            corpus_suggestions = [
-                s.as_dict()
-                for s in corpus_aware.suggest_related(
-                    vault_root, title=title, body=body_clean,
-                    self_path=rel_note_no_ext, existing_links=existing_links,
-                    limit=6,
+            def _cosines() -> dict[str, float]:
+                # One embedding pass, partitioned into the dup band and the
+                # contradiction band — the draft is encoded once per write.
+                return corpus_aware._best_cosine_per_file(
+                    vault_root, title=title, body=body_clean
                 )
-            ]
-            # One embedding pass, partitioned into the dup band and the
-            # contradiction band — the draft is encoded only once per write.
-            cosines = corpus_aware._best_cosine_per_file(
-                vault_root, title=title, body=body_clean
-            )
+
+            if suggestions:
+                # The suggestion query (find-class) and the near-dup sweep
+                # (draft embed + sidecar KNN) are independent read-only
+                # passes — overlap them. The server already encodes from
+                # several threads (worker pool, watcher), so this introduces
+                # no new concurrency class.
+                from concurrent.futures import ThreadPoolExecutor
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    fut_sugg = pool.submit(
+                        corpus_aware.suggest_related,
+                        vault_root, title=title, body=body_clean,
+                        self_path=rel_note_no_ext, existing_links=existing_links,
+                        limit=6,
+                    )
+                    fut_cos = pool.submit(_cosines)
+                    cosines = fut_cos.result()
+                    corpus_suggestions = [s.as_dict() for s in fut_sugg.result()]
+            else:
+                # suggestions=False skips ONLY the related-links pass. The
+                # near-dup/contradiction sweep below is a dedupe GUARDRAIL
+                # (SKILL rule: prefer edit/replace over a parallel page) and
+                # stays on in every mode.
+                cosines = _cosines()
             dup_warnings = [
                 corpus_aware.dup_warning(c)
                 for c in corpus_aware.detect_duplicates(
