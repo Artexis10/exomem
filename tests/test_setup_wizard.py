@@ -68,7 +68,7 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert code == 0
     # KB scaffold landed; skill installed under the injected home
     assert (vault / "Knowledge Base" / "index.md").is_file()
-    assert (home / "skills" / "knowledge-base" / "SKILL.md").is_file()
+    assert (home / "skills" / "exomem" / "SKILL.md").is_file()
     # pre-init scan surfaced the existing content + the write contract
     assert "2 files" in out
     assert "writes only under 'Knowledge Base/'" in out
@@ -96,13 +96,45 @@ def test_rerun_converges_to_skips(tmp_path: Path) -> None:
 
 def test_foreign_skill_is_preserved(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
-    target = home / "skills" / "knowledge-base"
+    target = home / "skills" / "exomem"
     target.mkdir(parents=True)
     (target / "SKILL.md").write_text("---\nname: my-custom-skill\n---\n", encoding="utf-8")
     code, out = _setup(vault, home, Recorder())
     assert code == 0
     assert "not the bundled skill" in out
     assert (target / "SKILL.md").read_text(encoding="utf-8").startswith("---\nname: my-custom-skill")
+
+
+def test_legacy_skill_is_migrated(tmp_path: Path) -> None:
+    """A pre-rename install at skills/knowledge-base is retired once the renamed skill
+    lands at skills/exomem."""
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    legacy = home / "skills" / "knowledge-base"
+    legacy.mkdir(parents=True)
+    (legacy / "SKILL.md").write_text(
+        "---\nname: knowledge-base\n---\n\nThis skill is the Exomem contract.\n",
+        encoding="utf-8",
+    )
+    code, out = _setup(vault, home, Recorder())
+    assert code == 0
+    assert (home / "skills" / "exomem" / "SKILL.md").is_file()
+    assert not legacy.exists()
+    assert "removed stale" in out
+
+
+def test_setup_generates_access_policy(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    code, out = _setup(vault, home, Recorder())
+    assert code == 0
+    # `Daily/` is a markdown sibling → classified read-only in a generated _access.yaml.
+    access_yaml = vault / "Knowledge Base" / "_access.yaml"
+    assert access_yaml.is_file()
+    assert "Daily" in access_yaml.read_text(encoding="utf-8")
+    assert "personalize" in out
+    # Re-run converges — nothing left to govern.
+    code2, out2 = _setup(vault, home, Recorder(results={"mcp add": (1, "", "already exists")}))
+    assert code2 == 0
+    assert "[skipped: no sibling folders need governing]" in out2
 
 
 def test_no_claude_cli_prints_snippet(tmp_path: Path) -> None:

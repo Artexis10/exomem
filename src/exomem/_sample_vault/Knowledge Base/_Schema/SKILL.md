@@ -1,5 +1,5 @@
 ---
-name: knowledge-base
+name: exomem
 description: Minimal public sample schema for exomem smoke tests.
 version: 0.1.0
 ---

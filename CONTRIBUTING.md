@@ -28,9 +28,9 @@ leak class that once shipped a maintainer's real names into a friend's clone. If
 it flags a token, genericize it (don't add it to an allowlist).
 
 ### Maintainer-only: the personal claude.ai skill
-The maintainer keeps a *private* canonical skill in their own Obsidian vault and
-derives a personal claude.ai `.skill` zip from it via
-`scripts/rebuild-schema-zip.py` (using the block-marker / substitution utilities
-in `scripts/generic/` and `scripts/genericize-schema.py`, the latter now retired
-as a scaffold *generator*). That path is maintainer-only and unrelated to the
-public scaffold above — contributors can ignore it.
+The maintainer derives a personal claude.ai `.skill` zip via
+`scripts/rebuild-schema-zip.py`, which reads the **public scaffold**
+(`src/exomem/_scaffold/_Schema/`) and overlays their real `project-keys.yaml` from
+their vault. There is no private canonical or marker system — the scaffold is the
+single source. That path is maintainer-only and unrelated to the public scaffold
+above; contributors can ignore it.

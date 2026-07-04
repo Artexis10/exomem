@@ -1,22 +1,23 @@
 #!/usr/bin/env python3
-"""Rebuild Knowledge Base/_Schema.zip (the claude.ai `.skill`) from the canonical.
+"""Rebuild the claude.ai `.skill` zip from the public scaffold.
 
-This is the **personal** derivation of the canonical skill (the maintainer's real
-content), for upload to claude.ai — the sibling of scripts/genericize-schema.py
-(which derives the *generic* repo scaffold from the same canonical). Both strip the
-GENERIC markers; this one keeps the REAL side, the genericize script keeps the
-generic side.
+The public scaffold `src/exomem/_scaffold/_Schema/` is the single source of the skill.
+This assembles the maintainer's claude.ai `.skill` archive from it — SKILL.md +
+references verbatim — overlaying the maintainer's real `project-keys.yaml` when a vault
+is given (so the personal upload advertises real project scopes), otherwise shipping the
+scaffold's generic starter keys. SKILL.md lands at the archive root, mirroring the
+on-disk skill layout claude.ai expects.
 
-So the canonical `_Schema/` stays the single editable source — its inline
-`<!-- GENERIC-START ... GENERIC-REPLACE --> <real> <!-- GENERIC-END -->` regions
-let one file serve both the personal zip (real content, markers removed) and the
-generic scaffold (generic content) without hand-maintaining either.
+There is no longer a private marker-canonical: personal specifics live in the
+maintainer's own `project-keys.yaml` / `_access.yaml`, not a forked SKILL.md.
 
-Cross-platform (pure stdlib; no `zip` CLI / Compress-Archive). SKILL.md lands at the
-archive root, mirroring the on-disk skill layout claude.ai expects.
+Cross-platform (pure stdlib; no `zip` CLI / Compress-Archive).
 
-Usage: python scripts/rebuild-schema-zip.py [--vault <root>]
-  --vault   vault root containing "Knowledge Base/" (default: $EXOMEM_VAULT_PATH)
+Usage: python scripts/rebuild-schema-zip.py [--vault <root>] [--out <path>]
+  --vault  vault root containing "Knowledge Base/" — used only to overlay your real
+           project-keys.yaml and to default --out (default: $EXOMEM_VAULT_PATH)
+  --out    output zip path (default: <vault>/Knowledge Base/_Schema.zip when --vault is
+           given, else <repo>/dist/_Schema.zip)
 """
 
 from __future__ import annotations
@@ -28,69 +29,59 @@ import sys
 import zipfile
 from pathlib import Path
 
-
-def strip_markers_keep_real(text: str) -> str:
-    """Drop GENERIC marker scaffolding + the generic replacement, KEEP the real
-    content (the inverse of genericize-schema.strip_markers, which keeps generic)."""
-    out: list[str] = []
-    state = "normal"
-    for line in text.splitlines(keepends=True):
-        s = line.strip()
-        if state == "normal":
-            if s.startswith("<!-- GENERIC-START"):
-                state = "repl"
-            elif s.startswith("<!-- GENERIC-END"):
-                pass  # stray end — drop
-            else:
-                out.append(line)
-        elif state == "repl":
-            if s.endswith("GENERIC-REPLACE -->"):
-                state = "real"
-            # else: drop the generic replacement line
-        elif state == "real":
-            if s.startswith("<!-- GENERIC-END"):
-                state = "normal"
-            else:
-                out.append(line)  # keep the real personal content
-    if state != "normal":
-        raise SystemExit(f"rebuild-schema-zip: unbalanced GENERIC markers (ended in state '{state}')")
-    return "".join(out)
+REPO = Path(__file__).resolve().parent.parent
+SCAFFOLD = REPO / "src" / "exomem" / "_scaffold" / "_Schema"
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(prog="rebuild-schema-zip")
     ap.add_argument("--vault", help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)")
+    ap.add_argument("--out", help="output zip path (default: <vault>/Knowledge Base/_Schema.zip, else <repo>/dist/_Schema.zip)")
     args = ap.parse_args()
 
-    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
-    if not vault:
-        print("rebuild-schema-zip: set --vault or EXOMEM_VAULT_PATH (vault root containing 'Knowledge Base/').", file=sys.stderr)
-        return 2
-    kb = Path(vault).expanduser() / "Knowledge Base"
-    canon = kb / "_Schema"
-    zip_path = kb / "_Schema.zip"
-    if not (canon / "SKILL.md").exists():
-        print(f"rebuild-schema-zip: {canon / 'SKILL.md'} not found.", file=sys.stderr)
+    if not (SCAFFOLD / "SKILL.md").exists():
+        print(f"rebuild-schema-zip: {SCAFFOLD / 'SKILL.md'} not found.", file=sys.stderr)
         return 2
 
-    # Build the personal rendering (markers stripped, real content kept).
-    files: dict[str, str] = {"SKILL.md": strip_markers_keep_real((canon / "SKILL.md").read_text(encoding="utf-8"))}
-    for ref in sorted((canon / "references").glob("*.md")):
-        files[f"references/{ref.name}"] = strip_markers_keep_real(ref.read_text(encoding="utf-8"))
-    keys = canon / "project-keys.yaml"
-    if keys.exists():
-        files["project-keys.yaml"] = keys.read_text(encoding="utf-8")  # real keys, verbatim
+    vault = args.vault or os.environ.get("EXOMEM_VAULT_PATH")
+
+    # SKILL.md + references come verbatim from the public scaffold.
+    files: dict[str, str] = {"SKILL.md": (SCAFFOLD / "SKILL.md").read_text(encoding="utf-8")}
+    for ref in sorted((SCAFFOLD / "references").glob("*.md")):
+        files[f"references/{ref.name}"] = ref.read_text(encoding="utf-8")
+
+    # project-keys.yaml: overlay the maintainer's real keys when a vault is given,
+    # else ship the scaffold's generic starter.
+    real_keys = (
+        Path(vault).expanduser() / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+        if vault
+        else None
+    )
+    if real_keys is not None and real_keys.exists():
+        files["project-keys.yaml"] = real_keys.read_text(encoding="utf-8")
+        keys_source = str(real_keys)
+    else:
+        files["project-keys.yaml"] = (SCAFFOLD / "project-keys.yaml").read_text(encoding="utf-8")
+        keys_source = f"{SCAFFOLD / 'project-keys.yaml'} (generic)"
 
     version = ""
     m = re.search(r"(?m)^\s*version:\s*([0-9]+\.[0-9]+\.[0-9]+)", files["SKILL.md"])
     if m:
         version = m.group(1)
 
-    print(f"vault:      {vault}")
-    print(f"schema dir: {canon}")
+    if args.out:
+        zip_path = Path(args.out).expanduser()
+    elif vault:
+        zip_path = Path(vault).expanduser() / "Knowledge Base" / "_Schema.zip"
+    else:
+        zip_path = REPO / "dist" / "_Schema.zip"
+
+    print(f"scaffold:   {SCAFFOLD}")
+    print(f"keys:       {keys_source}")
     print(f"zip target: {zip_path}")
     print(f"version:    {version}" if version else "warning: could not parse version from SKILL.md frontmatter.")
 
+    zip_path.parent.mkdir(parents=True, exist_ok=True)
     if zip_path.exists():
         zip_path.unlink()
     with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
@@ -98,7 +89,7 @@ def main() -> int:
             z.writestr(arcname, content)
 
     size_kb = zip_path.stat().st_size // 1024
-    print(f"wrote {zip_path} ({size_kb} KB, {len(files)} files; GENERIC markers stripped).")
+    print(f"wrote {zip_path} ({size_kb} KB, {len(files)} files) from the public scaffold.")
     return 0
 
 

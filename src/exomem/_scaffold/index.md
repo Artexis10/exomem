@@ -1,6 +1,6 @@
 # Knowledge Base — Index
 
-Compiled, structured layer of your Obsidian vault. Governed by [[Knowledge Base/_Schema/SKILL]].
+Compiled, structured layer of your markdown vault (Obsidian optional). Governed by [[Knowledge Base/_Schema/SKILL]].
 
 ## Sections
 

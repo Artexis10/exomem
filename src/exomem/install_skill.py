@@ -1,4 +1,4 @@
-"""install-skill: copy the bundled Exomem knowledge-base skill into Claude Code.
+"""install-skill: copy the bundled Exomem skill into Claude Code.
 
 The Exomem MCP server is only the *hands* — the `find`/`add`/`note`/`edit` tools. The
 *brain* that tells Claude when to capture, how to file a source, and how to
@@ -17,14 +17,21 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
-# The Exomem Knowledge Base skill ships inside the package, the same `_Schema/` that `init` lays into a
+# The Exomem skill ships inside the package, the same `_Schema/` that `init` lays into a
 # vault. Resolving from `__file__` works for an installed wheel too, not just a
 # git checkout — same pattern as init.py's _SCAFFOLD.
 _SKILL_SRC = Path(__file__).parent / "_scaffold" / "_Schema"
 
 # Claude Code loads `~/.claude/skills/<name>/SKILL.md`; the folder name must match
-# the skill's `name:` frontmatter (`knowledge-base`).
-DEFAULT_TARGET = Path.home() / ".claude" / "skills" / "knowledge-base"
+# the skill's `name:` frontmatter (`exomem`).
+DEFAULT_TARGET = Path.home() / ".claude" / "skills" / "exomem"
+
+# Before the skill was renamed to `exomem` it installed here. Left behind after an
+# upgrade it loads as a stale duplicate, so `remove_legacy_skill` retires it — but
+# only when it is unmistakably ours (see that function).
+_LEGACY_TARGET = Path.home() / ".claude" / "skills" / "knowledge-base"
+_LEGACY_MARKER = "name: knowledge-base"
+_LEGACY_FINGERPRINT = "Exomem"
 
 
 def install_skill(
@@ -33,12 +40,12 @@ def install_skill(
     force: bool = False,
     link: bool = False,
 ) -> dict:
-    """Install the bundled Exomem knowledge-base skill into a Claude Code skills folder.
+    """Install the bundled Exomem skill into a Claude Code skills folder.
 
     Copies (or, with ``link=True``, symlinks) the canonical `_Schema/` — SKILL.md,
     references/, project-keys.yaml — to ``target`` (default
-    ``~/.claude/skills/knowledge-base``). Claude Code picks it up as the
-    `knowledge-base` skill on next start.
+    ``~/.claude/skills/exomem``). Claude Code picks it up as the
+    `exomem` skill on next start.
 
     Args:
         target: Destination skill folder. Defaults to DEFAULT_TARGET.
@@ -103,3 +110,33 @@ def install_skill(
 
 def _count_files(root: Path) -> int:
     return sum(1 for p in root.rglob("*") if p.is_file())
+
+
+def remove_legacy_skill(legacy: Path | None = None) -> Path | None:
+    """Retire a pre-rename ``knowledge-base`` skill install, if present and ours.
+
+    Before the rename to ``exomem`` the skill installed at
+    ``~/.claude/skills/knowledge-base``; left in place after an upgrade it loads as a
+    stale, second skill with the old description. We remove it only when its SKILL.md
+    still carries the old ``name: knowledge-base`` marker *and* the ``Exomem``
+    fingerprint — so a user's own, unrelated skill that merely shares that folder name
+    is never touched. Best-effort for copy installs; a ``--link`` symlink (whose
+    content already reflects the renamed scaffold) is left for the user to clear.
+
+    Returns the removed path, or ``None`` if there was nothing of ours to remove.
+    """
+    legacy = (Path(legacy) if legacy is not None else _LEGACY_TARGET).expanduser()
+    skill_md = legacy / "SKILL.md"
+    if not skill_md.is_file():
+        return None
+    try:
+        head = skill_md.read_text(encoding="utf-8", errors="replace")[:4096]
+    except OSError:
+        return None
+    if _LEGACY_MARKER not in head or _LEGACY_FINGERPRINT not in head:
+        return None
+    if legacy.is_symlink() or legacy.is_file():
+        legacy.unlink()
+    else:
+        shutil.rmtree(legacy)
+    return legacy

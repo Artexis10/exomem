@@ -247,9 +247,10 @@ into Claude Code's skills folder (no vault path needed — it ships in the packa
 uv run python -m exomem install-skill
 ```
 
-That writes the skill to `~/.claude/skills/knowledge-base/`. The stable skill
-name remains `knowledge-base`; Exomem is the MCP server/tool layer it teaches
-Claude to use. **Restart Claude Code** so it loads. Useful flags: `--link`
+That writes the skill to `~/.claude/skills/exomem/` — the same name as the Exomem
+connector and tools, so it all reads as one product. (If you installed before the
+rename, this also retires the old `knowledge-base` skill folder.) **Restart Claude
+Code** so it loads. Useful flags: `--link`
 symlinks instead of copying so it
 tracks repo updates as you `git pull` (falls back to a copy if your OS refuses
 the symlink); `--force` overwrites an existing install; `--target` picks a

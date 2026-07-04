@@ -55,8 +55,9 @@ When in doubt, supersede. It's recoverable; in-place rewrites are not.
    > Reason: <one-line reason>
    ```
 
-   Obsidian renders `> [!warning]` as a callout. If you prefer a different visual,
-   this can be a plain blockquote — but the explicit "Superseded" header is
+   Obsidian (and other callout-aware viewers) render `> [!warning]` as a callout; in
+   plain markdown it is an ordinary blockquote, which is fine — the callout is an
+   optional nicety. The explicit "Superseded" header is
    required.
 
 5. **The old page is NOT moved or deleted.** It stays in place. Backlinks to it
@@ -74,7 +75,7 @@ When in doubt, supersede. It's recoverable; in-place rewrites are not.
   should still resolve to something — even if that something is "this was the old
   answer; here's the new one."
 - **Audit trail.** Git preserves old versions, but doesn't make the supersession
-  relationship discoverable from inside Obsidian. The link does.
+  relationship discoverable from inside your vault viewer (e.g. Obsidian). The link does.
 
 ## Cascading supersession
 

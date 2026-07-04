@@ -1,5 +1,5 @@
 ---
-name: knowledge-base
+name: exomem
 description: Operates on your personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when you want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively — it consults the KB for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Do NOT write outside the Knowledge Base folder; any sibling folders in the vault are read-only inputs.
 version: 0.29.1
 ---

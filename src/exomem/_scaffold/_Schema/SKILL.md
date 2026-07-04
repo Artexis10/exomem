@@ -1,16 +1,17 @@
 ---
-name: knowledge-base
-description: Exomem-powered skill for operating on your personal Obsidian Knowledge Base — raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts. Triggers when you want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this"). Also engages proactively — it consults the KB for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Do NOT write outside the Knowledge Base folder; any sibling folders in the vault are read-only inputs.
-version: 0.31.0
+name: exomem
+description: Use when working with Exomem — your personal knowledge base (a markdown vault, Obsidian optional, of raw sources, compiled research notes, insights, failures, patterns, experiments, production-logs, typed entities, and Evidence artifacts). Triggers whenever you name Exomem (the connector/MCP you talk to) or want to save, file, log, compile, distill, search, audit, supersede, or preserve anything in Exomem, your KB, vault, Obsidian, or notes — including oblique phrasings ("interesting, save it," "I want to remember this," "what does Exomem have on X"). Also engages proactively — it consults Exomem for prior conclusions when a turn touches a topic it likely covers, and captures durable conclusions when the conversation reaches a stepping-stone (a decision, a solved problem, a diagnosed failure, a recognized pattern). Governed writes stay inside the folder Exomem manages; the rest of your vault is read-only input.
+version: 0.32.0
 ---
 
-# Knowledge Base
+# Exomem
 
-This skill is the Exomem Knowledge Base contract. It keeps the stable
-`knowledge-base` skill identity while teaching agents how to use Exomem's MCP
-tools over your vault.
+This skill is the Exomem contract. "Exomem" is the connector/MCP you talk to;
+your Knowledge Base is the governed set of folders it manages inside your markdown
+vault (Obsidian optional). This file pins the `exomem` skill identity while teaching agents how to use
+Exomem's MCP tools over that vault.
 
-The compiled, structured layer of your Obsidian vault. Everything in
+The compiled, structured layer of your markdown vault (Obsidian optional). Everything in
 `Knowledge Base/` is either a raw source (immutable), compiled material under
 explicit governance, or a preserved factual artifact (Evidence). Any other
 folders in the vault are hand-authored and are **read-only input** to this
@@ -83,6 +84,7 @@ notes stay distilled in form but never context-pruned.
 <vault>/Knowledge Base/
 ├── index.md                      Top-level catalog; updated on every write
 ├── log.md                        Append-only activity log; most recent first
+├── _access.yaml                  (optional) per-subtree readonly/excluded — see references/write-scope.md
 ├── _Schema/
 │   ├── SKILL.md                  This file (canonical)
 │   ├── project-keys.yaml         Registered research scope keys
@@ -116,9 +118,17 @@ notes stay distilled in form but never context-pruned.
     └── <scope>/                  Per-incident binary/document/factual preservation
 ```
 
-`<vault>` resolves to your Obsidian vault root — the folder that contains
-`Knowledge Base/`, set via `EXOMEM_VAULT_PATH`. Verify allowed filesystem paths
-before writing.
+**This tree is the `Knowledge Base/` layer only — not the shape of your whole vault.**
+The vault around it is yours: any top-level folders you keep (`Daily/`, `Projects/`,
+`Reference/`, a journal — whatever) sit *beside* `Knowledge Base/` and are **read-only
+input** to this skill. Don't infer a fixed vault shape from the tree above. On your
+first engagement in a vault, run `overview` once to learn its real top-level layout
+(see § Assessing a vault you didn't build), then treat everything outside
+`Knowledge Base/` as read-only. Only `Knowledge Base/` is governed and writeable.
+
+`<vault>` resolves to your markdown vault root (Obsidian optional) — the folder that
+contains `Knowledge Base/`, set via `EXOMEM_VAULT_PATH`. Verify allowed filesystem
+paths before writing.
 
 The research scopes are an open set you grow over time, registered in
 `_Schema/project-keys.yaml` (see § Research scope keys). New users start with a
@@ -169,7 +179,7 @@ and index updates are determined by the operation, not the caller.
 | **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
-| **reconcile** | Heal drift from out-of-band edits (Obsidian/mobile/manual): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
+| **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
 | **provenance_report** | Scan note bodies for `<!-- key:value -->` provenance tags (filter by key/value/path). Read-only | — |
 
 For the full per-operation spec — inputs, validation, write rules, edge cases —
@@ -236,9 +246,12 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
   Bounded and read-only (default 8 frames, hard cap 16, JPEG ≤768px); soft-fails
   with a clear code when the server lacks the media extra.
-- **Read-only subtrees are write-protected.** Any vault subtree marked read-only
-  (see `references/write-scope.md`) refuses Tier 2 writes by default; reads are
-  unrestricted.
+- **Read-only / excluded subtrees are write-protected.** Mark a subtree `readonly:`
+  or `excluded:` in `Knowledge Base/_access.yaml` (see `references/write-scope.md` §
+  Per-subtree access overrides): `readonly` stays searchable but refuses **every**
+  write (Tier 1 and Tier 2) — hard, no override; `excluded` is additionally hidden
+  from `find`/embeddings. This is the in-KB counterpart to the by-location rule that
+  everything outside `Knowledge Base/` is read-only.
 - **Every write logs to `Knowledge Base/log.md`** with the operation, path, and a
   one-line rationale. Where appropriate, ops require a `why:` (e.g. `edit`'s
   frontmatter-patch mode).
@@ -332,19 +345,21 @@ data files aren't `find`-searchable. To make a dataset findable, write a
 from the `data_file` with `query_data`.
 
 Vector embeddings live in a per-machine sidecar at
-`<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile Obsidian Sync ignores).
+`<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile that file-sync tools like Obsidian Sync ignore).
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
 
 ### Assessing a vault you didn't build
 
-For structural questions — "what does this vault look like," "how is this vault
-organized," "is there junk in here" — run **overview** first: one bounded,
+**Make this your first move in any unfamiliar vault.** For structural questions —
+"what does this vault look like," "how is this vault organized," "is there junk in
+here" — and simply to learn the layout before you write, run **overview** first: one bounded,
 read-only report of folder structure, counts, frontmatter coverage, naming
 patterns, and junk candidates (zero-byte files, sync-conflict duplicates). It
 works on any folder under the vault root, including trees outside
 `Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
-all. Drill down from there: `list_directory` on folders of interest,
+all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
+to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `list_directory` on folders of interest,
 `find scope="vault"` for content, targeted `get` for individual files. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.

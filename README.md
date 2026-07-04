@@ -83,8 +83,9 @@ The individual steps (`exomem init` / `doctor` / `install-skill` /
 `install-hook`, plus `claude mcp add`) still exist as the manual path — see
 [QUICKSTART.md](QUICKSTART.md).
 
-The skill installs under the stable Claude Code name `knowledge-base`; Exomem is
-the server and tool layer behind it. The skill is recommended for Claude Code —
+The skill installs under the Claude Code name `exomem` — the same name as the
+connector, so skill, server, and tools all read as one product. The skill is
+recommended for Claude Code —
 the server gives Claude the tools, the skill is what makes it use them. Hooks
 are Claude Code-only reliability nudges for long sessions: a read-side reminder
 before answers and a write-side reminder at natural stopping points. The

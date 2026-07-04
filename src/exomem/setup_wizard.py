@@ -30,8 +30,9 @@ from . import init as init_module
 from . import install_hook as hook_module
 from . import install_skill as install_module
 from . import overview as overview_module
+from . import personalize as personalize_module
 
-_SKILL_NAME_MARKER = "name: knowledge-base"
+_SKILL_NAME_MARKER = "name: exomem"
 
 
 def _ask_yn(input_fn, prompt: str, default: bool) -> bool:
@@ -150,6 +151,28 @@ def run_setup(
     except FileExistsError:
         report("init", "[skipped: Knowledge Base/ already exists]")
 
+    # 3b. personalize — propose per-subtree access governance for sibling folders
+    try:
+        prep = personalize_module.scan_and_classify(vault_path)
+    except personalize_module.PersonalizeError as e:
+        report("personalize", f"[failed: {e}]")
+        prep = None
+    if prep is not None:
+        if not prep.needs_write:
+            report("personalize", "[skipped: no sibling folders need governing]")
+        else:
+            for p in prep.proposals:
+                if p.already_configured is None and p.classification != personalize_module.CLASS_UNMANAGED:
+                    print_fn(f"    {p.folder}/  -> {p.classification}  ({p.reason})")
+            if yes or _ask_yn(input_fn, "Write these entries to _access.yaml?", True):
+                done = personalize_module.write_access_yaml(prep)
+                report(
+                    "personalize",
+                    f"[done] +{len(done.add_readonly)} readonly, +{len(done.add_excluded)} excluded",
+                )
+            else:
+                report("personalize", "[skipped: declined]")
+
     # 4. profile
     if profile is None:
         has_embeddings = importlib.util.find_spec("sentence_transformers") is not None
@@ -232,7 +255,7 @@ def run_setup(
                 report("register", f"[failed: {detail}]")
 
     # 7. skill — the brain; without it the tools sit unused
-    skill_target = (home / "skills" / "knowledge-base") if home else None
+    skill_target = (home / "skills" / "exomem") if home else None
     try:
         install_module.install_skill(skill_target)
         report("skill", "[done] installed")
@@ -252,6 +275,13 @@ def run_setup(
             report("skill", "[skipped: already installed]")
     except FileNotFoundError as e:
         report("skill", f"[failed: {e}]")
+
+    # 7b. migrate: a pre-rename `knowledge-base` install lingers as a stale duplicate
+    # skill now that the skill is `exomem`; retire it, but only when it's ours.
+    legacy_dir = (home / "skills" / "knowledge-base") if home else None
+    removed = install_module.remove_legacy_skill(legacy_dir)
+    if removed is not None:
+        report("migrate", f"[done] removed stale {removed}")
 
     # 8. hooks — optional reliability nudges
     do_hooks = with_hooks
