@@ -31,6 +31,8 @@ from pathlib import Path
 
 import yaml
 
+from .kbdir import kb_dirname
+
 log = logging.getLogger(__name__)
 
 TIER_EXCLUDED = "excluded"
@@ -47,7 +49,7 @@ _CACHE: dict[str, tuple[float, dict[str, list[str]]]] = {}
 
 
 def access_config_path(vault_root: Path) -> Path:
-    return vault_root / "Knowledge Base" / "_access.yaml"
+    return vault_root / kb_dirname() / "_access.yaml"
 
 
 def _load_config(vault_root: Path) -> dict[str, list[str]]:
@@ -88,7 +90,7 @@ def _kb_relative(rel_path: str) -> str:
     """
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0] == "Knowledge Base":
+    if parts and parts[0] == kb_dirname():
         return "/".join(parts[1:])
     return rel
 

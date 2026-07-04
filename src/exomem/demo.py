@@ -80,7 +80,7 @@ def run_demo(
     echo=print,
 ) -> int:
     """Run the four timed proof steps. Returns the process exit code."""
-    saved = {k: os.environ.get(k) for k in (*LEAN_ENV, "EXOMEM_VAULT_PATH")}
+    saved = {k: os.environ.get(k) for k in (*LEAN_ENV, "EXOMEM_VAULT_PATH", "EXOMEM_KB_DIRNAME")}
     target: Path | None = None
     is_temp = False
     steps: list[StepResult] = []
@@ -90,6 +90,10 @@ def run_demo(
         target, is_temp = _materialize_vault(vault)
         os.environ.update(LEAN_ENV)
         os.environ["EXOMEM_VAULT_PATH"] = str(target)
+        # The bundled sample vault ships with a literal "Knowledge Base/" tree,
+        # so pin the governed-folder name for the demo regardless of any
+        # EXOMEM_KB_DIRNAME the caller has set (restored in `finally`).
+        os.environ["EXOMEM_KB_DIRNAME"] = "Knowledge Base"
         from exomem import audit, doctor, find, get_page
 
         def _timed(name: str, fn) -> StepResult:

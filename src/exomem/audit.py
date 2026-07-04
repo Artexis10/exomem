@@ -49,6 +49,7 @@ import yaml
 
 from . import access, indexes
 from . import find as find_module
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
     in_append_only_tree,
@@ -229,7 +230,7 @@ def _check_broken_wikilinks(
             continue
         no_ext = rel.removesuffix(".md")
         full_paths.add(no_ext)
-        kb_stripped_paths.add(no_ext.removeprefix("Knowledge Base/"))
+        kb_stripped_paths.add(no_ext.removeprefix(kb_prefix()))
         names_to_paths.setdefault(md_path.stem, no_ext)
         # Title fallback: lets `[[North-Led Content Manual]]` resolve to a
         # date-prefixed source whose frontmatter `title:` matches.
@@ -256,7 +257,7 @@ def _check_broken_wikilinks(
             target_for_resolve = target.split("#", 1)[0].strip()
             if not target_for_resolve:
                 continue
-            normalized = target_for_resolve.removeprefix("Knowledge Base/").lstrip("/")
+            normalized = target_for_resolve.removeprefix(kb_prefix()).lstrip("/")
             if normalized in kb_stripped_paths:
                 continue
             if target_for_resolve.lstrip("/") in full_paths:
@@ -282,7 +283,7 @@ def _check_broken_wikilinks(
             if suffix and suffix != ".md":
                 rel = target_for_resolve.lstrip("/")
                 if (vault_root / rel).exists() or (
-                    vault_root / "Knowledge Base" / normalized
+                    vault_root / kb_dirname() / normalized
                 ).exists():
                     continue
             # A broken link inside an append-only tree (Sources/, Evidence/)
@@ -347,19 +348,19 @@ def _check_orphan_entities(
     for page in pages:
         # Don't count self-references and don't count from inside Entities/index.md
         # (those are hub listings, not real "uses").
-        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == "Knowledge Base/Entities/index.md":
+        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == f"{kb_prefix()}Entities/index.md":
             continue
         for match in WIKILINK_PATTERN.finditer(page.body):
-            target = match.group(1).strip().removeprefix("Knowledge Base/").lstrip("/")
+            target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
             if target:
                 referenced.add(target)
         # Frontmatter wikilinks (sources, related, supersedes, etc.) count too.
         for value in page.frontmatter.values():
             for link in _extract_wikilinks_from_value(value):
-                referenced.add(link.removeprefix("Knowledge Base/").lstrip("/"))
+                referenced.add(link.removeprefix(kb_prefix()).lstrip("/"))
 
     for page in pages:
-        if not page.rel_path.startswith("Knowledge Base/Entities/"):
+        if not page.rel_path.startswith(f"{kb_prefix()}Entities/"):
             continue
         if page.path.name == "index.md":
             continue
@@ -511,7 +512,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
             findings.append(AuditFinding(
                 category="index_drift",
                 severity="warn",
-                path="Knowledge Base/index.md",
+                path=f"{kb_prefix()}index.md",
                 detail=(
                     f"Counts row {key!r} declared {declared_count} but the on-disk "
                     "folder doesn't exist"
@@ -523,7 +524,7 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
             findings.append(AuditFinding(
                 category="index_drift",
                 severity="warn",
-                path="Knowledge Base/index.md",
+                path=f"{kb_prefix()}index.md",
                 detail=(
                     f"Counts row {key!r} declared {declared_count}, actual is {actual_count}"
                 ),
@@ -777,7 +778,7 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     one wipe-and-rebuild.
     """
     findings: list[AuditFinding] = []
-    sidecar = vault_root / "Knowledge Base" / ".embeddings.sqlite"
+    sidecar = vault_root / kb_dirname() / ".embeddings.sqlite"
     if not sidecar.exists():
         return findings
     import sqlite3
@@ -845,7 +846,7 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
         from .vault import walk_vault_md
         never_walk = walk_vault_md(vault_root)
     else:
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         never_walk = find_module._walk_md(kb) if kb.is_dir() else ()
     for md in never_walk:
         if not embeddings_module._is_embeddable_path(md):
@@ -1032,19 +1033,19 @@ def _inbound_degree(pages: list[find_module.ParsedPage]) -> dict[str, int]:
     for page in pages:
         if (
             page.rel_path.endswith("/Entities/index.md")
-            or page.rel_path == "Knowledge Base/Entities/index.md"
+            or page.rel_path == f"{kb_prefix()}Entities/index.md"
         ):
             continue
         self_key = _relevance_canon(page.rel_path)
         targets: set[str] = set()
         for match in WIKILINK_PATTERN.finditer(page.body):
-            target = match.group(1).strip().removeprefix("Knowledge Base/").lstrip("/")
+            target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")
             if target:
                 targets.add(_relevance_canon(target))
         for value in page.frontmatter.values():
             for link in _extract_wikilinks_from_value(value):
                 targets.add(
-                    _relevance_canon(link.removeprefix("Knowledge Base/").lstrip("/"))
+                    _relevance_canon(link.removeprefix(kb_prefix()).lstrip("/"))
                 )
         for target in targets:
             if target == self_key:
@@ -1303,7 +1304,7 @@ def _contradiction_family(rel_path: str) -> str | None:
     leading `Knowledge Base/` is stripped) and None for anything outside that
     tree (or directly in it with no `<X>` subfolder).
     """
-    stripped = rel_path.removeprefix("Knowledge Base/").lstrip("/")
+    stripped = rel_path.removeprefix(kb_prefix()).lstrip("/")
     parts = stripped.split("/")
     # parts = ["Notes", "Research", "<X>", ..., "file.md"] → need an <X> dir
     # before the filename, so at least 4 components.
@@ -1561,7 +1562,7 @@ def _check_corpus_contradictions(
         findings.append(AuditFinding(
             category="corpus_contradictions",
             severity="info",
-            path="Knowledge Base/",
+            path=kb_prefix(),
             detail=(
                 f"{omitted} more lower-priority/same-family contradiction pair(s) "
                 f"not shown (showing top {top_n} of {len(scored)}; raise "
@@ -1587,4 +1588,4 @@ def _rel_kb_path_no_ext(absolute: Path, vault_root: Path) -> str:
     """
     rel = absolute.resolve().relative_to(vault_root.resolve())
     no_ext = rel.with_suffix("").as_posix()
-    return no_ext.removeprefix("Knowledge Base/").lstrip("/")
+    return no_ext.removeprefix(kb_prefix()).lstrip("/")

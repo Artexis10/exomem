@@ -18,6 +18,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
     in_append_only_tree,
@@ -76,13 +77,13 @@ def recover_from_trash(
     # Must actually be a trash entry.
     parts = trash_rel.split("/")
     in_trash = (
-        len(parts) >= 2 and parts[0] == "Knowledge Base" and parts[1] == TRASH_SUBPATH
+        len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH
     )
     if not in_trash:
         raise RecoverError(
             code="NOT_IN_TRASH",
             reason=(
-                f"{trash_rel} is not under Knowledge Base/{TRASH_SUBPATH}/. "
+                f"{trash_rel} is not under {kb_prefix()}{TRASH_SUBPATH}/. "
                 f"Use `move_file` for general relocations."
             ),
         )
@@ -116,7 +117,7 @@ def recover_from_trash(
 
     # The destination must not be inside the trash (recovery, not re-trashing).
     rparts = restore_rel.split("/")
-    if len(rparts) >= 2 and rparts[0] == "Knowledge Base" and rparts[1] == TRASH_SUBPATH:
+    if len(rparts) >= 2 and rparts[0] == kb_dirname() and rparts[1] == TRASH_SUBPATH:
         raise RecoverError(
             code="RESTORE_INTO_TRASH",
             reason=(

@@ -37,6 +37,7 @@ from pathlib import Path
 
 from . import corpus_aware, indexes
 from . import project_keys as project_keys_module
+from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -394,7 +395,7 @@ def note(
         writes.append(PlannedWrite(path=top_index, content=new_top))
         writes.extend(sub_writes)
     else:
-        warnings.append("Knowledge Base/index.md missing; skipped Recent activity bump")
+        warnings.append(f"{kb_prefix()}index.md missing; skipped Recent activity bump")
 
     if log_file.exists():
         full_body = log_body + (
@@ -409,7 +410,7 @@ def note(
         )
         writes.append(PlannedWrite(path=log_file, content=new_log))
     else:
-        warnings.append("Knowledge Base/log.md missing; skipped log entry")
+        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
     try:
         batch_atomic_write(writes, vault_root=vault_root)
@@ -841,7 +842,7 @@ def _normalize_sources(
 def _resolve_source_path(vault_root: Path, kb_relative: str) -> Path | None:
     """Resolve a 'Knowledge Base/Sources/Articles/<slug>' wikilink to an on-disk
     .md path, or None if the path escapes the vault."""
-    rel = kb_relative.removeprefix("Knowledge Base/")
+    rel = kb_relative.removeprefix(kb_prefix())
     candidate = (kb_root(vault_root) / rel).with_suffix(".md")
     try:
         candidate.resolve().relative_to(vault_root.resolve())
@@ -858,7 +859,7 @@ def _prepend_log_entry(
 ) -> str:
     """Insert `## [<date>] <verb> | <kb-relative-path>` entry just after the
     log's `---` separator (newest entries at top)."""
-    title = rel_path.replace("Knowledge Base/", "", 1)
+    title = rel_path.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] {verb} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:
@@ -880,7 +881,7 @@ def _activity_summary(
     medium: str | None = None,
     status: str | None = None,
 ) -> str:
-    path_part = rel_note_no_ext.replace("Knowledge Base/", "")
+    path_part = rel_note_no_ext.replace(kb_prefix(), "")
     modifier_parts: list[str] = []
     if note_type == "research-note" and project:
         modifier_parts.append(project)

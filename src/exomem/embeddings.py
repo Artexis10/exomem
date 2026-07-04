@@ -26,6 +26,7 @@ from pathlib import Path
 import numpy as np
 
 from . import accel, vecstore
+from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -67,12 +68,12 @@ _INDEX_CACHE_LOCK = threading.Lock()
 
 
 def sidecar_path(vault_root: Path) -> Path:
-    return vault_root / "Knowledge Base" / ".embeddings.sqlite"
+    return vault_root / kb_dirname() / ".embeddings.sqlite"
 
 
 def clip_sidecar_path(vault_root: Path) -> Path:
     """Separate per-machine sidecar for CLIP image vectors (independent lifecycle)."""
-    return vault_root / "Knowledge Base" / ".clip.sqlite"
+    return vault_root / kb_dirname() / ".clip.sqlite"
 
 
 def clip_enabled() -> bool:
@@ -116,7 +117,7 @@ def _index_walk(vault_root: Path):
 
         yield from walk_vault_md(vault_root)
     else:
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         if kb.is_dir():
             yield from find_module._walk_md(kb)
 
@@ -1202,7 +1203,7 @@ class EmbeddingIndex:
         from . import find as find_module
 
         scope = index_scope()
-        kb = self.vault_root / "Knowledge Base"
+        kb = self.vault_root / kb_dirname()
         # KB scope with no Knowledge Base/ is a no-op that must NOT wipe (historical
         # early return). Vault scope always proceeds — it indexes the wider tree.
         if scope == "kb" and not kb.is_dir():

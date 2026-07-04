@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 from . import server
+from .kbdir import kb_dirname, kb_prefix
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -124,7 +125,7 @@ def _backfill_media_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
     parser.add_argument("--no-ocr", action="store_true", help="skip text extraction (sidecar + CLIP only)")
@@ -172,18 +173,18 @@ def _index_main(argv: list[str]) -> int:
         description="Build/refresh the semantic (bge) vector index INCREMENTALLY: "
         "skip files already up to date, embed new/changed ones in batches, prune "
         "rows for files that are gone. Idempotent; unlike a full audit_fix rebuild "
-        "it never wipes the sidecar first. Covers Knowledge Base/ by default, or "
-        "the whole vault with --scope vault (so notes outside Knowledge Base/ "
+        f"it never wipes the sidecar first. Covers {kb_prefix()} by default, or "
+        f"the whole vault with --scope vault (so notes outside {kb_prefix()} "
         "become semantically searchable).",
     )
     parser.add_argument(
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--scope", choices=("kb", "vault"), default=None,
         help="index scope override; default reads EXOMEM_INDEX_SCOPE (else 'kb'). "
-        "'vault' indexes the whole vault, not just Knowledge Base/.",
+        f"'vault' indexes the whole vault, not just {kb_prefix()}.",
     )
     parser.add_argument(
         "--batch-size", type=int, default=256,
@@ -242,7 +243,7 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--vault",
         default=None,
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     parser.add_argument(
         "--profile",
@@ -388,7 +389,7 @@ def _enroll_speaker_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -418,7 +419,7 @@ def _list_speakers_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -446,7 +447,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
     parser.add_argument("--name", required=True, help="profile name to remove")
     parser.add_argument(
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
-        help="vault root containing 'Knowledge Base/' (default: $EXOMEM_VAULT_PATH)",
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
     args = parser.parse_args(argv)
 
@@ -464,7 +465,7 @@ def _remove_speaker_main(argv: list[str]) -> int:
 def _init_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem init",
-        description="Bootstrap a fresh Knowledge Base scaffold into a vault.",
+        description=f"Bootstrap a fresh {kb_dirname()} scaffold into a vault.",
     )
     parser.add_argument(
         "--vault",
@@ -473,7 +474,7 @@ def _init_main(argv: list[str]) -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Overlay the scaffold even if Knowledge Base/ exists (existing files kept).",
+        help=f"Overlay the scaffold even if {kb_prefix()} exists (existing files kept).",
     )
     args = parser.parse_args(argv)
 
@@ -485,12 +486,12 @@ def _init_main(argv: list[str]) -> int:
     except FileExistsError as e:
         print(f"exomem init: {e}", file=sys.stderr)
         return 1
-    print(f"Initialized Knowledge Base at {report['kb']}")
+    print(f"Initialized {kb_dirname()} at {report['kb']}")
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
-    print("  2. Install the Exomem Knowledge Base skill so Claude knows how to use it: python -m exomem install-skill")
-    print("  3. Adapt Knowledge Base/_Schema/project-keys.yaml to your own projects.")
+    print(f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: python -m exomem install-skill")
+    print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
     return 0
 
 
@@ -725,7 +726,7 @@ def _core_op_main(argv: list[str]) -> int:
         for c in commands_module.commands_for("cli", expose_tier2=_expose_tier2())
     }
 
-    parser = _CLIParser(prog="kb", description="Query and write the local Knowledge Base.")
+    parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")
     sub = parser.add_subparsers(dest="op", required=True, parser_class=_CLIParser)
     for name in sorted(cmds):
         cmd = cmds[name]

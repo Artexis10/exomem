@@ -27,6 +27,7 @@ from pathlib import Path
 from . import find as find_module
 from . import indexes
 from . import note as note_module
+from .kbdir import kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 
@@ -125,8 +126,8 @@ def replace(
     new_result = note_module.note(vault_root, today=today, **note_kwargs)
     new_path_str = new_result.path  # vault-relative, with .md
     rel_new_no_ext = new_path_str.removesuffix(".md")
-    if not rel_new_no_ext.startswith("Knowledge Base/"):
-        rel_new_no_ext = "Knowledge Base/" + rel_new_no_ext
+    if not rel_new_no_ext.startswith(kb_prefix()):
+        rel_new_no_ext = kb_prefix() + rel_new_no_ext
     new_resolved = vault_root / new_path_str
 
     warnings: list[str] = list(new_result.warnings)
@@ -168,7 +169,7 @@ def replace(
         )
         log_writes.append(PlannedWrite(path=log_file, content=new_log))
     else:
-        warnings.append("Knowledge Base/log.md missing; skipped replace log entry")
+        warnings.append(f"{kb_prefix()}log.md missing; skipped replace log entry")
 
     writes = [
         PlannedWrite(path=new_resolved, content=new_text_updated),
@@ -201,8 +202,8 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
             reason="old_path is empty",
         )
     rel = path.strip().replace("\\", "/").lstrip("/")
-    if not rel.startswith("Knowledge Base/"):
-        rel = "Knowledge Base/" + rel
+    if not rel.startswith(kb_prefix()):
+        rel = kb_prefix() + rel
     if not rel.endswith(".md"):
         rel = rel + ".md"
     candidate = vault_root / rel
@@ -213,7 +214,7 @@ def _resolve_kb_path(vault_root: Path, path: str) -> tuple[Path, str]:
         raise ReplaceError(
             code="INVALID_PATH",
             missing=["old_path"],
-            reason=f"path escapes Knowledge Base/: {e}",
+            reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
     if not candidate.exists():
         raise ReplaceError(
@@ -345,7 +346,7 @@ def _append_to_yaml_list(fm_text: str, key: str, new_quoted_value: str) -> str:
 def _prepend_replace_log_entry(
     text: str, *, date_iso: str, rel_new_no_ext: str, body: str
 ) -> str:
-    title = rel_new_no_ext.replace("Knowledge Base/", "", 1)
+    title = rel_new_no_ext.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] replace | {title}\n\n{body}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

@@ -22,6 +22,7 @@ import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     VaultPathError,
     find_inbound_wikilinks,
@@ -83,7 +84,7 @@ def delete_directory(
             code="UNCONFIRMED",
             reason=(
                 "delete_directory requires `confirm=true` explicitly. "
-                "Deletes go to Knowledge Base/_trash/ (recoverable) but the "
+                f"Deletes go to {kb_prefix()}_trash/ (recoverable) but the "
                 "action is still deliberate."
             ),
         )
@@ -97,7 +98,7 @@ def delete_directory(
 
     # Don't allow deleting the trash itself, or trash subdirs.
     parts = rel_path.split("/")
-    if len(parts) >= 2 and parts[0] == "Knowledge Base" and parts[1] == TRASH_SUBPATH:
+    if len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == TRASH_SUBPATH:
         raise DeleteDirectoryError(
             code="ALREADY_TRASHED",
             reason=(
@@ -186,7 +187,7 @@ def delete_directory(
     today = today or now.date()
     date_dir = now.strftime("%Y-%m-%d")
     time_prefix = now.strftime("%H%M%S")
-    sanitized = rel_path.replace("Knowledge Base/", "", 1).replace("/", "__")
+    sanitized = rel_path.replace(kb_prefix(), "", 1).replace("/", "__")
     trash_basename = f"{time_prefix}-{sanitized}"
     trash_root = kb_root(vault_root) / TRASH_SUBPATH / date_dir
     trash_root.mkdir(parents=True, exist_ok=True)

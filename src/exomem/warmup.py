@@ -32,6 +32,8 @@ import threading
 import time
 from pathlib import Path
 
+from .kbdir import kb_dirname
+
 log = logging.getLogger(__name__)
 
 _WARM_THREAD: threading.Thread | None = None
@@ -61,7 +63,7 @@ def warm_caches(vault_root: Path) -> dict[str, float]:
             durations[name] = round((time.perf_counter() - t0) * 1000.0, 1)
 
     def _warm_pages() -> None:
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         if not kb.is_dir():
             return
         for p in find._walk_md(kb):

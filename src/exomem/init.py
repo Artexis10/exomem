@@ -12,6 +12,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from .kbdir import kb_dirname
+
 _SCAFFOLD = Path(__file__).parent / "_scaffold"
 
 # Typed folder tree laid down up-front. Deeper folders (Sources/Articles,
@@ -41,7 +43,7 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     any existing files).
     """
     vault_root = Path(vault_root)
-    kb = vault_root / "Knowledge Base"
+    kb = vault_root / kb_dirname()
     if kb.exists() and not force:
         raise FileExistsError(
             f"{kb} already exists. Pass force=True to overlay the scaffold "

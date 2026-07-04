@@ -29,6 +29,7 @@ from typing import Any
 import yaml
 
 from . import freshness
+from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
 
@@ -722,7 +723,7 @@ class FreshnessSnapshot:
             if live is not None:
                 self._kb = live
             else:
-                kb = self._root / "Knowledge Base"
+                kb = self._root / kb_dirname()
                 self._kb = _walk_freshness_key(_walk_md(kb) if kb.is_dir() else ())
         return self._kb
 
@@ -759,7 +760,7 @@ def _freshness_key(
       absent), since sidecar refreshes change semantic results.
     """
     parts: list[Any] = [date.today().toordinal()]
-    kb = vault_root / "Knowledge Base"
+    kb = vault_root / kb_dirname()
     if scope in ("kb", "kb-only"):
         parts.append(("kb", *snapshot.kb()))
     if scope == "vault" or (scope == "kb" and query_norm):
@@ -1171,7 +1172,7 @@ def _find_keyword(
 ) -> list[Hit]:
     """Original keyword-mode find. Preserved for backward compat."""
     if scope == "kb":
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         if not kb.is_dir():
             log.error("KB directory missing: %s", kb)
             return []
@@ -1840,7 +1841,7 @@ def _find_outside_kb(
             vault_root, query, k=bm25_k, scope="vault",
             freshness=snapshot.vault() if snapshot is not None else None,
         ):
-            if not path.startswith("Knowledge Base/"):
+            if not path.startswith(kb_prefix()):
                 candidates.append(path)
     except ImportError:
         candidates = _outside_kb_keyword_paths(vault_root, query_norm)
@@ -1910,7 +1911,7 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
             rel = path.resolve().relative_to(vault_resolved).as_posix()
         except ValueError:
             continue
-        if rel.startswith("Knowledge Base/"):
+        if rel.startswith(kb_prefix()):
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
@@ -2298,7 +2299,7 @@ def _keyword_match_paths(
     if indexed is not None:
         return indexed
     if scope == "kb":
-        kb = vault_root / "Knowledge Base"
+        kb = vault_root / kb_dirname()
         if not kb.is_dir():
             return []
         walk = _walk_md(kb)
@@ -2359,7 +2360,7 @@ def _outbound_wikilink_paths(
         rel_with_md = rel if rel.endswith(".md") else rel + ".md"
         # Sanity: only walk into the KB itself for graph expansion; curated
         # trees are intentional out-of-graph references.
-        if not rel_with_md.startswith("Knowledge Base/"):
+        if not rel_with_md.startswith(kb_prefix()):
             continue
         if rel_with_md in seen:
             continue

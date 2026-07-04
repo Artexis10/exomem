@@ -20,6 +20,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
+from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     PlannedWrite,
     VaultPathError,
@@ -216,11 +217,11 @@ def move_file(
     # moves we leave it alone (the sidecar is still valid).
     parts = old_rel.split("/")
     moved_out_of_trash = (
-        len(parts) >= 2 and parts[0] == "Knowledge Base" and parts[1] == "_trash"
+        len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == "_trash"
     )
     new_parts = new_rel.split("/")
     moved_into_trash = (
-        len(new_parts) >= 2 and new_parts[0] == "Knowledge Base"
+        len(new_parts) >= 2 and new_parts[0] == kb_dirname()
         and new_parts[1] == "_trash"
     )
     if moved_out_of_trash and not moved_into_trash:
@@ -274,10 +275,10 @@ def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]
     """
     old_no_ext = old_rel.removesuffix(".md")
     new_no_ext = new_rel.removesuffix(".md")
-    old_full = old_no_ext if old_no_ext.startswith("Knowledge Base/") else "Knowledge Base/" + old_no_ext
-    new_full = new_no_ext if new_no_ext.startswith("Knowledge Base/") else "Knowledge Base/" + new_no_ext
-    old_stripped = old_full.removeprefix("Knowledge Base/")
-    new_stripped = new_full.removeprefix("Knowledge Base/")
+    old_full = old_no_ext if old_no_ext.startswith(kb_prefix()) else kb_prefix() + old_no_ext
+    new_full = new_no_ext if new_no_ext.startswith(kb_prefix()) else kb_prefix() + new_no_ext
+    old_stripped = old_full.removeprefix(kb_prefix())
+    new_stripped = new_full.removeprefix(kb_prefix())
     old_basename = old_no_ext.rsplit("/", 1)[-1]
     new_basename = new_no_ext.rsplit("/", 1)[-1]
 
@@ -302,7 +303,7 @@ def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]
             n += 1
             # Preserve whether the link was full-form or stripped-form, and
             # carry the anchor through unchanged.
-            if target_path.startswith("Knowledge Base/"):
+            if target_path.startswith(kb_prefix()):
                 return f"[[{new_full}{anchor_suffix}{alias}]]"
             return f"[[{new_stripped}{anchor_suffix}{alias}]]"
         if "/" not in target_no_ext and target_no_ext == old_basename:

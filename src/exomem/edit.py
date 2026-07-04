@@ -41,6 +41,7 @@ from pathlib import Path
 from . import corpus_aware
 from . import find as find_module
 from . import indexes
+from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
@@ -314,8 +315,8 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
     if not path or not path.strip():
         raise EditError(code="INVALID_PATH", missing=["path"], reason="path is empty")
     rel = path.strip().replace("\\", "/").lstrip("/")
-    if not rel.startswith("Knowledge Base/"):
-        rel = "Knowledge Base/" + rel
+    if not rel.startswith(kb_prefix()):
+        rel = kb_prefix() + rel
     if not rel.endswith(".md"):
         rel = rel + ".md"
     candidate = vault_root / rel
@@ -326,7 +327,7 @@ def _resolve(vault_root: Path, path: str) -> tuple[Path, str]:
         raise EditError(
             code="INVALID_PATH",
             missing=["path"],
-            reason=f"path escapes Knowledge Base/: {e}",
+            reason=f"path escapes {kb_prefix()}: {e}",
         ) from None
     if not candidate.exists():
         raise EditError(
@@ -617,7 +618,7 @@ def commit_edit(
         )
         writes.append(PlannedWrite(path=log_file, content=new_log))
     else:
-        warnings.append("Knowledge Base/log.md missing; skipped log entry")
+        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
     try:
         batch_atomic_write(writes, vault_root=vault_root)
@@ -708,7 +709,7 @@ def _clean_tags(tags: list[str]) -> list[str]:
 def _prepend_log_entry(
     text: str, *, date_iso: str, rel_no_ext: str, body: str, op: str = "edit"
 ) -> str:
-    title = rel_no_ext.replace("Knowledge Base/", "", 1)
+    title = rel_no_ext.replace(kb_prefix(), "", 1)
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     sep_idx = text.find(indexes.LOG_SEPARATOR)
     if sep_idx == -1:

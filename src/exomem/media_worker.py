@@ -22,6 +22,7 @@ from pathlib import Path
 
 from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
 from .backfill import iter_kb_files
+from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
@@ -235,7 +236,7 @@ class MediaWorker:
 
     def _scan_pending_ocr(self) -> int:
         """Re-enqueue every `extracted_by: pending` sidecar under the KB. Returns count."""
-        kb = self._vault_root / "Knowledge Base"
+        kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
         n = 0
@@ -292,7 +293,7 @@ class MediaWorker:
         """
         if not embeddings.clip_enabled():
             return 0
-        kb = self._vault_root / "Knowledge Base"
+        kb = self._vault_root / kb_dirname()
         if not kb.is_dir():
             return 0
         n = 0

@@ -34,6 +34,8 @@ import threading
 from collections.abc import Iterable
 from pathlib import Path
 
+from .kbdir import kb_dirname
+
 log = logging.getLogger(__name__)
 
 SCOPES = ("kb", "vault")
@@ -100,7 +102,7 @@ def scopes_for(vault_root: Path, path: Path) -> tuple[bool, bool]:
 
     in_kb = False
     try:
-        kb_parts = path.relative_to(vault_root / "Knowledge Base").parts
+        kb_parts = path.relative_to(vault_root / kb_dirname()).parts
         in_kb = not any(d in EXCLUDED_DIR_NAMES for d in kb_parts[:-1])
     except ValueError:
         in_kb = False
