@@ -44,6 +44,7 @@ import sqlite3
 import threading
 from dataclasses import dataclass
 from pathlib import Path
+from typing import NamedTuple
 
 import numpy as np
 
@@ -280,22 +281,44 @@ def _claim_types() -> frozenset[str]:
     return find_module._COMPILED_TYPES
 
 
+class _ClaimCache(NamedTuple):
+    """ClaimIndex's in-memory matrix cache — mirrors `embeddings._EmbCache`.
+    `(epoch, generation, instance)` is the write token; `mtime` is retained only
+    for the gen==0 legacy fallback. metadata[i] = (file_path, claim_text,
+    page_type, status); matrix[i] = its bge vector."""
+
+    epoch: int
+    generation: int
+    instance: int
+    mtime: float
+    metadata: list[tuple[str, str, str | None, str | None]]
+    matrix: np.ndarray
+
+
 class ClaimIndex:
     """Per-vault sqlite sidecar holding ONE claim vector per compiled page.
 
     The lighter cousin of `EmbeddingIndex`: one row per file (not per chunk), so
-    the matrix is small and a plain mtime-cached full reload replaces the chunk
-    index's copy-on-write splice. Same durability contract otherwise — WAL
-    pragmas via `embeddings._apply_sidecar_pragmas`, incremental checksum-keyed
-    upsert, process-shared memo.
+    the matrix is small — every local write NULLS the cache and the next read does
+    one full reload (no copy-on-write splice; there is no `_patch_cache`). Same
+    durability contract otherwise — WAL pragmas via
+    `embeddings._apply_sidecar_pragmas`, incremental checksum-keyed upsert,
+    process-shared memo.
+
+    `all_claims()` is cached and invalidated by the same in-band WRITE GENERATION
+    the chunk/image indexes use (a `meta` row bumped inside every write's own
+    transaction, read via the shared `embeddings._*_token` helpers), NOT the
+    sidecar mtime: the sidecar is WAL sqlite, so a commit does not move the main
+    file's mtime while a checkpoint does — at a moment no writer runs — making
+    mtime keying both spuriously miss and go stale. Third occurrence of this class
+    in the repo (after EmbeddingIndex/ClipIndex, PR #125); precedent + rationale:
+    the generation-meta note in `embeddings`.
     """
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
         self.path = sidecar_path(vault_root)
-        # (sidecar_mtime, metadata, matrix); metadata[i] = (file_path, claim_text,
-        # page_type, status).
-        self._cache: tuple[float, list[tuple[str, str, str | None, str | None]], np.ndarray] | None = None
+        self._cache: _ClaimCache | None = None
         self._lock = threading.RLock()
 
     def _connect(self) -> sqlite3.Connection:
@@ -315,6 +338,7 @@ class ClaimIndex:
             )
             """
         )
+        embeddings._ensure_meta_table(conn, "claims", self.path.name)
         return conn
 
     def checksums(self) -> dict[str, str]:
@@ -355,8 +379,9 @@ class ClaimIndex:
 
         Each row is `(file_path, claim_text, checksum, vector, page_type, status,
         mtime)`. `file_path` is the PK, so `INSERT OR REPLACE` cleanly overwrites a
-        changed claim. Drops the cache (small matrix → a single full reload is
-        cheaper than a splice).
+        changed claim. Bumps the in-band write generation INSIDE the txn (so the
+        cache invalidates on content, not mtime) and drops the cache (small matrix
+        → a single full reload is cheaper than a splice).
         """
         if not rows:
             return
@@ -372,6 +397,7 @@ class ClaimIndex:
                         for fp, ct, cs, vec, pt, st, mt in rows
                     ],
                 )
+                embeddings._bump_meta(conn, "generation")
         finally:
             conn.close()
         with self._lock:
@@ -384,6 +410,7 @@ class ClaimIndex:
         try:
             with conn:
                 conn.execute("DELETE FROM claims WHERE file_path = ?", (file_path,))
+                embeddings._bump_meta(conn, "generation")
         finally:
             conn.close()
         with self._lock:
@@ -392,45 +419,74 @@ class ClaimIndex:
     def all_claims(
         self,
     ) -> tuple[list[tuple[str, str, str | None, str | None]], np.ndarray]:
-        """`(metadata, matrix)` cached until the sidecar mtime advances.
+        """`(metadata, matrix)` cached until the sidecar's write generation (or
+        epoch) advances — NOT its mtime (see the class + generation-meta notes).
 
         metadata[i] = (file_path, claim_text, page_type, status); matrix[i] =
         the claim's bge vector. Empty when the sidecar is absent.
         """
-        try:
-            sidecar_mtime = self.path.stat().st_mtime
-        except FileNotFoundError:
+        if not self.path.exists():
             return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+        # Snapshot the cache tuple ONCE: another thread may swap or null it between
+        # reads. This fast path takes no lock — the common case.
         c = self._cache
-        if c is not None and c[0] == sidecar_mtime:
-            return c[1], c[2]
+        served = embeddings._try_serve_cached(c, self.path)
+        if served is not None:
+            return served.metadata, served.matrix
         with self._lock:
+            # Re-check under the lock: another thread may have loaded while we
+            # waited, or the fast-path token read may have failed transiently.
             c = self._cache
-            if c is not None and c[0] == sidecar_mtime:
-                return c[1], c[2]
-            metadata, matrix = self._load_all_rows()
-            self._cache = (sidecar_mtime, metadata, matrix)
-            return metadata, matrix
+            served = embeddings._try_serve_cached(c, self.path)
+            if served is not None:
+                return served.metadata, served.matrix
+            loaded = self._load_all_rows()
+            log.info(
+                "claim matrix full load: reason=%s rows=%d gen=%d epoch=%d",
+                embeddings._reload_reason(c, loaded.epoch, loaded.generation),
+                len(loaded.metadata), loaded.generation, loaded.epoch,
+            )
+            self._cache = loaded
+            return loaded.metadata, loaded.matrix
 
-    def _load_all_rows(
-        self,
-    ) -> tuple[list[tuple[str, str, str | None, str | None]], np.ndarray]:
+    def _load_all_rows(self) -> _ClaimCache:
+        """Full reload from the sidecar → a `_ClaimCache`.
+
+        Reads the meta token AND the rows inside ONE explicit `BEGIN` so they are a
+        single consistent snapshot (python sqlite3 runs each bare SELECT in its own
+        snapshot in autocommit, so a naive two-statement read could pair a
+        generation with rows from a different write — mirrors
+        `EmbeddingIndex._load_all_rows`). Kept a named method so tests can count
+        genuine full reloads.
+        """
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT file_path, claim_text, page_type, status, vector FROM claims "
-                "ORDER BY file_path"
-            ).fetchall()
+            conn.execute("BEGIN")
+            try:
+                epoch, gen, instance = embeddings._read_meta_token(conn)
+                rows = conn.execute(
+                    "SELECT file_path, claim_text, page_type, status, vector FROM claims "
+                    "ORDER BY file_path"
+                ).fetchall()
+            finally:
+                conn.rollback()  # read-only txn — release the snapshot
         finally:
             conn.close()
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
         if not rows:
-            return [], np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32)
+            return _ClaimCache(
+                epoch, gen, instance, mtime, [],
+                np.zeros((0, embeddings.VECTOR_DIM), dtype=np.float32),
+            )
         metadata: list[tuple[str, str, str | None, str | None]] = []
         vectors: list[np.ndarray] = []
         for fp, ct, pt, st, blob in rows:
             metadata.append((fp, ct, pt, st))
             vectors.append(np.frombuffer(blob, dtype=np.float32))
-        return metadata, np.stack(vectors, axis=0)
+        return _ClaimCache(epoch, gen, instance, mtime, metadata, np.stack(vectors, axis=0))
 
     def rebuild_all(self) -> int:
         """Wipe + re-extract/re-embed a claim for every compiled page. Returns the
