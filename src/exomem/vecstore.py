@@ -10,8 +10,16 @@ Mapping contract: vec0 rowid == blob-table rowid (both blob tables are ordinary
 rowid tables). Callers join KNN rowids back to the blob table for metadata.
 
 Availability is a ladder, decided per process:
-- `EXOMEM_VEC_BACKEND` = `auto` (default) | `sqlite-vec` | `numpy` (kill switch).
+- `EXOMEM_VEC_BACKEND` = `numpy` (default) | `sqlite-vec` (opt-in). The numpy scan
+  is the default backend; vec0 activates ONLY when this is set explicitly to
+  `sqlite-vec`. There is no probe-and-activate: nothing here is touched unless a
+  caller opts in, so installing the extension can never silently flip the backend.
   Policy (who consults it) lives in the index classes; this module is mechanism.
+- With vec0 off (the default), the sidecar writers skip their vec dual-writes, so
+  the shadow tables drift out of sync with the blob tables over time. That is
+  benign: opting back in re-runs `ensure_synced`, whose count-mismatch check
+  rebuilds the vec rows from the blobs in pure SQL ("vec sync: rebuilding") before
+  the first opt-in search.
 - `try_load()` soft-fails once per process (`_LOAD_FAILED` memo, mirroring
   `embeddings._IMPORT_FAILED`): sqlite-vec not installed (lean deploy), or this
   Python's sqlite3 compiled without loadable-extension support
@@ -54,13 +62,18 @@ _LOAD_LOCK = threading.Lock()
 
 
 def backend() -> str:
-    """`EXOMEM_VEC_BACKEND`: `auto` (default) | `sqlite-vec` | `numpy` (kill switch).
+    """`EXOMEM_VEC_BACKEND`: `numpy` (default) | `sqlite-vec` (opt-in).
 
-    Unrecognized values fall back to `auto` — a typo must not silently disable the
-    exact numpy escape hatch someone reached for, nor hard-fail search.
+    numpy is the default vector backend. vec0 activates ONLY on the explicit value
+    `sqlite-vec`; everything else — unset, the legacy `auto`, or any unrecognized
+    value — resolves to `numpy`. This is a deliberate reversal of the old
+    probe-and-activate `auto`: enabling vec0 is now an explicit choice, so a fresh
+    `sqlite-vec` install can never silently flip production onto it. `numpy` is
+    still accepted as an explicit value, preserving its kill-switch reading for
+    anyone who pins it.
     """
     raw = (os.environ.get("EXOMEM_VEC_BACKEND") or "").strip().lower()
-    return raw if raw in ("sqlite-vec", "numpy") else "auto"
+    return "sqlite-vec" if raw == "sqlite-vec" else "numpy"
 
 
 def quant_mode() -> str:

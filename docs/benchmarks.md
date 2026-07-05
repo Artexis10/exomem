@@ -211,10 +211,11 @@ Reading it honestly:
   slowest configuration. "Sub-second search at 100k notes" is gated on the
   lexical/graph lanes, not on vector search — that is the next scaling build.
 
-**Decision record.** `auto` defaults to vec0-f32: the lane-latency delta is
-invisible end-to-end today, while the residency and reload wins are large and
-grow with corpus size. `EXOMEM_VEC_BACKEND=numpy` restores the previous behavior
-wholesale. If a future build makes the vector lane the visible bottleneck (e.g.
+**Decision record.** (Superseded 2026-07-05 — the default is now `numpy`; see the
+"Default-backend flip" note at the end of this section.) `auto` defaults to
+vec0-f32: the lane-latency delta is invisible end-to-end today, while the
+residency and reload wins are large and grow with corpus size.
+`EXOMEM_VEC_BACKEND=numpy` restores the previous behavior wholesale. If a future build makes the vector lane the visible bottleneck (e.g.
 after the lexical lanes are fixed), the recorded next step is a real ANN index —
 hnswlib, or sqlite-vec's ANN once it leaves alpha — behind the same `vecstore`
 seam, recall-gated by the same golden floors.
@@ -258,6 +259,24 @@ it overnight, or drop the python passes:
 ```
 uv run python scripts/latency_curve.py --embeddings --sizes 100000 --max-embeddings-size 100000 --repeat 1 --vec-backend numpy,sqlite-vec,binary --lexical-backend fts5 --corpus-cache <cache-dir>
 ```
+
+**Default-backend flip (2026-07-05): numpy is now the default; sqlite-vec is
+opt-in.** The `add-sqlite-vec-backend` decision above defaulted `auto` to vec0-f32
+on the *synthetic* evidence, where its brute f32 scan lost the warm race to numpy
+but won on residency. Real-vault measurement reversed the call. On the owner's
+production vault (41k chunks on a spinning D: drive), the vec0 f32 KNN measured
+123–134ms only while its ~127MB of vec tables stayed warm in the OS page cache; as
+soon as the cache evicted them (routine on a working machine) the same query cost
+1–12s. The RAM-resident numpy scan with the generation-keyed matrix cache (#125)
+measures 24–65ms and is write-independent — no page-cache cliff. Both backends are
+exact and rank-identical (the golden floors and the f32 parity tests still hold),
+so recall is unaffected; this is purely a latency/robustness decision. The trigger
+was also operational: the old probe-and-activate `auto` silently flipped production
+onto vec0 the moment a `uv sync` installed the extension — a behavior change no one
+requested. `EXOMEM_VEC_BACKEND` now defaults to `numpy`, and vec0 activates ONLY on
+the explicit value `sqlite-vec`; there is no `auto`. The at-scale synthetic numbers
+in the table above are unchanged and still measured by naming both backends
+explicitly (`--vec-backend numpy,sqlite-vec,binary`).
 
 ## Lexical backend at scale (10k–50k notes, FTS5 vs in-process)
 

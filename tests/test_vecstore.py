@@ -73,9 +73,13 @@ def _build_text_index(
 
 @pytest.fixture(autouse=True)
 def _fresh_vec_state(monkeypatch: pytest.MonkeyPatch):
-    """Every test starts from a clean process-global load memo and default env."""
+    """Every test starts from a clean process-global load memo, with the vec0
+    backend OPTED IN. This is the vec0-mechanics suite; since numpy is now the
+    product default, the whole file must set `sqlite-vec` explicitly to exercise
+    vec0 (this is "exactly as the old `auto` behaved"). Individual tests still
+    override to `numpy` where they assert the kill-switch / parity paths."""
     vecstore.reset_load_memo()
-    monkeypatch.delenv("EXOMEM_VEC_BACKEND", raising=False)
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
     monkeypatch.delenv("EXOMEM_VEC_QUANT", raising=False)
     yield
     vecstore.reset_load_memo()
@@ -126,8 +130,10 @@ def test_schema_creation_is_idempotent(tmp_path):
 
 
 def test_legacy_blobs_only_sidecar_is_backfilled_on_first_use(tmp_path, monkeypatch):
-    """A sidecar written with the kill switch on (blob rows only) gains vec rows —
-    with correct search results — the first time a vec-aware instance touches it."""
+    """A sidecar written with the numpy backend (blob rows only) gains vec rows —
+    with correct search results — the first time a vec-opted-in instance touches
+    it. This is also the re-enable path: after running numpy-default for a while,
+    opting back into `sqlite-vec` rebuilds the drifted shadow tables from blobs."""
     rng = np.random.default_rng(9)
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", "numpy")
     legacy, vecs_by_file = _build_text_index(tmp_path, rng, files=5, chunks_per_file=4)
@@ -137,7 +143,7 @@ def test_legacy_blobs_only_sidecar_is_backfilled_on_first_use(tmp_path, monkeypa
     finally:
         plain.close()
 
-    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "auto")
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
     idx = EmbeddingIndex(tmp_path)
     query = vecs_by_file["Knowledge Base/Notes/note-002.md"][1]
     hits = idx.search(query, k=3)

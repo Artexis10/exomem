@@ -47,18 +47,56 @@ def _fresh_vec_state(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_backend_env_reader_defaults(monkeypatch):
-    assert vecstore.backend() == "auto"
+    # numpy is the default backend; sqlite-vec is strictly opt-in. Unset, the
+    # legacy `auto`, and any unrecognized value all resolve to numpy — a typo (or
+    # a stale `auto`) must never silently activate vec0.
+    assert vecstore.backend() == "numpy"
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", "numpy")
     assert vecstore.backend() == "numpy"
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
     assert vecstore.backend() == "sqlite-vec"
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "auto")  # legacy value → no longer special
+    assert vecstore.backend() == "numpy"
     monkeypatch.setenv("EXOMEM_VEC_BACKEND", "bogus")
-    assert vecstore.backend() == "auto"
+    assert vecstore.backend() == "numpy"
     monkeypatch.delenv("EXOMEM_VEC_BACKEND")
     monkeypatch.setenv("EXOMEM_VEC_QUANT", "binary")
     assert vecstore.quant_mode() == "binary"
     monkeypatch.setenv("EXOMEM_VEC_QUANT", "bogus")
     assert vecstore.quant_mode() == "off"
+
+
+def test_default_serves_numpy_and_never_probes_extension(tmp_path, monkeypatch):
+    """The new default (EXOMEM_VEC_BACKEND unset): search serves the numpy scan and
+    the sqlite-vec extension is NEVER probed or loaded. This is the whole point of
+    the opt-in flip — no silent probe-and-activate. Both the write path (dual-write
+    gate) and the read path (search) must short-circuit before touching vec code."""
+    probes = {"n": 0}
+
+    def _spy_import():
+        probes["n"] += 1
+        raise ImportError("vec extension must not be probed under the numpy default")
+
+    monkeypatch.setattr(vecstore, "_import_sqlite_vec", _spy_import)
+    loads = {"n": 0}
+    real_try_load = vecstore.SqliteVecStore.try_load
+
+    def _count_try_load(self, conn):
+        loads["n"] += 1
+        return real_try_load(self, conn)
+
+    monkeypatch.setattr(vecstore.SqliteVecStore, "try_load", _count_try_load)
+
+    rng = np.random.default_rng(42)
+    idx = EmbeddingIndex(tmp_path)
+    vecs = _unit_rows(rng, 3, VECTOR_DIM)
+    idx.upsert_file("Knowledge Base/a.md", ["c0", "c1", "c2"], vecs, 1.0)  # write path
+
+    hits = idx.search(vecs[1], k=2)  # read path
+    assert hits[0] == ("Knowledge Base/a.md", 1, "c1", pytest.approx(1.0, abs=1e-5))
+    assert not _has_table(idx.path, "vec_chunks")  # no vec tables ever written
+    assert loads["n"] == 0  # the gate short-circuits on the numpy default
+    assert probes["n"] == 0  # the extension import is never attempted
 
 
 def test_kill_switch_forces_numpy_and_skips_vec_writes(tmp_path, monkeypatch):
@@ -76,8 +114,10 @@ def test_kill_switch_forces_numpy_and_skips_vec_writes(tmp_path, monkeypatch):
 
 
 def test_unavailable_extension_serves_numpy_results(tmp_path, monkeypatch):
-    """Under `auto` with the extension unavailable (the lean deployment shape, forced
-    here deterministically), search serves the numpy scan with the same contract."""
+    """With `sqlite-vec` opted in but the extension unavailable (the lean deployment
+    shape, forced here deterministically), search soft-fails to the numpy scan with
+    the same contract."""
+    monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
     monkeypatch.setattr(
         vecstore, "_import_sqlite_vec", lambda: (_ for _ in ()).throw(ImportError("lean"))
     )

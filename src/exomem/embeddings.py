@@ -1127,10 +1127,16 @@ def _vec_gate(index, conn: sqlite3.Connection) -> bool:
     """Shared vec0 policy ladder for EmbeddingIndex/ClipIndex on one connection.
 
     Duck-typed over the index's vec state (`_vec`, `_vec_failed`, `_vec_ready`,
-    `_vec_quant_synced`): kill switch → extension loadable on this connection →
+    `_vec_quant_synced`): backend gate → extension loadable on this connection →
     tables created + blob↔vec counts synced (memoized per instance; re-run once
     more when binary quant turns on later, to synthesize the bin table). Any sync
     failure retires vec for this instance — the numpy scan serves from then on.
+
+    numpy is the default backend, so this gate returns False (and every dual-write
+    site below is skipped) unless `EXOMEM_VEC_BACKEND=sqlite-vec` opts in. While
+    vec0 is off, the shadow tables drift as the blob tables advance without them;
+    that drift is self-healing — the first opt-in call reaches `ensure_synced`,
+    whose count-mismatch check rebuilds the vec rows from the blobs in pure SQL.
     """
     if index._vec_failed or vecstore.backend() == "numpy":
         return False
