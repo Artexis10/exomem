@@ -5,6 +5,37 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.9.0](https://github.com/Artexis10/exomem/compare/v0.8.0...v0.9.0) (2026-07-05)
+
+
+### Features
+
+* **log:** size-triggered log.md rotation into _archive/logs/ ([a20caa0](https://github.com/Artexis10/exomem/commit/a20caa0dc573745f2d5833a7f6631e14e53e29a2))
+* **vecstore:** numpy is the default vector backend; sqlite-vec becomes explicit opt-in (OpenSpec: make-sqlite-vec-opt-in) ([#128](https://github.com/Artexis10/exomem/issues/128)) ([ee5e744](https://github.com/Artexis10/exomem/commit/ee5e7446fee122f0de1b5dc93546d5eef0f91641))
+
+
+### Bug Fixes
+
+* **ci:** regenerate stale capabilities doc; generator writes LF ([ade69c6](https://github.com/Artexis10/exomem/commit/ade69c694b6dade896d85268a1ebdf6e7d9ae7f0))
+* **freshness:** canonicalize event-path registry keys — Windows 8.3 aliases dropped live notes from event-maintained indexes ([#129](https://github.com/Artexis10/exomem/issues/129)) ([5f29525](https://github.com/Artexis10/exomem/commit/5f29525656fae928af914c62298b3bef577ee706))
+* **indexes:** excluded scan dirs stay excluded on the incremental paths ([dca70d5](https://github.com/Artexis10/exomem/commit/dca70d56b05bda040f5bf33c11d14bdb2aa3b9ea))
+* PyPI SETUP-LOCAL link + hooks recognise the renamed `exomem` tools ([#118](https://github.com/Artexis10/exomem/issues/118)) ([00c00d2](https://github.com/Artexis10/exomem/commit/00c00d2cccdd4714a8f689d9d62164c0a3fffb44))
+* **scripts:** install-service no-UAC grant failed silently while claiming success ([b672efa](https://github.com/Artexis10/exomem/commit/b672efaae592c11b7b04e872fbde64c4655cb06a))
+* **writers:** reuse the shared freshness-checked WikilinkResolver instead of rebuilding per write ([8459def](https://github.com/Artexis10/exomem/commit/8459defc8a06e538b5f4187ca873d4c1197332ff))
+
+
+### Performance
+
+* **claims:** key the claim cache on the shared write-generation token ([#127](https://github.com/Artexis10/exomem/issues/127)) ([a04bcf7](https://github.com/Artexis10/exomem/commit/a04bcf7f2ad667275ac617bfb87291c7d29c78c3))
+* **embeddings:** key the matrix caches on a write generation, not the WAL-checkpoint mtime ([#125](https://github.com/Artexis10/exomem/issues/125)) ([07e23cf](https://github.com/Artexis10/exomem/commit/07e23cf9645867bef0be9fdcf9a8540a9c5f2219))
+* **embeddings:** numpy-lite — the matrix cache holds no chunk text ([557dcf9](https://github.com/Artexis10/exomem/commit/557dcf9b13cb1b1f8bdf6b54f7677c0e115abd82))
+* **freshness:** reconcile dispatches the drift delta through the event fan-out ([#124](https://github.com/Artexis10/exomem/issues/124)) ([ecca095](https://github.com/Artexis10/exomem/commit/ecca09516d59ff1a3d6cba6ee2b2409eaa60ac98))
+* **lexstore:** heal from the freshness registry, not a filesystem walk ([#122](https://github.com/Artexis10/exomem/issues/122)) ([5b887e5](https://github.com/Artexis10/exomem/commit/5b887e580f9e4664dd4a67344ce5161f6bcf0acf))
+* **lexstore:** incremental heal — patch only drifted rows, not a full O(corpus) rebuild ([#121](https://github.com/Artexis10/exomem/issues/121)) ([5415c3d](https://github.com/Artexis10/exomem/commit/5415c3daf326970d9330291575e909611832d327))
+* **lexstore:** route the _walk_matches_rows verify path through the registry too ([#123](https://github.com/Artexis10/exomem/issues/123)) ([d579df0](https://github.com/Artexis10/exomem/commit/d579df00c0ea3d29f09376356ca0d63348ff2f47))
+* **note:** overlap the two corpus-aware passes; add suggestions= knob (default ON) ([eef4523](https://github.com/Artexis10/exomem/commit/eef4523a3b08232e77925b8251376ae575f97067))
+* **yaml:** parse frontmatter via libyaml CSafeLoader (measured 6.9x) ([e3909ab](https://github.com/Artexis10/exomem/commit/e3909ab2e53377ae1e0e488538456b10966deb67))
+
 ## [0.8.0](https://github.com/Artexis10/exomem/compare/v0.7.0...v0.8.0) (2026-07-04)
 
 
