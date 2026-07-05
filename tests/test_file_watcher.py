@@ -437,3 +437,78 @@ def test_reconcile_delta_conflict_missing_file_routes_as_deleted_only(
 
     assert ups == []
     assert dels == [["Knowledge Base/Notes/split-brain-gone.md"]]
+
+
+# ---- Rel-level dispatch guard for dual-form path collapse (#126) ----------
+#
+# The abs-string guard above only catches a conflict when both event forms are
+# the literal SAME string. Two DIFFERENT abs-path forms of one file (e.g. a
+# Windows 8.3 short name vs. the long form) evade it but can still collapse to
+# the SAME rel once `_rel()` resolves them. We drive that collapse platform-
+# free by monkeypatching `_rel` so a distinct "alias" string resolves to the
+# same rel a real path would — modeling the 8.3 short-name vector without
+# depending on it actually being enabled on the test box.
+
+
+def test_reconcile_delta_dual_form_collapse_existing_file_routes_as_changed_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two different abs-path STRING forms of the SAME on-disk file (e.g. a
+    Windows 8.3 short name vs. the long form, #126) don't collide in the
+    abs-string guard (different strings) but collapse to the identical rel
+    once `_rel()` resolves them. That collapse must still route the live file
+    as changed only — never also as a delete that would strip its index
+    rows."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "dual-form-exists.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# dual form\n", encoding="utf-8")
+
+    long_form = str(p)
+    alias_form = long_form + ".8dot3-alias"  # a distinct string; never touches disk
+    rel = _vault_rel(vault, p)
+    real_rel = w._rel
+
+    def fake_rel(path: Path):
+        if str(path) == alias_form:
+            return rel
+        return real_rel(path)
+
+    monkeypatch.setattr(w, "_rel", fake_rel)
+
+    w._dispatch_reconcile_delta([long_form], [alias_form])
+
+    assert len(ups) == 1 and ups[0] == [p]
+    assert dels == []
+
+
+def test_reconcile_delta_dual_form_collapse_missing_file_routes_as_deleted_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror case: the dual-form collapse resolves to a rel whose file is
+    genuinely ABSENT — must dispatch as a delete only, never also as an
+    upsert."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "dual-form-gone.md"
+    # Deliberately never created — absent on disk.
+
+    long_form = str(p)
+    alias_form = long_form + ".8dot3-alias"
+    rel = "Knowledge Base/Notes/dual-form-gone.md"
+    real_rel = w._rel
+
+    def fake_rel(path: Path):
+        if str(path) in (long_form, alias_form):
+            return rel
+        return real_rel(path)
+
+    monkeypatch.setattr(w, "_rel", fake_rel)
+
+    w._dispatch_reconcile_delta([long_form], [alias_form])
+
+    assert ups == []
+    assert dels == [[rel]]

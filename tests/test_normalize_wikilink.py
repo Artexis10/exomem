@@ -182,6 +182,35 @@ def test_pending_path_resolves_before_disk_write(vault: Path) -> None:
     assert canonical == "Knowledge Base/Notes/Insights/fresh-note"
 
 
+def test_on_files_changed_same_rel_in_both_lists_retains_live_file(vault: Path) -> None:
+    """A rel present in BOTH `changed_rels` and `deleted_rels` in the same batch
+    — the two-path-string-forms-collapse-to-one-rel case (Windows 8.3 short
+    names are the concrete vector, #126: a watchdog event reporting a long
+    slug's `REAL-V~1.MD` short alias vs. the walk's long form) — must not drop
+    a file that is still on disk. The old code (`changed = _norm(changed_rels)
+    - deleted`) unconditionally subtracted the conflicting rel out of
+    `changed`, so both the remove-and-re-add loops skipped it entirely and the
+    resolver silently lost a live file's entry. The filesystem breaks the tie:
+    re-add wins."""
+    target = vault / "Knowledge Base" / "Notes" / "Failures" / "dual-form.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text('---\ntitle: "Dual Form"\n---\n\nbody\n', encoding="utf-8")
+    rel = "Knowledge Base/Notes/Failures/dual-form"
+
+    resolver = WikilinkResolver(vault)
+    assert rel in resolver.full_paths
+
+    resolver.on_files_changed(vault, [rel + ".md"], [rel + ".md"])
+
+    assert rel in resolver.full_paths, (
+        "resolver dropped a live on-disk file when its rel appeared in both "
+        "changed_rels and deleted_rels in the same batch"
+    )
+    canonical, warning = normalize_wikilink(rel, vault, resolver=resolver)
+    assert warning is None
+    assert canonical == rel
+
+
 def test_body_normalization_rewrites_kb_relative_to_full(vault: Path) -> None:
     body = "See [[Notes/Insights/progressive-disclosure-without-mode-fragmentation]] for context."
     new_body, warnings = normalize_body_wikilinks(body, vault)
