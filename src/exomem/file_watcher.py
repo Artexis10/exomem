@@ -45,6 +45,13 @@ DEBOUNCE_SECONDS = 0.5
 # How often the watcher re-walks and reconciles the freshness registry against
 # disk truth, bounding how long a dropped watchdog event can leave it stale.
 RECONCILE_INTERVAL_SECONDS = 300.0
+# Upper bound on how many KB files one reconcile cycle re-embeds. Drift deltas
+# are normally a handful of files (a missed event or two per 300s window); this
+# only fires on a pathological drift (e.g. watchdog was dead while a large sync
+# landed). The freshness map is ALWAYS fully healed regardless — only the embed
+# dispatch is capped, and it logs the cap so the remainder can be closed with an
+# explicit `reconcile`.
+RECONCILE_MAX_EMBED_FILES = 500
 
 # ---- Self-write suppression registry (module-level: available to writers even
 # when no FileWatcher is running; keyed by (resolved vault root, vault-rel path)) ----
@@ -382,15 +389,121 @@ class FileWatcher:
     def _reconcile_once(self, *, seed: bool) -> None:
         """Re-derive the freshness maps from a fresh walk. `seed=True` on the
         first pass installs the maps and marks the scopes live; later passes
-        heal any drift from a missed watchdog event."""
+        heal any drift from a missed watchdog event AND dispatch that drift
+        delta through the same event fan-out `_flush` uses, so the derived
+        indexes (resolver, bm25, keyword, embeddings) heal off the query path
+        instead of rebuilding lazily on the next `find`.
+
+        Ordering matters: every scope's registry map is replaced FIRST (below),
+        THEN the deduped union of the deltas is dispatched — so a query racing
+        the short dispatch window pays at most today's rebuild cost, never
+        worse. Seed is NOT drift: the boot pass dispatches nothing (it must not
+        re-embed the whole vault)."""
+        changed_union: dict[str, None] = {}  # insertion-ordered dedupe across scopes
+        deleted_union: dict[str, None] = {}
+        drifted = False
         for scope in freshness.SCOPES:
             try:
                 if seed:
                     freshness.seed(self._vault_root, scope, self._walk_entries(scope))
                 else:
-                    freshness.reconcile(self._vault_root, scope, self._walk_entries(scope))
+                    delta = freshness.reconcile(
+                        self._vault_root, scope, self._walk_entries(scope)
+                    )
+                    if delta.drifted:
+                        drifted = True
+                        # vault ⊇ kb, so a KB file lands in both deltas — dedupe
+                        # to dispatch it at most once per cycle.
+                        for sp in delta.changed:
+                            changed_union.setdefault(sp, None)
+                        for sp in delta.deleted:
+                            deleted_union.setdefault(sp, None)
             except Exception:  # noqa: BLE001 — reconcile must never kill the watcher
                 log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
+        if seed or not drifted:
+            return
+        # Maps are healed; fan the drift delta out and pre-warm the triple-keyed
+        # bm25 corpus. Each step is belt-and-suspenders exception-safe — a bad
+        # batch must never kill the reconcile loop.
+        try:
+            self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
+        except Exception:  # noqa: BLE001
+            log.exception("file watcher: reconcile drift dispatch failed")
+        from . import bm25
+        for scope in freshness.SCOPES:
+            try:
+                bm25.warm(self._vault_root, scope)
+            except Exception:  # noqa: BLE001
+                log.exception("file watcher: reconcile bm25 warm failed (scope=%s)", scope)
+
+    def _dispatch_reconcile_delta(self, changed: list[str], deleted: list[str]) -> None:
+        """Fan a reconcile drift delta out through the per-batch event path.
+
+        Mirrors `_flush` MINUS the freshness publish — `reconcile` already
+        replaced the freshness map, so re-publishing it would be redundant. The
+        delta paths are the registry map's own absolute-path-string keys. A path
+        that matches a still-live self-write registration is dropped: the writer
+        already fanned it out via `register_self_write`, so re-dispatching would
+        double-embed (normally moot — the 30s suppression TTL has expired by the
+        300s reconcile — but correct under a tight race)."""
+        changed_paths = [
+            p
+            for p in (Path(sp) for sp in changed)
+            if not _is_self_write_event(self._vault_root, p, deleted=False)
+        ]
+        deleted_paths = [
+            p
+            for p in (Path(sp) for sp in deleted)
+            if not _is_self_write_event(self._vault_root, p, deleted=True)
+        ]
+        up_rels = [r for r in (self._rel(p) for p in changed_paths) if r]
+        del_rels = [r for r in (self._rel(p) for p in deleted_paths) if r]
+        if not (up_rels or del_rels):
+            return
+
+        # Inbound + resolver: the whole vault (both index sibling folders). The
+        # resolver patch also restamps its freshness triple, so the next graph
+        # query HITS the cache instead of paying the full-vault rebuild.
+        try:
+            from . import vault as vault_module
+
+            vault_module.on_inbound_files_changed(self._vault_root, up_rels, del_rels)
+        except Exception:  # noqa: BLE001
+            log.exception("file watcher: reconcile inbound publish failed")
+        try:
+            from . import find as find_module
+
+            find_module.on_resolver_files_changed(self._vault_root, up_rels, del_rels)
+        except Exception:  # noqa: BLE001
+            log.exception("file watcher: reconcile resolver publish failed")
+
+        # Index sidecars (embedding + lexical): Knowledge Base markdown only.
+        kb_ups = [p for p in changed_paths if self._is_kb(p)]
+        kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
+        if len(kb_ups) > RECONCILE_MAX_EMBED_FILES:
+            log.warning(
+                "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
+                "the freshness registry is fully healed — run `reconcile` to re-embed "
+                "the remainder",
+                RECONCILE_MAX_EMBED_FILES, len(kb_ups),
+            )
+            kb_ups = kb_ups[:RECONCILE_MAX_EMBED_FILES]
+        if kb_ups:
+            try:
+                index_sync.upsert_after_write(self._vault_root, kb_ups)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "file watcher: reconcile upsert_after_write failed for %d file(s)",
+                    len(kb_ups),
+                )
+        if kb_del_rels:
+            try:
+                index_sync.delete_after_remove(self._vault_root, kb_del_rels)
+            except Exception:  # noqa: BLE001
+                log.exception(
+                    "file watcher: reconcile delete_after_remove failed for %d file(s)",
+                    len(kb_del_rels),
+                )
 
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own
