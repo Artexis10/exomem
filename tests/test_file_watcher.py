@@ -8,6 +8,7 @@ the lazy import.
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from exomem import embeddings, file_watcher
+from exomem import find as find_module
 
 
 def _stub_embeddings(monkeypatch: pytest.MonkeyPatch):
@@ -215,3 +217,223 @@ def test_batch_atomic_write_registers_suppression(vault, monkeypatch: pytest.Mon
     w._record(p, deleted=False)
     w._flush()
     assert ups == []
+
+
+# ---- Reconcile drift dispatch through the event fan-out (PR1) ----------------
+#
+# The 300s reconcile only re-derives the freshness map from a fresh walk. When a
+# watchdog event is missed, that drift used to force every triple-keyed derived
+# index (resolver, bm25, keyword) to rebuild lazily on the NEXT query — a
+# multi-second first-query-after-drift stall — and never re-embedded the missed
+# files (a recall gap). PR1 makes reconcile return the drift delta and the
+# watcher dispatch it through the SAME fan-out a live batch uses, off the query
+# path. We drive drift by writing/utime WITHOUT _record (a missed event), then
+# call _reconcile_once directly (the pattern in test_freshness_registry.py:215).
+
+
+def _spy_reconcile_fanout(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
+    """Capture the reconcile dispatch seams: inbound + resolver publishes, the
+    KB-filtered embed heal (index_sync), and the bm25 pre-warm."""
+    calls: dict[str, list] = {
+        "inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": [],
+    }
+    monkeypatch.setattr(
+        "exomem.vault.on_inbound_files_changed",
+        lambda root, up, dl: calls["inbound"].append((list(up), list(dl))),
+    )
+    monkeypatch.setattr(
+        "exomem.find.on_resolver_files_changed",
+        lambda root, up, dl: calls["resolver"].append((list(up), list(dl))),
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync, "upsert_after_write",
+        lambda root, paths: calls["upsert"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        file_watcher.index_sync, "delete_after_remove",
+        lambda root, rels: calls["delete"].append(list(rels)),
+    )
+    monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: calls["warm"].append(scope))
+    return calls
+
+
+def _vault_rel(vault: Path, path: Path) -> str:
+    return path.resolve().relative_to(vault.resolve()).as_posix()
+
+
+def test_reconcile_dispatches_drift_delta_to_fanout(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))  # a missed watchdog event
+
+    w._reconcile_once(seed=False)
+
+    rel = _vault_rel(vault, target)
+    # The exact delta reaches inbound + resolver once, no phantom deletes.
+    assert calls["inbound"] == [([rel], [])]
+    assert calls["resolver"] == [([rel], [])]
+    # The KB file is handed to the embed/lexical heal exactly once (deduped
+    # across the kb + vault scopes).
+    assert len(calls["upsert"]) == 1
+    assert [p.resolve() for p in calls["upsert"][0]] == [target.resolve()]
+    assert calls["delete"] == []
+    # bm25 corpus pre-warmed for both scopes off the query path.
+    assert calls["warm"] == ["kb", "vault"]
+
+
+def test_reconcile_seed_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Boot seed is NOT drift — it must not re-embed the whole vault."""
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+
+    w._reconcile_once(seed=True)
+
+    assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_reconcile_no_drift_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    w._reconcile_once(seed=False)  # nothing changed on disk since the seed
+
+    assert calls == {"inbound": [], "resolver": [], "upsert": [], "delete": [], "warm": []}
+
+
+def test_reconcile_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    rel = _vault_rel(vault, target)
+    target.unlink()  # a missed delete event
+
+    w._reconcile_once(seed=False)
+
+    assert calls["delete"] == [[rel]]
+    assert calls["upsert"] == []
+    assert calls["resolver"] == [([], [rel])]
+    assert calls["inbound"] == [([], [rel])]
+
+
+def test_reconcile_reembeds_missed_kb_file(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The recall-gap fix: a missed KB edit reaches embeddings.upsert_after_write
+    through the real index_sync seam (stubbed embedder, as in _stub_embeddings)."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: None)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+
+    w._reconcile_once(seed=False)
+
+    embedded = [p for batch in ups for p in batch]
+    assert any(p.resolve() == target.resolve() for p in embedded)
+    assert dels == []
+
+
+def test_reconcile_restamps_resolver_triple_no_rebuild(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 11.3s fix: after reconcile dispatch, the cached resolver's freshness
+    triple is restamped, so the next _get_query_resolver HITS the same instance
+    instead of a full-vault rebuild."""
+    file_watcher.clear_self_write_registry()
+    _stub_embeddings(monkeypatch)  # keep torch out; lexstore/resolver run for real
+    monkeypatch.setattr("exomem.bm25.warm", lambda root, scope: None)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    # Prime the process-shared resolver at the current freshness triple.
+    r1 = find_module._get_query_resolver(vault)
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+
+    w._reconcile_once(seed=False)
+
+    r2 = find_module._get_query_resolver(vault)
+    assert r2 is r1, "reconcile must restamp the resolver triple, not force a rebuild"
+
+
+def test_reconcile_dispatch_suppresses_registered_self_write(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A path that was a registered self-write (already fanned out by the writer)
+    must not be re-dispatched by reconcile drift."""
+    file_watcher.clear_self_write_registry()
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "reconcile-self-write.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# self\n", encoding="utf-8")
+    file_watcher.register_self_write(vault, [p])  # matching signature registered
+
+    # Spy AFTER register_self_write so the writer's own publish isn't counted.
+    ups, dels = _stub_embeddings(monkeypatch)
+    inbound: list = []
+    resolver: list = []
+    monkeypatch.setattr(
+        "exomem.vault.on_inbound_files_changed",
+        lambda root, up, dl: inbound.append((list(up), list(dl))),
+    )
+    monkeypatch.setattr(
+        "exomem.find.on_resolver_files_changed",
+        lambda root, up, dl: resolver.append((list(up), list(dl))),
+    )
+
+    w._dispatch_reconcile_delta([str(p)], [])
+
+    assert ups == [] and dels == []
+    assert inbound == [] and resolver == []
+
+
+def test_reconcile_delta_conflict_existing_file_routes_as_changed_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kb/vault scope walks are two separate, non-atomic snapshots — a file
+    deleted+recreated between them can appear in BOTH the changed and deleted
+    delta lists in the same cycle. Split-brain must resolve by trusting the
+    filesystem now: a path that exists is dispatched as changed ONLY, never
+    also as a delete (a delete-after-upsert would strip a live file's index
+    rows until the next drift cycle re-surfaces it)."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "split-brain-exists.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# split brain\n", encoding="utf-8")
+
+    w._dispatch_reconcile_delta([str(p)], [str(p)])
+
+    assert len(ups) == 1 and ups[0] == [p]
+    assert dels == []
+
+
+def test_reconcile_delta_conflict_missing_file_routes_as_deleted_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror case: a path present in both lists that is ABSENT on disk must
+    dispatch as a delete only, never also as an upsert."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "split-brain-gone.md"
+    # Deliberately never created — absent on disk.
+
+    w._dispatch_reconcile_delta([str(p)], [str(p)])
+
+    assert ups == []
+    assert dels == [["Knowledge Base/Notes/split-brain-gone.md"]]

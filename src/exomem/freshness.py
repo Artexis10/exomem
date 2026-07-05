@@ -33,12 +33,28 @@ import os
 import threading
 from collections.abc import Iterable
 from pathlib import Path
+from typing import NamedTuple
 
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
 
 SCOPES = ("kb", "vault")
+
+
+class ReconcileDelta(NamedTuple):
+    """What `reconcile` found: whether the map drifted, and the exact delta.
+
+    `changed` (created/modified) and `deleted` are absolute path strings — the
+    registry map's own keys — so the caller can dispatch precisely the paths a
+    missed watchdog event left stale through the same event fan-out a live batch
+    uses, healing the derived indexes off the query path instead of letting them
+    rebuild lazily on the next `find`.
+    """
+
+    drifted: bool
+    changed: list[str]
+    deleted: list[str]
 
 _lock = threading.RLock()
 # (vault_root_str, scope) -> {absolute_path_str: mtime_ns}
@@ -142,27 +158,37 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]) -> No
         _live.add(key)
 
 
-def reconcile(vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]) -> bool:
-    """Replace the map from a fresh walk; return True if it drifted.
+def reconcile(
+    vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]
+) -> ReconcileDelta:
+    """Replace the map from a fresh walk; return the drift delta.
 
     The 300s safety net for a missed watchdog event: the walk's result wins.
     A drift means an event was lost between reconciles — logged for visibility,
-    never silently dropped.
+    never silently dropped. The returned `ReconcileDelta` carries the exact
+    changed/deleted paths (this function holds both the old map and the fresh
+    walk) so the caller can dispatch them through the event fan-out; the map is
+    always fully replaced regardless of what the caller does with the delta.
     """
     key = _key(vault_root, scope)
     fresh = {sp: ns for sp, ns in entries}
     with _lock:
-        drifted = _maps.get(key) != fresh
+        old = _maps.get(key)
         _maps[key] = fresh
         _triples[key] = None
         _live.add(key)
+    old = old or {}
+    changed = [sp for sp, ns in fresh.items() if old.get(sp) != ns]
+    deleted = [sp for sp in old if sp not in fresh]
+    drifted = bool(changed or deleted)
     if drifted:
         log.warning(
             "freshness_reconcile_drift: %s scope=%s map re-derived from a fresh walk "
-            "(a filesystem event was missed since the last reconcile)",
-            vault_root, scope,
+            "(a filesystem event was missed since the last reconcile): "
+            "%d changed, %d deleted",
+            vault_root, scope, len(changed), len(deleted),
         )
-    return drifted
+    return ReconcileDelta(drifted=drifted, changed=changed, deleted=deleted)
 
 
 def triple(vault_root: Path, scope: str) -> tuple[int, int, str] | None:
