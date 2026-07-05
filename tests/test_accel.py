@@ -21,6 +21,8 @@ _ENV_KEYS = (
     "EXOMEM_EMBED_DEVICE",
     "EXOMEM_CLIP_DEVICE",
     "EXOMEM_VOICE_DEVICE",
+    "EXOMEM_ASR_DEVICE",
+    "EXOMEM_DIARIZE_DEVICE",
     "EXOMEM_MODE",
     "EXOMEM_QUIET_MODE",
     "EXOMEM_GPU_MIN_FREE_GB",
@@ -412,3 +414,86 @@ def test_maybe_half_swallows_conversion_failure(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.delenv("EXOMEM_MPS_FP16", raising=False)
     m = _Boom()
     assert embeddings._maybe_half(m, "mps") is m  # original returned, no raise
+
+
+# ---- cuda_if_performance: non-torch engines (CTranslate2 ASR, diarizer) ----
+
+def test_cuda_if_performance_cpu_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default (normal) mode keeps ASR/diarizer on CPU even with a capable GPU — this is
+    the fix for the ~3 GB Whisper model that PR1's accel change didn't reach."""
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert accel.cuda_if_performance() == "cpu"
+
+
+def test_cuda_if_performance_quiet_is_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert accel.cuda_if_performance() == "cpu"
+
+
+def test_cuda_if_performance_performance_capable_is_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert accel.cuda_if_performance() == "cuda"
+
+
+def test_cuda_if_performance_performance_marginal_is_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: False)
+    assert accel.cuda_if_performance() == "cpu"
+
+
+# ---- bulk_device: the `exomem index` CLI opt-in ----
+
+def test_bulk_device_explicit_wins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: False)
+    assert accel.bulk_device("cpu") == "cpu"
+    assert accel.bulk_device("gpu") == "gpu"
+    assert accel.bulk_device("auto") == "auto"
+
+
+def test_bulk_device_default_gpu_when_capable_and_not_quiet(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert accel.bulk_device() == "gpu"  # normal mode + capable GPU → opt in (subprocess frees it)
+
+
+def test_bulk_device_default_none_when_incapable(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: False)
+    assert accel.bulk_device() is None  # leave the CPU-default mode policy
+
+
+def test_bulk_device_quiet_stays_cpu(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert accel.bulk_device() is None  # don't grab the GPU mid-game
+
+
+# ---- extract._device: ASR is now mode-aware (was bare torch.cuda.is_available) ----
+
+def test_asr_device_cpu_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import extract
+
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert extract._device() == "cpu"  # normal mode → CPU even with a capable GPU
+
+
+def test_asr_device_cuda_in_performance(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import extract
+
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert extract._device() == "cuda"
+
+
+def test_asr_device_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import extract
+
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: False)
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cuda")
+    assert extract._device() == "cuda"  # explicit verbatim wins over mode+probe
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "cpu")
+    assert extract._device() == "cpu"
+    monkeypatch.setenv("EXOMEM_ASR_DEVICE", "auto")
+    assert extract._device() == "cpu"  # auto probes; gpu_usable False → cpu
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    assert extract._device() == "cuda"  # auto + capable → cuda

@@ -201,13 +201,22 @@ def _ensure_cuda_dll_path() -> None:
 
 
 def _device() -> str:
-    """'cuda' when a GPU is visible, else 'cpu' — mirrors embeddings.py's check."""
-    try:
-        import torch
+    """ASR (faster-whisper / CTranslate2) compute device — mode-aware, CPU by default.
 
-        return "cuda" if torch.cuda.is_available() else "cpu"
-    except Exception:  # noqa: BLE001 — torch absent on a lean box → CPU
-        return "cpu"
+    CUDA only in `performance` mode with a capable GPU (via `accel.cuda_if_performance`),
+    so a normal/quiet server never preloads the ~3 GB Whisper model onto the GPU at boot
+    — the idle VRAM the accel-routed models (bge/reranker/CLIP) already avoid. CTranslate2
+    can't use MPS, so this is strictly cuda-or-cpu. `EXOMEM_ASR_DEVICE` (cpu | cuda | auto)
+    is an explicit override.
+    """
+    from . import accel
+
+    pref = (os.environ.get("EXOMEM_ASR_DEVICE") or "").strip().lower()
+    if pref in ("cpu", "cuda"):
+        return pref
+    if pref in ("auto", "gpu"):
+        return "cuda" if accel.gpu_usable() else "cpu"
+    return accel.cuda_if_performance()
 
 
 _WHISPER_LOCK = threading.Lock()
@@ -590,7 +599,16 @@ def _diarizer_child_env() -> dict[str, str]:
     can't shadow the sidecar's bundled cu130 CUDA/cuDNN (the CLIP/cuDNN shadow class of bug).
     """
     env = {**os.environ, "HF_HUB_DISABLE_PROGRESS_BARS": "1"}
-    pref = os.environ.get("EXOMEM_DIARIZE_DEVICE", "auto").lower()
+    pref = os.environ.get("EXOMEM_DIARIZE_DEVICE")
+    if pref is None or not pref.strip():
+        # No explicit override → follow the compute mode: CPU unless performance, so a
+        # normal/quiet box doesn't spin the diarizer up on the GPU mid-game. (The sidecar
+        # is transient, so this is about not interrupting, not idle VRAM.)
+        from . import accel
+
+        pref = accel.cuda_if_performance()  # "cuda" | "cpu"
+    else:
+        pref = pref.strip().lower()
     if pref == "cpu":
         env["CUDA_VISIBLE_DEVICES"] = ""
         return env

@@ -167,6 +167,28 @@ def test_child_env_cuda_keeps_gpu_and_strips_nvidia_bins(monkeypatch) -> None:
     assert not any("nvidia" in p.lower() for p in parts)  # cu12 wheel bins stripped → no cuDNN shadow
 
 
+def test_child_env_default_follows_mode_cpu_in_normal(monkeypatch) -> None:
+    """With no explicit EXOMEM_DIARIZE_DEVICE, the sidecar follows the compute mode:
+    normal (default) → CPU, so it doesn't spin the GPU up mid-game."""
+    from exomem import accel
+
+    monkeypatch.delenv("EXOMEM_DIARIZE_DEVICE", raising=False)
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    env = extract._diarizer_child_env()
+    assert env["CUDA_VISIBLE_DEVICES"] == ""  # CPU by default
+
+
+def test_child_env_default_gpu_in_performance(monkeypatch) -> None:
+    from exomem import accel
+
+    monkeypatch.delenv("EXOMEM_DIARIZE_DEVICE", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setattr(accel, "gpu_usable", lambda *a, **k: True)
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/x/nvidia/cublas/bin"]))
+    env = extract._diarizer_child_env()
+    assert env.get("CUDA_VISIBLE_DEVICES", "x") != ""  # GPU stays visible in performance mode
+
+
 def test_run_diarization_passes_device_env(monkeypatch) -> None:
     _fake_python(monkeypatch)
     monkeypatch.setenv("EXOMEM_DIARIZE_DEVICE", "cpu")
