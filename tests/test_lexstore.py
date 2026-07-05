@@ -250,6 +250,60 @@ def test_out_of_band_add_and_delete_heal_incrementally(tmp_path):
     assert calls["n"] == 0  # incremental delete+insert, not a full rebuild
 
 
+def test_heal_reads_registry_map_not_filesystem_walk_when_live(tmp_path):
+    """When the freshness registry is live (watcher-maintained), the incremental
+    heal must diff against the registry's in-memory map, NOT re-stat the whole
+    corpus — the ~2.7s drift-walk observed on the real D: vault. The registry is
+    already current whenever a heal fires (that's why the triple drifted from the
+    sidecar), so the filesystem walk is redundant."""
+    from exomem import find as find_module
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    try:
+        for i in range(5):
+            _write_page(tmp_path, f"Knowledge Base/n{i}.md", f"payload token{i}", mtime=1_000 + i)
+        assert lexstore.search_bm25(tmp_path, "payload", k=10, scope="kb")
+        lexstore.clear_stores()  # fresh lexstore process; sidecar left on disk
+
+        # The watcher seeds the registry live for both scopes at the current state.
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path, "kb",
+            ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+        )
+        freshness.seed(
+            tmp_path, "vault",
+            ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+
+        # One file edited out-of-band; the watcher catches it and patches the
+        # registry (but not the lexstore sidecar) — the exact drift the heal fixes.
+        p = _write_page(tmp_path, "Knowledge Base/n2.md", "payload zzzreplaced", mtime=9_000)
+        freshness.on_files_changed(tmp_path, changed=[p])
+
+        walks = {"n": 0}
+        real = lexstore.LexicalStore._walk_entries
+
+        def _counting(self):
+            walks["n"] += 1
+            return real(self)
+
+        lexstore.LexicalStore._walk_entries = _counting
+        try:
+            hits = lexstore.search_bm25(tmp_path, "zzzreplaced", k=5, scope="kb")
+        finally:
+            lexstore.LexicalStore._walk_entries = real
+
+        assert hits and hits[0][0] == "Knowledge Base/n2.md"                   # healed
+        assert lexstore.search_bm25(tmp_path, "token2", k=5, scope="kb") == []  # old gone
+        assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")        # survivor
+        assert walks["n"] == 0  # read the registry map, did NOT walk the filesystem
+    finally:
+        freshness.clear()
+
+
 def test_writer_hooks_keep_index_in_lockstep(tmp_path):
     """upsert_after_write / delete_after_remove maintain pages+fts+tri without a
     rebuild, and a subsequent query observes the change."""

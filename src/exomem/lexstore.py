@@ -453,6 +453,32 @@ class LexicalStore:
             ]
             self._bless(conn, scope, freshness_module.triple_from_entries(entries))
 
+    def _delta_source(self) -> tuple[dict[Path, list[bool]], dict[Path, int]]:
+        """`(members, mtimes)` for the heal's diff — from the live freshness
+        registry (no filesystem walk) when BOTH scopes are live, else a fresh walk.
+
+        Whenever a heal fires, the registry map is already current (it's why the
+        scope triple drifted from the sidecar), so reading it in-memory avoids
+        re-statting the whole corpus — the ~2.7s drift-walk measured on the real
+        D: vault. Byte-identical to `_walk_entries` by the freshness contract (the
+        registry mirrors the same two walks). Falls back to the walk when the
+        registry isn't live (kill-switched, or a scope never seeded)."""
+        from . import freshness as freshness_module
+
+        kb = freshness_module.live_entries(self.vault_root, "kb")
+        vault = freshness_module.live_entries(self.vault_root, "vault")
+        if kb is None or vault is None:
+            return self._walk_entries()
+        members: dict[Path, list[bool]] = {}
+        mtimes: dict[Path, int] = {}
+        for sp, ns in kb.items():
+            members.setdefault(Path(sp), [False, False])[0] = True
+            mtimes[Path(sp)] = ns
+        for sp, ns in vault.items():
+            members.setdefault(Path(sp), [False, False])[1] = True
+            mtimes[Path(sp)] = ns
+        return members, mtimes
+
     def _heal_delta(self, conn: sqlite3.Connection) -> None:
         """Reconcile the sidecar to the markdown walks by touching ONLY the rows
         that drifted — the incremental alternative to `_rebuild`'s wipe-and-repopulate.
@@ -467,7 +493,7 @@ class LexicalStore:
         diverge (the class of `UNIQUE constraint failed: pages.path`)."""
         from . import freshness as freshness_module
 
-        members, mtimes = self._walk_entries()
+        members, mtimes = self._delta_source()
         walk: dict[str, tuple[Path, int, bool, bool]] = {}
         for path, (in_kb, in_vault) in members.items():
             rel = self._rel(path)

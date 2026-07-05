@@ -184,6 +184,25 @@ def triple(vault_root: Path, scope: str) -> tuple[int, int, str] | None:
         return cached
 
 
+def live_entries(vault_root: Path, scope: str) -> dict[str, int] | None:
+    """The live `{abs_path_str: mtime_ns}` map for a scope, or None when not live.
+
+    Returns a copy so callers can diff without holding the lock. The lexical heal
+    reads this instead of re-walking the filesystem: whenever a heal fires, this
+    map is already current (the watcher or the 300s reconcile updated it — that's
+    exactly why the sidecar's triple drifted), so re-statting the whole corpus is
+    redundant. Not live (kill-switched, or a scope never seeded) → None, and the
+    caller falls back to a fresh walk.
+    """
+    if not event_indexes_enabled():
+        return None
+    key = _key(vault_root, scope)
+    with _lock:
+        if key not in _live:
+            return None
+        return dict(_maps.get(key, {}))
+
+
 def on_files_changed(
     vault_root: Path,
     changed: Iterable[Path] = (),
