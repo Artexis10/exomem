@@ -1408,7 +1408,7 @@ def _check_corpus_contradictions(
     supersede; nothing is ever auto-acted.
 
     Reuses the existing vector sidecar (`EmbeddingIndex.all_vectors()`, cached by
-    mtime) — it reads the chunk vectors already on disk and never re-encodes, so the
+    the write generation) — it reads the chunk vectors already on disk and never re-encodes, so the
     sweep is O(eligible_files) matmuls over the sidecar matrix and needs no model
     (works on a CPU/offline box as long as a sidecar exists). The band edges are the
     same knobs the write-time check uses: floor = `corpus_aware._contradiction_floor`,
@@ -1450,7 +1450,7 @@ def _check_corpus_contradictions(
         return []
 
     idx = embeddings_module.get_embedding_index(vault_root)
-    metadata, matrix = idx.all_vectors()  # cached by sidecar mtime
+    metadata, matrix = idx.all_vectors()  # cached by the sidecar write generation
     if not metadata or matrix.shape[0] == 0:
         return []
 

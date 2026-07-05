@@ -756,21 +756,24 @@ def _freshness_key(
     - scope="vault": full-vault walk key.
     - scope="kb" with a non-empty query: BOTH (auto-widen reserves out-of-KB
       slots on every non-empty query).
-    - hybrid/vector modes: the embedding and CLIP sidecar mtimes (0 when
-      absent), since sidecar refreshes change semantic results.
+    - hybrid/vector modes: each semantic sidecar's `(epoch, generation, instance)`
+      write token (0,0,0 when absent), since sidecar refreshes change semantic
+      results.
+      Deliberately NOT the sidecar file mtime — WAL-checkpoint timing moves it
+      independent of content (spurious misses) and leaves an uncheckpointed commit
+      unmoved (STALE hits); the in-band generation changes iff the content did.
+      See EmbeddingIndex.cache_token / lexstore.cache_token.
     """
     parts: list[Any] = [date.today().toordinal()]
-    kb = vault_root / kb_dirname()
     if scope in ("kb", "kb-only"):
         parts.append(("kb", *snapshot.kb()))
     if scope == "vault" or (scope == "kb" and query_norm):
         parts.append(("vault", *snapshot.vault()))
     if mode in ("hybrid", "vector"):
-        for name in (".embeddings.sqlite", ".clip.sqlite"):
-            try:
-                parts.append((name, (kb / name).stat().st_mtime_ns))
-            except OSError:
-                parts.append((name, 0))
+        from . import embeddings
+
+        parts.append((".embeddings.sqlite", embeddings.EmbeddingIndex.cache_token(vault_root)))
+        parts.append((".clip.sqlite", embeddings.ClipIndex.cache_token(vault_root)))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the

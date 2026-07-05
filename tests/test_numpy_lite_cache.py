@@ -66,7 +66,7 @@ def test_cache_holds_no_chunk_text(tmp_path: Path) -> None:
     idx, _ = _build(tmp_path, rng)
     idx.search(_unit_rows(rng, 1)[0], k=3)  # loads the cache
     assert idx._cache is not None
-    _mtime, metadata, _matrix = idx._cache
+    _epoch, _gen, _instance, _mtime, metadata, _matrix = idx._cache
     assert metadata and all(len(m) == 2 for m in metadata), (
         "numpy-lite cache must hold (file_path, chunk_idx) only — no text"
     )
@@ -88,6 +88,6 @@ def test_write_splice_keeps_hydration_and_shape(tmp_path: Path) -> None:
     assert hits[0][0] == rel and hits[0][1] == 2  # its own vector wins
     for fp, ci, txt, _score in hits:
         assert txt == texts[(fp, ci)]
-    _mtime, metadata, matrix = idx._cache
+    _epoch, _gen, _instance, _mtime, metadata, matrix = idx._cache
     assert len(metadata) == matrix.shape[0]
     assert all(len(m) == 2 for m in metadata)
