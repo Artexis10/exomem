@@ -756,8 +756,9 @@ def _freshness_key(
     - scope="vault": full-vault walk key.
     - scope="kb" with a non-empty query: BOTH (auto-widen reserves out-of-KB
       slots on every non-empty query).
-    - hybrid/vector modes: each semantic sidecar's `(epoch, generation)` write
-      token (0,0 when absent), since sidecar refreshes change semantic results.
+    - hybrid/vector modes: each semantic sidecar's `(epoch, generation, instance)`
+      write token (0,0,0 when absent), since sidecar refreshes change semantic
+      results.
       Deliberately NOT the sidecar file mtime — WAL-checkpoint timing moves it
       independent of content (spurious misses) and leaves an uncheckpointed commit
       unmoved (STALE hits); the in-band generation changes iff the content did.
