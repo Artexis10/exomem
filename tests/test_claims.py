@@ -13,6 +13,8 @@ The one model-loading test (real bge claim vectors) import-skips without torch.
 
 from __future__ import annotations
 
+import os
+import sqlite3
 from pathlib import Path
 
 import numpy as np
@@ -337,6 +339,259 @@ def test_overlap_warning_byte_identical_without_polarity() -> None:
         "— review: does this restate, refine, or contradict it? supersede the "
         "stale one if they conflict"
     )
+
+
+# ---------------- matrix cache: shared write-generation keying (mirrors #125) ----------------
+#
+# ClaimIndex is the THIRD occurrence of the WAL-mtime cache class (after
+# EmbeddingIndex/ClipIndex in PR #125): a WAL commit does not move the sidecar's
+# main-file mtime — a checkpoint does, at a moment no writer runs — so mtime
+# keying both spuriously reloads (checkpoint with no content change) AND goes
+# stale (uncheckpointed commit leaves the mtime unmoved). These lock the
+# migration onto the in-band write generation. All torch-free (fabricated
+# vectors); assertions count genuine full reloads, never wall-clock.
+#
+# ClaimIndex has NO in-place splice (unlike EmbeddingIndex/ClipIndex): its matrix
+# is small, so every local write NULLS the cache and the next read does one full
+# reload. The out-of-order-patch/contiguity tests therefore do not apply here —
+# there is no `_patch_cache`; the null-on-write behavior is asserted instead.
+
+
+def _fresh_vault(tmp_path: Path) -> Path:
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    return vault
+
+
+def _cvec(*vals: float) -> np.ndarray:
+    out = np.zeros(embeddings.VECTOR_DIM, dtype=np.float32)
+    out[: len(vals)] = vals
+    return out
+
+
+def _claim_row(
+    file_path: str, vec: np.ndarray, *, checksum: str = "cs", mtime: float = 1.0
+) -> tuple[str, str, str, np.ndarray, str | None, str | None, float]:
+    """One `upsert_many` row: `(file_path, claim_text, checksum, vector,
+    page_type, status, mtime)`."""
+    return (file_path, f"{file_path}\n\nclaim", checksum, vec, "insight", "active", mtime)
+
+
+def _count_loads(
+    monkeypatch: pytest.MonkeyPatch, idx: claims.ClaimIndex
+) -> dict[str, int]:
+    """Wrap `idx._load_all_rows` to count genuine full reloads (mirrors the
+    embedding-matrix cache tests)."""
+    calls = {"n": 0}
+    orig = idx._load_all_rows
+
+    def wrapped():
+        calls["n"] += 1
+        return orig()
+
+    monkeypatch.setattr(idx, "_load_all_rows", wrapped)
+    return calls
+
+
+def _bump_mtime(path: Path) -> None:
+    """Push the sidecar mtime clearly forward (coarse Windows resolution) WITHOUT
+    changing content — the WAL-checkpoint symptom in the small."""
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 2_000_000_000))
+
+
+def _make_legacy_claims_sidecar(
+    path: Path,
+    rows: list[tuple[str, str, str, list[float], str | None, str | None, float]],
+) -> None:
+    """Write an OLD `.claims.sqlite`: the `claims` table only, NO `meta` table —
+    exactly what a pre-generation binary left on disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE claims (file_path TEXT NOT NULL PRIMARY KEY, "
+            "claim_text TEXT NOT NULL, checksum TEXT NOT NULL, vector BLOB NOT NULL, "
+            "page_type TEXT, status TEXT, file_mtime REAL NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO claims VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (fp, ct, cs, _cvec(*v).tobytes(), pt, st, mt)
+                for fp, ct, cs, v, pt, st, mt in rows
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _claims_meta_exists(path: Path) -> bool:
+    conn = sqlite3.connect(path)
+    try:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
+
+
+def test_claim_matrix_loads_once_and_is_reused(tmp_path, monkeypatch) -> None:
+    """A quiescent claim sidecar loads the matrix once, then every read reuses it."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0)), _claim_row("b.md", _cvec(0, 1))])
+
+    count = _count_loads(monkeypatch, idx)
+    metadata = matrix = None
+    for _ in range(5):
+        metadata, matrix = idx.all_claims()
+    assert count["n"] == 1  # loaded once, not per call
+    assert matrix.shape[0] == 2
+    assert [m[0] for m in metadata] == ["a.md", "b.md"]
+
+
+def test_claim_utime_bump_alone_does_not_reload(tmp_path, monkeypatch) -> None:
+    """A sidecar mtime bump with NO content change must not invalidate the cache
+    (the WAL-checkpoint symptom). RED on the old mtime-keyed ClaimIndex."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
+    idx.all_claims()  # warm; cache keyed on generation
+
+    count = _count_loads(monkeypatch, idx)
+    _bump_mtime(idx.path)  # move mtime WITHOUT changing content
+    idx.all_claims()
+    idx.all_claims()
+    assert count["n"] == 0  # generation unchanged -> served from cache, no reload
+
+
+def test_claim_local_write_nulls_cache_then_reloads_once(tmp_path, monkeypatch) -> None:
+    """ClaimIndex has NO in-place splice — the small matrix is nulled on every
+    local write. Assert that behavior survives the generation migration: a write
+    drops the cache to None and the next read does exactly one converging reload."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
+    idx.all_claims()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    idx.upsert_many([_claim_row("b.md", _cvec(0, 1), mtime=2.0)])
+    with idx._lock:
+        assert idx._cache is None  # nulled on write, never spliced
+    metadata, matrix = idx.all_claims()
+    assert count["n"] == 1  # one reload after the write
+    assert [m[0] for m in metadata] == ["a.md", "b.md"]
+    idx.all_claims()
+    assert count["n"] == 1  # reused after the reload
+
+
+def test_claim_external_writer_detected_via_generation(tmp_path, monkeypatch) -> None:
+    """A second instance's write bumps the on-disk generation; the shared index
+    detects it and serves the new rows — with NO mtime bump needed."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])
+    idx.all_claims()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    external = claims.ClaimIndex(vault)
+    external.upsert_many([_claim_row("b.md", _cvec(0, 1), mtime=2.0)])  # bumps DB generation
+
+    metadata, matrix = idx.all_claims()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["a.md", "b.md"]
+    idx.all_claims()
+    assert count["n"] == 1  # second read reuses the reloaded cache
+
+
+def test_claim_external_delete_detected_via_generation(tmp_path, monkeypatch) -> None:
+    """An external delete bumps the generation; the row is dropped on next read."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0)), _claim_row("b.md", _cvec(0, 1))])
+    idx.all_claims()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    external = claims.ClaimIndex(vault)
+    external.delete("a.md")  # bumps DB generation
+
+    metadata, matrix = idx.all_claims()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["b.md"]
+    assert matrix.shape[0] == 1
+
+
+def test_claim_sidecar_deleted_and_recreated_aba_detected_via_instance(
+    tmp_path, monkeypatch
+) -> None:
+    """F3 ABA guard: a sidecar deleted and recreated from scratch restarts its
+    (epoch, generation) counters, so a still-warm cache could coincidentally match
+    the NEW file's early tokens. The random `instance` nonce catches it even when
+    (epoch, gen) coincide."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("old.md", _cvec(1, 0))])  # generation 1
+    idx.all_claims()  # warm
+    old_instance = idx._cache.instance
+    old_gen = idx._cache.generation
+
+    count = _count_loads(monkeypatch, idx)
+    for suffix in ("", "-wal", "-shm"):
+        p = idx.path.with_name(idx.path.name + suffix)
+        if p.exists():
+            p.unlink()
+    fresh = claims.ClaimIndex(vault)
+    fresh.upsert_many([_claim_row("new.md", _cvec(0, 1), mtime=5.0)])  # new file's gen -> 1
+
+    new_epoch, new_gen, new_instance = embeddings._peek_sidecar_token(idx.path)
+    assert new_gen == old_gen  # (epoch, gen) ALONE would have looked "fresh"
+    assert new_instance != old_instance  # the instance nonce catches it
+
+    metadata, matrix = idx.all_claims()
+    assert count["n"] == 1  # detected via instance mismatch -> reloaded
+    assert [m[0] for m in metadata] == ["new.md"]  # NEW file's rows, never stale "old.md"
+
+
+def test_claim_legacy_sidecar_migrates_and_mtime_fallback_invalidates(
+    tmp_path, monkeypatch
+) -> None:
+    """A pre-meta `.claims.sqlite` reads generation 0; the meta table migrates in
+    on first connect, the cache retains mtime-keyed invalidation (version-skew
+    fallback) until a gen-bumping write, and an mtime bump still invalidates."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    _make_legacy_claims_sidecar(
+        idx.path, [("a.md", "a.md\n\nclaim", "cs", [1, 0], "insight", "active", 1.0)]
+    )
+    assert not _claims_meta_exists(idx.path)  # legacy: no meta table yet
+
+    count = _count_loads(monkeypatch, idx)
+    metadata, matrix = idx.all_claims()  # migrates meta, loads at generation 0
+    assert [m[0] for m in metadata] == ["a.md"]
+    assert idx._cache.generation == 0  # legacy sidecar reads generation 0
+    assert count["n"] == 1
+    assert _claims_meta_exists(idx.path)  # migration created the meta table
+
+    _bump_mtime(idx.path)  # gen==0 fallback: a bare mtime bump STILL invalidates
+    idx.all_claims()
+    assert count["n"] == 2
+
+
+def test_claim_sidecar_uses_wal(tmp_path) -> None:
+    """WAL is what lets a reader proceed without blocking a concurrent writer."""
+    vault = _fresh_vault(tmp_path)
+    idx = claims.ClaimIndex(vault)
+    idx.upsert_many([_claim_row("a.md", _cvec(1, 0))])  # creates the sidecar
+    conn = sqlite3.connect(idx.path)
+    try:
+        mode = conn.execute("PRAGMA journal_mode").fetchone()[0]
+    finally:
+        conn.close()
+    assert mode.lower() == "wal"
 
 
 # ---------------- semantic (model-loading) ----------------
