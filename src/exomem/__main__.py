@@ -191,6 +191,13 @@ def _index_main(argv: list[str]) -> int:
         help="chunks per embedding batch (default: 256)",
     )
     parser.add_argument(
+        "--device", choices=("auto", "cpu", "gpu"), default=None,
+        help="embedding device for this run. Default: GPU when a capable one is present "
+        "and the mode isn't 'quiet' (this is a short-lived process, so it frees the CUDA "
+        "context on exit — safe even on a CPU-default server). 'cpu' forces CPU; 'gpu'/"
+        "'auto' opt in with the marginal-VRAM guard.",
+    )
+    parser.add_argument(
         "--dry-run", action="store_true",
         help="report what would be (re)embedded and pruned; write nothing",
     )
@@ -204,7 +211,7 @@ def _index_main(argv: list[str]) -> int:
         os.environ["EXOMEM_INDEX_SCOPE"] = args.scope
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")
-    from . import embeddings
+    from . import accel, embeddings
 
     # A real run needs the model; --dry-run only walks + reads the sidecar, so it
     # stays fast and works in stripped/embeddings-disabled environments.
@@ -215,6 +222,17 @@ def _index_main(argv: list[str]) -> int:
                 file=sys.stderr,
             )
             return 2
+        # Pick the embedding device for THIS one-shot process (accel.bulk_device):
+        # explicit --device wins; else GPU when capable and not quiet. A short-lived
+        # CLI process frees the CUDA context on exit, so GPU here is safe even on a
+        # normal-mode (CPU-default) server — this is how onboarding gets GPU speed
+        # without leaving a resident context floor.
+        bulk = accel.bulk_device(args.device)
+        if bulk:
+            os.environ["EXOMEM_EMBED_DEVICE"] = bulk
+        logging.getLogger(__name__).info(
+            "index: embedding on %s", accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
+        )
         try:
             embeddings.get_model()
         except Exception as e:  # noqa: BLE001 — surface a clean CLI error

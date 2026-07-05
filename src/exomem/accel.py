@@ -202,3 +202,36 @@ def pipeline_device(**kwargs):
     if device == "cpu":
         return -1
     return device  # "mps", or an explicit override like "cuda:1"
+
+
+def cuda_if_performance() -> str:
+    """``"cuda"`` | ``"cpu"`` for non-torch engines that bypass `select_device`.
+
+    The CTranslate2 ASR engine (faster-whisper) and the diarizer sidecar can't use
+    MPS, and they own their own device argument rather than routing through
+    `select_device`. This gives them the SAME mode-aware policy: CUDA only in
+    performance mode with a capable GPU, CPU otherwise (the default) — so a
+    normal/quiet server doesn't preload a ~3 GB Whisper model onto the GPU at boot.
+    """
+    if mode_module.resolve_mode() == "performance" and gpu_usable():
+        return "cuda"
+    return "cpu"
+
+
+def bulk_device(explicit: str | None = None) -> str | None:
+    """Device to set as ``EXOMEM_EMBED_DEVICE`` for a one-shot bulk index (the
+    ``exomem index`` CLI), or ``None`` to leave the CPU-default mode policy.
+
+    An explicit ``--device`` wins verbatim. Otherwise: GPU when a capable GPU is
+    present AND the mode isn't quiet — safe even on a normal-mode box because the
+    ``exomem index`` process is short-lived and frees the CUDA context on exit
+    (unlike the long-lived server, which stays CPU to avoid a resident context
+    floor). Quiet mode always stays on CPU (don't grab the GPU mid-game). The
+    returned value is understood by `select_device` (``"cpu"``/``"cuda"``/``"gpu"``/
+    ``"auto"``); ``"gpu"`` is probe-gated so it degrades if the GPU went marginal.
+    """
+    if explicit:
+        return explicit
+    if mode_module.resolve_mode() != "quiet" and gpu_usable():
+        return "gpu"
+    return None
