@@ -308,45 +308,17 @@ class FileWatcher:
         """Dispatch the coalesced batch: publish freshness/inbound for every
         changed path (vault-wide), and re-embed only the Knowledge Base subset."""
         ups, del_rels = self._drain()
+        if not (ups or del_rels):
+            return
 
-        # Freshness + inbound: the whole vault, since both index sibling folders too.
-        if ups or del_rels:
-            deleted_paths = [self._vault_root / r for r in del_rels]
-            try:
-                freshness.on_files_changed(self._vault_root, changed=ups, deleted=deleted_paths)
-            except Exception:  # noqa: BLE001 — a bad batch must never kill the watcher
-                log.exception("file watcher: freshness publish failed")
-            up_rels = [r for r in (self._rel(p) for p in ups) if r]
-            try:
-                from . import vault as vault_module
-
-                vault_module.on_inbound_files_changed(
-                    self._vault_root, up_rels, del_rels
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("file watcher: inbound publish failed")
-            try:
-                from . import find as find_module
-
-                find_module.on_resolver_files_changed(
-                    self._vault_root, up_rels, del_rels
-                )
-            except Exception:  # noqa: BLE001
-                log.exception("file watcher: resolver publish failed")
-
-        # Index sidecars (embedding + lexical): Knowledge Base markdown only.
-        kb_ups = [p for p in ups if self._is_kb(p)]
-        kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
-        if kb_ups:
-            try:
-                index_sync.upsert_after_write(self._vault_root, kb_ups)
-            except Exception:  # noqa: BLE001
-                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
-        if kb_del_rels:
-            try:
-                index_sync.delete_after_remove(self._vault_root, kb_del_rels)
-            except Exception:  # noqa: BLE001
-                log.exception("file watcher: delete_after_remove failed for %d file(s)", len(kb_del_rels))
+        # Freshness: the whole vault, since both index sibling folders too.
+        deleted_paths = [self._vault_root / r for r in del_rels]
+        try:
+            freshness.on_files_changed(self._vault_root, changed=ups, deleted=deleted_paths)
+        except Exception:  # noqa: BLE001 — a bad batch must never kill the watcher
+            log.exception("file watcher: freshness publish failed")
+        up_rels = [r for r in (self._rel(p) for p in ups) if r]
+        self._dispatch_batch(ups, up_rels, del_rels, cap=False)
 
     # ---- debounce loop ----
 
@@ -441,23 +413,63 @@ class FileWatcher:
 
         Mirrors `_flush` MINUS the freshness publish — `reconcile` already
         replaced the freshness map, so re-publishing it would be redundant. The
-        delta paths are the registry map's own absolute-path-string keys. A path
-        that matches a still-live self-write registration is dropped: the writer
-        already fanned it out via `register_self_write`, so re-dispatching would
-        double-embed (normally moot — the 30s suppression TTL has expired by the
-        300s reconcile — but correct under a tight race)."""
+        delta paths are the registry map's own absolute-path-string keys.
+
+        The kb/vault scope walks that produced `changed`/`deleted` are two
+        separate, non-atomic snapshots — a file deleted+recreated (or vice
+        versa) between them can land in BOTH lists. Resolve that split-brain by
+        trusting the filesystem NOW: a path present in both is routed by
+        `Path(sp).exists()` (exists -> changed only, absent -> deleted only), so
+        a live file never loses its index rows to a delete dispatched after its
+        upsert.
+
+        A path that matches a still-live self-write registration is dropped:
+        the writer already fanned it out via `register_self_write`, so
+        re-dispatching would double-embed (normally moot — the 30s suppression
+        TTL has expired by the 300s reconcile — but correct under a tight
+        race)."""
+        changed_set = set(changed)
+        deleted_set = set(deleted)
+        for sp in changed_set & deleted_set:
+            if Path(sp).exists():
+                deleted_set.discard(sp)
+            else:
+                changed_set.discard(sp)
+
         changed_paths = [
             p
-            for p in (Path(sp) for sp in changed)
+            for p in (Path(sp) for sp in changed_set)
             if not _is_self_write_event(self._vault_root, p, deleted=False)
         ]
         deleted_paths = [
             p
-            for p in (Path(sp) for sp in deleted)
+            for p in (Path(sp) for sp in deleted_set)
             if not _is_self_write_event(self._vault_root, p, deleted=True)
         ]
         up_rels = [r for r in (self._rel(p) for p in changed_paths) if r]
         del_rels = [r for r in (self._rel(p) for p in deleted_paths) if r]
+        self._dispatch_batch(changed_paths, up_rels, del_rels, cap=True)
+
+    def _dispatch_batch(
+        self,
+        ups: list[Path],
+        up_rels: list[str],
+        del_rels: list[str],
+        *,
+        cap: bool,
+    ) -> None:
+        """Shared fan-out tail for `_flush` and `_dispatch_reconcile_delta`:
+        inbound publish -> resolver publish -> KB-filtered index_sync
+        upsert/delete. Each step keeps its own exception guard — a bad batch
+        must never kill the watcher or the reconcile loop.
+
+        `cap`: when True (reconcile only), the KB re-embed list fed to
+        `index_sync.upsert_after_write` is bounded by
+        `RECONCILE_MAX_EMBED_FILES` and logs when exceeded — the resolver and
+        inbound publishes still get the FULL lists regardless of `cap`; only
+        the embed dispatch is ever bounded, and the freshness/registry maps are
+        always fully healed independent of this cap.
+        """
         if not (up_rels or del_rels):
             return
 
@@ -469,18 +481,18 @@ class FileWatcher:
 
             vault_module.on_inbound_files_changed(self._vault_root, up_rels, del_rels)
         except Exception:  # noqa: BLE001
-            log.exception("file watcher: reconcile inbound publish failed")
+            log.exception("file watcher: inbound publish failed")
         try:
             from . import find as find_module
 
             find_module.on_resolver_files_changed(self._vault_root, up_rels, del_rels)
         except Exception:  # noqa: BLE001
-            log.exception("file watcher: reconcile resolver publish failed")
+            log.exception("file watcher: resolver publish failed")
 
         # Index sidecars (embedding + lexical): Knowledge Base markdown only.
-        kb_ups = [p for p in changed_paths if self._is_kb(p)]
+        kb_ups = [p for p in ups if self._is_kb(p)]
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
-        if len(kb_ups) > RECONCILE_MAX_EMBED_FILES:
+        if cap and len(kb_ups) > RECONCILE_MAX_EMBED_FILES:
             log.warning(
                 "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
                 "the freshness registry is fully healed — run `reconcile` to re-embed "
@@ -492,18 +504,12 @@ class FileWatcher:
             try:
                 index_sync.upsert_after_write(self._vault_root, kb_ups)
             except Exception:  # noqa: BLE001
-                log.exception(
-                    "file watcher: reconcile upsert_after_write failed for %d file(s)",
-                    len(kb_ups),
-                )
+                log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
         if kb_del_rels:
             try:
                 index_sync.delete_after_remove(self._vault_root, kb_del_rels)
             except Exception:  # noqa: BLE001
-                log.exception(
-                    "file watcher: reconcile delete_after_remove failed for %d file(s)",
-                    len(kb_del_rels),
-                )
+                log.exception("file watcher: delete_after_remove failed for %d file(s)", len(kb_del_rels))
 
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own

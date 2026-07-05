@@ -398,3 +398,42 @@ def test_reconcile_dispatch_suppresses_registered_self_write(
 
     assert ups == [] and dels == []
     assert inbound == [] and resolver == []
+
+
+def test_reconcile_delta_conflict_existing_file_routes_as_changed_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The kb/vault scope walks are two separate, non-atomic snapshots — a file
+    deleted+recreated between them can appear in BOTH the changed and deleted
+    delta lists in the same cycle. Split-brain must resolve by trusting the
+    filesystem now: a path that exists is dispatched as changed ONLY, never
+    also as a delete (a delete-after-upsert would strip a live file's index
+    rows until the next drift cycle re-surfaces it)."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "split-brain-exists.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("# split brain\n", encoding="utf-8")
+
+    w._dispatch_reconcile_delta([str(p)], [str(p)])
+
+    assert len(ups) == 1 and ups[0] == [p]
+    assert dels == []
+
+
+def test_reconcile_delta_conflict_missing_file_routes_as_deleted_only(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mirror case: a path present in both lists that is ABSENT on disk must
+    dispatch as a delete only, never also as an upsert."""
+    file_watcher.clear_self_write_registry()
+    ups, dels = _stub_embeddings(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    p = vault / "Knowledge Base" / "Notes" / "split-brain-gone.md"
+    # Deliberately never created — absent on disk.
+
+    w._dispatch_reconcile_delta([str(p)], [str(p)])
+
+    assert ups == []
+    assert dels == [["Knowledge Base/Notes/split-brain-gone.md"]]
