@@ -413,8 +413,11 @@ class LexicalStore:
             return None
 
     def _walk_matches_rows(self, conn: sqlite3.Connection, scope: str) -> bool:
-        """Exact (path, mtime_ns) comparison of the scope's walk vs stored rows."""
-        members, mtimes = self._walk_entries()
+        """Exact (path, mtime_ns) comparison of the scope's current set vs stored
+        rows — reads the live freshness registry when available (no filesystem
+        walk), else walks. Obsidian-Sync edits preserve mtimes, so this verify
+        path is the one a real out-of-band edit hits; it must be walk-free too."""
+        members, mtimes = self._delta_source()
         idx = 1 if scope == "vault" else 0
         walked = {
             (rel, mtimes[p])
