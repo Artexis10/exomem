@@ -139,7 +139,7 @@ def _is_embeddable_path(path: Path) -> bool:
 
 
 def get_model():
-    """Lazy singleton. Device via `accel.select_device` (CUDA > MPS > CPU)."""
+    """Lazy singleton. Device via `accel.select_device` — CPU-default, `EXOMEM_EMBED_DEVICE` opts in."""
     global _MODEL
     if _MODEL is not None:
         return _MODEL
@@ -150,14 +150,14 @@ def get_model():
         # pay this cost.
         from sentence_transformers import SentenceTransformer
 
-        device = accel.select_device()
+        device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
         log.info("loading embedding model %s on %s", MODEL_NAME, device)
         _MODEL = _maybe_half(SentenceTransformer(MODEL_NAME, device=device), device)
     return _MODEL
 
 
 def get_reranker():
-    """Lazy singleton for the cross-encoder reranker. Device via `accel.select_device`."""
+    """Lazy singleton for the cross-encoder reranker. Shares the text-path device (`EXOMEM_EMBED_DEVICE`)."""
     global _RERANKER
     if _RERANKER is not None:
         return _RERANKER
@@ -166,7 +166,7 @@ def get_reranker():
             return _RERANKER
         from sentence_transformers import CrossEncoder
 
-        device = accel.select_device()
+        device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
         _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
     return _RERANKER

@@ -320,7 +320,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
     # add-instant-start-boot). EXOMEM_EAGER_BOOT=1 restores the old blocking
     # boot (rollback lever for deploys); EXOMEM_DISABLE_WARMUP skips warm-up
     # entirely (pure lazy).
-    from . import warmup
+    from . import mode, warmup
+    log.info("compute policy: %s", mode.resolved())
     if warmup.warmup_enabled():
         if os.environ.get("EXOMEM_EAGER_BOOT"):
             warmup.warm_all(vault_root)

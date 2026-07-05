@@ -17,13 +17,19 @@ FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
 @pytest.fixture(autouse=True)
-def _disable_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Skip the heavy bge-base load by default in the test suite.
 
     Individual tests that exercise embeddings (test_hybrid_search.py)
     delete this env var via their own monkeypatch.
     """
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    # Isolate compute-mode resolution from the developer's real ~/.exomem/config.json
+    # and any ambient EXOMEM_MODE/EXOMEM_DEVICE — the suite must resolve to the
+    # `normal` default deterministically (device selection now consults mode.py).
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "no-such-exomem-config.json"))
+    for _var in ("EXOMEM_MODE", "EXOMEM_QUIET_MODE", "EXOMEM_DEVICE", "EXOMEM_GPU_MIN_FREE_GB"):
+        monkeypatch.delenv(_var, raising=False)
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
     # Never spawn the background warm thread from build_server in tests — it
     # would outlive the per-test tmp vault. Warm/readiness tests manage their
