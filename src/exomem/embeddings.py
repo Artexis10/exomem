@@ -878,6 +878,116 @@ def _file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
     return ins, ins
 
 
+# --------------------------------------------------------------- generation meta
+#
+# The matrix caches key on an in-band WRITE GENERATION, not the sidecar file's
+# mtime. The sidecars are WAL sqlite: a commit does NOT move the main file's
+# mtime — a CHECKPOINT does, and under concurrent connections the checkpoint
+# fires whenever the last connection (often a pure reader) closes, at a moment no
+# writer runs. So mtime-keyed invalidation BOTH spuriously misses (a checkpoint
+# with no content change) AND goes stale (an uncheckpointed commit leaves the
+# mtime unmoved). A `meta(key, value)` row bumped inside each write's own
+# transaction changes iff the content did. Third occurrence of this class in the
+# repo; precedent + rationale: lexstore.cache_token.
+
+
+def _ensure_meta_table(
+    conn: sqlite3.Connection, data_table: str, sidecar_name: str
+) -> None:
+    """Create the `meta(key, value)` generation table if absent (idempotent).
+
+    Logs ONCE when the table is first created over an EXISTING non-empty sidecar
+    (a legacy DB written before this binary): its generation reads 0 until the
+    first gen-bumping write, and the caches fall back to mtime keying meanwhile.
+    """
+    existed = (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+        ).fetchone()
+        is not None
+    )
+    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
+    if not existed:
+        # data_table is a trusted literal ("chunks"/"images"), never user input.
+        has_rows = (
+            conn.execute(f"SELECT 1 FROM {data_table} LIMIT 1").fetchone() is not None
+        )
+        if has_rows:
+            log.info(
+                "%s: created generation-meta over an existing non-empty sidecar "
+                "(legacy migration; mtime-keyed cache until the first gen-bumping write)",
+                sidecar_name,
+            )
+
+
+def _read_generation(conn: sqlite3.Connection) -> tuple[int, int]:
+    """Return `(epoch, generation)` from the sidecar's meta table.
+
+    A missing key reads as 0 — a legacy sidecar, or a fresh one before its first
+    gen-bumping write. One SELECT is one implicit snapshot, so the pair is
+    internally consistent even in autocommit.
+    """
+    rows = conn.execute(
+        "SELECT key, value FROM meta WHERE key IN ('epoch', 'generation')"
+    ).fetchall()
+    d = {k: v for k, v in rows}
+    return int(d.get("epoch") or 0), int(d.get("generation") or 0)
+
+
+def _bump_meta(conn: sqlite3.Connection, key: str) -> int:
+    """Increment `meta[key]` inside the caller's OPEN write txn; return the new value.
+
+    UPDATE-then-INSERT (never `INSERT OR REPLACE` with a subselect, which yields
+    NULL on the missing row). The read-back is stable because the caller holds the
+    write lock for the whole transaction.
+    """
+    cur = conn.execute("UPDATE meta SET value = value + 1 WHERE key = ?", (key,))
+    if cur.rowcount == 0:
+        conn.execute("INSERT INTO meta (key, value) VALUES (?, 1)", (key,))
+    return int(
+        conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()[0]
+    )
+
+
+def _reload_reason(old_cache: tuple | None, new_epoch: int, new_gen: int) -> str:
+    """Observability tag for a full matrix load: cold|legacy|epoch|genuine.
+
+    The `old_cache` tuple's [0] element is its captured epoch. This log line is
+    the blind spot that made the WAL-mtime bug cost two debugging sessions — every
+    full reload now says WHY, greppable in logs/exomem.log.
+    """
+    if old_cache is None:
+        return "cold"
+    if new_gen == 0:
+        return "legacy"  # gen-0 sidecar: reload was mtime-triggered (version-skew fallback)
+    if new_epoch != old_cache[0]:
+        return "epoch"  # a rebuild_all re-embed bumped the epoch
+    return "genuine"  # generation advanced — an external incremental write
+
+
+def _sidecar_cache_token(path: Path) -> tuple[int, int]:
+    """`(epoch, generation)` read READ-ONLY from a sidecar; `(0, 0)` when the file
+    is absent or predates the meta table. Never creates the sidecar or its tables —
+    a plain connection, not `_connect()`, so a find on a KB with no sidecar stays
+    a no-op. Shared by `EmbeddingIndex.cache_token` / `ClipIndex.cache_token`."""
+    if not path.exists():
+        return (0, 0)
+    try:
+        conn = sqlite3.connect(path)
+        try:
+            has_meta = (
+                conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+                ).fetchone()
+                is not None
+            )
+            return _read_generation(conn) if has_meta else (0, 0)
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return (0, 0)
+
+
 def _vec_gate(index, conn: sqlite3.Connection) -> bool:
     """Shared vec0 policy ladder for EmbeddingIndex/ClipIndex on one connection.
 
@@ -912,9 +1022,10 @@ class EmbeddingIndex:
     """Per-vault sqlite sidecar holding chunk-level vectors.
 
     The matrix returned by `all_vectors()` is cached per-process and
-    invalidated by the sidecar's own mtime — any writer that ran
-    `upsert_file()` advances the mtime, so the next search call reloads.
-    When the vec0 backend is active (`vecstore`), `search()` is served by a
+    invalidated by an in-band WRITE GENERATION (a `meta` row bumped inside every
+    write's own transaction), NOT the sidecar mtime — see the generation-meta
+    note above for why WAL-checkpoint timing makes mtime keying both spuriously
+    miss and go stale. When the vec0 backend is active (`vecstore`), `search()` is served by a
     SQL-native KNN over shadow tables in the same sidecar instead, and this
     matrix stays cold — `all_vectors()` remains for audit's all-pairs sweep
     and the numpy fallback.
@@ -930,7 +1041,11 @@ class EmbeddingIndex:
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
         self.path = sidecar_path(vault_root)
-        self._cache: tuple[float, list[tuple[str, int]], np.ndarray] | None = None
+        # (epoch, generation, mtime, metadata, matrix). Keyed on (epoch, gen);
+        # mtime is retained only for the gen==0 legacy-sidecar fallback.
+        self._cache: (
+            tuple[int, int, float, list[tuple[str, int]], np.ndarray] | None
+        ) = None
         # Guards in-memory cache mutation only (never held across a sqlite write).
         # Reentrant so rebuild_all()-style nesting can't self-deadlock.
         self._lock = threading.RLock()
@@ -956,6 +1071,7 @@ class EmbeddingIndex:
             )
             """
         )
+        _ensure_meta_table(conn, "chunks", self.path.name)
         return conn
 
     def upsert_file(
@@ -992,6 +1108,9 @@ class EmbeddingIndex:
                     )
                     if vec_on:
                         self._vec.dual_insert(conn, "file_path = ?", (rel_path,))
+                # Bump the write generation INSIDE this txn — the read-back is
+                # stable under the write lock. The cache keys on it, not the mtime.
+                own_gen = _bump_meta(conn, "generation")
         finally:
             conn.close()
         # Patch the shared in-memory matrix in place instead of nulling it, so a
@@ -999,7 +1118,7 @@ class EmbeddingIndex:
         # numpy-lite: metadata rows carry no chunk text (see class docstring).
         new_meta = [(rel_path, i) for i in range(len(chunks))]
         new_vecs = np.asarray(vectors, dtype=np.float32) if chunks else None
-        self._patch_cache(rel_path, new_meta, new_vecs)
+        self._patch_cache(rel_path, new_meta, new_vecs, own_gen)
 
     def delete_file(self, rel_path: str) -> None:
         conn = self._connect()
@@ -1009,17 +1128,27 @@ class EmbeddingIndex:
                 if vec_on:
                     self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
+                own_gen = _bump_meta(conn, "generation")
         finally:
             conn.close()
-        self._patch_cache(rel_path, [], None)
+        self._patch_cache(rel_path, [], None, own_gen)
 
     def _patch_cache(
         self,
         rel_path: str,
-        new_meta: list[tuple[str, int, str]],
+        new_meta: list[tuple[str, int]],
         new_vecs: np.ndarray | None,
+        own_gen: int,
     ) -> None:
         """Splice one file's rows into the cached matrix (copy-on-write).
+
+        `own_gen` is the writer's OWN in-transaction generation. The file's rows
+        are ALWAYS spliced (this write's commit is durable). The cached generation
+        advances ONLY when this write is contiguous with the cache
+        (`own_gen == cached + 1`): a gap means another writer committed rows this
+        splice never saw, so claiming `own_gen` would let the cache serve a
+        generation whose rows it lacks (never use `max()`). On a gap the cache
+        keeps its generation and the next `all_vectors()` full-reload converges.
 
         Builds fresh `metadata`/`matrix` and atomically swaps `self._cache`; never
         mutates the arrays a concurrent reader may be holding. Best-effort: any
@@ -1031,12 +1160,7 @@ class EmbeddingIndex:
             if c is None:
                 return
             try:
-                new_mtime = self.path.stat().st_mtime
-            except OSError:
-                self._cache = None
-                return
-            try:
-                _, metadata, matrix = c
+                c_epoch, c_gen, c_mtime, metadata, matrix = c
                 lo, hi = _file_block([m[0] for m in metadata], rel_path)
                 new_metadata = metadata[:lo] + list(new_meta) + metadata[hi:]
                 parts = [matrix[:lo]]
@@ -1054,62 +1178,107 @@ class EmbeddingIndex:
                         f"splice invariant broken for {rel_path}: "
                         f"{len(new_metadata)} meta rows vs {new_matrix.shape[0]} vectors"
                     )
-                self._cache = (new_mtime, new_metadata, new_matrix)
+                next_gen = own_gen if own_gen == c_gen + 1 else c_gen
+                self._cache = (c_epoch, next_gen, c_mtime, new_metadata, new_matrix)
             except Exception as e:  # noqa: BLE001 — self-heal, never break a write
                 log.warning("embedding matrix splice failed (%s); dropping cache", e)
                 self._cache = None
 
+    def _read_token(self) -> tuple[int, int]:
+        """Read `(epoch, generation)` from the sidecar — the cheap freshness probe
+        every `all_vectors()` pays (~2ms on the real sidecar). No sidecar creation:
+        callers gate on `self.path.exists()` first."""
+        conn = self._connect()
+        try:
+            return _read_generation(conn)
+        finally:
+            conn.close()
+
+    def _cache_matches(self, c: tuple, epoch: int, gen: int) -> bool:
+        """Does cache tuple `c` still serve for on-disk `(epoch, gen)`?
+
+        gen >= 1 → trust the generation only. gen == 0 (legacy sidecar, pre-meta)
+        → version-skew fallback to today's mtime keying until a gen-bumping write.
+        """
+        c_epoch, c_gen, c_mtime = c[0], c[1], c[2]
+        if gen >= 1:
+            return c_gen == gen and c_epoch == epoch
+        try:
+            return c_mtime == self.path.stat().st_mtime
+        except OSError:
+            return False
+
     def all_vectors(self) -> tuple[list[tuple[str, int]], np.ndarray]:
-        """Return `(metadata, matrix)` cached until the sidecar mtime advances.
+        """Return `(metadata, matrix)` cached until the sidecar's write generation
+        (or epoch) advances — NOT its mtime (see the class + generation-meta notes).
 
         metadata[i] = (file_path, chunk_idx); matrix[i] = vector. Chunk text
         is deliberately NOT here (numpy-lite — see class docstring); fetch the
         winners' texts via `_texts_for` when needed.
         """
-        try:
-            sidecar_mtime = self.path.stat().st_mtime
-        except FileNotFoundError:
+        if not self.path.exists():
             return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        epoch, gen = self._read_token()
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
-        # reads, and `self._cache[0]` then `self._cache[1]` would race (TypeError on
-        # a mid-flight None). This fast path takes no lock — the common case.
+        # reads. This fast path takes no lock — the common case.
         c = self._cache
-        if c is not None and c[0] == sidecar_mtime:
-            return c[1], c[2]
+        if c is not None and self._cache_matches(c, epoch, gen):
+            return c[3], c[4]
         with self._lock:
-            c = self._cache  # re-check under the lock; another thread may have loaded
-            if c is not None and c[0] == sidecar_mtime:
-                return c[1], c[2]
-            metadata, matrix = self._load_all_rows()
-            self._cache = (sidecar_mtime, metadata, matrix)
+            # Re-read the token under the lock so the double-check compares the
+            # cache against the CURRENT on-disk generation: a thread that just
+            # loaded while we waited leaves a cache our pre-lock token can't match.
+            epoch, gen = self._read_token()
+            c = self._cache
+            if c is not None and self._cache_matches(c, epoch, gen):
+                return c[3], c[4]
+            s_epoch, s_gen, mtime, metadata, matrix = self._load_all_rows()
+            log.info(
+                "embedding matrix full load: reason=%s rows=%d gen=%d epoch=%d",
+                _reload_reason(c, s_epoch, s_gen), len(metadata), s_gen, s_epoch,
+            )
+            self._cache = (s_epoch, s_gen, mtime, metadata, matrix)
             return metadata, matrix
 
-    def _load_all_rows(self) -> tuple[list[tuple[str, int]], np.ndarray]:
-        """Full reload of every row from the sidecar → `(metadata, matrix)`.
+    def _load_all_rows(
+        self,
+    ) -> tuple[int, int, float, list[tuple[str, int]], np.ndarray]:
+        """Full reload from the sidecar → `(epoch, gen, mtime, metadata, matrix)`.
 
-        This is the O(vault) `SELECT` + `np.stack` the incremental cache exists to
-        avoid paying per find. Isolated as a named method so tests can count how
-        often a genuine full reload happens. numpy-lite: chunk text is neither
-        SELECTed nor retained (it dominated both the reload I/O and the resident
-        cost at scale); file_path strings are interned so N rows of one file
-        share a single str object.
+        Reads the meta generation AND the rows inside ONE explicit `BEGIN` so they
+        are a single consistent snapshot — python sqlite3 in autocommit runs each
+        bare SELECT in its OWN snapshot, so a naive two-statement read could pair a
+        generation with rows from a different write. This is the O(vault) `SELECT`
+        + `np.stack` the incremental cache exists to avoid paying per find; kept a
+        named method so tests can count genuine full reloads. numpy-lite: chunk
+        text is neither SELECTed nor retained; file_path strings are interned so N
+        rows of one file share a single str object.
         """
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT file_path, chunk_idx, vector FROM chunks "
-                "ORDER BY file_path, chunk_idx"
-            ).fetchall()
+            conn.execute("BEGIN")
+            try:
+                epoch, gen = _read_generation(conn)
+                rows = conn.execute(
+                    "SELECT file_path, chunk_idx, vector FROM chunks "
+                    "ORDER BY file_path, chunk_idx"
+                ).fetchall()
+            finally:
+                conn.rollback()  # read-only txn — release the snapshot
         finally:
             conn.close()
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
         if not rows:
-            return [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
+            return epoch, gen, mtime, [], np.zeros((0, VECTOR_DIM), dtype=np.float32)
         metadata: list[tuple[str, int]] = []
         vectors: list[np.ndarray] = []
         for fp, idx, blob in rows:
             metadata.append((sys.intern(fp), idx))
             vectors.append(np.frombuffer(blob, dtype=np.float32))
-        return metadata, np.stack(vectors, axis=0)
+        return epoch, gen, mtime, metadata, np.stack(vectors, axis=0)
 
     def search(
         self, query_vec: np.ndarray, k: int
@@ -1325,26 +1494,52 @@ class EmbeddingIndex:
                     # bulk analog of the per-file dual-write.
                     self._vec.wipe(conn)
                     self._vec.repopulate_all(conn)
+                # Bump generation (monotonic write counter) AND epoch (re-embed
+                # marker) in the FINAL txn only — never the wipe txn above, so a
+                # reader between wipe and this commit keeps serving its consistent
+                # pre-rebuild cache instead of catching the empty intermediate.
+                # epoch catches re-embeds that changed no file mtimes.
+                _bump_meta(conn, "generation")
+                _bump_meta(conn, "epoch")
         finally:
             conn.close()
         with self._lock:
             self._cache = None
         return total
 
+    @staticmethod
+    def cache_token(vault_root: Path) -> tuple[int, int]:
+        """`(epoch, generation)` for this vault's embedding sidecar — the freshness
+        signal find keys its hot cache on. `(0, 0)` when the sidecar is absent or
+        pre-meta (legacy); find's walk triples cover invalidation meanwhile.
+
+        Deliberately NOT the sidecar file's mtime: WAL-checkpoint timing moves the
+        mtime independent of content (spurious misses) and an uncheckpointed commit
+        leaves it unmoved (stale hits). The in-band generation is bumped inside
+        every write's transaction, so it changes iff the content did. Precedent and
+        rationale: lexstore.cache_token. Read-only: never creates the sidecar.
+        """
+        path = sidecar_path(vault_root)
+        return _sidecar_cache_token(path)
+
 
 class ClipIndex:
     """Per-vault sqlite sidecar of CLIP image vectors — one vector per image.
 
-    Mirrors EmbeddingIndex (mtime-cached matrix, cosine search) but keyed by image
-    file with no chunking. Lives in its own `.clip.sqlite` so the bge text index is
+    Mirrors EmbeddingIndex (generation-cached matrix, cosine search) but keyed by
+    image file with no chunking. Lives in its own `.clip.sqlite` so the bge text index is
     untouched and the two evolve independently.
     """
 
     def __init__(self, vault_root: Path):
         self.vault_root = vault_root
         self.path = clip_sidecar_path(vault_root)
-        # (sidecar_mtime, file_paths, frame_ts_list, matrix) — frame_ts is None for images.
-        self._cache: tuple[float, list[str], list[float | None], np.ndarray] | None = None
+        # (epoch, generation, mtime, file_paths, frame_ts_list, matrix). Keyed on
+        # (epoch, gen) like EmbeddingIndex; mtime is the gen==0 legacy fallback.
+        # frame_ts is None for images, a float (seconds) for video keyframes.
+        self._cache: (
+            tuple[int, int, float, list[str], list[float | None], np.ndarray] | None
+        ) = None
         self._lock = threading.RLock()
         # vec0 backend state (see _vec_gate) — mirrors EmbeddingIndex.
         self._vec = vecstore.SqliteVecStore("images", "vector", CLIP_DIM, "vec_images")
@@ -1373,6 +1568,7 @@ class ClipIndex:
             """
         )
         self._migrate_add_frame_ts(conn)
+        _ensure_meta_table(conn, "images", self.path.name)
         return conn
 
     @staticmethod
@@ -1435,6 +1631,7 @@ class ClipIndex:
                     self._vec.dual_insert(
                         conn, "file_path = ? AND frame_ts IS NULL", (rel_path,)
                     )
+                own_gen = _bump_meta(conn, "generation")
         finally:
             conn.close()
         # Mirror the partial DELETE: replace only the image (NULL-ts) row, keep any
@@ -1444,6 +1641,7 @@ class ClipIndex:
             [rel_path],
             [None],
             np.asarray(vector, dtype=np.float32).reshape(1, -1),
+            own_gen,
             images_only=True,
         )
 
@@ -1475,6 +1673,7 @@ class ClipIndex:
                 )
                 if vec_on:
                     self._vec.dual_insert(conn, "file_path = ?", (rel_path,))
+                own_gen = _bump_meta(conn, "generation")
         finally:
             conn.close()
         # Whole-file DELETE + re-insert → block-replace with the frames, ordered by
@@ -1485,6 +1684,7 @@ class ClipIndex:
             [rel_path] * len(ordered),
             [float(ts) for ts, _ in ordered],
             np.stack([np.asarray(vec, dtype=np.float32) for _, vec in ordered], axis=0),
+            own_gen,
         )
 
     def delete(self, rel_path: str) -> None:
@@ -1495,9 +1695,10 @@ class ClipIndex:
                 if vec_on:
                     self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM images WHERE file_path = ?", (rel_path,))
+                own_gen = _bump_meta(conn, "generation")
         finally:
             conn.close()
-        self._patch_cache(rel_path, [], [], None)
+        self._patch_cache(rel_path, [], [], None, own_gen)
 
     def _patch_cache(
         self,
@@ -1505,10 +1706,15 @@ class ClipIndex:
         new_paths: list[str],
         new_frame_ts: list[float | None],
         new_vecs: np.ndarray | None,
+        own_gen: int,
         *,
         images_only: bool = False,
     ) -> None:
         """Splice one file's CLIP rows into the cached matrix (copy-on-write).
+
+        `own_gen` is the writer's own in-transaction generation; the cached
+        generation advances only when contiguous (`own_gen == cached + 1`) — see
+        `EmbeddingIndex._patch_cache` for why `max()` is unsafe.
 
         `images_only=True` keeps existing video keyframe rows (frame_ts NOT NULL)
         and replaces only the image (NULL-ts) row, mirroring `upsert()`'s partial
@@ -1520,12 +1726,7 @@ class ClipIndex:
             if c is None:
                 return
             try:
-                new_mtime = self.path.stat().st_mtime
-            except OSError:
-                self._cache = None
-                return
-            try:
-                _, paths, frame_ts, matrix = c
+                c_epoch, c_gen, c_mtime, paths, frame_ts, matrix = c
                 lo, hi = _file_block(paths, rel_path)
                 if images_only and hi > lo:
                     keep = [j for j in range(lo, hi) if frame_ts[j] is not None]
@@ -1557,7 +1758,8 @@ class ClipIndex:
                         f"CLIP splice invariant broken for {rel_path}: "
                         f"{len(out_paths)} paths / {len(out_ts)} ts / {out_matrix.shape[0]} vecs"
                     )
-                self._cache = (new_mtime, out_paths, out_ts, out_matrix)
+                next_gen = own_gen if own_gen == c_gen + 1 else c_gen
+                self._cache = (c_epoch, next_gen, c_mtime, out_paths, out_ts, out_matrix)
             except Exception as e:  # noqa: BLE001 — self-heal, never break a write
                 log.warning("CLIP matrix splice failed (%s); dropping cache", e)
                 self._cache = None
@@ -1597,39 +1799,82 @@ class ClipIndex:
             conn.close()
         return row is not None
 
-    def all_vectors(self) -> tuple[list[str], list[float | None], np.ndarray]:
-        """Returns parallel `(file_paths, frame_ts_list, matrix)`. frame_ts is None
-        for image rows, a float (seconds) for video keyframe rows."""
-        try:
-            sidecar_mtime = self.path.stat().st_mtime
-        except FileNotFoundError:
-            return [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
-        c = self._cache  # snapshot once — a concurrent writer may swap/null it
-        if c is not None and c[0] == sidecar_mtime:
-            return c[1], c[2], c[3]
-        with self._lock:
-            c = self._cache
-            if c is not None and c[0] == sidecar_mtime:
-                return c[1], c[2], c[3]
-            paths, frame_ts, matrix = self._load_all_rows()
-            self._cache = (sidecar_mtime, paths, frame_ts, matrix)
-            return paths, frame_ts, matrix
-
-    def _load_all_rows(self) -> tuple[list[str], list[float | None], np.ndarray]:
-        """Full reload of every CLIP row from the sidecar (the O(vault) path)."""
+    def _read_token(self) -> tuple[int, int]:
+        """`(epoch, generation)` from the CLIP sidecar (mirrors EmbeddingIndex)."""
         conn = self._connect()
         try:
-            rows = conn.execute(
-                "SELECT file_path, frame_ts, vector FROM images ORDER BY file_path, frame_ts"
-            ).fetchall()
+            return _read_generation(conn)
         finally:
             conn.close()
-        if not rows:
+
+    def _cache_matches(self, c: tuple, epoch: int, gen: int) -> bool:
+        """gen >= 1 → trust generation; gen == 0 (legacy) → mtime fallback."""
+        c_epoch, c_gen, c_mtime = c[0], c[1], c[2]
+        if gen >= 1:
+            return c_gen == gen and c_epoch == epoch
+        try:
+            return c_mtime == self.path.stat().st_mtime
+        except OSError:
+            return False
+
+    def all_vectors(self) -> tuple[list[str], list[float | None], np.ndarray]:
+        """Returns parallel `(file_paths, frame_ts_list, matrix)`, cached until the
+        write generation advances (NOT the mtime — see EmbeddingIndex.all_vectors).
+        frame_ts is None for image rows, a float (seconds) for video keyframe rows."""
+        if not self.path.exists():
             return [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
+        epoch, gen = self._read_token()
+        c = self._cache  # snapshot once — a concurrent writer may swap/null it
+        if c is not None and self._cache_matches(c, epoch, gen):
+            return c[3], c[4], c[5]
+        with self._lock:
+            # Re-read the token under the lock (see EmbeddingIndex.all_vectors).
+            epoch, gen = self._read_token()
+            c = self._cache
+            if c is not None and self._cache_matches(c, epoch, gen):
+                return c[3], c[4], c[5]
+            s_epoch, s_gen, mtime, paths, frame_ts, matrix = self._load_all_rows()
+            log.info(
+                "CLIP matrix full load: reason=%s rows=%d gen=%d epoch=%d",
+                _reload_reason(c, s_epoch, s_gen), len(paths), s_gen, s_epoch,
+            )
+            self._cache = (s_epoch, s_gen, mtime, paths, frame_ts, matrix)
+            return paths, frame_ts, matrix
+
+    def _load_all_rows(
+        self,
+    ) -> tuple[int, int, float, list[str], list[float | None], np.ndarray]:
+        """Full reload → `(epoch, gen, mtime, paths, frame_ts, matrix)`, reading the
+        meta generation and rows in ONE `BEGIN` snapshot (see EmbeddingIndex)."""
+        conn = self._connect()
+        try:
+            conn.execute("BEGIN")
+            try:
+                epoch, gen = _read_generation(conn)
+                rows = conn.execute(
+                    "SELECT file_path, frame_ts, vector FROM images "
+                    "ORDER BY file_path, frame_ts"
+                ).fetchall()
+            finally:
+                conn.rollback()  # read-only txn — release the snapshot
+        finally:
+            conn.close()
+        try:
+            mtime = self.path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        if not rows:
+            return epoch, gen, mtime, [], [], np.zeros((0, CLIP_DIM), dtype=np.float32)
         paths = [r[0] for r in rows]
         frame_ts = [r[1] for r in rows]
         matrix = np.stack([np.frombuffer(r[2], dtype=np.float32) for r in rows], axis=0)
-        return paths, frame_ts, matrix
+        return epoch, gen, mtime, paths, frame_ts, matrix
+
+    @staticmethod
+    def cache_token(vault_root: Path) -> tuple[int, int]:
+        """`(epoch, generation)` for this vault's CLIP sidecar — `(0, 0)` when
+        absent or pre-meta. Read-only (mirrors EmbeddingIndex.cache_token)."""
+        return _sidecar_cache_token(clip_sidecar_path(vault_root))
 
     def _vec_search(
         self, query_vec: np.ndarray, k: int

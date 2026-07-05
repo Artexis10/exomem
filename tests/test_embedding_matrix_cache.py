@@ -11,6 +11,7 @@ never wall-clock — deterministic in CI. All fabricated vectors: no torch/model
 
 from __future__ import annotations
 
+import os
 import sqlite3
 import threading
 from pathlib import Path
@@ -191,6 +192,26 @@ def test_external_writer_triggers_exactly_one_reload(tmp_path, monkeypatch):
     assert count["n"] == 1
 
 
+def test_utime_bump_alone_does_not_reload(tmp_path, monkeypatch):
+    """A sidecar mtime bump with NO content change must not invalidate the cache.
+
+    This is the WAL-checkpoint symptom in the small: a checkpoint (fired by a
+    pure reader closing last) moves the main file's mtime without any row change,
+    so the OLD mtime-keyed cache spuriously full-reloads. The generation-keyed
+    cache ignores a bare mtime move. RED on the mtime-keyed implementation.
+    """
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.all_vectors()  # warm; cache keyed on generation
+
+    count = _count_loads(monkeypatch, idx)
+    _bump_mtime(idx.path)  # move mtime WITHOUT changing content (checkpoint symptom)
+    idx.all_vectors()
+    idx.all_vectors()
+    assert count["n"] == 0  # generation unchanged -> served from cache, no reload
+
+
 def test_rebuild_all_does_not_splice_per_file(tmp_path, monkeypatch):
     """rebuild_all writes in one transaction and leaves a cold cache (one reload
     on next read) — never O(N) per-file splices."""
@@ -333,6 +354,220 @@ def test_find_vector_lane_reuses_shared_matrix(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Generation keying (the WAL-checkpoint/mtime bug fix)
+# --------------------------------------------------------------------------- #
+
+
+def _make_legacy_sidecar(
+    path: Path, rows: list[tuple[str, int, list[float], float]]
+) -> None:
+    """Write an OLD sidecar: the `chunks` table only, NO `meta` table — exactly
+    what a pre-generation binary left on disk."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute(
+            "CREATE TABLE chunks (file_path TEXT NOT NULL, chunk_idx INTEGER NOT NULL, "
+            "chunk_text TEXT NOT NULL, vector BLOB NOT NULL, file_mtime REAL NOT NULL, "
+            "PRIMARY KEY (file_path, chunk_idx))"
+        )
+        conn.executemany(
+            "INSERT INTO chunks VALUES (?, ?, ?, ?, ?)",
+            [(fp, i, "t", _pad(v).tobytes(), m) for fp, i, v, m in rows],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _meta_exists(path: Path) -> bool:
+    conn = sqlite3.connect(path)
+    try:
+        return (
+            conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
+            ).fetchone()
+            is not None
+        )
+    finally:
+        conn.close()
+
+
+def test_writer_under_held_reader_txn_no_reload(tmp_path, monkeypatch):
+    """The proven WAL race: a reader holds an open txn while a writer commits, so
+    the reader closes LAST and the checkpoint (and the main-file mtime move) lands
+    after the writer's _patch_cache. Old mtime keying spuriously reloads; the
+    generation-keyed cache does not."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.all_vectors()  # warm at generation 1
+
+    count = _count_loads(monkeypatch, idx)
+
+    # A separate connection opens a read txn and holds it — this is what defers
+    # the WAL checkpoint to whichever connection closes last.
+    reader = sqlite3.connect(idx.path)
+    try:
+        reader.execute("BEGIN")
+        reader.execute("SELECT count(*) FROM chunks").fetchone()
+        # Writer commits through the shared index while the reader txn is open.
+        idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)  # bumps gen, patches cache
+        metadata, matrix = idx.all_vectors()
+        assert [m[0] for m in metadata] == ["a.md", "b.md"]
+        assert matrix.shape[0] == 2
+    finally:
+        reader.close()  # reader closes LAST -> the deferred checkpoint fires now
+
+    # Stand in for that checkpoint's observable effect: the mtime moves with the
+    # content unchanged. Old mtime keying reloads here; generation keying does not.
+    _bump_mtime(idx.path)
+    idx.all_vectors()
+    idx.all_vectors()
+    assert count["n"] == 0  # generation stayed at 2 the whole time -> no reload
+
+
+def test_external_writer_detected_via_generation(tmp_path, monkeypatch):
+    """A second instance writing the sidecar bumps the on-disk generation; the
+    shared index detects it and serves the new rows — with NO mtime bump needed."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    external = embeddings.EmbeddingIndex(vault)
+    external.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)  # bumps DB generation
+
+    metadata, matrix = idx.all_vectors()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["a.md", "b.md"]
+    idx.all_vectors()
+    assert count["n"] == 1  # second read reuses the reloaded cache
+
+
+def test_external_delete_detected_via_generation(tmp_path, monkeypatch):
+    """An external delete bumps the generation; the block is dropped on next read."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.upsert_file("b.md", ["b"], _mat([0, 1]), 2.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    external = embeddings.EmbeddingIndex(vault)
+    external.delete_file("a.md")  # bumps DB generation
+
+    metadata, matrix = idx.all_vectors()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["b.md"]
+    assert matrix.shape[0] == 1
+
+
+def test_external_rebuild_serves_fresh_vectors_frozen_mtime(tmp_path, monkeypatch):
+    """rebuild_all re-embeds with an UNCHANGED file mtime; the epoch/generation
+    bump — not the sidecar mtime — is what invalidates. Freezing the sidecar mtime
+    across the external rebuild proves the cache no longer depends on it."""
+    vault = _fresh_vault(tmp_path)
+    kb = vault / "Knowledge Base"
+    (kb / "one.md").write_text(
+        "---\ntype: note\n---\n# One\nalpha beta\n", encoding="utf-8"
+    )
+
+    seq = {"n": 0}
+
+    def fake_embed(texts, *, is_query=False):
+        seq["n"] += 1
+        return np.stack([_pad([float(seq["n"]), 0.0]) for _ in texts], axis=0)
+
+    monkeypatch.setattr(embeddings, "embed_texts", fake_embed)
+
+    idx = embeddings.get_embedding_index(vault)
+    idx.rebuild_all()
+    first = idx.all_vectors()[1][0].copy()
+    frozen = idx.path.stat()
+
+    ext = embeddings.EmbeddingIndex(vault)
+    ext.rebuild_all()  # re-embed -> different vectors; epoch + generation bumped
+    os.utime(idx.path, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))  # freeze mtime
+
+    second = idx.all_vectors()[1][0]
+    assert not np.array_equal(second, first)  # fresh vectors served despite frozen mtime
+
+
+def test_epoch_bump_invalidates_without_gen_or_mtime(tmp_path, monkeypatch):
+    """The epoch key catches a re-embed that neither moved a file mtime NOR is
+    distinguishable by generation alone: bumping only epoch invalidates the cache."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    idx.all_vectors()  # warm at (epoch 0, gen 1)
+    frozen = idx.path.stat()
+
+    count = _count_loads(monkeypatch, idx)
+    # Bump ONLY the epoch (rebuild_all's re-embed marker), leave generation, and
+    # freeze the mtime — isolating epoch as the sole invalidation signal.
+    conn = sqlite3.connect(idx.path)
+    try:
+        with conn:
+            embeddings._bump_meta(conn, "epoch")
+    finally:
+        conn.close()
+    os.utime(idx.path, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
+
+    idx.all_vectors()
+    assert count["n"] == 1  # epoch moved -> reload despite unchanged gen and mtime
+
+
+def test_out_of_order_patch_gen_gap_does_not_advance(tmp_path, monkeypatch):
+    """A patch whose own generation skips ahead (a concurrent writer's rows this
+    splice never saw) must not let the cache claim a generation it lacks rows for.
+    The cache holds its generation; the next all_vectors() reload converges."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    idx.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)  # DB + cache generation 1
+    idx.all_vectors()
+    assert idx._cache[1] == 1
+
+    # Gap: own_gen 3 while the cache is at generation 1 -> refuse to advance.
+    idx._patch_cache("z.md", [("z.md", 0)], _mat([9, 0]), 3)
+    assert idx._cache[1] == 1  # stayed put — did not jump to 3
+
+    # Contiguous: own_gen 2 == cached 1 + 1 -> advance.
+    idx._patch_cache("b.md", [("b.md", 0)], _mat([0, 1]), 2)
+    assert idx._cache[1] == 2
+
+    # The manual splices desynced the cache from the DB (still at generation 1);
+    # the mismatch forces exactly one reload that converges on the DB's truth.
+    count = _count_loads(monkeypatch, idx)
+    metadata, _ = idx.all_vectors()
+    assert count["n"] == 1
+    assert [m[0] for m in metadata] == ["a.md"]
+
+
+def test_legacy_sidecar_migrates_and_mtime_fallback_invalidates(tmp_path, monkeypatch):
+    """A pre-meta sidecar reads generation 0; the meta table is migrated in on
+    first connect, the cache retains mtime-keyed invalidation (version-skew
+    fallback) until a gen-bumping write, and an mtime bump still invalidates."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_embedding_index(vault)
+    _make_legacy_sidecar(idx.path, [("a.md", 0, [1, 0], 1.0)])
+    assert not _meta_exists(idx.path)  # legacy: no meta table yet
+
+    count = _count_loads(monkeypatch, idx)
+    metadata, matrix = idx.all_vectors()  # migrates meta, loads at generation 0
+    assert [m[0] for m in metadata] == ["a.md"]
+    assert idx._cache[1] == 0  # legacy sidecar reads generation 0
+    assert count["n"] == 1
+    assert _meta_exists(idx.path)  # migration created the meta table
+
+    # gen==0 fallback: a bare mtime bump STILL invalidates (today's semantics).
+    _bump_mtime(idx.path)
+    idx.all_vectors()
+    assert count["n"] == 2
+
+
+# --------------------------------------------------------------------------- #
 # ClipIndex (visual matrix) — structural twin
 # --------------------------------------------------------------------------- #
 
@@ -377,6 +612,55 @@ def test_clip_sidecar_uses_wal(tmp_path):
     finally:
         conn.close()
     assert mode.lower() == "wal"
+
+
+def test_clip_utime_bump_alone_does_not_reload(tmp_path, monkeypatch):
+    """ClipIndex mirror: a bare mtime bump (checkpoint symptom) does not reload."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_clip_index(vault)
+    idx.upsert("a.png", _cpad([1, 0]), 1.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    _bump_mtime(idx.path)
+    idx.all_vectors()
+    idx.all_vectors()
+    assert count["n"] == 0
+
+
+def test_clip_external_writer_detected_via_generation(tmp_path, monkeypatch):
+    """ClipIndex mirror: a second instance's write is caught via the generation."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_clip_index(vault)
+    idx.upsert("a.png", _cpad([1, 0]), 1.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    ext = embeddings.ClipIndex(vault)
+    ext.upsert("b.png", _cpad([0, 1]), 2.0)  # bumps DB generation
+
+    paths, ts, matrix = idx.all_vectors()
+    assert count["n"] == 1
+    assert paths == ["a.png", "b.png"]
+    idx.all_vectors()
+    assert count["n"] == 1
+
+
+def test_clip_external_delete_detected_via_generation(tmp_path, monkeypatch):
+    """ClipIndex mirror: an external delete drops the block on next read."""
+    vault = _fresh_vault(tmp_path)
+    idx = embeddings.get_clip_index(vault)
+    idx.upsert("a.png", _cpad([1, 0]), 1.0)
+    idx.upsert("b.png", _cpad([0, 1]), 2.0)
+    idx.all_vectors()  # warm
+
+    count = _count_loads(monkeypatch, idx)
+    ext = embeddings.ClipIndex(vault)
+    ext.delete("a.png")  # bumps DB generation
+
+    paths, ts, matrix = idx.all_vectors()
+    assert count["n"] == 1
+    assert paths == ["b.png"]
 
 
 def _bump_mtime(path: Path) -> None:

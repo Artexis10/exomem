@@ -3,12 +3,12 @@ invalidation, caller-mutation safety, and the clear_cache() test hook."""
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
-from exomem import commands
+from exomem import commands, embeddings
 from exomem import find as find_module
 
 
@@ -76,17 +76,33 @@ def test_markdown_write_invalidates(vault: Path, monkeypatch) -> None:
 
 
 @pytest.mark.parametrize("sidecar_name", [".embeddings.sqlite", ".clip.sqlite"])
-def test_sidecar_mtime_invalidates(vault: Path, monkeypatch, sidecar_name: str) -> None:
+def test_sidecar_generation_invalidates(
+    vault: Path, monkeypatch, sidecar_name: str
+) -> None:
+    """A gen-bumping write to a semantic sidecar invalidates the hot cache — keyed
+    on the in-band (epoch, generation) token, NOT the sidecar file mtime (a WAL
+    checkpoint moves the mtime with no content change; an uncheckpointed commit
+    leaves it unmoved). Replaces the old mtime/utime-driven invalidation."""
     calls = _count_semantic(monkeypatch)
     find_module.find(vault, query="metabolism")
-    sidecar = vault / "Knowledge Base" / sidecar_name
-    sidecar.write_bytes(b"stub")
     find_module.find(vault, query="metabolism")
-    assert calls["n"] == 2
-    ns = sidecar.stat().st_mtime_ns
-    os.utime(sidecar, ns=(ns + 2_000_000_000, ns + 2_000_000_000))
+    assert calls["n"] == 1  # second serve came from the hot cache
+
+    if sidecar_name == ".embeddings.sqlite":
+        vec = np.zeros((1, embeddings.VECTOR_DIM), dtype=np.float32)
+        vec[0, 0] = 1.0
+        embeddings.get_embedding_index(vault).upsert_file(
+            "Knowledge Base/Notes/gen-probe.md", ["x"], vec, 1.0
+        )
+    else:
+        vec = np.zeros(embeddings.CLIP_DIM, dtype=np.float32)
+        vec[0] = 1.0
+        embeddings.get_clip_index(vault).upsert(
+            "Knowledge Base/Attachments/gen-probe.png", vec, 1.0
+        )
+
     find_module.find(vault, query="metabolism")
-    assert calls["n"] == 3
+    assert calls["n"] == 2  # the generation bump invalidated the cache
 
 
 def test_cache_disabled_by_env(vault: Path, monkeypatch) -> None:
