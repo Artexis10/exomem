@@ -304,6 +304,60 @@ def test_heal_reads_registry_map_not_filesystem_walk_when_live(tmp_path):
         freshness.clear()
 
 
+def test_mtime_preserving_drift_heals_from_registry_no_walk(tmp_path):
+    """Obsidian Sync preserves mtimes, so an out-of-band edit can land as
+    count/max-match + digest-differ — the `_walk_matches_rows` verify path, NOT
+    `_heal_delta`. With the registry live, that path must ALSO read the registry
+    instead of re-statting the corpus (this is the real-vault drift shape that
+    the earlier `_heal_delta`-only fix missed)."""
+    from exomem import find as find_module
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    try:
+        _write_page(tmp_path, "Knowledge Base/rename-old.md", "zanzibar quixotic marker", mtime=5_000)
+        _write_page(tmp_path, "Knowledge Base/other.md", "unrelated filler", mtime=4_000)
+        assert lexstore.search_bm25(tmp_path, "zanzibar", k=5, scope="kb")
+        lexstore.clear_stores()  # fresh process; no in-process hook witnessed anything
+
+        # Watcher seeds the registry live for both scopes at the current state.
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path, "kb",
+            ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+        )
+        freshness.seed(
+            tmp_path, "vault",
+            ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+
+        # Pure rename: os.replace preserves mtime, so count AND max_mtime are
+        # unchanged — only the digest differs (the `_walk_matches_rows` trigger).
+        old = tmp_path / "Knowledge Base/rename-old.md"
+        new = tmp_path / "Knowledge Base/rename-new.md"
+        os.replace(old, new)
+        freshness.on_files_changed(tmp_path, changed=[new], deleted=[old])
+
+        walks = {"n": 0}
+        real = lexstore.LexicalStore._walk_entries
+
+        def _counting(self):
+            walks["n"] += 1
+            return real(self)
+
+        lexstore.LexicalStore._walk_entries = _counting
+        try:
+            hits = lexstore.search_bm25(tmp_path, "zanzibar", k=5, scope="kb")
+        finally:
+            lexstore.LexicalStore._walk_entries = real
+
+        assert hits and hits[0][0] == "Knowledge Base/rename-new.md"  # healed via registry
+        assert walks["n"] == 0  # the verify path read the registry, not the filesystem
+    finally:
+        freshness.clear()
+
+
 def test_writer_hooks_keep_index_in_lockstep(tmp_path):
     """upsert_after_write / delete_after_remove maintain pages+fts+tri without a
     rebuild, and a subsequent query observes the change."""
