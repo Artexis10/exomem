@@ -22,6 +22,35 @@ vault; `.md`-only; sync-conflict duplicates excluded). A registry that included
 one extra file or directory would silently diverge from the walk it stands in
 for, so the equality is pinned by tests across create/modify/delete/move/rename.
 
+Canonicalization contract (event side only — see #126): the walk side
+(`seed`/`reconcile`, fed by `walk_vault_md`/`_walk_md`'s `iterdir()`) always
+yields a file's long-form name — the OS directory listing never returns an
+8.3 short alias unless specifically asked. The EVENT side (`on_files_changed`,
+fed by watchdog callbacks and self-write registrations) has no such guarantee:
+on Windows, a file whose basename is long enough to earn an 8.3 short alias
+(e.g. a long slug like `real-vault-...-by-d.md` → `REAL-V~1.MD`) can be
+reported by an event under either form. Two string forms of the SAME file
+would otherwise coexist as two separate keys in `_maps`; the next `reconcile()`
+then reads that as "one file deleted, one file created", and any consumer
+keyed on that identity (the wikilink resolver, the inbound-link index) drops
+the file's entry until it's touched again — exactly the false "does not
+resolve to any file in the vault" writer warning #126 reported.
+
+`on_files_changed` is the single ingress point for EVENT-derived keys (its
+only two callers — the watcher's debounced batch flush and the self-write
+publish path — both funnel through it), so it canonicalizes there: each event
+path is `resolve()`d and rejoined onto the literal `vault_root` prefix before
+becoming a map key, so an 8.3 short segment expands to the long form the walk
+side would have produced for the SAME still-existing file. For an already
+DELETED path, `resolve()` can't query a vanished directory entry, so it can't
+expand the leaf; canonicalization falls back to the best-effort partial result
+(or the raw form, if `resolve()` itself raises). Any resulting stale "ghost"
+key is not data loss — the 300s periodic `reconcile()` re-walks from disk and
+replaces the map wholesale, so a leftover short-form key from a delete self-
+heals on the very next cycle. Cost: this adds one `resolve()` call per
+debounced EVENT file (a handful per batch), not per walk entry — negligible
+next to the O(vault) walk the registry exists to avoid.
+
 Pure substrate: mechanical file-change bookkeeping, no reasoning over content.
 """
 
@@ -229,6 +258,28 @@ def live_entries(vault_root: Path, scope: str) -> dict[str, int] | None:
         return dict(_maps.get(key, {}))
 
 
+def _canonicalize_event_path(vault_root: Path, vr: Path, p: Path) -> Path:
+    """Best-effort long-form path for an EVENT-derived filesystem change.
+
+    See the module docstring's "Canonicalization contract" for the full
+    rationale. `resolve()` expands an 8.3 short segment to its long form when
+    the underlying directory entry still exists; the result is re-rooted onto
+    the literal `vault_root` (not `vr`, its resolved form) so the reconstructed
+    key shares the exact prefix the walk side's `iterdir()`-built keys use —
+    resolving only the sub-path relative to `vr` avoids introducing a NEW
+    mismatch class for vaults where `vault_root` itself isn't already in
+    resolved form. Falls back to `p` unchanged when `resolve()`/`relative_to`
+    can't establish that relationship (e.g. a deleted path's vanished leaf
+    segment can't be queried, or `vault_root` is momentarily unreachable) —
+    the raw form is exactly today's behavior, healed by the next reconcile.
+    """
+    try:
+        rel = p.resolve().relative_to(vr)
+    except (OSError, ValueError):
+        return p
+    return vault_root / rel
+
+
 def on_files_changed(
     vault_root: Path,
     changed: Iterable[Path] = (),
@@ -241,9 +292,17 @@ def on_files_changed(
     that was never seeded stays not-live and keeps falling back to the walk.
     Classification is stat-free, so a path that vanished between the event and
     here is still correctly removed.
+
+    Every path is canonicalized first (see the module docstring's
+    "Canonicalization contract") so an event-derived path never produces a
+    map key that diverges from the walk side's for the same file.
     """
     if not event_indexes_enabled():
         return
+    try:
+        vr = vault_root.resolve()
+    except OSError:
+        vr = vault_root
     # Phase 1 — classify + stat OUTSIDE the lock. `scopes_for` is stat-free;
     # only changed paths stat. A big external burst (a git pull / Obsidian Sync
     # landing hundreds of files) must not stat under the lock, or it would block
@@ -251,13 +310,13 @@ def on_files_changed(
     # the 300s reconcile heals them, and a self-write also publishes here.
     del_items: list[tuple[str, bool, bool]] = []
     for path in deleted:
-        p = Path(path)
+        p = _canonicalize_event_path(vault_root, vr, Path(path))
         in_kb, in_vault = scopes_for(vault_root, p)
         if in_kb or in_vault:
             del_items.append((str(p), in_kb, in_vault))
     chg_items: list[tuple[str, int | None, bool, bool]] = []
     for path in changed:
-        p = Path(path)
+        p = _canonicalize_event_path(vault_root, vr, Path(path))
         in_kb, in_vault = scopes_for(vault_root, p)
         if not (in_kb or in_vault):
             continue

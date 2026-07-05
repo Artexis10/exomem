@@ -140,6 +140,45 @@ def test_incremental_patch_matches_full_rebuild_across_add_edit_delete_move(
     assert {ln.path for ln in links} == {moved_rel}
 
 
+def test_on_files_changed_same_rel_in_both_lists_retains_live_entries(
+    vault: Path,
+) -> None:
+    """Mirrors the WikilinkResolver defense (#126): a rel present in BOTH
+    `changed_rels` and `deleted_rels` in the same batch — two path-string
+    forms of one file (Windows 8.3 short name vs. the walk's long form)
+    collapsing to the identical rel upstream — must not drop a file's
+    inbound-link edges when it is still on disk. The old code (`changed =
+    set(changed_rels) - deleted`) unconditionally subtracted the conflicting
+    rel out of `changed`, so the linker's edges were dropped and never
+    re-added even though the file was live. The filesystem breaks the tie:
+    re-add wins."""
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True, exist_ok=True)
+    target = notes / "dual-form-target.md"
+    target.write_text("# Target\n", encoding="utf-8")
+    target_rel = "Knowledge Base/Notes/dual-form-target.md"
+
+    linker = notes / "dual-form-linker.md"
+    linker.write_text("# L\n\n[[Notes/dual-form-target]]\n", encoding="utf-8")
+    linker_rel = "Knowledge Base/Notes/dual-form-linker.md"
+
+    # Seed live.
+    seeded = find_inbound_wikilinks(vault, target_rel)
+    assert len(seeded) == 1
+    _assert_matches_full_rebuild(vault, target_rel)
+
+    # Same rel in both lists (the collapse scenario) — file still exists.
+    on_inbound_files_changed(vault, changed_rels=[linker_rel], deleted_rels=[linker_rel])
+
+    got = find_inbound_wikilinks(vault, target_rel)
+    assert len(got) == 1, (
+        "inbound index dropped a live linker's edges when its rel appeared "
+        "in both changed_rels and deleted_rels in the same batch"
+    )
+    assert got[0].path == linker_rel
+    _assert_matches_full_rebuild(vault, target_rel)
+
+
 def test_incremental_patch_updates_stem_counts_for_basename_uniqueness(
     vault: Path,
 ) -> None:

@@ -427,7 +427,15 @@ class FileWatcher:
         the writer already fanned it out via `register_self_write`, so
         re-dispatching would double-embed (normally moot — the 30s suppression
         TTL has expired by the 300s reconcile — but correct under a tight
-        race)."""
+        race).
+
+        The abs-string guard above only catches a conflict when both event
+        forms are the literal SAME string. Two DIFFERENT abs-path forms of one
+        file (e.g. a Windows 8.3 short name vs. the long form, #126) evade it
+        but can still collapse to the SAME rel once `_rel()` resolves them —
+        so the same split-brain tie-break is repeated at the rel level below,
+        after computing `up_rels`/`del_rels`: a rel the filesystem still has on
+        disk is a change, not a delete."""
         changed_set = set(changed)
         deleted_set = set(deleted)
         for sp in changed_set & deleted_set:
@@ -446,8 +454,27 @@ class FileWatcher:
             for p in (Path(sp) for sp in deleted_set)
             if not _is_self_write_event(self._vault_root, p, deleted=True)
         ]
-        up_rels = [r for r in (self._rel(p) for p in changed_paths) if r]
+        changed_rel_pairs: list[tuple[Path, str]] = []
+        for p in changed_paths:
+            r = self._rel(p)
+            if r:
+                changed_rel_pairs.append((p, r))
+        up_rels = [r for _, r in changed_rel_pairs]
         del_rels = [r for r in (self._rel(p) for p in deleted_paths) if r]
+
+        rel_conflicts = set(up_rels) & set(del_rels)
+        if rel_conflicts:
+            exists_now = {r for r in rel_conflicts if (self._vault_root / r).is_file()}
+            gone_now = rel_conflicts - exists_now
+            if exists_now:
+                del_rels = [r for r in del_rels if r not in exists_now]
+            if gone_now:
+                up_rels = [r for r in up_rels if r not in gone_now]
+                changed_rel_pairs = [
+                    (p, r) for p, r in changed_rel_pairs if r not in gone_now
+                ]
+                changed_paths = [p for p, _ in changed_rel_pairs]
+
         self._dispatch_batch(changed_paths, up_rels, del_rels, cap=True)
 
     def _dispatch_batch(

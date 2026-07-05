@@ -564,9 +564,23 @@ class _InboundIndexData:
         entries from OTHER files touched at a different time does not mirror
         a fresh full-walk order, but the output SET per target always
         matches a full rebuild.
+
+        A rel present in BOTH `changed_rels` and `deleted_rels` in the same
+        batch (two path-string forms of one file collapsing to the same rel
+        upstream — Windows 8.3 short names are the concrete vector, #126, but
+        this defends against ANY dual-form vector: case aliasing, symlinks,
+        a future one) is a same-batch conflict. Trust the filesystem to break
+        the tie: a rel whose file still exists is a change, not a delete —
+        dropping it would silently remove a live file's inbound-link edges.
         """
+        changed = set(changed_rels)
         deleted = set(deleted_rels)
-        changed = set(changed_rels) - deleted
+        conflict = changed & deleted
+        for rel in conflict:
+            if (vault_root / rel).is_file():
+                deleted.discard(rel)
+            else:
+                changed.discard(rel)
         affected = changed | deleted
         if not affected:
             return
@@ -932,6 +946,14 @@ class WikilinkResolver:
         the graph lane's 1-hop recall) is byte-for-byte unchanged; only the
         cost is (patch a handful of files vs. re-read + YAML-parse the whole
         vault). `*_rels` are vault-relative POSIX, with or without `.md`.
+
+        A rel present in BOTH `changed_rels` and `deleted_rels` in the same
+        batch (two path-string forms of one file collapsing to the same rel
+        upstream — Windows 8.3 short names are the concrete vector, #126, but
+        this defends against ANY dual-form vector: case aliasing, symlinks, a
+        future one) is a same-batch conflict. Trust the filesystem to break
+        the tie: a rel whose file still exists is a change, not a delete —
+        dropping it would silently remove a live file from the resolver.
         """
         def _norm(rels: Iterable[str]) -> set[str]:
             out: set[str] = set()
@@ -941,8 +963,14 @@ class WikilinkResolver:
                     out.add(s[:-3])
             return out
 
+        changed = _norm(changed_rels)
         deleted = _norm(deleted_rels)
-        changed = _norm(changed_rels) - deleted
+        conflict = changed & deleted
+        for no_ext in conflict:
+            if (vault_root / (no_ext + ".md")).is_file():
+                deleted.discard(no_ext)
+            else:
+                changed.discard(no_ext)
         if not (deleted or changed):
             return
         for no_ext in deleted | changed:
