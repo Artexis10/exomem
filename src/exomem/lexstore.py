@@ -369,7 +369,7 @@ class LexicalStore:
                 return
             self._ensure_schema(conn)
             if self._stored_count_max(conn, scope) != (freshness[0], freshness[1]):
-                self._rebuild(conn)  # definite drift (add/delete/edit shape)
+                self._heal_delta(conn)  # incremental: patch only the drifted rows
                 return
             if self._witnessed:
                 # In-process hooks applied every change they saw; matching
@@ -384,7 +384,7 @@ class LexicalStore:
             if self._walk_matches_rows(conn, scope):
                 self._bless(conn, scope, freshness)
             else:
-                self._rebuild(conn)
+                self._heal_delta(conn)
 
     def _walk_entries(self) -> tuple[dict[Path, list[bool]], dict[Path, int]]:
         """One pass over both walks: membership flags + stat'ed mtimes."""
@@ -446,6 +446,49 @@ class LexicalStore:
             conn.execute("DELETE FROM tri")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, mtimes[path], in_kb, in_vault)
+        self._witnessed = False
+        for scope, idx in (("kb", 0), ("vault", 1)):
+            entries = [
+                (str(p), mtimes[p]) for p, flags in members.items() if flags[idx]
+            ]
+            self._bless(conn, scope, freshness_module.triple_from_entries(entries))
+
+    def _heal_delta(self, conn: sqlite3.Connection) -> None:
+        """Reconcile the sidecar to the markdown walks by touching ONLY the rows
+        that drifted — the incremental alternative to `_rebuild`'s wipe-and-repopulate.
+
+        Reaches the same end state (pages+fts+tri match the walks; both scopes
+        blessed) but its writes are O(changed files), not O(corpus). This is the
+        heal for the common real-vault case: a handful of out-of-band edits that
+        the in-process hooks never witnessed (a watcher that missed the events).
+        A single changed file therefore costs one delete+reinsert, not a full
+        1,900-file rebuild. `rel` is computed once per file and used for both the
+        stored-row lookup and the insert, so the delete-key and insert-key cannot
+        diverge (the class of `UNIQUE constraint failed: pages.path`)."""
+        from . import freshness as freshness_module
+
+        members, mtimes = self._walk_entries()
+        walk: dict[str, tuple[Path, int, bool, bool]] = {}
+        for path, (in_kb, in_vault) in members.items():
+            rel = self._rel(path)
+            if rel is not None:
+                walk[rel] = (path, mtimes[path], in_kb, in_vault)
+        # path(rel) -> (rowid, mtime_ns, in_kb, in_vault), snapshotted before writes.
+        stored = {
+            row[0]: (int(row[1]), int(row[2]), bool(row[3]), bool(row[4]))
+            for row in conn.execute(
+                "SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages"
+            )
+        }
+        with conn:
+            for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
+                w = walk.get(rel)
+                if w is None or (w[1], w[2], w[3]) != (mtime_ns, in_kb, in_vault):
+                    self._delete_rowid(conn, rowid)  # removed, or replaced below
+            for rel, (path, mtime_ns, in_kb, in_vault) in walk.items():
+                s = stored.get(rel)
+                if s is None or (s[1], s[2], s[3]) != (mtime_ns, in_kb, in_vault):
+                    self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
         self._witnessed = False
         for scope, idx in (("kb", 0), ("vault", 1)):
             entries = [

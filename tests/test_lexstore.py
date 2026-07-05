@@ -185,6 +185,71 @@ def test_manual_row_drift_self_heals(tmp_path):
     assert _count(side, "pages") == 4
 
 
+def test_out_of_band_single_edit_heals_incrementally_not_full_rebuild(tmp_path):
+    """A single out-of-band file edit (count unchanged, one mtime bumped) must
+    heal by patching ONLY that file's rows — not by wiping and repopulating the
+    whole corpus. The full-rebuild heal is O(corpus); on a large real vault
+    behind a flaky watcher it fires on every missed event (the 10-17s keyword
+    lane / 3-6s cold find() observed 2026-07-05)."""
+    for i in range(6):
+        _write_page(tmp_path, f"Knowledge Base/n{i}.md", f"payload token{i}", mtime=1_000 + i)
+    assert lexstore.search_bm25(tmp_path, "payload", k=10, scope="kb")
+    lexstore.clear_stores()  # fresh process; no in-process hook witnessed the edit
+
+    # One file rewritten out-of-band: same file count, a newer max mtime.
+    _write_page(tmp_path, "Knowledge Base/n3.md", "payload zzzreplacement", mtime=9_000)
+
+    calls = {"n": 0}
+    real = lexstore.LexicalStore._rebuild
+
+    def _counting(self, conn):
+        calls["n"] += 1
+        return real(self, conn)
+
+    lexstore.LexicalStore._rebuild = _counting
+    try:
+        hits = lexstore.search_bm25(tmp_path, "zzzreplacement", k=5, scope="kb")
+    finally:
+        lexstore.LexicalStore._rebuild = real
+
+    assert hits and hits[0][0] == "Knowledge Base/n3.md"       # new content indexed
+    assert lexstore.search_bm25(tmp_path, "token3", k=5, scope="kb") == []  # old tokens gone
+    assert lexstore.search_bm25(tmp_path, "token5", k=5, scope="kb")        # untouched intact
+    assert _count(lexstore.lexical_path(tmp_path), "pages") == 6
+    assert calls["n"] == 0  # healed incrementally, NOT via full rebuild
+
+
+def test_out_of_band_add_and_delete_heal_incrementally(tmp_path):
+    """A file removed from disk and another added out-of-band heal by patching
+    just those two rows (delete + insert branches), never a full rebuild."""
+    for i in range(5):
+        _write_page(tmp_path, f"Knowledge Base/n{i}.md", f"corpus token{i}", mtime=1_000 + i)
+    assert lexstore.search_bm25(tmp_path, "corpus", k=10, scope="kb")
+    lexstore.clear_stores()
+
+    (tmp_path / "Knowledge Base/n0.md").unlink()                                   # removed
+    _write_page(tmp_path, "Knowledge Base/added.md", "corpus freshadd", mtime=8_000)  # added
+
+    calls = {"n": 0}
+    real = lexstore.LexicalStore._rebuild
+
+    def _counting(self, conn):
+        calls["n"] += 1
+        return real(self, conn)
+
+    lexstore.LexicalStore._rebuild = _counting
+    try:
+        hits = lexstore.search_bm25(tmp_path, "freshadd", k=5, scope="kb")
+    finally:
+        lexstore.LexicalStore._rebuild = real
+
+    assert hits and hits[0][0] == "Knowledge Base/added.md"
+    assert lexstore.search_bm25(tmp_path, "token0", k=5, scope="kb") == []  # removed file gone
+    assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")        # survivor intact
+    assert _count(lexstore.lexical_path(tmp_path), "pages") == 5            # 5 - 1 + 1
+    assert calls["n"] == 0  # incremental delete+insert, not a full rebuild
+
+
 def test_writer_hooks_keep_index_in_lockstep(tmp_path):
     """upsert_after_write / delete_after_remove maintain pages+fts+tri without a
     rebuild, and a subsequent query observes the change."""
