@@ -154,11 +154,19 @@ def _percentile(sorted_vals: list[float], pct: float) -> float:
 # Vector-lane backend passes (--vec-backend). "binary" = sqlite-vec + binary
 # quantization (EXOMEM_VEC_QUANT=binary). "numpy" is the reference pass: when
 # present it runs first and the other backends report top-10 overlap against it.
+# numpy is ALSO the product default now (vec0 is opt-in) — there is no `auto`
+# value — so this harness always sets EXOMEM_VEC_BACKEND explicitly for each pass
+# and must name both `numpy` and `sqlite-vec` to keep a published comparison honest.
 VEC_BACKENDS = ("numpy", "sqlite-vec", "binary")
 
 
 def _apply_vec_backend(name: str) -> None:
-    """Point the vector lane at one backend via the env seam `search()` reads."""
+    """Point the vector lane at one backend via the env seam `search()` reads.
+
+    Always sets EXOMEM_VEC_BACKEND to an explicit value (`numpy` or `sqlite-vec`);
+    the harness never relies on the product default, so the pass measures exactly
+    the named backend regardless of what production defaults to.
+    """
     if name == "binary":
         os.environ["EXOMEM_VEC_BACKEND"] = "sqlite-vec"
         os.environ["EXOMEM_VEC_QUANT"] = "binary"

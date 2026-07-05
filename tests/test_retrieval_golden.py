@@ -67,9 +67,9 @@ _MEAN_RECALL10_FLOOR = 0.88
 @pytest.mark.parametrize(
     ("vec_quant", "lexical_backend"),
     [
-        ("off", "fts5"),     # the shipped default: vec0-f32 + FTS5 lexical lanes
+        ("off", "fts5"),     # the shipped default: numpy scan + FTS5 lexical lanes
         ("off", "python"),   # lexical kill switch: yesterday's ranking wholesale
-        ("binary", "fts5"),  # promotion gate for opt-in binary quantization
+        ("binary", "fts5"),  # promotion gate for opt-in binary quantization (vec0)
     ],
 )
 def test_golden_hybrid_ranking_clears_floors(
@@ -78,9 +78,10 @@ def test_golden_hybrid_ranking_clears_floors(
     """Hybrid ranking over the golden set must clear the measured floors.
 
     Parametrized over the vector backend's quantization mode AND the lexical
-    backend: `off` exercises vec0 full-precision (exact, so the floors are the
-    same regression gate they always were); `binary` is the PROMOTION GATE for
-    the opt-in quantized mode. `fts5` is the PROMOTION GATE for the FTS5
+    backend: `off` exercises the numpy scan (the shipped default; exact, so the
+    floors are the same regression gate they always were); `binary` opts into the
+    vec0 backend and is the PROMOTION GATE for its quantized mode. `fts5` is the
+    PROMOTION GATE for the FTS5
     lexical backend — its bm25() scorer differs from BM25Okapi, so it is
     floors-gated (including the stemming pin), not rank-identical; `python`
     proves the kill switch still clears the same floors. The gates compose.
@@ -93,8 +94,15 @@ def test_golden_hybrid_ranking_clears_floors(
 
     if vec_quant == "binary":
         pytest.importorskip("sqlite_vec")
+        # numpy is now the default backend; binary quantization lives ONLY in the
+        # vec0 backend, so this promotion gate must opt into it explicitly — else
+        # the QUANT flag would be silently ignored and the case would re-run numpy.
+        monkeypatch.setenv("EXOMEM_VEC_BACKEND", "sqlite-vec")
         monkeypatch.setenv("EXOMEM_VEC_QUANT", "binary")
     else:
+        # `off` cases run the shipped default (numpy) — unset both so no stray
+        # process env forces a backend.
+        monkeypatch.delenv("EXOMEM_VEC_BACKEND", raising=False)
         monkeypatch.delenv("EXOMEM_VEC_QUANT", raising=False)
     if lexical_backend == "fts5" and not lexstore.fts5_available():
         pytest.skip("this SQLite build lacks FTS5/trigram")
