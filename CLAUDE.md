@@ -49,11 +49,17 @@ to an allowlist.
 `scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real
 `project-keys.yaml` — no private canonical, no markers. Needs no version bump here.)
 
-## Connector triage ("MCP not working" / forced reconnect)
+## Connector triage ("MCP not working" / slow first call / forced reconnect)
 
 claude.ai connector problems are almost always **connection-side, not the service**.
-A healthy service returns a fast `401` at the funnel. The most common cause is the
-**Tailscale Funnel relay throttling the connector's request burst** — the connector
-looks disconnected but the exomem service is RUNNING and fine. **Diagnose from the
-access log before touching the server** (look for the claude.ai gateway IPs); don't
-restart the service reflexively.
+The public ingress is a **Cloudflare Tunnel** (`kb.substratesystems.io`, cloudflared
+Windows service; migrated FROM Tailscale Funnel 2026-06-21 — the funnel throttled
+connector bursts, KB note `kb-mcp-ingress-migrated-to-cloudflare-tunnel-…`). Known
+connection-side patterns: (1) a long-lived claude.ai session's **first MCP call
+after an exomem service restart** can stall minutes in the gateway's MCP-session
+re-establishment while fresh sessions connect instantly — the server log shows
+`Created new transport with session ID` when the delayed call finally lands, and
+the request then executes in normal time; (2) Cloudflare's edge caps a single
+request at ~100 s. **Diagnose from the access log before touching the server**
+(claude.ai gateway IPs `160.79.104.0/21` still appear through the tunnel); don't
+restart the service reflexively — restarts CAUSE pattern (1) for live sessions.
