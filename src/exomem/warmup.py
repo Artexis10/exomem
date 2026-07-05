@@ -43,9 +43,15 @@ def warmup_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_WARMUP")
 
 
-def warm_caches(vault_root: Path) -> dict[str, float]:
+def warm_caches(vault_root: Path, *, preload_models: bool = True) -> dict[str, float]:
     """Warm find's lexical/derived caches; returns per-step durations in ms
-    (empty when disabled). Never raises."""
+    (empty when disabled). Never raises.
+
+    The lexical steps (pages, BM25 both scopes, resolver) are CPU-only and always
+    run. The embedding/CLIP matrix dummy searches touch the vector backend and are
+    skipped when `preload_models` is False (quiet mode) so a quiet boot keeps its
+    RAM footprint minimal — the first find faults the matrix lazily instead.
+    """
     if not warmup_enabled():
         log.info("cache warm-up disabled via EXOMEM_DISABLE_WARMUP")
         return {}
@@ -73,7 +79,7 @@ def warm_caches(vault_root: Path) -> dict[str, float]:
     _step("bm25_kb", lambda: bm25.warm(vault_root, "kb"))
     _step("bm25_vault", lambda: bm25.warm(vault_root, "vault"))
     _step("resolver", lambda: find._get_query_resolver(vault_root))
-    if not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+    if preload_models and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         # One tiny search warms WHICHEVER backend serves vector search: the vec0
         # backend (sync check + first KNN faults in the vec tables; the numpy
         # matrix stays cold — not holding it resident is the backend's point) or
@@ -120,9 +126,10 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     not-ready (never marked), so requests defer for the rest of the warm and
     then return to inline lazy-load semantics. Never raises.
     """
-    from . import readiness
+    from . import mode, readiness
 
-    durations = warm_caches(vault_root)
+    preload = mode.preload_models()
+    durations = warm_caches(vault_root, preload_models=preload)
     readiness.mark_ready("lexical")
 
     def _model_step(name: str, fn) -> bool:
@@ -154,14 +161,31 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             log.debug("%s warm-encode skipped", step, exc_info=True)
         return True
 
-    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        # Lexical-only install: there are no models to wait for, so mark the
-        # model components ready immediately — otherwise finds during the
-        # few-second lexical warm would carry a "warming" marker naming
-        # models this install will never load.
-        log.info("model preloads skipped (EXOMEM_DISABLE_EMBEDDINGS)")
-        for component in ("embeddings", "reranker", "clip"):
-            readiness.mark_ready(component)
+    disabled = bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"))
+    if disabled or not preload:
+        # Skip model preloads: either a lexical-only install (DISABLE_EMBEDDINGS,
+        # nothing to load) or quiet mode (models lazy-load on first use, then the
+        # idle-unload reaper reclaims them). Mark the model components ready either
+        # way so finds during the lexical warm don't carry a "warming" marker for
+        # models that won't preload, and writers stop deferring.
+        reason = "EXOMEM_DISABLE_EMBEDDINGS" if disabled else "quiet mode"
+        log.info("model preloads skipped (%s); models lazy-load on first use", reason)
+        readiness.mark_ready("reranker")
+        readiness.mark_ready("clip")
+        drained = readiness.mark_ready("embeddings")
+        # Quiet mode: embeddings ARE available (just lazy), so replay any write
+        # parked during the brief lexical warm — mirror the real-preload branch so
+        # those edits aren't stranded. Under DISABLE_EMBEDDINGS there's nothing to
+        # embed (upsert_after_write no-ops), so the drain is discarded.
+        if not disabled and drained:
+            from . import embeddings
+
+            for item_vault, paths in drained:
+                try:
+                    embeddings.upsert_after_write(item_vault, list(paths))
+                except Exception:  # noqa: BLE001 — drain is best-effort
+                    log.warning("deferred embed drain failed", exc_info=True)
+            log.info("drained %d deferred write-embed batch(es)", len(drained))
     else:
         from . import embeddings
 

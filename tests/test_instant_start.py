@@ -228,7 +228,7 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
     ready as it lands."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     call_order: list[str] = []
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: call_order.append("lexical") or {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
     monkeypatch.setattr(embeddings, "get_model", lambda: call_order.append("embeddings") or object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: call_order.append("reranker") or object())
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: call_order.append("clip") or object())
@@ -250,7 +250,7 @@ def test_warm_all_skips_model_preloads_when_embeddings_disabled(
     finds during the lexical warm must not carry a "warming" marker naming
     models this install will never load."""
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
 
     def _forbidden() -> None:
         raise AssertionError("model getters must not be called when embeddings are disabled")
@@ -267,13 +267,92 @@ def test_warm_all_skips_model_preloads_when_embeddings_disabled(
     assert readiness.is_ready("clip") is True
 
 
+def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Quiet mode (models available, just lazy) skips the bge/reranker/CLIP preloads
+    entirely — the getters are never called — yet marks every model component ready
+    so finds during the lexical warm don't carry a bogus "warming" marker. This is
+    the idle-VRAM win: no model touches CUDA at boot."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
+
+    def _forbidden() -> None:
+        raise AssertionError("model getters must not be called in quiet mode")
+
+    monkeypatch.setattr(embeddings, "get_model", _forbidden)
+    monkeypatch.setattr(embeddings, "get_reranker", _forbidden)
+    monkeypatch.setattr(embeddings, "get_clip_model", _forbidden)
+
+    warmup.warm_all(tmp_path)
+
+    for c in readiness.COMPONENTS:
+        assert readiness.is_ready(c) is True
+
+
+def test_warm_all_quiet_mode_replays_deferred_write_embeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlike the DISABLE_EMBEDDINGS leg, quiet mode HAS embeddings (lazy), so a write
+    parked via readiness.defer during the brief lexical warm must be replayed through
+    embeddings.upsert_after_write — not stranded."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
+    drained_calls: list[tuple] = []
+    monkeypatch.setattr(
+        embeddings, "upsert_after_write",
+        lambda vr, paths: drained_calls.append((vr, list(paths))),
+    )
+
+    readiness.begin_warm()
+    some_paths = (tmp_path / "a.md", tmp_path / "b.md")
+    assert readiness.defer("embeddings", (tmp_path, some_paths)) is True
+
+    warmup.warm_all(tmp_path)
+
+    assert drained_calls == [(tmp_path, list(some_paths))]
+
+
+def test_warm_caches_gates_matrix_warm_on_preload_models(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The embedding/CLIP matrix dummy searches (which touch the vector backend) are
+    skipped when preload_models is False and run when True — the CPU-only lexical
+    steps are unaffected either way."""
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+
+    calls: list[int] = []
+
+    class _Idx:
+        def search(self, q, k):
+            calls.append(k)
+            return []
+
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda vr: _Idx())
+    monkeypatch.setattr(embeddings, "get_clip_index", lambda vr: _Idx())
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
+
+    d_quiet = warmup.warm_caches(tmp_path, preload_models=False)
+    assert "embedding_matrix" not in d_quiet
+    assert "clip_matrix" not in d_quiet
+    assert calls == []
+
+    d_default = warmup.warm_caches(tmp_path, preload_models=True)
+    assert "embedding_matrix" in d_default
+    assert "clip_matrix" in d_default
+    assert calls == [1, 1]
+
+
 def test_warm_all_soft_fails_one_step_and_continues_to_later_steps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A raising loader must not abort later steps — bge failing leaves only
     "embeddings" unready while reranker/clip still load and mark ready."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
 
     def _boom() -> None:
         raise RuntimeError("network unreachable")
@@ -302,7 +381,7 @@ def test_warm_all_drains_deferred_write_embeds_after_embeddings_ready(
     parked via readiness.defer("embeddings", ...) during the warm and
     replay it through embeddings.upsert_after_write."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     monkeypatch.setattr(embeddings, "get_model", lambda: object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
@@ -332,7 +411,7 @@ def test_warm_all_drains_deferred_write_embeds_even_when_bge_preload_fails(
     WITHOUT marking the component ready: request paths keep their inline
     lazy-load + soft-degrade fallback, but the parked writes are replayed."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
 
     def _boom() -> None:
         raise RuntimeError("network unreachable")
@@ -376,7 +455,7 @@ def test_warm_all_runs_a_throwaway_encode_after_each_preload(
             warmed.append("predict")
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     monkeypatch.setattr(embeddings, "get_model", _FakeST)
     monkeypatch.setattr(embeddings, "get_reranker", _FakeCE)
     monkeypatch.setattr(embeddings, "get_clip_model", _FakeST)
@@ -402,7 +481,7 @@ def test_warm_encode_failure_is_swallowed_and_does_not_block_readiness(
             raise RuntimeError("mps kernel compile failed")
 
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     monkeypatch.setattr(embeddings, "get_model", _Boom)
     monkeypatch.setattr(embeddings, "get_reranker", _Boom)
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
@@ -809,7 +888,7 @@ def test_warm_cli_vault_flag_also_warms_lexical_caches(
     monkeypatch.setattr(embeddings, "get_model", lambda: object())
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     calls: list[Path] = []
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr: calls.append(vr) or {})
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: calls.append(vr) or {})
 
     code = main(["warm", "--vault", str(tmp_path)])
 
