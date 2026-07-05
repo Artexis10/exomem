@@ -230,9 +230,12 @@ def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
 
     kb_dir = vault / "Knowledge Base"
     fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
-    drifted = freshness.reconcile(vault, "kb", fresh_entries)
+    delta = freshness.reconcile(vault, "kb", fresh_entries)
 
-    assert drifted is True
+    assert delta.drifted is True
+    # The delta names exactly the file whose event was missed.
+    assert delta.changed == [str(target)]
+    assert delta.deleted == []
     assert freshness.triple(vault, "kb") == fresh_truth
 
 
@@ -241,9 +244,31 @@ def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:
 
     kb_dir = vault / "Knowledge Base"
     fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
-    drifted = freshness.reconcile(vault, "kb", fresh_entries)
+    delta = freshness.reconcile(vault, "kb", fresh_entries)
 
-    assert drifted is False
+    assert delta.drifted is False
+    assert delta.changed == []
+    assert delta.deleted == []
+    assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
+
+
+def test_reconcile_delta_reports_changed_and_deleted_paths(vault: Path) -> None:
+    _seed_both_scopes(vault)
+
+    kb_files = list(find_module._walk_md(vault / "Knowledge Base"))
+    modified, removed = kb_files[0], kb_files[1]
+    future = time.time() + 10_000
+    os.utime(modified, (future, future))
+    removed.unlink()
+    # No on_files_changed calls — both events are "missed".
+
+    kb_dir = vault / "Knowledge Base"
+    fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
+    delta = freshness.reconcile(vault, "kb", fresh_entries)
+
+    assert delta.drifted is True
+    assert delta.changed == [str(modified)]
+    assert delta.deleted == [str(removed)]
     assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
 
 
