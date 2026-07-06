@@ -16,12 +16,13 @@ Three canonical modes (aliases in `_ALIASES` so whatever a user types works):
                    present; release when idle. Aliases: `gpu`, `turbo`.
 
 Resolution precedence: `EXOMEM_MODE` env → the per-machine config file
-(`~/.exomem/config.json`, or `EXOMEM_CONFIG_PATH`) → the legacy `EXOMEM_QUIET_MODE`
-boolean → the `normal` default. The config file is read explicitly (never injected
-into the environment) so an exported `EXOMEM_MODE` always wins over it — and it is a
-fixed home path, not `.env`, because a Windows service launched via `sc.exe` has an
-unpredictable cwd and CLI subcommands never `load_dotenv`, yet both must read the
-same mode.
+(`%PROGRAMDATA%\\exomem\\config.json` on Windows, `~/.exomem/config.json` on POSIX, or
+`EXOMEM_CONFIG_PATH`) → the legacy `EXOMEM_QUIET_MODE` boolean → the `normal` default.
+The config file is read explicitly (never injected into the environment) so an exported
+`EXOMEM_MODE` always wins over it — and it is a fixed, machine-wide path (not `.env`,
+whose cwd-relative discovery a `sc.exe`-launched service can't rely on, and which CLI
+subcommands never `load_dotenv`) so the service and the CLI — often different OS users —
+read the SAME mode. See `config_path` for the Windows LocalSystem-vs-user rationale.
 
 Torch-free by design: importable in keyword-mode / lean CLI dispatch without paying
 a torch import. `accel` imports this; this never imports `accel`.
@@ -65,10 +66,22 @@ def normalize(value: str | None) -> str | None:
 
 
 def config_path() -> Path:
-    """Per-machine config file. `EXOMEM_CONFIG_PATH` overrides (tests/multi-instance)."""
+    """Per-machine config file. `EXOMEM_CONFIG_PATH` overrides (tests/multi-instance).
+
+    On Windows the default is machine-wide (`%PROGRAMDATA%\\exomem\\config.json`), NOT
+    the user home: a service commonly runs as LocalSystem while the `exomem` CLI runs as
+    the logged-in user, and `~` resolves to two different profiles — so a home-relative
+    file would let the CLI write one config the service never reads, silently breaking the
+    live mode switch. ProgramData is shared (the CLI user creates+writes it; the service
+    reads it). On POSIX, home is kept — services there usually run as the user, and the
+    override covers the rest.
+    """
     override = os.environ.get(_CONFIG_PATH_ENV)
     if override:
         return Path(override)
+    if os.name == "nt":
+        base = os.environ.get("PROGRAMDATA") or os.environ.get("ALLUSERSPROFILE") or r"C:\ProgramData"
+        return Path(base) / "exomem" / "config.json"
     return Path.home() / ".exomem" / "config.json"
 
 
