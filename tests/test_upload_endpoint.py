@@ -7,6 +7,8 @@ can't clobber the per-test fixture vault.
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 from starlette.testclient import TestClient
 
@@ -48,6 +50,12 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert r.status_code == 201, r.text
     body = r.json()
     assert "Evidence/Yolo/01 - Check-in/shot.png" in body["path"]
+    assert body["stored_path"] == body["path"]
+    assert body["size"] == len(b"\x89PNGrealbytes")
+    assert body["hash"] == hashlib.sha256(b"\x89PNGrealbytes").hexdigest()
+    assert body["hash_algorithm"] == "sha256"
+    assert body["media_id"] == f"sha256:{body['hash']}"
+    assert body["content_type"] == "image/png"
     written = vault / body["path"]
     assert written.read_bytes() == b"\x89PNGrealbytes"
 

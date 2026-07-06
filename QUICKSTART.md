@@ -17,12 +17,12 @@ shell; the few Windows (PowerShell) differences are called out inline.
 
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
-> **exomem is two parts, and you need both.** The **MCP server** (steps 1–5) is
-> the *hands* — the `find`/`add`/`note` tools. The **skill** (step 6) is the
-> *brain* — it's what tells Claude *when* to save, how to file a source, and how
-> to compile a note. Install the server but skip the skill and Claude has the
-> tools but no idea it's meant to use them: it sits silent and feels broken.
-> **This is the #1 "it does nothing" trap — don't skip step 6.**
+> **For Claude Code, exomem is two parts and you want both.** The **MCP server**
+> (steps 1–5) is the *hands* — the `find`/`add`/`note` tools. The **skill**
+> (step 6) is the *brain* — it tells Claude *when* to save, how to file a source,
+> and how to compile a note. Generic MCP clients that cannot load Skills should
+> call `bootstrap()` once after connecting; that returns the compact operating
+> contract through MCP.
 
 ---
 
@@ -237,13 +237,13 @@ Restart Claude Code; you should see the `exomem` tools (`find`, `note`, `add`,
 
 ---
 
-## 6. Install the skill (REQUIRED — this is the brain)
+## 6. Install the skill (Claude Code best UX)
 
 The server gives Claude the tools; **the Exomem Knowledge Base skill is what
-makes Claude actually use them** — capture at natural stopping points, file
-sources to the right folder,
-compile notes under the schema. One command installs it straight from the repo
-into Claude Code's skills folder (no vault path needed — it ships in the package):
+makes Claude Code use them well** — capture at natural stopping points, file
+sources to the right folder, and compile notes under the schema. One command
+installs it straight from the repo into Claude Code's skills folder (no vault
+path needed — it ships in the package):
 
 ```bash
 uv run python -m exomem install-skill
@@ -269,6 +269,11 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > stepping-stone — a decision, a solved problem, a recognized pattern. There's
 > **no background daemon**: it won't save things while you're away from the chat,
 > and a fresh thread starts fresh. You can always just say *"save that to kb."*
+>
+> **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
+> without Skill support should call `bootstrap()` once after connecting. It returns
+> Exomem's search/save/upload defaults and performance guidance in a structured
+> MCP response.
 
 ---
 

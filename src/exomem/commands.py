@@ -25,6 +25,7 @@ import types
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
+from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fastmcp.tools import ToolResult
@@ -67,6 +68,7 @@ from . import replace as replace_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import video_frames as video_frames_module
+from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
     find_body_wikilinks,
@@ -249,6 +251,183 @@ def _link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
 # descriptions Claude reads (byte-pinned by tests/test_mcp_schema_fidelity.py).
 
 
+def op_bootstrap(
+    vault_root: Path,
+    profile: str = "compact",
+    workflow: str | None = None,
+) -> dict:
+    """Return Exomem's versioned operating contract for generic MCP clients.
+
+    Call this once at the start of a session when the client does not have the
+    Exomem Claude Skill loaded. It teaches the agent how to use the tools: when
+    to search, when to save, how to interpret scoped misses, which `find` knobs
+    are cheap vs diagnostic, and how compiled notes differ from raw evidence.
+    The payload is deterministic instruction plus local compute policy; it does
+    not inspect or summarize vault content.
+
+    Args:
+        profile: "compact" (default), "full", or "diagnostics". Compact is
+            enough for normal clients. Full adds examples. Diagnostics adds
+            performance interpretation guidance.
+        workflow: Optional caller-selected workflow label. Returned as context
+            only; it does not change server behavior.
+
+    Returns:
+        A structured, versioned contract with workflow, search, save, upload,
+        and performance guidance for MCP clients.
+    """
+    if profile not in ("compact", "full", "diagnostics"):
+        raise ValueError(
+            "bootstrap: profile must be 'compact', 'full', or 'diagnostics', "
+            f"got {profile!r}"
+        )
+
+    try:
+        package_version = version("exomem")
+    except PackageNotFoundError:
+        package_version = "0+unknown"
+
+    from . import mode as mode_module
+
+    compute_policy = mode_module.resolved()
+    requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
+    payload: dict = {
+        "contract_version": "2026-07-06.1",
+        "profile": profile,
+        "server": {
+            "name": "exomem",
+            "version": package_version,
+            "kb_dir": kb_dirname(),
+            "pure_substrate": True,
+            "content_included": False,
+            "compute_policy": compute_policy,
+        },
+        "workflow": {
+            "requested": requested_workflow,
+            "loop": [
+                "bootstrap",
+                "find",
+                "get or find(pack=true) when more context is needed",
+                "reason in the agent",
+                "note, edit, or replace when there is a durable conclusion",
+            ],
+            "save_rule": (
+                "Save durable decisions, solved problems, diagnosed failures, "
+                "and reusable patterns as compiled notes; keep raw artifacts in "
+                "Sources or Evidence."
+            ),
+            "miss_rule": (
+                "An empty search means not found in that query/scope. Try synonyms, "
+                "related terms, compact recall, or scope='vault' before concluding absence."
+            ),
+        },
+        "tool_defaults": {
+            "normal_lookup": {
+                "tool": "find",
+                "args": {"detail": "compact", "rerank": False},
+            },
+            "reasoning_lookup": {
+                "tool": "find",
+                "args": {"pack": True},
+            },
+            "diagnostics_lookup": {
+                "tool": "find",
+                "args": {
+                    "detail": "compact",
+                    "include_timings": True,
+                    "rerank": True,
+                },
+            },
+            "read_full_page": {"tool": "get", "when": "after choosing a hit"},
+            "write_compiled_note": {
+                "tool": "note",
+                "when": "new durable conclusion",
+            },
+            "minor_edit": {"tool": "edit", "when": "small correction to an existing page"},
+            "supersede": {
+                "tool": "replace",
+                "when": "substantial rewrite of compiled material",
+            },
+            "binary_upload": {
+                "tool": "mint_upload_token",
+                "endpoint": "/upload",
+                "fields": ["file", "scope", "category", "description", "text"],
+            },
+        },
+        "performance_profiles": {
+            "normal": {
+                "find_args": {"detail": "compact", "rerank": False},
+                "interpretation": "cheap routing recall; follow with get if needed",
+            },
+            "reasoning": {
+                "find_args": {"pack": True},
+                "interpretation": "bounded context assembly for synthesis",
+            },
+            "diagnostics": {
+                "find_args": {"include_timings": True, "rerank": True},
+                "interpretation": (
+                    "timings measure retrieval stages; compute_policy explains "
+                    "quiet/normal/performance mode separately from rerank/pack knobs"
+                ),
+            },
+        },
+        "search_guidance": {
+            "prefer_compiled_default": True,
+            "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
+            "raw_types": ["source", "evidence"],
+            "retry_examples": [
+                "try synonyms and singular/plural forms",
+                "try adjacent domain terms",
+                "try scope='vault' if Knowledge Base recall is sparse",
+                "try pack=true for synthesis instead of many get calls",
+            ],
+        },
+        "common_tools": [
+            "find",
+            "get",
+            "note",
+            "edit",
+            "replace",
+            "suggest_links",
+            "mint_upload_token",
+            "get_video_frames",
+        ],
+    }
+
+    if profile in ("full", "diagnostics"):
+        payload["examples"] = [
+            {
+                "goal": "cheap proactive recall",
+                "call": "find(query='...', detail='compact', rerank=false)",
+            },
+            {
+                "goal": "reason across top matches",
+                "call": "find(query='...', pack=true)",
+            },
+            {
+                "goal": "capture a durable conclusion",
+                "call": "note(note_type='research-note'|'insight'|..., title='...', content='...')",
+            },
+        ]
+    if profile == "diagnostics":
+        payload["diagnostics"] = {
+            "timings": (
+                "Use include_timings=true when discussing latency. Rerank and pack "
+                "can dominate wall time and are not the same as CPU/GPU mode."
+            ),
+            "compute_modes": {
+                "quiet": "CPU/low-power, no preload, releases models when idle",
+                "normal": "safe default, CPU steady-state with lexical recall ready first",
+                "performance": "GPU-preferred steady-state when available",
+            },
+            "upload_response": (
+                "/upload returns stored_path, hash, media_id, size, and sidecar_path "
+                "so the agent can report stored artifacts exactly."
+            ),
+        }
+    return payload
+
+
 def op_find(
     vault_root: Path,
     query: str = "",
@@ -417,6 +596,24 @@ def op_find(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
     timings = find_module.FindTimings() if include_timings else None
+    if timings is not None:
+        from . import mode as mode_module
+
+        timings.profile.update(
+            {
+                "mode": mode,
+                "scope": scope,
+                "detail": detail,
+                "pack": pack,
+                "graph": graph,
+                "rerank_requested": rerank,
+                "auto_rerank": rerank is None,
+                "prefer_compiled": prefer_compiled,
+                "prefer_active": prefer_active,
+                "prefer_used": prefer_used,
+                "compute_policy": mode_module.resolved(),
+            }
+        )
     degraded: list[str] = []
     failed: list[str] = []
     hits = find_module.find(
@@ -2288,6 +2485,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
     ("add", op_add, 1, True, True, None, _MCRC),

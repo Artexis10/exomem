@@ -162,6 +162,32 @@
       "type": "object"
     }
   },
+  "bootstrap": {
+    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, and how compiled notes differ from raw evidence.\nThe payload is deterministic instruction plus local compute policy; it does\nnot inspect or summarize vault content.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "default": "compact",
+          "type": "string",
+          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is\nenough for normal clients. Full adds examples. Diagnostics adds\nperformance interpretation guidance."
+        },
+        "workflow": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional caller-selected workflow label. Returned as context\nonly; it does not change server behavior."
+        }
+      },
+      "type": "object"
+    }
+  },
   "create_file": {
     "description": "Tier 2: write a file — or, with `kind=\"dir\"`, create a folder — at an\narbitrary vault path.\n\nWith `kind=\"dir\"`, this creates a folder (mkdir -p when `parents=true`)\nand ignores `content`/`frontmatter`/`overwrite` (folds in the former\n`create_directory` tool); returns {path, created, warnings}.\n\nEscape hatch for files that don't fit Tier 1 type routing — new folder\nstructures (`Identity/`, `Templates/`), skill files, scratch. For\ntyped notes use `note`/`add`/`link`/`preserve`.\n\nIf `frontmatter` is a dict, this op prepends a YAML block built from\nit (and auto-fills `created`/`updated` to today if not provided);\n`content` is the body in that case. If `frontmatter` is omitted,\n`content` is written verbatim — the caller is responsible for any\nfrontmatter already in it.\n\nRefuses:\n- Sources/, Evidence/ (append-only — use `add` or `preserve`).\n- Subtrees marked `readonly`/`excluded` in `_access.yaml` (curated,\n  read-only material) — a hard refusal with no override.\n- Existing files unless `overwrite=true`.",
     "inputSchema": {

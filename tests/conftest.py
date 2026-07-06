@@ -44,6 +44,10 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     # No real CLIP either; tests that exercise it stub embeddings.embed_image/embed_clip_text.
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    # Opt-in media upgrades must not leak from a developer's real environment into
+    # default tests. Tests that exercise these gates set them explicitly.
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
     # The watcher now starts independently of embeddings (it maintains the
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.

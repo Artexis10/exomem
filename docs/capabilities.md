@@ -6,18 +6,19 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Registry commands: 27
-- Tier 1 commands: 17
+- Registry commands: 28
+- Tier 1 commands: 18
 - Tier 2 commands: 10
-- Registry-generated MCP commands: 26
-- REST commands: 26
-- CLI commands: 26
+- Registry-generated MCP commands: 27
+- REST commands: 27
+- CLI commands: 27
 - Hand-registered MCP tools: mint_download_token, mint_upload_token, note
 
 ## Command Registry
 
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
+| bootstrap | 1 | MCP, REST, CLI | read | no | - | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
 | find | 1 | MCP, REST, CLI | read | no | query | query, types, projects, tags, speakers, file_types, exclude_file_types, limit, scope, mode, graph, rerank, prefer_compiled, prefer_active, prefer_used, pack, detail, include_timings | Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within. |
 | suggest_links | 1 | MCP, REST, CLI | read | no | - | path, draft_title, draft_body, limit, scope | Suggest existing KB pages a note should link to. Read-only. |
 | add | 1 | MCP, REST, CLI | write | no | - | content*, source_type*, title*, url, tags, why_captured | Capture raw content as an immutable source page in the Knowledge Base. |

@@ -579,6 +579,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 category=category,
                 filename=filename,
                 stream=upload.file,
+                content_type=getattr(upload, "content_type", None),
                 description=description,
                 text=text,
                 max_bytes=upload_max_bytes,
