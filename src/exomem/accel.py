@@ -235,3 +235,41 @@ def bulk_device(explicit: str | None = None) -> str | None:
     if mode_module.resolve_mode() != "quiet" and gpu_usable():
         return "gpu"
     return None
+
+
+def empty_cache() -> None:
+    """Return unused caching-allocator blocks to the driver after a model unload.
+
+    Only touches CUDA when a context already exists (`is_initialized`) so it never
+    creates one on a CPU-default process. Note (see the CUDA-context-floor KB note):
+    this frees weights + the reserved pool, NOT the CUDA context itself — so it can't
+    reach ~0 VRAM on its own; that's why CPU-default is the primary idle-VRAM fix and
+    this is the complement for the GPU-opt-in path. Never raises.
+    """
+    try:
+        import torch
+
+        if torch.cuda.is_available() and torch.cuda.is_initialized():
+            torch.cuda.empty_cache()
+    except Exception:  # noqa: BLE001 — cache release is best-effort
+        pass
+
+
+def gpu_mem() -> dict | None:
+    """`{"allocated_mb", "reserved_mb"}` for the current CUDA device, or None.
+
+    For unload/reaper observability and `doctor`. Returns None when torch is absent or
+    CUDA isn't available; never raises. Reads the accounting only if a context exists so
+    it doesn't create one.
+    """
+    try:
+        import torch
+
+        if not (torch.cuda.is_available() and torch.cuda.is_initialized()):
+            return None
+        return {
+            "allocated_mb": round(torch.cuda.memory_allocated() / 2**20, 1),
+            "reserved_mb": round(torch.cuda.memory_reserved() / 2**20, 1),
+        }
+    except Exception:  # noqa: BLE001 — observability must never break a caller
+        return None
