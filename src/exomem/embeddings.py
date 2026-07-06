@@ -15,6 +15,8 @@ Sidecar lives outside `_Schema/` deliberately:
 
 from __future__ import annotations
 
+import contextlib
+import gc
 import logging
 import math
 import os
@@ -22,6 +24,7 @@ import random
 import sqlite3
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import NamedTuple
@@ -58,6 +61,101 @@ _CLIP_MODEL = None
 _CLIP_LOCK = threading.Lock()
 _IMPORT_FAILED = False  # one-time soft-fail flag for upsert_after_write
 _CLIP_IMPORT_FAILED = False
+
+
+class _ModelGuard:
+    """In-flight + last-activity tracking for a lazily-loaded model singleton, so the
+    idle-unload reaper (`model_reaper`) can reclaim it safely.
+
+    Correctness rests on the worker holding a live LOCAL ref to the model for the whole
+    encode (get_model() returns it, the worker calls model.encode on that local): nulling
+    the module singleton can't collect it and `empty_cache()` frees only unused blocks, so
+    an unload racing an in-flight encode is never a use-after-free. This guard therefore
+    only prevents INEFFICIENCY — a transient double-load or empty_cache stealing reusable
+    blocks mid-encode — via the in-flight counter, not a crash. Its lock guards only the
+    counter + timestamp; it is never held across a model load or an encode.
+    """
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+        self._lock = threading.Lock()
+        self._inflight = 0
+        self._last_activity = 0.0  # time.monotonic() of last load/encode; 0 = never loaded
+
+    def touch(self) -> None:
+        """Stamp activity (called on model load so a fresh model isn't instantly reaped)."""
+        with self._lock:
+            self._last_activity = time.monotonic()
+
+    @contextlib.contextmanager
+    def active(self):
+        """Bracket an encode/predict: bump in-flight so the reaper skips this model."""
+        with self._lock:
+            self._inflight += 1
+            self._last_activity = time.monotonic()
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._inflight -= 1
+                self._last_activity = time.monotonic()
+
+    def inflight(self) -> int:
+        with self._lock:
+            return self._inflight
+
+    def last_activity(self) -> float:
+        with self._lock:
+            return self._last_activity
+
+
+BGE_GUARD = _ModelGuard("embeddings")
+RERANKER_GUARD = _ModelGuard("reranker")
+CLIP_GUARD = _ModelGuard("clip")
+
+
+def unload_model() -> bool:
+    """Drop the bge singleton and release its GPU cache. Skips if a worker is mid-encode.
+
+    Returns True if it actually unloaded. Safe under concurrent use (see `_ModelGuard`):
+    a worker that already holds the model finishes its encode on its local ref. The busy
+    check + null happen under `_MODEL_LOCK`, so no new get_model() can complete a load in
+    between (get_model also takes `_MODEL_LOCK`)."""
+    global _MODEL
+    with _MODEL_LOCK:
+        if _MODEL is None or BGE_GUARD.inflight() > 0:
+            return False
+        m, _MODEL = _MODEL, None
+    del m
+    gc.collect()
+    accel.empty_cache()
+    return True
+
+
+def unload_reranker() -> bool:
+    """Drop the reranker singleton + release GPU cache. See `unload_model`."""
+    global _RERANKER
+    with _RERANKER_LOCK:
+        if _RERANKER is None or RERANKER_GUARD.inflight() > 0:
+            return False
+        m, _RERANKER = _RERANKER, None
+    del m
+    gc.collect()
+    accel.empty_cache()
+    return True
+
+
+def unload_clip_model() -> bool:
+    """Drop the CLIP singleton + release GPU cache. See `unload_model`."""
+    global _CLIP_MODEL
+    with _CLIP_LOCK:
+        if _CLIP_MODEL is None or CLIP_GUARD.inflight() > 0:
+            return False
+        m, _CLIP_MODEL = _CLIP_MODEL, None
+    del m
+    gc.collect()
+    accel.empty_cache()
+    return True
 
 # Process-lifetime memo of the per-vault index objects. Sharing ONE instance per
 # vault is what makes the in-memory matrix cache survive across find() calls (and
@@ -153,6 +251,7 @@ def get_model():
         device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
         log.info("loading embedding model %s on %s", MODEL_NAME, device)
         _MODEL = _maybe_half(SentenceTransformer(MODEL_NAME, device=device), device)
+    BGE_GUARD.touch()  # start the idle clock at load, not epoch 0
     return _MODEL
 
 
@@ -169,6 +268,7 @@ def get_reranker():
         device = accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
         log.info("loading reranker %s on %s", RERANKER_NAME, device)
         _RERANKER = CrossEncoder(RERANKER_NAME, device=device)
+    RERANKER_GUARD.touch()
     return _RERANKER
 
 
@@ -228,6 +328,7 @@ def get_clip_model():
         device = _clip_device()
         log.info("loading CLIP model %s on %s", CLIP_MODEL_NAME, device)
         _CLIP_MODEL = _maybe_half(SentenceTransformer(CLIP_MODEL_NAME, device=device), device)
+    CLIP_GUARD.touch()
     return _CLIP_MODEL
 
 
@@ -244,7 +345,7 @@ def embed_image(path: Path) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    with Image.open(path) as img:
+    with Image.open(path) as img, CLIP_GUARD.active():
         vec = model.encode(img.convert("RGB"), convert_to_numpy=True, normalize_embeddings=True)
     return vec.astype(np.float32, copy=False)
 
@@ -255,7 +356,8 @@ def embed_clip_text(query: str) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
+    with CLIP_GUARD.active():
+        vec = model.encode([query], convert_to_numpy=True, normalize_embeddings=True)[0]
     return vec.astype(np.float32, copy=False)
 
 
@@ -272,7 +374,8 @@ def embed_clip_texts(texts: list[str]) -> np.ndarray:
         model = get_clip_model()
     except ImportError as e:
         raise ClipUnavailable(f"sentence-transformers not installed: {e}") from e
-    vecs = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
+    with CLIP_GUARD.active():
+        vecs = model.encode(texts, convert_to_numpy=True, normalize_embeddings=True)
     return vecs.astype(np.float32, copy=False)
 
 
@@ -679,9 +782,10 @@ def embed_video_scenes(
     pairs = sample_video_scenes(path)
     if not pairs:
         raise ClipUnavailable(f"no decodable video frames in {path.name}")
-    vecs = model.encode(
-        [img for _, img in pairs], convert_to_numpy=True, normalize_embeddings=True
-    )
+    with CLIP_GUARD.active():
+        vecs = model.encode(
+            [img for _, img in pairs], convert_to_numpy=True, normalize_embeddings=True
+        )
     vectors = [
         (float(s.rep_ts), vecs[i].astype(np.float32, copy=False))
         for i, (s, _) in enumerate(pairs)
@@ -722,7 +826,8 @@ def embed_video_frames(path: Path) -> list[tuple[float, np.ndarray]]:
         idx = sorted(set(np.linspace(0, len(kept) - 1, cap).round().astype(int).tolist()))
         kept = [kept[i] for i in idx]
     images = [img for _, img in kept]
-    vecs = model.encode(images, convert_to_numpy=True, normalize_embeddings=True)
+    with CLIP_GUARD.active():
+        vecs = model.encode(images, convert_to_numpy=True, normalize_embeddings=True)
     return [(float(ts), vecs[i].astype(np.float32, copy=False)) for i, (ts, _) in enumerate(kept)]
 
 
@@ -736,12 +841,13 @@ def rerank_pairs(query: str, passages: list[str]) -> np.ndarray:
         return np.zeros(0, dtype=np.float32)
     model = get_reranker()
     pairs = [(query, p) for p in passages]
-    scores = model.predict(
-        pairs,
-        batch_size=32,
-        convert_to_numpy=True,
-        show_progress_bar=False,
-    )
+    with RERANKER_GUARD.active():
+        scores = model.predict(
+            pairs,
+            batch_size=32,
+            convert_to_numpy=True,
+            show_progress_bar=False,
+        )
     return scores.astype(np.float32, copy=False)
 
 
@@ -823,13 +929,14 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     model = get_model()
     if is_query:
         texts = [QUERY_PREFIX + t for t in texts]
-    vecs = model.encode(
-        texts,
-        batch_size=32,
-        convert_to_numpy=True,
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )
+    with BGE_GUARD.active():
+        vecs = model.encode(
+            texts,
+            batch_size=32,
+            convert_to_numpy=True,
+            normalize_embeddings=True,
+            show_progress_bar=False,
+        )
     return vecs.astype(np.float32, copy=False)
 
 

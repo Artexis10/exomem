@@ -328,6 +328,15 @@ def build_server(*, require_auth: bool) -> FastMCP:
         else:
             warmup.start_background(vault_root)
 
+    # Idle-unload reaper: reclaim resident models once they go idle. Only for the
+    # GPU-opt-in (performance) / quiet paths — a CPU-default normal-mode server never
+    # starts it (nothing resident to reclaim; no CUDA context). A live `exomem mode`
+    # switch (PR4) starts/stops it to match the new mode.
+    if mode.release_when_idle():
+        from . import model_reaper
+
+        model_reaper.start()
+
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests
     # and on lean boxes via EXOMEM_DISABLE_MEDIA_EXTRACTION (mirrors the embeddings flag).
