@@ -29,6 +29,17 @@ def _three_frames():
     ]
 
 
+def test_scene_frame_gate_accepts_falsey_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_VIDEO_SCENE_FRAMES", raising=False)
+    assert embeddings.scene_frames_enabled() is False
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "0")
+    assert embeddings.scene_frames_enabled() is False
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "off")
+    assert embeddings.scene_frames_enabled() is False
+    monkeypatch.setenv("EXOMEM_VIDEO_SCENE_FRAMES", "1")
+    assert embeddings.scene_frames_enabled() is True
+
+
 def test_worker_clip_embeds_video_via_keyframes(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)

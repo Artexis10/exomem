@@ -29,6 +29,11 @@ def test_timings_envelope_and_stages(vault: Path) -> None:
     t = out["timings"]
     assert t["total_ms"] >= 0
     assert "cache" in t and "hit" in t["cache"]
+    assert t["profile"]["mode"] == "hybrid"
+    assert t["profile"]["detail"] == "full"
+    assert t["profile"]["pack"] is False
+    assert t["profile"]["auto_rerank"] is True
+    assert t["profile"]["compute_policy"]["mode"] in {"quiet", "normal", "performance"}
     stages = t["stages"]
     # Lexical lanes always run in hybrid mode; vector is present as a timed
     # or errored stage even with embeddings disabled (soft-fail, never fatal).

@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import base64
 import datetime as dt
+import hashlib
 import io
 import logging
+import mimetypes
 import os
 import re
 from dataclasses import dataclass
@@ -78,12 +80,23 @@ class PreserveResult:
     path: str                 # vault-relative path of the artifact
     sidecar_path: str | None  # vault-relative path of the .md sidecar (if any)
     warnings: list[str]
+    size: int | None = None
+    hash: str | None = None
+    hash_algorithm: str | None = None
+    media_id: str | None = None
+    content_type: str | None = None
 
     def as_dict(self) -> dict:
         return {
             "path": self.path,
+            "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
             "warnings": self.warnings,
+            "size": self.size,
+            "hash": self.hash,
+            "hash_algorithm": self.hash_algorithm,
+            "media_id": self.media_id,
+            "content_type": self.content_type,
         }
 
 
@@ -106,6 +119,7 @@ def preserve(
     content_base64: str | None = None,
     content: str | None = None,
     content_stream: BinaryIO | None = None,
+    content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
     today: dt.date | None = None,
@@ -194,20 +208,34 @@ def preserve(
     warnings: list[str] = []
     written_artifact = False
     sidecar_rel: str | None = None
+    artifact_size: int | None = None
+    artifact_hash: str | None = None
+    content_type_effective = (
+        content_type.strip()
+        if content_type and content_type.strip()
+        else mimetypes.guess_type(filename_safe)[0]
+    )
 
     try:
         if content_stream is not None:
             # Stream the upload to disk in chunks — peak memory is one chunk, not
             # the whole file. Enforces the byte cap mid-copy (defense in depth; the
             # HTTP layer's max_part_size already bounds the part during parsing).
-            _copy_stream_to_file(content_stream, artifact_path, limit=max_stream_bytes)
+            artifact_size, artifact_hash = _copy_stream_to_file(
+                content_stream, artifact_path, limit=max_stream_bytes
+            )
             written_artifact = True
         elif artifact_bytes is not None:
             # Binary: write directly, no atomic batch (batch_atomic_write is text-only).
             artifact_path.write_bytes(artifact_bytes)
+            artifact_size = len(artifact_bytes)
+            artifact_hash = hashlib.sha256(artifact_bytes).hexdigest()
             written_artifact = True
         else:
+            artifact_text_bytes = (artifact_text or "").encode("utf-8")
             artifact_path.write_text(artifact_text or "", encoding="utf-8", newline="\n")
+            artifact_size = len(artifact_text_bytes)
+            artifact_hash = hashlib.sha256(artifact_text_bytes).hexdigest()
             written_artifact = True
 
         writes: list[PlannedWrite] = []
@@ -322,6 +350,11 @@ def preserve(
         path=artifact_path.relative_to(vault_root).as_posix(),
         sidecar_path=sidecar_rel,
         warnings=warnings,
+        size=artifact_size,
+        hash=artifact_hash,
+        hash_algorithm="sha256" if artifact_hash else None,
+        media_id=f"sha256:{artifact_hash}" if artifact_hash else None,
+        content_type=content_type_effective,
     )
 
 
@@ -332,6 +365,7 @@ def preserve_stream(
     category: str,
     filename: str,
     stream: BinaryIO,
+    content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
     today: dt.date | None = None,
@@ -354,6 +388,7 @@ def preserve_stream(
         category=category,
         filename=filename,
         content_stream=stream,
+        content_type=content_type,
         description=description,
         text=text,
         today=today,
@@ -368,6 +403,7 @@ def preserve_bytes(
     category: str,
     filename: str,
     data: bytes,
+    content_type: str | None = None,
     description: str | None = None,
     text: str | None = None,
     today: dt.date | None = None,
@@ -385,6 +421,7 @@ def preserve_bytes(
         category=category,
         filename=filename,
         stream=io.BytesIO(data),
+        content_type=content_type,
         description=description,
         text=text,
         today=today,
@@ -398,17 +435,18 @@ def preserve_bytes(
 _STREAM_CHUNK = 1024 * 1024  # 1 MiB copy buffer
 
 
-def _copy_stream_to_file(stream: BinaryIO, dest: Path, *, limit: int) -> int:
+def _copy_stream_to_file(stream: BinaryIO, dest: Path, *, limit: int) -> tuple[int, str]:
     """Copy a binary file-like to `dest` in chunks, enforcing `limit` bytes.
 
     Peak memory is one chunk regardless of file size. On overflow the partial
-    file is removed and TOO_LARGE is raised. Returns the bytes written.
+    file is removed and TOO_LARGE is raised. Returns bytes written and SHA-256.
     """
     try:
         stream.seek(0)
     except (OSError, AttributeError, ValueError):
         pass  # non-seekable stream: copy from the current position
     written = 0
+    digest = hashlib.sha256()
     overflow = False
     with dest.open("wb") as out:
         while True:
@@ -419,11 +457,12 @@ def _copy_stream_to_file(stream: BinaryIO, dest: Path, *, limit: int) -> int:
             if written > limit:
                 overflow = True
                 break
+            digest.update(buf)
             out.write(buf)
     if overflow:
         dest.unlink(missing_ok=True)
         _raise("TOO_LARGE", ["file"], f"upload exceeds the {limit:,}-byte limit")
-    return written
+    return written, digest.hexdigest()
 
 
 _INVALID_PATH_CHARS = re.compile(r'[<>:"/\\|?*\x00-\x1f]')

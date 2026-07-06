@@ -550,13 +550,16 @@ SCENE_HIST_THRESHOLD = 0.35  # L1 distance between normalized 32-bin histograms 
 SCENE_MIN_SECS = 4.0  # boundaries closer than this merge; EXOMEM_VIDEO_SCENE_MIN_SECS overrides
 
 
+_FALSY_ENV = {"", "0", "false", "no", "off"}
+
+
 def scene_frames_enabled() -> bool:
     """EXOMEM_VIDEO_SCENE_FRAMES gates scene detection + persisted scene frames.
 
     Default OFF: video keyframe selection stays the uniform sampler and no frame
     files are written — byte-identical to the pre-feature behavior.
     """
-    return bool(os.environ.get("EXOMEM_VIDEO_SCENE_FRAMES"))
+    return os.environ.get("EXOMEM_VIDEO_SCENE_FRAMES", "").strip().lower() not in _FALSY_ENV
 
 
 def _scene_hash_threshold() -> int:

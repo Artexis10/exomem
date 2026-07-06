@@ -93,9 +93,10 @@ read-side hook can optionally upgrade that reminder to real retrieved KB
 content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy `KB_RETRIEVE_INJECT`
 name still works) — see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
-Other MCP clients can still use the server; put the same knowledge-discipline
-instructions in their system/project instructions if they do not support
-skills.
+Other MCP clients can still use the server. If they do not support Skills,
+have them call `bootstrap()` once at the start of the session; it returns the
+same compact operating contract through MCP, including when to search, when to
+save, upload guidance, and performance profiles.
 
 Full local setup is in [QUICKSTART.md](QUICKSTART.md). Remote/mobile setup is
 in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
@@ -118,7 +119,7 @@ uv run exomem demo
 | Claude Code | `exomem setup` registers it for you (see above) |
 | Codex CLI | `codex mcp add` — see below |
 | claude.ai (remote) | Remote server — see [docs/remote-quickstart.md](docs/remote-quickstart.md) |
-| Any MCP client | Generic stdio config — see below |
+| Any MCP client | Generic stdio config — see below; call `bootstrap()` first |
 | Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
 
 <details>
@@ -145,6 +146,10 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 ```json
 {"mcpServers": {"exomem": {"command": "exomem", "args": ["--transport", "stdio"], "env": {"EXOMEM_VAULT_PATH": "/path/to/vault"}}}}
 ```
+
+After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
+Skills are still the best UX where available, but `bootstrap()` lets generic MCP
+clients learn Exomem's search/save/upload contract without a separate skill file.
 
 </details>
 

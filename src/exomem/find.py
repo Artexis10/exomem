@@ -628,6 +628,7 @@ class FindTimings:
         self._t0 = time.perf_counter()
         self.stages: dict[str, dict[str, Any]] = {}
         self.cache: dict[str, Any] = {"enabled": False, "hit": False}
+        self.profile: dict[str, Any] = {}
 
     @contextmanager
     def span(self, name: str):
@@ -648,6 +649,7 @@ class FindTimings:
         return {
             "total_ms": round((time.perf_counter() - self._t0) * 1000.0, 3),
             "cache": dict(self.cache),
+            "profile": dict(self.profile),
             "stages": {k: dict(v) for k, v in self.stages.items()},
         }
 
