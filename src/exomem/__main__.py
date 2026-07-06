@@ -58,6 +58,8 @@ def main(argv: list[str] | None = None) -> int:
         return _doctor_main(raw[1:])
     if raw and raw[0] == "warm":
         return _warm_main(raw[1:])
+    if raw and raw[0] == "mode":
+        return _mode_main(raw[1:])
     if raw and raw[0] == "backfill-media":
         return _backfill_media_main(raw[1:])
     if raw and raw[0] == "index":
@@ -253,6 +255,60 @@ def _index_main(argv: list[str]) -> int:
     return 0
 
 
+def _mode_main(argv: list[str]) -> int:
+    """`exomem mode [quiet|normal|performance]` — show or set the per-machine compute mode.
+
+    Torch-free (no vault, no model import) so it stays instant. Writing persists to
+    ~/.exomem/config.json, which the running server picks up live within ~10s and CLI
+    ops read on their next run.
+    """
+    from . import mode as mode_mod
+
+    parser = argparse.ArgumentParser(
+        prog="exomem mode",
+        description="Show or set the compute mode: quiet (CPU, low footprint) | normal "
+        "(default, CPU steady-state) | performance (use the GPU; aliases gpu/turbo). "
+        "Persisted to ~/.exomem/config.json, read by BOTH the server and CLI ops.",
+    )
+    parser.add_argument(
+        "mode", nargs="?",
+        choices=("quiet", "normal", "performance", "gpu", "turbo"),
+        help="mode to set; omit to show the current one",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON (status only)")
+    args = parser.parse_args(argv)
+
+    if args.mode is None:
+        source = (
+            "env" if os.environ.get("EXOMEM_MODE")
+            else "config" if mode_mod.read_config().get("mode")
+            else "quiet-alias" if os.environ.get("EXOMEM_QUIET_MODE")
+            else "default"
+        )
+        policy = mode_mod.resolved()
+        policy["source"] = source
+        policy["config_path"] = str(mode_mod.config_path())
+        if args.json:
+            print(json.dumps(policy))
+        else:
+            print(f"mode: {policy['mode']}  (source: {source})")
+            print(f"  preload_models:    {policy['preload_models']}")
+            print(f"  release_when_idle: {policy['release_when_idle']}")
+            print(f"  bulk_gpu:          {policy['bulk_gpu']}")
+            print(f"  config: {policy['config_path']}")
+        return 0
+
+    try:
+        path = mode_mod.write_mode(args.mode)
+    except ValueError as e:
+        print(f"mode: {e}", file=sys.stderr)
+        return 2
+    print(f"Compute mode set to '{mode_mod.normalize(args.mode)}'  ({path})")
+    print("A running exomem server applies it live within ~10s (or restart to apply now).")
+    print("CLI ops (exomem index / warm) use it on their next run.")
+    return 0
+
+
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem doctor",
@@ -287,6 +343,16 @@ def _doctor_main(argv: list[str]) -> int:
         print(json.dumps(report.as_dict(), ensure_ascii=False, default=str))
     else:
         print(doctor_module.render_human(report))
+        # GPU-discoverability: offer the performance-mode upgrade when a capable idle GPU
+        # is present and we're not already using it. Silent when no/weak GPU (the default).
+        from . import accel
+        from . import mode as mode_mod
+
+        if mode_mod.resolve_mode() != "performance" and accel.gpu_usable():
+            print(
+                "\n⚡ A capable GPU was detected. For faster indexing & search, enable "
+                "performance mode:\n    exomem mode performance"
+            )
     return 0 if report.success else 1
 
 

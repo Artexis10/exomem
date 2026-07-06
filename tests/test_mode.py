@@ -154,3 +154,90 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
         "release_when_idle": True,
         "bulk_gpu": False,
     }
+
+
+# ---- apply_live: reconcile the running process to a mode ----
+
+def _patch_runtime(monkeypatch):
+    """Stub embeddings.unload_* + model_reaper.start/stop; return a call recorder."""
+    from exomem import embeddings, model_reaper
+
+    calls = {"unload": 0, "start": 0, "stop": 0}
+    monkeypatch.setattr(embeddings, "unload_model", lambda: calls.__setitem__("unload", calls["unload"] + 1) or True)
+    monkeypatch.setattr(embeddings, "unload_reranker", lambda: True)
+    monkeypatch.setattr(embeddings, "unload_clip_model", lambda: True)
+    monkeypatch.setattr(model_reaper, "start", lambda: calls.__setitem__("start", calls["start"] + 1))
+    monkeypatch.setattr(model_reaper, "stop", lambda: calls.__setitem__("stop", calls["stop"] + 1))
+    return calls
+
+
+def test_apply_live_normal_unloads_and_stops_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_runtime(monkeypatch)
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    policy = mode.apply_live()
+    assert calls["unload"] == 1  # models unloaded so they reload on the new device
+    assert calls["stop"] == 1 and calls["start"] == 0  # normal → reaper off
+    assert policy["mode"] == "normal"
+
+
+def test_apply_live_performance_starts_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_runtime(monkeypatch)
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    mode.apply_live()
+    assert calls["start"] == 1 and calls["stop"] == 0
+
+
+# ---- config watch: apply a file-driven mode change live ----
+
+def test_config_watch_applies_on_change(monkeypatch: pytest.MonkeyPatch) -> None:
+    import time
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MODE_WATCH", raising=False)
+    monkeypatch.delenv("EXOMEM_MODE", raising=False)  # let the config file drive resolution
+    applied: list[str] = []
+    monkeypatch.setattr(mode, "apply_live", lambda: applied.append(mode.resolve_mode()))
+    try:
+        mode.start_config_watch(interval=0.02)
+        time.sleep(0.06)
+        assert applied == []  # baseline normal, no change yet
+        mode.write_mode("quiet")
+        time.sleep(0.12)
+    finally:
+        mode.stop_config_watch()
+    assert "quiet" in applied
+
+
+def test_config_watch_disabled_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_MODE_WATCH", "1")
+    assert mode.start_config_watch(interval=0.01) is None
+
+
+# ---- exomem mode CLI ----
+
+def test_mode_cli_status_human(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    from exomem.__main__ import main
+
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    assert main(["mode"]) == 0
+    out = capsys.readouterr().out
+    assert "quiet" in out and "source: env" in out
+
+
+def test_mode_cli_status_json(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    from exomem.__main__ import main
+
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    assert main(["mode", "--json"]) == 0
+    data = json.loads(capsys.readouterr().out)
+    assert data["mode"] == "performance"
+    assert data["source"] == "env"
+    assert data["bulk_gpu"] is True
+
+
+def test_mode_cli_set_writes_config(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture) -> None:
+    from exomem.__main__ import main
+
+    monkeypatch.delenv("EXOMEM_MODE", raising=False)
+    assert main(["mode", "gpu"]) == 0  # alias → performance
+    assert mode.read_config().get("mode") == "performance"
+    assert "performance" in capsys.readouterr().out

@@ -30,8 +30,12 @@ a torch import. `accel` imports this; this never imports `accel`.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import threading
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 CANON = ("quiet", "normal", "performance")
 _ALIASES = {"gpu": "performance", "turbo": "performance"}
@@ -144,3 +148,78 @@ def write_mode(value: str) -> Path:
     tmp.write_text(json.dumps(data, indent=2), "utf-8")
     os.replace(tmp, path)  # atomic swap
     return path
+
+
+# --------------------------------------------------------------- live application
+#
+# The server watches the config file and reconciles the running process to a mode
+# change WITHOUT a restart (the user's chosen UX). Reconciliation = unload the model
+# singletons so they lazily reload on the new device, and start/stop the idle-unload
+# reaper to match. Lazy imports keep this module torch-free at import time.
+
+_watch_thread: threading.Thread | None = None
+_watch_stop = threading.Event()
+_applied_mode: str | None = None
+
+
+def apply_live() -> dict:
+    """Reconcile the running process to the currently-resolved mode. Returns the policy.
+
+    Unloads the model singletons (skipping any mid-encode — they reload on the new
+    device next use) and starts/stops the idle-unload reaper. Safe to call repeatedly.
+    Caveat (CUDA-context-floor note): a performance→quiet live switch frees weights but
+    the CUDA context floor persists until the process restarts; the default normal mode
+    never holds a context, so ordinary use is unaffected.
+    """
+    global _applied_mode
+    _applied_mode = resolve_mode()
+    from . import embeddings, model_reaper
+
+    for unload in (embeddings.unload_model, embeddings.unload_reranker, embeddings.unload_clip_model):
+        try:
+            unload()
+        except Exception:  # noqa: BLE001 — a live switch must never crash the caller
+            log.warning("model unload during mode switch failed", exc_info=True)
+    if release_when_idle():
+        model_reaper.start()
+    else:
+        model_reaper.stop()
+    return resolved()
+
+
+def _config_watch_disabled() -> bool:
+    return _truthy(os.environ.get("EXOMEM_DISABLE_MODE_WATCH"))
+
+
+def start_config_watch(interval: float = 10.0) -> threading.Thread | None:
+    """Daemon that applies a config-file mode change live (idempotent).
+
+    Polls `resolve_mode()` every `interval`s and calls `apply_live()` when it changes,
+    so `exomem mode <name>` takes effect on the running server within one interval — no
+    restart. Off via `EXOMEM_DISABLE_MODE_WATCH`. Returns None when disabled/already up.
+    """
+    global _watch_thread, _applied_mode
+    if _config_watch_disabled():
+        return None
+    if _watch_thread is not None and _watch_thread.is_alive():
+        return _watch_thread
+    _watch_stop.clear()
+    _applied_mode = resolve_mode()  # baseline; don't reconcile on startup
+
+    def _run() -> None:
+        while not _watch_stop.wait(interval):
+            try:
+                if resolve_mode() != _applied_mode:
+                    log.info("compute mode changed to %s; applying live", resolve_mode())
+                    apply_live()
+            except Exception:  # noqa: BLE001 — the watch must never die on a bad tick
+                log.warning("mode-watch tick failed", exc_info=True)
+
+    t = threading.Thread(target=_run, name="exomem-mode-watch", daemon=True)
+    _watch_thread = t
+    t.start()
+    return t
+
+
+def stop_config_watch() -> None:
+    _watch_stop.set()
