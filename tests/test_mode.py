@@ -8,6 +8,7 @@ and the atomic config writer. No hardware needed.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -241,3 +242,33 @@ def test_mode_cli_set_writes_config(monkeypatch: pytest.MonkeyPatch, capsys: pyt
     assert main(["mode", "gpu"]) == 0  # alias → performance
     assert mode.read_config().get("mode") == "performance"
     assert "performance" in capsys.readouterr().out
+
+
+# ---- config_path: cross-user (service vs CLI) resolution ----
+
+def test_config_path_env_override_wins(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("EXOMEM_CONFIG_PATH", str(tmp_path / "c.json"))
+    assert mode.config_path() == tmp_path / "c.json"
+
+
+def test_config_path_default_shared_and_machine_wide(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default resolves to a machine-wide file (NATIVE platform — patching os.name would
+    break pathlib): ProgramData\\exomem on Windows so a LocalSystem service and the user
+    CLI share it (the live-switch fix), ~/.exomem on POSIX."""
+    monkeypatch.delenv("EXOMEM_CONFIG_PATH", raising=False)
+    p = mode.config_path()
+    assert p.name == "config.json"
+    if os.name == "nt":
+        assert "exomem" in p.parts       # %PROGRAMDATA%\exomem\config.json
+        assert ".exomem" not in p.parts  # NOT the per-user home dotdir
+    else:
+        assert ".exomem" in p.parts      # ~/.exomem/config.json
+
+
+def test_config_path_windows_programdata_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """On Windows, PROGRAMDATA drives the base (native os.name only — no cross-platform patch)."""
+    if os.name != "nt":
+        pytest.skip("Windows-only path branch")
+    monkeypatch.delenv("EXOMEM_CONFIG_PATH", raising=False)
+    monkeypatch.setenv("PROGRAMDATA", str(tmp_path / "PD"))
+    assert mode.config_path() == tmp_path / "PD" / "exomem" / "config.json"
