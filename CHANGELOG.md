@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.10.0](https://github.com/Artexis10/exomem/compare/v0.9.0...v0.10.0) (2026-07-06)
+
+
+### Features
+
+* **compute:** CPU-default device policy + quiet/normal/performance modes (PR1: idle-VRAM kill) ([#130](https://github.com/Artexis10/exomem/issues/130)) ([452a558](https://github.com/Artexis10/exomem/commit/452a5582ccdf7cd8152aa7b435f18cfd87d0eec2))
+* **compute:** exomem mode CLI + live switch + GPU-detection prompt (PR4) ([#134](https://github.com/Artexis10/exomem/issues/134)) ([e97ae7c](https://github.com/Artexis10/exomem/commit/e97ae7c95a26bb71e87fc90f42c5b2b3d8104a7d))
+* **compute:** extend CPU-default device policy to ASR + diarizer + bulk-index (PR2) ([#132](https://github.com/Artexis10/exomem/issues/132)) ([e611610](https://github.com/Artexis10/exomem/commit/e611610dba445b2f90346e8e4437811ee45f9a3b))
+* **compute:** idle-unload subsystem — reclaim resident models after N idle minutes (PR3) ([#133](https://github.com/Artexis10/exomem/issues/133)) ([0a49d45](https://github.com/Artexis10/exomem/commit/0a49d45370f15f610419349810ae6d6406aa50c3))
+* **compute:** reranker off/configurable + lite profile + compute-knob docs (PR5) ([#135](https://github.com/Artexis10/exomem/issues/135)) ([e6c1fe2](https://github.com/Artexis10/exomem/commit/e6c1fe2df20f7bc10b390c493816e8709fcc9150))
+
+
+### Bug Fixes
+
+* **compute:** machine-wide config path so the service + CLI share it — cross-user live-switch (PR6) ([#136](https://github.com/Artexis10/exomem/issues/136)) ([b89deb8](https://github.com/Artexis10/exomem/commit/b89deb8c50849d3495e4a21374ab6d911fc7b534))
+
 ## [0.9.0](https://github.com/Artexis10/exomem/compare/v0.8.0...v0.9.0) (2026-07-05)
 
 
