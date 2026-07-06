@@ -1735,6 +1735,9 @@ def _find_semantic(
     else:
         do_rerank = rerank
 
+    if do_rerank and not embeddings.ranking_enabled():
+        do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
+
     if do_rerank and hits and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling
         # rerank_pairs would block on the singleton lock. Skip; caller marks

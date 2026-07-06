@@ -38,8 +38,16 @@ log = logging.getLogger(__name__)
 
 
 MODEL_NAME = "BAAI/bge-base-en-v1.5"
-RERANKER_NAME = "BAAI/bge-reranker-base"
 VECTOR_DIM = 768
+# The cross-encoder reranker is a stateless scorer (no stored vectors / sidecar dim),
+# so it can be swapped freely without a re-index. EXOMEM_RANKING_MODEL (legacy alias
+# EXOMEM_RERANKER_MODEL) overrides; EXOMEM_DISABLE_RANKING turns it off entirely (a
+# ~0.44 GB RAM + rerank-latency saving for low-resource / lite installs).
+RERANKER_NAME = (
+    os.environ.get("EXOMEM_RANKING_MODEL")
+    or os.environ.get("EXOMEM_RERANKER_MODEL")
+    or "BAAI/bge-reranker-base"
+)
 # bge documentation recommends prefixing queries (not passages) for retrieval.
 QUERY_PREFIX = "Represent this sentence for searching relevant passages: "
 # Rough word-count cap per chunk. bge-base's tokenizer maxes at 512 tokens;
@@ -180,6 +188,17 @@ def clip_sidecar_path(vault_root: Path) -> Path:
 def clip_enabled() -> bool:
     """False when EXOMEM_DISABLE_CLIP is set (mirrors EXOMEM_DISABLE_EMBEDDINGS)."""
     return not os.environ.get("EXOMEM_DISABLE_CLIP")
+
+
+def ranking_enabled() -> bool:
+    """False when EXOMEM_DISABLE_RANKING is set — the reranker never loads or scores.
+
+    The reranker is already opt-in per query (see find.should_rerank); this hard-off
+    keeps it from ever being preloaded or invoked, freeing ~0.44 GB and its latency —
+    the 'lite' knob for low-resource installs. Retrieval falls back to the fused
+    vector+BM25 ordering, which is what serves the un-reranked majority of queries anyway.
+    """
+    return not os.environ.get("EXOMEM_DISABLE_RANKING")
 
 
 # Which markdown scope the semantic (bge) text index covers.
