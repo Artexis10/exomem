@@ -337,6 +337,11 @@ def build_server(*, require_auth: bool) -> FastMCP:
 
         model_reaper.start()
 
+    # Watch the per-machine config file so `exomem mode <name>` applies live (no restart):
+    # on a mode change the server unloads the models (reload on the new device) and
+    # starts/stops the reaper. Off via EXOMEM_DISABLE_MODE_WATCH.
+    mode.start_config_watch()
+
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests
     # and on lean boxes via EXOMEM_DISABLE_MEDIA_EXTRACTION (mirrors the embeddings flag).

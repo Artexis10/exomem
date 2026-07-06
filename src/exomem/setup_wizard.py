@@ -202,6 +202,25 @@ def run_setup(
         if yes or not _ask_yn(input_fn, "Doctor reported failures. Continue anyway?", False):
             return finish()
 
+    # 5b. GPU discoverability — offer performance mode when a capable idle GPU is present.
+    # Interactive only (never blocks --yes automation), and only when embeddings are on
+    # (a lean install has no models to accelerate). CPU stays the safe default otherwise.
+    if not yes and profile != "lean":
+        from . import accel
+        from . import mode as mode_mod
+
+        if mode_mod.resolve_mode() != "performance" and accel.gpu_usable():
+            if _ask_yn(
+                input_fn,
+                "\n⚡ A capable GPU was detected. Use it for faster indexing & search? "
+                "(change anytime with `exomem mode`)",
+                False,
+            ):
+                mode_mod.write_mode("performance")
+                report("gpu", "[done] performance mode enabled")
+            else:
+                report("gpu", "[skipped] staying on CPU (normal mode)")
+
     # 6. Claude Code registration
     if skip_claude_register:
         report("register", "[skipped: --skip-claude-register]")

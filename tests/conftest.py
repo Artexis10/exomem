@@ -48,6 +48,9 @@ def _disable_embeddings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     # freshness/inbound registries too), so build_server would spawn a real
     # watchdog observer in the suite without this. Watcher tests opt back in.
     monkeypatch.setenv("EXOMEM_DISABLE_FILE_WATCHER", "1")
+    # Don't spawn the mode-config watch daemon from build_server in the suite; mode-watch
+    # tests drive it directly.
+    monkeypatch.setenv("EXOMEM_DISABLE_MODE_WATCH", "1")
 
 
 @pytest.fixture
