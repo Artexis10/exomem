@@ -212,9 +212,13 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         if drained:
             log.info("drained %d deferred write-embed batch(es)", len(drained))
 
-        log.info("preloading reranker %s", embeddings.RERANKER_NAME)
-        if _preload("model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])):
-            log.info("reranker model ready")
+        if embeddings.ranking_enabled():
+            log.info("preloading reranker %s", embeddings.RERANKER_NAME)
+            if _preload("model_reranker", embeddings.get_reranker, lambda m: m.predict([("warm", "warm")])):
+                log.info("reranker model ready")
+                readiness.mark_ready("reranker")
+        else:
+            log.info("reranker disabled (EXOMEM_DISABLE_RANKING); skipping preload")
             readiness.mark_ready("reranker")
 
         if embeddings.clip_enabled():
