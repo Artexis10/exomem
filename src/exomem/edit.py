@@ -48,6 +48,7 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
+    find_body_wikilinks,
     kb_root,
     normalize_body_wikilinks,
 )
@@ -477,12 +478,14 @@ def apply_surgical_replace(
         )
     # Normalize wikilinks only in the inserted snippet — the rest of the body
     # is left byte-for-byte untouched (no incidental legacy rewrites).
+    n = -1 if replace_all else 1
+    if resolver is None and not find_body_wikilinks(new_string):
+        return body.replace(old_string, new_string, n), []
     if resolver is None:
         resolver = find_module.shared_resolver(vault_root)
     new_string_norm, warnings = normalize_body_wikilinks(
         new_string, vault_root, resolver=resolver
     )
-    n = -1 if replace_all else 1
     return body.replace(old_string, new_string_norm, n), warnings
 
 
@@ -543,11 +546,14 @@ def apply_section_edit(
             end = j
             break
 
-    if resolver is None:
-        resolver = find_module.shared_resolver(vault_root)
-    content_norm, warnings = normalize_body_wikilinks(
-        content, vault_root, resolver=resolver
-    )
+    if resolver is None and not find_body_wikilinks(content):
+        content_norm, warnings = content, []
+    else:
+        if resolver is None:
+            resolver = find_module.shared_resolver(vault_root)
+        content_norm, warnings = normalize_body_wikilinks(
+            content, vault_root, resolver=resolver
+        )
     content_lines = content_norm.split("\n")
 
     before = lines[:h_idx]
@@ -580,7 +586,7 @@ def commit_edit(
     op: str = "edit",
     extra_warnings: list[str] | None = None,
 ) -> list[str]:
-    """Stage page write + opportunistic index refresh + ONE log entry; commit atomically.
+    """Stage page write + ONE log entry; commit atomically.
 
     Shared by `edit` and `multi_edit` so both produce exactly one log entry and
     one embedding re-sync per call. Returns the warnings list (extended with any
@@ -590,18 +596,6 @@ def commit_edit(
     log_file = kb / "log.md"
     writes: list[PlannedWrite] = [PlannedWrite(path=abs_path, content=new_text)]
     warnings: list[str] = list(extra_warnings or [])
-
-    # Opportunistic sub-index refresh — surfacing any drift on every write
-    # keeps the indexes self-healing.
-    top_index = kb / "index.md"
-    if top_index.exists():
-        current_top = top_index.read_text(encoding="utf-8")
-        sub_writes, new_top = indexes.compute_subindex_writes(
-            vault_root, top_index_text=current_top
-        )
-        if new_top is not None and new_top != current_top:
-            writes.append(PlannedWrite(path=top_index, content=new_top))
-        writes.extend(sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
     if log_file.exists():

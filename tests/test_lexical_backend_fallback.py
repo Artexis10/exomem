@@ -257,6 +257,48 @@ def test_keyword_parity_vault_scope(tmp_path, monkeypatch):
     assert "Projects/outside.md" in indexed
 
 
+def test_keyword_match_paths_limit_is_ordered_prefix(tmp_path, monkeypatch):
+    _parity_corpus(tmp_path)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    full = find_module._keyword_match_paths(tmp_path, "employment", "kb")
+    limited = find_module._keyword_match_paths(tmp_path, "employment", "kb", limit=2)
+    assert limited == full[:2]
+
+
+@needs_fts5
+def test_keyword_match_paths_limit_is_ordered_prefix_under_fts5(tmp_path, monkeypatch):
+    _parity_corpus(tmp_path)
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    reference = find_module._keyword_match_paths(tmp_path, "employment", "kb")
+    find_module.clear_cache()
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "fts5")
+    limited = find_module._keyword_match_paths(tmp_path, "employment", "kb", limit=2)
+    assert limited == reference[:2]
+
+
+def test_keyword_mode_uses_indexed_match_paths(tmp_path, monkeypatch):
+    _write_page(tmp_path, "Knowledge Base/a.md", "needle body", updated="2026-01-01")
+    _write_page(tmp_path, "Knowledge Base/b.md", "needle body", updated="2026-02-01")
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+
+    calls = {}
+
+    def fake_keyword_paths(vault_root, query_norm, scope, freshness=None, limit=None):
+        calls["args"] = (vault_root, query_norm, scope, freshness, limit)
+        return ["Knowledge Base/b.md", "Knowledge Base/a.md"]
+
+    monkeypatch.setattr(find_module, "_keyword_match_paths", fake_keyword_paths)
+
+    hits = find_module.find(
+        tmp_path, query="needle", mode="keyword", scope="kb-only", limit=1
+    )
+
+    assert [h.path for h in hits] == ["Knowledge Base/b.md"]
+    vault_root, query_norm, scope, freshness, limit = calls["args"]
+    assert (vault_root, query_norm, scope, limit) == (tmp_path, "needle", "kb", 100)
+    assert freshness is not None
+
+
 @needs_fts5
 def test_keyword_parity_after_edit_and_delete(tmp_path, monkeypatch):
     """Parity holds across a write/delete cycle driven through the hooks —

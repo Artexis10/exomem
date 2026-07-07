@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from exomem import edit as edit_module
+from exomem import find as find_module
 
 
 TODAY = dt.date(2026, 6, 1)
@@ -55,6 +56,50 @@ def test_surgical_replace_fills_a_take(vault: Path) -> None:
     assert "- Seven (1995) — 10/10 — [take: ]  <!-- platform:imdb -->" in text
     # updated: bumped.
     assert "updated: 2026-06-01" in text
+
+
+def test_surgical_plain_replacement_does_not_build_resolver(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No wikilinks in the inserted snippet means no full-vault resolver walk."""
+    rel = _make_page(vault, "# Scratch\n\nplain body.\n")
+
+    def fail_shared_resolver(_vault: Path):
+        raise AssertionError("shared resolver should not be built")
+
+    monkeypatch.setattr(find_module, "shared_resolver", fail_shared_resolver)
+    edit_module.edit(
+        vault,
+        path=rel,
+        why="plain replacement",
+        old_string="plain body.",
+        new_string="changed body.",
+        today=TODAY,
+    )
+
+    assert "changed body." in (vault / rel).read_text(encoding="utf-8")
+
+
+def test_surgical_edit_does_not_refresh_global_subindexes(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Body/tag edits do not affect note/entity counts, so skip O(vault) refresh."""
+    rel = _make_page(vault, "# Scratch\n\nplain body.\n")
+
+    def fail_refresh(*_args, **_kwargs):
+        raise AssertionError("edit should not refresh global subindexes")
+
+    monkeypatch.setattr(edit_module.indexes, "compute_subindex_writes", fail_refresh)
+    edit_module.edit(
+        vault,
+        path=rel,
+        why="plain replacement",
+        old_string="plain body.",
+        new_string="changed body.",
+        today=TODAY,
+    )
+
+    assert "changed body." in (vault / rel).read_text(encoding="utf-8")
 
 
 def test_surgical_append_to_section(vault: Path) -> None:

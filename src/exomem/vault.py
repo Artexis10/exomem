@@ -1170,10 +1170,12 @@ def normalize_body_wikilinks(
     and inline code spans. Returns `(new_body, warnings)`. Unresolvable links
     are left as-is with a warning — forward references are intentional.
     """
-    if resolver is None:
-        resolver = WikilinkResolver(vault_root)
     warnings: list[str] = []
     matches = find_body_wikilinks(body)
+    if not matches:
+        return body, warnings
+    if resolver is None:
+        resolver = WikilinkResolver(vault_root)
     new_body = body
     # Walk back-to-front so earlier rewrites don't shift later positions.
     # _WIKILINK_PATTERN's group(1) is the target without the alias (the alias

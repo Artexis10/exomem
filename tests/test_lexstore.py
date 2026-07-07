@@ -106,6 +106,27 @@ def test_schema_creation_is_idempotent(tmp_path):
     assert _count(lexstore.lexical_path(tmp_path), "pages") == 1
 
 
+def test_navigation_files_are_metadata_only_in_sidecar(tmp_path):
+    _write_page(tmp_path, "Knowledge Base/log.md", "navonlytoken")
+    _write_page(tmp_path, "Knowledge Base/Notes/a.md", "searchabletoken")
+
+    assert lexstore.search_bm25(tmp_path, "searchabletoken", k=3, scope="kb")
+    assert lexstore.search_bm25(tmp_path, "navonlytoken", k=3, scope="kb") == []
+
+    conn = sqlite3.connect(lexstore.lexical_path(tmp_path))
+    try:
+        rowid = conn.execute(
+            "SELECT rowid FROM pages WHERE path = ?", ("Knowledge Base/log.md",)
+        ).fetchone()[0]
+        assert conn.execute(
+            "SELECT is_nav FROM pages WHERE rowid = ?", (rowid,)
+        ).fetchone()[0] == 1
+        assert conn.execute("SELECT 1 FROM fts WHERE rowid = ?", (rowid,)).fetchone() is None
+        assert conn.execute("SELECT 1 FROM tri WHERE rowid = ?", (rowid,)).fetchone() is None
+    finally:
+        conn.close()
+
+
 def test_out_of_band_edit_self_heals(tmp_path):
     """Markdown changed while no lexstore was watching (server down): the next
     use detects the count/mtime mismatch against the walk and rebuilds."""

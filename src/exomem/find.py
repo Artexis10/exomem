@@ -464,7 +464,9 @@ def find(
                 query_norm=query_norm,
                 types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
-                limit=limit, scope=walk_scope,
+                limit=limit,
+                scope=walk_scope,
+                freshness=snapshot.for_scope(walk_scope),
             )
     else:
         hits = _find_semantic(
@@ -646,29 +648,34 @@ def _find_keyword(
     exclude_file_types: list[str] | None = None,
     limit: int,
     scope: str,
+    freshness: tuple | None = None,
 ) -> list[Hit]:
     """Original keyword-mode find. Preserved for backward compat."""
-    if scope == "kb":
-        kb = vault_root / kb_dirname()
-        if not kb.is_dir():
-            log.error("KB directory missing: %s", kb)
-            return []
-        walk = _walk_md(kb)
-    else:
-        from .vault import walk_vault_md
-        walk = walk_vault_md(vault_root)
+    def _build_hits(ranking: list[str]) -> list[Hit]:
+        hits: list[tuple[str, Hit]] = []
+        by_path: dict[str, Hit] = {}
+        for rel in ranking:
+            page = _CACHE.get(vault_root / rel, vault_root)
+            if page is None:
+                continue
+            excerpt = _make_excerpt(page, query_norm)
+            if query_norm and excerpt is None:
+                continue
+            hit = _keyword_hit_from_page(page, excerpt, by_path)
+            if hit is None:
+                continue
+            if hit.path in by_path:
+                continue
+            by_path[hit.path] = hit
+            hits.append((hit.updated or "0000-00-00", hit))
+            if len(hits) >= limit:
+                break
+        hits.sort(key=lambda t: (t[0], t[1].path), reverse=True)
+        return [h for _, h in hits[:limit]]
 
-    hits: list[tuple[str, Hit]] = []
-    by_path: dict[str, Hit] = {}
-    for path in walk:
-        if path.name.lower() in _NAVIGATION_BASENAMES:
-            continue
-        page = _CACHE.get(path, vault_root)
-        if page is None:
-            continue
-        excerpt = _make_excerpt(page, query_norm)
-        if query_norm and excerpt is None:
-            continue
+    def _keyword_hit_from_page(
+        page: ParsedPage, excerpt: str | None, by_path: dict[str, Hit]
+    ) -> Hit | None:
         # A scene-frame child groups under its parent video: the parent becomes
         # the hit (carrying the matched frame + timestamp); an orphan frame
         # (parent gone) surfaces standalone. Filters apply to the EMITTED page.
@@ -682,14 +689,12 @@ def _find_keyword(
                     if existing.scene_frame is None:
                         existing.scene_frame = page.media_file
                         existing.scene_frame_ts = page.frame_ts
-                    continue
+                    return None
                 scene_frame, scene_frame_ts = page.media_file, page.frame_ts
                 page = parent_page
-        if page.rel_path in by_path:
-            continue
         if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
-            continue
+            return None
         hit = Hit(
             path=page.rel_path,
             type=page.page_type,
@@ -710,11 +715,39 @@ def _find_keyword(
             nf = scene_frames.nearest_frame(vault_root, page.media_file, hit.transcript_ts)
             if nf is not None:
                 hit.scene_frame, hit.scene_frame_ts = nf
-        by_path[page.rel_path] = hit
-        hits.append((page.updated or "0000-00-00", hit))
+        return hit
 
-    hits.sort(key=lambda t: (t[0], t[1].path), reverse=True)
-    return [h for _, h in hits[:limit]]
+    if query_norm:
+        # Use the same indexed substring path the hybrid keyword lane uses.
+        # Oversample to preserve parent-media collapsing and filtered requests;
+        # if that still underfills, fall back to the full ordered match set.
+        candidate_limit = max(limit * 5, 100)
+        ranking = _keyword_match_paths(
+            vault_root, query_norm, scope, freshness=freshness, limit=candidate_limit
+        )
+        hits = _build_hits(ranking)
+        if len(hits) >= limit or len(ranking) < candidate_limit:
+            return hits
+        return _build_hits(
+            _keyword_match_paths(vault_root, query_norm, scope, freshness=freshness)
+        )
+
+    if scope == "kb":
+        kb = vault_root / kb_dirname()
+        if not kb.is_dir():
+            log.error("KB directory missing: %s", kb)
+            return []
+        walk = _walk_md(kb)
+    else:
+        from .vault import walk_vault_md
+        walk = walk_vault_md(vault_root)
+
+    ranking = [
+        p.resolve().relative_to(vault_root.resolve()).as_posix()
+        for p in walk
+        if p.name.lower() not in _NAVIGATION_BASENAMES
+    ]
+    return _build_hits(ranking)
 
 
 def _find_semantic(
@@ -923,7 +956,11 @@ def _find_semantic(
         # under Q marketing pages on the "market" stem).
         with _span(timings, "keyword"):
             keyword_ranking = _keyword_match_paths(
-                vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
+                vault_root,
+                query_norm,
+                scope,
+                freshness=snapshot.for_scope(scope),
+                limit=max(candidate_k, limit * 10, 200),
             )
         keyword_ranking = _collapse_frame_children(
             keyword_ranking, vault_root, frame_attribution
@@ -1027,7 +1064,9 @@ def _find_semantic(
             query_norm=query_norm,
             types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
-            limit=limit, scope=scope,
+            limit=limit,
+            scope=scope,
+            freshness=snapshot.for_scope(scope),
         )
 
     # ---- Temporal lane: recency-ordered candidates (temporal queries only) ----
@@ -1754,7 +1793,11 @@ def should_rerank(
 
 
 def _keyword_match_paths(
-    vault_root: Path, query_norm: str, scope: str, freshness: tuple | None = None
+    vault_root: Path,
+    query_norm: str,
+    scope: str,
+    freshness: tuple | None = None,
+    limit: int | None = None,
 ) -> list[str]:
     """Return paths that satisfy keyword mode's all-tokens-present gate.
 
@@ -1774,7 +1817,7 @@ def _keyword_match_paths(
     from . import lexstore
 
     indexed = lexstore.search_substring(
-        vault_root, query_norm, scope=scope, freshness=freshness
+        vault_root, query_norm, scope=scope, freshness=freshness, limit=limit
     )
     if indexed is not None:
         return indexed
@@ -1797,7 +1840,8 @@ def _keyword_match_paths(
             continue
         matches.append((page.updated or "0000-00-00", page.rel_path))
     matches.sort(reverse=True)  # most-recent first
-    return [p for _, p in matches]
+    paths = [p for _, p in matches]
+    return paths[:limit] if limit is not None else paths
 
 
 def _outbound_wikilink_paths(
