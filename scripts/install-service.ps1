@@ -9,6 +9,7 @@
 # Usage:
 #   pwsh -File scripts/install-service.ps1
 #   pwsh -File scripts/install-service.ps1 -NssmPath "C:\nssm\nssm.exe"
+#   pwsh -File scripts/install-service.ps1 -Profile lean    # lexical-only service
 #
 # Uninstall:
 #   nssm stop exomem
@@ -18,7 +19,9 @@ param(
     [string]$NssmPath = "nssm",
     [string]$ServiceName = "exomem",
     [string]$BindHost = "127.0.0.1",
-    [int]$Port = 8765
+    [int]$Port = 8765,
+    [ValidateSet("lean", "hybrid", "media")]
+    [string]$Profile = "hybrid"
 )
 
 $ErrorActionPreference = "Stop"
@@ -39,7 +42,8 @@ if (-not $isAdmin) {
         "-NssmPath", "`"$NssmPath`"",
         "-ServiceName", $ServiceName,
         "-BindHost", $BindHost,
-        "-Port", $Port
+        "-Port", $Port,
+        "-Profile", $Profile
     )
     Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
     exit
@@ -56,6 +60,31 @@ if (-not (Test-Path (Join-Path $repoRoot ".env"))) {
     throw ".env file missing in $repoRoot. See the Install section of README.md for the required GitHub OAuth vars."
 }
 if (-not (Test-Path $logDir)) { New-Item -ItemType Directory -Path $logDir | Out-Null }
+
+function Get-DotenvValue {
+    param([string]$Name)
+    $envPath = Join-Path $repoRoot ".env"
+    if (-not (Test-Path $envPath)) { return $null }
+    foreach ($line in Get-Content $envPath) {
+        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
+            $value = $Matches[1].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            return $value
+        }
+    }
+    return $null
+}
+
+$doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile)
+$vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
+if ($vault) { $doctorArgs += @("--vault", $vault) }
+Write-Host "Preflight: exomem doctor --profile $Profile..."
+& $python @doctorArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before installing the service."
+}
 
 # Install
 & $NssmPath install $ServiceName $python "-m" "exomem" "--transport" "streamable-http" "--host" $BindHost "--port" $Port

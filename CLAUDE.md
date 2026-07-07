@@ -22,10 +22,13 @@ uncommitted work would conflict); and anything off the git tree — building/syn
 venvs (`uv sync`), running or restarting the service, editing a file you yourself
 just created. Don't hand the user a command you can safely run yourself.
 
-**Mitigation:** isolate any *new change* — feature, fix, or docs — in a dedicated
-git worktree (its own branch + tree) and commit/push from there, leaving the
-primary untouched for the other session. The worktree is the default for new work;
-the rule above is the guardrail for when you must operate on the primary.
+**Mitigation:** before editing for any *new change* — feature, fix, docs,
+OpenSpec artifact, or release prep — first check whether the current checkout is
+an isolated worktree. If it is the shared primary checkout, create a dedicated
+worktree from `origin/main` and do the edits there. Do not ask the user to repeat
+this preference; state the worktree path in your first progress update. The
+worktree is the default for new work; the rule above is the guardrail for when
+you must operate on the primary.
 
 - Native (Claude Code): `EnterWorktree` — branches off `origin/main`; edit,
   commit, `git push origin HEAD:main` (or open a PR), then `ExitWorktree`.

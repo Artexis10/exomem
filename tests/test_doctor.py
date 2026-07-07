@@ -6,7 +6,9 @@ is exercised by stubbing the import-spec seam rather than importing heavy extras
 
 from __future__ import annotations
 
+import io
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -91,6 +93,35 @@ def test_doctor_human_output_includes_remediation(
     assert "FAIL" in out
     assert "vault.path" in out
     assert "fix:" in out
+
+
+def test_doctor_gpu_advisory_is_safe_on_cp1252_stdout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for Windows legacy consoles: advisory text must be encodable."""
+    from exomem import doctor as doctor_module
+    from exomem import mode as mode_module
+    from exomem import resource_status
+
+    class Cp1252Stdout(io.StringIO):
+        encoding = "cp1252"
+
+        def write(self, text: str) -> int:
+            text.encode("cp1252")
+            return super().write(text)
+
+    stdout = Cp1252Stdout()
+    monkeypatch.setattr(sys, "stdout", stdout)
+    monkeypatch.setattr(
+        doctor_module,
+        "doctor",
+        lambda **kw: doctor_module.DoctorReport(profile=kw.get("profile", "lean"), checks=[]),
+    )
+    monkeypatch.setattr(resource_status, "gpu_headroom", lambda: {"usable": True})
+    monkeypatch.setattr(mode_module, "resolve_mode", lambda: "normal")
+
+    assert main(["doctor"]) == 0
+    assert "A capable idle GPU was detected" in stdout.getvalue()
 
 
 def test_doctor_unknown_profile_exits_2(capsys) -> None:
@@ -249,3 +280,32 @@ def test_resource_posture_check_marginal_gpu_warns_for_hybrid(
     assert check.status == "warn"
     assert "free VRAM below policy threshold" in check.message
     assert check.as_dict()["details"]["gpu"]["usable"] is False
+
+
+def test_resource_posture_reports_container_variant_without_cuda_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import resource_status
+
+    monkeypatch.setenv("EXOMEM_CONTAINER_VARIANT", "cuda")
+    monkeypatch.setattr(
+        resource_status,
+        "gpu_headroom",
+        lambda: {
+            "status": "capable",
+            "usable": True,
+            "free_mb": 8192,
+            "total_mb": 16384,
+            "min_free_mb": 2048,
+        },
+    )
+    monkeypatch.setitem(sys.modules, "torch", None)
+
+    check = doctor_module._check_resource_posture("hybrid")
+    details = check.as_dict()["details"]
+
+    assert check.status == "pass"
+    assert "Runtime is container(cuda)" in check.message
+    assert details["runtime"]["kind"] == "container"
+    assert details["runtime"]["variant"] == "cuda"
+    assert details["cuda"] == {"torch_imported": False, "initialized": False, "memory": None}

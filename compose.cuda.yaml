@@ -1,0 +1,13 @@
+# exomem — NVIDIA CUDA-capable container override.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.cuda.yaml up -d
+#   docker compose -f compose.yaml -f compose.cuda.yaml --profile cloudflared up -d
+#
+# The CUDA image is CPU-default at idle. Set EXOMEM_MODE=performance in .env only
+# when you want steady-state model work to use the GPU.
+
+services:
+  exomem:
+    image: ghcr.io/artexis10/exomem:cuda
+    gpus: all

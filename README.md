@@ -161,9 +161,13 @@ clients learn Exomem's search/save/upload contract without a separate skill file
 claude mcp add exomem -- docker run -i --rm -v "/path/to/vault:/vault" -e EXOMEM_VAULT_PATH=/vault ghcr.io/artexis10/exomem:latest --transport stdio
 ```
 
+Use `:latest` for the lean keyword/BM25 image, `:ml` for CPU hybrid search, or
+`:cuda` for NVIDIA/Linux CUDA capability. CUDA images still boot CPU-default at
+idle; opt into GPU residency with `EXOMEM_MODE=performance` when you want it.
 The image also runs as an always-on remote server via `docker compose` with a
-tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users: prefer
-the native install (WSL2 bind mounts miss live file-watch events).
+tunnel sidecar — see [docs/docker.md](docs/docker.md). Windows users with a live
+vault should usually prefer the native install (WSL2 bind mounts miss live
+file-watch events); macOS Apple Silicon users need native install for MPS/MLX.
 
 </details>
 

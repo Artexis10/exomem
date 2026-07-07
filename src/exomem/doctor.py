@@ -249,6 +249,10 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
     from . import resource_status
 
     posture = resource_status.resource_posture()
+    runtime = posture["runtime"]
+    runtime_label = runtime["kind"]
+    if runtime.get("variant"):
+        runtime_label += f"({runtime['variant']})"
     gpu = posture["gpu"]
     mode_name = posture["mode"]
     if gpu.get("usable") is False:
@@ -257,7 +261,8 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
         return _check(
             "resource.posture",
             status,
-            f"Resource mode is {mode_name}; CPU is the supported baseline. {reason}.",
+            f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
+            f"supported baseline. {reason}.",
             "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
             "performance` only when enough free VRAM is available.",
             details=posture,
@@ -266,15 +271,16 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
         return _check(
             "resource.posture",
             "pass",
-            f"Resource mode is {mode_name}; GPU headroom probe is capable, but GPU "
-            "use remains explicit policy opt-in.",
+            f"Runtime is {runtime_label}; resource mode is {mode_name}; GPU headroom "
+            "probe is capable, but GPU use remains explicit policy opt-in.",
             details=posture,
         )
     return _check(
         "resource.posture",
         "pass",
-        f"Resource mode is {mode_name}; CPU is the supported baseline and GPU "
-        "headroom is unknown without an available non-torch probe.",
+        f"Runtime is {runtime_label}; resource mode is {mode_name}; CPU is the "
+        "supported baseline and GPU headroom is unknown without an available "
+        "non-torch probe.",
         details=posture,
     )
 

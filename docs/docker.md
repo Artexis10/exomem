@@ -21,6 +21,7 @@ For an always-on remote deployment (mobile/web access via claude.ai), skip to
 | --- | --- | --- | --- |
 | `latest`, `X.Y.Z` | `lean` | keyword/BM25 only, no torch | ~250–350 MB |
 | `ml`, `X.Y.Z-ml` | `ml` | hybrid embeddings + CLIP search, CPU-only torch | ~1.5–2 GB |
+| `cuda`, `X.Y.Z-cuda` | `cuda` | hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle | larger; NVIDIA/Linux amd64 only |
 
 `lean` is the default and is what the stdio one-liner above pulls — no torch,
 no model download, matching a fast zero-Python onboarding path. Opt into
@@ -28,10 +29,33 @@ hybrid search with the `ml` tag (`ghcr.io/artexis10/exomem:ml`); the first
 `find` call downloads the embedding/CLIP model weights into the `/data` volume
 (see below), so later restarts don't re-download them.
 
-**GPU is out of scope for both variants.** `ml` runs CPU-only torch — no CUDA
-runtime is bundled, and none is documented for this image. If you need GPU
-throughput, use the native install instead ([../QUICKSTART.md](../QUICKSTART.md),
-[deployment.md](deployment.md)'s CUDA/GPU notes).
+For NVIDIA Linux hosts, use the CUDA-capable image:
+
+```bash
+docker run --gpus all -i --rm \
+  -v "/path/to/vault:/vault" \
+  -v exomem-data:/data \
+  -e EXOMEM_VAULT_PATH=/vault \
+  ghcr.io/artexis10/exomem:cuda --transport stdio
+```
+
+The CUDA image is **capable**, not **resident by default**. It still boots in
+normal mode, where exomem's steady-state torch models select CPU so the container
+does not grab VRAM at idle. Opt into GPU use explicitly when you want it:
+
+```bash
+docker run --gpus all -i --rm \
+  -v "/path/to/vault:/vault" \
+  -v exomem-data:/data \
+  -e EXOMEM_VAULT_PATH=/vault \
+  -e EXOMEM_MODE=performance \
+  ghcr.io/artexis10/exomem:cuda --transport stdio
+```
+
+Use `ml` for reproducible hybrid search without NVIDIA runtime. Use native install
+instead ([../QUICKSTART.md](../QUICKSTART.md), [deployment.md](deployment.md)'s
+CUDA/GPU notes) when you need Windows live-vault watcher reliability or macOS
+Apple Silicon MPS/MLX.
 
 ## Volume contract
 
@@ -44,7 +68,7 @@ throughput, use the native install instead ([../QUICKSTART.md](../QUICKSTART.md)
     `queries.jsonl` / `writes.jsonl` / `reads.jsonl` audit logs land here too,
     but only in the `ml` image (the lean image runs with embeddings disabled,
     which also turns the query log off).
-  - `ml` only: `HF_HOME=/data/hf` — downloaded embedding/CLIP model weights.
+  - `ml`/`cuda` only: `HF_HOME=/data/hf` — downloaded embedding/CLIP model weights.
 
   Mount a named volume (or bind mount) at `/data` so logs and model weights
   survive container restarts instead of resetting every time. `/data` is
@@ -78,7 +102,24 @@ documented in [deployment.md](deployment.md).
    - Whichever tunnel credential you're using: `CLOUDFLARE_TUNNEL_TOKEN`, or
      `NGROK_AUTHTOKEN` + `NGROK_DOMAIN`.
 
-3. Bring it up with the tunnel profile you have an account for:
+3. Pick the runtime image:
+
+   ```bash
+   # lean keyword/BM25 (default)
+   docker compose up -d
+
+   # CPU hybrid search
+   docker compose -f compose.yaml -f compose.ml.yaml up -d
+
+   # NVIDIA/Linux CUDA-capable hybrid search
+   docker compose -f compose.yaml -f compose.cuda.yaml up -d
+   ```
+
+   The CUDA override declares `gpus: all`, so it requires Docker with the NVIDIA
+   container runtime. It still boots normal/CPU-default unless `.env` sets
+   `EXOMEM_MODE=performance`.
+
+4. Add the tunnel profile you have an account for when you need public ingress:
 
    ```bash
    docker compose --profile ngrok up -d
@@ -86,12 +127,18 @@ documented in [deployment.md](deployment.md).
    docker compose --profile cloudflared up -d
    ```
 
+   Combine the runtime override and tunnel profile when needed:
+
+   ```bash
+   docker compose -f compose.yaml -f compose.cuda.yaml --profile cloudflared up -d
+   ```
+
    With **no** `--profile` flag, only the `exomem` service starts: no host
    port published, no tunnel sidecar running — useful for a LAN-only or
    locally-debugged setup. Uncomment the `ports:` line in `compose.yaml` to
    bind `127.0.0.1:8765` for local access.
 
-4. Verify:
+5. Verify:
 
    ```bash
    docker compose exec exomem exomem doctor --profile remote
@@ -120,7 +167,7 @@ before running non-root against it. The
 image does not impose a fixed `USER`, so you can pick the uid/gid that matches
 your host's volume ownership.
 
-## Windows caveat
+## Windows and macOS caveats
 
 If you're on Windows, prefer the native install
 ([../QUICKSTART.md](../QUICKSTART.md)) over Docker for day-to-day editing.
@@ -131,3 +178,12 @@ container. NTFS-backed WSL2 mounts are also noticeably slower than a native
 filesystem for the same reason. Docker remains a good choice for a Linux/macOS
 host, or for the remote-compose walkthrough above running on a remote Linux
 box.
+
+On Windows+WSL2 with NVIDIA, the `cuda` image can use the GPU when Docker Desktop
+and the NVIDIA runtime are configured, but the bind-mount watcher caveat still
+applies. For a live Obsidian vault on the Windows filesystem, native NSSM remains
+the recommended default; use Docker CUDA when you accept the watcher tradeoff or
+run against a Linux-native vault path.
+
+On macOS Apple Silicon, Docker Linux containers do not expose Metal/MPS/MLX to
+exomem. Use the native install for GPU-backed bge/CLIP or MLX Whisper.

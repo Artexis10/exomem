@@ -1,14 +1,16 @@
 # exomem — multi-stage container image.
 #
-# Two final targets share this one file (openspec/changes/add-docker-distribution/design.md D6):
+# Three final targets share this one file:
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
+#   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
 # is meant to be that zero-argument default (matches the stdio one-liner's
 # zero-Python, zero-model-download onboarding promise — see docs/docker.md).
 # Build `ml` explicitly with `--target ml` (or pull the published `:ml` tag).
+# Build `cuda` explicitly with `--target cuda` (or pull the published `:cuda` tag).
 #
 # Every stage builds from the checked-out source tree (COPY src/ pyproject.toml
 # uv.lock), never a published PyPI wheel — see design.md D1.
@@ -70,6 +72,19 @@ RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url http
  && uv pip install --python /app/.venv/bin/python ".[embeddings]"
 
 ########################################################################
+# builder-cuda — adds the `embeddings` extra with CUDA-capable torch.
+#
+# This is intentionally separate from `ml`: the CPU image stays portable and
+# small, while this image carries the NVIDIA/CUDA torch wheel for Linux hosts
+# that run Docker with the NVIDIA container runtime. CUDA capability still does
+# NOT imply CUDA residency: exomem's default `normal` mode selects CPU unless the
+# user opts into performance mode or an explicit CUDA device.
+########################################################################
+FROM builder-lean AS builder-cuda
+RUN uv pip install --python /app/.venv/bin/python "torch>=2.12" --index-url https://download.pytorch.org/whl/cu132 \
+ && uv pip install --python /app/.venv/bin/python ".[embeddings]"
+
+########################################################################
 # Final: ml (target `ml`). Fresh slim base — no build tooling, no uv, no
 # source tree — just the populated venv. HF_HOME pins the downloaded
 # embedding/CLIP model weights under the declared /data volume so they
@@ -82,7 +97,8 @@ COPY LICENSE /LICENSE
 ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_HOST=0.0.0.0 \
     EXOMEM_LOG_DIR=/data/logs \
-    HF_HOME=/data/hf
+    HF_HOME=/data/hf \
+    EXOMEM_CONTAINER_VARIANT=ml
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
@@ -92,6 +108,37 @@ LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
 # would run unconditionally, including for `--transport stdio`, where there is
 # no HTTP server to probe. The healthcheck lives in compose.yaml instead, where
 # it only applies to the long-running HTTP deployment.
+VOLUME /data
+EXPOSE 8765
+ENTRYPOINT ["exomem"]
+CMD ["--transport", "http", "--port", "8765"]
+
+########################################################################
+# Final: cuda (target `cuda`). Fresh slim base — no build tooling, no uv, no
+# source tree — just the populated venv. The image is CUDA-capable but remains
+# CPU-default at idle via exomem's mode resolver. NVIDIA_* env vars are hints
+# consumed by the NVIDIA container runtime; without that runtime, doctor reports
+# CUDA unavailable and the service degrades to CPU.
+########################################################################
+FROM python:3.12-slim AS cuda
+COPY --from=builder-cuda /app/.venv /app/.venv
+COPY LICENSE /LICENSE
+
+ENV PATH=/app/.venv/bin:$PATH \
+    EXOMEM_HOST=0.0.0.0 \
+    EXOMEM_LOG_DIR=/data/logs \
+    HF_HOME=/data/hf \
+    EXOMEM_CONTAINER_VARIANT=cuda \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.description="exomem — local knowledge substrate for owned markdown/Obsidian vaults, exposed through MCP, REST, and CLI (cuda: hybrid embeddings + CLIP search, CUDA-capable torch, CPU-default at idle)"
+
+# No HEALTHCHECK here by design — a Dockerfile-level HEALTHCHECK would run
+# unconditionally, including for `--transport stdio`, where there is no HTTP
+# server to probe. The healthcheck lives in compose.yaml instead.
 VOLUME /data
 EXPOSE 8765
 ENTRYPOINT ["exomem"]
@@ -111,7 +158,8 @@ COPY LICENSE /LICENSE
 ENV PATH=/app/.venv/bin:$PATH \
     EXOMEM_HOST=0.0.0.0 \
     EXOMEM_LOG_DIR=/data/logs \
-    EXOMEM_DISABLE_EMBEDDINGS=1
+    EXOMEM_DISABLE_EMBEDDINGS=1 \
+    EXOMEM_CONTAINER_VARIANT=lean
 
 LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
       org.opencontainers.image.licenses="AGPL-3.0-or-later" \
