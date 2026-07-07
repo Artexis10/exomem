@@ -342,6 +342,11 @@ def build_server(*, require_auth: bool) -> FastMCP:
     # starts/stops the reaper. Off via EXOMEM_DISABLE_MODE_WATCH.
     mode.start_config_watch()
 
+    # Optional auto-quiet: default-off, non-torch pressure probes only.
+    from . import auto_quiet
+
+    auto_quiet.start_if_enabled()
+
     # Media-extraction worker: transcribes/OCRs binaries uploaded without text, off
     # the request path, and fills their sidecars (then re-embeds). Disabled in tests
     # and on lean boxes via EXOMEM_DISABLE_MEDIA_EXTRACTION (mirrors the embeddings flag).

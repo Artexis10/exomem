@@ -109,8 +109,9 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         drift = audit_module._check_embedding_drift(vault_root)
         drifted_abs = [vault_root / f.path for f in drift]
         if drifted_abs and not dry_run:
-            from . import embeddings
+            from . import embeddings, index_sync
             embeddings.upsert_after_write(vault_root, drifted_abs)
+            index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
         report.embeddings_refreshed = len(drifted_abs)
         report.embeddings_status = "refreshed" if drifted_abs else "current"
 

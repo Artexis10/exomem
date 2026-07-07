@@ -170,6 +170,23 @@ The first start downloads search models in the background — `find` works
 immediately with keyword ranking and upgrades to semantic search automatically
 once the models land. Run `exomem warm` to pre-download them ahead of time.
 
+## Resource modes
+
+Exomem is CPU-first by default so an idle server does not quietly occupy GPU
+memory. Control the machine footprint without editing code:
+
+```bash
+exomem mode quiet          # low-resource: no heavy warm-up, evict caches, defer semantic reindex
+exomem mode normal         # default: CPU steady-state, warm CPU caches allowed
+exomem mode performance    # explicit opt-in for GPU-capable bulk/model work
+exomem status --resources --json
+```
+
+Use `quiet` before gaming or other foreground workloads. Keyword/BM25 freshness,
+file-change freshness, inbound links, and resolver state stay live; expensive
+semantic/CLIP reindex work can be deferred and is reported in resource status.
+Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
+
 ## What it does
 
 - **Searches the vault you already own.** Markdown stays in place; exomem does
@@ -281,9 +298,9 @@ System tools: Tesseract is required for image OCR. On Windows:
 winget install --id UB-Mannheim.TesseractOCR -e
 ```
 
-GPU acceleration is useful but not required, and cross-platform: NVIDIA **CUDA**
-(Linux/Windows) and Apple Silicon **MPS/Metal** (macOS) are both auto-detected for
-the torch models (bge embeddings, reranker, CLIP), with CPU as the fallback. See
+GPU acceleration is useful but not required. Steady-state torch models default to
+CPU in `normal` and `quiet`; `performance` is the explicit opt-in for capable
+NVIDIA CUDA or Apple Silicon MPS/Metal paths. See
 [docs/deployment.md](docs/deployment.md) for CUDA, Blackwell, Apple Silicon,
 diarization, and remote-service details.
 
@@ -300,7 +317,10 @@ The server reads environment variables or a `.env` file. The main ones are:
 | `EXOMEM_REST_API_KEY` | Enables authenticated REST routes. |
 | `EXOMEM_DISABLE_MEDIA_EXTRACTION` | `1` skips server-side OCR/ASR/PDF/Office extraction. |
 | `EXOMEM_DISABLE_CLIP` | `1` disables CLIP image search. |
-| `EXOMEM_TORCH_DEVICE` | Force the device for all torch models: `cuda`, `mps`, or `cpu` (default: auto-detect CUDA → MPS → CPU). Pin `cpu` to avoid thermal throttling on a fanless Mac. |
+| `EXOMEM_MODE` | Hard-pin resource mode: `quiet`, `normal`, or `performance`. Env wins over config. |
+| `EXOMEM_QUIET_MODE` | Legacy truthy alias for `quiet` when `EXOMEM_MODE` is unset. |
+| `EXOMEM_AUTO_QUIET` | `1` enables optional non-torch GPU-pressure auto-quiet switching (default off). |
+| `EXOMEM_DEVICE` / `EXOMEM_TORCH_DEVICE` | Force all torch models to `cuda`, `mps`, or `cpu`. Normally leave unset and use `exomem mode`. |
 | `EXOMEM_MPS_FP16` | On Apple Silicon, run bge/CLIP in fp16 on the Metal GPU — ~half the memory, faster encodes (default on; set `0` to keep fp32). |
 | `EXOMEM_VIDEO_SCENE_FRAMES` | Set to enable video scene detection + persisted, OCR'd scene-frame JPEGs (default off). |
 | `EXOMEM_VIDEO_SCENE_THRESHOLD` | Scene-boundary hash threshold in bits of 64 (default 10). |

@@ -92,3 +92,125 @@ def test_index_sync_upsert_noop_when_all_excluded(
     index_sync.upsert_after_write(vault, [trashed])
 
     assert called == []
+
+
+def test_index_sync_quiet_defers_semantic_upserts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    index_sync.clear_deferred_work(vault)
+    from exomem import embeddings, find, lexstore
+
+    seen: dict[str, list] = {"lexstore": [], "embeddings": [], "resolver": []}
+    monkeypatch.setattr(
+        lexstore,
+        "upsert_after_write",
+        lambda root, paths: seen["lexstore"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write",
+        lambda root, paths: seen["embeddings"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        find,
+        "on_resolver_files_changed",
+        lambda root, changed, deleted: seen["resolver"].append(
+            (list(changed), list(deleted))
+        ),
+    )
+
+    good = vault / "Knowledge Base" / "Notes" / "Insights" / "quiet-defers.md"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text("# quiet\n", encoding="utf-8")
+
+    try:
+        index_sync.upsert_after_write(vault, [good, good])
+
+        assert seen["lexstore"] == [[good, good]]
+        assert seen["embeddings"] == []
+        assert seen["resolver"] == [
+            (
+                [
+                    "Knowledge Base/Notes/Insights/quiet-defers.md",
+                    "Knowledge Base/Notes/Insights/quiet-defers.md",
+                ],
+                [],
+            )
+        ]
+        status = index_sync.deferred_work_status(vault)["semantic_upserts"]
+        assert status["count"] == 1
+        assert status["paths"] == ["Knowledge Base/Notes/Insights/quiet-defers.md"]
+    finally:
+        index_sync.clear_deferred_work(vault)
+
+
+def test_index_sync_nonquiet_keeps_immediate_embedding_upsert(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    index_sync.clear_deferred_work(vault)
+    from exomem import embeddings, find, lexstore
+
+    seen: dict[str, list] = {"lexstore": [], "embeddings": [], "resolver": []}
+    monkeypatch.setattr(
+        lexstore,
+        "upsert_after_write",
+        lambda root, paths: seen["lexstore"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write",
+        lambda root, paths: seen["embeddings"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        find,
+        "on_resolver_files_changed",
+        lambda root, changed, deleted: seen["resolver"].append(
+            (list(changed), list(deleted))
+        ),
+    )
+
+    good = vault / "Knowledge Base" / "Notes" / "Insights" / "normal-upserts.md"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text("# normal\n", encoding="utf-8")
+
+    index_sync.upsert_after_write(vault, [good])
+
+    assert seen["lexstore"] == [[good]]
+    assert seen["embeddings"] == [[good]]
+    assert seen["resolver"] == [(["Knowledge Base/Notes/Insights/normal-upserts.md"], [])]
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0
+
+
+def test_drain_deferred_work_processes_and_clears_semantic_upserts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    index_sync.clear_deferred_work(vault)
+    from exomem import embeddings, find, lexstore
+
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda root, paths: None)
+    monkeypatch.setattr(
+        find,
+        "on_resolver_files_changed",
+        lambda root, changed, deleted: None,
+    )
+    calls: list[list[Path]] = []
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write",
+        lambda root, paths: calls.append(list(paths)),
+    )
+    good = vault / "Knowledge Base" / "Notes" / "Insights" / "drain-me.md"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text("# drain\n", encoding="utf-8")
+
+    index_sync.upsert_after_write(vault, [good])
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
+
+    processed = index_sync.drain_deferred_work(vault)
+
+    assert processed == 1
+    assert calls == [[good]]
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0

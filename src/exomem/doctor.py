@@ -47,14 +47,18 @@ class DoctorCheck:
     status: Status
     message: str
     remediation: str | None = None
+    details: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        data = {
             "id": self.id,
             "status": self.status,
             "message": self.message,
             "remediation": self.remediation,
         }
+        if self.details is not None:
+            data["details"] = self.details
+        return data
 
 
 @dataclass
@@ -79,8 +83,16 @@ def _check(
     status: Status,
     message: str,
     remediation: str | None = None,
+    *,
+    details: dict | None = None,
 ) -> DoctorCheck:
-    return DoctorCheck(id=id_, status=status, message=message, remediation=remediation)
+    return DoctorCheck(
+        id=id_,
+        status=status,
+        message=message,
+        remediation=remediation,
+        details=details,
+    )
 
 
 def _module_available(module: str) -> bool:
@@ -232,6 +244,39 @@ def _check_dependency(module: str, extra: str, *, import_name: str | None = None
         f"Install the requested capability with `uv sync --extra {extra}`.",
     )
 
+
+def _check_resource_posture(profile: Profile) -> DoctorCheck:
+    from . import resource_status
+
+    posture = resource_status.resource_posture()
+    gpu = posture["gpu"]
+    mode_name = posture["mode"]
+    if gpu.get("usable") is False:
+        status: Status = "pass" if profile == "lean" else "warn"
+        reason = gpu.get("reason") or "GPU is not usable under current policy"
+        return _check(
+            "resource.posture",
+            status,
+            f"Resource mode is {mode_name}; CPU is the supported baseline. {reason}.",
+            "Use `exomem mode quiet` before foreground GPU work, or `exomem mode "
+            "performance` only when enough free VRAM is available.",
+            details=posture,
+        )
+    if gpu.get("usable") is True:
+        return _check(
+            "resource.posture",
+            "pass",
+            f"Resource mode is {mode_name}; GPU headroom probe is capable, but GPU "
+            "use remains explicit policy opt-in.",
+            details=posture,
+        )
+    return _check(
+        "resource.posture",
+        "pass",
+        f"Resource mode is {mode_name}; CPU is the supported baseline and GPU "
+        "headroom is unknown without an available non-torch probe.",
+        details=posture,
+    )
 
 def _check_lexical(vault_root: Path | None) -> DoctorCheck:
     """Lexical FTS5 backend availability + sidecar health.
@@ -735,6 +780,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
         *_check_schema_files(vault_root),
         _check_repo_env(),
         _check_registry(),
+        _check_resource_posture(profile),
         _check_lexical(vault_root),
     ]
 

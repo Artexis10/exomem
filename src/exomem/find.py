@@ -2725,14 +2725,42 @@ def _collapse(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
+def unload_ram_caches() -> dict[str, int]:
+    """Evict rebuildable find RAM caches without clearing freshness/inbound metadata."""
+    page_entries = len(_CACHE.entries)
+    _CACHE.entries.clear()
+    with _RESOLVER_LOCK:
+        resolver_entries = len(_RESOLVER_CACHE)
+        _RESOLVER_CACHE.clear()
+    with _FIND_CACHE_LOCK:
+        hot_entries = len(_FIND_CACHE)
+        _FIND_CACHE.clear()
+    return {"pages": page_entries, "resolvers": resolver_entries, "hot_find": hot_entries}
+
+
+def cache_status() -> dict:
+    """No-allocation residency status for find's rebuildable RAM caches."""
+    page_entries = list(_CACHE.entries.values())
+    with _RESOLVER_LOCK:
+        resolver_entries = len(_RESOLVER_CACHE)
+    with _FIND_CACHE_LOCK:
+        hot_entries = len(_FIND_CACHE)
+        hot_hits = sum(len(v) for v in _FIND_CACHE.values())
+    return {
+        "pages": {
+            "entries": len(page_entries),
+            "body_chars": sum(len(p.body) for p in page_entries),
+        },
+        "resolvers": {"entries": resolver_entries},
+        "hot_find": {"entries": hot_entries, "hits": hot_hits},
+    }
+
+
 def clear_cache() -> None:
     """Test hook: flush every in-process find cache between tests — parsed
     pages, the wikilink resolver, the hot find-result cache, and the vault
     inbound-link index."""
-    _CACHE.entries.clear()
-    _RESOLVER_CACHE.clear()
-    with _FIND_CACHE_LOCK:
-        _FIND_CACHE.clear()
+    unload_ram_caches()
     freshness.clear()
     from . import vault as vault_module
     vault_module.clear_inbound_index()

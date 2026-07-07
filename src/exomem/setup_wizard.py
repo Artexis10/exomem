@@ -206,14 +206,16 @@ def run_setup(
     # Interactive only (never blocks --yes automation), and only when embeddings are on
     # (a lean install has no models to accelerate). CPU stays the safe default otherwise.
     if not yes and profile != "lean":
-        from . import accel
         from . import mode as mode_mod
+        from . import resource_status
 
-        if mode_mod.resolve_mode() != "performance" and accel.gpu_usable():
+        gpu = resource_status.gpu_headroom()
+        if mode_mod.resolve_mode() != "performance" and gpu.get("usable") is True:
             if _ask_yn(
                 input_fn,
-                "\n⚡ A capable GPU was detected. Use it for faster indexing & search? "
-                "(change anytime with `exomem mode`)",
+                "\nA capable idle GPU was detected. Use performance mode for "
+                "faster explicit indexing? Normal mode avoids steady-state CUDA "
+                "residency. (change anytime with `exomem mode`)",
                 False,
             ):
                 mode_mod.write_mode("performance")
@@ -327,7 +329,11 @@ def run_setup(
     print_fn("Next steps:")
     print_fn("  1. Restart Claude Code so it loads the exomem server and skill.")
     print_fn('  2. Try: "what does this vault look like" or "find my notes on X".')
-    print_fn("  3. Optional, for direct CLI use (`kb find …`): set EXOMEM_VAULT_PATH.")
+    print_fn("  3. Optional, for direct CLI use (`kb find ...`): set EXOMEM_VAULT_PATH.")
+    print_fn(
+        "  4. For foreground work/gaming: exomem mode quiet; inspect with "
+        "exomem status --resources --json."
+    )
     return code
 
 

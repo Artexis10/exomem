@@ -43,17 +43,28 @@ def warmup_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_WARMUP")
 
 
-def warm_caches(vault_root: Path, *, preload_models: bool = True) -> dict[str, float]:
-    """Warm find's lexical/derived caches; returns per-step durations in ms
-    (empty when disabled). Never raises.
+def warm_caches(
+    vault_root: Path,
+    *,
+    preload_models: bool = True,
+    preload_cpu_caches: bool | None = None,
+) -> dict[str, float]:
+    """Warm find's rebuildable caches; returns per-step durations in ms.
 
-    The lexical steps (pages, BM25 both scopes, resolver) are CPU-only and always
-    run. The embedding/CLIP matrix dummy searches touch the vector backend and are
-    skipped when `preload_models` is False (quiet mode) so a quiet boot keeps its
-    RAM footprint minimal — the first find faults the matrix lazily instead.
+    Quiet mode disables CPU cache preloading entirely: parsed pages, BM25 corpora,
+    resolver state, and vector matrices all stay cold until a request needs them.
+    `preload_models=False` still only gates model-backed vector/CLIP matrix warm-up
+    when CPU cache preloading is otherwise allowed.
     """
     if not warmup_enabled():
         log.info("cache warm-up disabled via EXOMEM_DISABLE_WARMUP")
+        return {}
+    if preload_cpu_caches is None:
+        from . import mode
+
+        preload_cpu_caches = mode.preload_cpu_caches()
+    if not preload_cpu_caches:
+        log.info("cache warm-up skipped by resource mode")
         return {}
     from . import bm25, find
 
@@ -129,7 +140,11 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     from . import mode, readiness
 
     preload = mode.preload_models()
-    durations = warm_caches(vault_root, preload_models=preload)
+    durations = warm_caches(
+        vault_root,
+        preload_models=preload,
+        preload_cpu_caches=mode.preload_cpu_caches(),
+    )
     readiness.mark_ready("lexical")
 
     def _model_step(name: str, fn) -> bool:

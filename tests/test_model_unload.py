@@ -201,6 +201,66 @@ def test_reap_once_unloads_only_stale() -> None:
     assert len(reaped) == 1
 
 
+def test_reap_once_soft_fails_per_slot() -> None:
+    def boom():
+        raise RuntimeError("bad slot")
+
+    bad = model_reaper.ModelSlot("bad", lambda: True, lambda: 0, lambda: 0.0, boom)
+    good, unloaded = _slot(last=0.0)
+    reaped = model_reaper._reap_once([bad, good], now=1000.0, threshold=900.0)
+    assert reaped == ["m"]
+    assert unloaded == [1]
+
+
+def test_default_cache_slots_reap_only_when_cpu_caches_are_evictable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import bm25, find
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        embeddings,
+        "index_cache_status",
+        lambda: {
+            "embedding": {"loaded": 1},
+            "clip": {"loaded": 1},
+        },
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "unload_index_caches",
+        lambda: calls.append("index") or {"embedding": 1, "clip": 1},
+    )
+    monkeypatch.setattr(bm25, "cache_status", lambda: {"loaded": True})
+    monkeypatch.setattr(bm25, "unload_cache", lambda: calls.append("bm25") or True)
+    monkeypatch.setattr(
+        find,
+        "cache_status",
+        lambda: {
+            "pages": {"entries": 1},
+            "resolvers": {"entries": 1},
+            "hot_find": {"entries": 1},
+        },
+    )
+    monkeypatch.setattr(
+        find,
+        "unload_ram_caches",
+        lambda: calls.append("find") or {"pages": 1},
+    )
+    monkeypatch.setattr(accel, "gpu_mem", lambda: None)
+
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    slots = [s for s in model_reaper.default_slots() if s.name.endswith("cache") or s.name.endswith("caches") or s.name == "index-matrices"]
+    model_reaper._reap_once(slots, now=time.monotonic() + 2.0, threshold=1.0)
+    assert calls == []
+
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    slots = [s for s in model_reaper.default_slots() if s.name.endswith("cache") or s.name.endswith("caches") or s.name == "index-matrices"]
+    reaped = model_reaper._reap_once(slots, now=time.monotonic() + 2.0, threshold=1.0)
+    assert reaped == ["index-matrices", "bm25-cache", "find-ram-caches"]
+    assert calls == ["index", "bm25", "find"]
+
+
 # ---- reaper lifecycle ----
 
 def test_reaper_start_fires_then_stops() -> None:

@@ -8,8 +8,10 @@ remaining drift, without audit_fix's wikilink/frontmatter rewrites.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 
 from exomem import audit as audit_module
+from exomem import index_sync
 from exomem import reconcile as reconcile_module
 
 
@@ -59,3 +61,55 @@ def test_reconcile_dry_run_reports_without_writing(vault: Path) -> None:
     assert rep.dry_run is True
     assert "Knowledge Base/index.md" in rep.indexes_updated
     assert top.read_text(encoding="utf-8") == drifted, "dry_run must not write"
+
+
+def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
+    vault: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    index_sync.clear_deferred_work(vault)
+
+    from exomem import find, lexstore
+
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda root, paths: None)
+    monkeypatch.setattr(
+        find,
+        "on_resolver_files_changed",
+        lambda root, changed, deleted: None,
+    )
+    target = vault / "Knowledge Base" / "Notes" / "reconcile-deferred.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# reconcile deferred\n", encoding="utf-8")
+    index_sync.upsert_after_write(vault, [target])
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
+
+    calls: list[list[Path]] = []
+    monkeypatch.setattr(
+        "exomem.embeddings.upsert_after_write",
+        lambda root, paths: calls.append(list(paths)),
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "_check_embedding_drift",
+        lambda root: [
+            SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-deferred.md"))
+        ],
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "audit",
+        lambda root, categories: SimpleNamespace(findings=[]),
+    )
+    monkeypatch.setattr(
+        reconcile_module.indexes,
+        "compute_subindex_writes",
+        lambda root, top_index_text: ([], top_index_text),
+    )
+    monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
+
+    rep = reconcile_module.reconcile(vault)
+
+    assert rep.embeddings_status == "refreshed"
+    assert calls == [[target]]
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0

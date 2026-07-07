@@ -121,6 +121,32 @@ def test_clear_cache_clears_hot_cache(vault: Path, monkeypatch) -> None:
     assert calls["n"] == 2
 
 
+def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
+    from exomem import freshness
+
+    kb = vault / "Knowledge Base"
+    freshness.seed(
+        vault,
+        "kb",
+        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb)),
+    )
+    before_freshness = freshness.triple(vault, "kb")
+
+    assert find_module.find(vault, query="metabolism")
+    status = find_module.cache_status()
+    assert status["pages"]["entries"] > 0
+    assert status["hot_find"]["entries"] > 0
+
+    unloaded = find_module.unload_ram_caches()
+    assert unloaded["pages"] > 0
+    assert unloaded["hot_find"] > 0
+    assert find_module.cache_status()["pages"]["entries"] == 0
+    assert find_module.cache_status()["hot_find"]["entries"] == 0
+    assert freshness.triple(vault, "kb") == before_freshness
+
+    assert find_module.find(vault, query="metabolism")
+
+
 def test_keyword_mode_also_cached(vault: Path, monkeypatch) -> None:
     calls = {"n": 0}
     orig = find_module._find_keyword

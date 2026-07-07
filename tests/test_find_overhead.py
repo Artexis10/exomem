@@ -95,6 +95,32 @@ def test_bm25_sees_delete(vault: Path) -> None:
     assert not any(p.endswith("delete-probe.md") for p, _ in hits)
 
 
+def test_bm25_cache_status_and_unload_rebuilds(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    bm25.clear_cache()
+    cold = bm25.cache_status()
+    assert cold == {
+        "loaded": False,
+        "corpora": 0,
+        "documents": 0,
+        "tokenized_documents": 0,
+        "tokens": 0,
+    }
+
+    first = bm25.search(vault, "insulin", k=5)
+    warm = bm25.cache_status()
+    assert first
+    assert warm["loaded"] is True
+    assert warm["corpora"] == 1
+    assert warm["documents"] > 0
+    assert warm["tokenized_documents"] > 0
+    assert warm["tokens"] > 0
+
+    assert bm25.unload_cache() is True
+    assert bm25.cache_status()["loaded"] is False
+    assert bm25.search(vault, "insulin", k=5) == first
+
+
 def test_resolver_rebuilds_on_rename(vault: Path) -> None:
     """The resolver's old (count, max-mtime) key missed pure renames."""
     a = vault / "Knowledge Base" / "Notes" / "resolver-rename-a.md"
@@ -219,3 +245,20 @@ def test_warmup_soft_fails_on_broken_vault(tmp_path: Path) -> None:
     # No Knowledge Base/ dir at all — every step must soft-fail, not raise.
     durations = warmup.warm_caches(tmp_path / "nonexistent")
     assert isinstance(durations, dict)
+
+
+def test_quiet_cold_find_matches_warm_cache_find(vault: Path, monkeypatch) -> None:
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    find_module.clear_cache()
+    bm25.clear_cache()
+    assert warmup.warm_caches(vault) == {}
+    cold = find_module.find(vault, query="metabolism", mode="hybrid", limit=10)
+
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    find_module.clear_cache()
+    bm25.clear_cache()
+    warmup.warm_caches(vault)
+    warm = find_module.find(vault, query="metabolism", mode="hybrid", limit=10)
+
+    assert [h.path for h in cold] == [h.path for h in warm]
