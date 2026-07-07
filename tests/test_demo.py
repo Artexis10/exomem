@@ -18,6 +18,7 @@ from pathlib import Path
 import pytest
 
 import exomem
+from exomem import commands
 from exomem import demo
 from exomem.__main__ import _core_op_names
 from exomem.__main__ import main as cli_main
@@ -38,6 +39,30 @@ def test_packaged_sample_vault_present() -> None:
     assert demo.SAMPLE_VAULT.is_dir()
     assert (demo.SAMPLE_VAULT / "Knowledge Base" / "_Schema" / "SKILL.md").is_file()
     assert (demo.SAMPLE_VAULT / demo.TARGET_PATH).is_file()
+
+
+def test_sample_vault_shows_proof_without_treating_sources_as_evidence() -> None:
+    evidence_rel = "Knowledge Base/Evidence/Warranty/Receipts/2026-06-30-laptop-receipt.md"
+    source_rel = "Knowledge Base/Sources/Sessions/2026-06-30-sample-session.md"
+    note = demo.SAMPLE_VAULT / "Knowledge Base" / "Notes" / "Research" / "Sample" / "sample-architecture.md"
+
+    assert (demo.SAMPLE_VAULT / evidence_rel).is_file()
+    assert (demo.SAMPLE_VAULT / source_rel).is_file()
+    assert f"[[{evidence_rel[:-3]}]]" in note.read_text(encoding="utf-8")
+
+    hits = commands.op_find(
+        demo.SAMPLE_VAULT,
+        query="receipt warranty",
+        mode="keyword",
+        scope="vault",
+        limit=10,
+        prefer_compiled=False,
+    )
+    paths = [hit["path"] for hit in hits]
+
+    assert evidence_rel in paths
+    assert source_rel not in paths
+    assert any(hit["path"] == evidence_rel and hit["title"] == "Sample Laptop Receipt" for hit in hits)
 
 
 def test_happy_path_human_output() -> None:

@@ -1,0 +1,38 @@
+{
+  "id": "personal-records",
+  "name": "Personal records",
+  "description": "Purchases, travel, home, vehicles, admin records, and life logistics.",
+  "primitives": [
+    "source",
+    "record",
+    "entity",
+    "evidence",
+    "decision"
+  ],
+  "actions": [
+    "save",
+    "ask",
+    "prove",
+    "review",
+    "update"
+  ],
+  "examples": [
+    "Save this vehicle maintenance record.",
+    "Find the documents for the trip."
+  ],
+  "signals": [
+    "personal",
+    "home",
+    "house",
+    "vehicle",
+    "car",
+    "travel",
+    "trip",
+    "purchase",
+    "admin",
+    "records",
+    "passport",
+    "tax",
+    "finance"
+  ]
+}

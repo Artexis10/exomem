@@ -28,7 +28,7 @@ is always clear.
 
 - `Sources/` — raw inputs. Append-only. Never edited after capture.
 - `Notes/`, `Entities/` — compiled, structured, supersedable. Always carry frontmatter, sources, and links.
-- `Evidence/` — raw factual artifacts (binaries, documents, screenshots). Append-only. No analysis at this layer.
+- `Evidence/` — proof/case-bound artifacts (binaries, documents, screenshots). Append-only. No analysis at this layer. A raw item is a Source by default; it becomes Evidence when preserved for a claim, case, dispute, warranty, record, or other proof-bearing context.
 - Anything outside `Knowledge Base/` — Claude reads, Claude does not write.
 
 ## Proactive engagement
@@ -142,7 +142,7 @@ you'll almost always need `find` (search), `get` (read a page), and one or more
 of `note`, `add`, `link`, `suggest_links`, `edit`, `audit`. In Claude Code, load
 them by exact name in a single call:
 
-`ToolSearch("select:find,get,note,add,link,suggest_links,edit,audit")`
+`ToolSearch("select:adopt,overview,find,get,note,add,link,suggest_links,edit,audit")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -158,6 +158,27 @@ mode, reranking, `pack`, or `include_timings`.
 
 The Tier 2 filesystem ops below may be turned off on lean deployments
 (`EXOMEM_DISABLE_TIER2`), in which case only the Tier 1 ops are registered.
+
+
+## Simple front door
+
+Speak to users in simple product actions; use the typed operations underneath.
+Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, or
+`replace` unless that implementation detail matters.
+
+| User action | Preferred route |
+|---|---|
+| save | `add` for raw material; `note`/`link` for durable conclusions; `preserve` only for proof-bound material |
+| adopt/import | `adopt(mode="scan-only")` first; then ask before `save-manifest`, `copy-as-sources`, or compile actions |
+| ask | `find` first, then `get` or `find(pack=true)` for synthesis context |
+| prove | `preserve` or upload to Evidence for cases, claims, warranties, disputes, records, and receipts |
+| review | `attention`, `audit`, or `propose_compilation` |
+| update | `edit` for small changes; `replace` for supersession; `reconcile` for out-of-band drift |
+| connect | `link` and `suggest_links` |
+
+Built-in AI memory is for preferences, working rules, and routing instructions.
+Exomem is for durable governed knowledge with sources, proof, history, decisions,
+records, review, and compiled conclusions.
 
 ## Operations
 
@@ -185,6 +206,7 @@ and index updates are determined by the operation, not the caller.
 | **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (echo `content_hash` to `edit` via `expected_hash`). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
 | **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
+| **adopt** | Safe first-run adoption workflow for an existing vault: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals | `Knowledge Base/_Adoption/` or `Sources/Imported/` only in explicit write modes |
 | **propose_compilation** | Draft a note scaffold from unprocessed source(s) — the backlog-drain companion to audit (read-only) | proposals only |
 | **replace** | Supersession: mark old, write new with header pointer | both old + new |
 | **reconcile** | Heal drift from out-of-band edits (any editor/sync/mobile, e.g. Obsidian): recompute index counts + re-embed stale files + report remaining drift. Idempotent; `dry_run` reports only | drifted indexes + embedding sidecar |
@@ -281,6 +303,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - "log this batch," "add this episode," "record this launch" → **note** with type=production-log
 - "this is connected to [[X]]," "create an entity for X" → **link**
 - "preserve this letter," "file this in evidence," "save this for the record" → **preserve**
+- "import my vault," "adopt these notes," "make this old knowledge base usable" → **adopt** first (`mode="scan-only"`), then ask before `save-manifest`, `copy-as-sources`, or compile actions
 - "update the skill," "the KB structure needs to change" → no MCP tool — hand-edit `_Schema/` files directly
 - "fill in the take for X," "set the take on that row" → **edit** (`row_key`+`take`)
 - "make these few edits to the page" (same page) → **edit** (`edits=[…]`)
@@ -291,6 +314,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
+- "what should Exomem do with this existing vault," "how can we migrate this safely" → **adopt**
 - "I edited the vault directly / on my phone — sync it up," "heal the drift" → **reconcile**
 - "this replaces the old strategy," "supersede the old note on X" → **replace**
 - "make a new folder for X" → **create_file** (`kind="dir"`, Tier 2)
@@ -364,9 +388,11 @@ Vector embeddings live in a per-machine sidecar at
 Writers refresh it incrementally after every atomic batch. To bootstrap or after
 drift, call `audit_fix(rebuild_embeddings=true)`.
 
-### Assessing a vault you didn't build
+### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For structural questions —
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance.
+
+For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in
 here" — and simply to learn the layout before you write, run **overview** first: one bounded,
 read-only report of folder structure, counts, frontmatter coverage, naming
@@ -375,7 +401,7 @@ works on any folder under the vault root, including trees outside
 `Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
 all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
 to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `list_directory` on folders of interest,
-`find scope="vault"` for content, targeted `get` for individual files. **Never
+`find scope="vault"` for content, targeted `get` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.
 

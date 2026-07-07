@@ -20,4 +20,5 @@ What does the smallest useful exomem vault need to demonstrate?
 - A raw source under `Sources/`.
 - A compiled conclusion under `Notes/`.
 - A concept entity under `Entities/`.
+- A proof artifact under `Evidence/`, e.g. [[Knowledge Base/Evidence/Warranty/Receipts/2026-06-30-laptop-receipt]].
 - Clean wikilinks between them.

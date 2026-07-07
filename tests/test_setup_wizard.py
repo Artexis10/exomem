@@ -69,8 +69,10 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     # KB scaffold landed; skill installed under the injected home
     assert (vault / "Knowledge Base" / "index.md").is_file()
     assert (home / "skills" / "exomem" / "SKILL.md").is_file()
-    # pre-init scan surfaced the existing content + the write contract
+    # pre-init scan surfaced the existing content, likely packs, and write contract
     assert "2 files" in out
+    assert "Likely packs:" in out
+    assert "Adoption: run `exomem adopt`" in out
     assert "writes only under 'Knowledge Base/'" in out
     # registration argv shape
     (reg,) = [c for c in recorder.calls if "add" in c]

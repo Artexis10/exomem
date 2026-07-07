@@ -1,0 +1,36 @@
+{
+  "id": "business",
+  "name": "Business",
+  "description": "Customers, meetings, commitments, contracts, risks, and decisions.",
+  "primitives": [
+    "source",
+    "entity",
+    "decision",
+    "record",
+    "evidence"
+  ],
+  "actions": [
+    "save",
+    "ask",
+    "review",
+    "update",
+    "prove"
+  ],
+  "examples": [
+    "Save the customer commitment from this call.",
+    "What risks are open for this account?"
+  ],
+  "signals": [
+    "business",
+    "customer",
+    "client",
+    "meeting",
+    "sales",
+    "contract",
+    "proposal",
+    "invoice",
+    "risk",
+    "commitment",
+    "account"
+  ]
+}

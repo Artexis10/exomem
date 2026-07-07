@@ -35,7 +35,10 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["server"]["content_included"] is False
     assert out["server"]["pure_substrate"] is True
     assert "compute_policy" in out["server"]
-    assert {"workflow", "tool_defaults", "performance_profiles"} <= set(out)
+    assert {"workflow", "tool_defaults", "performance_profiles", "memory_model"} <= set(out)
+    assert "durable governed knowledge" in out["memory_model"]["exomem"]
+    assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt"
+    assert "adopt" in out["common_tools"]
     assert out["tool_defaults"]["normal_lookup"]["args"] == {
         "detail": "compact",
         "rerank": False,
@@ -58,6 +61,26 @@ def test_bootstrap_profiles_and_validation(vault: Path) -> None:
         commands.op_bootstrap(vault, profile="verbose")
 
 
+def test_product_front_door_metadata_is_registry_derived() -> None:
+    catalog = commands.product_tool_catalog()
+    front_door = commands.product_front_door_catalog()
+
+    assert {"save", "adopt", "ask", "prove", "review", "update", "connect"} <= set(front_door)
+    assert "adopt" in catalog["primary"]
+    assert "find" in catalog["primary"]
+    assert "preserve" in front_door["prove"]["primary_tools"]
+    assert "audit" in front_door["review"]["primary_tools"]
+    assert "create_file" in catalog["advanced"]
+    assert "list_directory" in catalog["advanced"]
+    assert "scan-only" in front_door["adopt"]["contract"]
+    assert "proof" in front_door["prove"]["contract"]
+
+    actions = set(front_door)
+    for command in commands.COMMANDS:
+        assert command.product_surface in {"primary", "advanced"}
+        assert set(command.product_actions) <= actions
+
+
 def test_bootstrap_is_registry_generated_on_public_surfaces(
     vault: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -69,7 +92,9 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
     mcp = server.build_server(require_auth=False)
-    assert "bootstrap" in _tool_names(mcp)
+    names = _tool_names(mcp)
+    assert "bootstrap" in names
+    assert "adopt" in names
 
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(

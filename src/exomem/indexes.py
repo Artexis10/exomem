@@ -192,6 +192,7 @@ def _replace_by_type_section(
         "Papers": "academic papers",
         "Videos": "captured video transcripts/notes",
         "Other": "miscellaneous captures",
+        "Imported": "copied legacy-vault material with provenance",
     }
     if folder_title not in known_descriptions:
         known_descriptions[folder_title] = folder_description

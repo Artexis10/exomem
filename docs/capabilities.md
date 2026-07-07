@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Registry commands: 28
-- Tier 1 commands: 18
+- Registry commands: 29
+- Tier 1 commands: 19
 - Tier 2 commands: 10
-- Registry-generated MCP commands: 27
-- REST commands: 27
-- CLI commands: 27
+- Registry-generated MCP commands: 28
+- REST commands: 28
+- CLI commands: 28
 - Hand-registered MCP tools: mint_download_token, mint_upload_token, note
 
 ## Command Registry
@@ -25,6 +25,7 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | audit | 1 | MCP, REST, CLI | read | no | - | categories | Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only. |
 | attention | 1 | MCP, REST, CLI | read | no | - | categories, limit | Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only. |
 | overview | 1 | MCP, REST, CLI | read | no | path | path, max_depth, include_hidden, samples | Bounded, read-only structure report of the vault (or a subtree). |
+| adopt | 1 | MCP, REST, CLI | write | no | path | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths | Adopt / import an existing vault safely: scan first, preserve originals. |
 | evolution | 1 | MCP, REST, CLI | read | no | query | query, limit, scope, projects, tags | How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only. |
 | audit_fix | 1 | MCP, REST, CLI | write | yes | - | dry_run, rebuild_embeddings | Run audit + auto-apply safe fixes; propose-only for risky categories. |
 | reconcile | 1 | MCP, REST, CLI | write | no | - | dry_run | Heal vault drift from out-of-band edits in one pass. |

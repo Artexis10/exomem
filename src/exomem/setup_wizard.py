@@ -25,6 +25,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
+from . import adopt as adopt_module
 from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
@@ -34,6 +35,18 @@ from . import personalize as personalize_module
 from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
+
+
+def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
+    shown = []
+    for pack in packs[:limit]:
+        name = pack.get("name") or pack.get("id") or "unknown"
+        score = int(pack.get("score") or 0)
+        if score > 0:
+            shown.append(f"{name} ({score} signal{'s' if score != 1 else ''})")
+        else:
+            shown.append(f"{name} (default)")
+    return ", ".join(shown)
 
 
 def _ask_yn(input_fn, prompt: str, default: bool) -> bool:
@@ -119,8 +132,9 @@ def run_setup(
 
     # 2. pre-init scan — the "you already have notes here" moment
     try:
-        scan = overview_module.overview(vault_path)
-    except overview_module.OverviewError as e:
+        adoption = adopt_module.adopt(vault_path)
+        scan = adoption["overview"]
+    except adopt_module.AdoptError as e:
         report("scan", f"[failed: {e}]")
         return finish()
     totals = scan["totals"]
@@ -140,8 +154,12 @@ def run_setup(
         print_fn(f"    {junk_total} junk candidate(s) — zero-byte or sync-conflict copies.")
     kb_state = "already present" if scan["kb"]["present"] else "not present yet"
     print_fn(f"    {kb_prefix()}: {kb_state}")
+    packs = adoption.get("pack_suggestions") or []
+    if packs:
+        print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
     print_fn("")
     print_fn(f"  Contract: {overview_module.SCOPE_NOTE}")
+    print_fn("  Adoption: run `exomem adopt` anytime for the copy/manifest plan.")
     print_fn("")
     report("scan", "[done]")
 
