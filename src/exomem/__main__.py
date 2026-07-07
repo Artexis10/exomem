@@ -703,8 +703,8 @@ def _install_hook_main(argv: list[str]) -> int:
     parser.add_argument(
         "--client",
         choices=("claude", "codex"),
-        default="claude",
-        help="client hook config to wire (default: claude)",
+        default=None,
+        help="client hook config to wire/check (default: claude for install; both for --check)",
     )
     parser.add_argument(
         "--hook-dir",
@@ -719,20 +719,48 @@ def _install_hook_main(argv: list[str]) -> int:
         action="store_true",
         help="Write the script but don't touch settings.json; print the snippet to add.",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Read-only health check for deployed Claude Code/Codex hooks; writes nothing.",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
     args = parser.parse_args(argv)
 
     from . import install_hook as hook_module
+
+    if args.check:
+        if (args.hook_dir or args.settings) and args.client is None:
+            parser.error("--hook-dir/--settings with --check require --client")
+        try:
+            report = hook_module.check_hooks(
+                clients=(args.client,) if args.client else hook_module.SUPPORTED_CLIENTS,
+                hook_dir=Path(args.hook_dir) if args.hook_dir else None,
+                settings_path=Path(args.settings) if args.settings else None,
+            )
+        except ValueError as e:
+            print(f"exomem install-hook --check: {e}", file=sys.stderr)
+            return 2
+        if args.json:
+            print(json.dumps(report))
+        else:
+            print(hook_module.render_check_human(report))
+        return 0 if report["success"] else 1
 
     try:
         report = hook_module.install_hook(
             hook_dir=args.hook_dir,
             settings_path=args.settings,
             wire=not args.print_only,
-            client=args.client,
+            client=args.client or "claude",
         )
     except FileNotFoundError as e:
         print(f"exomem install-hook: {e}", file=sys.stderr)
         return 1
+
+    if args.json:
+        print(json.dumps(report))
+        return 0
 
     client_label = "Codex" if report["client"] == "codex" else "Claude Code"
     print(f"Installed the KB hook scripts for {client_label}:")
