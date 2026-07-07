@@ -22,6 +22,7 @@ import pytest
 
 from exomem import embeddings
 from exomem import find as find_module
+from exomem import index_paths
 
 # A probe whose BODY + TITLE share NO stem with the query below, so the ONLY way
 # it can surface is the semantic (vector) lane — never BM25/keyword/auto-widen.
@@ -54,8 +55,10 @@ def _write_out_of_kb(vault: Path) -> Path:
 def test_index_scope_defaults_to_kb(monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_INDEX_SCOPE", raising=False)
     assert embeddings.index_scope() == "kb"
+    assert index_paths.index_scope() == "kb"
     monkeypatch.setenv("EXOMEM_INDEX_SCOPE", "vault")
     assert embeddings.index_scope() == "vault"
+    assert index_paths.index_scope() == "vault"
     # Case-insensitive, and any unrecognized value falls back to the safe default.
     monkeypatch.setenv("EXOMEM_INDEX_SCOPE", "VAULT")
     assert embeddings.index_scope() == "vault"
@@ -65,13 +68,21 @@ def test_index_scope_defaults_to_kb(monkeypatch) -> None:
     assert embeddings.index_scope() == "kb"
 
 
+def test_index_paths_public_contract(vault) -> None:
+    assert index_paths.sidecar_path(vault).name == ".embeddings.sqlite"
+    assert index_paths.clip_sidecar_path(vault).name == ".clip.sqlite"
+    assert index_paths.is_embeddable_path(Path("Knowledge Base/Notes/x.md"))
+    assert not index_paths.is_embeddable_path(Path("Knowledge Base/log.md"))
+    assert not index_paths.is_embeddable_path(Path("Knowledge Base/data.csv"))
+
+
 def test_index_walk_kb_excludes_out_of_kb(vault, monkeypatch) -> None:
     """Default (kb) walk yields only Knowledge Base/ paths — the regression guard
     at the walk level."""
     _write_out_of_kb(vault)
     monkeypatch.delenv("EXOMEM_INDEX_SCOPE", raising=False)
     walked = {p.resolve().relative_to(vault.resolve()).as_posix()
-              for p in embeddings._index_walk(vault)}
+              for p in index_paths.iter_index_markdown(vault)}
     assert walked, "kb walk should yield the fixture's KB notes"
     assert all(p.startswith("Knowledge Base/") for p in walked), (
         f"kb scope must not walk outside Knowledge Base/; got {sorted(walked)[:5]}"
@@ -84,7 +95,7 @@ def test_index_walk_vault_includes_out_of_kb(vault, monkeypatch) -> None:
     _write_out_of_kb(vault)
     monkeypatch.setenv("EXOMEM_INDEX_SCOPE", "vault")
     walked = {p.resolve().relative_to(vault.resolve()).as_posix()
-              for p in embeddings._index_walk(vault)}
+              for p in index_paths.iter_index_markdown(vault)}
     assert _PROBE_REL in walked, f"vault scope must reach the out-of-KB probe; got probe missing"
     assert any(p.startswith("Knowledge Base/") for p in walked), (
         "vault scope should still include KB notes"

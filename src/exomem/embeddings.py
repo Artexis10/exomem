@@ -20,7 +20,6 @@ import gc
 import logging
 import math
 import os
-import random
 import sqlite3
 import sys
 import threading
@@ -31,8 +30,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import accel, vecstore
-from .kbdir import kb_dirname
+from . import accel, index_paths, sidecar_store, vecstore
 
 log = logging.getLogger(__name__)
 
@@ -176,13 +174,8 @@ _CLIP_INDEX_CACHE: dict[str, ClipIndex] = {}
 _INDEX_CACHE_LOCK = threading.Lock()
 
 
-def sidecar_path(vault_root: Path) -> Path:
-    return vault_root / kb_dirname() / ".embeddings.sqlite"
-
-
-def clip_sidecar_path(vault_root: Path) -> Path:
-    """Separate per-machine sidecar for CLIP image vectors (independent lifecycle)."""
-    return vault_root / kb_dirname() / ".clip.sqlite"
+sidecar_path = index_paths.sidecar_path
+clip_sidecar_path = index_paths.clip_sidecar_path
 
 
 def clip_enabled() -> bool:
@@ -201,58 +194,18 @@ def ranking_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_RANKING")
 
 
-# Which markdown scope the semantic (bge) text index covers.
-INDEX_SCOPES = ("kb", "vault")
-
-
-def index_scope() -> str:
-    """Return the semantic-index scope: `"kb"` (default) or `"vault"`.
-
-    `EXOMEM_INDEX_SCOPE=vault` opts the whole Obsidian vault into the vector
-    index, so a user's existing notes OUTSIDE `Knowledge Base/` become
-    semantically searchable (not keyword-only). Any other/unset value is `"kb"`
-    — the historical behavior, which MUST stay byte-identical. The sidecar path
-    is unchanged either way (`<vault>/Knowledge Base/.embeddings.sqlite`); only
-    the set of files walked into it widens.
-    """
-    raw = (os.environ.get("EXOMEM_INDEX_SCOPE") or "").strip().lower()
-    return "vault" if raw == "vault" else "kb"
+INDEX_SCOPES = index_paths.INDEX_SCOPES
+index_scope = index_paths.index_scope
 
 
 def _index_walk(vault_root: Path):
-    """Yield the markdown paths the semantic index should cover, per `index_scope`.
-
-    - `"kb"`   → `find._walk_md(<vault>/Knowledge Base)` — byte-identical to the
-      historical KB-only walk (empty when there is no `Knowledge Base/`).
-    - `"vault"`→ `vault.walk_vault_md(<vault>)` — the whole vault.
-
-    Only the WALK differs by scope; every caller still applies the shared
-    `_is_embeddable_path` + `access.is_indexable` + `_chunks_for_page` filtering,
-    so the chunk/embed path is identical for a KB file whichever scope is active.
-    """
-    from . import find as find_module
-
-    if index_scope() == "vault":
-        from .vault import walk_vault_md
-
-        yield from walk_vault_md(vault_root)
-    else:
-        kb = vault_root / kb_dirname()
-        if kb.is_dir():
-            yield from find_module._walk_md(kb)
-
-
-# Navigation files that aren't real content — their bodies are
-# auto-generated summaries / activity feeds and would just add noise to
-# vector search ("find recent activity" should surface the activity, not
-# log.md itself).
-_SKIP_NAMES = frozenset({"log.md", "index.md"})
+    """Compatibility wrapper for the semantic-index path contract."""
+    yield from index_paths.iter_index_markdown(vault_root)
 
 
 def _is_embeddable_path(path: Path) -> bool:
-    if path.suffix.lower() != ".md":
-        return False
-    return path.name.lower() not in _SKIP_NAMES
+    """Compatibility wrapper for derived-index markdown eligibility."""
+    return index_paths.is_embeddable_path(path)
 
 
 def get_model():
@@ -962,51 +915,8 @@ def embed_texts(texts: list[str], *, is_query: bool = False) -> np.ndarray:
     return vecs.astype(np.float32, copy=False)
 
 
-def _apply_sidecar_pragmas(conn: sqlite3.Connection) -> None:
-    """WAL + relaxed sync on a sidecar connection.
-
-    WAL lets a find (reader) proceed WITHOUT blocking a concurrent backfill
-    (writer) and vice-versa — the whole point of this change: find latency stops
-    tracking sidecar write churn. `synchronous=NORMAL` collapses the per-write
-    fsync cost (the 37-42s note-writes were writer↔writer fsync contention).
-    Safe here because the sidecar is a LOCAL, per-machine dotfile Obsidian Sync
-    ignores (WAL's shared-memory requirement rules out network filesystems, which
-    this sidecar is designed never to live on). The `-wal`/`-shm` siblings inherit
-    the leading dot, so Sync ignores them too. SQLite's automatic checkpoint
-    (wal_autocheckpoint, ~1000 pages) bounds the WAL under a long backfill.
-    """
-    try:
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute("PRAGMA synchronous=NORMAL")
-        conn.execute("PRAGMA busy_timeout=5000")
-    except sqlite3.Error as e:  # pragma: no cover — WAL unavailable (e.g. odd FS)
-        log.warning("sidecar WAL pragmas failed (%s); continuing on default journal", e)
-
-
-def _file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
-    """Locate `rel_path`'s rows in a `(file_path, …)`-sorted key list.
-
-    Returns `(lo, hi)` for the contiguous block of rows whose file_path equals
-    `rel_path` (rows for one file are always contiguous under the load ordering).
-    When the file is absent, returns `(ins, ins)` — the sorted insertion point —
-    so a splice keeps the array ordered the same way a full reload would.
-    """
-    lo = hi = None
-    for i, k in enumerate(keys):
-        if k == rel_path:
-            if lo is None:
-                lo = i
-            hi = i + 1
-        elif hi is not None:
-            break  # block ended — rows for one file are contiguous
-    if lo is not None:
-        return lo, hi
-    ins = len(keys)
-    for i, k in enumerate(keys):
-        if k > rel_path:
-            ins = i
-            break
-    return ins, ins
+_apply_sidecar_pragmas = sidecar_store.apply_sidecar_pragmas
+_file_block = sidecar_store.file_block
 
 
 # --------------------------------------------------------------- generation meta
@@ -1028,201 +938,14 @@ def _file_block(keys: list[str], rel_path: str) -> tuple[int, int]:
 # the SAME sidecar concurrently is unsupported. Fine for this single-user,
 # single-machine-per-sidecar deployment; would need re-litigating for multi-writer.
 
-_INSTANCE_MIN = 1
-_INSTANCE_MAX = 2**31 - 1
-
-
-def _ensure_meta_table(
-    conn: sqlite3.Connection, data_table: str, sidecar_name: str
-) -> None:
-    """Create the `meta(key, value)` generation table if absent (idempotent).
-
-    On first creation (never on a later `_connect()` against the same physical
-    file) also writes a random nonzero `instance` row — the ABA guard (F3): a
-    sidecar file that gets DELETED and recreated from scratch restarts its
-    (epoch, generation) counters at (0, 1), so a still-warm cache from the OLD
-    file could otherwise coincidentally match the NEW file's early tokens and
-    serve the old file's stale rows forever (impossible with mtime, which a
-    brand-new file can't collide with). `instance` is committed immediately
-    (this runs before the caller's own write txn opens) so a concurrent reader
-    can never observe the meta table without it.
-
-    Logs ONCE when the table is first created over an EXISTING non-empty sidecar
-    (a legacy DB written before this binary): its generation reads 0 until the
-    first gen-bumping write, and the caches fall back to mtime keying meanwhile.
-    """
-    existed = (
-        conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-        ).fetchone()
-        is not None
-    )
-    conn.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value INTEGER)")
-    if not existed:
-        instance = random.SystemRandom().randint(_INSTANCE_MIN, _INSTANCE_MAX)
-        conn.execute(
-            "INSERT OR IGNORE INTO meta (key, value) VALUES ('instance', ?)",
-            (instance,),
-        )
-        conn.commit()
-        # data_table is a trusted literal ("chunks"/"images"), never user input.
-        has_rows = (
-            conn.execute(f"SELECT 1 FROM {data_table} LIMIT 1").fetchone() is not None
-        )
-        if has_rows:
-            log.info(
-                "%s: created generation-meta over an existing non-empty sidecar "
-                "(legacy migration; mtime-keyed cache until the first gen-bumping write)",
-                sidecar_name,
-            )
-
-
-def _read_meta_token(conn: sqlite3.Connection) -> tuple[int, int, int]:
-    """Return `(epoch, generation, instance)` from the sidecar's meta table.
-
-    A missing key reads as 0 — epoch/generation: a legacy sidecar, or a fresh one
-    before its first gen-bumping write; instance: a sidecar migrated before the
-    instance nonce existed (self-consistent — see `_ensure_meta_table`: such a
-    sidecar always reports 0 here, so a cache built from the SAME physical file
-    compares 0 == 0, and only a genuinely NEW file — random nonzero — differs).
-    One SELECT is one implicit snapshot, so the triple is internally consistent
-    even in autocommit.
-    """
-    rows = conn.execute(
-        "SELECT key, value FROM meta WHERE key IN ('epoch', 'generation', 'instance')"
-    ).fetchall()
-    d = {k: v for k, v in rows}
-    return (
-        int(d.get("epoch") or 0),
-        int(d.get("generation") or 0),
-        int(d.get("instance") or 0),
-    )
-
-
-def _bump_meta(conn: sqlite3.Connection, key: str) -> int:
-    """Increment `meta[key]` inside the caller's OPEN write txn; return the new value.
-
-    UPDATE-then-INSERT (never `INSERT OR REPLACE` with a subselect, which yields
-    NULL on the missing row). The read-back is stable because the caller holds the
-    write lock for the whole transaction.
-    """
-    cur = conn.execute("UPDATE meta SET value = value + 1 WHERE key = ?", (key,))
-    if cur.rowcount == 0:
-        conn.execute("INSERT INTO meta (key, value) VALUES (?, 1)", (key,))
-    return int(
-        conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()[0]
-    )
-
-
-def _reload_reason(old_cache, new_epoch: int, new_gen: int) -> str:
-    """Observability tag for a full matrix load: cold|legacy|epoch|genuine.
-
-    `old_cache` is the previous `_EmbCache`/`_ClipCache` (or None) — `.epoch` is
-    its captured epoch. This log line is the blind spot that made the WAL-mtime
-    bug cost two debugging sessions — every full reload now says WHY, greppable
-    in logs/exomem.log.
-    """
-    if old_cache is None:
-        return "cold"
-    if new_gen == 0:
-        return "legacy"  # gen-0 sidecar: reload was mtime-triggered (version-skew fallback)
-    if new_epoch != old_cache.epoch:
-        return "epoch"  # a rebuild_all re-embed bumped the epoch
-    return "genuine"  # generation (or instance) advanced — an external write
-
-
-def _peek_sidecar_token(path: Path) -> tuple[int, int, int] | None:
-    """Bare-connection freshness probe: `(epoch, generation, instance)`.
-
-    Plain `sqlite3.connect` — NO WAL/synchronous pragmas, NO schema CREATE TABLE
-    DDL (mirrors the original `_sidecar_cache_token` pattern; F4). A find touches
-    this 4-6x per query (the hot-cache freshness key plus `all_vectors()`, and
-    hybrid mode reads both sidecars), so skipping pragma/DDL setup on every peek
-    materially cuts the per-call overhead versus routing through `_connect()`.
-
-    Returns `(0, 0, 0)` when the sidecar doesn't exist yet or predates the `meta`
-    table — a real, expected state (fresh or legacy sidecar), not a failure.
-    Returns `None` when the read itself failed (locked/corrupt sidecar): callers
-    holding a warm cache should serve it rather than treat this as invalidation
-    (F2) — a plain `stat()` never raised this way, so a bare read here must not
-    newly break a caller that previously only paid a filesystem stat.
-    """
-    if not path.exists():
-        return (0, 0, 0)
-    try:
-        conn = sqlite3.connect(path)
-        try:
-            has_meta = (
-                conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'"
-                ).fetchone()
-                is not None
-            )
-            return _read_meta_token(conn) if has_meta else (0, 0, 0)
-        finally:
-            conn.close()
-    except sqlite3.Error:
-        return None
-
-
-def _sidecar_cache_token(path: Path) -> tuple[int, int, int]:
-    """`(epoch, generation, instance)` for `find._freshness_key` — `(0, 0, 0)` on
-    ANY failure (absent, legacy, or a transient read error). A wrong reading here
-    only makes find's hot cache MISS (recompute), never serve a stale HIT, so
-    failing open to `(0, 0, 0)` is safe (contrast `_peek_sidecar_token`, whose
-    `all_vectors()` caller must distinguish a real `(0,0,0)` from a failed read to
-    avoid dropping a perfectly good warm cache — see that docstring). Read-only:
-    never creates the sidecar. Shared by `EmbeddingIndex.cache_token` /
-    `ClipIndex.cache_token`.
-    """
-    return _peek_sidecar_token(path) or (0, 0, 0)
-
-
-def _cache_is_fresh(c, path: Path, epoch: int, gen: int, instance: int) -> bool:
-    """Does cached token `(c.epoch, c.generation, c.instance, c.mtime)` still
-    serve for on-disk `(epoch, gen, instance)`?
-
-    `gen >= 1` → trust the full `(epoch, gen, instance)` triple only — matching
-    `instance` too guards the ABA case (F3): a sidecar deleted and recreated from
-    scratch restarts (epoch, generation) at (0, 1), which could otherwise
-    coincidentally match a still-warm cache from the OLD file.
-    `gen == 0` (legacy sidecar, pre-meta) → version-skew fallback to today's
-    mtime keying until the first gen-bumping write.
-
-    Shared by `EmbeddingIndex`/`ClipIndex` (F4): both cache NamedTuples expose the
-    same `.epoch`/`.generation`/`.instance`/`.mtime` fields regardless of their
-    different payloads (metadata+matrix vs paths+frame_ts+matrix).
-    """
-    if gen >= 1:
-        return c.generation == gen and c.epoch == epoch and c.instance == instance
-    try:
-        return c.mtime == path.stat().st_mtime
-    except OSError:
-        return False
-
-
-def _try_serve_cached(c, path: Path):
-    """Return `c` unchanged if it can serve the CURRENT on-disk token, else None.
-
-    Centralizes the double-checked-locking freshness gate for both classes'
-    `all_vectors()` (F4). `_peek_sidecar_token` returning `None` means the read
-    itself failed (locked/corrupt sidecar, F2): a WARM cache is served anyway
-    (stale-by-seconds under contention is acceptable and matches busy semantics)
-    — only a COLD cache (`c is None`) falls through (returns None) to the
-    caller's full-load attempt, which has its own connect/BEGIN and can still
-    raise on a genuinely broken sidecar (that failure mode is unchanged from
-    before this fix — this function only protects the fast, no-lock-needed path).
-    """
-    token = _peek_sidecar_token(path)
-    if token is None:
-        if c is not None:
-            log.warning(
-                "sidecar token read failed for %s; serving the warm cache", path
-            )
-        return c
-    if c is not None and _cache_is_fresh(c, path, *token):
-        return c
-    return None
+_ensure_meta_table = sidecar_store.ensure_meta_table
+_read_meta_token = sidecar_store.read_meta_token
+_bump_meta = sidecar_store.bump_meta
+_reload_reason = sidecar_store.reload_reason
+_peek_sidecar_token = sidecar_store.peek_sidecar_token
+_sidecar_cache_token = sidecar_store.sidecar_cache_token
+_cache_is_fresh = sidecar_store.cache_is_fresh
+_try_serve_cached = sidecar_store.try_serve_cached
 
 
 class _EmbCache(NamedTuple):
@@ -1703,11 +1426,10 @@ class EmbeddingIndex:
         from . import access
         from . import find as find_module
 
-        scope = index_scope()
-        kb = self.vault_root / kb_dirname()
+        scope = index_paths.index_scope()
         # KB scope with no Knowledge Base/ is a no-op that must NOT wipe (historical
         # early return). Vault scope always proceeds — it indexes the wider tree.
-        if scope == "kb" and not kb.is_dir():
+        if scope == "kb" and not index_paths.kb_index_root(self.vault_root).is_dir():
             return 0
         # Wipe whole table — easier than per-file diff for a one-shot rebuild.
         conn = self._connect()
@@ -1722,8 +1444,8 @@ class EmbeddingIndex:
         self._cache = None
 
         all_chunks: list[tuple[str, list[str], float]] = []
-        for md in _index_walk(self.vault_root):
-            if not _is_embeddable_path(md):
+        for md in index_paths.iter_index_markdown(self.vault_root):
+            if not index_paths.is_embeddable_path(md):
                 continue
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None:
@@ -2346,7 +2068,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return
-    md_paths = [p for p in written_paths if _is_embeddable_path(p)]
+    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
     if not md_paths:
         return
 
@@ -2475,15 +2197,15 @@ def index_incremental(
     from . import access
     from . import find as find_module
 
-    scope = index_scope()
+    scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
     row_mtimes = index.file_mtimes()
 
     pending: list[tuple[str, list[str], float]] = []
     seen_on_disk: set[str] = set()
     scanned = 0
-    for md in _index_walk(vault_root):
-        if not _is_embeddable_path(md):
+    for md in index_paths.iter_index_markdown(vault_root):
+        if not index_paths.is_embeddable_path(md):
             continue
         page = find_module._CACHE.get(md, vault_root)
         if page is None:

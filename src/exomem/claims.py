@@ -48,7 +48,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import embeddings
+from . import embeddings, index_paths, sidecar_store
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -302,7 +302,7 @@ class ClaimIndex:
     the matrix is small — every local write NULLS the cache and the next read does
     one full reload (no copy-on-write splice; there is no `_patch_cache`). Same
     durability contract otherwise — WAL pragmas via
-    `embeddings._apply_sidecar_pragmas`, incremental checksum-keyed upsert,
+    `sidecar_store.apply_sidecar_pragmas`, incremental checksum-keyed upsert,
     process-shared memo.
 
     `all_claims()` is cached and invalidated by the same in-band WRITE GENERATION
@@ -324,7 +324,7 @@ class ClaimIndex:
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         conn = sqlite3.connect(self.path)
-        embeddings._apply_sidecar_pragmas(conn)
+        sidecar_store.apply_sidecar_pragmas(conn)
         conn.execute(
             """
             CREATE TABLE IF NOT EXISTS claims (
@@ -338,7 +338,7 @@ class ClaimIndex:
             )
             """
         )
-        embeddings._ensure_meta_table(conn, "claims", self.path.name)
+        sidecar_store.ensure_meta_table(conn, "claims", self.path.name)
         return conn
 
     def checksums(self) -> dict[str, str]:
@@ -397,7 +397,7 @@ class ClaimIndex:
                         for fp, ct, cs, vec, pt, st, mt in rows
                     ],
                 )
-                embeddings._bump_meta(conn, "generation")
+                sidecar_store.bump_meta(conn, "generation")
         finally:
             conn.close()
         with self._lock:
@@ -410,7 +410,7 @@ class ClaimIndex:
         try:
             with conn:
                 conn.execute("DELETE FROM claims WHERE file_path = ?", (file_path,))
-                embeddings._bump_meta(conn, "generation")
+                sidecar_store.bump_meta(conn, "generation")
         finally:
             conn.close()
         with self._lock:
@@ -430,14 +430,14 @@ class ClaimIndex:
         # Snapshot the cache tuple ONCE: another thread may swap or null it between
         # reads. This fast path takes no lock — the common case.
         c = self._cache
-        served = embeddings._try_serve_cached(c, self.path)
+        served = sidecar_store.try_serve_cached(c, self.path)
         if served is not None:
             return served.metadata, served.matrix
         with self._lock:
             # Re-check under the lock: another thread may have loaded while we
             # waited, or the fast-path token read may have failed transiently.
             c = self._cache
-            served = embeddings._try_serve_cached(c, self.path)
+            served = sidecar_store.try_serve_cached(c, self.path)
             if served is not None:
                 return served.metadata, served.matrix
             loaded = self._load_all_rows()
@@ -463,7 +463,7 @@ class ClaimIndex:
         try:
             conn.execute("BEGIN")
             try:
-                epoch, gen, instance = embeddings._read_meta_token(conn)
+                epoch, gen, instance = sidecar_store.read_meta_token(conn)
                 rows = conn.execute(
                     "SELECT file_path, claim_text, page_type, status, vector FROM claims "
                     "ORDER BY file_path"
@@ -508,7 +508,7 @@ class ClaimIndex:
         claim_types = _claim_types()
         pending: list[tuple[str, str, str, str | None, str | None, float]] = []
         for md in find_module._walk_md(kb):
-            if not embeddings._is_embeddable_path(md):
+            if not index_paths.is_embeddable_path(md):
                 continue
             page = find_module._CACHE.get(md, self.vault_root)
             if page is None or page.page_type not in claim_types:
@@ -571,7 +571,7 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
         return
     from . import access, find as find_module
 
-    md_paths = [p for p in written_paths if embeddings._is_embeddable_path(p)]
+    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
     if not md_paths:
         return
     idx = get_claim_index(vault_root)
