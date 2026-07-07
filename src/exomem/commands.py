@@ -28,6 +28,7 @@ from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
 
 from . import add as add_module
+from . import adopt as adopt_module
 from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
@@ -140,7 +141,7 @@ def op_bootstrap(
     compute_policy = mode_module.resolved()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     payload: dict = {
-        "contract_version": "2026-07-06.1",
+        "contract_version": "2026-07-07.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -150,10 +151,21 @@ def op_bootstrap(
             "content_included": False,
             "compute_policy": compute_policy,
         },
+        "memory_model": {
+            "built_in_ai_memory": (
+                "Use for user preferences, working rules, and the instruction to route "
+                "durable knowledge into Exomem."
+            ),
+            "exomem": (
+                "Use for durable governed knowledge: sources, proof/evidence, "
+                "history, decisions, records, review, and compiled conclusions."
+            ),
+        },
         "workflow": {
             "requested": requested_workflow,
             "loop": [
                 "bootstrap",
+                "adopt or overview when first seeing an existing vault",
                 "find",
                 "get or find(pack=true) when more context is needed",
                 "reason in the agent",
@@ -177,6 +189,11 @@ def op_bootstrap(
             "reasoning_lookup": {
                 "tool": "find",
                 "args": {"pack": True},
+            },
+            "adopt_existing_vault": {
+                "tool": "adopt",
+                "args": {"mode": "scan-only"},
+                "when": "first-run import/adoption of an existing vault",
             },
             "diagnostics_lookup": {
                 "tool": "find",
@@ -227,10 +244,15 @@ def op_bootstrap(
                 "try synonyms and singular/plural forms",
                 "try adjacent domain terms",
                 "try scope='vault' if Knowledge Base recall is sparse",
+                "use adopt(mode='scan-only') before proposing migration/copy actions",
                 "try pack=true for synthesis instead of many get calls",
             ],
         },
+        "front_door_actions": product_front_door_catalog(),
+        "tool_catalog": product_tool_catalog(),
         "common_tools": [
+            "adopt",
+            "overview",
             "find",
             "get",
             "note",
@@ -244,6 +266,10 @@ def op_bootstrap(
 
     if profile in ("full", "diagnostics"):
         payload["examples"] = [
+            {
+                "goal": "safe existing-vault adoption",
+                "call": "adopt(mode='scan-only')",
+            },
             {
                 "goal": "cheap proactive recall",
                 "call": "find(query='...', detail='compact', rerank=false)",
@@ -1855,6 +1881,57 @@ def op_overview(
         raise ValueError(f"{e.code}: {e.reason}") from e
 
 
+def op_adopt(
+    vault_root: Path,
+    path: str = "",
+    mode: str = "scan-only",
+    max_depth: int = overview_module.DEFAULT_MAX_DEPTH,
+    include_hidden: bool = False,
+    samples: int = 5,
+    pack_limit: int = 6,
+    manifest_path: str | None = None,
+    selected_paths: list[str] | None = None,
+) -> dict:
+    """Adopt / import an existing vault safely: scan first, preserve originals.
+
+    This is the product-facing first step for a vault that already contains
+    notes, media, records, or project folders. `mode="scan-only"` returns a
+    bounded read-only adoption report: what Exomem found, which content is
+    governed versus read-only input, likely knowledge packs, and safe next
+    actions. Explicit write modes only write under `Knowledge Base/`:
+    `save-manifest` saves the report, and `copy-as-sources` copies selected
+    legacy text files into governed Sources with original path/hash provenance.
+
+    Use this when the user says "import my vault", "adopt these notes", "make
+    this existing knowledge base usable", or asks what Exomem would do with an
+    old folder before committing to migration.
+
+    Args:
+        path: Optional vault subtree to scan. Defaults to the vault root.
+        mode: Adoption mode: scan-only, save-manifest, or copy-as-sources.
+        max_depth: Folder-tree depth cap for the scan.
+        include_hidden: Include hidden files/directories in the scan.
+        samples: Sample filename count per folder.
+        pack_limit: Maximum knowledge-pack suggestions to return.
+        manifest_path: Optional markdown destination under Knowledge Base/ for
+            save-manifest. A default under _Adoption/ is used when omitted.
+        selected_paths: Explicit vault-relative legacy files for copy-as-sources.
+    """
+    try:
+        return adopt_module.adopt(
+            vault_root,
+            path=path,
+            mode=mode,
+            max_depth=max_depth,
+            include_hidden=include_hidden,
+            samples=samples,
+            pack_limit=pack_limit,
+            manifest_path=manifest_path,
+            selected_paths=selected_paths,
+        )
+    except adopt_module.AdoptError as e:
+        raise ValueError(f"adopt: {e.code}: {e.reason}") from e
+
 def op_list_directory(
     vault_root: Path,
     path: str = "",
@@ -2242,6 +2319,28 @@ def note_description(project_keys_hint: str) -> str:
 # The registry
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
+_PRODUCT_ACTIONS: tuple[str, ...] = ("save", "adopt", "ask", "prove", "review", "update", "connect")
+_PRODUCT_METADATA: dict[str, dict] = {
+    "bootstrap": {"surface": "primary", "actions": (), "first_run_safe": True},
+    "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
+    "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
+    "find": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "get": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "add": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+    "note": {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
+    "preserve": {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
+    "attention": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
+    "audit": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
+    "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    "replace": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    "link": {"surface": "primary", "actions": ("connect", "save"), "first_run_safe": False},
+    "suggest_links": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
+    "propose_compilation": {"surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
+    "provenance_report": {"surface": "advanced", "actions": ("ask", "prove"), "first_run_safe": True},
+    "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
+    "reconcile": {"surface": "advanced", "actions": ("update",), "first_run_safe": False},
+    "audit_fix": {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": False},
+}
 _MCRC = frozenset({"mcp", "rest", "cli"})
 _RC = frozenset({"rest", "cli"})
 # `get_video_frames` returns MCP image content blocks (a FastMCP ToolResult) —
@@ -2255,6 +2354,7 @@ _SPEC: tuple[tuple, ...] = (
     ("audit", op_audit, 1, False, False, None, _MCRC),
     ("attention", op_attention, 1, False, False, None, _MCRC),
     ("overview", op_overview, 1, False, False, "path", _MCRC),
+    ("adopt", op_adopt, 1, True, False, "path", _MCRC),
     ("evolution", op_evolution, 1, False, False, "query", _MCRC),
     ("audit_fix", op_audit_fix, 1, True, False, None, _MCRC),
     ("reconcile", op_reconcile, 1, True, False, None, _MCRC),
@@ -2284,6 +2384,7 @@ _SPEC: tuple[tuple, ...] = (
 def _build_commands() -> tuple[Command, ...]:
     cmds: list[Command] = []
     for name, leaf, tier, writes, needs_schema, positional, surfaces in _SPEC:
+        meta = _PRODUCT_METADATA.get(name, {})
         skip = 2 if needs_schema else 1
         desc = leaf.__doc__ or ""
         if name == "note":
@@ -2300,6 +2401,9 @@ def _build_commands() -> tuple[Command, ...]:
                 cli_writes=writes,
                 needs_schema=needs_schema,
                 description=desc,
+                product_surface=meta.get("surface", "advanced"),
+                product_actions=tuple(meta.get("actions", ())),
+                first_run_safe=bool(meta.get("first_run_safe", False)),
             )
         )
     return tuple(cmds)
@@ -2325,3 +2429,35 @@ def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, .
     return tuple(
         c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
+
+
+def product_tool_catalog() -> dict:
+    """Registry-derived product surface: primary tools first, advanced tools visible."""
+    primary = [c.name for c in COMMANDS if c.product_surface == "primary"]
+    advanced = [c.name for c in COMMANDS if c.product_surface != "primary"]
+    return {
+        "primary": primary,
+        "advanced": advanced,
+        "first_run_safe": [c.name for c in COMMANDS if c.first_run_safe],
+    }
+
+
+def product_front_door_catalog() -> dict:
+    """Map simple product verbs to the typed tools that enforce governance."""
+    out = {
+        action: {"primary_tools": [], "advanced_tools": []}
+        for action in _PRODUCT_ACTIONS
+    }
+    for command in COMMANDS:
+        bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
+        for action in command.product_actions:
+            if action in out:
+                out[action][bucket].append(command.name)
+    out["adopt"]["contract"] = "scan-only by default; write modes preserve originals and stay under Knowledge Base/"
+    out["ask"]["contract"] = "retrieve with citations; prefer compiled notes, then sources/evidence for provenance"
+    out["prove"]["contract"] = "use Evidence/proof for cases, claims, disputes, warranties, records, or other proof contexts"
+    out["review"]["contract"] = "surface review queues and lint findings; do not auto-change conclusions"
+    out["save"]["contract"] = "raw material becomes Sources; durable conclusions become governed notes/entities"
+    out["update"]["contract"] = "edit or supersede with an explicit reason; keep history"
+    out["connect"]["contract"] = "link entities and related notes so the graph compounds"
+    return out

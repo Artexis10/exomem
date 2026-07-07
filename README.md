@@ -5,7 +5,7 @@
 [![CI](https://github.com/Artexis10/exomem/actions/workflows/ci.yml/badge.svg)](https://github.com/Artexis10/exomem/actions/workflows/ci.yml)
 [![License: AGPL-3.0](https://img.shields.io/badge/license-AGPL--3.0-blue.svg)](LICENSE)
 
-External memory for MCP-capable agents.
+Durable memory with sources, proof, history, and review for MCP-capable agents.
 
 exomem turns an owned Markdown/Obsidian vault into a local knowledge substrate
 for Codex, Claude Code, Cursor, chatbots, CLI agents, and any client that can
@@ -71,9 +71,10 @@ One command does the whole local setup: the wizard scans your vault and shows
 what's already there, initializes `Knowledge Base/`, runs the `doctor`
 preflight, registers the server with Claude Code, and installs the skill.
 
-Already have a vault full of notes? That's the normal case: the wizard shows
-what's there first, and exomem only ever writes under `Knowledge Base/` — your
-existing files stay untouched (read-only, still searchable). See
+Already have a vault full of notes? That's the normal case: `adopt` gives a
+scan-first, read-only report of what's there, suggested knowledge packs, and
+safe copy/compile next actions. Exomem only ever writes under `Knowledge Base/` — your
+existing files stay untouched unless you explicitly copy or compile selected material. See
 [QUICKSTART.md § Already have a vault full of notes?](QUICKSTART.md#already-have-a-vault-full-of-notes)
 for the full contract, including daily-notes vaults. Re-running `setup` is
 safe; completed steps report `[skipped]`. Non-interactive:
@@ -109,6 +110,8 @@ between Exomem and a chat product's built-in memory, see
 Full local setup is in [QUICKSTART.md](QUICKSTART.md). Remote/mobile setup is
 in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 [docs/deployment.md](docs/deployment.md).
+
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model and [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:
@@ -220,6 +223,8 @@ Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
 
 - **Searches the vault you already own.** Markdown stays in place; exomem does
   not import copies into a proprietary note store.
+- **Adopts messy vaults safely.** `adopt` starts with a read-only report and
+  explicit copy/compile options, so originals remain archival until you choose.
 - **Retrieves across text and media.** Markdown, PDFs, Office docs, images,
   screenshots, audio, and video can become searchable through local extraction.
 - **Keeps sources separate from conclusions.** Raw captures, compiled notes,
@@ -254,6 +259,20 @@ keyword/BM25 lanes served from an FTS5 sidecar index in milliseconds —
 built into stdlib SQLite, so it works on the lean install too. Methodology
 and numbers in [docs/benchmarks.md](docs/benchmarks.md).
 
+## Simple front door
+
+Agents should route normal user requests through simple actions first, then use the typed tools underneath.
+
+| Action | Use when the user says | Backed by |
+| --- | --- | --- |
+| Save | "remember this", "log this", "this is a decision" | `add`, `note`, `link`, `preserve` |
+| Adopt/import | "make this old vault usable", "import my notes safely" | `adopt`, `overview` |
+| Ask | "what do we know about X?", "show the sources" | `find`, `get` |
+| Prove | "save this for the warranty case", "show the evidence" | `preserve`, upload/download, `find` |
+| Review | "what needs cleanup?", "what is stale?" | `attention`, `audit`, `propose_compilation` |
+| Update | "this replaced the old conclusion", "fix that note" | `edit`, `replace`, `reconcile` |
+| Connect | "link this to X", "what should this cite?" | `link`, `suggest_links` |
+
 ## Core tools
 
 exomem exposes typed MCP tools for common knowledge-base work:
@@ -270,6 +289,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 | `audit` | Check graph and corpus health. |
 | `attention` | Surface review queues such as stale notes, close-by claims, and unprocessed sources. |
 | `overview` | Bounded, read-only structure report of the vault or a subtree — works outside `Knowledge Base/` and before `init`. |
+| `adopt` | Existing-vault adoption: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals. |
 
 Tier-2 filesystem tools exist for escape hatches such as listing directories,
 creating files, moving pages, trashing files, and recovering from trash. Set

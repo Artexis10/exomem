@@ -881,7 +881,59 @@ def _collect_raw_args(
     return raw
 
 
-def _print_human(result) -> None:
+def _print_adopt_human(result: dict) -> None:
+    summary = result.get("summary") or {}
+    totals = summary.get("totals") or {}
+    governance = result.get("governance") or {}
+
+    print("Adoption report")
+    print(f"  Mode: {result.get('mode', 'scan-only')}")
+    print(
+        "  Scan: "
+        f"{totals.get('files', 0)} files, "
+        f"{totals.get('markdown', 0)} markdown, "
+        f"{totals.get('dirs', 0)} folders"
+    )
+    if governance.get("kb_present"):
+        print(f"  Governed layer: {governance.get('governed_path') or kb_prefix()}")
+    else:
+        print("  Governed layer: not initialized yet")
+    print("  Originals: untouched; non-KB files stay read-only input.")
+
+    packs = result.get("pack_suggestions") or []
+    print("\nLikely packs")
+    if packs:
+        for pack in packs[:6]:
+            name = pack.get("name") or pack.get("id") or "unknown"
+            score = int(pack.get("score") or 0)
+            signals = ", ".join(pack.get("matched_signals") or [])
+            suffix = f" - {signals}" if signals else " - default starting pack"
+            print(f"  - {name} ({score} signal{'s' if score != 1 else ''}){suffix}")
+    else:
+        print("  - None suggested by the structural scan")
+
+    actions = result.get("next_actions") or []
+    print("\nSafe next actions")
+    for action in actions:
+        print(
+            f"  - {action.get('action')} [{action.get('status')}]: "
+            f"{action.get('description')}"
+        )
+
+    if manifest := result.get("manifest"):
+        print(f"\nSaved manifest: {manifest.get('path')}")
+    if copy := result.get("copy"):
+        copied = copy.get("copied_sources") or []
+        skipped = copy.get("skipped") or []
+        print(f"\nCopied sources: {len(copied)} copied, {len(skipped)} skipped")
+        for item in copied[:10]:
+            print(f"  - {item.get('original_path')} -> {item.get('source_path')}")
+
+
+def _print_human(result, *, op: str | None = None) -> None:
+    if op == "adopt" and isinstance(result, dict):
+        _print_adopt_human(result)
+        return
     if isinstance(result, list):
         if not result:
             print("(no results)")
@@ -948,7 +1000,7 @@ def _core_op_main(argv: list[str]) -> int:
     if as_json:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
     else:
-        _print_human(result)
+        _print_human(result, op=cmd.name)
     return 0
 
 

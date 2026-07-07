@@ -1,0 +1,38 @@
+{
+  "id": "health-athletic",
+  "name": "Health / athletic",
+  "description": "Training, symptoms, measurements, protocols, injuries, and goals.",
+  "primitives": [
+    "source",
+    "record",
+    "experiment",
+    "entity",
+    "evidence"
+  ],
+  "actions": [
+    "save",
+    "ask",
+    "review",
+    "update",
+    "prove"
+  ],
+  "examples": [
+    "Log this training session.",
+    "What changed after the new protocol?"
+  ],
+  "signals": [
+    "health",
+    "workout",
+    "training",
+    "athlete",
+    "athletic",
+    "run",
+    "running",
+    "sleep",
+    "symptom",
+    "injury",
+    "protocol",
+    "blood",
+    "medical"
+  ]
+}

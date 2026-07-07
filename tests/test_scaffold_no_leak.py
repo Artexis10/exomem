@@ -143,7 +143,11 @@ def test_sample_vault_ships_no_personal_data() -> None:
     for f in sorted(SAMPLE_VAULT.rglob("*")):
         if not f.is_file():
             continue
-        for i, line in enumerate(f.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            lines = f.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError:
+            continue  # binary sidecars in the sample vault are not text leak surfaces
+        for i, line in enumerate(lines, 1):
             for p in patterns:
                 if p.search(line):
                     offenders.append(

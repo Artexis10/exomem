@@ -1,0 +1,37 @@
+{
+  "id": "creative",
+  "name": "Creative",
+  "description": "References, assets, drafts, productions, taste notes, and releases.",
+  "primitives": [
+    "source",
+    "asset",
+    "production",
+    "entity",
+    "record"
+  ],
+  "actions": [
+    "save",
+    "connect",
+    "review",
+    "update"
+  ],
+  "examples": [
+    "Save these references for the next shoot.",
+    "Turn this draft into a production log."
+  ],
+  "signals": [
+    "creative",
+    "photo",
+    "photos",
+    "image",
+    "images",
+    "video",
+    "draft",
+    "asset",
+    "assets",
+    "production",
+    "portfolio",
+    "music",
+    "design"
+  ]
+}

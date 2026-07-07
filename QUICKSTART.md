@@ -63,19 +63,42 @@ That's the normal case, and it's safe:
   set `EXOMEM_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
   your vault already uses.)*
 - **Your notes stay searchable.** `find` reaches sibling folders (the default
-  scope auto-widens; `scope="vault"` always walks everything), and `overview`
-  gives Claude a bounded structural report of the whole vault — one call, not
-  one read per file.
+  scope auto-widens; `scope="vault"` always walks everything), `overview`
+  gives Claude a bounded structural report of the whole vault, and `adopt`
+  turns that scan into a safe adoption report with likely knowledge packs and
+  copy/compile next actions — one call, not one read per file.
 - **Daily-notes vaults** (a `Daily/` or `Journal/` tree of dated logs): leave
   them exactly as they are. The Knowledge Base is a *compiled* layer beside
   your log, not a migration target — exomem never requires frontmatter, links,
-  or restructuring from existing notes. A good first prompt after setup:
-  *"what does this vault look like?"* — Claude answers with `overview`, and you
-  decide together what, if anything, to change.
+  or restructuring from existing notes. Good first prompts after setup:
+  *"what does this vault look like?"* — Claude answers with `overview`; or
+  *"adopt this vault safely"* — Claude answers with `adopt`, preserving originals
+  and proposing manifest/copy/compile next actions for you to approve.
 - **Same vault or a separate one?** Same vault is the default: notes and KB in
   one Obsidian window, cross-search included. Pick a separate vault only when
   you want hard isolation (e.g. a shared or team-synced vault where a new
   top-level folder would bother other tooling).
+
+Concrete adoption commands after setup:
+
+```bash
+# readable read-only report: no files created, moved, edited, or deleted
+exomem adopt
+
+# same report as a machine-readable envelope
+exomem adopt --json
+
+# save the report under Knowledge Base/_Adoption/
+exomem adopt --mode save-manifest --json
+
+# copy only files you explicitly name into governed Sources/Imported/
+exomem adopt --mode copy-as-sources \
+  --selected-paths "Warranty Case/laptop-receipt.md" \
+  --json
+```
+
+See [docs/product-model.md](docs/product-model.md) for the simple action model
+and [docs/knowledge-packs.md](docs/knowledge-packs.md) for the pack schema.
 
 ---
 

@@ -1,0 +1,35 @@
+{
+  "id": "legal-warranty",
+  "name": "Legal / warranty",
+  "description": "Cases, receipts, correspondence, deadlines, and proof.",
+  "primitives": [
+    "source",
+    "evidence",
+    "case",
+    "decision",
+    "record"
+  ],
+  "actions": [
+    "save",
+    "prove",
+    "review",
+    "update"
+  ],
+  "examples": [
+    "Save this receipt for the laptop warranty case.",
+    "Show the evidence for the landlord dispute."
+  ],
+  "signals": [
+    "legal",
+    "warranty",
+    "receipt",
+    "invoice",
+    "contract",
+    "insurance",
+    "claim",
+    "dispute",
+    "case",
+    "return",
+    "refund"
+  ]
+}

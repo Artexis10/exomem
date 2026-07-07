@@ -66,6 +66,9 @@ class Command:
     cli_writes: bool = False
     needs_schema: bool = False
     description: str = ""
+    product_surface: str = "advanced"
+    product_actions: tuple[str, ...] = ()
+    first_run_safe: bool = False
 
     @property
     def doc(self) -> str:

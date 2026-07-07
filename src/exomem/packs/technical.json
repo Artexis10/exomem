@@ -1,0 +1,39 @@
+{
+  "id": "technical",
+  "name": "Technical",
+  "description": "Projects, repositories, decisions, failures, incidents, and runbooks.",
+  "primitives": [
+    "source",
+    "decision",
+    "failure",
+    "pattern",
+    "experiment",
+    "entity"
+  ],
+  "actions": [
+    "save",
+    "ask",
+    "review",
+    "update",
+    "connect"
+  ],
+  "examples": [
+    "Save this architecture decision.",
+    "What failed in the last deployment?"
+  ],
+  "signals": [
+    "code",
+    "repo",
+    "repos",
+    "github",
+    "incident",
+    "bug",
+    "debug",
+    "architecture",
+    "runbook",
+    "api",
+    "server",
+    "deploy",
+    "experiment"
+  ]
+}
