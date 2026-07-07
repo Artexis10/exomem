@@ -115,6 +115,38 @@ def reset_active_ranking_cache() -> None:
     _ranking_config.reset_active_ranking_cache()
 
 
+def _accelerated_device(device: str) -> bool:
+    """Whether a resolved torch device is an accelerator worth auto-reranking on."""
+    d = (device or "").strip().lower()
+    return d == "mps" or d == "cuda" or d.startswith("cuda:")
+
+
+def auto_rerank_allowed_by_policy() -> bool:
+    """True when unset `rerank` may invoke the CrossEncoder automatically.
+
+    Explicit `rerank=True` remains allowed anywhere unless EXOMEM_DISABLE_RANKING
+    hard-disables the reranker. This gates only the default/auto path so normal
+    and quiet CPU service modes keep `find` latency predictable. The common
+    normal/quiet path avoids probing torch; the device selector is consulted only
+    when performance mode or an explicit text-device override asks for acceleration.
+    """
+    from . import mode as mode_module
+
+    explicit_device = any(
+        os.environ.get(env) and os.environ.get(env, "").strip()
+        for env in ("EXOMEM_EMBED_DEVICE", "EXOMEM_DEVICE", "EXOMEM_TORCH_DEVICE")
+    )
+    if not explicit_device and mode_module.resolve_mode() != "performance":
+        return False
+    try:
+        from . import accel
+
+        return _accelerated_device(
+            accel.select_device(override_env="EXOMEM_EMBED_DEVICE")
+        )
+    except Exception:  # noqa: BLE001 - auto-rerank must fail closed to cheap find.
+        return False
+
 
 # --------------------------------------------------------------------------- #
 # Hot find cache: bounded in-process LRU over base Hit lists (OpenSpec change
@@ -309,8 +341,10 @@ def find(
 
     `auto_rerank`: when True AND `rerank` is left unset (None), the reranker
     fires only when `should_rerank()` judges it worthwhile (top-3 vector/bm25
-    disagreement >50% or a long query). An explicit `rerank=True/False` always
-    wins over this. Default False so the suite never loads the model implicitly.
+    disagreement >50% or a long query). Public callers should gate this through
+    `auto_rerank_allowed_by_policy()` so CPU steady-state modes keep predictable
+    latency. An explicit `rerank=True/False` always wins over this. Default
+    False so the suite never loads the model implicitly.
 
     `temporal`: when True (default), temporal queries (recent/latest/when/...)
     get a recency fusion lane and the optional Gaussian recency boost

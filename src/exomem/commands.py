@@ -231,8 +231,9 @@ def op_bootstrap(
             "diagnostics": {
                 "find_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
-                    "timings measure retrieval stages; compute_policy explains "
-                    "quiet/normal/performance mode separately from rerank/pack knobs"
+                    "timings measure retrieval stages; unset rerank is mode-aware "
+                    "and CPU steady-state modes keep auto-rerank off; compute_policy "
+                    "explains quiet/normal/performance mode separately from rerank/pack knobs"
                 ),
             },
         },
@@ -287,7 +288,8 @@ def op_bootstrap(
         payload["diagnostics"] = {
             "timings": (
                 "Use include_timings=true when discussing latency. Rerank and pack "
-                "can dominate wall time and are not the same as CPU/GPU mode."
+                "can dominate wall time; unset rerank is mode-aware, while explicit "
+                "rerank=true may still spend CPU seconds for precision."
             ),
             "compute_modes": {
                 "quiet": "CPU/low-power, no preload, releases models when idle",
@@ -375,11 +377,12 @@ def op_find(
             ranking — surfaces 1-hop neighbours of strong matches.
         rerank: Cross-encoder re-sort of the top fused candidates
             (bge-reranker-base) for higher-precision ordering. Default
-            (unset) is AUTO: the server reranks only when the ranking
-            lanes disagree or the query is long — the cases where it
-            measurably helps — and skips the ~100-200ms cost otherwise.
-            Pass true to force it on every query, false to disable
-            entirely (yesterday's default).
+            (unset) is mode-aware AUTO: in CPU steady-state modes it stays
+            off for predictable latency; when the text/reranker device is
+            accelerated, the server reranks only when ranking lanes
+            disagree or the query is long. Pass true to force reranking
+            for a high-value query, including on CPU; pass false to skip
+            it entirely.
         prefer_compiled: When true (default), applies a small boost to
             compiled types (insight, pattern, failure, research-note,
             entity) and a small penalty to raw `source` after fusion
@@ -469,6 +472,7 @@ def op_find(
         raise ValueError(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
+    auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
     timings = find_module.FindTimings() if include_timings else None
     if timings is not None:
         from . import mode as mode_module
@@ -481,7 +485,7 @@ def op_find(
                 "pack": pack,
                 "graph": graph,
                 "rerank_requested": rerank,
-                "auto_rerank": rerank is None,
+                "auto_rerank": auto_rerank,
                 "prefer_compiled": prefer_compiled,
                 "prefer_active": prefer_active,
                 "prefer_used": prefer_used,
@@ -504,10 +508,9 @@ def op_find(
         mode=mode,
         graph=graph,
         rerank=rerank,
-        # rerank=None defers to the engine's per-query heuristic
-        # (should_rerank: lane disagreement / long query). Explicit
+        # rerank=None uses the mode/device-gated auto policy. Explicit
         # true/false from the caller always wins over auto.
-        auto_rerank=rerank is None,
+        auto_rerank=auto_rerank,
         prefer_compiled=prefer_compiled,
         prefer_active=prefer_active,
         prefer_used=prefer_used,
