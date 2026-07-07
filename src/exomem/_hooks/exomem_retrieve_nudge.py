@@ -7,11 +7,12 @@ of a thread. This re-arms the read side: when the user submits a substantial
 prompt, it injects a one-line reminder to run `find` first and fold prior
 conclusions into the answer, so the KB actually functions as the source of truth.
 
-Language-agnostic and cheap: gates on prompt length + a per-session cooldown, no
-keywords. By default it injects only a *reminder* — Claude still runs the real
-(semantic) find — so it never stalls the prompt. (UserPromptSubmit blocks model
-start until the hook returns, so the hook must be fast: stdlib only, no search
-here by default.)
+Cheap by default: gates on prompt length, an obvious-control-prompt filter, and
+a per-session cooldown. By default it injects only a *reminder* — Claude still
+runs the real (semantic) find only when the prompt actually needs prior KB
+context — so it never stalls the prompt. (UserPromptSubmit blocks model start
+until the hook returns, so the hook must be fast: stdlib only, no search here by
+default.)
 
 Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
@@ -21,15 +22,18 @@ opt-in CLI fallback (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the
 reminder. Any transport failure (or the flag being off) falls straight through to
 the reminder-only floor; the hook never blocks or raises past that point.
 
-Tunables (env): EXOMEM_RETRIEVE_NUDGE_DISABLE=1 (off), EXOMEM_RETRIEVE_NUDGE_MIN_CHARS
-(default 20 — short, since prompts are short and a dense script like Japanese
-packs more per char), EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300),
-EXOMEM_RETRIEVE_INJECT (opt-in, default off — truthy-parsed: unset/""/"0"/"false"/
-"no"/"off", any case, count as off) to turn on retrieve-and-inject, and
-EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same truthy parse) to additionally allow the
-slower CLI transport when REST isn't configured or fails. The legacy KB_RETRIEVE_*
-names (including KB_RETRIEVE_INJECT / KB_RETRIEVE_INJECT_CLI) are still accepted for
-back-compat, aliased to the EXOMEM_* names at startup.
+Tunables (env): EXOMEM_RETRIEVE_NUDGE_DISABLE=1 (off),
+EXOMEM_RETRIEVE_NUDGE_MIN_CHARS (default 20 — short, since prompts are short and
+a dense script like Japanese packs more per char),
+EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS (default 180 — only prompts at or below
+this length are eligible for the obvious-control-prompt skip gate),
+EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300), EXOMEM_RETRIEVE_INJECT (opt-in,
+default off — truthy-parsed: unset/""/"0"/"false"/"no"/"off", any case, count as
+off) to turn on retrieve-and-inject, and EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same
+truthy parse) to additionally allow the slower CLI transport when REST isn't
+configured or fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT
+/ KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
+EXOMEM_* names at startup.
 
 Contract (Claude Code UserPromptSubmit hook): read the event JSON on stdin (incl.
 `prompt`); on exit 0, print
@@ -54,10 +58,13 @@ REMINDER = (
     "[Exomem retrieval check] Before answering: if this prompt touches a topic your "
     "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
     "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
-    "`find` FIRST and fold any hits into the answer (cite them). The KB is the "
-    "source of truth for prior conclusions; a miss means 'not found in what I "
-    "searched,' not 'doesn't exist.' If the prompt plainly has no KB bearing "
-    "(chit-chat, or a fresh task with no prior notes), skip silently."
+    "`find` only if recent conversation context does not already cover it, then fold "
+    "any hits into the answer (cite them). Do not repeat a KB search just because this "
+    "reminder appears again; reuse fresh KB context until the topic changes or the "
+    "answer needs more evidence. The KB is the source of truth for prior conclusions; "
+    "a miss means 'not found in what I searched,' not 'doesn't exist.' If the prompt "
+    "plainly has no KB bearing (chit-chat, status/control messages, or a fresh task "
+    "with no prior notes), skip silently."
 )
 
 # Inject-mode routing-stub block: header + up to 3 `- path (type, updated)` lines,
@@ -69,6 +76,35 @@ _STUB_BLOCK_MAX_CHARS = 400
 # deliberately never imports exomem (see module docstring), so the helper is
 # duplicated rather than shared.
 _FALSY_ENV = {"", "0", "false", "no", "off"}
+
+_KB_BEARING_RE = re.compile(
+    r"\b("
+    r"kb|knowledge\s+base|exomem|note|notes|remember|save|capture|"
+    r"conclud(?:e|ed|ion|ions)?|decision|decisions|"
+    r"prior|previous|earlier|history|looked\s+at|have\s+i|did\s+i"
+    r")\b",
+    re.IGNORECASE,
+)
+
+_CONTROL_PROMPT_RE = re.compile(
+    r"""
+    ^\s*
+    (?:
+        y(?:es|ep|eah)?|ok(?:ay)?|no(?:pe)?|thanks?|thank\s+you|thx|
+        good\s+job|gj|perfect|cool|nice|great|done|
+        perfect\s+merge(?:\s+\w+){0,8}|
+        (?:cool|ok(?:ay)?|nice|great)\s+(?:did|are|is|merge|continue|go)\b.*|
+        so\s+everything\s+done\??|
+        continue|carry\s+on|go\s+on|go\s+ahead|proceed|do\s+it|do\s+that|
+        merge(?:\s+(?:it|then|to|into|main))*|ship\s+it|
+        open(?:\s+(?:the\s+)?)?pr|put(?:\s+it)?\s+to\s+pr|
+        restart(?:\s+the)?\s+server|cut(?:\s+the)?\s+release|
+        status|stuck|are\s+you\s+done|done\s+yet|why\s+is\s+it\s+taking
+    )
+    [\s\.,!?:;\-]*$
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 def _env_flag(name: str) -> bool:
@@ -86,6 +122,7 @@ def _env_flag(name: str) -> bool:
 _ENV_ALIASES = (
     ("EXOMEM_RETRIEVE_NUDGE_DISABLE", "KB_RETRIEVE_NUDGE_DISABLE"),
     ("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", "KB_RETRIEVE_NUDGE_MIN_CHARS"),
+    ("EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS", "KB_RETRIEVE_NUDGE_CONTROL_MAX_CHARS"),
     ("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "KB_RETRIEVE_NUDGE_COOLDOWN_SEC"),
     ("EXOMEM_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT"),
     ("EXOMEM_RETRIEVE_INJECT_CLI", "KB_RETRIEVE_INJECT_CLI"),
@@ -104,6 +141,22 @@ def _env_int(name: str, default: int) -> int:
         return int(os.environ.get(name) or default)
     except (ValueError, TypeError):
         return default
+
+
+def _is_obvious_control_prompt(prompt: str, max_chars: int) -> bool:
+    """Skip short command/ack/status prompts that do not need prior KB context.
+
+    This is deliberately a narrow English-only fast path. Non-English prompts
+    and substantive English prompts still flow through the length+cooldown gate,
+    preserving the hook's language-agnostic default for real questions while
+    suppressing the common churn cases ("continue", "merge it", "done?").
+    """
+    text = re.sub(r"\s+", " ", prompt).strip()
+    if not text or len(text) > max_chars:
+        return False
+    if _KB_BEARING_RE.search(text):
+        return False
+    return bool(_CONTROL_PROMPT_RE.match(text))
 
 
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
@@ -273,9 +326,13 @@ def main() -> int:
         return 0
 
     min_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", 20)
+    control_max_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS", 180)
     cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", 300)
 
     if len(prompt.strip()) < min_chars:  # trivial prompt ("yes", "go", "thanks")
+        return 0
+
+    if _is_obvious_control_prompt(prompt, control_max_chars):
         return 0
 
     ok, stamp = _cooldown_ok(data.get("session_id", ""), cooldown)

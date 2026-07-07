@@ -324,9 +324,11 @@ variant too, for example `--settings ~/.claude/settings.json##os.Msys`.
   when your message touches something the KB might hold, so it actually behaves as
   your source of truth.
 
-Both are **language-agnostic** (no keyword matching — they work the same in any
-language you write in) and cheap (gated so they stay quiet on ordinary
-turns/prompts, plus a per-session cooldown). They write scripts to
+Both are cheap: gated so they stay quiet on ordinary turns/prompts, plus a
+per-session cooldown. The read hook is still language-agnostic for substantive
+prompts, but it also suppresses obvious short control/status prompts such as
+`continue`, `thanks`, `are you done?`, `merge it`, and `restart the server` so
+the reminder does not churn through routine command flow. They write scripts to
 `~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
 Code to activate. Triggers log to `~/.claude/exomem-capture-nudge.log` and
 `~/.claude/exomem-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
@@ -334,7 +336,8 @@ by hand? `uv run python -m exomem install-hook --print-only` writes the scripts 
 prints the snippet to paste.
 
 Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
-matching `_COOLDOWN_SEC`), or disable either with `EXOMEM_CAPTURE_NUDGE_DISABLE=1` /
+matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
+hook's control-prompt skip ceiling, or disable either with `EXOMEM_CAPTURE_NUDGE_DISABLE=1` /
 `EXOMEM_RETRIEVE_NUDGE_DISABLE=1`. **Writing in a dense script (Japanese, Chinese)?**
 Lower the `MIN_CHARS` values — those scripts pack more meaning per character, so
 the defaults (tuned for English) can under-fire. (These tunables were renamed from
