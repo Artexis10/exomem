@@ -136,6 +136,29 @@ second cooldown clock.
 - **THEN** the second call produces no `additionalContext`
 - **AND** no REST request or CLI subprocess is attempted for that second call
 
+### Requirement: Obvious Control Prompts Stay Silent
+
+The hook SHALL suppress obvious short control/status/acknowledgement prompts
+before emitting reminder context or attempting any inject-mode transport. Examples
+include "continue", "thanks", "are you done?", "perfect merge then to main", and
+"restart the server". The skip gate SHALL be conservative: prompts that explicitly
+touch KB-bearing topics (for example `kb`, `knowledge base`, `Exomem`, `notes`,
+`save`, `remember`, prior conclusions, previous decisions, or "have I looked at")
+SHALL still flow through the normal prompt-length and cooldown gates.
+
+#### Scenario: Control-only prompt skips the hook
+
+- **WHEN** a `UserPromptSubmit` event contains a short control-only prompt such as
+  "perfect merge then to main gj"
+- **THEN** the hook produces no `additionalContext`
+- **AND** no REST request or CLI subprocess is attempted
+
+#### Scenario: KB-bearing prompt still gets the reminder
+
+- **WHEN** a prompt asks "what did I conclude about the kb hook design earlier?"
+- **THEN** the prompt is not suppressed by the control-prompt gate
+- **AND** the hook continues through the existing min-chars and cooldown gates
+
 ### Requirement: The Hook Never Blocks Indefinitely Or Raises
 
 Every transport attempt SHALL be wrapped so that any exception (network
@@ -151,4 +174,3 @@ exit `0`.
   next rung or the nudge-only floor
 - **AND** the hook process exits `0` with no traceback on stderr affecting the
   Claude Code session
-

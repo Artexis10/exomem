@@ -50,6 +50,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for var in (
         "EXOMEM_RETRIEVE_NUDGE_DISABLE",
         "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS",
+        "EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS",
         "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC",
         "EXOMEM_RETRIEVE_INJECT",
         "EXOMEM_RETRIEVE_INJECT_CLI",
@@ -58,6 +59,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         # Legacy aliases (still honored via _normalize_env_aliases).
         "KB_RETRIEVE_NUDGE_DISABLE",
         "KB_RETRIEVE_NUDGE_MIN_CHARS",
+        "KB_RETRIEVE_NUDGE_CONTROL_MAX_CHARS",
         "KB_RETRIEVE_NUDGE_COOLDOWN_SEC",
         "KB_RETRIEVE_INJECT",
         "KB_RETRIEVE_INJECT_CLI",
@@ -117,6 +119,36 @@ def test_env_flag_unset_is_disabled() -> None:
 def test_env_flag_truthy_values_are_enabled(monkeypatch: pytest.MonkeyPatch, value: str) -> None:
     monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT_CLI", value)
     assert hook_mod._env_flag("EXOMEM_RETRIEVE_INJECT_CLI") is True
+
+
+# --- prompt relevance gate ------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "perfect merge then to main gj",
+        "are you done?",
+        "restart the server",
+        "continue",
+        "status?",
+    ],
+)
+def test_obvious_control_prompts_are_skipped(prompt: str) -> None:
+    assert hook_mod._is_obvious_control_prompt(prompt, max_chars=180) is True
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "what did I conclude about the kb hook design earlier?",
+        "save this to the knowledge base",
+        "Have I looked at this Exomem decision before?",
+        "去年このプロジェクトについて何を結論づけましたか？詳しく教えてください。",
+    ],
+)
+def test_kb_bearing_or_non_english_prompts_are_not_control_skipped(prompt: str) -> None:
+    assert hook_mod._is_obvious_control_prompt(prompt, max_chars=180) is False
 
 
 # --- _format_inject_block ---------------------------------------------------------
@@ -407,6 +439,33 @@ def test_default_off_no_network_or_subprocess_attempted(
             "additionalContext": hook_mod.REMINDER,
         }
     }
+
+
+def test_control_prompt_skips_before_reminder_or_transport(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    monkeypatch.setenv("EXOMEM_RETRIEVE_INJECT", "1")
+    monkeypatch.setenv("EXOMEM_REST_API_KEY", "secret")
+
+    def _boom_url(req, timeout=None):
+        raise AssertionError("urlopen must not be called for control-only prompts")
+
+    def _boom_run(cmd, **kwargs):
+        raise AssertionError("subprocess.run must not be called for control-only prompts")
+
+    monkeypatch.setattr(urllib_request, "urlopen", _boom_url)
+    monkeypatch.setattr(hook_mod.subprocess, "run", _boom_run)
+
+    out = _call_main(
+        monkeypatch,
+        capsys,
+        {"prompt": "perfect merge then to main gj", "session_id": "e2e-control"},
+        home,
+    )
+    assert out.strip() == ""
 
 
 def test_inject_rest_configured_and_reachable_appends_stubs(
