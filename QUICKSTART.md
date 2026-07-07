@@ -22,7 +22,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > (step 6) is the *brain* — it tells Claude *when* to save, how to file a source,
 > and how to compile a note. Generic MCP clients that cannot load Skills should
 > call `bootstrap()` once after connecting; that returns the compact operating
-> contract through MCP.
+> contract through MCP. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
+> for Codex, hosted chat clients, Cursor/Windsurf/Gemini, and generic MCP setup.
 
 ---
 
@@ -299,7 +300,8 @@ own — or just start writing; the writer auto-registers new keys as you use the
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
 > Exomem's search/save/upload defaults and performance guidance in a structured
-> MCP response.
+> MCP response. The copyable standing instruction lives in
+> [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 
 ---
 
@@ -343,6 +345,10 @@ the same scripts go to `~/.codex/hooks/`, wire into `~/.codex/hooks.json`, and
 log under `~/.codex/`. Prefer to wire it by hand?
 `uv run python -m exomem install-hook --print-only` writes the scripts and prints
 the snippet to paste.
+
+The read hook is a nudge, not a forced retrieval policy. The agent should still
+skip Exomem for unrelated chat, tiny control prompts, or follow-ups where the
+current conversation already contains the needed KB evidence.
 
 To verify the deployed hooks without changing anything:
 
@@ -430,10 +436,12 @@ responses?"**:
 ```
 Precise and non-performative: no hype, fluff, or motivational tone; clarity and correctness over filler. Use lists/structure only when they genuinely help; plain prose is fine. Match length to the substance, terse when simple and fuller when it's not.
 
-I keep a personal Knowledge Base served by the Exomem MCP. Use it proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
+I keep a personal Knowledge Base served by the Exomem MCP. If no Exomem skill is loaded, call bootstrap(profile="compact") once at the start of a new chat and follow it. Use Exomem proactively: search first when a turn touches my projects, notes, decisions, or domains (cite what you find; an empty search is a gap, not a dead end). Do not search on unrelated chit-chat, small control prompts, or follow-ups where the current conversation already has the needed KB evidence. Capture durable conclusions on your own — a decision, solved problem, diagnosed failure, or recognized pattern — as a short compiled note, not a transcript, then report one line: "Saved -> <path>". Ask before saving only if type/scope is genuinely ambiguous. Stay quiet on chit-chat; don't narrate empty searches.
 ```
 
 The first paragraph is general response style (trim to taste); the second is the KB
 nudge. Account-level custom instructions are always in context, so they make Claude
 reach for the connected KB on its own — the app-side equivalent of the Claude Code
-hooks. The "stay quiet on chit-chat" line keeps it from firing on unrelated chats.
+hooks. The "do not search" line keeps it from firing on unrelated or already
+answered turns. For more client-specific instructions, see
+[docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).

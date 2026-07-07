@@ -4,6 +4,10 @@
 remote MCP connector — the same vault you already use locally, reachable from
 anywhere.
 
+For the assistant-side behavior after the connector is added, see
+[ai-assistant-guide.md](ai-assistant-guide.md). Remote clients cannot use local
+hooks, so they should rely on custom instructions plus `bootstrap()`.
+
 **What you need:** a machine that stays on (desktop, home server, or a cheap
 VPS) and about **15 minutes**.
 
@@ -193,6 +197,10 @@ just importable.
 claude.ai → **Settings** → **Connectors** → **Add custom connector** →
 `https://<host>/mcp` → log in with GitHub as the account named in
 `EXOMEM_GITHUB_USERNAME`.
+
+Then add Exomem behavior to the hosted client. Paste the instruction block from
+[ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
+asking it to call `bootstrap(profile="compact")` once before using the KB.
 
 ## ngrok free-tier limits
 

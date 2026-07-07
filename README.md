@@ -101,6 +101,11 @@ have them call `bootstrap()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to
 save, upload guidance, and performance profiles.
 
+For client-specific assistant instructions, see
+[docs/ai-assistant-guide.md](docs/ai-assistant-guide.md). For the boundary
+between Exomem and a chat product's built-in memory, see
+[docs/vs-built-in-memory.md](docs/vs-built-in-memory.md).
+
 Full local setup is in [QUICKSTART.md](QUICKSTART.md). Remote/mobile setup is
 in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 [docs/deployment.md](docs/deployment.md).
@@ -120,9 +125,9 @@ uv run exomem demo
 | Client | How |
 | --- | --- |
 | Claude Code | `exomem setup` registers it for you (see above) |
-| Codex CLI | `codex mcp add` plus optional `exomem install-hook --client codex` — see below |
-| claude.ai (remote) | Remote server — see [docs/remote-quickstart.md](docs/remote-quickstart.md) |
-| Any MCP client | Generic stdio config — see below; call `bootstrap()` first |
+| Codex CLI | `codex mcp add` plus optional `exomem install-hook --client codex` - see [docs/ai-assistant-guide.md#codex-cli](docs/ai-assistant-guide.md#codex-cli) |
+| claude.ai or hosted chat | Remote MCP/connector - see [docs/remote-quickstart.md](docs/remote-quickstart.md) and [docs/ai-assistant-guide.md#hosted-chat-clients](docs/ai-assistant-guide.md#hosted-chat-clients) |
+| Any MCP client | Generic stdio config - see below and [docs/ai-assistant-guide.md#generic-stdio-mcp-clients](docs/ai-assistant-guide.md#generic-stdio-mcp-clients); call `bootstrap()` first |
 | Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
 
 <details>
@@ -143,6 +148,9 @@ Verify deployed Claude Code/Codex hooks without changing anything:
 ```bash
 exomem install-hook --check
 ```
+
+For the `AGENTS.md` instruction block and the "do not search every tiny prompt"
+policy, see [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 
 Or add it directly to `~/.codex/config.toml`:
 
@@ -165,6 +173,8 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
 Skills are still the best UX where available, but `bootstrap()` lets generic MCP
 clients learn Exomem's search/save/upload contract without a separate skill file.
+See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md) for the copyable
+standing instruction.
 
 </details>
 
@@ -232,7 +242,9 @@ store. exomem works the other way around: agents come to your vault.
 | Memory hidden inside one assistant | exomem is client-agnostic: use the same vault from Claude Code, Codex, Cursor, scripts, or a custom chatbot. |
 
 For a deeper point-in-time comparison, see
-[docs/comparison-engraph.md](docs/comparison-engraph.md).
+[docs/comparison-engraph.md](docs/comparison-engraph.md). For the practical
+boundary with chat products' own memory features, see
+[docs/vs-built-in-memory.md](docs/vs-built-in-memory.md).
 
 **Measured retrieval quality — and speed.** Retrieval is graded by a
 reproducible golden-set eval harness, not asserted, and latency is measured
