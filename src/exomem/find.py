@@ -11,20 +11,19 @@ from __future__ import annotations
 
 import copy
 import logging
-import math
 import os
 import re
 import threading
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import date, timedelta
+from datetime import date
 from pathlib import Path
 from typing import Any
 
 import yaml
 
-from . import freshness
+from . import find_policy, freshness
 from .find_types import (
     FindTimings,
     Hit,
@@ -1406,46 +1405,23 @@ def _outside_kb_keyword_paths(vault_root: Path, query_norm: str) -> list[str]:
 # raw sources are inputs. Surfaced via prefer_compiled=True post-RRF boost.
 # Multipliers are small — designed as tie-breakers between similar fused
 # scores, not as dominators. Tune in one place if needed.
-_COMPILED_TYPES = frozenset(
-    {
-        "insight", "pattern", "failure", "research-note", "entity",
-        # Production-logs and experiments are also Notes/-tier compiled
-        # outputs (creative-artifact knowledge / hypothesis-tested results
-        # respectively), not raw inputs. Boost them alongside their peers.
-        "production-log", "experiment",
-    }
-)
-_SOURCE_TYPES = frozenset({"source"})
-_COMPILED_BOOST = 1.15
-_SOURCE_PENALTY = 0.85
-# Supersession demotion: a `status: superseded` page stays in place per the
-# supersession protocol (it is NOT moved), so without this it competes head-to-head
-# with — and can outrank — the very page that replaced it. Soft-demote, never
-# exclude: the tombstone must stay findable for "what did I used to think".
-_SUPERSEDED_PENALTY = 0.5
+_COMPILED_TYPES = find_policy.COMPILED_TYPES
+_SOURCE_TYPES = find_policy.SOURCE_TYPES
+_COMPILED_BOOST = find_policy.COMPILED_BOOST
+_SOURCE_PENALTY = find_policy.SOURCE_PENALTY
+_SUPERSEDED_PENALTY = find_policy.SUPERSEDED_PENALTY
+_type_multiplier = find_policy.type_multiplier
+_status_multiplier = find_policy.status_multiplier
+_is_temporal_query = find_policy.is_temporal_query
+_classify_intent = find_policy.classify_intent
+_parse_date = find_policy.parse_date
+_recency_multiplier = find_policy.recency_multiplier
+_filter_by_date = find_policy.filter_by_date
+should_rerank = find_policy.should_rerank
 
 
-def _type_multiplier(
-    page_type: str | None, config: RankingConfig = DEFAULT_RANKING
-) -> float:
-    if page_type in _COMPILED_TYPES:
-        return config.compiled_boost
-    if page_type in _SOURCE_TYPES:
-        return config.source_penalty
-    return 1.0
-
-
-def _status_multiplier(
-    status: str | None, config: RankingConfig = DEFAULT_RANKING
-) -> float:
-    """Demote `superseded` tombstones; everything else is neutral.
-
-    `archived` pages live in `_archive/` (already dir-excluded), so only
-    `superseded` needs handling here. `active`/`draft`/unset → 1.0.
-    """
-    if status == "superseded":
-        return config.superseded_penalty
-    return 1.0
+def _page_of(vault_root: Path):
+    return lambda path: _CACHE.get(vault_root / path, vault_root)
 
 
 def _apply_type_boost(
@@ -1453,23 +1429,7 @@ def _apply_type_boost(
     vault_root: Path,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    """Re-sort fused `(path, score)` pairs after applying per-type multipliers.
-
-    Paths whose ParsedPage can't be loaded keep their original score (no
-    multiplier known). Stable sort by adjusted score desc, path asc.
-    """
-    adjusted: list[tuple[str, float]] = []
-    for path, score in fused:
-        page = _CACHE.get(vault_root / path, vault_root)
-        if page is not None and page.media_type:
-            # A media sidecar is `type: source`, but the binary it points at IS the
-            # answer — exempt it from the source penalty so it ranks on its content.
-            mult = 1.0
-        else:
-            mult = _type_multiplier(page.page_type if page else None, config)
-        adjusted.append((path, score * mult))
-    adjusted.sort(key=lambda t: (-t[1], t[0]))
-    return adjusted
+    return find_policy.apply_type_boost(fused, _page_of(vault_root), config)
 
 
 def _apply_status_demotion(
@@ -1477,18 +1437,7 @@ def _apply_status_demotion(
     vault_root: Path,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    """Re-sort fused `(path, score)` pairs after demoting superseded pages.
-
-    Mirrors `_apply_type_boost` but gated by `prefer_active` independently of
-    `prefer_compiled`. Pages that can't be loaded keep their original score.
-    """
-    adjusted: list[tuple[str, float]] = []
-    for path, score in fused:
-        page = _CACHE.get(vault_root / path, vault_root)
-        mult = _status_multiplier(page.status if page else None, config)
-        adjusted.append((path, score * mult))
-    adjusted.sort(key=lambda t: (-t[1], t[0]))
-    return adjusted
+    return find_policy.apply_status_demotion(fused, _page_of(vault_root), config)
 
 
 def _apply_post_rrf_multipliers(
@@ -1502,136 +1451,15 @@ def _apply_post_rrf_multipliers(
     page_of,
     usage_map: dict[str, float] | None = None,
 ) -> list[tuple[str, float]]:
-    """All post-RRF multiplicative boosts in one pass with one final sort.
-
-    Combines the type boost (`prefer_compiled`, with the media-sidecar
-    source-penalty exemption), the supersession demotion (`prefer_active`),
-    and the Gaussian recency multiplier (temporal query AND
-    `config.temporal_boost != 1.0`). Order-equivalent to running the three
-    single-purpose `_apply_*` passes sequentially — each ended with the same
-    total-order sort key `(-score, path)`, so intermediate orders never
-    mattered; those functions remain as the reference implementations the
-    equivalence tests compare against. When no stage is active the input is
-    returned unchanged (matching the historical all-off path, which never
-    re-sorted). `page_of` is the per-request ParsedPage memo, so each
-    candidate is stat'd/parsed at most once per request.
-    """
-    temporal_active = (
-        temporal and config.temporal_boost != 1.0 and _is_temporal_query(query)
-    )
-    usage_active = bool(usage_map)
-    if not (prefer_compiled or prefer_active or temporal_active or usage_active):
-        return fused
-    if usage_active:
-        from . import usage as usage_module
-    today = date.today() if temporal_active else None
-    adjusted: list[tuple[str, float]] = []
-    for path, score in fused:
-        page = page_of(path)
-        # Multiply the score progressively (never pre-combine multipliers) so
-        # the float ops are bit-identical to the sequential reference passes.
-        if prefer_compiled:
-            if page is not None and page.media_type:
-                # A media sidecar is `type: source`, but the binary it points
-                # at IS the answer — exempt from the source penalty.
-                pass
-            else:
-                score = score * _type_multiplier(
-                    page.page_type if page else None, config
-                )
-        if prefer_active:
-            score = score * _status_multiplier(
-                page.status if page else None, config
-            )
-        if temporal_active:
-            d = _parse_date(page.updated) if page else None
-            if d is not None:
-                score = score * _recency_multiplier(
-                    max(0.0, float((today - d).days)), config
-                )
-        if usage_active:
-            b = usage_map.get(usage_module.canon(path))
-            if b is not None:
-                score = score * usage_module.usage_multiplier(b, config)
-        adjusted.append((path, score))
-    adjusted.sort(key=lambda t: (-t[1], t[0]))
-    return adjusted
-
-
-# ---- Intent classification + temporal lane (deterministic, no LLM) ----
-# Pure pattern-matching, per the pure-substrate constraint: NO model decides
-# intent — only literal markers do. Word-boundaried so a marker can't fire from
-# a substring of an unrelated token (e.g. "reference-marker-xyz" must NOT read
-# as a relationship query).
-_TEMPORAL_MARKERS = re.compile(
-    r"\b(recent|recently|latest|newest|today|yesterday|tonight|"
-    r"week|weeks|month|months|year|years|"
-    r"when|before|after|since|until|ago|"
-    r"20\d\d|\d{4}-\d{2}-\d{2})\b",
-    re.IGNORECASE,
-)
-_RELATIONSHIP_MARKERS = re.compile(
-    r"\b(links?|linked|relate[sd]?|related|relationship|"
-    r"connect(?:s|ed|ion|ions)?|cite[sd]?|citations?|"
-    r"mention(?:s|ed)?)\b",
-    re.IGNORECASE,
-)
-_EXACT_LEADING = re.compile(r"^(who|whose|what|which)\b", re.IGNORECASE)
-
-
-def _is_temporal_query(query: str) -> bool:
-    """True when the query carries a recency/time marker (deterministic scan).
-
-    Gates the temporal lane + Gaussian recency boost. Markers: recent/latest/
-    today/yesterday/week/month/year/when/before/after/since/ago, a bare 4-digit
-    year (20xx), or an ISO date. Word-boundaried to avoid substring false hits.
-    """
-    if not query:
-        return False
-    return _TEMPORAL_MARKERS.search(query) is not None
-
-
-def _classify_intent(query: str) -> str:
-    """Deterministic intent label: exact | temporal | relationship | conceptual.
-
-    Precedence: a literal/lookup signal (quotes, a wikilink, or a leading
-    who/what/which) wins as "exact"; then temporal markers; then relationship
-    markers; else the common "conceptual" case (semantic recall). Used only to
-    pick a lane-weight tuple — never changes WHICH candidates are considered,
-    only how they're fused.
-    """
-    q = (query or "").strip()
-    if not q:
-        return "conceptual"
-    if '"' in q or "[[" in q:
-        return "exact"
-    if _EXACT_LEADING.match(q):
-        return "exact"
-    if _is_temporal_query(q):
-        return "temporal"
-    if _RELATIONSHIP_MARKERS.search(q):
-        return "relationship"
-    return "conceptual"
-
-
-def _parse_date(value: str | None) -> date | None:
-    """Best-effort ISO date parse (YYYY-MM-DD prefix); None when unparseable."""
-    if not value:
-        return None
-    try:
-        return date.fromisoformat(str(value).strip()[:10])
-    except ValueError:
-        return None
-
-
-def _recency_multiplier(days_old: float, config: RankingConfig = DEFAULT_RANKING) -> float:
-    """Gaussian recency weight: peaks at `temporal_boost` for a brand-new page,
-    decaying to 1.0 over `temporal_sigma_days`. Returns 1.0 when boost is off."""
-    if config.temporal_boost == 1.0:
-        return 1.0
-    sigma = config.temporal_sigma_days or 1.0
-    return 1.0 + (config.temporal_boost - 1.0) * math.exp(
-        -(days_old ** 2) / (2.0 * sigma ** 2)
+    return find_policy.apply_post_rrf_multipliers(
+        fused,
+        query,
+        config,
+        prefer_compiled=prefer_compiled,
+        prefer_active=prefer_active,
+        temporal=temporal,
+        page_of=page_of,
+        usage_map=usage_map,
     )
 
 
@@ -1641,116 +1469,17 @@ def _apply_temporal_boost(
     query: str,
     config: RankingConfig = DEFAULT_RANKING,
 ) -> list[tuple[str, float]]:
-    """Re-sort fused `(path, score)` after a Gaussian recency multiplier.
-
-    Mirrors `_apply_type_boost`/`_apply_status_demotion` but gated on BOTH a
-    temporal query AND `temporal_boost != 1.0`, so it is a strict no-op for the
-    default config and for every non-temporal query. Pages with no parseable
-    `updated`/`captured` date keep their score (multiplier 1.0).
-    """
-    if not _is_temporal_query(query) or config.temporal_boost == 1.0:
-        return fused
-    today = date.today()
-    adjusted: list[tuple[str, float]] = []
-    for path, score in fused:
-        page = _CACHE.get(vault_root / path, vault_root)
-        d = _parse_date(page.updated) if page else None
-        if d is None:
-            mult = 1.0
-        else:
-            days_old = max(0.0, float((today - d).days))
-            mult = _recency_multiplier(days_old, config)
-        adjusted.append((path, score * mult))
-    adjusted.sort(key=lambda t: (-t[1], t[0]))
-    return adjusted
+    return find_policy.apply_temporal_boost(
+        fused, query, _page_of(vault_root), config
+    )
 
 
 def _recency_ranking(
     candidate_paths: list[str], vault_root: Path, cap: int
 ) -> list[str]:
-    """The temporal fusion lane: candidate paths ordered most-recently-updated
-    first. Undated pages are dropped (no recency vote). Capped at `cap`."""
-    dated: list[tuple[date, str]] = []
-    seen: set[str] = set()
-    for p in candidate_paths:
-        if p in seen:
-            continue
-        seen.add(p)
-        page = _CACHE.get(vault_root / p, vault_root)
-        if page is None:
-            continue
-        d = _parse_date(page.updated)
-        if d is not None:
-            dated.append((d, p))
-    dated.sort(key=lambda t: (-t[0].toordinal(), t[1]))
-    return [p for _, p in dated][:cap]
-
-
-def _filter_by_date(
-    hits: list[Hit],
-    *,
-    updated_after: str | None = None,
-    updated_before: str | None = None,
-    recency_days: int | None = None,
-) -> list[Hit]:
-    """Drop hits whose `updated` date falls outside the requested window.
-
-    All three knobs are optional and off by default. A hit with no parseable
-    date is dropped when any window is active (it can't be confirmed in-range).
-    """
-    after = _parse_date(updated_after)
-    before = _parse_date(updated_before)
-    floor: date | None = None
-    if recency_days is not None and recency_days >= 0:
-        floor = date.today() - timedelta(days=recency_days)
-    if after is None and before is None and floor is None:
-        return hits
-    out: list[Hit] = []
-    for h in hits:
-        d = _parse_date(h.updated)
-        if d is None:
-            continue
-        if after is not None and d < after:
-            continue
-        if before is not None and d > before:
-            continue
-        if floor is not None and d < floor:
-            continue
-        out.append(h)
-    return out
-
-
-def should_rerank(
-    hits: list[Hit], query: str, config: RankingConfig = DEFAULT_RANKING
-) -> bool:
-    """Heuristic: is this query worth the reranker's model-load cost?
-
-    True when the top-3 vector and top-3 bm25 paths disagree by >50% (the
-    rankers can't agree on the best matches, so a cross-encoder tiebreak pays
-    off) OR the query is long (>=5 tokens, where lexical signal is diluted).
-    Deterministic and torch-free — inspects only the ranks already on `hits`.
-    """
-    if len((query or "").split()) >= 5:
-        return True
-    vec = [
-        h.path
-        for h in sorted(
-            (h for h in hits if h.vector_rank is not None),
-            key=lambda h: h.vector_rank,  # type: ignore[arg-type,return-value]
-        )
-    ][:3]
-    bm = [
-        h.path
-        for h in sorted(
-            (h for h in hits if h.bm25_rank is not None),
-            key=lambda h: h.bm25_rank,  # type: ignore[arg-type,return-value]
-        )
-    ][:3]
-    if not vec or not bm:
-        return False
-    overlap = len(set(vec) & set(bm))
-    disagreement = 1.0 - overlap / max(len(vec), len(bm))
-    return disagreement > 0.5
+    return find_policy.recency_ranking(
+        candidate_paths, _page_of(vault_root), cap
+    )
 
 
 def _keyword_match_paths(

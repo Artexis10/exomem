@@ -14,7 +14,7 @@ from pathlib import Path
 import pytest
 
 from exomem import find as find_module
-from exomem import fusion
+from exomem import find_policy, fusion
 from exomem.find import DEFAULT_RANKING, Hit
 
 
@@ -89,6 +89,7 @@ def test_is_temporal_query_false(query: str) -> None:
 )
 def test_classify_intent(query: str, expected: str) -> None:
     assert find_module._classify_intent(query) == expected
+    assert find_policy.classify_intent(query) == expected
 
 
 def test_existing_suite_queries_classify_conceptual() -> None:
@@ -143,6 +144,8 @@ def test_recency_multiplier_off_by_default() -> None:
     # Default temporal_boost == 1.0 → always neutral, regardless of age.
     assert find_module._recency_multiplier(0.0) == 1.0
     assert find_module._recency_multiplier(1000.0) == 1.0
+    assert find_policy.recency_multiplier(0.0) == 1.0
+    assert find_policy.recency_multiplier(1000.0) == 1.0
 
 
 def test_recency_multiplier_peaks_at_zero_age() -> None:
@@ -214,6 +217,8 @@ def _hit(path: str, *, vector_rank=None, bm25_rank=None) -> Hit:
 def test_should_rerank_long_query() -> None:
     assert find_module.should_rerank([], "one two three four five") is True
     assert find_module.should_rerank([], "one two three four") is False
+    assert find_policy.should_rerank([], "one two three four five") is True
+    assert find_policy.should_rerank([], "one two three four") is False
 
 
 def test_should_rerank_high_disagreement() -> None:
