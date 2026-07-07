@@ -8,7 +8,7 @@ Subcommands:
 - `init` — bootstrap a fresh Knowledge Base into a vault
 - `install-skill` — install the Exomem skill into Claude Code
 - `personalize` — scan a vault and generate a starter `_access.yaml` (readonly/excluded siblings)
-- `install-hook` — wire the KB capture + retrieval hooks into Claude Code
+- `install-hook` — wire the KB capture + retrieval hooks into Claude Code or Codex
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `doctor` — read-only local install/setup preflight
@@ -693,20 +693,26 @@ def _install_hook_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-hook",
         description=(
-            "Wire the KB capture + retrieval hooks into Claude Code: a Stop hook "
-            "that captures conclusions at stepping-stones (write), and a "
-            "UserPromptSubmit hook that reminds Claude to consult the KB before "
+            "Wire the KB capture + retrieval hooks into Claude Code or Codex: a "
+            "Stop hook that captures conclusions at stepping-stones (write), and "
+            "a UserPromptSubmit hook that reminds the agent to consult the KB before "
             "answering (read). Language-agnostic and cheap (gated + cooldown). "
             "Re-running is idempotent."
         ),
     )
     parser.add_argument(
+        "--client",
+        choices=("claude", "codex"),
+        default="claude",
+        help="client hook config to wire (default: claude)",
+    )
+    parser.add_argument(
         "--hook-dir",
-        help="Where to write the hook script (default: ~/.claude/hooks).",
+        help="Where to write the hook scripts (default: ~/.claude/hooks or ~/.codex/hooks).",
     )
     parser.add_argument(
         "--settings",
-        help="settings.json to wire (default: ~/.claude/settings.json).",
+        help="hook config to wire (default: ~/.claude/settings.json or ~/.codex/hooks.json).",
     )
     parser.add_argument(
         "--print-only",
@@ -722,21 +728,24 @@ def _install_hook_main(argv: list[str]) -> int:
             hook_dir=args.hook_dir,
             settings_path=args.settings,
             wire=not args.print_only,
+            client=args.client,
         )
     except FileNotFoundError as e:
         print(f"exomem install-hook: {e}", file=sys.stderr)
         return 1
 
-    print("Installed the KB hook scripts:")
+    client_label = "Codex" if report["client"] == "codex" else "Claude Code"
+    print(f"Installed the KB hook scripts for {client_label}:")
     for item in report["installed"]:
         print(f"  {item['event']:<16} {item['script']}")
     if report["wired"]:
         print(f"Wired into {report['settings']}.")
-        print("Restart Claude Code to activate. Triggers log to:")
-        print("  ~/.claude/exomem-capture-nudge.log   (write / capture)")
-        print("  ~/.claude/exomem-retrieve-nudge.log  (read / retrieval)")
+        print(f"Restart {client_label} to activate. Triggers log to:")
+        home = "~/.codex" if report["client"] == "codex" else "~/.claude"
+        print(f"  {home}/exomem-capture-nudge.log   (write / capture)")
+        print(f"  {home}/exomem-retrieve-nudge.log  (read / retrieval)")
     else:
-        print("Add this to your settings.json (merge into hooks):")
+        print("Add this to your hook config (merge into hooks):")
         print(hook_module.snippet(report["installed"]))
     return 0
 

@@ -17,18 +17,18 @@ it to do nothing if it isn't one).
 
 Cheap and safe: the script itself is free (stdlib only); the only token cost is a
 real capture (the feature). Self-disarms via `stop_hook_active` (no loops); the
-cooldown caps frequency; every trigger is logged to ~/.claude/exomem-capture-nudge.log
-for tuning.
+cooldown caps frequency; every trigger is logged under the active client home for
+tuning.
 
 Tunables (env): EXOMEM_CAPTURE_NUDGE_DISABLE=1 (off), EXOMEM_CAPTURE_NUDGE_MIN_CHARS
 (default 300 — lower it for a dense script like Japanese, which packs more meaning
 per char), EXOMEM_CAPTURE_NUDGE_COOLDOWN_SEC (default 300). The legacy KB_CAPTURE_NUDGE_*
 names are still accepted for back-compat (aliased to the EXOMEM_* names at startup).
 
-Contract (Claude Code Stop hook): read the event JSON on stdin; print
+Contract (Claude Code / Codex Stop hook): read the event JSON on stdin; print
 `{"decision":"block","reason":...}` and exit 0 to block the stop and feed the
-reminder to Claude; exit 0 with no output to allow the stop. Never raises — a hook
-crash must not break the session.
+reminder to the agent; exit 0 with no output to allow the stop. Never raises — a
+hook crash must not break the session.
 """
 
 from __future__ import annotations
@@ -81,6 +81,26 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _hook_client() -> str:
+    explicit = os.environ.get("EXOMEM_HOOK_CLIENT", "").strip().lower()
+    if explicit in {"claude", "codex"}:
+        return explicit
+    try:
+        parts = {p.lower() for p in Path(__file__).resolve().parts}
+    except Exception:
+        parts = set()
+    if ".codex" in parts:
+        return "codex"
+    return "claude"
+
+
+def _hook_home() -> Path:
+    explicit = os.environ.get("EXOMEM_HOOK_HOME")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+
+
 def _content_blocks(msg: dict) -> list[dict]:
     if not isinstance(msg, dict):
         return []
@@ -121,7 +141,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
         msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
         role = msg.get("role") if isinstance(msg, dict) else None
         typ = obj.get("type")
-        if role == "assistant" or typ == "assistant":
+        if role == "assistant" or typ in {"assistant", "agent_message"}:
             for b in _content_blocks(msg):
                 if b.get("type") == "text":
                     chunks.append(b.get("text", ""))
@@ -138,7 +158,7 @@ def _latest_turn(path: str, max_bytes: int = 262_144) -> tuple[str, list[str]]:
 
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     """Per-session timestamp file (mtime-based, so we never parse content)."""
-    state_dir = Path.home() / ".claude" / ".cache" / "exomem-nudge"
+    state_dir = _hook_home() / ".cache" / "exomem-nudge"
     key = re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:128]
     stamp = state_dir / key
     try:
@@ -159,7 +179,7 @@ def _touch(stamp: Path) -> None:
 
 def _log(text: str) -> None:
     try:
-        logp = Path.home() / ".claude" / "exomem-capture-nudge.log"
+        logp = _hook_home() / "exomem-capture-nudge.log"
         logp.parent.mkdir(parents=True, exist_ok=True)
         snippet = re.sub(r"\s+", " ", text)[-160:]
         with open(logp, "a", encoding="utf-8") as f:
@@ -178,9 +198,9 @@ def main() -> int:
     except Exception:
         return 0
 
-    if data.get("stop_hook_active"):  # we already blocked once — stand down
+    if data.get("stop_hook_active") or data.get("stopHookActive"):  # already blocked once
         return 0
-    tpath = data.get("transcript_path")
+    tpath = data.get("transcript_path") or data.get("transcriptPath")
     if not tpath:
         return 0
 
@@ -195,7 +215,7 @@ def main() -> int:
     if len(assistant_text.strip()) < min_chars:  # trivial turn, not a landing
         return 0
 
-    ok, stamp = _cooldown_ok(data.get("session_id", ""), cooldown)
+    ok, stamp = _cooldown_ok(str(data.get("session_id") or data.get("sessionId") or ""), cooldown)
     if not ok:  # fired recently this session — keep cost bounded
         return 0
 

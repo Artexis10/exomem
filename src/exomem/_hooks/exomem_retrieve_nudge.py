@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""UserPromptSubmit hook: nudge a KB retrieval before Claude answers.
+"""UserPromptSubmit hook: nudge a KB retrieval before the agent answers.
 
 The read-side mirror of the capture hook. The skill says to consult the KB
 proactively, but that prose is passive — Claude forgets, especially at the start
@@ -35,8 +35,8 @@ configured or fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJEC
 / KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
 EXOMEM_* names at startup.
 
-Contract (Claude Code UserPromptSubmit hook): read the event JSON on stdin (incl.
-`prompt`); on exit 0, print
+Contract (Claude Code / Codex UserPromptSubmit hook): read the event JSON on
+stdin (incl. `prompt`); on exit 0, print
 `{"hookSpecificOutput": {"hookEventName": "UserPromptSubmit", "additionalContext": ...}}`
 to add the reminder to context; print nothing to stay silent. Never raises — a
 hook crash must not break the session.
@@ -143,6 +143,34 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _hook_client() -> str:
+    explicit = os.environ.get("EXOMEM_HOOK_CLIENT", "").strip().lower()
+    if explicit in {"claude", "codex"}:
+        return explicit
+    try:
+        parts = {p.lower() for p in Path(__file__).resolve().parts}
+    except Exception:
+        parts = set()
+    if ".codex" in parts:
+        return "codex"
+    return "claude"
+
+
+def _hook_home() -> Path:
+    explicit = os.environ.get("EXOMEM_HOOK_HOME")
+    if explicit:
+        return Path(explicit).expanduser()
+    return Path.home() / (".codex" if _hook_client() == "codex" else ".claude")
+
+
+def _prompt(data: dict) -> str:
+    for key in ("prompt", "user_prompt", "userPrompt", "input"):
+        value = data.get(key)
+        if isinstance(value, str):
+            return value
+    return ""
+
+
 def _is_obvious_control_prompt(prompt: str, max_chars: int) -> bool:
     """Skip short command/ack/status prompts that do not need prior KB context.
 
@@ -162,7 +190,7 @@ def _is_obvious_control_prompt(prompt: str, max_chars: int) -> bool:
 def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
     """Per-session timestamp file (mtime-based). Namespaced so it never collides
     with the capture hook's cooldown stamp for the same session."""
-    state_dir = Path.home() / ".claude" / ".cache" / "exomem-nudge"
+    state_dir = _hook_home() / ".cache" / "exomem-nudge"
     key = "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
     stamp = state_dir / key
     try:
@@ -183,7 +211,7 @@ def _touch(stamp: Path) -> None:
 
 def _log(prompt: str) -> None:
     try:
-        logp = Path.home() / ".claude" / "exomem-retrieve-nudge.log"
+        logp = _hook_home() / "exomem-retrieve-nudge.log"
         logp.parent.mkdir(parents=True, exist_ok=True)
         snippet = re.sub(r"\s+", " ", prompt)[:160]
         with open(logp, "a", encoding="utf-8") as f:
@@ -321,8 +349,8 @@ def main() -> int:
     except Exception:
         return 0
 
-    prompt = data.get("prompt")
-    if not isinstance(prompt, str):
+    prompt = _prompt(data)
+    if not prompt:
         return 0
 
     min_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", 20)
@@ -335,7 +363,7 @@ def main() -> int:
     if _is_obvious_control_prompt(prompt, control_max_chars):
         return 0
 
-    ok, stamp = _cooldown_ok(data.get("session_id", ""), cooldown)
+    ok, stamp = _cooldown_ok(str(data.get("session_id") or data.get("sessionId") or ""), cooldown)
     if not ok:  # already nudged recently this session — keep it quiet
         return 0
 
