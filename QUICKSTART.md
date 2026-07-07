@@ -309,10 +309,17 @@ The skill *tells* Claude to capture at stepping-stones and to consult the KB
 before answering, but those instructions are passive — over a long conversation
 Claude tends to forget them, so auto-save quietly never fires (you'll know:
 `Knowledge Base/log.md` only shows saves you asked for) and prior notes don't get
-pulled in. This one command installs two small hooks that fix both directions:
+pulled in. This one command installs two small Claude Code hooks that fix both
+directions:
 
 ```bash
 uv run python -m exomem install-hook
+```
+
+Codex CLI can use the same bundled Exomem hook scripts:
+
+```bash
+uv run python -m exomem install-hook --client codex
 ```
 
 If you maintain alternate Claude settings files with yadm, wire each active
@@ -331,9 +338,11 @@ prompts, but it also suppresses obvious short control/status prompts such as
 the reminder does not churn through routine command flow. They write scripts to
 `~/.claude/hooks/` and wire the two hooks into your settings.json — restart Claude
 Code to activate. Triggers log to `~/.claude/exomem-capture-nudge.log` and
-`~/.claude/exomem-retrieve-nudge.log` so you can see the real rate. Prefer to wire it
-by hand? `uv run python -m exomem install-hook --print-only` writes the scripts and
-prints the snippet to paste.
+`~/.claude/exomem-retrieve-nudge.log` so you can see the real rate. For Codex,
+the same scripts go to `~/.codex/hooks/`, wire into `~/.codex/hooks.json`, and
+log under `~/.codex/`. Prefer to wire it by hand?
+`uv run python -m exomem install-hook --print-only` writes the scripts and prints
+the snippet to paste.
 
 Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
 matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
@@ -350,17 +359,18 @@ the `UserPromptSubmit` hook only reminds Claude to run `find` — set
 reminder, so relevant prior KB pages are already in context before Claude
 decides whether to search. It tries a short transport ladder and never blocks
 on a slow path: REST first (one `POST /api/find`, ~2s timeout) — only attempted
-when `EXOMEM_REST_API_KEY` is set **in the shell that launches Claude Code**
+when `EXOMEM_REST_API_KEY` is set **in the shell that launches the client**
 (not just the server's service environment — the hook can't read another
-process's env, so export it in the same profile Claude Code inherits from);
+process's env, so export it in the same profile Claude Code or Codex inherits from);
 then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem find --json`
 subprocess call (~5s timeout, slower — cold Python start). If neither is
 configured or reachable, it falls straight back to the plain reminder — no
 network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. (The legacy
 `KB_RETRIEVE_INJECT` / `KB_RETRIEVE_INJECT_CLI` names still work too.)
 
-(Hooks are Claude Code only — claude.ai web/mobile can't run them, so there the
-skill stays best-effort: nudge it with *"save that to kb"* or *"check the kb."*)
+(Hooks are local-client only — claude.ai web/mobile can't run them, so there the
+skill or `bootstrap()` contract stays best-effort: nudge it with *"save that to
+kb"* or *"check the kb."*)
 
 ---
 

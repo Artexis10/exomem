@@ -5,7 +5,9 @@ The hooks are the reliability fix for the KB loop: skill prose is passive, so St
 re-arms "capture this stepping-stone" (write) and UserPromptSubmit re-arms "consult
 the KB first" (read). Both are language-agnostic (structural gate + cooldown). The
 registered command is machine-agnostic (`bash ~/.claude/hooks/<name>.sh`) so a
-yadm-synced ~/.claude works across Windows / WSL / Linux / macOS.
+yadm-synced ~/.claude works across Windows / WSL / Linux / macOS. Codex installs
+the same bundled Python scripts into ~/.codex/hooks with command + commandWindows
+wiring.
 """
 
 from __future__ import annotations
@@ -32,6 +34,10 @@ def _ups_cmds(data: dict) -> list[str]:
     return [h["command"] for g in data["hooks"].get("UserPromptSubmit", []) for h in g["hooks"]]
 
 
+def _hook_entries(data: dict, event: str) -> list[dict]:
+    return [h for g in data["hooks"].get(event, []) for h in g["hooks"]]
+
+
 # --- install_hook: the installer (both hooks, py + wrapper) ----------------------
 
 def test_install_hook_copies_scripts_and_wrappers_and_wires_both(tmp_path: Path) -> None:
@@ -54,6 +60,14 @@ def test_command_is_machine_agnostic(tmp_path: Path) -> None:
     # Custom dir -> POSIX (forward-slash) bash command, never Windows backslashes.
     custom = hook_module._command_for("exomem-capture-nudge.sh", tmp_path / "hooks")
     assert custom.startswith('bash "') and custom.endswith('.sh"') and "\\" not in custom
+
+    codex = hook_module._command_for(
+        "exomem-retrieve-nudge.sh",
+        hook_module.DEFAULT_CODEX_HOOK_DIR,
+        client="codex",
+        script="exomem_retrieve_nudge.py",
+    )
+    assert codex == "python3 ~/.codex/hooks/exomem_retrieve_nudge.py"
 
 
 def test_install_hook_idempotent(tmp_path: Path) -> None:
@@ -104,6 +118,38 @@ def test_install_hook_migrates_old_kb_entry(tmp_path: Path) -> None:
     assert sum("exomem-retrieve-nudge" in c for c in ups) == 1
 
 
+def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "codex-hooks", tmp_path / "hooks.json"
+    sp.write_text(
+        json.dumps({"hooks": {
+            "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python guard.py"}]}],
+            "UserPromptSubmit": [
+                {"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/kb_retrieve_nudge.py"}]},
+                {"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py"}]},
+            ],
+            "Stop": [{"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/kb_capture_nudge.py"}]}],
+        }}),
+        encoding="utf-8",
+    )
+
+    r = hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+
+    assert r["client"] == "codex"
+    for f in ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh"):
+        assert (hd / f).exists(), f
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    assert _stop_cmds(data).count("python3 \"" + (hd / "exomem_capture_nudge.py").as_posix() + "\"") == 1
+    ups = _ups_cmds(data)
+    assert sum("exomem_retrieve_nudge.py" in c for c in ups) == 1
+    assert not any("kb_retrieve_nudge" in c for c in ups)
+    assert not any("kb_capture_nudge" in c for c in _stop_cmds(data))
+    assert "exomem_retrieve_nudge.py" in ups[0]
+    assert "zellij_tab_context_rename.py" in ups[1]
+    assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "python guard.py"
+    retrieve = [h for h in _hook_entries(data, "UserPromptSubmit") if "exomem_retrieve_nudge.py" in h["command"]][0]
+    assert retrieve["commandWindows"].endswith("exomem_retrieve_nudge.py\"")
+
+
 def test_install_hook_preserves_other_hooks_and_keys(tmp_path: Path) -> None:
     sp = tmp_path / "settings.json"
     sp.write_text(
@@ -145,10 +191,26 @@ def test_install_hook_via_cli(tmp_path: Path) -> None:
     assert data["hooks"]["Stop"] and data["hooks"]["UserPromptSubmit"]
 
 
+def test_install_hook_via_cli_for_codex(tmp_path: Path) -> None:
+    from exomem.__main__ import main
+
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    assert main(["install-hook", "--client", "codex", "--hook-dir", str(hd), "--settings", str(sp)]) == 0
+    assert (hd / "exomem_capture_nudge.py").exists() and (hd / "exomem_retrieve_nudge.py").exists()
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    entries = _hook_entries(data, "UserPromptSubmit")
+    assert any("exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows") for h in entries)
+
+
 # --- shared subprocess helper ---------------------------------------------------
 
-def _run(script: Path, event: dict, home: Path):
-    env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}  # redirect Path.home()
+def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        **(extra_env or {}),
+    }  # redirect Path.home()
     return subprocess.run(
         [sys.executable, str(script)],
         input=json.dumps(event), capture_output=True, text=True, env=env,
@@ -222,6 +284,21 @@ def test_capture_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
     assert second.stdout.strip() == ""
 
 
+def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"; home.mkdir()
+    t = _transcript(tmp_path, "q?", "We landed on a clear decision. " + "x" * 450)
+    r = _run(
+        CAPTURE_SCRIPT,
+        {"transcriptPath": str(t), "sessionId": "codex-cap"},
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+    assert '"decision": "block"' in r.stdout
+    assert (home / ".codex" / ".cache" / "exomem-nudge" / "codex-cap").exists()
+    assert (home / ".codex" / "exomem-capture-nudge.log").exists()
+    assert not (home / ".claude" / "exomem-capture-nudge.log").exists()
+
+
 # --- retrieval (UserPromptSubmit) gate ------------------------------------------
 
 def test_retrieve_fires_on_substantial_prompt(tmp_path: Path) -> None:
@@ -250,3 +327,17 @@ def test_retrieve_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
     second = _run(RETRIEVE_SCRIPT, ev, home)
     assert "additionalContext" in first.stdout
     assert second.stdout.strip() == ""
+
+
+def test_retrieve_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"; home.mkdir()
+    r = _run(
+        RETRIEVE_SCRIPT,
+        {"userPrompt": "what did I conclude about the Codex hook setup earlier?", "sessionId": "codex-ret"},
+        home,
+        {"EXOMEM_HOOK_CLIENT": "codex"},
+    )
+    assert "additionalContext" in r.stdout
+    assert (home / ".codex" / ".cache" / "exomem-nudge" / "retrieve_codex-ret").exists()
+    assert (home / ".codex" / "exomem-retrieve-nudge.log").exists()
+    assert not (home / ".claude" / "exomem-retrieve-nudge.log").exists()

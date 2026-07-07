@@ -87,12 +87,14 @@ The skill installs under the Claude Code name `exomem` — the same name as the
 connector, so skill, server, and tools all read as one product. The skill is
 recommended for Claude Code —
 the server gives Claude the tools, the skill is what makes it use them. Hooks
-are Claude Code-only reliability nudges for long sessions: a read-side reminder
-before answers and a write-side reminder at natural stopping points. The
-read-side hook suppresses obvious control/status prompts like `continue`, `merge
-it`, and `are you done?`, and can optionally upgrade that reminder to real
+are local-client reliability nudges for Claude Code and Codex: a read-side
+reminder before answers and a write-side reminder at natural stopping points.
+The read-side hook suppresses obvious control/status prompts like `continue`,
+`merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
-`KB_RETRIEVE_INJECT` name still works) — see
+`KB_RETRIEVE_INJECT` name still works). For Codex, run
+`exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
+see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
 Other MCP clients can still use the server. If they do not support Skills,
 have them call `bootstrap()` once at the start of the session; it returns the
@@ -118,7 +120,7 @@ uv run exomem demo
 | Client | How |
 | --- | --- |
 | Claude Code | `exomem setup` registers it for you (see above) |
-| Codex CLI | `codex mcp add` — see below |
+| Codex CLI | `codex mcp add` plus optional `exomem install-hook --client codex` — see below |
 | claude.ai (remote) | Remote server — see [docs/remote-quickstart.md](docs/remote-quickstart.md) |
 | Any MCP client | Generic stdio config — see below; call `bootstrap()` first |
 | Docker (no Python) | One `docker run` line — see below and [docs/docker.md](docs/docker.md) |
@@ -128,6 +130,12 @@ uv run exomem demo
 
 ```bash
 codex mcp add exomem --env EXOMEM_VAULT_PATH="/path/to/vault" -- exomem --transport stdio
+```
+
+Optional local hooks, using the same Exomem scripts as Claude Code:
+
+```bash
+exomem install-hook --client codex
 ```
 
 Or add it directly to `~/.codex/config.toml`:
