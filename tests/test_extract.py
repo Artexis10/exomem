@@ -314,9 +314,13 @@ def test_transcribe_timed_render_failure_falls_back_flat(
     monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
     segs = [_FakeSeg("hello there", 0.0, 1.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    class _BoomSemanticSegments:
+        @staticmethod
+        def render_timed_lines(_segments):
+            raise RuntimeError("boom")
+
     monkeypatch.setattr(
-        extract.semantic_segments, "render_timed_lines",
-        lambda s: (_ for _ in ()).throw(RuntimeError("boom")),
+        extract, "_semantic_segments_module", lambda: _BoomSemanticSegments
     )
     r = extract._transcribe(Path("x.wav"), "audio")
     assert r.text == "hello there"

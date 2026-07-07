@@ -53,7 +53,6 @@ from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
 from . import overview as overview_module
-from . import preserve as preserve_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, vault
@@ -63,7 +62,6 @@ from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
-from . import video_frames as video_frames_module
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
@@ -82,6 +80,18 @@ from .command_surface import (
 )
 
 _link_summary = link_summary_module.link_summary
+
+
+def _preserve_module():
+    from . import preserve as preserve_module
+
+    return preserve_module
+
+
+def _video_frames_module():
+    from . import video_frames as video_frames_module
+
+    return video_frames_module
 
 
 # ----- op-leaves: the former per-surface wrapper bodies (vault_root injected) -----
@@ -1484,6 +1494,7 @@ def op_preserve(
         INVALID_PRESERVE (missing required); ARTIFACT_EXISTS (file already
         exists — Evidence is append-only, pick a new filename).
     """
+    preserve_module = _preserve_module()
     try:
         result = preserve_module.preserve(
             vault_root,
@@ -2182,6 +2193,7 @@ def op_get_video_frames(
         NO_DECODABLE_FRAMES (corrupt/streamless video, or a window on a
         video of unknown duration).
     """
+    video_frames_module = _video_frames_module()
     try:
         result = video_frames_module.get_frames(
             vault_root,

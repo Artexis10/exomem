@@ -45,9 +45,27 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Protocol
 
-from . import accel, semantic_segments
+from . import accel
 
 log = logging.getLogger(__name__)
+
+_SEMANTIC_SEGMENTS_FALSY = {"", "0", "false", "no", "off"}
+_TIMED_LINE_RE = re.compile(
+    r"^\[(?:(\d+):)?(\d{1,2}):(\d{2})\](?:\s\[([^\]\n]+)\]:)?\s?(.*)$"
+)
+
+
+def _semantic_segments_enabled() -> bool:
+    return (
+        os.environ.get("EXOMEM_SEMANTIC_SEGMENTS", "").strip().lower()
+        not in _SEMANTIC_SEGMENTS_FALSY
+    )
+
+
+def _semantic_segments_module():
+    from . import semantic_segments
+
+    return semantic_segments
 
 # Media-type buckets by extension. Extension-based is deliberate: no libmagic dep, and
 # the uploader names the file. Unknown extension → not extractable (returns None).
@@ -475,8 +493,9 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
     # segment with a `[m:ss]` prefix — the substrate for semantic segmentation
     # and `transcript_match_at`. Soft-fail: any renderer error falls back to the
     # flat join below; gate unset is byte-identical to it.
-    if semantic_segments.semantic_segments_enabled():
+    if _semantic_segments_enabled():
         try:
+            semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(
                 [
                     (
@@ -502,7 +521,7 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
 def _is_timed_text(text: str) -> bool:
     """True when the transcript's first line carries a `[m:ss]` marker."""
     first = text.split("\n", 1)[0] if text else ""
-    m = semantic_segments.TIMED_LINE_RE.match(first)
+    m = _TIMED_LINE_RE.match(first)
     return bool(m and m.group(2) is not None)
 
 
@@ -788,8 +807,9 @@ def _diarize(
     # and match localization. The structured `merged` list keeps the merged-turn
     # shape either way (speakers: frontmatter + filters are unaffected). Soft-fail
     # to the merged-turn rendering below.
-    if semantic_segments.semantic_segments_enabled():
+    if _semantic_segments_enabled():
         try:
+            semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(timed_segs).strip()
             if timed_text:
                 return timed_text, merged

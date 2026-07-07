@@ -34,12 +34,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import extract, indexes
+from . import indexes
 from .kbdir import kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, kb_root
 
 
 log = logging.getLogger(__name__)
+
+
+def _extract_module():
+    from . import extract
+
+    return extract
 
 # Cap extracted text written into a sidecar. `find` rebuilds BM25 over the whole
 # corpus per query, so one oversized document (e.g. a 7 MB HTML export rendered to
@@ -253,6 +259,7 @@ def preserve(
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
         # text later. Only when server extraction is enabled (else nothing fills it).
+        extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
         want_stub = media_type is not None and not text_clean and extract.extraction_enabled()
         if desc_clean or text_clean or want_stub:
@@ -581,6 +588,7 @@ def ensure_media_sidecar(
     `extracted_by: none`) and embeds it. Idempotent: returns (existing_sidecar, False) if one
     already exists, else (new_sidecar, True). Used by `exomem backfill-media`.
     """
+    extract = _extract_module()
     media_type = extract.media_type_for(binary_path)
     if media_type is None:
         raise ValueError(f"not an extractable media file: {binary_path.name!r}")
