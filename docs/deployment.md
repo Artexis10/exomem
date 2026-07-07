@@ -194,10 +194,14 @@ command.
 ## 6. Install as a service (auto-start on boot)
 
 **Option 0 (container):** `docker compose --profile cloudflared up -d` (or
-`--profile ngrok`) runs the server plus the tunnel as one supervised unit —
-see [docker.md](docker.md). The native services below suit hosts where Docker
-isn't wanted, Windows vaults (WSL2 bind mounts miss live file-watch events),
-and GPU setups.
+`--profile ngrok`) runs the lean server plus the tunnel as one supervised unit.
+Use `docker compose -f compose.yaml -f compose.ml.yaml ...` for CPU hybrid search,
+or `docker compose -f compose.yaml -f compose.cuda.yaml ...` for NVIDIA/Linux
+CUDA capability. The CUDA image remains CPU-default at idle unless you explicitly
+set performance mode. See [docker.md](docker.md). The native services below suit
+Windows live vaults (Docker Desktop/WSL2 bind mounts miss live file-watch events),
+macOS Apple Silicon GPU paths (MPS/MLX are native-only), and hosts where Docker
+isn't wanted.
 
 Pick your platform — all three run the same `streamable-http` server and differ
 only in the OS service manager.

@@ -162,6 +162,19 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push cuda image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cuda
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem:cuda
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
@@ -208,6 +221,18 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-ml
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push cuda image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: cuda
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

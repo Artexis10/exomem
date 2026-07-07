@@ -1,0 +1,9 @@
+# exomem — CPU hybrid container override.
+#
+# Usage:
+#   docker compose -f compose.yaml -f compose.ml.yaml up -d
+#   docker compose -f compose.yaml -f compose.ml.yaml --profile cloudflared up -d
+
+services:
+  exomem:
+    image: ghcr.io/artexis10/exomem:ml

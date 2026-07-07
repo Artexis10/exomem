@@ -121,10 +121,31 @@ def cuda_accounting_if_initialized() -> dict[str, Any]:
     return {"torch_imported": True, "initialized": True, "memory": memory}
 
 
+def runtime_info() -> dict[str, Any]:
+    """Runtime shape without shelling out or importing heavy modules."""
+    variant = (os.environ.get("EXOMEM_CONTAINER_VARIANT") or "").strip() or None
+    marker = None
+    for candidate in (Path("/.dockerenv"), Path("/run/.containerenv")):
+        try:
+            if candidate.exists():
+                marker = str(candidate)
+                break
+        except OSError:
+            continue
+    in_container = bool(variant or marker)
+    return {
+        "kind": "container" if in_container else "native",
+        "container": in_container,
+        "variant": variant,
+        "marker": marker,
+    }
+
+
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
     policy = mode.resolved()
     return {
+        "runtime": runtime_info(),
         "mode": policy["mode"],
         "source": _mode_source(),
         "config_path": str(mode.config_path()),
@@ -216,9 +237,11 @@ def gpu_headroom() -> dict[str, Any]:
 def resource_posture() -> dict[str, Any]:
     policy = mode.resolved()
     return {
+        "runtime": runtime_info(),
         "mode": policy["mode"],
         "source": _mode_source(),
         "policy": policy,
         "cpu_baseline": True,
         "gpu": gpu_headroom(),
+        "cuda": cuda_accounting_if_initialized(),
     }

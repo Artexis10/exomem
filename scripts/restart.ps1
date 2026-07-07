@@ -4,10 +4,13 @@
 # Usage:
 #   pwsh -File scripts/restart.ps1
 #   pwsh -File scripts/restart.ps1 -Force   # also kills orphan python.exe procs
+#   pwsh -File scripts/restart.ps1 -Profile lean    # lexical-only service
 
 param(
     [switch]$Force,
-    [string]$ServiceName = "exomem"
+    [string]$ServiceName = "exomem",
+    [ValidateSet("lean", "hybrid", "media")]
+    [string]$Profile = "hybrid"
 )
 
 $ErrorActionPreference = "Stop"
@@ -36,6 +39,34 @@ $RepoRoot  = Split-Path -Parent $PSScriptRoot
 $VenvPy    = Join-Path $RepoRoot ".venv\Scripts\python.exe"
 $PyvenvCfg = Join-Path $RepoRoot ".venv\pyvenv.cfg"
 
+function Get-DotenvValue {
+    param([string]$Name)
+    $envPath = Join-Path $RepoRoot ".env"
+    if (-not (Test-Path $envPath)) { return $null }
+    foreach ($line in Get-Content $envPath) {
+        if ($line -match "^\s*$([Regex]::Escape($Name))\s*=\s*(.*)\s*$") {
+            $value = $Matches[1].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            return $value
+        }
+    }
+    return $null
+}
+
+function Invoke-DoctorGate {
+    param([string]$Profile)
+    $args = @("-m", "exomem", "doctor", "--profile", $Profile)
+    $vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
+    if ($vault) { $args += @("--vault", $vault) }
+    Write-Host "Preflight: exomem doctor --profile $Profile..."
+    & $VenvPy @args
+    if ($LASTEXITCODE -ne 0) {
+        throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before restarting."
+    }
+}
+
 function Test-VenvInterpreter {
     if (-not (Test-Path $VenvPy)) { return $false }
     try { & $VenvPy --version 2>$null | Out-Null; return ($LASTEXITCODE -eq 0) }
@@ -56,6 +87,8 @@ if (-not (Test-VenvInterpreter)) {
     }
     Write-Host "  interpreter restored."
 }
+
+Invoke-DoctorGate -Profile $Profile
 
 # Back-compat with the kb-mcp -> exomem rename: boxes provisioned before the
 # rename still run the service under the OLD name. If the requested service isn't
