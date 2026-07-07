@@ -5,6 +5,21 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0](https://github.com/Artexis10/exomem/compare/v0.11.0...v0.12.0) (2026-07-07)
+
+
+### Features
+
+* **deploy:** add CUDA container setup path ([e533570](https://github.com/Artexis10/exomem/commit/e5335707edcd796faeeae735b5744a7f11ac5096))
+* **hooks:** add install health check ([ccb6f17](https://github.com/Artexis10/exomem/commit/ccb6f1790263751a678d4fec23cc8d4d21636d0e))
+* **hooks:** support Codex install target ([#148](https://github.com/Artexis10/exomem/issues/148)) ([f3d1e41](https://github.com/Artexis10/exomem/commit/f3d1e4166f967d02b0af3300489f9e9e284200f5))
+* **resource:** complete low-interrupt quiet mode ([#140](https://github.com/Artexis10/exomem/issues/140)) ([7153f10](https://github.com/Artexis10/exomem/commit/7153f101cbeb0fdf8ed992074a36521a07cdc821))
+
+
+### Bug Fixes
+
+* **hooks:** suppress retrieval nudge on control prompts ([#142](https://github.com/Artexis10/exomem/issues/142)) ([d93d856](https://github.com/Artexis10/exomem/commit/d93d856aacc51814d4b5309abc8a421f853e5071))
+
 ## [0.11.0](https://github.com/Artexis10/exomem/compare/v0.10.0...v0.11.0) (2026-07-06)
 
 
