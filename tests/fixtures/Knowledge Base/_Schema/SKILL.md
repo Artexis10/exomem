@@ -362,19 +362,23 @@ Empty queries degrade to filtered-most-recent regardless of mode.
   try `scope="vault"`, vary the query terms, or `get` a path you suspect.
 
 Additional knobs on `find`: `graph=true` (1-hop neighbours of strong matches),
-`rerank=true` (CrossEncoder re-sort, opt-in), `prefer_compiled=true` (default;
-favours compiled types over raw `source`), `prefer_active=true` (default;
-soft-demotes superseded pages), `file_types` / `exclude_file_types` (scope to
-or drop artifact kinds: `note`, `pdf`, `image`, `audio`, `video`, `docx`, `xlsx`,
-`pptx`, `html`, `text`, `email`, `calendar`, `csv`, `json`, `tsv`), and `speakers`
-(restrict to diarized media whose `speakers:` frontmatter names a given person).
+`rerank=true` (CrossEncoder re-sort, explicit precision spend),
+`prefer_compiled=true` (default; favours compiled types over raw `source`),
+`prefer_active=true` (default; soft-demotes superseded pages), `file_types` /
+`exclude_file_types` (scope to or drop artifact kinds: `note`, `pdf`, `image`,
+`audio`, `video`, `docx`, `xlsx`, `pptx`, `html`, `text`, `email`, `calendar`,
+`csv`, `json`, `tsv`), and `speakers` (restrict to diarized media whose
+`speakers:` frontmatter names a given person). Leaving `rerank` unset is
+mode-aware auto: CPU steady-state modes keep it off; accelerated/performance
+mode may auto-rerank when lanes strongly disagree or the query is long.
 
 Performance presets:
 - Normal lookup: `detail="compact"`, `rerank=false`.
 - Reasoning context: `pack=true` when you need a compressed evidence bundle.
 - Diagnostics: `include_timings=true`; add `rerank=true` only when you are
-  intentionally measuring reranking. Interpret timing output with the returned
-  compute mode, embedding backend, cache state, rerank flag, and search profile.
+  intentionally measuring reranking or spending latency for precision. Interpret
+  timing output with the returned compute mode, embedding backend, cache state,
+  rerank flag, and search profile.
 
 **Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded and raw
 data files aren't `find`-searchable. To make a dataset findable, write a

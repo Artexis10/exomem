@@ -289,9 +289,12 @@ Search for modes, scope, and ranking knobs.
 - Reasoning context: `pack=true` when you need a compact evidence bundle for
   downstream reasoning.
 - Diagnostics: `include_timings=true`; add `rerank=true` only when you are
-  intentionally measuring reranking. Timing output should be interpreted with the
-  returned compute mode, embedding backend, cache state, rerank flag, and search
-  profile when present.
+  intentionally measuring reranking or spending latency for precision. Leaving
+  `rerank` unset is mode-aware auto: CPU steady-state modes keep it off;
+  accelerated/performance mode may auto-rerank when lanes strongly disagree or
+  the query is long. Timing output should be interpreted with the returned
+  compute mode, embedding backend, cache state, rerank flag, and search profile
+  when present.
 - If one search misses, try synonyms and adjacent domain terms before concluding
   the KB lacks coverage. Example: `wood`, `woods`, `smoke`, `smoking`, `kamado`,
   `grill`, `apple`, `oak`, `hickory`.

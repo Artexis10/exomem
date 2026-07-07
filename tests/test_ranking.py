@@ -6,7 +6,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import embeddings, readiness, warmup
+from exomem import accel, embeddings, readiness, warmup
+from exomem import find as find_module
 
 
 @pytest.fixture(autouse=True)
@@ -50,3 +51,38 @@ def test_warm_all_skips_reranker_when_disabled(
 def test_reranker_name_default() -> None:
     """Default reranker unchanged (the env override is resolved at import; default here)."""
     assert embeddings.RERANKER_NAME == "BAAI/bge-reranker-base"
+
+def test_auto_rerank_policy_off_in_normal_without_device_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+
+    def _forbidden(**_kwargs):
+        raise AssertionError("normal-mode auto policy should not probe torch/device")
+
+    monkeypatch.setattr(accel, "select_device", _forbidden)
+    assert find_module.auto_rerank_allowed_by_policy() is False
+
+
+def test_auto_rerank_policy_requires_accelerated_performance_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    monkeypatch.setattr(accel, "select_device", lambda **_kwargs: "cuda")
+    assert find_module.auto_rerank_allowed_by_policy() is True
+
+    monkeypatch.setattr(accel, "select_device", lambda **_kwargs: "cpu")
+    assert find_module.auto_rerank_allowed_by_policy() is False
+
+
+def test_auto_rerank_policy_honors_explicit_text_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setenv("EXOMEM_EMBED_DEVICE", "cuda")
+    monkeypatch.setattr(accel, "select_device", lambda **_kwargs: "cuda")
+    assert find_module.auto_rerank_allowed_by_policy() is True
+
+    monkeypatch.setenv("EXOMEM_EMBED_DEVICE", "cpu")
+    monkeypatch.setattr(accel, "select_device", lambda **_kwargs: "cpu")
+    assert find_module.auto_rerank_allowed_by_policy() is False

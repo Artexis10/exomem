@@ -32,7 +32,7 @@ def test_timings_envelope_and_stages(vault: Path) -> None:
     assert t["profile"]["mode"] == "hybrid"
     assert t["profile"]["detail"] == "full"
     assert t["profile"]["pack"] is False
-    assert t["profile"]["auto_rerank"] is True
+    assert t["profile"]["auto_rerank"] is False
     assert t["profile"]["compute_policy"]["mode"] in {"quiet", "normal", "performance"}
     stages = t["stages"]
     # Lexical lanes always run in hybrid mode; vector is present as a timed

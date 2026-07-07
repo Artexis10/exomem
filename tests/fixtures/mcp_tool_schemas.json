@@ -750,7 +750,7 @@
             }
           ],
           "default": null,
-          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is AUTO: the server reranks only when the ranking\nlanes disagree or the query is long — the cases where it\nmeasurably helps — and skips the ~100-200ms cost otherwise.\nPass true to force it on every query, false to disable\nentirely (yesterday's default)."
+          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is mode-aware AUTO: in CPU steady-state modes it stays\noff for predictable latency; when the text/reranker device is\naccelerated, the server reranks only when ranking lanes\ndisagree or the query is long. Pass true to force reranking\nfor a high-value query, including on CPU; pass false to skip\nit entirely."
         },
         "prefer_compiled": {
           "default": true,
