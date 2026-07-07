@@ -16,33 +16,39 @@ import re
 import threading
 import time
 from collections import OrderedDict
-from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
 from typing import Any
 
-import yaml
-
-from . import find_policy, freshness
+from . import find_corpus, find_policy, find_types, freshness
+from . import ranking_config as _ranking_config
 from .find_types import (
     FindTimings,
     Hit,
     ParsedPage,
-    _format_timestamp as _format_timestamp,
-    timing_span as _span,
 )
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
 
-EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"})
+EXCLUDED_DIR_NAMES = find_corpus.EXCLUDED_DIR_NAMES
 # Navigation files — auto-generated summaries / activity logs. Their bodies
 # mention every recently-written page, so they false-positive on hybrid
 # queries that touch any term recently introduced into the KB. Excluded
 # from search results regardless of mode.
-_NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
-FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
-H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
+_NAVIGATION_BASENAMES = find_corpus.NAVIGATION_BASENAMES
+FRONTMATTER_PATTERN = find_corpus.FRONTMATTER_PATTERN
+H1_PATTERN = find_corpus.H1_PATTERN
+
+FrontmatterCache = find_corpus.FrontmatterCache
+_CACHE = find_corpus.CACHE
+_walk_freshness_key = find_corpus.walk_freshness_key
+_walk_md = find_corpus.walk_md
+_parse_page = find_corpus.parse_page
+_passes_filters = find_corpus.passes_filters
+_all_projects = find_corpus.all_projects
+_format_timestamp = find_types._format_timestamp
+_span = find_types.timing_span
 
 EXCERPT_RADIUS = 100  # chars on each side of the match
 EXCERPT_MAX_LEN = 220
@@ -85,8 +91,6 @@ def reset_degradation_counts() -> None:
         _DEGRADATION_COUNTS.clear()
 
 
-from . import ranking_config as _ranking_config
-
 DEFAULT_RANKING = _ranking_config.DEFAULT_RANKING
 LANE_ORDER = _ranking_config.LANE_ORDER
 RankingConfig = _ranking_config.RankingConfig
@@ -105,29 +109,6 @@ def reset_active_ranking_cache() -> None:
     """Drop the memoized adopted ranking config."""
     _ranking_config.reset_active_ranking_cache()
 
-
-@dataclass
-class FrontmatterCache:
-    """Per-process cache of parsed pages, invalidated by mtime."""
-
-    entries: dict[Path, ParsedPage] = field(default_factory=dict)
-
-    def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
-        try:
-            mtime = path.stat().st_mtime
-        except FileNotFoundError:
-            self.entries.pop(path, None)
-            return None
-        cached = self.entries.get(path)
-        if cached and cached.mtime == mtime:
-            return cached
-        parsed = _parse_page(path, mtime, vault_root)
-        if parsed is not None:
-            self.entries[path] = parsed
-        return parsed
-
-
-_CACHE = FrontmatterCache()
 
 
 # --------------------------------------------------------------------------- #
@@ -155,23 +136,6 @@ def _find_cache_size() -> int:
         log.warning("EXOMEM_FIND_CACHE_SIZE=%r is not an int; using default", raw)
         return _DEFAULT_FIND_CACHE_SIZE
 
-
-def _walk_freshness_key(paths) -> tuple[int, int, str]:
-    """(file count, max st_mtime_ns, digest of sorted path+mtime pairs).
-
-    Digest-strength on purpose: count/max-mtime alone miss a delete paired
-    with a create, a rename (mtime preserved), and a replacement carrying an
-    older mtime. Every consumer that caches corpus-derived state (the hot
-    find cache, BM25, the wikilink resolver, the inbound-link index) compares
-    the whole triple, so those histories now invalidate correctly.
-    """
-    entries: list[tuple[str, int]] = []
-    for p in paths:
-        try:
-            entries.append((str(p), p.stat().st_mtime_ns))
-        except OSError:
-            continue
-    return freshness.triple_from_entries(entries)
 
 
 class FreshnessSnapshot:
@@ -1752,127 +1716,6 @@ def _semantic_excerpt(
         return _collapse(snippet)
     return keyword_excerpt or ""
 
-
-def _walk_md(root: Path):
-    """Yield every .md path under root, skipping excluded subtrees.
-
-    Skips Obsidian `*.sync-conflict-*.md` files — transient conflict
-    duplicates that would otherwise pollute the index and search results.
-    """
-    for child in root.iterdir():
-        if child.is_dir():
-            if child.name in EXCLUDED_DIR_NAMES:
-                continue
-            yield from _walk_md(child)
-        elif (
-            child.is_file()
-            and child.suffix.lower() == ".md"
-            and ".sync-conflict-" not in child.name
-        ):
-            yield child
-
-
-def _parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
-    try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        log.warning("could not read %s: %s", path, e)
-        return None
-
-    fm_match = FRONTMATTER_PATTERN.match(text)
-    if fm_match:
-        try:
-            # Hot path: every page-cache miss parses here (warm-up walks the
-            # whole vault through it). libyaml loader via the vault seam.
-            from .vault import yaml_safe_load
-            frontmatter = yaml_safe_load(fm_match.group(1)) or {}
-            if not isinstance(frontmatter, dict):
-                frontmatter = {}
-        except yaml.YAMLError as e:
-            log.warning("YAML parse error in %s: %s", path, e)
-            frontmatter = {}
-        body = fm_match.group(2)
-        # The FRONTMATTER_PATTERN consumes the closing `\n---\n` but not the
-        # blank line that conventionally follows. Strip a single leading `\n`
-        # so callers (notably `get`) can feed `body` back into `edit` without
-        # accumulating blanks across round-trips.
-        if body.startswith("\n"):
-            body = body[1:]
-    else:
-        frontmatter = {}
-        body = text
-
-    h1_match = H1_PATTERN.search(body)
-    title = h1_match.group(1).strip() if h1_match else path.stem
-
-    try:
-        rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()
-    except ValueError:
-        rel_path = path.as_posix()
-
-    return ParsedPage(
-        path=path,
-        rel_path=rel_path,
-        frontmatter=frontmatter,
-        body=body,
-        title=title,
-        mtime=mtime,
-    )
-
-
-def _passes_filters(
-    page: ParsedPage,
-    *,
-    vault_root: Path | None = None,
-    types: list[str] | None,
-    projects: list[str] | None,
-    tags: list[str] | None,
-    speakers: list[str] | None = None,
-    file_types: list[str] | None = None,
-    exclude_file_types: list[str] | None = None,
-) -> bool:
-    # `excluded` tier (_access.yaml): never surfaced. Checked first — an excluded
-    # page is invisible regardless of how well it matches. (vault_root omitted in
-    # unit tests → skip; real find paths always pass it.)
-    if vault_root is not None:
-        from . import access
-        if not access.is_indexable(vault_root, page.rel_path):
-            return False
-    if types and page.page_type not in types:
-        return False
-    if projects:
-        page_projects = _all_projects(page.frontmatter)
-        if not any(p in page_projects for p in projects):
-            return False
-    if tags:
-        page_tags = set(page.tags)
-        if not any(t.lower() in page_tags for t in tags):
-            return False
-    if speakers:
-        page_speakers = {s.lower() for s in page.speakers}
-        if not any(s.lower() in page_speakers for s in speakers):
-            return False
-    # File-type scoping (opt-in; default None/None lets every kind through — a
-    # search must never hide an artifact type by default).
-    if file_types or exclude_file_types:
-        kind = page.file_kind
-        if file_types and kind not in {ft.lower() for ft in file_types}:
-            return False
-        if exclude_file_types and kind in {ft.lower() for ft in exclude_file_types}:
-            return False
-    return True
-
-
-def _all_projects(fm: dict) -> set[str]:
-    out: set[str] = set()
-    if (p := fm.get("project")):
-        out.add(str(p))
-    if (ps := fm.get("projects")):
-        if isinstance(ps, list):
-            out.update(str(x) for x in ps)
-        else:
-            out.add(str(ps))
-    return out
 
 
 def _make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
