@@ -19,7 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import find_corpus, find_policy, find_results, find_types, freshness
+from . import find_candidates, find_corpus, find_policy, find_results, find_types, freshness
 from . import ranking_config as _ranking_config
 from .find_types import (
     FindTimings,
@@ -528,40 +528,14 @@ def _collapse_frame_children(
     attribution: dict[str, tuple[str, float | None]],
     *aux_maps: dict,
 ) -> list[str]:
-    """Remap scene-frame sidecar candidates onto their parent video's sidecar
-    (pre-fusion) so one video = one candidate.
-
-    A persisted scene frame (frontmatter `parent_media`, written by scene_frames)
-    must never compete with its parent in ranking — RRF would count the same
-    content twice and a multi-scene video could flood a lane with near-duplicate
-    frames. Each frame child is replaced by `<parent_media>.md` at the frame's
-    lane position (keep-first = keep-best in a rank-ordered lane); the best-ranked
-    frame per parent is recorded in `attribution[parent] = (jpg_rel, frame_ts)`
-    for hit enrichment. Keys in `aux_maps` (scores/chunk texts) move to the
-    parent keep-best. An orphan frame (parent sidecar gone) passes through and
-    surfaces standalone. Non-frame candidates cost one cached frontmatter lookup.
-    """
-    if not ranking:
-        return ranking
-    out: list[str] = []
-    seen: set[str] = set()
-    for rel in ranking:
-        page = _CACHE.get(vault_root / rel, vault_root)
-        parent = page.parent_media if page is not None else None
-        if parent:
-            parent_sidecar = parent + ".md"
-            if (vault_root / parent_sidecar).exists():
-                attribution.setdefault(parent_sidecar, (page.media_file or rel, page.frame_ts))
-                for m in aux_maps:
-                    if rel in m:
-                        v = m.pop(rel)
-                        m.setdefault(parent_sidecar, v)
-                rel = parent_sidecar
-        if rel in seen:
-            continue
-        seen.add(rel)
-        out.append(rel)
-    return out
+    """Compatibility wrapper for candidate-lane scene-frame collapsing."""
+    return find_candidates.collapse_frame_children(
+        ranking,
+        vault_root,
+        lambda rel: _CACHE.get(vault_root / rel, vault_root),
+        attribution,
+        *aux_maps,
+    )
 
 
 def _find_keyword(
@@ -685,268 +659,44 @@ def _find_semantic(
     `degraded_out`'s "the lane was deferred while a model preload is warming".
     """
     # Lazy imports — keep keyword-mode users out of the torch import path.
-    from . import bm25, embeddings, fusion, readiness, scene_frames
+    from . import embeddings, readiness, scene_frames
 
     if snapshot is None:
         snapshot = FreshnessSnapshot(vault_root)
     if page_memo is None:
         page_memo = {}
 
-    # Usage-activation map for the opt-in boost. Empty dict = strict no-op
-    # (default, cold start, gated, or kill-switched).
-    usage_map: dict[str, float] = {}
-    if prefer_used:
-        from . import usage as usage_module
-        usage_map = usage_module.activation_map(config)
-
     def _page_of(rel: str) -> ParsedPage | None:
         if rel not in page_memo:
             page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
         return page_memo[rel]
 
-    # Pull more than we need so post-filter losses don't starve the result.
-    candidate_k = max(limit * config.candidate_multiplier, config.candidate_floor)
-
-    # Scene-frame children collapse onto their parent video per lane (pre-fusion);
-    # this records parent sidecar → (best matching frame jpg, frame_ts) for hits.
-    frame_attribution: dict[str, tuple[str, float | None]] = {}
-
-    # ---- Vector contribution ----
-    vector_ranking: list[str] = []
-    chunk_text_by_path: dict[str, str] = {}
-    vector_score_by_path: dict[str, float] = {}
-    if readiness.should_defer("embeddings"):
-        # Background warm-up owns the model lock right now — calling
-        # embed_texts here would BLOCK on it (minutes on a first-ever
-        # download), and the except-fallback below would never fire. Skip
-        # the lane; the caller marks the response as warming.
-        if timings is not None:
-            timings.skipped("vector")
-        if degraded_out is not None:
-            degraded_out.append("embeddings")
-    else:
-        try:
-            with _span(timings, "vector"):
-                idx = embeddings.get_embedding_index(vault_root)
-                query_vec = embeddings.embed_texts([query], is_query=True)[0]
-                chunk_hits = idx.search(query_vec, k=candidate_k * 3)  # over-fetch chunks
-                # Collapse chunks → file-level: keep the best-scoring chunk per file.
-                best_per_file: dict[str, tuple[float, str]] = {}
-                for fp, _idx, ctext, score in chunk_hits:
-                    existing = best_per_file.get(fp)
-                    if existing is None or score > existing[0]:
-                        best_per_file[fp] = (score, ctext)
-                vector_ranking = sorted(
-                    best_per_file.keys(), key=lambda p: -best_per_file[p][0]
-                )[:candidate_k]
-                chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
-                vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
-        except ImportError as e:
-            # The embedding library isn't installed (lean deployment, no
-            # `embeddings` extra). This is a DEPLOYMENT SHAPE, not a runtime
-            # failure — keyword/BM25 is the intended mode here — so it is NOT a
-            # degradation and must not flip op_find's return shape to a
-            # `degraded` envelope. Fall back silently. A genuine runtime failure
-            # (model present but errored at query time) is the `except Exception`
-            # branch below, which DOES record degradation.
-            log.info(
-                "vector search unavailable (%s); keyword/BM25-only ranking", e
-            )
-            if timings is not None:
-                timings.error("vector", e)
-        except Exception as e:
-            log.warning("vector search failed: %s; falling back to BM25-only", e)
-            _record_degradation("vector")
-            if failed_out is not None:
-                failed_out.append("vector")
-            if timings is not None:
-                timings.error("vector", e)
-    vector_ranking = _collapse_frame_children(
-        vector_ranking, vault_root, frame_attribution, chunk_text_by_path, vector_score_by_path
+    bundle = find_candidates.collect_candidates(
+        vault_root,
+        query=query,
+        query_norm=query_norm,
+        limit=limit,
+        scope=scope,
+        mode=mode,
+        graph=graph,
+        temporal=temporal,
+        intent=intent,
+        prefer_compiled=prefer_compiled,
+        prefer_active=prefer_active,
+        prefer_used=prefer_used,
+        config=config,
+        timings=timings,
+        snapshot=snapshot,
+        page_of=_page_of,
+        keyword_match_paths=_keyword_match_paths,
+        outbound_wikilink_paths=_outbound_wikilink_paths,
+        get_query_resolver=_get_query_resolver,
+        record_degradation=_record_degradation,
+        degraded_out=degraded_out,
+        failed_out=failed_out,
     )
 
-    # ---- CLIP contribution: text→image visual search ----
-    # Lets a text query match a (possibly textless) Evidence photo by visual content.
-    # Returns the image's *sidecar* path (what the corpus indexes); soft-fails when CLIP
-    # isn't installed or the index is empty. Gated by EXOMEM_DISABLE_CLIP.
-    clip_ranking: list[str] = []
-    clip_score_by_path: dict[str, float] = {}
-    clip_frame_ts_by_path: dict[str, float | None] = {}
-    if embeddings.clip_enabled() and query.strip() and readiness.should_defer("clip"):
-        # Same lock-blocking hazard as the vector lane: never touch the CLIP
-        # getter while the background warm is loading it.
-        if timings is not None:
-            timings.skipped("clip")
-        if degraded_out is not None:
-            degraded_out.append("clip")
-    elif embeddings.clip_enabled() and query.strip():
-        try:
-            with _span(timings, "clip"):
-                clip_idx = embeddings.get_clip_index(vault_root)
-                clip_qvec = embeddings.embed_clip_text(query)
-                # A video contributes N keyframe rows; over-fetch so distinct videos
-                # aren't crowded out, then dedup to best-per-file (rows are score-desc,
-                # so the FIRST time a sidecar appears is its best frame). Stop at candidate_k
-                # distinct sidecars; record that best frame's timestamp (None for images).
-                for img_rel, frame_ts, score in clip_idx.search(clip_qvec, k=candidate_k * 8):
-                    if len(clip_ranking) >= candidate_k:
-                        break
-                    sidecar_rel = img_rel + ".md"
-                    if sidecar_rel not in clip_score_by_path and (vault_root / sidecar_rel).exists():
-                        clip_ranking.append(sidecar_rel)
-                        clip_score_by_path[sidecar_rel] = score
-                        clip_frame_ts_by_path[sidecar_rel] = frame_ts
-        except embeddings.ClipUnavailable as e:
-            log.warning("CLIP search unavailable (%s); skipping image search", e)
-            _record_degradation("clip")
-            if failed_out is not None:
-                failed_out.append("clip")
-            if timings is not None:
-                timings.error("clip", e)
-        except Exception as e:  # noqa: BLE001 — image search is best-effort
-            log.warning("CLIP search failed: %s; skipping image search", e)
-            _record_degradation("clip")
-            if failed_out is not None:
-                failed_out.append("clip")
-            if timings is not None:
-                timings.error("clip", e)
-    elif timings is not None:
-        timings.skipped("clip")
-    # Defensive: frame children get no ClipIndex rows, but a stray row (e.g. from a
-    # pre-exclusion index) must still group under the parent.
-    clip_ranking = _collapse_frame_children(
-        clip_ranking, vault_root, frame_attribution, clip_score_by_path, clip_frame_ts_by_path
-    )
-
-    bm25_ranking: list[str] = []
-    keyword_ranking: list[str] = []
-    if mode == "vector":
-        if timings is not None:
-            timings.skipped("bm25")
-            timings.skipped("keyword")
-        rankings = [r for r in (vector_ranking, clip_ranking) if r]
-    else:
-        # ---- BM25 contribution ----
-        try:
-            with _span(timings, "bm25"):
-                bm25_hits = bm25.search(
-                    vault_root, query, k=candidate_k, scope=scope,
-                    freshness=snapshot.for_scope(scope),
-                )
-                bm25_ranking = [p for p, _ in bm25_hits]
-        except ImportError as e:
-            log.warning("BM25 unavailable (%s); using vector-only", e)
-            if timings is not None:
-                timings.error("bm25", e)
-        except Exception as e:
-            log.warning("BM25 search failed: %s; using vector-only", e)
-            if timings is not None:
-                timings.error("bm25", e)
-        bm25_ranking = _collapse_frame_children(bm25_ranking, vault_root, frame_attribution)
-
-        # ---- Keyword contribution: literal all-tokens-present matches ----
-        # Walking the KB for substring matches makes hybrid a strict superset
-        # of keyword — any page keyword would surface lands in the candidate
-        # pool regardless of where BM25/vector rank it. Closes the recall
-        # hole where BM25 buries a target under thematically-noisy hits with
-        # high TF on a shared common token (e.g. "Borough Market" buried
-        # under Q marketing pages on the "market" stem).
-        with _span(timings, "keyword"):
-            keyword_ranking = _keyword_match_paths(
-                vault_root, query_norm, scope, freshness=snapshot.for_scope(scope)
-            )
-        keyword_ranking = _collapse_frame_children(
-            keyword_ranking, vault_root, frame_attribution
-        )
-        rankings = [
-            r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
-        ]
-
-    # ---- Graph expansion: 1-hop outbound wikilinks of STRONG candidates ----
-    # Strong = ranked by vector (semantically gated by construction), or
-    # BM25-ranked AND passing the stem-aware all-tokens-present check. Seeding
-    # from raw BM25 alone leaks neighbours of weak matches into results
-    # (e.g. queries like "skip-marker-abc" where every token is common).
-    graph_ranking: list[str] = []
-    graph_in_degree_by_path: dict[str, int] = {}
-    if not graph and timings is not None:
-        timings.skipped("graph")
-    _graph_t0 = time.perf_counter()
-    if graph:
-        primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
-        vector_set: set[str] = set(vector_ranking)
-        graph_seeds: list[str] = []
-        seen_seed: set[str] = set()
-        for r in (vector_ranking, bm25_ranking):
-            for p in r[:config.graph_seed_cap]:  # cap fanout
-                if p in seen_seed:
-                    continue
-                seen_seed.add(p)
-                if p in vector_set:
-                    graph_seeds.append(p)
-                    continue
-                # BM25-only seed: gate via stem-aware tokens-present.
-                page = _page_of(p)
-                if page is None:
-                    continue
-                if (
-                    _make_excerpt(page, query_norm) is not None
-                    or _stem_tokens_present(page, query_norm)
-                ):
-                    graph_seeds.append(p)
-        _graph_t_seeds = time.perf_counter()
-        # One resolver for the whole request, freshness-checked against the
-        # request's own vault snapshot (no extra walk).
-        resolver = (
-            _get_query_resolver(vault_root, freshness=snapshot.vault())
-            if graph_seeds else None
-        )
-        _graph_t_resolver = time.perf_counter()
-        seen_target: set[str] = set()
-        for seed_rel in graph_seeds:
-            page = _page_of(seed_rel)
-            if page is None:
-                continue
-            for target_rel in _outbound_wikilink_paths(
-                page, vault_root, resolver=resolver
-            ):
-                # Count in-degree for ALL targets — primary-ranked hubs benefit
-                # too. graph_ranking still only carries non-primary targets so
-                # RRF doesn't double-count them.
-                graph_in_degree_by_path[target_rel] = (
-                    graph_in_degree_by_path.get(target_rel, 0) + 1
-                )
-                if target_rel in primary_set or target_rel in seen_target:
-                    continue
-                seen_target.add(target_rel)
-                graph_ranking.append(target_rel)
-        if graph_ranking:
-            rankings.append(graph_ranking)
-        if timings is not None:
-            # Sub-spans partition the stage so a scaling regression names its
-            # phase (seed gating vs resolver freshness vs link expansion)
-            # instead of hiding inside one opaque number.
-            _graph_t_end = time.perf_counter()
-            timings.stages.setdefault("graph", {})["ms"] = round(
-                (_graph_t_end - _graph_t0) * 1000.0, 3
-            )
-            for name, t0, t1 in (
-                ("graph.seeds", _graph_t0, _graph_t_seeds),
-                ("graph.resolver", _graph_t_seeds, _graph_t_resolver),
-                ("graph.expand", _graph_t_resolver, _graph_t_end),
-            ):
-                timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
-
-    # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
-    vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
-    bm25_rank_by_path = {p: i + 1 for i, p in enumerate(bm25_ranking)}
-    keyword_rank_by_path = {p: i + 1 for i, p in enumerate(keyword_ranking)}
-    clip_rank_by_path = {p: i + 1 for i, p in enumerate(clip_ranking)}
-    keyword_set: set[str] = set(keyword_ranking)
-    clip_set: set[str] = set(clip_ranking)
-    graph_set = set(graph_ranking)
-
-    if not rankings:
+    if not bundle.had_rankings:
         # Both rankers failed or produced nothing. Degrade to keyword.
         log.info("semantic search produced no candidates; falling back to keyword")
         _record_degradation("no_candidates")
@@ -960,55 +710,28 @@ def _find_semantic(
             limit=limit, scope=scope,
         )
 
-    # ---- Temporal lane: recency-ordered candidates (temporal queries only) ----
-    # Built ONLY when the query is temporal, so it's empty (and thus a no-op in
-    # fusion) for every other query — keeping the common path byte-identical.
-    temporal_ranking: list[str] = []
-    if temporal and _is_temporal_query(query):
-        with _span(timings, "temporal"):
-            pool: list[str] = []
-            for lane in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking):
-                pool.extend(lane)
-            temporal_ranking = _recency_ranking(pool, vault_root, candidate_k)
-    elif timings is not None:
-        timings.skipped("temporal")
+    fused = bundle.fused
+    vector_ranking = bundle.vector_ranking
+    bm25_ranking = bundle.bm25_ranking
+    keyword_ranking = bundle.keyword_ranking
+    clip_ranking = bundle.clip_ranking
+    graph_ranking = bundle.graph_ranking
+    chunk_text_by_path = bundle.chunk_text_by_path
+    vector_score_by_path = bundle.vector_score_by_path
+    clip_score_by_path = bundle.clip_score_by_path
+    clip_frame_ts_by_path = bundle.clip_frame_ts_by_path
+    frame_attribution = bundle.frame_attribution
+    graph_in_degree_by_path = bundle.graph_in_degree_by_path
+    usage_map = bundle.usage_map
 
-    # ---- Intent-adaptive weighted RRF ----
-    # Classify the query, pick the per-intent lane weights, fuse. The
-    # "conceptual" default is all-1.0, so the common case reproduces the
-    # unweighted RRF exactly; only non-conceptual intents reweight the lanes.
-    with _span(timings, "fusion"):
-        intent_label = intent or _classify_intent(query)
-        weights = config.intent_weights(intent_label)
-        lane_rankings = [
-            vector_ranking, bm25_ranking, keyword_ranking,
-            clip_ranking, graph_ranking, temporal_ranking,
-        ]
-        active_lists: list[list[str]] = []
-        active_weights: list[float] = []
-        for lane, w in zip(lane_rankings, weights, strict=True):
-            if lane:
-                active_lists.append(lane)
-                active_weights.append(w)
-        fused = fusion.reciprocal_rank_fusion_weighted(
-            active_lists, active_weights, k=config.rrf_k
-        )
-        # Post-RRF multiplicative boosts (type / status / Gaussian recency) in
-        # ONE pass with ONE sort. Order-equivalent to the historical
-        # sequential _apply_type_boost → _apply_status_demotion →
-        # _apply_temporal_boost passes: each of those ended with the same
-        # total-order sort key (-score, path), so only the final combined
-        # multiplier ever determined the order (guarded by the equivalence
-        # tests). For rerank, type/status/usage are also applied to
-        # rerank_score below so they survive the final sort.
-        fused = _apply_post_rrf_multipliers(
-            fused, query, config,
-            prefer_compiled=prefer_compiled,
-            prefer_active=prefer_active,
-            temporal=temporal,
-            page_of=_page_of,
-            usage_map=usage_map,
-        )
+    # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
+    vector_rank_by_path = {p: i + 1 for i, p in enumerate(vector_ranking)}
+    bm25_rank_by_path = {p: i + 1 for i, p in enumerate(bm25_ranking)}
+    keyword_rank_by_path = {p: i + 1 for i, p in enumerate(keyword_ranking)}
+    clip_rank_by_path = {p: i + 1 for i, p in enumerate(clip_ranking)}
+    keyword_set: set[str] = set(keyword_ranking)
+    clip_set: set[str] = set(clip_ranking)
+    graph_set = set(graph_ranking)
     vector_paths: set[str] = set(vector_ranking)
 
     # Resolve fused paths back to ParsedPage, filter, build hits in fused order.
