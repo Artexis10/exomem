@@ -123,6 +123,13 @@ On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 resolves to the right tool. `find` is the read-only hybrid (semantic + keyword)
 search and your default entry point.
 
+This skill is the rich behavioural contract for Exomem-aware agents. If this
+file has been read, routine KB work does not need a separate `bootstrap()` call.
+Generic MCP clients without this skill should call `bootstrap()` once at session
+start to get the portable operating contract. Skill-aware agents may still use
+`bootstrap(profile="diagnostics")` when interpreting retrieval speed, compute
+mode, reranking, `pack`, or `include_timings`.
+
 The Tier 2 filesystem ops below may be turned off on lean deployments
 (`EXOMEM_DISABLE_TIER2`), in which case only the Tier 1 ops are registered.
 
@@ -141,12 +148,13 @@ and index updates are determined by the operation, not the caller.
 
 | Op | Intent | Writes to |
 |---|---|---|
+| **bootstrap** | Return a portable, versioned operating contract for generic MCP clients. Skill-aware agents can skip routine calls after reading this file; use diagnostics profile for timing/performance interpretation | — |
 | **add** | Capture raw input as immutable source | `Sources/<type>/` |
 | **note** | Compile a structured note from raw input or thinking | `Notes/<type>/` |
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit of a compiled page. One mode per call: whole `body` / `tags` / surgical `old_string`→`new_string`; `edits=[…]` several surgical pairs in one atomic batch; `row_key`+`take` fill a `[take: ]` row by its leading text; `field`+`value` patch ONE frontmatter field (requires `why:`). Bumps `updated:`. Optional `expected_hash` (drift guard) + `validate_only` | the page |
-| **find** | Type-aware search across the KB (read-only) | — |
+| **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (echo `content_hash` to `edit` via `expected_hash`). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
@@ -196,7 +204,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   and CLIP-embeds images and per-keyframe video frames for visual search — all
   server-side after upload, filling an embedded sidecar so any upload becomes
   findable by content. You *may* still pass a `text` field to supply your own
-  extraction; it takes precedence. The write tools take text only and reject
+  extraction; it takes precedence. Upload responses return concrete metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`, `content_type`) so agents can report exactly what landed. The write tools take text only and reject
   inline byte blobs (`BINARY_BLOB_REJECTED`). Full workflow:
   `references/operations.md` § preserve.
 - **Pull a vault file back out — the download channel.** Call
@@ -295,6 +303,13 @@ favours compiled types over raw `source`), `prefer_active=true` (default;
 soft-demotes superseded pages), and `file_types` / `exclude_file_types` (scope to
 or drop artifact kinds: `note`, `pdf`, `image`, `audio`, `video`, `docx`, `xlsx`,
 `pptx`, `html`, `text`, `email`, `calendar`, `csv`, `json`, `tsv`).
+
+Performance presets:
+- Normal lookup: `detail="compact"`, `rerank=false`.
+- Reasoning context: `pack=true` when you need a compressed evidence bundle.
+- Diagnostics: `include_timings=true`; add `rerank=true` only when you are
+  intentionally measuring reranking. Interpret timing output with the returned
+  compute mode, embedding backend, cache state, rerank flag, and search profile.
 
 **Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded and raw
 data files aren't `find`-searchable. To make a dataset findable, write a
@@ -482,7 +497,7 @@ under the vault root with no prefix guessing:
 `Sources/` file via the `sources:` frontmatter list (mirrors the source's
 `ingested_into:` list).
 
-**The writer normalizes on your behalf.** exomem's writers run every wikilink
+**The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.

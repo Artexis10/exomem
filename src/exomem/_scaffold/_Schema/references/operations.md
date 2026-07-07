@@ -1,6 +1,6 @@
 # Operations
 
-Detailed specs for each operation. Read on first use of an operation.
+Detailed specs for the Knowledge Base operations. Read on first use of an operation.
 
 ## Index and log discipline (applies to every write)
 
@@ -20,8 +20,44 @@ bookkeeping updates:
    `<op>` is one of: `add`, `note`, `link`, `preserve`, `replace`, `edit`,
    `audit`. (`find` doesn't append because it's read-only.)
 
-These two updates are non-negotiable for every operation below. The per-operation
-specs note their primary writes; the index + log update is implicit.
+These two updates are non-negotiable for every write operation below. Read-only
+operations such as `bootstrap`, `find`, `get`, `suggest_links`, `overview`,
+`propose_compilation`, `query_data`, `provenance_report`, and `download` do not
+update indexes or logs. The per-operation specs note their primary writes; the
+index + log update is implicit.
+
+---
+
+## bootstrap
+
+**Goal:** Return a portable, versioned operating contract so generic MCP clients
+can use Exomem without relying on a client-specific skill.
+
+### Triggers
+- A new MCP session in ChatGPT, Cursor, Codex, Gemini, Windsurf, or another
+  client that only receives tool schemas.
+- The agent needs to understand preferred workflows, defaults, retrieval modes,
+  upload semantics, or performance diagnostics.
+- A skill-aware client is diagnosing retrieval speed or comparing CPU/GPU/low
+  power behaviour.
+
+### Profiles
+- `profile="compact"` — terse operation map and defaults. Use for normal startup.
+- `profile="default"` — startup contract plus workflow guidance and examples.
+- `profile="diagnostics"` — includes timing/performance guidance, search profile,
+  compute mode, backend/cache hints, rerank state, and recommended debug knobs.
+
+### Procedure
+1. Call once at the beginning of a generic MCP-client session.
+2. Treat the returned contract as behavioural guidance for tool choice: search
+   before absence claims, use compiled notes for durable conclusions, preserve raw
+   evidence separately, and prefer supersession over deletion.
+3. Use diagnostics output when interpreting search latency. Do not label Exomem
+   slow from a single CPU rerank measurement; identify whether rerank, embedding
+   backend, compute mode, cache state, or cold start dominated the run.
+
+### Writes performed
+None.
 
 ---
 
@@ -172,10 +208,15 @@ Binaries are delivered out-of-band — never inline as a tool argument (the
   multipart-`curl` each attached file to `upload_url` with `Authorization: Bearer
   <token>` and form fields `file` / `scope` / `category` (optional `filename`,
   `description`, **`text`**); (3) **searchability is automatic** — the server
-  transcribes audio/video (Whisper), OCRs images (Tesseract), and reads PDFs after
-  the upload and fills an embedded sidecar, so the binary becomes findable by its
-  content. You *may* still pass a `text` field to supply your own extraction; it
-  wins and skips the server pass. No inline bytes, no pasted secret. Files must be
+  transcribes audio/video (Whisper), OCRs images (Tesseract), reads PDFs
+  (pymupdf), extracts office/web documents (docx/xlsx/pptx/html via MarkItDown;
+  txt/eml/ics via native parsers), and CLIP-embeds images and per-keyframe video
+  frames for visual search. It fills an embedded sidecar so the binary becomes
+  findable by content. You *may* still pass a `text` field to supply your own
+  extraction; it wins and skips the server pass. Upload responses return concrete
+  metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`,
+  `content_type`) so agents can report exactly what landed. No inline bytes, no
+  pasted secret. Files must be
   **attached** (inline-pasted images never land on the sandbox disk), and the host
   must be in the sandbox's egress allowlist (Settings → network; one-time). If the
   sandbox can't reach the host, fall back to handing the user the prefilled link
@@ -242,6 +283,18 @@ Search for modes, scope, and ranking knobs.
 - "what do I have on X," "find my notes on Y"
 - "have I covered Z," "show me everything tagged W"
 - "list all my failure modes on <project>"
+
+### Diagnostics and performance
+- Normal lookup: `detail="compact"`, `rerank=false`.
+- Reasoning context: `pack=true` when you need a compact evidence bundle for
+  downstream reasoning.
+- Diagnostics: `include_timings=true`; add `rerank=true` only when you are
+  intentionally measuring reranking. Timing output should be interpreted with the
+  returned compute mode, embedding backend, cache state, rerank flag, and search
+  profile when present.
+- If one search misses, try synonyms and adjacent domain terms before concluding
+  the KB lacks coverage. Example: `wood`, `woods`, `smoke`, `smoking`, `kamado`,
+  `grill`, `apple`, `oak`, `hickory`.
 
 ### Edge cases
 - **No filesystem MCP available.** This skill cannot run without a connected KB server. Surface this and stop — don't fake search.
