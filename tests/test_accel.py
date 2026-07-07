@@ -185,6 +185,20 @@ def test_gpu_usable_false_without_cuda(monkeypatch: pytest.MonkeyPatch) -> None:
     assert accel.gpu_usable() is False
 
 
+def test_gpu_usable_false_when_cuda_available_probe_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    torch = types.ModuleType("torch")
+
+    def _boom():
+        raise RuntimeError("driver probe failed")
+
+    torch.cuda = types.SimpleNamespace(is_available=_boom)
+    torch.backends = types.SimpleNamespace()
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    assert accel.gpu_usable() is False
+
+
 def test_gpu_usable_false_on_marginal_vram(monkeypatch: pytest.MonkeyPatch) -> None:
     _set_hw(monkeypatch, cuda=True, mps=False, free_gb=1.0)  # < 2 GB default
     assert accel.gpu_usable() is False

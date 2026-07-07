@@ -7,6 +7,7 @@ and the atomic config writer. No hardware needed.
 
 from __future__ import annotations
 
+import builtins
 import json
 import os
 from pathlib import Path
@@ -32,6 +33,8 @@ def test_normalize_canonical_and_aliases() -> None:
     assert mode.normalize("performance") == "performance"
     assert mode.normalize("gpu") == "performance"  # alias
     assert mode.normalize("turbo") == "performance"  # alias
+    assert mode.normalize("resource-saver") == "quiet"
+    assert mode.normalize("low-resource") == "quiet"
     assert mode.normalize(" GPU ") == "performance"  # case/space-insensitive
 
 
@@ -66,6 +69,23 @@ def test_env_beats_config_file(monkeypatch: pytest.MonkeyPatch) -> None:
     mode.write_mode("performance")
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     assert mode.resolve_mode() == "quiet"
+
+
+def test_env_beats_config_file_and_auto_quiet_state(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "schema": 1,
+                "mode": "quiet",
+                "auto_quiet": {"active": True, "previous_mode": "normal"},
+            }
+        ),
+        "utf-8",
+    )
+    monkeypatch.setenv("EXOMEM_MODE", "performance")
+    assert mode.resolve_mode() == "performance"
 
 
 def test_legacy_quiet_alias(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -113,8 +133,97 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
     assert mode.bulk_gpu_opted() is bulk
 
 
-# ---- config file read/write ----
+@pytest.mark.parametrize(
+    "m, expected",
+    [
+        (
+            "quiet",
+            {
+                "preload_cpu_caches": False,
+                "retain_cpu_caches": False,
+                "defer_expensive_indexes": True,
+                "watcher_policy": {
+                    "debounce_seconds": 2.0,
+                    "reconcile_interval_seconds": 900.0,
+                    "max_embed_files_per_batch": 0,
+                    "max_reconcile_embed_files": 0,
+                    "defer_expensive_indexes": True,
+                },
+                "release_when_idle": True,
+                "bulk_gpu": False,
+            },
+        ),
+        (
+            "normal",
+            {
+                "preload_cpu_caches": True,
+                "retain_cpu_caches": True,
+                "defer_expensive_indexes": False,
+                "watcher_policy": {
+                    "debounce_seconds": 0.5,
+                    "reconcile_interval_seconds": 300.0,
+                    "max_embed_files_per_batch": None,
+                    "max_reconcile_embed_files": 500,
+                    "defer_expensive_indexes": False,
+                },
+                "release_when_idle": False,
+                "bulk_gpu": False,
+            },
+        ),
+        (
+            "performance",
+            {
+                "preload_cpu_caches": True,
+                "retain_cpu_caches": True,
+                "defer_expensive_indexes": False,
+                "watcher_policy": {
+                    "debounce_seconds": 0.5,
+                    "reconcile_interval_seconds": 300.0,
+                    "max_embed_files_per_batch": None,
+                    "max_reconcile_embed_files": 500,
+                    "defer_expensive_indexes": False,
+                },
+                "release_when_idle": True,
+                "bulk_gpu": True,
+            },
+        ),
+    ],
+)
+def test_resolved_resource_policy_fields(
+    monkeypatch: pytest.MonkeyPatch, m: str, expected: dict
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", m)
+    snap = mode.resolved()
+    for key, value in expected.items():
+        assert snap[key] == value
+    assert mode.preload_cpu_caches() is expected["preload_cpu_caches"]
+    assert mode.retain_cpu_caches() is expected["retain_cpu_caches"]
+    assert mode.defer_expensive_indexes() is expected["defer_expensive_indexes"]
+    assert mode.watcher_policy().as_dict() == expected["watcher_policy"]
 
+
+def test_policy_helpers_do_not_import_torch(monkeypatch: pytest.MonkeyPatch) -> None:
+    original_import = builtins.__import__
+
+    def guarded_import(name, *args, **kwargs):  # noqa: ANN001
+        if name == "torch" or name.startswith("torch."):
+            raise AssertionError("mode policy helpers must not import torch")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", guarded_import)
+    mode.normalize("resource-saver")
+    mode.resolve_mode()
+    mode.preload_models()
+    mode.preload_cpu_caches()
+    mode.retain_cpu_caches()
+    mode.defer_expensive_indexes()
+    mode.watcher_policy()
+    mode.release_when_idle()
+    mode.bulk_gpu_opted()
+    mode.resolved()
+
+
+# ---- config file read/write ----
 def test_read_config_missing_is_empty() -> None:
     assert mode.read_config() == {}
 
@@ -152,6 +261,16 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
     assert snap == {
         "mode": "quiet",
         "preload_models": False,
+        "preload_cpu_caches": False,
+        "retain_cpu_caches": False,
+        "defer_expensive_indexes": True,
+        "watcher_policy": {
+            "debounce_seconds": 2.0,
+            "reconcile_interval_seconds": 900.0,
+            "max_embed_files_per_batch": 0,
+            "max_reconcile_embed_files": 0,
+            "defer_expensive_indexes": True,
+        },
         "release_when_idle": True,
         "bulk_gpu": False,
     }
@@ -160,13 +279,16 @@ def test_resolved_snapshot(monkeypatch: pytest.MonkeyPatch) -> None:
 # ---- apply_live: reconcile the running process to a mode ----
 
 def _patch_runtime(monkeypatch):
-    """Stub embeddings.unload_* + model_reaper.start/stop; return a call recorder."""
-    from exomem import embeddings, model_reaper
+    """Stub runtime unload/start hooks; return a call recorder."""
+    from exomem import bm25, embeddings, find, model_reaper
 
-    calls = {"unload": 0, "start": 0, "stop": 0}
+    calls = {"unload": 0, "cache": 0, "start": 0, "stop": 0}
     monkeypatch.setattr(embeddings, "unload_model", lambda: calls.__setitem__("unload", calls["unload"] + 1) or True)
     monkeypatch.setattr(embeddings, "unload_reranker", lambda: True)
     monkeypatch.setattr(embeddings, "unload_clip_model", lambda: True)
+    monkeypatch.setattr(embeddings, "unload_index_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {"embedding": 0, "clip": 0})
+    monkeypatch.setattr(bm25, "unload_cache", lambda: calls.__setitem__("cache", calls["cache"] + 1) or False)
+    monkeypatch.setattr(find, "unload_ram_caches", lambda: calls.__setitem__("cache", calls["cache"] + 1) or {})
     monkeypatch.setattr(model_reaper, "start", lambda: calls.__setitem__("start", calls["start"] + 1))
     monkeypatch.setattr(model_reaper, "stop", lambda: calls.__setitem__("stop", calls["stop"] + 1))
     return calls
@@ -185,6 +307,15 @@ def test_apply_live_performance_starts_reaper(monkeypatch: pytest.MonkeyPatch) -
     calls = _patch_runtime(monkeypatch)
     monkeypatch.setenv("EXOMEM_MODE", "performance")
     mode.apply_live()
+    assert calls["start"] == 1 and calls["stop"] == 0
+
+
+def test_apply_live_quiet_unloads_heavy_caches(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = _patch_runtime(monkeypatch)
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    policy = mode.apply_live()
+    assert policy["mode"] == "quiet"
+    assert calls["cache"] == 3
     assert calls["start"] == 1 and calls["stop"] == 0
 
 
@@ -242,6 +373,17 @@ def test_mode_cli_set_writes_config(monkeypatch: pytest.MonkeyPatch, capsys: pyt
     assert main(["mode", "gpu"]) == 0  # alias → performance
     assert mode.read_config().get("mode") == "performance"
     assert "performance" in capsys.readouterr().out
+
+
+def test_mode_cli_low_resource_alias_writes_quiet(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from exomem.__main__ import main
+
+    monkeypatch.delenv("EXOMEM_MODE", raising=False)
+    assert main(["mode", "low-resource"]) == 0
+    assert mode.read_config().get("mode") == "quiet"
+    assert "quiet" in capsys.readouterr().out
 
 
 # ---- config_path: cross-user (service vs CLI) resolution ----

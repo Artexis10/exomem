@@ -12,6 +12,7 @@ Subcommands:
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `doctor` — read-only local install/setup preflight
+- `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
   also warms the lexical caches
@@ -56,6 +57,8 @@ def main(argv: list[str] | None = None) -> int:
         return demo_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
+    if raw and raw[0] == "status":
+        return _status_main(raw[1:])
     if raw and raw[0] == "warm":
         return _warm_main(raw[1:])
     if raw and raw[0] == "mode":
@@ -245,12 +248,17 @@ def _index_main(argv: list[str]) -> int:
             )
             return 1
 
+    vault_root = Path(args.vault).expanduser()
     stats = embeddings.index_incremental(
-        Path(args.vault).expanduser(),
+        vault_root,
         batch_size=max(1, args.batch_size),
         dry_run=args.dry_run,
         log_fn=print,
     )
+    if not args.dry_run:
+        from . import index_sync
+
+        index_sync.clear_deferred_work(vault_root)
     print(json.dumps(stats))
     return 0
 
@@ -268,11 +276,15 @@ def _mode_main(argv: list[str]) -> int:
         prog="exomem mode",
         description="Show or set the compute mode: quiet (CPU, low footprint) | normal "
         "(default, CPU steady-state) | performance (use the GPU; aliases gpu/turbo). "
-        "Persisted to ~/.exomem/config.json, read by BOTH the server and CLI ops.",
+        "Low-resource aliases resource-saver/low-resource map to quiet. Persisted to "
+        "~/.exomem/config.json, read by BOTH the server and CLI ops.",
     )
     parser.add_argument(
         "mode", nargs="?",
-        choices=("quiet", "normal", "performance", "gpu", "turbo"),
+        choices=(
+            "quiet", "normal", "performance", "gpu", "turbo",
+            "resource-saver", "low-resource",
+        ),
         help="mode to set; omit to show the current one",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON (status only)")
@@ -292,9 +304,12 @@ def _mode_main(argv: list[str]) -> int:
             print(json.dumps(policy))
         else:
             print(f"mode: {policy['mode']}  (source: {source})")
-            print(f"  preload_models:    {policy['preload_models']}")
-            print(f"  release_when_idle: {policy['release_when_idle']}")
-            print(f"  bulk_gpu:          {policy['bulk_gpu']}")
+            print(f"  preload_models:          {policy['preload_models']}")
+            print(f"  preload_cpu_caches:      {policy['preload_cpu_caches']}")
+            print(f"  retain_cpu_caches:       {policy['retain_cpu_caches']}")
+            print(f"  defer_expensive_indexes: {policy['defer_expensive_indexes']}")
+            print(f"  release_when_idle:       {policy['release_when_idle']}")
+            print(f"  bulk_gpu:                {policy['bulk_gpu']}")
             print(f"  config: {policy['config_path']}")
         return 0
 
@@ -308,6 +323,38 @@ def _mode_main(argv: list[str]) -> int:
     print("CLI ops (exomem index / warm) use it on their next run.")
     return 0
 
+
+def _status_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem status",
+        description="Report resource mode, residency, deferred work, and CUDA accounting.",
+    )
+    parser.add_argument(
+        "--resources",
+        action="store_true",
+        help="report resource posture and residency (default)",
+    )
+    parser.add_argument(
+        "--vault",
+        default=os.environ.get("EXOMEM_VAULT_PATH"),
+        help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
+    )
+    parser.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    from . import resource_status
+
+    vault_root = Path(args.vault).expanduser() if args.vault else None
+    status = resource_status.collect(vault_root)
+    if args.json:
+        print(json.dumps(status))
+    else:
+        print(f"mode: {status['mode']}  (source: {status['source']})")
+        print(f"  config: {status['config_path']}")
+        print(f"  models: {status['models']}")
+        print(f"  deferred_work: {status['deferred_work']}")
+        print(f"  cuda: {status['cuda']}")
+    return 0
 
 def _doctor_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
@@ -343,16 +390,22 @@ def _doctor_main(argv: list[str]) -> int:
         print(json.dumps(report.as_dict(), ensure_ascii=False, default=str))
     else:
         print(doctor_module.render_human(report))
-        # GPU-discoverability: offer the performance-mode upgrade when a capable idle GPU
-        # is present and we're not already using it. Silent when no/weak GPU (the default).
-        from . import accel
+        # GPU-discoverability: use a non-torch probe so doctor does not create
+        # a CUDA context or import model dependencies just to print guidance.
         from . import mode as mode_mod
+        from . import resource_status
 
-        if mode_mod.resolve_mode() != "performance" and accel.gpu_usable():
+        gpu = resource_status.gpu_headroom()
+        if mode_mod.resolve_mode() != "performance" and gpu.get("usable") is True:
             print(
-                "\n⚡ A capable GPU was detected. For faster indexing & search, enable "
-                "performance mode:\n    exomem mode performance"
+                "\nA capable idle GPU was detected. Normal mode still avoids "
+                "steady-state CUDA residency. For faster explicit indexing, run:\n"
+                "    exomem mode performance"
             )
+        print(
+            "\nResource controls: exomem mode quiet | normal | performance; "
+            "inspect with exomem status --resources --json."
+        )
     return 0 if report.success else 1
 
 
@@ -574,8 +627,15 @@ def _init_main(argv: list[str]) -> int:
     print(f"  {len(report['created'])} files created + the typed folder tree.")
     print("Next:")
     print("  1. Point Claude Code at this vault (see QUICKSTART.md).")
-    print(f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: python -m exomem install-skill")
+    print(
+        f"  2. Install the Exomem {kb_dirname()} skill so Claude knows how to use it: "
+        "python -m exomem install-skill"
+    )
     print(f"  3. Adapt {kb_prefix()}_Schema/project-keys.yaml to your own projects.")
+    print(
+        "  4. For low-resource mode: exomem mode quiet; inspect with "
+        "exomem status --resources --json."
+    )
     return 0
 
 

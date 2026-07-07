@@ -105,6 +105,59 @@ def test_dispatch_thread_coalesces_within_debounce(vault, monkeypatch: pytest.Mo
         t.join(timeout=2)
 
 
+def test_file_watcher_reads_policy_without_restart(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    w = file_watcher.FileWatcher(vault)
+
+    assert w._debounce_seconds() == pytest.approx(2.0)
+    assert w._reconcile_interval_seconds() == pytest.approx(900.0)
+
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+
+    assert w._debounce_seconds() == pytest.approx(0.5)
+    assert w._reconcile_interval_seconds() == pytest.approx(300.0)
+
+
+def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls: list[list[Path]] = []
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda root, paths: calls.append(list(paths)),
+    )
+    monkeypatch.setattr(
+        file_watcher.mode,
+        "watcher_policy",
+        lambda: file_watcher.mode.WatcherPolicy(
+            debounce_seconds=0.05,
+            reconcile_interval_seconds=999.0,
+            max_embed_files_per_batch=0,
+            max_reconcile_embed_files=0,
+            defer_expensive_indexes=True,
+        ),
+    )
+    w = file_watcher.FileWatcher(vault)
+    t = threading.Thread(target=w._run_dispatch, daemon=True)
+    t.start()
+    try:
+        a = vault / "Knowledge Base" / "Notes" / "quiet-a.md"
+        b = vault / "Knowledge Base" / "Notes" / "quiet-b.md"
+        w._record(a, deleted=False)
+        time.sleep(0.01)
+        w._record(b, deleted=False)
+        deadline = time.monotonic() + 2.0
+        while not calls and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert len(calls) == 1
+        assert sorted(calls[0]) == sorted([a, b])
+    finally:
+        w._stop.set()
+        w._wake.set()
+        t.join(timeout=2)
+
+
 def test_start_soft_fails_when_watchdog_missing(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom():
         raise ImportError("No module named 'watchdog'")
@@ -284,6 +337,26 @@ def test_reconcile_dispatches_drift_delta_to_fanout(vault, monkeypatch: pytest.M
     assert calls["delete"] == []
     # bm25 corpus pre-warmed for both scopes off the query path.
     assert calls["warm"] == ["kb", "vault"]
+
+
+def test_quiet_reconcile_defers_embedding_and_skips_bm25_warm(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    file_watcher.clear_self_write_registry()
+    calls = _spy_reconcile_fanout(monkeypatch)
+    w = file_watcher.FileWatcher(vault)
+    w._reconcile_once(seed=True)
+
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    future = time.time() + 10_000
+    os.utime(target, (future, future))
+
+    w._reconcile_once(seed=False)
+
+    assert len(calls["upsert"]) == 1
+    assert [p.resolve() for p in calls["upsert"][0]] == [target.resolve()]
+    assert calls["warm"] == []
 
 
 def test_reconcile_seed_dispatches_nothing(vault, monkeypatch: pytest.MonkeyPatch) -> None:

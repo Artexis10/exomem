@@ -34,18 +34,45 @@ import json
 import logging
 import os
 import threading
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 log = logging.getLogger(__name__)
 
 CANON = ("quiet", "normal", "performance")
-_ALIASES = {"gpu": "performance", "turbo": "performance"}
+_ALIASES = {
+    "gpu": "performance",
+    "turbo": "performance",
+    "resource-saver": "quiet",
+    "low-resource": "quiet",
+}
 DEFAULT_MODE = "normal"
+
+_DEFAULT_DEBOUNCE_SECONDS = 0.5
+_QUIET_DEBOUNCE_SECONDS = 2.0
+_DEFAULT_RECONCILE_INTERVAL_SECONDS = 300.0
+_QUIET_RECONCILE_INTERVAL_SECONDS = 900.0
+_DEFAULT_RECONCILE_MAX_EMBED_FILES = 500
+_QUIET_EXPENSIVE_INDEX_CAP = 0
 
 _MODE_ENV = "EXOMEM_MODE"
 _QUIET_ALIAS_ENV = "EXOMEM_QUIET_MODE"
 _CONFIG_PATH_ENV = "EXOMEM_CONFIG_PATH"
 _RELEASE_ENV = "EXOMEM_RELEASE_GPU_WHEN_IDLE"
+
+
+@dataclass(frozen=True)
+class WatcherPolicy:
+    """Mode-derived watcher/reconcile limits, kept torch-free for lean status paths."""
+
+    debounce_seconds: float
+    reconcile_interval_seconds: float
+    max_embed_files_per_batch: int | None
+    max_reconcile_embed_files: int | None
+    defer_expensive_indexes: bool
+
+    def as_dict(self) -> dict:
+        return asdict(self)
 
 
 def _truthy(value: str | None) -> bool:
@@ -112,6 +139,40 @@ def preload_models() -> bool:
     return resolve_mode() != "quiet"
 
 
+def preload_cpu_caches() -> bool:
+    """Whether startup warm-up may materialize O(vault) CPU caches."""
+    return resolve_mode() != "quiet"
+
+
+def retain_cpu_caches() -> bool:
+    """Whether large CPU caches may stay resident after use."""
+    return resolve_mode() != "quiet"
+
+
+def defer_expensive_indexes() -> bool:
+    """Whether semantic/visual indexing should be queued or capped."""
+    return resolve_mode() == "quiet"
+
+
+def watcher_policy() -> WatcherPolicy:
+    """Mode-derived low-interrupt watcher/reconcile policy."""
+    if defer_expensive_indexes():
+        return WatcherPolicy(
+            debounce_seconds=_QUIET_DEBOUNCE_SECONDS,
+            reconcile_interval_seconds=_QUIET_RECONCILE_INTERVAL_SECONDS,
+            max_embed_files_per_batch=_QUIET_EXPENSIVE_INDEX_CAP,
+            max_reconcile_embed_files=_QUIET_EXPENSIVE_INDEX_CAP,
+            defer_expensive_indexes=True,
+        )
+    return WatcherPolicy(
+        debounce_seconds=_DEFAULT_DEBOUNCE_SECONDS,
+        reconcile_interval_seconds=_DEFAULT_RECONCILE_INTERVAL_SECONDS,
+        max_embed_files_per_batch=None,
+        max_reconcile_embed_files=_DEFAULT_RECONCILE_MAX_EMBED_FILES,
+        defer_expensive_indexes=False,
+    )
+
+
 def release_when_idle() -> bool:
     """Whether the idle-unload reaper should run.
 
@@ -141,6 +202,10 @@ def resolved() -> dict:
     return {
         "mode": m,
         "preload_models": preload_models(),
+        "preload_cpu_caches": preload_cpu_caches(),
+        "retain_cpu_caches": retain_cpu_caches(),
+        "defer_expensive_indexes": defer_expensive_indexes(),
+        "watcher_policy": watcher_policy().as_dict(),
         "release_when_idle": release_when_idle(),
         "bulk_gpu": bulk_gpu_opted(),
     }
@@ -193,6 +258,14 @@ def apply_live() -> dict:
             unload()
         except Exception:  # noqa: BLE001 — a live switch must never crash the caller
             log.warning("model unload during mode switch failed", exc_info=True)
+    if _applied_mode == "quiet":
+        from . import bm25, find
+
+        for unload in (embeddings.unload_index_caches, bm25.unload_cache, find.unload_ram_caches):
+            try:
+                unload()
+            except Exception:  # noqa: BLE001 — quiet entry must remain best-effort
+                log.warning("cache unload during quiet mode switch failed", exc_info=True)
     if release_when_idle():
         model_reaper.start()
     else:

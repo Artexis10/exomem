@@ -36,7 +36,7 @@ import time
 from collections.abc import Iterable
 from pathlib import Path
 
-from . import freshness, index_sync
+from . import freshness, index_sync, mode
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -230,10 +230,10 @@ def _import_watchdog():
 class FileWatcher:
     """Watch Knowledge Base/ for `.md` changes and re-embed them, debounced."""
 
-    def __init__(self, vault_root: Path, *, debounce_seconds: float = DEBOUNCE_SECONDS) -> None:
+    def __init__(self, vault_root: Path, *, debounce_seconds: float | None = None) -> None:
         self._vault_root = vault_root
         self._kb_root = vault_root / kb_dirname()
-        self._debounce = debounce_seconds
+        self._debounce_override = debounce_seconds
         self._lock = threading.Lock()
         self._pending_upsert: set[Path] = set()
         self._pending_delete: set[Path] = set()
@@ -243,6 +243,17 @@ class FileWatcher:
         self._thread: threading.Thread | None = None
         self._observer = None
         self._reconcile_thread: threading.Thread | None = None
+
+    def _watcher_policy(self) -> mode.WatcherPolicy:
+        return mode.watcher_policy()
+
+    def _debounce_seconds(self) -> float:
+        if self._debounce_override is not None:
+            return self._debounce_override
+        return self._watcher_policy().debounce_seconds
+
+    def _reconcile_interval_seconds(self) -> float:
+        return self._watcher_policy().reconcile_interval_seconds
 
     def _is_kb(self, path: Path) -> bool:
         """True when `path` is under Knowledge Base/ — the subset that gets
@@ -330,9 +341,10 @@ class FileWatcher:
             # Wait for a quiet window so a burst of saves (or a git pull) coalesces
             # into one batch instead of one upsert per FS event.
             while not self._stop.is_set():
-                time.sleep(self._debounce)
+                debounce = self._debounce_seconds()
+                time.sleep(debounce)
                 with self._lock:
-                    quiet = (time.monotonic() - self._last_change) >= self._debounce
+                    quiet = (time.monotonic() - self._last_change) >= debounce
                 if quiet:
                     break
             self._wake.clear()
@@ -401,6 +413,9 @@ class FileWatcher:
             self._dispatch_reconcile_delta(list(changed_union), list(deleted_union))
         except Exception:  # noqa: BLE001
             log.exception("file watcher: reconcile drift dispatch failed")
+        if self._watcher_policy().defer_expensive_indexes:
+            log.info("file watcher: quiet reconcile deferred expensive warm-up")
+            return
         from . import bm25
         for scope in freshness.SCOPES:
             try:
@@ -519,14 +534,22 @@ class FileWatcher:
         # Index sidecars (embedding + lexical): Knowledge Base markdown only.
         kb_ups = [p for p in ups if self._is_kb(p)]
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
-        if cap and len(kb_ups) > RECONCILE_MAX_EMBED_FILES:
-            log.warning(
-                "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
-                "the freshness registry is fully healed — run `reconcile` to re-embed "
-                "the remainder",
-                RECONCILE_MAX_EMBED_FILES, len(kb_ups),
+        policy = self._watcher_policy()
+        if cap and not policy.defer_expensive_indexes:
+            max_files = policy.max_reconcile_embed_files
+            if max_files is not None and len(kb_ups) > max_files:
+                log.warning(
+                    "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
+                    "the freshness registry is fully healed — run `reconcile` to re-embed "
+                    "the remainder",
+                    max_files, len(kb_ups),
+                )
+                kb_ups = kb_ups[:max_files]
+        elif policy.defer_expensive_indexes and kb_ups:
+            log.info(
+                "file watcher: quiet mode deferring semantic indexing for %d KB file(s)",
+                len(kb_ups),
             )
-            kb_ups = kb_ups[:RECONCILE_MAX_EMBED_FILES]
         if kb_ups:
             try:
                 index_sync.upsert_after_write(self._vault_root, kb_ups)
@@ -536,13 +559,16 @@ class FileWatcher:
             try:
                 index_sync.delete_after_remove(self._vault_root, kb_del_rels)
             except Exception:  # noqa: BLE001
-                log.exception("file watcher: delete_after_remove failed for %d file(s)", len(kb_del_rels))
+                log.exception(
+                    "file watcher: delete_after_remove failed for %d file(s)",
+                    len(kb_del_rels),
+                )
 
     def _run_reconcile(self) -> None:
         # Seed immediately (off the boot path — this is the watcher's own
         # daemon thread), then re-walk every RECONCILE_INTERVAL to bound drift.
         self._reconcile_once(seed=True)
-        while not self._stop.wait(RECONCILE_INTERVAL_SECONDS):
+        while not self._stop.wait(self._reconcile_interval_seconds()):
             self._reconcile_once(seed=False)
 
     # ---- lifecycle ----

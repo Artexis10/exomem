@@ -1499,6 +1499,26 @@ class EmbeddingIndex:
             self._cache = loaded
             return loaded.metadata, loaded.matrix
 
+    def unload_cache(self) -> bool:
+        """Drop the resident matrix cache without deleting sidecar rows."""
+        with self._lock:
+            loaded = self._cache is not None
+            self._cache = None
+            return loaded
+
+    def cache_status(self) -> dict:
+        """Best-effort residency status for this in-memory matrix only."""
+        c = self._cache
+        if c is None:
+            return {"loaded": False, "rows": 0, "bytes": 0}
+        return {
+            "loaded": True,
+            "rows": len(c.metadata),
+            "bytes": int(c.matrix.nbytes),
+            "epoch": c.epoch,
+            "generation": c.generation,
+        }
+
     def _load_all_rows(self) -> _EmbCache:
         """Full reload from the sidecar → an `_EmbCache`.
 
@@ -2102,6 +2122,26 @@ class ClipIndex:
             self._cache = loaded
             return loaded.paths, loaded.frame_ts, loaded.matrix
 
+    def unload_cache(self) -> bool:
+        """Drop the resident CLIP matrix cache without deleting sidecar rows."""
+        with self._lock:
+            loaded = self._cache is not None
+            self._cache = None
+            return loaded
+
+    def cache_status(self) -> dict:
+        """Best-effort residency status for this in-memory matrix only."""
+        c = self._cache
+        if c is None:
+            return {"loaded": False, "rows": 0, "bytes": 0}
+        return {
+            "loaded": True,
+            "rows": len(c.paths),
+            "bytes": int(c.matrix.nbytes),
+            "epoch": c.epoch,
+            "generation": c.generation,
+        }
+
     def _load_all_rows(self) -> _ClipCache:
         """Full reload → a `_ClipCache`, reading the meta token and rows in ONE
         `BEGIN` snapshot (see EmbeddingIndex._load_all_rows)."""
@@ -2253,6 +2293,40 @@ def clear_embedding_indexes() -> None:
     with _INDEX_CACHE_LOCK:
         _INDEX_CACHE.clear()
         _CLIP_INDEX_CACHE.clear()
+
+
+def unload_index_caches() -> dict[str, int]:
+    """Evict resident embedding/CLIP matrices from already-shared index objects."""
+    with _INDEX_CACHE_LOCK:
+        embedding_indexes = list(_INDEX_CACHE.values())
+        clip_indexes = list(_CLIP_INDEX_CACHE.values())
+    return {
+        "embedding": sum(1 for idx in embedding_indexes if idx.unload_cache()),
+        "clip": sum(1 for idx in clip_indexes if idx.unload_cache()),
+    }
+
+
+def _summarize_index_status(indexes: dict[str, object]) -> dict:
+    by_vault = {key: idx.cache_status() for key, idx in indexes.items()}
+    loaded = [s for s in by_vault.values() if s.get("loaded")]
+    return {
+        "indexes": len(by_vault),
+        "loaded": len(loaded),
+        "rows": sum(int(s.get("rows") or 0) for s in loaded),
+        "bytes": sum(int(s.get("bytes") or 0) for s in loaded),
+        "by_vault": by_vault,
+    }
+
+
+def index_cache_status() -> dict:
+    """No-allocation residency status for already-created embedding index objects."""
+    with _INDEX_CACHE_LOCK:
+        embedding_indexes = dict(_INDEX_CACHE)
+        clip_indexes = dict(_CLIP_INDEX_CACHE)
+    return {
+        "embedding": _summarize_index_status(embedding_indexes),
+        "clip": _summarize_index_status(clip_indexes),
+    }
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:

@@ -220,12 +220,31 @@ class BM25Index:
             return
         self._fresh_corpus(vault_root, scope, None)
 
-    def clear(self) -> None:
+    def unload_cache(self) -> bool:
+        """Drop rebuildable in-process BM25 corpus/token caches."""
         with self._build_lock:
+            loaded = bool(self._cache or self._tokens)
             self._cache.clear()
             self._tokens.clear()
             self.last_tokenized = 0
             self.last_reused = 0
+            return loaded
+
+    def cache_status(self) -> dict:
+        """No-allocation residency status for the Python BM25 rung."""
+        with self._build_lock:
+            doc_count = sum(len(entry[2]) for entry in self._cache.values())
+            token_count = sum(len(tokens) for _mtime, tokens in self._tokens.values())
+            return {
+                "loaded": bool(self._cache or self._tokens),
+                "corpora": len(self._cache),
+                "documents": doc_count,
+                "tokenized_documents": len(self._tokens),
+                "tokens": token_count,
+            }
+
+    def clear(self) -> None:
+        self.unload_cache()
 
 
 def corpus_key(vault_root: Path, scope: str) -> tuple:
@@ -259,6 +278,16 @@ def search(
 def warm(vault_root: Path, scope: str = "kb") -> None:
     """Module-level warm-up hook using the per-process singleton."""
     _INDEX.warm(vault_root, scope)
+
+
+def unload_cache() -> bool:
+    """Evict the singleton BM25 corpus/token cache without touching vault files."""
+    return _INDEX.unload_cache()
+
+
+def cache_status() -> dict:
+    """No-allocation residency status for the singleton BM25 cache."""
+    return _INDEX.cache_status()
 
 
 def clear_cache() -> None:

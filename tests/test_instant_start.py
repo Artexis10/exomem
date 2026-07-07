@@ -276,7 +276,8 @@ def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
     the idle-VRAM win: no model touches CUDA at boot."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
-    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
+    cache_policy: dict = {}
+    monkeypatch.setattr(warmup, "warm_caches", lambda vr, **kw: cache_policy.update(kw) or {})
 
     def _forbidden() -> None:
         raise AssertionError("model getters must not be called in quiet mode")
@@ -287,6 +288,8 @@ def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
 
     warmup.warm_all(tmp_path)
 
+    assert cache_policy["preload_models"] is False
+    assert cache_policy["preload_cpu_caches"] is False
     for c in readiness.COMPONENTS:
         assert readiness.is_ready(c) is True
 
@@ -318,11 +321,11 @@ def test_warm_all_quiet_mode_replays_deferred_write_embeds(
 def test_warm_caches_gates_matrix_warm_on_preload_models(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The embedding/CLIP matrix dummy searches (which touch the vector backend) are
-    skipped when preload_models is False and run when True — the CPU-only lexical
-    steps are unaffected either way."""
+    """The embedding/CLIP matrix dummy searches are skipped when preload_models is
+    False and run when True while CPU cache preloading is otherwise allowed."""
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
 
     calls: list[int] = []
 
@@ -344,6 +347,34 @@ def test_warm_caches_gates_matrix_warm_on_preload_models(
     assert "embedding_matrix" in d_default
     assert "clip_matrix" in d_default
     assert calls == [1, 1]
+
+
+def test_warm_caches_quiet_skips_cpu_and_vector_warmup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir()
+    (kb / "a.md").write_text("# A\n\nbody", encoding="utf-8")
+
+    forbidden: list[str] = []
+
+    def _forbid(name: str):
+        def inner(*_args, **_kwargs):
+            forbidden.append(name)
+            raise AssertionError(f"{name} should not warm in quiet mode")
+        return inner
+
+    monkeypatch.setattr(bm25, "warm", _forbid("bm25"))
+    monkeypatch.setattr(find_module._CACHE, "get", _forbid("pages"))
+    monkeypatch.setattr(find_module, "_get_query_resolver", _forbid("resolver"))
+    monkeypatch.setattr(embeddings, "get_embedding_index", _forbid("embedding_matrix"))
+    monkeypatch.setattr(embeddings, "get_clip_index", _forbid("clip_matrix"))
+
+    assert warmup.warm_caches(tmp_path) == {}
+    assert forbidden == []
 
 
 def test_warm_all_soft_fails_one_step_and_continues_to_later_steps(

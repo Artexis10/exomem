@@ -36,7 +36,7 @@ _stop = threading.Event()
 
 
 @dataclass
-class ModelSlot:
+class ResourceSlot:
     name: str
     is_loaded: Callable[[], bool]
     inflight: Callable[[], int]
@@ -56,7 +56,10 @@ def idle_seconds() -> float:
     return minutes * 60.0 if minutes > 0 else DEFAULT_IDLE_SECONDS
 
 
-def _should_unload(slot: ModelSlot, now: float, threshold: float) -> bool:
+ModelSlot = ResourceSlot
+
+
+def _should_unload(slot: ResourceSlot, now: float, threshold: float) -> bool:
     """Pure decision: unload iff not warming, loaded, not in-flight, idle-window elapsed."""
     if readiness.is_warming():
         return False
@@ -67,27 +70,70 @@ def _should_unload(slot: ModelSlot, now: float, threshold: float) -> bool:
     return (now - slot.last_activity()) >= threshold
 
 
-def default_slots() -> list[ModelSlot]:
-    """The find-path model trio (bge, reranker, CLIP) — the models that go resident."""
-    from . import embeddings as e
+def _quiet_cache_slot(
+    name: str,
+    is_loaded: Callable[[], bool],
+    unload: Callable[[], bool],
+) -> ResourceSlot:
+    """Cache slot with approximate idle tracking, active only when caches are evictable."""
+    from . import mode
+
+    state = {"last_empty": time.monotonic()}
+
+    def loaded() -> bool:
+        should_retain = mode.retain_cpu_caches()
+        resident = (not should_retain) and is_loaded()
+        if not resident:
+            state["last_empty"] = time.monotonic()
+        return resident
+
+    return ResourceSlot(
+        name=name,
+        is_loaded=loaded,
+        inflight=lambda: 0,
+        last_activity=lambda: state["last_empty"],
+        unload=unload,
+    )
+
+
+def default_slots() -> list[ResourceSlot]:
+    """Default reclaimable resources: models always, CPU caches only in quiet mode."""
+    from . import bm25, embeddings as e, find
 
     return [
-        ModelSlot(
+        ResourceSlot(
             "embeddings", lambda: e._MODEL is not None,
             e.BGE_GUARD.inflight, e.BGE_GUARD.last_activity, e.unload_model,
         ),
-        ModelSlot(
+        ResourceSlot(
             "reranker", lambda: e._RERANKER is not None,
             e.RERANKER_GUARD.inflight, e.RERANKER_GUARD.last_activity, e.unload_reranker,
         ),
-        ModelSlot(
+        ResourceSlot(
             "clip", lambda: e._CLIP_MODEL is not None,
             e.CLIP_GUARD.inflight, e.CLIP_GUARD.last_activity, e.unload_clip_model,
+        ),
+        _quiet_cache_slot(
+            "index-matrices",
+            lambda: any(v.get("loaded", 0) for v in e.index_cache_status().values()),
+            lambda: any(e.unload_index_caches().values()),
+        ),
+        _quiet_cache_slot(
+            "bm25-cache",
+            lambda: bool(bm25.cache_status().get("loaded")),
+            bm25.unload_cache,
+        ),
+        _quiet_cache_slot(
+            "find-ram-caches",
+            lambda: any(
+                section.get("entries", 0) for section in find.cache_status().values()
+            ),
+            lambda: any(find.unload_ram_caches().values()),
         ),
     ]
 
 
-def _reap_once(slots: list[ModelSlot], now: float, threshold: float) -> list[str]:
+def _reap_once(slots: list[ResourceSlot], now: float, threshold: float) -> list[str]:
     """Unload every stale slot once; return the names actually reaped. Never raises."""
     reaped: list[str] = []
     for s in slots:
@@ -105,7 +151,7 @@ def _reap_once(slots: list[ModelSlot], now: float, threshold: float) -> list[str
 def start(
     threshold: float | None = None,
     tick: float = TICK_SECONDS,
-    slots: list[ModelSlot] | None = None,
+    slots: list[ResourceSlot] | None = None,
 ) -> threading.Thread:
     """Start the idle-unload daemon (idempotent — a second call returns the live thread)."""
     global _thread

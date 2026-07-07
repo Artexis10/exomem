@@ -90,6 +90,41 @@ def test_matrix_loads_once_and_is_reused(tmp_path, monkeypatch):
     assert [m[0] for m in metadata] == ["a.md", "b.md"]
 
 
+def test_index_cache_status_and_unload_are_non_destructive(tmp_path):
+    vault = _fresh_vault(tmp_path)
+    emb = embeddings.get_embedding_index(vault)
+    clip = embeddings.get_clip_index(vault)
+
+    cold = embeddings.index_cache_status()
+    assert cold["embedding"]["indexes"] == 1
+    assert cold["embedding"]["loaded"] == 0
+    assert cold["clip"]["indexes"] == 1
+    assert cold["clip"]["loaded"] == 0
+
+    emb.upsert_file("a.md", ["a"], _mat([1, 0]), 1.0)
+    clip.upsert("a.png", _cpad([1, 0]), 1.0)
+    emb_meta, emb_matrix = emb.all_vectors()
+    clip_paths, clip_ts, clip_matrix = clip.all_vectors()
+    assert emb_meta == [("a.md", 0)]
+    assert clip_paths == ["a.png"] and clip_ts == [None]
+
+    warm = embeddings.index_cache_status()
+    assert warm["embedding"]["loaded"] == 1
+    assert warm["embedding"]["rows"] == 1
+    assert warm["embedding"]["bytes"] == emb_matrix.nbytes
+    assert warm["clip"]["loaded"] == 1
+    assert warm["clip"]["rows"] == 1
+    assert warm["clip"]["bytes"] == clip_matrix.nbytes
+
+    assert embeddings.unload_index_caches() == {"embedding": 1, "clip": 1}
+    assert embeddings.index_cache_status()["embedding"]["loaded"] == 0
+    assert embeddings.index_cache_status()["clip"]["loaded"] == 0
+
+    # The sidecars remain intact and lazily reload on next use.
+    assert emb.all_vectors()[0] == [("a.md", 0)]
+    assert clip.all_vectors()[0] == ["a.png"]
+
+
 def test_in_process_writes_never_force_reload(tmp_path, monkeypatch):
     """Warm cache + a stream of in-process writes → reads reload zero times.
 

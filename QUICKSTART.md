@@ -198,6 +198,32 @@ uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile lean
 uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile hybrid
 ```
 
+### Resource modes
+
+The safe default is `normal`: CPU steady-state, no automatic CUDA residency, and
+warm CPU caches allowed. For gaming or other foreground work, switch to quiet:
+
+```bash
+uv run python -m exomem mode quiet
+uv run python -m exomem status --resources --json
+```
+
+Quiet skips heavy startup warm-up, makes large caches evictable, and defers
+expensive semantic/CLIP indexing while keeping cheap freshness/inbound/resolver
+updates live. After foreground work, return to `normal` or run an explicit heal:
+
+```bash
+uv run python -m exomem mode normal
+uv run python -m exomem index --vault "/path/to/your/Obsidian"
+uv run python -m exomem reconcile --vault "/path/to/your/Obsidian"
+```
+
+Use `performance` only when you explicitly want GPU-capable bulk/model work:
+
+```bash
+uv run python -m exomem mode performance
+```
+
 ---
 
 ## 5. Add it to Claude Code

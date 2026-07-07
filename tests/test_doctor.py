@@ -203,3 +203,49 @@ def test_sidecar_live_probe_passes_on_built_sidecar(
 
     assert check.status == "pass", check.message
     assert "live" in check.message
+
+
+def test_resource_posture_check_cpu_unknown_is_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import resource_status
+
+    monkeypatch.setattr(
+        resource_status,
+        "gpu_headroom",
+        lambda: {
+            "status": "unknown",
+            "usable": None,
+            "reason": "nvidia-smi not found",
+            "min_free_mb": 2048,
+        },
+    )
+
+    check = doctor_module._check_resource_posture("lean")
+
+    assert check.status == "pass"
+    assert "CPU is the supported baseline" in check.message
+    assert check.as_dict()["details"]["gpu"]["status"] == "unknown"
+
+
+def test_resource_posture_check_marginal_gpu_warns_for_hybrid(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import resource_status
+
+    monkeypatch.setattr(
+        resource_status,
+        "gpu_headroom",
+        lambda: {
+            "status": "marginal",
+            "usable": False,
+            "reason": "free VRAM below policy threshold",
+            "free_mb": 512,
+            "total_mb": 8192,
+            "min_free_mb": 2048,
+        },
+    )
+
+    check = doctor_module._check_resource_posture("hybrid")
+
+    assert check.status == "warn"
+    assert "free VRAM below policy threshold" in check.message
+    assert check.as_dict()["details"]["gpu"]["usable"] is False
