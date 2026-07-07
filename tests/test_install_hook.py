@@ -202,6 +202,69 @@ def test_install_hook_via_cli_for_codex(tmp_path: Path) -> None:
     assert any("exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows") for h in entries)
 
 
+def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkeypatch) -> None:
+    home = tmp_path / "home"; home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+
+    assert report["success"] is True
+    client = report["clients"][0]
+    assert client["client"] == "codex"
+    assert any(c["id"] == "config.UserPromptSubmit" and c["status"] == "pass" for c in client["checks"])
+    assert any(c["id"] == "scripts.Stop" and c["status"] == "pass" for c in client["checks"])
+    assert client["logs"]["retrieve"]["path"].startswith(str(home / ".codex"))
+
+
+def test_install_hook_check_flags_stale_deployed_copy(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+    (hd / "exomem_retrieve_nudge.py").write_text("# stale\n", encoding="utf-8")
+
+    report = hook_module.check_hooks(clients=("claude",), hook_dir=hd, settings_path=sp)
+
+    assert report["success"] is False
+    checks = report["clients"][0]["checks"]
+    stale = [c for c in checks if c["id"] == "scripts.UserPromptSubmit"][0]
+    assert stale["status"] == "fail"
+    assert "differ from bundled source" in stale["message"]
+
+
+def test_install_hook_check_flags_legacy_kb_config(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    data["hooks"]["UserPromptSubmit"] = [
+        {"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh"}]}
+    ]
+    sp.write_text(json.dumps(data), encoding="utf-8")
+
+    report = hook_module.check_hooks(clients=("claude",), hook_dir=hd, settings_path=sp)
+
+    assert report["success"] is False
+    checks = report["clients"][0]["checks"]
+    assert [c for c in checks if c["id"] == "config.legacy"][0]["status"] == "fail"
+    assert [c for c in checks if c["id"] == "config.UserPromptSubmit"][0]["status"] == "fail"
+
+
+def test_install_hook_check_via_cli_json(tmp_path: Path, capsys) -> None:
+    from exomem.__main__ import main
+
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+
+    assert main([
+        "install-hook", "--check", "--client", "codex",
+        "--hook-dir", str(hd), "--settings", str(sp), "--json",
+    ]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["success"] is True
+    assert payload["clients"][0]["client"] == "codex"
+
+
 # --- shared subprocess helper ---------------------------------------------------
 
 def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):

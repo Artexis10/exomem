@@ -20,8 +20,10 @@ default this copies the scripts AND merges settings.json; `wire=False`
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
+import time
 from pathlib import Path
 
 _HOOK_DIR_SRC = Path(__file__).parent / "_hooks"
@@ -49,6 +51,7 @@ _MARKERS = (
     "kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge",
     "exomem_capture_nudge", "exomem_retrieve_nudge", "exomem-capture-nudge", "exomem-retrieve-nudge",
 )
+_LEGACY_MARKERS = ("kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge")
 
 
 def _normalize_client(client: str) -> str:
@@ -108,6 +111,264 @@ def _hook_entry(item: dict, timeout: int) -> dict:
     if item.get("commandWindows"):
         entry["commandWindows"] = item["commandWindows"]
     return entry
+
+
+def _sha256(path: Path) -> str | None:
+    try:
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except OSError:
+        return None
+
+
+def _read_json(path: Path) -> tuple[dict | None, str | None]:
+    try:
+        loaded = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001 - diagnostic boundary
+        return None, str(e)
+    return (loaded, None) if isinstance(loaded, dict) else (None, "top-level JSON is not an object")
+
+
+def _commands_for_event(data: dict | None, event: str) -> list[dict]:
+    if not isinstance(data, dict):
+        return []
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return []
+    groups = hooks.get(event)
+    if not isinstance(groups, list):
+        return []
+    entries: list[dict] = []
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        for hook in group.get("hooks", []):
+            if isinstance(hook, dict):
+                entries.append(hook)
+    return entries
+
+
+def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
+    haystack = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
+    return any(marker in haystack for marker in markers)
+
+
+def _fmt_age(ts: float | None) -> str | None:
+    if ts is None:
+        return None
+    age = max(0, int(time.time() - ts))
+    if age < 60:
+        return f"{age}s ago"
+    if age < 3600:
+        return f"{age // 60}m ago"
+    if age < 86400:
+        return f"{age // 3600}h ago"
+    return f"{age // 86400}d ago"
+
+
+def _file_mtime(path: Path) -> float | None:
+    try:
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _cache_summary(client: str) -> dict:
+    cache = Path.home() / (".codex" if client == "codex" else ".claude") / ".cache" / "exomem-nudge"
+    entries: list[Path] = []
+    try:
+        if cache.exists():
+            entries = [p for p in cache.iterdir() if p.is_file()]
+    except OSError:
+        entries = []
+    latest = max((_file_mtime(p) for p in entries), default=None)
+    return {
+        "path": str(cache),
+        "exists": cache.exists(),
+        "entries": len(entries),
+        "latest_age": _fmt_age(latest),
+    }
+
+
+def _log_summary(client: str, kind: str) -> dict:
+    home = Path.home() / (".codex" if client == "codex" else ".claude")
+    path = home / f"exomem-{kind}-nudge.log"
+    mtime = _file_mtime(path)
+    return {
+        "path": str(path),
+        "exists": path.exists(),
+        "last_trigger_age": _fmt_age(mtime),
+    }
+
+
+def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
+    items = {}
+    for name in (script, wrapper):
+        src = _HOOK_DIR_SRC / name
+        dst = hook_dir / name
+        src_hash = _sha256(src)
+        dst_hash = _sha256(dst)
+        items[name] = {
+            "path": str(dst),
+            "exists": dst.exists(),
+            "matches_bundle": bool(src_hash and dst_hash and src_hash == dst_hash),
+            "bundle_hash": src_hash,
+            "deployed_hash": dst_hash,
+        }
+    return items
+
+
+def check_hooks(
+    *,
+    clients: tuple[str, ...] = SUPPORTED_CLIENTS,
+    hook_dir: Path | None = None,
+    settings_path: Path | None = None,
+) -> dict:
+    """Read-only hook health report.
+
+    Checks deployed hook copies against bundled source, verifies client configs point
+    at current `exomem_*` hooks instead of legacy `kb_*` hooks, and reports where
+    logs/cooldown state land. Returns a JSON-serializable report.
+    """
+    normalized = tuple(_normalize_client(c) for c in clients)
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"duplicate clients requested: {clients!r}")
+    if (hook_dir or settings_path) and len(normalized) != 1:
+        raise ValueError("hook_dir/settings_path overrides require exactly one client")
+
+    reports = []
+    for client in normalized:
+        hd = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
+        sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
+        data, parse_error = (None, "file does not exist")
+        if sp.exists():
+            data, parse_error = _read_json(sp)
+
+        checks: list[dict] = []
+
+        def add(id_: str, status: str, message: str, details: dict | None = None) -> None:
+            row = {"id": id_, "status": status, "message": message}
+            if details is not None:
+                row["details"] = details
+            checks.append(row)
+
+        add(
+            "config.file",
+            "pass" if data is not None else "fail",
+            f"hook config readable at {sp}" if data is not None else f"hook config unavailable at {sp}: {parse_error}",
+            {"path": str(sp), "exists": sp.exists(), "parse_error": parse_error},
+        )
+
+        any_legacy = False
+        for _py, _sh, event in _HOOK_SPECS:
+            for hook in _commands_for_event(data, event):
+                if _contains_any(hook, _LEGACY_MARKERS):
+                    any_legacy = True
+        add(
+            "config.legacy",
+            "fail" if any_legacy else "pass",
+            "legacy kb_* hook entries are still configured" if any_legacy else "no legacy kb_* hook entries configured",
+        )
+
+        scripts = {}
+        for script, wrapper, event in _HOOK_SPECS:
+            entries = _commands_for_event(data, event)
+            configured = any(_contains_any(h, (script, wrapper)) for h in entries)
+            legacy = [h for h in entries if _contains_any(h, _LEGACY_MARKERS)]
+            add(
+                f"config.{event}",
+                "pass" if configured and not legacy else "fail",
+                (
+                    f"{event} points at current Exomem hook"
+                    if configured and not legacy
+                    else f"{event} does not point cleanly at current Exomem hook"
+                ),
+                {"entries": entries},
+            )
+
+            status = _script_status(hd, script, wrapper)
+            scripts.update(status)
+            stale = [name for name, row in status.items() if not row["matches_bundle"]]
+            missing = [name for name, row in status.items() if not row["exists"]]
+            if missing:
+                add(
+                    f"scripts.{event}",
+                    "fail",
+                    f"{event} deployed hook file(s) missing: {', '.join(missing)}",
+                    status,
+                )
+            elif stale:
+                add(
+                    f"scripts.{event}",
+                    "fail",
+                    f"{event} deployed hook file(s) differ from bundled source: {', '.join(stale)}",
+                    status,
+                )
+            else:
+                add(f"scripts.{event}", "pass", f"{event} deployed hook files match bundled source", status)
+
+        logs = {
+            "capture": _log_summary(client, "capture"),
+            "retrieve": _log_summary(client, "retrieve"),
+        }
+        for kind, row in logs.items():
+            add(
+                f"log.{kind}",
+                "pass" if row["exists"] else "warn",
+                (
+                    f"{kind} hook log exists at {row['path']}"
+                    if row["exists"]
+                    else f"{kind} hook log has not been created yet at {row['path']}"
+                ),
+                row,
+            )
+
+        cache = _cache_summary(client)
+        add(
+            "cache.cooldown",
+            "pass" if cache["exists"] else "warn",
+            (
+                f"cooldown cache exists with {cache['entries']} entries"
+                if cache["exists"]
+                else f"cooldown cache has not been created yet at {cache['path']}"
+            ),
+            cache,
+        )
+
+        reports.append({
+            "client": client,
+            "success": not any(c["status"] == "fail" for c in checks),
+            "hook_dir": str(hd),
+            "settings_path": str(sp),
+            "scripts": scripts,
+            "logs": logs,
+            "cache": cache,
+            "checks": checks,
+        })
+
+    return {
+        "success": not any(not c["success"] for c in reports),
+        "clients": reports,
+    }
+
+
+def render_check_human(report: dict) -> str:
+    lines = [
+        "exomem hook check",
+        f"overall: {'PASS' if report.get('success') else 'FAIL'}",
+    ]
+    for client in report.get("clients", []):
+        lines.append("")
+        lines.append(client["client"].upper())
+        lines.append(f"- config: {client['settings_path']}")
+        lines.append(f"- hooks:  {client['hook_dir']}")
+        for check in client.get("checks", []):
+            label = check["status"].upper()
+            lines.append(f"- {label} {check['id']}: {check['message']}")
+    return "\n".join(lines)
 
 
 def snippet(installed: list[dict], timeout: int = 10) -> str:

@@ -344,6 +344,17 @@ log under `~/.codex/`. Prefer to wire it by hand?
 `uv run python -m exomem install-hook --print-only` writes the scripts and prints
 the snippet to paste.
 
+To verify the deployed hooks without changing anything:
+
+```bash
+uv run python -m exomem install-hook --check
+```
+
+That checks both Claude Code and Codex by default. Use `--client claude` or
+`--client codex` to narrow it. The report flags stale deployed hook copies,
+legacy `kb_*` hook entries, missing config, and the log/cache paths where hook
+activity should land.
+
 Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
 matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
 hook's control-prompt skip ceiling, or disable either with `EXOMEM_CAPTURE_NUDGE_DISABLE=1` /

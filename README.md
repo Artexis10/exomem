@@ -138,6 +138,12 @@ Optional local hooks, using the same Exomem scripts as Claude Code:
 exomem install-hook --client codex
 ```
 
+Verify deployed Claude Code/Codex hooks without changing anything:
+
+```bash
+exomem install-hook --check
+```
+
 Or add it directly to `~/.codex/config.toml`:
 
 ```toml
