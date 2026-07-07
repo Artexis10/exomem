@@ -146,7 +146,7 @@ def multi_edit(
         )
         warnings.extend(w)
 
-    # ---- ONE commit: updated: bump + body + index refresh + one log entry ----
+    # ---- ONE commit: updated: bump + body + one log entry ----
     fm_text = _set_or_append(editable.fm_text, "updated", date_iso)
     new_body_final = body.rstrip() + "\n"
     new_text = f"---\n{fm_text}\n---\n{new_body_final}"

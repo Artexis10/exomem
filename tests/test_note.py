@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import find as find_module
 from exomem import note as note_module
 
 
@@ -105,3 +106,23 @@ def test_note_no_cap50_warning(vault: Path) -> None:
         today=TODAY,
     )
     assert not any("trimmed at cap-50" in w for w in result.warnings)
+
+
+def test_note_without_links_or_sources_does_not_build_resolver(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Plain note creation should not pay a full-vault resolver build."""
+
+    def fail_shared_resolver(_vault: Path):
+        raise AssertionError("shared resolver should not be built")
+
+    monkeypatch.setattr(find_module, "shared_resolver", fail_shared_resolver)
+    result = note_module.note(
+        vault,
+        content="# Resolver-free note\n\n## Claim\n\nNo wikilinks here.\n",
+        note_type="insight",
+        title="Resolver-free note",
+        today=TODAY,
+    )
+
+    assert (vault / result.path).exists()

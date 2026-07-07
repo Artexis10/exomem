@@ -180,6 +180,7 @@ def search_substring(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    limit: int | None = None,
 ) -> list[str] | None:
     """The keyword lane's match set (every whitespace token a substring of
     title or body), ordered `updated` desc then path desc, navigation files
@@ -193,7 +194,7 @@ def search_substring(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_substring(tokens, scope, freshness)
+    return store.search_substring(tokens, scope, freshness, limit=limit)
 
 
 def ensure_fresh(vault_root: Path) -> None:
@@ -307,6 +308,14 @@ class LexicalStore:
         # index-ranged instead of scanning 100k rows.
         conn.execute("CREATE INDEX IF NOT EXISTS pages_kb ON pages(in_kb, mtime_ns)")
         conn.execute("CREATE INDEX IF NOT EXISTS pages_vault ON pages(in_vault, mtime_ns)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_kb_recent "
+            "ON pages(in_kb, is_nav, updated DESC, path DESC)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS pages_vault_recent "
+            "ON pages(in_vault, is_nav, updated DESC, path DESC)"
+        )
         conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS fts USING fts5(stemmed)")
         conn.execute(
             "CREATE VIRTUAL TABLE IF NOT EXISTS tri USING fts5("
@@ -542,26 +551,32 @@ class LexicalStore:
         from . import bm25 as bm25_module
         from . import find as find_module
 
-        page = find_module._CACHE.get(path, self.vault_root)
-        if page is not None:
-            rel = page.rel_path
-            title_lower = page.title_norm
-            body_lower = page.body_norm
-            stemmed = " ".join(bm25_module.tokenize(page.title + " " + page.body))
-            updated = page.updated or "0000-00-00"
-        else:
-            try:
-                rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
-            except ValueError:
-                return
+        is_nav = path.name.lower() in _NAV_BASENAMES
+        try:
+            rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
+        except ValueError:
+            return
+        if is_nav:
             title_lower = body_lower = stemmed = ""
             updated = "0000-00-00"
-        is_nav = path.name.lower() in _NAV_BASENAMES
+        else:
+            page = find_module._CACHE.get(path, self.vault_root)
+            if page is not None:
+                rel = page.rel_path
+                title_lower = page.title_norm
+                body_lower = page.body_norm
+                stemmed = " ".join(bm25_module.tokenize(page.title + " " + page.body))
+                updated = page.updated or "0000-00-00"
+            else:
+                title_lower = body_lower = stemmed = ""
+                updated = "0000-00-00"
         cur = conn.execute(
             "INSERT INTO pages(path, mtime_ns, updated, in_kb, in_vault, is_nav) "
             "VALUES(?, ?, ?, ?, ?, ?)",
             (rel, mtime_ns, updated, int(in_kb), int(in_vault), int(is_nav)),
         )
+        if is_nav:
+            return
         rowid = cur.lastrowid
         conn.execute("INSERT INTO fts(rowid, stemmed) VALUES(?, ?)", (rowid, stemmed))
         conn.execute(
@@ -713,7 +728,12 @@ class LexicalStore:
         return [(p, float(s)) for p, s in rows]
 
     def search_substring(
-        self, tokens: list[str], scope: str, freshness: tuple | None
+        self,
+        tokens: list[str],
+        scope: str,
+        freshness: tuple | None,
+        *,
+        limit: int | None = None,
     ) -> list[str] | None:
         if self._failed:
             return None
@@ -721,7 +741,7 @@ class LexicalStore:
             conn = self._connect()
             try:
                 self._ensure_synced(conn, scope, freshness)
-                return self._substring_query(conn, tokens, scope)
+                return self._substring_query(conn, tokens, scope, limit=limit)
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -734,12 +754,19 @@ class LexicalStore:
             return None
 
     def _substring_query(
-        self, conn: sqlite3.Connection, tokens: list[str], scope: str
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        scope: str,
+        *,
+        limit: int | None = None,
     ) -> list[str]:
         """Exact keyword contract: trigram MATCH narrows (tokens >= 3 chars),
         then instr() verifies EVERY token against the stored raw text — the
         verification is what parity rests on; MATCH is only the accelerator.
         Needles under the trigram floor rely on the verification alone."""
+        if limit is not None:
+            return self._substring_recent_query(conn, tokens, scope, limit)
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses: list[str] = [f"p.{col} = 1", "p.is_nav = 0"]
         params: list[object] = []
@@ -751,10 +778,48 @@ class LexicalStore:
         for t in tokens:
             clauses.append("(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)")
             params.extend((t, t))
-        rows = conn.execute(
+        sql = (
             "SELECT p.path FROM tri JOIN pages p ON p.rowid = tri.rowid "
             "WHERE " + " AND ".join(clauses) + " "
-            "ORDER BY p.updated DESC, p.path DESC",
+            "ORDER BY p.updated DESC, p.path DESC"
+        )
+        if limit is not None:
+            sql += " LIMIT ?"
+            params.append(max(1, int(limit)))
+        rows = conn.execute(sql, params).fetchall()
+        return [r[0] for r in rows]
+
+    def _substring_recent_query(
+        self, conn: sqlite3.Connection, tokens: list[str], scope: str, limit: int
+    ) -> list[str]:
+        """Limited keyword mode path: scan pages in keyword-mode result order.
+
+        The unbounded trigram path is right for the hybrid contribution, where
+        callers want the whole match set. Keyword mode wants only the newest
+        `limit` hits, so a recency-indexed scan can stop as soon as it has
+        enough exact substring matches. It is also robust for broad/common-token
+        queries where trigram MATCH would still have to verify and sort most of
+        the corpus.
+        """
+        if scope == "vault":
+            col = "in_vault"
+            idx = "pages_vault_recent"
+        else:
+            col = "in_kb"
+            idx = "pages_kb_recent"
+        clauses: list[str] = [f"p.{col} = 1", "p.is_nav = 0"]
+        params: list[object] = []
+        for t in tokens:
+            clauses.append(
+                "(instr(tri.title_lower, ?) > 0 OR instr(tri.body_lower, ?) > 0)"
+            )
+            params.extend((t, t))
+        params.append(max(1, int(limit)))
+        rows = conn.execute(
+            f"SELECT p.path FROM pages p INDEXED BY {idx} "
+            "JOIN tri ON tri.rowid = p.rowid "
+            "WHERE " + " AND ".join(clauses) + " "
+            "ORDER BY p.updated DESC, p.path DESC LIMIT ?",
             params,
         ).fetchall()
         return [r[0] for r in rows]

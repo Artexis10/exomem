@@ -230,13 +230,15 @@ def note(
     new_note_wikilink = f"[[{rel_note_no_ext}]]"
 
     # Resolver: the process-shared, freshness-checked instance (find's graph-
-    # lane cache) — a fresh build reads + YAML-parses the whole vault per
-    # write. We register the new note's own path so any body reference back to
-    # itself resolves cleanly; index_sync re-syncs the entry from disk after
-    # the batch write, and the except-path below purges it on failure.
+    # lane cache). Build it only when source/body wikilink normalization needs
+    # it; otherwise a simple note write should not pay a full-vault read.
     from . import find as find_module
-    resolver = find_module.shared_resolver(vault_root)
-    resolver.add_pending(rel_note_no_ext, title=title)
+    resolver: WikilinkResolver | None = None
+    if sources or find_body_wikilinks(content):
+        resolver = find_module.shared_resolver(vault_root)
+        # Register the new note's own path so same-batch self-links resolve
+        # cleanly. index_sync re-syncs from disk after the batch write.
+        resolver.add_pending(rel_note_no_ext, title=title)
 
     sources_norm, source_warnings = _normalize_sources(
         sources, vault_root=vault_root, resolver=resolver
@@ -844,7 +846,7 @@ def _normalize_sources(
     sources: list[str] | None,
     *,
     vault_root: Path,
-    resolver: WikilinkResolver,
+    resolver: WikilinkResolver | None,
 ) -> tuple[list[str], list[str]]:
     """Canonicalize each source wikilink to full vault-rooted form.
 
