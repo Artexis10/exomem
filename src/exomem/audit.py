@@ -841,15 +841,12 @@ def _check_embedding_drift(vault_root: Path) -> list[AuditFinding]:
     # else out-of-KB creates would never be flagged and never get reconciled.
     # The "kb" branch is byte-identical to the historical KB-only scan.
     from . import embeddings as embeddings_module
-    scope = embeddings_module.index_scope()
-    if scope == "vault":
-        from .vault import walk_vault_md
-        never_walk = walk_vault_md(vault_root)
-    else:
-        kb = vault_root / kb_dirname()
-        never_walk = find_module._walk_md(kb) if kb.is_dir() else ()
+    from . import index_paths
+
+    scope = index_paths.index_scope()
+    never_walk = index_paths.iter_index_markdown(vault_root)
     for md in never_walk:
-        if not embeddings_module._is_embeddable_path(md):
+        if not index_paths.is_embeddable_path(md):
             continue
         try:
             rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
