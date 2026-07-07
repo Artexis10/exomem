@@ -231,3 +231,47 @@ def test_rust_write_lite_note_creates_frontmatter_page(rust_write_bin: Path) -> 
     assert "updated: 2026-07-07" in text
     assert "Created by the lite writer." in text
 
+
+def test_rust_write_lite_uses_distinct_runtime_exit_codes(rust_write_bin: Path) -> None:
+    vault = _fresh_vault("write-exit-codes")
+    rel = "Knowledge Base/Notes/Insights/write-target.md"
+    _write_page(vault, rel, "old marker", title="Write Target", updated="2026-01-01")
+
+    usage = subprocess.run(
+        [
+            str(rust_write_bin),
+            "edit",
+            "--vault",
+            str(vault),
+            "--path",
+            "../escape.md",
+            "--old",
+            "old marker",
+            "--new",
+            "new marker",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert usage.returncode == 2
+
+    data = subprocess.run(
+        [
+            str(rust_write_bin),
+            "edit",
+            "--vault",
+            str(vault),
+            "--path",
+            rel,
+            "--old",
+            "missing marker",
+            "--new",
+            "new marker",
+        ],
+        text=True,
+        capture_output=True,
+        timeout=30,
+    )
+    assert data.returncode == 3
+

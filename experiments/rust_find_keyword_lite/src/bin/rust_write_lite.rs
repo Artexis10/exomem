@@ -8,6 +8,61 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use serde::Serialize;
 
+const EXIT_USAGE: u8 = 2;
+const EXIT_DATA: u8 = 3;
+const EXIT_CONFLICT: u8 = 4;
+const EXIT_IO: u8 = 5;
+const EXIT_OUTPUT: u8 = 6;
+
+type Result<T> = std::result::Result<T, ToolError>;
+
+#[derive(Debug)]
+struct ToolError {
+    code: u8,
+    message: String,
+}
+
+impl ToolError {
+    fn exit_code(&self) -> ExitCode {
+        ExitCode::from(self.code)
+    }
+}
+
+fn usage_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        code: EXIT_USAGE,
+        message: message.into(),
+    }
+}
+
+fn data_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        code: EXIT_DATA,
+        message: message.into(),
+    }
+}
+
+fn conflict_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        code: EXIT_CONFLICT,
+        message: message.into(),
+    }
+}
+
+fn io_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        code: EXIT_IO,
+        message: message.into(),
+    }
+}
+
+fn output_error(message: impl Into<String>) -> ToolError {
+    ToolError {
+        code: EXIT_OUTPUT,
+        message: message.into(),
+    }
+}
+
 #[derive(Debug, Parser)]
 #[command(name = "rust_write_lite")]
 struct Cli {
@@ -65,41 +120,45 @@ fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("{err}");
-            ExitCode::FAILURE
+            eprintln!("{}", err.message);
+            err.exit_code()
         }
     }
 }
 
-fn run() -> Result<(), String> {
+fn run() -> Result<()> {
+    let command = Cli::parse().command;
     let started = Instant::now();
-    match Cli::parse().command {
+    match command {
         Command::Edit(args) => run_edit(args, started),
         Command::Note(args) => run_note(args, started),
     }
 }
 
-fn run_edit(args: EditArgs, started: Instant) -> Result<(), String> {
+fn run_edit(args: EditArgs, started: Instant) -> Result<()> {
     let target = resolve_target(&args.vault, &args.path)?;
     if !target.is_file() {
-        return Err(format!("target does not exist: {}", target.display()));
+        return Err(data_error(format!(
+            "target does not exist: {}",
+            target.display()
+        )));
     }
     let raw = fs::read_to_string(&target)
-        .map_err(|err| format!("could not read {}: {err}", target.display()))?;
+        .map_err(|err| io_error(format!("could not read {}: {err}", target.display())))?;
     if args.old.is_empty() {
-        return Err("--old cannot be empty".to_string());
+        return Err(usage_error("--old cannot be empty"));
     }
     let text = normalize_newlines(&raw);
     let (frontmatter, body) =
-        split_frontmatter(&text).ok_or_else(|| "target has no frontmatter block".to_string())?;
+        split_frontmatter(&text).ok_or_else(|| data_error("target has no frontmatter block"))?;
     let count = body.matches(&args.old).count();
     if count == 0 {
-        return Err("old string not found".to_string());
+        return Err(data_error("old string not found"));
     }
     if count > 1 && !args.replace_all {
-        return Err(format!(
+        return Err(conflict_error(format!(
             "old string occurs {count} times; pass --replace-all to replace every occurrence"
-        ));
+        )));
     }
 
     let updated_fm = set_or_append_frontmatter(frontmatter, "updated", &args.date);
@@ -120,10 +179,13 @@ fn run_edit(args: EditArgs, started: Instant) -> Result<(), String> {
     Ok(())
 }
 
-fn run_note(args: NoteArgs, started: Instant) -> Result<(), String> {
+fn run_note(args: NoteArgs, started: Instant) -> Result<()> {
     let target = resolve_target(&args.vault, &args.path)?;
     if target.exists() {
-        return Err(format!("target already exists: {}", target.display()));
+        return Err(conflict_error(format!(
+            "target already exists: {}",
+            target.display()
+        )));
     }
     let body = normalize_newlines(&args.content);
     let note = format!(
@@ -136,7 +198,7 @@ fn run_note(args: NoteArgs, started: Instant) -> Result<(), String> {
     );
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)
-            .map_err(|err| format!("could not create {}: {err}", parent.display()))?;
+            .map_err(|err| io_error(format!("could not create {}: {err}", parent.display())))?;
     }
     atomic_write(&target, &note)?;
     print_json(
@@ -148,13 +210,13 @@ fn run_note(args: NoteArgs, started: Instant) -> Result<(), String> {
     Ok(())
 }
 
-fn resolve_target(vault: &Path, rel: &str) -> Result<PathBuf, String> {
+fn resolve_target(vault: &Path, rel: &str) -> Result<PathBuf> {
     if rel.trim().is_empty() {
-        return Err("--path cannot be empty".to_string());
+        return Err(usage_error("--path cannot be empty"));
     }
     let rel_path = Path::new(rel);
     if rel_path.is_absolute() {
-        return Err("--path must be vault-relative".to_string());
+        return Err(usage_error("--path must be vault-relative"));
     }
     if rel_path.components().any(|component| {
         matches!(
@@ -162,7 +224,7 @@ fn resolve_target(vault: &Path, rel: &str) -> Result<PathBuf, String> {
             Component::ParentDir | Component::RootDir | Component::Prefix(_)
         )
     }) {
-        return Err("--path must stay inside the vault".to_string());
+        return Err(usage_error("--path must stay inside the vault"));
     }
     Ok(vault.join(rel_path))
 }
@@ -198,17 +260,17 @@ fn set_or_append_frontmatter(frontmatter: &str, key: &str, value: &str) -> Strin
     lines.join("\n")
 }
 
-fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
+fn atomic_write(path: &Path, content: &str) -> Result<()> {
     let parent = path
         .parent()
-        .ok_or_else(|| format!("target has no parent: {}", path.display()))?;
+        .ok_or_else(|| usage_error(format!("target has no parent: {}", path.display())))?;
     let file_name = path
         .file_name()
         .and_then(OsStr::to_str)
-        .ok_or_else(|| format!("target has invalid file name: {}", path.display()))?;
+        .ok_or_else(|| usage_error(format!("target has invalid file name: {}", path.display())))?;
     let stamp = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|err| format!("system time error: {err}"))?
+        .map_err(|err| io_error(format!("system time error: {err}")))?
         .as_nanos();
     let mut tmp = parent.join(format!(".{file_name}.{stamp}.tmp"));
     for attempt in 0..100 {
@@ -219,30 +281,38 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
             Ok(mut f) => {
                 if let Err(err) = f.write_all(content.as_bytes()) {
                     let _ = fs::remove_file(&tmp);
-                    return Err(format!("could not write {}: {err}", tmp.display()));
+                    return Err(io_error(format!(
+                        "could not write {}: {err}",
+                        tmp.display()
+                    )));
                 }
                 break;
             }
             Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => return Err(format!("could not create {}: {err}", tmp.display())),
+            Err(err) => {
+                return Err(io_error(format!(
+                    "could not create {}: {err}",
+                    tmp.display()
+                )));
+            }
         }
     }
     fs::rename(&tmp, path).map_err(|err| {
         let _ = fs::remove_file(&tmp);
-        format!("could not replace {}: {err}", path.display())
+        io_error(format!("could not replace {}: {err}", path.display()))
     })?;
     Ok(())
 }
 
-fn print_json(op: &str, path: &str, duration_ms: f64, bytes: usize) -> Result<(), String> {
+fn print_json(op: &str, path: &str, duration_ms: f64, bytes: usize) -> Result<()> {
     let output = WriteOutput {
         op,
         path,
         duration_ms: (duration_ms * 1000.0).round() / 1000.0,
         bytes,
     };
-    let encoded =
-        serde_json::to_string(&output).map_err(|err| format!("could not encode JSON: {err}"))?;
+    let encoded = serde_json::to_string(&output)
+        .map_err(|err| output_error(format!("could not encode JSON: {err}")))?;
     println!("{encoded}");
     Ok(())
 }

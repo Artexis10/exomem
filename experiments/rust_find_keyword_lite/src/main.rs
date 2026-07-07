@@ -77,42 +77,45 @@ fn run() -> Result<(), String> {
     let mut stats = Stats::default();
     let mut hits = Vec::new();
 
-    if !tokens.is_empty() {
-        let kb = args.vault.join("Knowledge Base");
-        if !kb.is_dir() {
-            return Err(format!(
-                "missing Knowledge Base directory: {}",
-                kb.display()
-            ));
+    if tokens.is_empty() {
+        print_json(hits, started.elapsed().as_secs_f64() * 1000.0, stats)?;
+        return Ok(());
+    }
+
+    let kb = args.vault.join("Knowledge Base");
+    if !kb.is_dir() {
+        return Err(format!(
+            "missing Knowledge Base directory: {}",
+            kb.display()
+        ));
+    }
+    let mut paths = Vec::new();
+    walk_md(&kb, &mut paths)?;
+    for path in paths {
+        if is_navigation_file(&path) {
+            continue;
         }
-        let mut paths = Vec::new();
-        walk_md(&kb, &mut paths)?;
-        for path in paths {
-            if is_navigation_file(&path) {
-                continue;
-            }
-            match parse_page(&path, &args.vault) {
-                Some(page) => {
-                    stats.scanned += 1;
-                    if tokens
-                        .iter()
-                        .all(|tok| page.title_norm.contains(tok) || page.body_norm.contains(tok))
-                    {
-                        let sort_updated = if page.updated.is_empty() {
-                            "0000-00-00".to_string()
-                        } else {
-                            page.updated.clone()
-                        };
-                        hits.push(Hit {
-                            path: page.path,
-                            title: page.title,
-                            updated: page.updated,
-                            sort_updated,
-                        });
-                    }
+        match parse_page(&path, &args.vault) {
+            Some(page) => {
+                stats.scanned += 1;
+                if tokens
+                    .iter()
+                    .all(|tok| page.title_norm.contains(tok) || page.body_norm.contains(tok))
+                {
+                    let sort_updated = if page.updated.is_empty() {
+                        "0000-00-00".to_string()
+                    } else {
+                        page.updated.clone()
+                    };
+                    hits.push(Hit {
+                        path: page.path,
+                        title: page.title,
+                        updated: page.updated,
+                        sort_updated,
+                    });
                 }
-                None => stats.read_errors += 1,
             }
+            None => stats.read_errors += 1,
         }
     }
 
