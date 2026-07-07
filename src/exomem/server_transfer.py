@@ -14,8 +14,22 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import FileResponse, HTMLResponse, JSONResponse
 
-from . import cf_access, extract, preserve as preserve_module, upload_tokens
+from . import cf_access, upload_tokens
 from .vault import VaultPathError, resolve_under_vault
+
+DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+
+
+def _extract_module():
+    from . import extract
+
+    return extract
+
+
+def _preserve_module():
+    from . import preserve as preserve_module
+
+    return preserve_module
 
 
 @dataclass(frozen=True)
@@ -36,7 +50,7 @@ def load_transfer_config() -> TransferConfig:
     """Read upload/download auth and sizing config from the environment."""
     upload_token = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
     upload_max_bytes = int(
-        os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(preserve_module.MAX_UPLOAD_BYTES))
+        os.environ.get("EXOMEM_UPLOAD_MAX_BYTES", str(DEFAULT_UPLOAD_MAX_BYTES))
     )
     large_upload_base = (
         os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
@@ -122,6 +136,7 @@ def register_transfer_routes(
         filename = str(form.get("filename") or "").strip() or (
             getattr(upload, "filename", "") or ""
         )
+        preserve_module = _preserve_module()
         try:
             result = await run_in_threadpool(
                 preserve_module.preserve_stream,
@@ -147,6 +162,7 @@ def register_transfer_routes(
             )
 
         if media_worker is not None and result.sidecar_path:
+            extract = _extract_module()
             media_type = extract.media_type_for(filename)
             if media_type:
                 do_ocr = text is None

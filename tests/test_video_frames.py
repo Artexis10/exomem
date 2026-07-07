@@ -294,8 +294,14 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
         dedup_dropped=2,
         max_frames_effective=2,
     )
+
+    class _CannedVideoFramesModule:
+        @staticmethod
+        def get_frames(*args, **kwargs):
+            return canned
+
     monkeypatch.setattr(
-        commands_module.video_frames_module, "get_frames", lambda *a, **k: canned
+        commands_module, "_video_frames_module", lambda: _CannedVideoFramesModule
     )
     mcp = _build_server(monkeypatch)
     result = asyncio.run(

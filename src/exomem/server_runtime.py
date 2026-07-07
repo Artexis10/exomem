@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, extract, project_keys, schema
+from . import env_compat, project_keys, schema
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
@@ -86,7 +86,7 @@ def _start_compute_runtime(vault_root: Path) -> None:
 
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
-    if not extract.extraction_enabled():
+    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
         return None
 
     from . import media_worker as media_worker_module
