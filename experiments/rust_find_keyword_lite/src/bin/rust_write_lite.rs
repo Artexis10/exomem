@@ -1,4 +1,3 @@
-use std::env;
 use std::ffi::OsStr;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
@@ -6,30 +5,60 @@ use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-#[derive(Debug)]
+use clap::{Parser, Subcommand};
+use serde::Serialize;
+
+#[derive(Debug, Parser)]
+#[command(name = "rust_write_lite")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     Edit(EditArgs),
     Note(NoteArgs),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Parser)]
 struct EditArgs {
+    #[arg(long)]
     vault: PathBuf,
+    #[arg(long)]
     path: String,
+    #[arg(long)]
     old: String,
+    #[arg(long)]
     new: String,
+    #[arg(long)]
     replace_all: bool,
+    #[arg(long, default_value = "2026-07-07")]
     date: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Parser)]
 struct NoteArgs {
+    #[arg(long)]
     vault: PathBuf,
+    #[arg(long)]
     path: String,
+    #[arg(long)]
     title: String,
+    #[arg(long = "note-type", default_value = "insight")]
     note_type: String,
+    #[arg(long)]
     content: String,
+    #[arg(long, default_value = "2026-07-07")]
     date: String,
+}
+
+#[derive(Serialize)]
+struct WriteOutput<'a> {
+    op: &'a str,
+    path: &'a str,
+    duration_ms: f64,
+    bytes: usize,
 }
 
 fn main() -> ExitCode {
@@ -44,7 +73,7 @@ fn main() -> ExitCode {
 
 fn run() -> Result<(), String> {
     let started = Instant::now();
-    match parse_args()? {
+    match Cli::parse().command {
         Command::Edit(args) => run_edit(args, started),
         Command::Note(args) => run_note(args, started),
     }
@@ -87,7 +116,7 @@ fn run_edit(args: EditArgs, started: Instant) -> Result<(), String> {
         &args.path,
         started.elapsed().as_secs_f64() * 1000.0,
         new_text.len(),
-    );
+    )?;
     Ok(())
 }
 
@@ -115,121 +144,8 @@ fn run_note(args: NoteArgs, started: Instant) -> Result<(), String> {
         &args.path,
         started.elapsed().as_secs_f64() * 1000.0,
         note.len(),
-    );
+    )?;
     Ok(())
-}
-
-fn parse_args() -> Result<Command, String> {
-    let mut iter = env::args().skip(1);
-    let command = iter.next().ok_or_else(usage)?;
-    match command.as_str() {
-        "edit" => parse_edit(iter.collect()),
-        "note" => parse_note(iter.collect()),
-        "--help" | "-h" => Err(usage()),
-        _ => Err(format!("unknown command: {command}\n{}", usage())),
-    }
-}
-
-fn parse_edit(args: Vec<String>) -> Result<Command, String> {
-    let mut vault = None;
-    let mut path = None;
-    let mut old = None;
-    let mut new = None;
-    let mut replace_all = false;
-    let mut date = "2026-07-07".to_string();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--vault" => {
-                i += 1;
-                vault = args.get(i).map(PathBuf::from);
-            }
-            "--path" => {
-                i += 1;
-                path = args.get(i).cloned();
-            }
-            "--old" => {
-                i += 1;
-                old = args.get(i).cloned();
-            }
-            "--new" => {
-                i += 1;
-                new = args.get(i).cloned();
-            }
-            "--date" => {
-                i += 1;
-                date = args
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| "--date requires a value".to_string())?;
-            }
-            "--replace-all" => replace_all = true,
-            other => return Err(format!("unknown edit argument: {other}")),
-        }
-        i += 1;
-    }
-    Ok(Command::Edit(EditArgs {
-        vault: vault.ok_or_else(|| "--vault is required".to_string())?,
-        path: path.ok_or_else(|| "--path is required".to_string())?,
-        old: old.ok_or_else(|| "--old is required".to_string())?,
-        new: new.ok_or_else(|| "--new is required".to_string())?,
-        replace_all,
-        date,
-    }))
-}
-
-fn parse_note(args: Vec<String>) -> Result<Command, String> {
-    let mut vault = None;
-    let mut path = None;
-    let mut title = None;
-    let mut note_type = "insight".to_string();
-    let mut content = None;
-    let mut date = "2026-07-07".to_string();
-    let mut i = 0;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--vault" => {
-                i += 1;
-                vault = args.get(i).map(PathBuf::from);
-            }
-            "--path" => {
-                i += 1;
-                path = args.get(i).cloned();
-            }
-            "--title" => {
-                i += 1;
-                title = args.get(i).cloned();
-            }
-            "--note-type" => {
-                i += 1;
-                note_type = args
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| "--note-type requires a value".to_string())?;
-            }
-            "--content" => {
-                i += 1;
-                content = args.get(i).cloned();
-            }
-            "--date" => {
-                i += 1;
-                date = args
-                    .get(i)
-                    .cloned()
-                    .ok_or_else(|| "--date requires a value".to_string())?;
-            }
-            other => return Err(format!("unknown note argument: {other}")),
-        }
-        i += 1;
-    }
-    Ok(Command::Note(NoteArgs {
-        vault: vault.ok_or_else(|| "--vault is required".to_string())?,
-        path: path.ok_or_else(|| "--path is required".to_string())?,
-        title: title.ok_or_else(|| "--title is required".to_string())?,
-        note_type,
-        content: content.ok_or_else(|| "--content is required".to_string())?,
-        date,
-    }))
 }
 
 fn resolve_target(vault: &Path, rel: &str) -> Result<PathBuf, String> {
@@ -318,32 +234,15 @@ fn atomic_write(path: &Path, content: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn print_json(op: &str, path: &str, duration_ms: f64, bytes: usize) {
-    println!(
-        "{{\"op\":\"{}\",\"path\":\"{}\",\"duration_ms\":{:.3},\"bytes\":{}}}",
-        json_escape(op),
-        json_escape(path),
-        duration_ms,
-        bytes
-    );
-}
-
-fn json_escape(value: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if c.is_control() => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out
-}
-
-fn usage() -> String {
-    "usage:\n  rust_write_lite edit --vault <vault> --path <rel.md> --old <text> --new <text> [--replace-all] [--date YYYY-MM-DD]\n  rust_write_lite note --vault <vault> --path <rel.md> --title <title> --content <markdown> [--note-type insight] [--date YYYY-MM-DD]".to_string()
+fn print_json(op: &str, path: &str, duration_ms: f64, bytes: usize) -> Result<(), String> {
+    let output = WriteOutput {
+        op,
+        path,
+        duration_ms: (duration_ms * 1000.0).round() / 1000.0,
+        bytes,
+    };
+    let encoded =
+        serde_json::to_string(&output).map_err(|err| format!("could not encode JSON: {err}"))?;
+    println!("{encoded}");
+    Ok(())
 }

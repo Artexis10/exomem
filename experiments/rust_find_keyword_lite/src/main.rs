@@ -1,26 +1,33 @@
 use std::cmp::Ordering;
-use std::env;
 use std::ffi::OsStr;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Instant;
 
+use clap::Parser;
+use serde::Serialize;
+
 const EXCLUDED_DIR_NAMES: &[&str] = &["_Schema", "_attachments", "_archive", "_trash"];
 const NAVIGATION_BASENAMES: &[&str] = &["index.md", "log.md"];
 
-#[derive(Debug)]
+#[derive(Debug, Parser)]
+#[command(name = "rust_find_keyword_lite")]
 struct Args {
+    #[arg(long)]
     vault: PathBuf,
+    #[arg(long)]
     query: String,
+    #[arg(long, default_value_t = 15)]
     limit: usize,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 struct Hit {
     path: String,
     title: String,
     updated: String,
+    #[serde(skip_serializing)]
     sort_updated: String,
 }
 
@@ -33,8 +40,21 @@ struct Page {
     title_norm: String,
 }
 
-#[derive(Default)]
+#[derive(Default, Serialize)]
 struct Stats {
+    scanned: usize,
+    read_errors: usize,
+}
+
+#[derive(Serialize)]
+struct Output {
+    hits: Vec<Hit>,
+    timings: Timings,
+}
+
+#[derive(Serialize)]
+struct Timings {
+    total_ms: f64,
     scanned: usize,
     read_errors: usize,
 }
@@ -50,7 +70,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), String> {
-    let args = parse_args()?;
+    let args = Args::parse();
     let started = Instant::now();
     let query_norm = args.query.trim().to_lowercase();
     let tokens: Vec<&str> = query_norm.split_whitespace().collect();
@@ -100,59 +120,13 @@ fn run() -> Result<(), String> {
         Ordering::Equal => b.path.cmp(&a.path),
         other => other,
     });
-    if hits.len() > args.limit {
-        hits.truncate(args.limit);
+    let limit = args.limit.max(1);
+    if hits.len() > limit {
+        hits.truncate(limit);
     }
 
-    print_json(&hits, started.elapsed().as_secs_f64() * 1000.0, &stats);
+    print_json(hits, started.elapsed().as_secs_f64() * 1000.0, stats)?;
     Ok(())
-}
-
-fn parse_args() -> Result<Args, String> {
-    let mut vault = None;
-    let mut query = None;
-    let mut limit = 15usize;
-    let mut iter = env::args().skip(1);
-
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--vault" => vault = iter.next().map(PathBuf::from),
-            "--query" => query = iter.next(),
-            "--limit" => {
-                let raw = iter
-                    .next()
-                    .ok_or_else(|| "--limit requires a value".to_string())?;
-                limit = raw
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid --limit value: {raw}"))?;
-            }
-            "--help" | "-h" => {
-                return Err(
-                    "usage: rust_find_keyword_lite --vault <path> --query <text> [--limit N]"
-                        .to_string(),
-                );
-            }
-            _ if arg.starts_with("--vault=") => {
-                vault = Some(PathBuf::from(arg.trim_start_matches("--vault=")));
-            }
-            _ if arg.starts_with("--query=") => {
-                query = Some(arg.trim_start_matches("--query=").to_string());
-            }
-            _ if arg.starts_with("--limit=") => {
-                let raw = arg.trim_start_matches("--limit=");
-                limit = raw
-                    .parse::<usize>()
-                    .map_err(|_| format!("invalid --limit value: {raw}"))?;
-            }
-            _ => return Err(format!("unknown argument: {arg}")),
-        }
-    }
-
-    Ok(Args {
-        vault: vault.ok_or_else(|| "--vault is required".to_string())?,
-        query: query.ok_or_else(|| "--query is required".to_string())?,
-        limit: limit.max(1),
-    })
 }
 
 fn walk_md(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
@@ -286,39 +260,17 @@ fn posix_relative_path(path: &Path, vault: &Path) -> String {
         .join("/")
 }
 
-fn print_json(hits: &[Hit], total_ms: f64, stats: &Stats) {
-    print!("{{\"hits\":[");
-    for (idx, hit) in hits.iter().enumerate() {
-        if idx > 0 {
-            print!(",");
-        }
-        print!(
-            "{{\"path\":\"{}\",\"title\":\"{}\",\"updated\":\"{}\"}}",
-            json_escape(&hit.path),
-            json_escape(&hit.title),
-            json_escape(&hit.updated),
-        );
-    }
-    println!(
-        "],\"timings\":{{\"total_ms\":{:.3},\"scanned\":{},\"read_errors\":{}}}}}",
-        total_ms, stats.scanned, stats.read_errors
-    );
-}
-
-fn json_escape(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for ch in value.chars() {
-        match ch {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            '\u{08}' => out.push_str("\\b"),
-            '\u{0c}' => out.push_str("\\f"),
-            ch if ch <= '\u{1f}' => out.push_str(&format!("\\u{:04x}", ch as u32)),
-            ch => out.push(ch),
-        }
-    }
-    out
+fn print_json(hits: Vec<Hit>, total_ms: f64, stats: Stats) -> Result<(), String> {
+    let output = Output {
+        hits,
+        timings: Timings {
+            total_ms: (total_ms * 1000.0).round() / 1000.0,
+            scanned: stats.scanned,
+            read_errors: stats.read_errors,
+        },
+    };
+    let encoded =
+        serde_json::to_string(&output).map_err(|err| format!("could not encode JSON: {err}"))?;
+    println!("{encoded}");
+    Ok(())
 }
