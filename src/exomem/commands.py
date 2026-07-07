@@ -19,18 +19,13 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 
 from __future__ import annotations
 
-import inspect
 import json
-import types
-import typing
-from collections.abc import Callable
-from dataclasses import dataclass
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
-from mcp.types import TextContent, ToolAnnotations
+from mcp.types import TextContent
 
 from . import add as add_module
 from . import append_to_file as append_to_file_module
@@ -50,6 +45,7 @@ from . import find as find_module
 from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
 from . import link as link_module
+from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
@@ -71,179 +67,21 @@ from . import video_frames as video_frames_module
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
-    find_body_wikilinks,
     resolve_under_vault,
 )
-
-# Text-write ops → the argument field(s) whose value must not be a base64 binary
-# blob. The model pays for those characters as output tokens before the request
-# arrives, so they are rejected at every write boundary (MCP middleware + REST
-# coercion) and the caller is pointed at /upload.
-GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
-    "add": ("content",),
-    "note": ("content",),
-    "edit": ("new_body", "new_string"),
-    "replace": ("content",),
-    "create_file": ("content",),
-    "append_to_file": ("content",),
-    "preserve": ("content",),
-}
-
-# Write ops whose mutation OVERWRITES or REMOVES existing vault content, as opposed
-# to purely additive writes (add / note / create_file / append_to_file / link /
-# preserve / recover_from_trash / reconcile). Drives the MCP `destructiveHint` so a
-# cautious client (e.g. ChatGPT) doesn't badge an append as destructive. Only
-# consulted for non-read-only tools.
-DESTRUCTIVE_OPS: frozenset[str] = frozenset(
-    {"edit", "replace", "delete", "move_file", "audit_fix"}
+from .command_surface import (
+    DESTRUCTIVE_OPS,
+    GUARDED_WRITE_FIELDS,
+    Command,
+    Param,
+    bind_vault,
+    derive_params as _derive_params,
+    mcp_tool_annotations,
+    parse_args_help as _parse_args_help,
+    type_tag as _type_tag,
 )
 
-
-def mcp_tool_annotations(name: str, *, read_only: bool) -> ToolAnnotations:
-    """MCP behaviour hints for one tool — what cautious clients render as badges.
-
-    exomem operates on a CLOSED local vault and never reaches external systems, so
-    `openWorldHint` is always False. `readOnlyHint` comes from the command's
-    `cli_writes` flag (search/get/list ops are read-only). `destructiveHint` is only
-    meaningful for writes: additive writes are non-destructive; only `DESTRUCTIVE_OPS`
-    overwrite or remove. Absent these hints, clients assume the worst (read-only
-    `find` shown as WRITE / OPEN-WORLD / DESTRUCTIVE).
-    """
-    return ToolAnnotations(
-        title=name,
-        readOnlyHint=read_only,
-        destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
-        openWorldHint=False,
-    )
-
-
-# --------------------------------------------------------------------------- #
-# Registry dataclasses
-# --------------------------------------------------------------------------- #
-@dataclass(frozen=True)
-class Param:
-    """One operation parameter, surface-agnostic.
-
-    `type` is a coercion tag ("str" | "int" | "bool" | "list[str]" | "dict" |
-    "json") used by the REST body coercion, the CLI argparse builder, and the
-    OpenAPI schema — NOT by MCP (MCP derives its schema from the leaf's real
-    signature via `bind_vault`). `cli_positional` makes the CLI take it as a
-    positional arg (at most one per command).
-    """
-
-    name: str
-    type: str = "str"
-    required: bool = False
-    help: str = ""
-    cli_positional: bool = False
-
-
-@dataclass(frozen=True)
-class Command:
-    name: str  # canonical op name — identical across all surfaces
-    leaf: Callable  # leaf(vault_root, **kwargs); for `add`, leaf(vault_root, source_schema, **kwargs)
-    params: tuple[Param, ...]
-    surfaces: frozenset  # subset of {"mcp", "rest", "cli"}
-    tier: int = 1
-    cli_writes: bool = False  # marks a vault-mutating op (CLI grouping / future confirms)
-    needs_schema: bool = False  # leaf takes source_schema as its 2nd injected arg (`add`)
-    description: str = ""
-
-    @property
-    def doc(self) -> str:
-        """The full description Claude reads — the leaf's own docstring."""
-        return self.description or (self.leaf.__doc__ or "")
-
-    @property
-    def guarded_fields(self) -> tuple[str, ...]:
-        """Text fields whose value must not be a base64 binary blob."""
-        return GUARDED_WRITE_FIELDS.get(self.name, ())
-
-    @property
-    def read_only(self) -> bool:
-        """True for non-mutating ops (search / get / list) — the inverse of
-        `cli_writes`, surfaced to the MCP `readOnlyHint`."""
-        return not self.cli_writes
-
-    @property
-    def mcp_annotations(self) -> ToolAnnotations:
-        """MCP behaviour hints for this command's generated tool."""
-        return mcp_tool_annotations(self.name, read_only=self.read_only)
-
-
-# --------------------------------------------------------------------------- #
-# bind_vault — present a leaf as an MCP-introspectable callable
-# --------------------------------------------------------------------------- #
-def bind_vault(
-    leaf: Callable,
-    *injected: object,
-    name: str | None = None,
-    description: str | None = None,
-) -> Callable:
-    """Return a callable FastMCP introspects exactly like a hand-written wrapper.
-
-    The returned wrapper:
-    - has `__signature__` = `leaf`'s signature minus the leading `injected` params
-      (always `vault_root`, plus `source_schema` for `add`),
-    - has `__annotations__` resolved against `leaf`'s own module (so string
-      annotations from `from __future__ import annotations` become real types),
-    - has `__doc__` = `description` (the registry/leaf docstring), and
-    - calls `leaf(*injected, **kwargs)`.
-
-    FastMCP builds the tool's input-schema from that signature + the parsed
-    docstring, so the generated tool is byte-identical to the original wrapper.
-    """
-    sig = inspect.signature(leaf)
-    params = list(sig.parameters.values())
-    visible = params[len(injected):]
-
-    # Resolve string annotations (PEP 563) against the leaf's real globals so the
-    # schema doesn't depend on this module's namespace.
-    try:
-        resolved = typing.get_type_hints(leaf)
-    except Exception:  # noqa: BLE001 — fall back to whatever inspect carries
-        resolved = {}
-
-    visible = [p.replace(annotation=resolved.get(p.name, p.annotation)) for p in visible]
-    new_sig = sig.replace(parameters=visible)
-
-    def wrapper(**kwargs):
-        return leaf(*injected, **kwargs)
-
-    wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
-    wrapper.__name__ = name or leaf.__name__
-    wrapper.__qualname__ = wrapper.__name__
-    wrapper.__doc__ = description if description is not None else leaf.__doc__
-    ann = {p.name: p.annotation for p in visible if p.annotation is not inspect.Parameter.empty}
-    if "return" in resolved:
-        ann["return"] = resolved["return"]
-    wrapper.__annotations__ = ann
-    return wrapper
-
-
-# --------------------------------------------------------------------------- #
-# Shared helper used by the `get` / suggest leaves
-# --------------------------------------------------------------------------- #
-def _link_summary(vault_root: Path, rel_path: str, body: str) -> dict:
-    """Inbound + outbound wikilink summary for the `get(links=True)` option.
-
-    Inbound reuses `vault.find_inbound_wikilinks` (the same matcher
-    `list_inbound_links` uses); outbound scans the body's wikilinks (code spans
-    skipped), de-duped and order-preserved.
-    """
-    inbound = (
-        [m.as_dict() for m in vault.find_inbound_wikilinks(vault_root, rel_path)]
-        if rel_path
-        else []
-    )
-    outbound: list[str] = []
-    seen: set[str] = set()
-    for m in find_body_wikilinks(body):
-        target = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
-        if target and target not in seen:
-            seen.add(target)
-            outbound.append(target)
-    return {"inbound": inbound, "outbound": outbound}
+_link_summary = link_summary_module.link_summary
 
 
 # ----- op-leaves: the former per-surface wrapper bodies (vault_root injected) -----
@@ -769,11 +607,7 @@ def op_suggest_links(
         )
     elif draft_title or draft_body:
         body = draft_body or ""
-        existing_links = set()
-        for m in find_body_wikilinks(body):
-            inner = m.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
-            if inner:
-                existing_links.add(inner)
+        existing_links = set(link_summary_module.outbound_link_targets(body))
         suggestions = corpus_aware_module.suggest_related(
             vault_root, title=draft_title or "", body=body,
             self_path=None, existing_links=existing_links,
@@ -2380,89 +2214,6 @@ def op_get_video_frames(
         ],
         structured_content=meta,
     )
-
-
-# --------------------------------------------------------------------------- #
-# Param derivation — the declarative Param specs come straight from each leaf's
-# signature (the single source) + its docstring Args (for help text), so they can
-# never drift from what the leaf actually accepts.
-# --------------------------------------------------------------------------- #
-def _parse_args_help(doc: str | None) -> dict[str, str]:
-    """Best-effort `{param: one-line help}` from a Google-style `Args:` block."""
-    if not doc:
-        return {}
-    lines = inspect.cleandoc(doc).splitlines()
-    try:
-        start = next(i for i, ln in enumerate(lines) if ln.strip() == "Args:")
-    except StopIteration:
-        return {}
-    out: dict[str, str] = {}
-    cur: str | None = None
-    buf: list[str] = []
-    for ln in lines[start + 1:]:
-        if ln.strip() and not ln.startswith((" ", "\t")):
-            break  # next top-level section (Returns:/Errors:/…)
-        stripped = ln.strip()
-        # A new param entry looks like "name: text" with a bare identifier key.
-        head, sep, rest = stripped.partition(":")
-        if sep and head and head.replace("_", "").isalnum() and " " not in head:
-            if cur is not None:
-                out[cur] = " ".join(buf).strip()
-            cur, buf = head, [rest.strip()]
-        elif cur is not None:
-            buf.append(stripped)
-    if cur is not None:
-        out[cur] = " ".join(buf).strip()
-    return out
-
-
-def _type_tag(annotation: object) -> str:
-    """Map a (resolved) type annotation to a coercion tag."""
-    origin = typing.get_origin(annotation)
-    # Both `typing.Optional[...]`/`typing.Union[...]` and PEP-604 `X | None`
-    # (which resolves to `types.UnionType`) must be unwrapped.
-    if origin is typing.Union or origin is types.UnionType:
-        non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
-        if len(non_none) == 1:
-            return _type_tag(non_none[0])
-        return "json"  # genuine multi-type union (e.g. edit's `value`)
-    if annotation is bool:
-        return "bool"
-    if annotation is int:
-        return "int"
-    if annotation is str:
-        return "str"
-    if annotation is dict or origin is dict:
-        return "dict"
-    if annotation is list or origin is list:
-        args = typing.get_args(annotation)
-        return "list[str]" if args in ((), (str,)) else "json"
-    return "json"
-
-
-def _derive_params(
-    leaf: Callable, *, skip: int, positional: str | None = None
-) -> tuple[Param, ...]:
-    """Derive the declarative `Param` tuple from a leaf signature + its docstring."""
-    sig = inspect.signature(leaf)
-    try:
-        hints = typing.get_type_hints(leaf)
-    except Exception:  # noqa: BLE001
-        hints = {}
-    helps = _parse_args_help(leaf.__doc__)
-    params: list[Param] = []
-    for p in list(sig.parameters.values())[skip:]:
-        ann = hints.get(p.name, p.annotation)
-        params.append(
-            Param(
-                name=p.name,
-                type=_type_tag(ann),
-                required=p.default is inspect.Parameter.empty,
-                help=helps.get(p.name, ""),
-                cli_positional=(p.name == positional),
-            )
-        )
-    return tuple(params)
 
 
 def note_description(project_keys_hint: str) -> str:
