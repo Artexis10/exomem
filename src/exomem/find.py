@@ -12,7 +12,6 @@ from __future__ import annotations
 import copy
 import logging
 import os
-import re
 import threading
 import time
 from collections import OrderedDict
@@ -20,7 +19,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import find_corpus, find_policy, find_types, freshness
+from . import find_corpus, find_policy, find_results, find_types, freshness
 from . import ranking_config as _ranking_config
 from .find_types import (
     FindTimings,
@@ -50,8 +49,14 @@ _all_projects = find_corpus.all_projects
 _format_timestamp = find_types._format_timestamp
 _span = find_types.timing_span
 
-EXCERPT_RADIUS = 100  # chars on each side of the match
-EXCERPT_MAX_LEN = 220
+EXCERPT_RADIUS = find_results.EXCERPT_RADIUS
+EXCERPT_MAX_LEN = find_results.EXCERPT_MAX_LEN
+_transcript_ts_for_hit = find_results.transcript_ts_for_hit
+_stem_tokens_present = find_results.stem_tokens_present
+_stem_anchored_excerpt = find_results.stem_anchored_excerpt
+_semantic_excerpt = find_results.semantic_excerpt
+_make_excerpt = find_results.make_excerpt
+_collapse = find_results.collapse
 
 # --- Silent-degradation counter (process-scoped observability) --------------
 # Every semantic lane has a soft-fallback, and a POST-WARM failure historically
@@ -515,44 +520,6 @@ def find(
                 _FIND_CACHE.popitem(last=False)
     return hits
 
-
-def _transcript_ts_for_hit(page: ParsedPage, chunk: str | None, query_norm: str) -> float | None:
-    """Localize a text match inside a TIMED transcript → seconds, or None.
-
-    Vector lane: the matched chunk is a semantic segment whose first timed line
-    carries the segment start. BM25/keyword (no chunk, or a chunk without
-    markers): anchor on the first query token's position in the body and take
-    the nearest PRECEDING timestamp marker. Only timed audio/video sidecars
-    ever return a value — flat pages cost one media_type check.
-    """
-    if page.media_type not in ("audio", "video"):
-        return None
-    from . import semantic_segments as ss
-
-    if chunk:
-        for line in chunk.splitlines():
-            m = ss.TIMED_LINE_RE.match(line)
-            if m and m.group(2) is not None:
-                return ss.ts_from_match(m)
-    tokens = query_norm.split() if query_norm else []
-    if not tokens:
-        return None
-    body = page.body or ""
-    if "[" not in body:
-        return None
-    pos = body.lower().find(tokens[0])
-    if pos == -1:
-        return None
-    offset = 0
-    best: float | None = None
-    for line in body.splitlines(keepends=True):
-        if offset > pos:
-            break
-        m = ss.TIMED_LINE_RE.match(line)
-        if m and m.group(2) is not None:
-            best = ss.ts_from_match(m)
-        offset += len(line)
-    return best
 
 
 def _collapse_frame_children(
@@ -1640,133 +1607,6 @@ def on_resolver_files_changed(
         resolver.on_files_changed(vault_root, changed_list, deleted_list)
         _RESOLVER_CACHE[vault_root] = (FreshnessSnapshot(vault_root).vault(), resolver)
 
-
-def _stem_tokens_present(page: ParsedPage, query_norm: str) -> bool:
-    """All-tokens-present check using Snowball stems on both sides.
-
-    Recovers morphological matches that the literal substring gate
-    misses — query "regulation" passes for a page that mentions
-    "regulator", "compounding" passes for one that mentions "compound".
-    Used only as a fallback in hybrid mode; keyword mode keeps the
-    strict substring gate (precision is the feature there).
-    """
-    if not query_norm:
-        return True
-    from . import bm25 as bm25_module
-    text_stems = page.stem_set
-    for tok in query_norm.split():
-        if not tok:
-            continue
-        if bm25_module.stem_word(tok) not in text_stems:
-            return False
-    return True
-
-
-def _stem_anchored_excerpt(page: ParsedPage, query_norm: str) -> str:
-    """Snippet anchored on the first body word whose stem matches the query.
-
-    Falls back to the leading body snippet when nothing in the body matches
-    a query stem (e.g. the match was title-only).
-    """
-    from . import bm25 as bm25_module
-    body = page.body.strip()
-    if not body:
-        return ""
-    query_stems = {bm25_module.stem_word(t) for t in query_norm.split() if t}
-    if not query_stems:
-        return _collapse(body[:EXCERPT_MAX_LEN])
-    anchor_idx = -1
-    anchor_len = 0
-    # Walk body words in order; first one whose stem is in query_stems wins.
-    for m in re.finditer(r"[A-Za-z0-9]+", body):
-        word = m.group(0)
-        if bm25_module.stem_word(word.lower()) in query_stems:
-            anchor_idx = m.start()
-            anchor_len = len(word)
-            break
-    if anchor_idx == -1:
-        return _collapse(body[:EXCERPT_MAX_LEN])
-    start = max(0, anchor_idx - EXCERPT_RADIUS)
-    end = min(len(body), anchor_idx + anchor_len + EXCERPT_RADIUS)
-    snippet = body[start:end]
-    if start > 0:
-        snippet = "…" + snippet.lstrip()
-    if end < len(body):
-        snippet = snippet.rstrip() + "…"
-    return _collapse(snippet)
-
-
-def _semantic_excerpt(
-    page: ParsedPage,
-    query_norm: str,
-    best_chunk: str | None,
-    keyword_excerpt: str | None,
-) -> str:
-    """Prefer the matching chunk text (trimmed); fall back to the keyword excerpt."""
-    if best_chunk:
-        # Strip the title prefix the chunker prepends — it's redundant with
-        # the Hit.title field.
-        body = best_chunk
-        title_prefix = (page.title or "").strip()
-        if title_prefix and body.startswith(title_prefix + "\n\n"):
-            body = body[len(title_prefix) + 2:]
-        snippet = body.strip()[:EXCERPT_MAX_LEN].strip()
-        if len(body) > EXCERPT_MAX_LEN:
-            snippet = snippet.rstrip() + "…"
-        return _collapse(snippet)
-    return keyword_excerpt or ""
-
-
-
-def _make_excerpt(page: ParsedPage, query_norm: str) -> str | None:
-    """Return ~200-char snippet anchored to the query; None if no match.
-
-    Tokenizes the query on whitespace and requires every token to appear in
-    title or body (case-insensitive, any order). So `contract employment`
-    matches a page mentioning "employment contract" — natural-language
-    queries don't have to guess exact phrasing.
-
-    If query is empty, returns the first ~200 chars of body (no match required).
-    """
-    body = page.body_stripped
-    if not query_norm:
-        snippet = body[:EXCERPT_MAX_LEN]
-        return _collapse(snippet)
-    title_norm = page.title_norm
-    body_norm = page.body_norm
-    tokens = query_norm.split()
-    if not tokens:
-        snippet = body[:EXCERPT_MAX_LEN]
-        return _collapse(snippet)
-    # Every token must appear somewhere in title or body.
-    for tok in tokens:
-        if tok not in title_norm and tok not in body_norm:
-            return None
-    # Pick the anchor: first token's first body occurrence; if every token is
-    # title-only, return a leading body snippet for context.
-    anchor_idx = -1
-    anchor_len = 0
-    for tok in tokens:
-        idx = body_norm.find(tok)
-        if idx != -1:
-            anchor_idx = idx
-            anchor_len = len(tok)
-            break
-    if anchor_idx == -1:
-        snippet = body[:EXCERPT_MAX_LEN]
-        return _collapse(snippet)
-    start = max(0, anchor_idx - EXCERPT_RADIUS)
-    end = min(len(body), anchor_idx + anchor_len + EXCERPT_RADIUS)
-    snippet = body[start:end]
-    if start > 0:
-        snippet = "…" + snippet.lstrip()
-    if end < len(body):
-        snippet = snippet.rstrip() + "…"
-    return _collapse(snippet)
-
-
-def _collapse(s: str) -> str:
-    return re.sub(r"\s+", " ", s).strip()
 
 
 def unload_ram_caches() -> dict[str, int]:
