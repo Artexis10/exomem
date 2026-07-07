@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import embeddings
+from exomem import embeddings, sidecar_store
 
 
 @pytest.fixture(autouse=True)
@@ -545,7 +545,7 @@ def test_epoch_bump_invalidates_without_gen_or_mtime(tmp_path, monkeypatch):
     conn = sqlite3.connect(idx.path)
     try:
         with conn:
-            embeddings._bump_meta(conn, "epoch")
+            sidecar_store.bump_meta(conn, "epoch")
     finally:
         conn.close()
     os.utime(idx.path, ns=(frozen.st_atime_ns, frozen.st_mtime_ns))
@@ -715,7 +715,7 @@ def test_sidecar_deleted_and_recreated_aba_detected_via_instance(tmp_path, monke
     fresh = embeddings.EmbeddingIndex(vault)
     fresh.upsert_file("new.md", ["new"], _mat([0, 1]), 5.0)  # new file's gen -> 1
 
-    new_epoch, new_gen, new_instance = embeddings._peek_sidecar_token(idx.path)
+    new_epoch, new_gen, new_instance = sidecar_store.peek_sidecar_token(idx.path)
     assert new_gen == old_gen  # (epoch, gen) ALONE would have looked "fresh"
     assert new_instance != old_instance  # the instance nonce catches it
 
