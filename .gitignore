@@ -3,7 +3,9 @@
 __pycache__/
 *.py[cod]
 .pytest_cache/
+pytest-cache-files-*/
 .pytest-tmp/
+.tmp-product-benchmark/
 .codex-manual-cache/
 .og-previews/
 .push-clone-test/
