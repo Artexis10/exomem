@@ -2,6 +2,49 @@
   "id": "business",
   "name": "Business",
   "description": "Customers, meetings, commitments, contracts, risks, and decisions.",
+  "purpose": "Keep customer, partner, contract, meeting, risk, and commitment knowledge findable with provenance and review.",
+  "audience": "Founders, operators, consultants, sales teams, account owners, and solo professionals tracking business context.",
+  "beginner_description": "Use this for work relationships, meetings, promises, contracts, open risks, and business decisions.",
+  "agent_instructions": "Treat meeting notes and documents as sources first. Preserve proof for commitments, contracts, invoices, disputes, and compliance records. Compile durable conclusions as research notes or decisions, and link customers, accounts, and counterparties as entities.",
+  "default_note_types": [
+    "research-note",
+    "insight",
+    "failure"
+  ],
+  "default_entity_types": [
+    "person",
+    "concept",
+    "decision"
+  ],
+  "default_block_types": [
+    "commitment",
+    "risk",
+    "decision",
+    "meeting-note",
+    "proof"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Sessions",
+    "Knowledge Base/Sources/Articles",
+    "Knowledge Base/Evidence/Business",
+    "Knowledge Base/Notes/Research/Business",
+    "Knowledge Base/Entities/People",
+    "Knowledge Base/Entities/Decisions"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Save a customer commitment",
+      "intent": "Capture an obligation, promise, or follow-up from a call or document.",
+      "route": "add raw material, then note or link the durable commitment and entities",
+      "example": "Save the customer commitment from this call."
+    },
+    {
+      "title": "Review open risks",
+      "intent": "Find risks, stalled commitments, or decisions needing follow-up.",
+      "route": "find with compact detail, then audit or attention for review queues",
+      "example": "What risks are open for this account?"
+    }
+  ],
   "primitives": [
     "source",
     "entity",

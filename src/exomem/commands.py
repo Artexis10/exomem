@@ -47,6 +47,7 @@ from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
 from . import link as link_module
 from . import link_summary as link_summary_module
+from . import knowledge_packs as knowledge_packs_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
@@ -140,6 +141,7 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
+    selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
         "contract_version": "2026-07-07.1",
         "profile": profile,
@@ -159,6 +161,14 @@ def op_bootstrap(
             "exomem": (
                 "Use for durable governed knowledge: sources, proof/evidence, "
                 "history, decisions, records, review, and compiled conclusions."
+            ),
+        },
+        "knowledge_packs": {
+            "available": knowledge_packs_module.list_builtin_packs(),
+            "selected": selected_packs,
+            "selection_rule": (
+                "Packs are product guidance only. They help route simple user intent "
+                "into typed tools; they do not create folders, migrate files, or bypass governance."
             ),
         },
         "workflow": {
@@ -249,7 +259,7 @@ def op_bootstrap(
                 "try pack=true for synthesis instead of many get calls",
             ],
         },
-        "front_door_actions": product_front_door_catalog(),
+        "front_door_actions": product_front_door_catalog(selected_packs),
         "tool_catalog": product_tool_catalog(),
         "common_tools": [
             "adopt",
@@ -2445,7 +2455,7 @@ def product_tool_catalog() -> dict:
     }
 
 
-def product_front_door_catalog() -> dict:
+def product_front_door_catalog(selected_packs: dict | None = None) -> dict:
     """Map simple product verbs to the typed tools that enforce governance."""
     out = {
         action: {"primary_tools": [], "advanced_tools": []}
@@ -2463,4 +2473,22 @@ def product_front_door_catalog() -> dict:
     out["save"]["contract"] = "raw material becomes Sources; durable conclusions become governed notes/entities"
     out["update"]["contract"] = "edit or supersede with an explicit reason; keep history"
     out["connect"]["contract"] = "link entities and related notes so the graph compounds"
+
+    packs = (selected_packs or {}).get("packs") or []
+    if packs:
+        for action in out:
+            guidance = []
+            for pack in packs:
+                if action not in set(pack.get("actions") or []):
+                    continue
+                guidance.append(
+                    {
+                        "pack_id": pack.get("id"),
+                        "name": pack.get("name"),
+                        "agent_instructions": pack.get("agent_instructions"),
+                        "suggested_workflows": pack.get("suggested_workflows") or [],
+                    }
+                )
+            if guidance:
+                out[action]["selected_pack_guidance"] = guidance
     return out
