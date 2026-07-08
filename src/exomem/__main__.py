@@ -929,6 +929,18 @@ def _print_adopt_human(result: dict) -> None:
         for item in copied[:10]:
             print(f"  - {item.get('original_path')} -> {item.get('source_path')}")
 
+    if plan := result.get("compile_plan"):
+        sources = plan.get("sources") or []
+        skipped = plan.get("skipped") or []
+        print(f"\nCompile plan: {plan.get('status', 'unknown')} ({len(sources)} source(s), {len(skipped)} skipped)")
+        proposal = plan.get("proposal") or {}
+        if proposal.get("suggested_title"):
+            print(f"  Suggested title: {proposal.get('suggested_title')}")
+        if proposal.get("suggested_note_type"):
+            print(f"  Suggested type: {proposal.get('suggested_note_type')}")
+        if plan.get("proposal_ref"):
+            print(f"  Ref: {plan.get('proposal_ref')}")
+
 
 def _print_human(result, *, op: str | None = None) -> None:
     if op == "adopt" and isinstance(result, dict):

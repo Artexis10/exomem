@@ -15,7 +15,8 @@ import json
 from pathlib import Path
 from typing import Any
 
-from . import indexes, knowledge_packs, overview as overview_module
+from . import compile_proposal as compile_proposal_module
+from . import context_refs, indexes, knowledge_packs, overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     PlannedWrite,
@@ -29,8 +30,8 @@ from .vault import (
 )
 
 DEFAULT_MODE = "scan-only"
-SUPPORTED_MODES = ("scan-only", "save-manifest", "copy-as-sources")
-PLANNED_MODES = ("compile-selected",)
+SUPPORTED_MODES = ("scan-only", "save-manifest", "copy-as-sources", "compile-selected")
+PLANNED_MODES: tuple[str, ...] = ()
 ADOPTION_DIR = "_Adoption"
 IMPORTED_SOURCE_FOLDER = "Imported"
 _TEXT_IMPORT_SUFFIXES = frozenset(
@@ -77,10 +78,11 @@ def _safe_next_actions(kb_present: bool) -> list[dict]:
                 },
                 {
                     "action": "compile-selected",
-                    "status": "planned",
+                    "status": "available",
                     "description": (
-                        "Create governed notes from selected sources, linked back "
-                        "to originals or imported source copies."
+                        "Copy explicitly selected legacy text files as governed Sources "
+                        "when needed, then return a compile plan. No compiled note is "
+                        "created until the user deliberately calls note()."
                     ),
                 },
             ]
@@ -166,6 +168,9 @@ def _compact_report(report: dict[str, Any]) -> dict[str, Any]:
         "summary": report.get("summary"),
         "pack_suggestions": report.get("pack_suggestions"),
         "next_actions": report.get("next_actions"),
+        "refs": report.get("refs"),
+        "copy": report.get("copy"),
+        "compile_plan": report.get("compile_plan"),
         "overview": report.get("overview"),
     }
 
@@ -281,7 +286,7 @@ def _save_manifest(
     writes = [PlannedWrite(path=target, content=content)]
     warnings = _add_manifest_index_writes(root=root, writes=writes, rel_path=rel, today=today)
     batch_atomic_write(writes, vault_root=root)
-    return {"path": rel, "warnings": warnings}
+    return {"path": rel, "ref": context_refs.manifest_ref(rel), "warnings": warnings}
 
 
 def _title_from_text(path: Path, text: str) -> str:
@@ -352,12 +357,14 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
             "path": rel,
             "code": "ALREADY_GOVERNED",
             "reason": f"copy-as-sources expects legacy files outside {kb_dirname()}/",
+            "ref": context_refs.vault_ref(rel),
         }
     if abs_path.suffix.lower() not in _TEXT_IMPORT_SUFFIXES:
         return {
             "path": rel,
             "code": "UNSUPPORTED_IMPORT_TYPE",
             "reason": "copy-as-sources currently imports text/markdown-like files only",
+            "ref": context_refs.vault_ref(rel),
         }
     return abs_path, rel
 
@@ -414,7 +421,9 @@ def _copy_as_sources(
         copied.append(
             {
                 "original_path": rel,
+                "original_ref": context_refs.vault_ref(rel),
                 "source_path": rel_target,
+                "source_ref": context_refs.source_ref(rel_target),
                 "original_sha256": sha,
                 "original_bytes": len(data),
             }
@@ -496,6 +505,131 @@ def _copy_as_sources(
     return {"copied_sources": copied, "skipped": skipped, "warnings": warnings}
 
 
+def _source_wikilink_path(rel_path: str) -> str:
+    return rel_path[:-3] if rel_path.lower().endswith(".md") else rel_path
+
+
+def _resolve_compile_selection(root: Path, raw: str) -> dict:
+    try:
+        abs_path, rel = resolve_under_vault(root, raw, must_exist=True, must_be_file=True)
+    except VaultPathError as e:
+        return {"kind": "skip", "path": raw, "code": e.code, "reason": e.reason}
+
+    if rel.startswith(kb_prefix()):
+        if rel.startswith(f"{kb_prefix()}Sources/") and rel.lower().endswith(".md"):
+            return {"kind": "governed_source", "abs_path": abs_path, "rel": rel}
+        return {
+            "kind": "skip",
+            "path": rel,
+            "code": "NOT_ADOPTION_SOURCE",
+            "reason": "compile-selected expects legacy files or governed Sources",
+            "ref": context_refs.vault_ref(rel),
+        }
+
+    if abs_path.suffix.lower() not in _TEXT_IMPORT_SUFFIXES:
+        return {
+            "kind": "skip",
+            "path": rel,
+            "code": "UNSUPPORTED_IMPORT_TYPE",
+            "reason": "compile-selected currently imports text/markdown-like files only",
+            "ref": context_refs.vault_ref(rel),
+        }
+    return {"kind": "legacy_text", "abs_path": abs_path, "rel": rel}
+
+
+def _compile_selected(
+    root: Path,
+    *,
+    selected_paths: list[str] | None,
+    today: dt.date,
+) -> dict:
+    _require_kb(root)
+    if not selected_paths:
+        raise AdoptError(
+            "MISSING_SELECTION",
+            "compile-selected requires selected_paths; scan first, then pass explicit files",
+        )
+
+    legacy_paths: list[str] = []
+    planned_sources: list[dict] = []
+    skipped: list[dict] = []
+    warnings: list[str] = []
+    copied_sources: list[dict] = []
+
+    for raw in selected_paths:
+        resolved = _resolve_compile_selection(root, raw)
+        kind = resolved.get("kind")
+        if kind == "governed_source":
+            rel = resolved["rel"]
+            data = resolved["abs_path"].read_bytes()
+            planned_sources.append(
+                {
+                    "source_path": rel,
+                    "source_wikilink": _source_wikilink_path(rel),
+                    "source_ref": context_refs.source_ref(rel),
+                    "source_sha256": hashlib.sha256(data).hexdigest(),
+                    "source_bytes": len(data),
+                    "already_governed": True,
+                }
+            )
+        elif kind == "legacy_text":
+            legacy_paths.append(resolved["rel"])
+        else:
+            item = dict(resolved)
+            item.pop("kind", None)
+            skipped.append(item)
+
+    if legacy_paths:
+        copy_result = _copy_as_sources(root, selected_paths=legacy_paths, today=today)
+        copied_sources = copy_result.get("copied_sources") or []
+        skipped.extend(copy_result.get("skipped") or [])
+        warnings.extend(copy_result.get("warnings") or [])
+        for item in copied_sources:
+            source_path = item["source_path"]
+            planned_sources.append(
+                {
+                    "original_path": item["original_path"],
+                    "original_ref": item.get("original_ref") or context_refs.vault_ref(item["original_path"]),
+                    "source_path": source_path,
+                    "source_wikilink": _source_wikilink_path(source_path),
+                    "source_ref": item.get("source_ref") or context_refs.source_ref(source_path),
+                    "original_sha256": item["original_sha256"],
+                    "original_bytes": item["original_bytes"],
+                    "already_governed": False,
+                }
+            )
+
+    if not planned_sources:
+        return {
+            "status": "empty",
+            "proposal_ref": None,
+            "sources": [],
+            "copied_sources": copied_sources,
+            "skipped": skipped,
+            "warnings": warnings + ["no source material available for compilation plan"],
+            "proposal": None,
+        }
+
+    source_wikilinks = [item["source_wikilink"] for item in planned_sources]
+    try:
+        proposal = compile_proposal_module.propose_compilation(root, sources=source_wikilinks)
+    except compile_proposal_module.ProposeError as e:
+        raise AdoptError(e.code, e.reason) from e
+
+    proposal_sources = proposal.get("suggested_sources") or source_wikilinks
+    proposal_ref = context_refs.proposal_ref(proposal_sources)
+    proposal["proposal_ref"] = proposal_ref
+    return {
+        "status": "ready",
+        "proposal_ref": proposal_ref,
+        "sources": planned_sources,
+        "copied_sources": copied_sources,
+        "skipped": skipped,
+        "warnings": warnings + list(proposal.get("warnings") or []),
+        "proposal": proposal,
+        "next_step": "Review outline_markdown, then call note() with suggested_sources when ready.",
+    }
+
 def adopt(
     root: Path | str,
     *,
@@ -520,16 +654,16 @@ def adopt(
         samples: Sample filename count per folder.
         pack_limit: Maximum pack suggestions to return.
         manifest_path: Optional markdown destination for ``save-manifest``.
-        selected_paths: Explicit vault-relative files for ``copy-as-sources``.
+        selected_paths: Explicit vault-relative files for ``copy-as-sources`` or ``compile-selected``.
 
     Scan-only never writes. Unsupported modes fail explicitly instead of
     silently pretending to migrate content.
     """
     if mode not in SUPPORTED_MODES:
-        planned = ", ".join(PLANNED_MODES)
+        supported = ", ".join(SUPPORTED_MODES)
         raise AdoptError(
             "UNSUPPORTED_MODE",
-            f"adopt mode {mode!r} is not implemented yet; planned safe modes: {planned}",
+            f"adopt mode {mode!r} is not supported; supported modes: {supported}",
         )
     root_path = Path(root)
     run_date = _today(today)
@@ -568,6 +702,7 @@ def adopt(
         "available_packs": knowledge_packs.list_builtin_packs(),
         "pack_schema": knowledge_packs.pack_schema(),
         "next_actions": _safe_next_actions(kb_present),
+        "refs": {"root": context_refs.vault_ref(path or "")},
         "overview": scan,
     }
     if mode == "save-manifest":
@@ -579,6 +714,12 @@ def adopt(
         )
     elif mode == "copy-as-sources":
         report["copy"] = _copy_as_sources(
+            root_path,
+            selected_paths=selected_paths,
+            today=run_date,
+        )
+    elif mode == "compile-selected":
+        report["compile_plan"] = _compile_selected(
             root_path,
             selected_paths=selected_paths,
             today=run_date,

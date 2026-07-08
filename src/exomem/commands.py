@@ -1912,8 +1912,10 @@ def op_adopt(
     bounded read-only adoption report: what Exomem found, which content is
     governed versus read-only input, likely knowledge packs, and safe next
     actions. Explicit write modes only write under `Knowledge Base/`:
-    `save-manifest` saves the report, and `copy-as-sources` copies selected
-    legacy text files into governed Sources with original path/hash provenance.
+    `save-manifest` saves the report, `copy-as-sources` copies selected
+    legacy text files into governed Sources with original path/hash provenance,
+    and `compile-selected` copies selected legacy files when needed then returns
+    a reviewable compile plan. It does not create compiled notes automatically.
 
     Use this when the user says "import my vault", "adopt these notes", "make
     this existing knowledge base usable", or asks what Exomem would do with an
@@ -1921,14 +1923,14 @@ def op_adopt(
 
     Args:
         path: Optional vault subtree to scan. Defaults to the vault root.
-        mode: Adoption mode: scan-only, save-manifest, or copy-as-sources.
+        mode: Adoption mode: scan-only, save-manifest, copy-as-sources, or compile-selected.
         max_depth: Folder-tree depth cap for the scan.
         include_hidden: Include hidden files/directories in the scan.
         samples: Sample filename count per folder.
         pack_limit: Maximum knowledge-pack suggestions to return.
         manifest_path: Optional markdown destination under Knowledge Base/ for
             save-manifest. A default under _Adoption/ is used when omitted.
-        selected_paths: Explicit vault-relative legacy files for copy-as-sources.
+        selected_paths: Explicit vault-relative legacy files for copy-as-sources or compile-selected.
     """
     try:
         return adopt_module.adopt(

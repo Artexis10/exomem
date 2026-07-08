@@ -34,9 +34,9 @@ The adoption modes are explicit:
 | `scan-only` | No | Report structure, likely packs, governed vs read-only areas, and next actions |
 | `save-manifest` | Yes, under `Knowledge Base/_Adoption/` only | Save the scan as a durable onboarding artifact |
 | `copy-as-sources` | Yes, under `Knowledge Base/Sources/Imported/` only | Copy selected legacy text files with original path and SHA-256 provenance |
-| `compile-selected` | Planned | Create governed notes from selected sources with citations |
+| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `note` |
 
-There is no rewrite-in-place onboarding path in the normal product flow.
+There is no rewrite-in-place onboarding path in the normal product flow. `compile-selected` is a planning step, not auto-migration: it prepares governed sources and a note scaffold so the user or agent can deliberately compile with `note`.
 
 ## Sources versus evidence
 
