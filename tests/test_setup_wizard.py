@@ -6,6 +6,7 @@ print_fn): no test touches the real `~/.claude` or spawns a real `claude`.
 
 from __future__ import annotations
 
+import json
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -69,9 +70,12 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     # KB scaffold landed; skill installed under the injected home
     assert (vault / "Knowledge Base" / "index.md").is_file()
     assert (home / "skills" / "exomem" / "SKILL.md").is_file()
+    selected = json.loads((vault / "Knowledge Base" / "_Packs" / "selected-packs.json").read_text(encoding="utf-8"))
+    assert selected["selected_pack_ids"] == ["personal-records"]
     # pre-init scan surfaced the existing content, likely packs, and write contract
     assert "2 files" in out
     assert "Likely packs:" in out
+    assert "Selected packs: Personal records" in out
     assert "Adoption: run `exomem adopt`" in out
     assert "writes only under 'Knowledge Base/'" in out
     # registration argv shape
@@ -83,6 +87,32 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert "EXOMEM_DISABLE_EMBEDDINGS=1" in reg  # lean profile
     assert "--" in reg
 
+
+def test_interactive_setup_can_select_multiple_packs(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder()
+    answers = iter(["technical, creative", "n"])
+    lines: list[str] = []
+
+    code = setup_wizard.run_setup(
+        vault=str(vault),
+        yes=False,
+        profile="lean",
+        with_hooks=False,
+        skip_claude_register=True,
+        scope="user",
+        input_fn=lambda prompt="": next(answers),
+        run_fn=recorder,
+        which_fn=lambda name: None,
+        home=home,
+        print_fn=lines.append,
+    )
+
+    selected = json.loads((vault / "Knowledge Base" / "_Packs" / "selected-packs.json").read_text(encoding="utf-8"))
+    assert code == 0
+    assert selected["selected_pack_ids"] == ["technical", "creative"]
+    assert "Choose starter knowledge packs" in "\n".join(lines)
+    assert "Selected packs: Technical, Creative" in "\n".join(lines)
 
 def test_rerun_converges_to_skips(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"

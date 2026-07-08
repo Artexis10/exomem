@@ -2,6 +2,50 @@
   "id": "creative",
   "name": "Creative",
   "description": "References, assets, drafts, productions, taste notes, and releases.",
+  "purpose": "Organize creative references, drafts, assets, production decisions, releases, and reusable taste knowledge.",
+  "audience": "Creators, designers, writers, musicians, filmmakers, photographers, and teams managing creative work.",
+  "beginner_description": "Use this for references, drafts, production logs, assets, taste notes, release notes, and creative decisions.",
+  "agent_instructions": "Save references and drafts as sources unless the user is preserving a final artifact or proof. Compile durable production knowledge as production logs, insights, or research notes. Link people, concepts, tools, and decisions when they recur across projects.",
+  "default_note_types": [
+    "production-log",
+    "insight",
+    "research-note"
+  ],
+  "default_entity_types": [
+    "person",
+    "concept",
+    "library",
+    "decision"
+  ],
+  "default_block_types": [
+    "reference",
+    "asset",
+    "draft",
+    "production-note",
+    "release"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Other",
+    "Knowledge Base/Sources/Videos",
+    "Knowledge Base/Evidence/Creative",
+    "Knowledge Base/Notes/Productions",
+    "Knowledge Base/Notes/Insights",
+    "Knowledge Base/Entities/Concepts"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Save references",
+      "intent": "Keep inspiration, source material, and examples connected to future work.",
+      "route": "add references as sources, then suggest links to related concepts or productions",
+      "example": "Save these references for the next shoot."
+    },
+    {
+      "title": "Log a production",
+      "intent": "Turn a creative artifact into a durable production record with outcomes and lessons.",
+      "route": "note with note_type production-log, then connect recurring people, tools, and ideas",
+      "example": "Turn this draft into a production log."
+    }
+  ],
   "primitives": [
     "source",
     "asset",

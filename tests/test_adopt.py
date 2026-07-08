@@ -81,6 +81,10 @@ def test_adopt_suggests_builtin_packs_from_structure(tmp_path: Path) -> None:
         "personal-records",
     }
     assert "required_fields" in report["pack_schema"]
+    assert "purpose" in report["pack_schema"]["required_fields"]
+    assert report["pack_schema"]["selection_manifest"] == "Knowledge Base/_Packs/selected-packs.json"
+    assert by_id["technical"]["beginner_description"]
+    assert by_id["legal-warranty"]["suggested_workflows"][0]["route"]
     assert report["governance"]["kb_present"] is True
     assert {a["action"] for a in report["next_actions"]} >= {"save-manifest", "copy-as-sources"}
 
@@ -157,6 +161,36 @@ def test_pack_validation_rejects_unknown_fields() -> None:
     with pytest.raises(knowledge_packs.PackValidationError) as ei:
         knowledge_packs.validate_pack_dict(raw)
     assert ei.value.code == "UNKNOWN_FIELD"
+def test_pack_validation_rejects_invalid_workflows() -> None:
+    raw = knowledge_packs.list_builtin_packs()[0]
+    raw["suggested_workflows"] = [{"title": "Missing route", "intent": "x", "example": "x"}]
+    with pytest.raises(knowledge_packs.PackValidationError) as ei:
+        knowledge_packs.validate_pack_dict(raw)
+    assert ei.value.code == "MISSING_WORKFLOW_FIELD"
+
+    raw = knowledge_packs.list_builtin_packs()[0]
+    raw["default_note_types"] = []
+    with pytest.raises(knowledge_packs.PackValidationError) as ei:
+        knowledge_packs.validate_pack_dict(raw)
+    assert ei.value.code == "INVALID_FIELD"
+
+
+def test_selected_pack_manifest_roundtrip(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+
+    written = knowledge_packs.write_selected_packs(
+        vault,
+        ["technical", "creative", "technical"],
+        source="test",
+        today=dt.date(2026, 7, 7),
+    )
+    state = knowledge_packs.selected_pack_state(vault)
+
+    assert written["path"] == "Knowledge Base/_Packs/selected-packs.json"
+    assert written["selected_pack_ids"] == ["technical", "creative"]
+    assert state["manifest_present"] is True
+    assert state["selected_pack_ids"] == ["technical", "creative"]
+    assert state["packs"][0]["agent_instructions"]
 
 
 def test_builtin_packs_are_declarative_files() -> None:

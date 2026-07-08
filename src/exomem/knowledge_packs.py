@@ -1,27 +1,56 @@
-"""Built-in knowledge-pack definitions and deterministic pack suggestions.
+"""Built-in knowledge-pack definitions and selected-pack persistence.
 
 Knowledge packs are product-level routing hints: small, declarative bundles that
-describe common domains in terms of Exomem's durable primitives. They are not a
-new storage engine and they do not infer meaning from note bodies. Suggestions
-come from cheap structural signals surfaced by ``overview``: folder names, sample
-file names, counts, and media mix.
+make common domains feel like first-class Exomem primitives without changing the
+storage engine. Suggestions are deterministic measurements over vault structure;
+selection is durable guidance stored under the governed Knowledge Base layer.
 """
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import re
 from dataclasses import asdict, dataclass
 from importlib import resources
+from pathlib import Path
 from typing import Any
+
+from .kbdir import kb_dirname, kb_prefix
+from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 
 PACK_DIRECTORY = "packs"
+PACK_SELECTION_DIR = "_Packs"
+PACK_SELECTION_FILE = "selected-packs.json"
+PACK_SELECTION_SCHEMA_VERSION = 1
+DEFAULT_PACK_ID = "personal-records"
 PACK_REQUIRED_FIELDS: frozenset[str] = frozenset(
-    {"id", "name", "description", "primitives", "actions", "examples", "signals"}
+    {
+        "id",
+        "name",
+        "description",
+        "purpose",
+        "audience",
+        "beginner_description",
+        "agent_instructions",
+        "default_note_types",
+        "default_entity_types",
+        "default_block_types",
+        "suggested_folders",
+        "suggested_workflows",
+        "primitives",
+        "actions",
+        "examples",
+        "signals",
+    }
 )
 PACK_OPTIONAL_FIELDS: frozenset[str] = frozenset()
 PACK_ALLOWED_FIELDS: frozenset[str] = PACK_REQUIRED_FIELDS | PACK_OPTIONAL_FIELDS
+PACK_WORKFLOW_REQUIRED_FIELDS: frozenset[str] = frozenset(
+    {"title", "intent", "route", "example"}
+)
+PACK_WORKFLOW_ALLOWED_FIELDS: frozenset[str] = PACK_WORKFLOW_REQUIRED_FIELDS
 PACK_ALLOWED_PRIMITIVES: frozenset[str] = frozenset(
     {
         "source",
@@ -51,11 +80,29 @@ class PackValidationError(ValueError):
         self.reason = reason
 
 
+class PackSelectionError(ValueError):
+    """Stable failure for selected-pack manifest operations."""
+
+    def __init__(self, code: str, reason: str) -> None:
+        super().__init__(f"{code}: {reason}")
+        self.code = code
+        self.reason = reason
+
+
 @dataclass(frozen=True)
 class KnowledgePack:
     id: str
     name: str
     description: str
+    purpose: str
+    audience: str
+    beginner_description: str
+    agent_instructions: str
+    default_note_types: tuple[str, ...]
+    default_entity_types: tuple[str, ...]
+    default_block_types: tuple[str, ...]
+    suggested_folders: tuple[str, ...]
+    suggested_workflows: tuple[dict[str, str], ...]
     primitives: tuple[str, ...]
     actions: tuple[str, ...]
     examples: tuple[str, ...]
@@ -90,6 +137,9 @@ def pack_schema() -> dict:
         "optional_fields": sorted(PACK_OPTIONAL_FIELDS),
         "allowed_primitives": sorted(PACK_ALLOWED_PRIMITIVES),
         "allowed_actions": sorted(PACK_ALLOWED_ACTIONS),
+        "workflow_required_fields": sorted(PACK_WORKFLOW_REQUIRED_FIELDS),
+        "selection_manifest": f"{kb_prefix()}{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}",
+        "selection_schema_version": PACK_SELECTION_SCHEMA_VERSION,
     }
 
 
@@ -128,6 +178,41 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
             out.append(item.strip())
         return tuple(out)
 
+    def _workflow_tuple(field: str) -> tuple[dict[str, str], ...]:
+        value = raw[field]
+        if not isinstance(value, (list, tuple)) or not value:
+            raise PackValidationError("INVALID_WORKFLOW", f"{field!r} must be a non-empty list")
+        workflows: list[dict[str, str]] = []
+        for index, item in enumerate(value):
+            if not isinstance(item, dict):
+                raise PackValidationError(
+                    "INVALID_WORKFLOW",
+                    f"{field!r}[{index}] must be a mapping",
+                )
+            unknown = sorted(set(item) - PACK_WORKFLOW_ALLOWED_FIELDS)
+            if unknown:
+                raise PackValidationError(
+                    "UNKNOWN_WORKFLOW_FIELD",
+                    f"{field!r}[{index}] unknown field(s): {unknown}",
+                )
+            missing = sorted(PACK_WORKFLOW_REQUIRED_FIELDS - set(item))
+            if missing:
+                raise PackValidationError(
+                    "MISSING_WORKFLOW_FIELD",
+                    f"{field!r}[{index}] missing field(s): {missing}",
+                )
+            clean: dict[str, str] = {}
+            for key in sorted(PACK_WORKFLOW_REQUIRED_FIELDS):
+                item_value = item[key]
+                if not isinstance(item_value, str) or not item_value.strip():
+                    raise PackValidationError(
+                        "INVALID_WORKFLOW",
+                        f"{field!r}[{index}].{key} must be a non-empty string",
+                    )
+                clean[key] = item_value.strip()
+            workflows.append(clean)
+        return tuple(workflows)
+
     primitives = _string_tuple("primitives")
     bad_primitives = sorted(set(primitives) - PACK_ALLOWED_PRIMITIVES)
     if bad_primitives:
@@ -145,6 +230,15 @@ def validate_pack_dict(raw: dict[str, Any]) -> KnowledgePack:
         id=_nonempty_string("id"),
         name=_nonempty_string("name"),
         description=_nonempty_string("description"),
+        purpose=_nonempty_string("purpose"),
+        audience=_nonempty_string("audience"),
+        beginner_description=_nonempty_string("beginner_description"),
+        agent_instructions=_nonempty_string("agent_instructions"),
+        default_note_types=_string_tuple("default_note_types"),
+        default_entity_types=_string_tuple("default_entity_types"),
+        default_block_types=_string_tuple("default_block_types"),
+        suggested_folders=_string_tuple("suggested_folders"),
+        suggested_workflows=_workflow_tuple("suggested_workflows"),
         primitives=primitives,
         actions=actions,
         examples=_string_tuple("examples"),
@@ -198,6 +292,132 @@ def list_builtin_packs() -> list[dict]:
     return [pack.as_dict() for pack in BUILTIN_PACKS]
 
 
+def get_builtin_pack(pack_id: str) -> dict:
+    """Return one built-in pack by ID."""
+    try:
+        return _PACK_BY_ID[pack_id].as_dict()
+    except KeyError as e:
+        raise PackValidationError("UNKNOWN_PACK", f"unknown pack id: {pack_id}") from e
+
+
+def normalize_pack_ids(pack_ids: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Validate, dedupe, and default a selected-pack ID list."""
+    raw_ids = list(pack_ids or [DEFAULT_PACK_ID])
+    out: list[str] = []
+    seen: set[str] = set()
+    unknown: list[str] = []
+    for raw in raw_ids:
+        pack_id = str(raw).strip()
+        if not pack_id:
+            continue
+        if pack_id not in _PACK_BY_ID:
+            unknown.append(pack_id)
+            continue
+        if pack_id not in seen:
+            seen.add(pack_id)
+            out.append(pack_id)
+    if unknown:
+        raise PackSelectionError("UNKNOWN_PACK", f"unknown pack id(s): {unknown}")
+    if not out:
+        out = [DEFAULT_PACK_ID]
+    return tuple(out)
+
+
+def _selection_rel_path() -> str:
+    return f"{kb_prefix()}{PACK_SELECTION_DIR}/{PACK_SELECTION_FILE}"
+
+
+def _selection_path(root: Path) -> Path:
+    return kb_root(root) / PACK_SELECTION_DIR / PACK_SELECTION_FILE
+
+
+def _pack_summaries(pack_ids: tuple[str, ...]) -> list[dict]:
+    return [
+        {
+            "id": pack.id,
+            "name": pack.name,
+            "beginner_description": pack.beginner_description,
+            "agent_instructions": pack.agent_instructions,
+            "suggested_workflows": list(pack.suggested_workflows),
+            "actions": list(pack.actions),
+        }
+        for pack in (_PACK_BY_ID[pack_id] for pack_id in pack_ids)
+    ]
+
+
+def selected_pack_state(root: Path | str) -> dict:
+    """Read selected packs, falling back to the default when no manifest exists."""
+    root_path = Path(root)
+    rel = _selection_rel_path()
+    path = _selection_path(root_path)
+    warnings: list[str] = []
+    source = "default"
+    updated: str | None = None
+    pack_ids: tuple[str, ...] = (DEFAULT_PACK_ID,)
+    manifest_present = path.is_file()
+
+    if manifest_present:
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            source = str(raw.get("source") or "unknown")
+            updated_raw = raw.get("updated")
+            updated = str(updated_raw) if updated_raw else None
+            pack_ids = normalize_pack_ids(raw.get("selected_pack_ids"))
+        except (OSError, json.JSONDecodeError, PackSelectionError) as e:
+            warnings.append(f"selected-pack manifest ignored: {e}")
+            pack_ids = (DEFAULT_PACK_ID,)
+            source = "default"
+            updated = None
+
+    return {
+        "schema_version": PACK_SELECTION_SCHEMA_VERSION,
+        "path": rel,
+        "manifest_present": manifest_present,
+        "selected_pack_ids": list(pack_ids),
+        "source": source,
+        "updated": updated,
+        "packs": _pack_summaries(pack_ids),
+        "warnings": warnings,
+    }
+
+
+def write_selected_packs(
+    root: Path | str,
+    pack_ids: list[str] | tuple[str, ...] | None,
+    *,
+    source: str = "setup",
+    today: dt.date | None = None,
+) -> dict:
+    """Persist selected packs under the governed Knowledge Base layer."""
+    root_path = Path(root)
+    kb = kb_root(root_path)
+    if not kb.is_dir():
+        raise PackSelectionError(
+            "KB_NOT_INITIALIZED",
+            f"{kb_dirname()}/ is required before selecting packs",
+        )
+    selected_ids = normalize_pack_ids(pack_ids)
+    date_iso = (today or dt.date.today()).isoformat()
+    rel = _selection_rel_path()
+    payload = {
+        "schema_version": PACK_SELECTION_SCHEMA_VERSION,
+        "selected_pack_ids": list(selected_ids),
+        "source": source,
+        "updated": date_iso,
+        "packs": _pack_summaries(selected_ids),
+    }
+    batch_atomic_write(
+        [
+            PlannedWrite(
+                path=_selection_path(root_path),
+                content=json.dumps(payload, indent=2, ensure_ascii=False) + "\n",
+            )
+        ],
+        vault_root=root_path,
+    )
+    return {"path": rel, **payload, "warnings": []}
+
+
 def _tokens(text: str) -> set[str]:
     return set(_TOKEN.findall(text.lower()))
 
@@ -238,7 +458,7 @@ def suggest_packs(scan: dict, *, limit: int = 6) -> list[dict]:
             )
     scored.sort(key=lambda s: (-s.score, s.pack.id))
     if not scored:
-        default = _PACK_BY_ID["personal-records"]
+        default = _PACK_BY_ID[DEFAULT_PACK_ID]
         scored.append(
             PackSuggestion(
                 pack=default,

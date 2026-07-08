@@ -2,6 +2,49 @@
   "id": "health-athletic",
   "name": "Health / athletic",
   "description": "Training, symptoms, measurements, protocols, injuries, and goals.",
+  "purpose": "Track health, training, symptoms, protocols, measurements, and evidence without turning raw logs into unsupported conclusions.",
+  "audience": "Athletes, patients, coaches, health experimenters, and people managing personal records with professional oversight.",
+  "beginner_description": "Use this for workouts, symptoms, injuries, measurements, protocols, appointments, and health records.",
+  "agent_instructions": "Keep raw logs and external documents as sources or evidence. Do not infer medical advice. Compile only user-stated observations, protocols, decisions, and experiment summaries with source links and review prompts.",
+  "default_note_types": [
+    "experiment",
+    "research-note",
+    "insight"
+  ],
+  "default_entity_types": [
+    "person",
+    "concept",
+    "decision"
+  ],
+  "default_block_types": [
+    "measurement",
+    "symptom",
+    "protocol",
+    "session-log",
+    "medical-record"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Sessions",
+    "Knowledge Base/Sources/Other",
+    "Knowledge Base/Evidence/Health",
+    "Knowledge Base/Notes/Experiments/Health",
+    "Knowledge Base/Notes/Research/Health",
+    "Knowledge Base/Entities/People"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Log a training or symptom record",
+      "intent": "Capture observations without prematurely turning them into conclusions.",
+      "route": "add raw log or preserve proof, then compile only durable observations when needed",
+      "example": "Log this training session."
+    },
+    {
+      "title": "Review a protocol change",
+      "intent": "Compare what changed after a protocol, injury, or intervention.",
+      "route": "find relevant logs and experiments, then reason in the agent with citations",
+      "example": "What changed after the new protocol?"
+    }
+  ],
   "primitives": [
     "source",
     "record",

@@ -30,6 +30,7 @@ from . import doctor as doctor_module
 from . import init as init_module
 from . import install_hook as hook_module
 from . import install_skill as install_module
+from . import knowledge_packs as knowledge_packs_module
 from . import overview as overview_module
 from . import personalize as personalize_module
 from .kbdir import kb_dirname, kb_prefix
@@ -47,6 +48,60 @@ def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
         else:
             shown.append(f"{name} (default)")
     return ", ".join(shown)
+
+
+def _default_pack_ids(suggested: list[dict]) -> list[str]:
+    ids: list[str] = []
+    for pack in suggested:
+        pack_id = str(pack.get("id") or "").strip()
+        if pack_id and pack_id not in ids:
+            ids.append(pack_id)
+    return ids or [knowledge_packs_module.DEFAULT_PACK_ID]
+
+
+def _format_selected_pack_names(selection: dict) -> str:
+    names = [pack.get("name") or pack.get("id") for pack in selection.get("packs") or []]
+    return ", ".join(str(name) for name in names if name) or knowledge_packs_module.DEFAULT_PACK_ID
+
+
+def _choose_pack_ids(input_fn, print_fn, *, available: list[dict], suggested: list[dict], yes: bool) -> list[str]:
+    default_ids = _default_pack_ids(suggested)
+    if yes:
+        return default_ids
+
+    suggested_set = set(default_ids)
+    print_lines = ["  Choose starter knowledge packs (guidance only; no folders are created):"]
+    for index, pack in enumerate(available, start=1):
+        marker = "*" if pack.get("id") in suggested_set else " "
+        desc = pack.get("beginner_description") or pack.get("description") or ""
+        print_lines.append(f"    {index}. [{marker}] {pack.get('name')} - {desc}")
+    print_lines.append("  Press Enter to accept the marked packs, or enter numbers/IDs separated by commas.")
+    for line in print_lines:
+        print_fn(line)
+
+    answer = input_fn("Packs: ").strip()
+    if not answer:
+        return default_ids
+    by_number = {str(index): str(pack.get("id")) for index, pack in enumerate(available, start=1)}
+    by_id = {str(pack.get("id")): str(pack.get("id")) for pack in available}
+    selected: list[str] = []
+    unknown: list[str] = []
+    for raw in answer.replace(";", ",").split(","):
+        token = raw.strip()
+        if not token:
+            continue
+        pack_id = by_number.get(token) or by_id.get(token)
+        if not pack_id:
+            unknown.append(token)
+            continue
+        if pack_id not in selected:
+            selected.append(pack_id)
+    if unknown:
+        raise knowledge_packs_module.PackSelectionError(
+            "UNKNOWN_PACK",
+            f"unknown pack selection(s): {unknown}",
+        )
+    return selected or default_ids
 
 
 def _ask_yn(input_fn, prompt: str, default: bool) -> bool:
@@ -170,7 +225,28 @@ def run_setup(
     except FileExistsError:
         report("init", f"[skipped: {kb_prefix()} already exists]")
 
-    # 3b. personalize — propose per-subtree access governance for sibling folders
+    # 3b. packs — product guidance for fresh vaults and suggested routes for existing vaults
+    try:
+        selected_ids = _choose_pack_ids(
+            input_fn,
+            print_fn,
+            available=adoption.get("available_packs") or knowledge_packs_module.list_builtin_packs(),
+            suggested=packs,
+            yes=yes,
+        )
+        selection = knowledge_packs_module.write_selected_packs(
+            vault_path,
+            selected_ids,
+            source="setup",
+        )
+        print_fn(f"    Selected packs: {_format_selected_pack_names(selection)}")
+        print_fn("    Pack selection is guidance only; no folders or notes were created.")
+        report("packs", f"[done] {', '.join(selection['selected_pack_ids'])}")
+    except knowledge_packs_module.PackSelectionError as e:
+        report("packs", f"[failed: {e}]")
+        return finish()
+
+    # 3c. personalize — propose per-subtree access governance for sibling folders
     try:
         prep = personalize_module.scan_and_classify(vault_path)
     except personalize_module.PersonalizeError as e:
