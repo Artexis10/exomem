@@ -159,7 +159,7 @@ def run_setup(
         print_fn(f"    Likely packs: {_format_pack_suggestions(packs)}")
     print_fn("")
     print_fn(f"  Contract: {overview_module.SCOPE_NOTE}")
-    print_fn("  Adoption: run `exomem adopt` anytime for the copy/manifest plan.")
+    print_fn("  Adoption: run `exomem adopt` anytime for manifest review, source copy, and compile planning.")
     print_fn("")
     report("scan", "[done]")
 

@@ -73,7 +73,7 @@ preflight, registers the server with Claude Code, and installs the skill.
 
 Already have a vault full of notes? That's the normal case: `adopt` gives a
 scan-first, read-only report of what's there, suggested knowledge packs, and
-safe copy/compile next actions. Exomem only ever writes under `Knowledge Base/` — your
+safe copy/compile-planning next actions. Exomem only ever writes under `Knowledge Base/` — your
 existing files stay untouched unless you explicitly copy or compile selected material. See
 [QUICKSTART.md § Already have a vault full of notes?](QUICKSTART.md#already-have-a-vault-full-of-notes)
 for the full contract, including daily-notes vaults. Re-running `setup` is
@@ -224,7 +224,7 @@ Run `exomem index` or `kb reconcile` later to heal deferred semantic work.
 - **Searches the vault you already own.** Markdown stays in place; exomem does
   not import copies into a proprietary note store.
 - **Adopts messy vaults safely.** `adopt` starts with a read-only report and
-  explicit copy/compile options, so originals remain archival until you choose.
+  explicit copy and compile-planning options, so originals remain archival until you choose.
 - **Retrieves across text and media.** Markdown, PDFs, Office docs, images,
   screenshots, audio, and video can become searchable through local extraction.
 - **Keeps sources separate from conclusions.** Raw captures, compiled notes,
@@ -289,7 +289,7 @@ exomem exposes typed MCP tools for common knowledge-base work:
 | `audit` | Check graph and corpus health. |
 | `attention` | Surface review queues such as stale notes, close-by claims, and unprocessed sources. |
 | `overview` | Bounded, read-only structure report of the vault or a subtree — works outside `Knowledge Base/` and before `init`. |
-| `adopt` | Existing-vault adoption: scan-only by default; can save a manifest or copy selected legacy text files as Sources while preserving originals. |
+| `adopt` | Existing-vault adoption: scan-only by default; can save a manifest, copy selected legacy text files as Sources, or return a compile plan while preserving originals. |
 
 Tier-2 filesystem tools exist for escape hatches such as listing directories,
 creating files, moving pages, trashing files, and recovering from trash. Set

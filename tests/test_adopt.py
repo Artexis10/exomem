@@ -132,6 +132,87 @@ def test_adopt_copy_as_sources_preserves_original_and_records_provenance(tmp_pat
     assert "# Laptop receipt" in source_text
 
 
+def test_adopt_compile_selected_copies_and_returns_reviewable_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    original = vault / "Warranty Case" / "laptop-receipt.md"
+    before_legacy = _snapshot(vault, exclude_kb=True)
+
+    def fake_propose(root: Path, *, sources: list[str], suggested_title: str | None = None) -> dict:
+        assert root == vault
+        assert sources == ["Knowledge Base/Sources/Imported/2026-07-07-laptop-receipt"]
+        return {
+            "suggested_note_type": "insight",
+            "suggested_title": "Laptop receipt",
+            "suggested_sources": list(sources),
+            "suggested_connections": [],
+            "outline_markdown": "# Laptop receipt\n\n## Claim\n",
+            "warnings": [],
+        }
+
+    monkeypatch.setattr(adopt_module.compile_proposal_module, "propose_compilation", fake_propose)
+
+    report = adopt_module.adopt(
+        vault,
+        mode="compile-selected",
+        selected_paths=["Warranty Case/laptop-receipt.md"],
+        today=dt.date(2026, 7, 7),
+    )
+
+    assert original.read_text(encoding="utf-8") == "# Laptop receipt\n\nreceipt\n"
+    assert _snapshot(vault, exclude_kb=True) == before_legacy
+    assert list((vault / "Knowledge Base" / "Notes").rglob("*.md")) == []
+
+    plan = report["compile_plan"]
+    assert plan["status"] == "ready"
+    assert plan["proposal"]["suggested_sources"] == [
+        "Knowledge Base/Sources/Imported/2026-07-07-laptop-receipt"
+    ]
+    assert plan["proposal"]["proposal_ref"].startswith("exomem://proposal/")
+    assert plan["next_step"].startswith("Review outline_markdown")
+
+    [source] = plan["sources"]
+    assert source["original_path"] == "Warranty Case/laptop-receipt.md"
+    assert source["original_ref"] == "exomem://vault/Warranty%20Case/laptop-receipt.md"
+    assert source["source_path"] == "Knowledge Base/Sources/Imported/2026-07-07-laptop-receipt.md"
+    assert source["source_ref"] == (
+        "exomem://source/Knowledge%20Base/Sources/Imported/2026-07-07-laptop-receipt"
+    )
+    assert source["already_governed"] is False
+
+
+def test_adopt_compile_selected_requires_explicit_selection(tmp_path: Path) -> None:
+    with pytest.raises(adopt_module.AdoptError) as ei:
+        adopt_module.adopt(_legacy_vault(tmp_path, kb=True), mode="compile-selected")
+    assert ei.value.code == "MISSING_SELECTION"
+
+
+def test_adopt_compile_selected_skips_unsupported_without_writing(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    (vault / "scan.jpg").write_bytes(b"not really an image")
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(
+        vault,
+        mode="compile-selected",
+        selected_paths=["scan.jpg"],
+        today=dt.date(2026, 7, 7),
+    )
+
+    assert _snapshot(vault) == before
+    plan = report["compile_plan"]
+    assert plan["status"] == "empty"
+    assert plan["proposal"] is None
+    assert plan["skipped"] == [
+        {
+            "path": "scan.jpg",
+            "code": "UNSUPPORTED_IMPORT_TYPE",
+            "reason": "compile-selected currently imports text/markdown-like files only",
+            "ref": "exomem://vault/scan.jpg",
+        }
+    ]
+
 def test_adopt_copy_as_sources_requires_explicit_selection(tmp_path: Path) -> None:
     with pytest.raises(adopt_module.AdoptError) as ei:
         adopt_module.adopt(_legacy_vault(tmp_path, kb=True), mode="copy-as-sources")
@@ -140,9 +221,10 @@ def test_adopt_copy_as_sources_requires_explicit_selection(tmp_path: Path) -> No
 
 def test_adopt_unsupported_mode_is_explicit(tmp_path: Path) -> None:
     with pytest.raises(adopt_module.AdoptError) as ei:
-        adopt_module.adopt(_legacy_vault(tmp_path), mode="compile-selected")
+        adopt_module.adopt(_legacy_vault(tmp_path), mode="teleport")
     assert ei.value.code == "UNSUPPORTED_MODE"
-    assert "planned safe modes" in ei.value.reason
+    assert "supported modes" in ei.value.reason
+    assert "compile-selected" in ei.value.reason
 
 
 def test_pack_suggestions_default_to_personal_records() -> None:

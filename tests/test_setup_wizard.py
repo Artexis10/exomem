@@ -73,6 +73,7 @@ def test_fresh_vault_happy_path(tmp_path: Path) -> None:
     assert "2 files" in out
     assert "Likely packs:" in out
     assert "Adoption: run `exomem adopt`" in out
+    assert "compile planning" in out
     assert "writes only under 'Knowledge Base/'" in out
     # registration argv shape
     (reg,) = [c for c in recorder.calls if "add" in c]
