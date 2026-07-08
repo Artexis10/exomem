@@ -26,7 +26,7 @@ import os
 import re
 from pathlib import Path
 
-from . import corpus_aware
+from . import corpus_aware, epistemic_graph
 from . import find as find_module
 from . import vault as vault_module
 from .find import Hit, ParsedPage
@@ -313,6 +313,7 @@ def assemble_pack(
     max_hits: int | None = None,
     max_neighbors: int | None = None,
     max_tension: int | None = None,
+    graph_enrich: bool = False,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
@@ -376,11 +377,47 @@ def assemble_pack(
             f"({t_dropped} more not shown; raise EXOMEM_PACK_MAX_TENSION)"
         )
 
-    return {
+    result = {
         "packed_paths": [p.rel_path for p in packed_pages],
         "claims": claims,
         "neighborhood": neighborhood,
         "contradictions": {"superseded": superseded, "tension": tension},
         "embeddings_available": embeddings_available,
         "truncation": truncation,
+    }
+    if graph_enrich:
+        result["graph"] = _graph_enrichment(vault_root, packed_pages)
+    return result
+
+
+def _graph_enrichment(vault_root: Path, packed_pages: list[ParsedPage]) -> dict:
+    if not packed_pages:
+        return {"available": False, "reason": "no packed pages", "nodes": [], "edges": []}
+    nodes: dict[str, dict] = {}
+    edges: dict[str, dict] = {}
+    unavailable: list[str] = []
+    for page in packed_pages:
+        ctx = epistemic_graph.graph_context(vault_root, path=page.rel_path, depth=1)
+        if not ctx.get("available"):
+            unavailable.append(str(ctx.get("reason") or "graph unavailable"))
+            continue
+        for node in ctx.get("nodes", []):
+            nodes.setdefault(node["node_key"], node)
+        for edge in ctx.get("edges", []):
+            edges.setdefault(edge["edge_key"], edge)
+    if not nodes and unavailable:
+        return {
+            "available": False,
+            "reason": unavailable[0],
+            "nodes": [],
+            "edges": [],
+            "truncation": [],
+        }
+    return {
+        "available": True,
+        "reason": None,
+        "nodes": list(nodes.values()),
+        "edges": list(edges.values()),
+        "truncation": [],
+        "warnings": sorted(set(unavailable)),
     }

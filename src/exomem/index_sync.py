@@ -148,7 +148,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
     events the same way; this belt covers direct writer calls.
     """
-    from . import find, lexstore, mode
+    from . import epistemic_graph, find, lexstore, mode
     from .vault import in_excluded_scan_dir
 
     vr = vault_root.resolve()
@@ -174,6 +174,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
             find.on_resolver_files_changed(vault_root, rels, [])
     except Exception:  # noqa: BLE001 -- resolver sync must never fail a write
         log.debug("resolver re-sync after write failed", exc_info=True)
+    epistemic_graph.upsert_after_write(vault_root, eligible)
     if mode.defer_expensive_indexes():
         added = _record_deferred_semantic_upserts(vault_root, eligible)
         if added:
@@ -186,9 +187,10 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
     """Fan a removal out to every index sidecar."""
-    from . import embeddings, find, lexstore
+    from . import embeddings, epistemic_graph, find, lexstore
 
     lexstore.delete_after_remove(vault_root, removed_rel_paths)
+    epistemic_graph.delete_after_remove(vault_root, removed_rel_paths)
     embeddings.delete_after_remove(vault_root, removed_rel_paths)
     try:
         md_rels = [r for r in removed_rel_paths if r.lower().endswith(".md")]
