@@ -66,6 +66,18 @@ diagnosed, a pattern is recognized — capture it:
 Not a stepping-stone: mid-thought exploration, brainstorm tangents, unresolved
 questions. Capture at the landing, not during the flight.
 
+## Agent write loop
+
+Use this loop whenever a durable conclusion should enter Exomem:
+
+1. `find` relevant prior notes and sources.
+2. `get` the chosen pages, or use `find(pack=true)` when synthesis needs a bounded context pack.
+3. Draft the typed page at the right layer: `add` for raw source, `note` for compiled conclusion, `link` for entity, `edit` for small correction, `replace` for supersession.
+4. Run `suggest_links` on the draft before writing; accept only links that genuinely clarify provenance or context.
+5. Write, then inspect the returned `warnings` and optional `suggestions`.
+6. If a near-duplicate warning fires, prefer `edit` or `replace` over a parallel page. If suggestions are useful, add them with a follow-up `edit`.
+7. Report one line: `Saved -> <path>`.
+
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
 *timing*, not *volume* — it never means keep less. Minimality is a property of
 *expression* — distillation, signal-density, no redundancy — never of *coverage*.
@@ -88,6 +100,7 @@ notes stay distilled in form but never context-pruned.
 ├── _Schema/
 │   ├── SKILL.md                  This file (canonical)
 │   ├── project-keys.yaml         Registered research scope keys
+│   ├── workflow-skills/          Named agent workflows built on the core contract
 │   └── references/
 │       ├── page-types.md         Page-type taxonomy
 │       ├── frontmatter.md        Frontmatter spec for each page type
@@ -155,6 +168,18 @@ Generic MCP clients without this skill should call `bootstrap()` once at session
 start to get the portable operating contract. Skill-aware agents may still use
 `bootstrap(profile="diagnostics")` when interpreting retrieval speed, compute
 mode, reranking, `pack`, or `include_timings`.
+
+## Workflow skills
+
+Named workflow skills live under `_Schema/workflow-skills/` and are installed as
+agent-visible sibling skills when `exomem install-skill` runs. They do not replace
+this contract; they route common user intents into the right Exomem tool loop:
+continue, capture, ingest, research, reflect, curate, defrag, review, and media.
+
+Use the workflow skill when its trigger matches the user's intent, then preserve
+the same invariants from this file: search before claiming prior context, keep
+raw Sources/Evidence separate from compiled notes, prefer `replace` for changed
+conclusions, and cite the pages or artifacts used.
 
 The Tier 2 filesystem ops below may be turned off on lean deployments
 (`EXOMEM_DISABLE_TIER2`), in which case only the Tier 1 ops are registered.

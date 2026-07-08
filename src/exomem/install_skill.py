@@ -17,6 +17,8 @@ from __future__ import annotations
 import shutil
 from pathlib import Path
 
+from . import workflow_skills
+
 # The Exomem skill ships inside the package, the same `_Schema/` that `init` lays into a
 # vault. Resolving from `__file__` works for an installed wheel too, not just a
 # git checkout — same pattern as init.py's _SCAFFOLD.
@@ -43,9 +45,10 @@ def install_skill(
     """Install the bundled Exomem skill into a Claude Code skills folder.
 
     Copies (or, with ``link=True``, symlinks) the canonical `_Schema/` — SKILL.md,
-    references/, project-keys.yaml — to ``target`` (default
-    ``~/.claude/skills/exomem``). Claude Code picks it up as the
-    `exomem` skill on next start.
+    references/, project-keys.yaml, and the workflow-skill definitions — to
+    ``target`` (default ``~/.claude/skills/exomem``). The named workflow skills
+    are also installed as sibling Claude Code skills beside the core `exomem`
+    skill so clients can discover them directly.
 
     Args:
         target: Destination skill folder. Defaults to DEFAULT_TARGET.
@@ -56,7 +59,8 @@ def install_skill(
             symlink — e.g. Windows without Developer Mode.
 
     Returns:
-        {"target": str, "mode": "copy"|"symlink", "files": int}.
+        {"target": str, "mode": "copy"|"symlink"|"mixed", "files": int,
+        "workflow_skills": [...]}.
 
     Raises:
         FileNotFoundError: the bundled skill is missing (broken install).
@@ -69,43 +73,92 @@ def install_skill(
         )
 
     target = (Path(target) if target is not None else DEFAULT_TARGET).expanduser()
+    targets = _install_targets(target)
 
-    # Refuse to clobber a real install. An empty dir is safe to fill (parent
-    # mkdir often leaves one); a symlink or any non-empty content needs --force.
-    if target.exists() and not force:
-        empty_dir = (
-            target.is_dir() and not target.is_symlink() and not any(target.iterdir())
-        )
-        if not empty_dir:
+    for item in targets:
+        src = item["source"]
+        if not (src / "SKILL.md").is_file():
+            raise FileNotFoundError(
+                f"bundled skill missing at {src} (SKILL.md not found) — "
+                "is the exomem install intact?"
+            )
+        dest = item["target"]
+        if dest.exists() and not force and not _empty_dir(dest):
             raise FileExistsError(
-                f"{target} already exists. Pass force=True to overwrite it, or "
+                f"{dest} already exists. Pass force=True to overwrite it, or "
                 "choose a different target."
             )
 
-    target.parent.mkdir(parents=True, exist_ok=True)
+    records: list[dict] = []
+    for item in targets:
+        mode = _mirror_tree(item["source"], item["target"], link=link)
+        files = _count_files(item["source"] if mode == "symlink" else item["target"])
+        records.append(
+            {
+                "kind": item["kind"],
+                "name": item["name"],
+                "target": str(item["target"]),
+                "mode": mode,
+                "files": files,
+            }
+        )
+
+    modes = {r["mode"] for r in records}
+    return {
+        "target": str(target),
+        "mode": records[0]["mode"] if len(modes) == 1 else "mixed",
+        "files": sum(r["files"] for r in records),
+        "workflow_skills": [r for r in records if r["kind"] == "workflow"],
+    }
+
+
+def _install_targets(target: Path) -> list[dict]:
+    targets = [
+        {
+            "kind": "core",
+            "name": "exomem",
+            "source": _SKILL_SRC,
+            "target": target,
+        }
+    ]
+    for skill in workflow_skills.list_skills():
+        name = str(skill["name"])
+        targets.append(
+            {
+                "kind": "workflow",
+                "name": name,
+                "source": workflow_skills.source_dir(name),
+                "target": target.parent / name,
+            }
+        )
+    return targets
+
+
+def _empty_dir(path: Path) -> bool:
+    return path.is_dir() and not path.is_symlink() and not any(path.iterdir())
+
+
+def _mirror_tree(src: Path, dest: Path, *, link: bool) -> str:
+    dest.parent.mkdir(parents=True, exist_ok=True)
 
     # Start from clean ground so the install is a faithful mirror, never a
     # half-merge of old and new files. Order matters: a symlink-to-dir reports
     # is_dir() True, so test is_symlink() first and only unlink the link.
-    if target.is_symlink() or target.is_file():
-        target.unlink()
-    elif target.is_dir():
-        shutil.rmtree(target)
+    if dest.is_symlink() or dest.is_file():
+        dest.unlink()
+    elif dest.is_dir():
+        shutil.rmtree(dest)
 
     if link:
         try:
-            target.symlink_to(_SKILL_SRC, target_is_directory=True)
-            return {
-                "target": str(target),
-                "mode": "symlink",
-                "files": _count_files(_SKILL_SRC),
-            }
+            dest.symlink_to(src, target_is_directory=True)
+            return "symlink"
         except OSError:
             # Restricted FS / no symlink privilege — fall through to a copy.
             pass
 
-    shutil.copytree(_SKILL_SRC, target)
-    return {"target": str(target), "mode": "copy", "files": _count_files(target)}
+    shutil.copytree(src, dest)
+    return "copy"
 
 
 def _count_files(root: Path) -> int:

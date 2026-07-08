@@ -100,7 +100,7 @@ see
 Other MCP clients can still use the server. If they do not support Skills,
 have them call `bootstrap()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to
-save, upload guidance, and performance profiles.
+save, workflow-skill discovery, upload guidance, and performance profiles.
 
 For client-specific assistant instructions, see
 [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md). For the boundary
@@ -111,7 +111,7 @@ Full local setup is in [QUICKSTART.md](QUICKSTART.md). Remote/mobile setup is
 in [docs/remote-quickstart.md](docs/remote-quickstart.md) and
 [docs/deployment.md](docs/deployment.md).
 
-The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model and [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details.
+The product model is intentionally simple: built-in AI memory remembers preferences and routing, while Exomem stores durable governed knowledge with sources, proof, history, decisions, records, and review. See [docs/product-model.md](docs/product-model.md) for the full mental model, [docs/knowledge-packs.md](docs/knowledge-packs.md) for pack/admin details, and [docs/workflow-skills.md](docs/workflow-skills.md) for the named agent workflows.
 
 For development, or to run the sample vault from a checkout instead of a
 package install:

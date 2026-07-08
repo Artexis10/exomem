@@ -23,6 +23,10 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert (kb / "index.md").exists()
     assert (kb / "log.md").exists()
     assert (kb / "_Schema" / "SKILL.md").exists()
+    assert (kb / "_Schema" / "workflow-skills" / "index.yaml").exists()
+    assert (
+        kb / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
+    ).exists()
 
     # log.md carries the `---` separator the writers prepend after.
     assert "---" in (kb / "log.md").read_text(encoding="utf-8")

@@ -333,10 +333,16 @@ path needed — it ships in the package):
 uv run python -m exomem install-skill
 ```
 
-That writes the skill to `~/.claude/skills/exomem/` — the same name as the Exomem
-connector and tools, so it all reads as one product. (If you installed before the
-rename, this also retires the old `knowledge-base` skill folder.) **Restart Claude
-Code** so it loads. Useful flags: `--link`
+That writes the core skill to `~/.claude/skills/exomem/` and installs the named
+workflow skills beside it, such as `exomem-continue`, `exomem-capture`,
+`exomem-research`, `exomem-review`, and `exomem-media`. The workflow skills are
+short operating loops for common user intents; the core `exomem` skill remains
+the contract that preserves Sources, Evidence, compiled notes, review, and
+supersession. See [docs/workflow-skills.md](docs/workflow-skills.md).
+
+The core skill uses the same name as the Exomem connector and tools, so it all
+reads as one product. (If you installed before the rename, this also retires the
+old `knowledge-base` skill folder.) **Restart Claude Code** so it loads. Useful flags: `--link`
 symlinks instead of copying so it
 tracks repo updates as you `git pull` (falls back to a copy if your OS refuses
 the symlink); `--force` overwrites an existing install; `--target` picks a
