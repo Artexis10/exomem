@@ -39,7 +39,7 @@ bookkeeping updates:
    `audit`. (`find` doesn't append because it's read-only.)
 
 These two updates are non-negotiable for every write operation below. Read-only
-operations such as `bootstrap`, `find`, `get`, `suggest_links`, `overview`,
+operations such as `bootstrap`, `find`, `get`, `suggest_links`, `graph_context`, `suggest_relations`, `overview`,
 `propose_compilation`, `query_data`, `provenance_report`, and `download` do not
 update indexes or logs. The per-operation specs note their primary writes; the
 index + log update is implicit.
@@ -305,7 +305,8 @@ Search for modes, scope, and ranking knobs.
 ### Diagnostics and performance
 - Normal lookup: `detail="compact"`, `rerank=false`.
 - Reasoning context: `pack=true` when you need a compact evidence bundle for
-  downstream reasoning.
+  downstream reasoning. Add `graph_enrich=true` only when the caller explicitly
+  wants typed graph neighborhoods included beside the normal pack output.
 - Diagnostics: `include_timings=true`; add `rerank=true` only when you are
   intentionally measuring reranking or spending latency for precision. Leaving
   `rerank` unset is mode-aware auto: CPU steady-state modes keep it off;
@@ -330,6 +331,57 @@ None.
 
 ---
 
+## graph_context
+
+**Goal:** Return a bounded, read-only typed graph neighborhood from the derived
+`.graph.sqlite` sidecar. This is the explicit knowledge-graph surface for
+semantic blocks, files, and deterministic relations such as `derived_from`,
+`evidenced_by`, `supports`, `contradicts`, `supersedes`, and `links_to`.
+
+### Triggers
+- "what does this connect to in the graph"
+- "show typed relations for this page"
+- needing graph context around a search result without changing the page
+
+### Procedure
+1. Provide either `path` or `query`. Use `path` when you already know the page;
+   use `query` to seed the neighborhood from matching node labels/content.
+2. Keep `depth` small unless the caller asks for a wider neighborhood. Use
+   `relation_types` / `node_types` filters when a narrower answer is better.
+3. Treat `available=false` as a soft fallback, not a failure. Existing search and
+   pack behavior remains valid when the sidecar is missing, disabled, stale, or
+   schema-incompatible.
+
+### Writes performed
+None. The graph sidecar is derived state only; this operation never mutates
+Markdown.
+
+---
+
+## suggest_relations
+
+**Goal:** Propose candidate typed graph relations for a page or draft. Suggestions
+are review-only and never write to the vault.
+
+### Triggers
+- "suggest relations for this note"
+- "what should this support, contradict, or supersede"
+- densifying a draft before calling `note` or `edit`
+
+### Procedure
+1. Pass a `path` for an existing page, or `draft_title` / `draft_body` for an
+   unwritten draft.
+2. Review deterministic candidates from wikilinks, frontmatter sources, shared
+   sources/entities, supersession, and optional embedding proximity.
+3. Model-backed suggestions are default-off (`include_model_suggestions=false`),
+   response-only, and soft-fail with warnings when optional extras are absent.
+4. Persist accepted relations through the normal Markdown write path (`note` or
+   `edit`); do not treat suggestions as an automatic write.
+
+### Writes performed
+None.
+
+---
 ## audit
 
 **Goal:** Surface drift and propose fixes. Read-mostly. See
