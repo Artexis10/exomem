@@ -48,7 +48,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import embeddings, index_paths, sidecar_store
+from . import embeddings, index_paths, semantic_blocks, sidecar_store
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -215,6 +215,13 @@ def extract_claim_text(
     the return contract (a short claim string, or None) stays the same.
     """
     title = (title or "").strip()
+    semantic_claim = semantic_blocks.first_block_body(body or "", "claim")
+    if semantic_claim:
+        claim_body = _cap_words(semantic_claim.strip())
+        if title and claim_body:
+            return f"{title}\n\n{claim_body}"
+        return title or claim_body or None
+
     _, sections = _split_sections(body or "")
 
     kind = _claim_kind(page_type, entity_type)

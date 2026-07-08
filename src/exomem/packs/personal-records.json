@@ -2,6 +2,49 @@
   "id": "personal-records",
   "name": "Personal records",
   "description": "Purchases, travel, home, vehicles, admin records, and life logistics.",
+  "purpose": "Provide a safe default for everyday records, purchases, travel, home, vehicle, and life-admin knowledge.",
+  "audience": "Fresh Exomem users and anyone tracking personal logistics, household records, travel, purchases, or administrative documents.",
+  "beginner_description": "Use this as the starter pack for everyday documents, purchases, travel, home, vehicles, and personal admin.",
+  "agent_instructions": "Use this as the default when no stronger domain pack is selected. Save raw documents as sources, preserve proof for receipts or records, and compile only durable decisions, solved problems, and reusable patterns.",
+  "default_note_types": [
+    "research-note",
+    "insight",
+    "failure"
+  ],
+  "default_entity_types": [
+    "person",
+    "concept",
+    "decision"
+  ],
+  "default_block_types": [
+    "record",
+    "receipt",
+    "admin-note",
+    "decision",
+    "proof"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Other",
+    "Knowledge Base/Evidence/Personal",
+    "Knowledge Base/Notes/Research/Personal",
+    "Knowledge Base/Notes/Insights",
+    "Knowledge Base/Entities/People",
+    "Knowledge Base/Entities/Concepts"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Save a personal record",
+      "intent": "Capture a document, purchase, travel detail, or administrative record.",
+      "route": "add as source or preserve as evidence when proof matters",
+      "example": "Save this vehicle maintenance record."
+    },
+    {
+      "title": "Find everyday documents",
+      "intent": "Retrieve records by topic, person, trip, purchase, or household context.",
+      "route": "find with compact detail, then get the most relevant record or source",
+      "example": "Find the documents for the trip."
+    }
+  ],
   "primitives": [
     "source",
     "record",

@@ -3,6 +3,18 @@
 The single most important rule of this skill: **what can and cannot be written
 to.** Everything else is downstream.
 
+## Memory boundary
+
+Built-in assistant memory and custom instructions are the right place for small
+preferences, style rules, identity facts, and reminders to use Exomem. Exomem is
+the right place for durable governed knowledge: sourced conclusions, project
+context, decisions, failures, experiments, proof-bearing records, review, and
+supersession.
+
+Do not turn transient scratch, reminders, tasks, credentials, or every passing
+chat remark into KB material. Capture only raw material worth preserving or a
+compiled conclusion that future agents should be able to retrieve.
+
 ## Binary placement decision tree
 
 Three locations hold binary files in the KB. Pick by **origin and purpose**:

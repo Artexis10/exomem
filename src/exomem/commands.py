@@ -48,6 +48,7 @@ from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
 from . import link as link_module
 from . import link_summary as link_summary_module
+from . import knowledge_packs as knowledge_packs_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
@@ -147,6 +148,7 @@ def op_bootstrap(
 
     compute_policy = mode_module.resolved()
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
+    selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
         "contract_version": "2026-07-07.1",
         "profile": profile,
@@ -166,6 +168,14 @@ def op_bootstrap(
             "exomem": (
                 "Use for durable governed knowledge: sources, proof/evidence, "
                 "history, decisions, records, review, and compiled conclusions."
+            ),
+        },
+        "knowledge_packs": {
+            "available": knowledge_packs_module.list_builtin_packs(),
+            "selected": selected_packs,
+            "selection_rule": (
+                "Packs are product guidance only. They help route simple user intent "
+                "into typed tools; they do not create folders, migrate files, or bypass governance."
             ),
         },
         "workflow": {
@@ -256,7 +266,7 @@ def op_bootstrap(
                 "try pack=true for synthesis instead of many get calls",
             ],
         },
-        "front_door_actions": product_front_door_catalog(),
+        "front_door_actions": product_front_door_catalog(selected_packs),
         "tool_catalog": product_tool_catalog(),
         "common_tools": [
             "adopt",
@@ -2005,8 +2015,10 @@ def op_adopt(
     bounded read-only adoption report: what Exomem found, which content is
     governed versus read-only input, likely knowledge packs, and safe next
     actions. Explicit write modes only write under `Knowledge Base/`:
-    `save-manifest` saves the report, and `copy-as-sources` copies selected
-    legacy text files into governed Sources with original path/hash provenance.
+    `save-manifest` saves the report, `copy-as-sources` copies selected
+    legacy text files into governed Sources with original path/hash provenance,
+    and `compile-selected` copies selected legacy files when needed then returns
+    a reviewable compile plan. It does not create compiled notes automatically.
 
     Use this when the user says "import my vault", "adopt these notes", "make
     this existing knowledge base usable", or asks what Exomem would do with an
@@ -2014,14 +2026,14 @@ def op_adopt(
 
     Args:
         path: Optional vault subtree to scan. Defaults to the vault root.
-        mode: Adoption mode: scan-only, save-manifest, or copy-as-sources.
+        mode: Adoption mode: scan-only, save-manifest, copy-as-sources, or compile-selected.
         max_depth: Folder-tree depth cap for the scan.
         include_hidden: Include hidden files/directories in the scan.
         samples: Sample filename count per folder.
         pack_limit: Maximum knowledge-pack suggestions to return.
         manifest_path: Optional markdown destination under Knowledge Base/ for
             save-manifest. A default under _Adoption/ is used when omitted.
-        selected_paths: Explicit vault-relative legacy files for copy-as-sources.
+        selected_paths: Explicit vault-relative legacy files for copy-as-sources or compile-selected.
     """
     try:
         return adopt_module.adopt(
@@ -2552,7 +2564,7 @@ def product_tool_catalog() -> dict:
     }
 
 
-def product_front_door_catalog() -> dict:
+def product_front_door_catalog(selected_packs: dict | None = None) -> dict:
     """Map simple product verbs to the typed tools that enforce governance."""
     out = {
         action: {"primary_tools": [], "advanced_tools": []}
@@ -2570,4 +2582,22 @@ def product_front_door_catalog() -> dict:
     out["save"]["contract"] = "raw material becomes Sources; durable conclusions become governed notes/entities"
     out["update"]["contract"] = "edit or supersede with an explicit reason; keep history"
     out["connect"]["contract"] = "link entities and related notes so the graph compounds"
+
+    packs = (selected_packs or {}).get("packs") or []
+    if packs:
+        for action in out:
+            guidance = []
+            for pack in packs:
+                if action not in set(pack.get("actions") or []):
+                    continue
+                guidance.append(
+                    {
+                        "pack_id": pack.get("id"),
+                        "name": pack.get("name"),
+                        "agent_instructions": pack.get("agent_instructions"),
+                        "suggested_workflows": pack.get("suggested_workflows") or [],
+                    }
+                )
+            if guidance:
+                out[action]["selected_pack_guidance"] = guidance
     return out

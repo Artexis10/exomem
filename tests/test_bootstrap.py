@@ -35,8 +35,11 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["server"]["content_included"] is False
     assert out["server"]["pure_substrate"] is True
     assert "compute_policy" in out["server"]
-    assert {"workflow", "tool_defaults", "performance_profiles", "memory_model"} <= set(out)
+    assert {"workflow", "tool_defaults", "performance_profiles", "memory_model", "knowledge_packs"} <= set(out)
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
+    assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
+    assert out["knowledge_packs"]["available"][0]["beginner_description"]
+    assert out["front_door_actions"]["save"]["selected_pack_guidance"][0]["pack_id"] == "personal-records"
     assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt"
     assert "adopt" in out["common_tools"]
     assert out["tool_defaults"]["normal_lookup"]["args"] == {
@@ -74,6 +77,21 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
     assert "list_directory" in catalog["advanced"]
     assert "scan-only" in front_door["adopt"]["contract"]
     assert "proof" in front_door["prove"]["contract"]
+
+    selected = {
+        "packs": [
+            {
+                "id": "technical",
+                "name": "Technical",
+                "actions": ["save", "ask"],
+                "agent_instructions": "Route technical work through governed notes.",
+                "suggested_workflows": [{"title": "Save", "intent": "x", "route": "note", "example": "x"}],
+            }
+        ]
+    }
+    guided = commands.product_front_door_catalog(selected)
+    assert guided["save"]["selected_pack_guidance"][0]["pack_id"] == "technical"
+    assert "selected_pack_guidance" not in guided["prove"]
 
     actions = set(front_door)
     for command in commands.COMMANDS:

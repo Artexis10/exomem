@@ -2,6 +2,24 @@
 
 Detailed specs for the Knowledge Base operations. Read on first use of an operation.
 
+## Plain-language routing
+
+Agents should hear user intent first and choose the operation second:
+
+| User intent | Operation path |
+|---|---|
+| Remember a durable conclusion | `note`; use `add` first when raw provenance matters |
+| Find a prior conclusion | `find`, then `get` or `find(pack=true)` if needed |
+| Preserve a source | `add` |
+| Preserve proof or a record | `preserve` or upload |
+| Compile evidence into a conclusion | `note` with source/evidence links |
+| Review stale knowledge | `audit` / stale-review checks |
+| Supersede old knowledge | `replace` |
+| Patch a small detail | `edit` |
+
+Do not ask users to choose internal folders or page types unless the distinction
+changes the write. Translate back to simple language when reporting results.
+
 ## Index and log discipline (applies to every write)
 
 Every confirmed write that creates, moves, or supersedes a page performs two
@@ -43,7 +61,7 @@ can use Exomem without relying on a client-specific skill.
 
 ### Profiles
 - `profile="compact"` — terse operation map and defaults. Use for normal startup.
-- `profile="default"` — startup contract plus workflow guidance and examples.
+- `profile="full"` — startup contract plus workflow guidance and examples.
 - `profile="diagnostics"` — includes timing/performance guidance, search profile,
   compute mode, backend/cache hints, rerank state, and recommended debug knobs.
 

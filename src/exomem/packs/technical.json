@@ -2,6 +2,51 @@
   "id": "technical",
   "name": "Technical",
   "description": "Projects, repositories, decisions, failures, incidents, and runbooks.",
+  "purpose": "Compound engineering knowledge across projects, repositories, incidents, decisions, failures, experiments, and runbooks.",
+  "audience": "Engineers, maintainers, technical founders, operators, and agents working across software projects.",
+  "beginner_description": "Use this for code projects, architecture decisions, incidents, debugging, runbooks, experiments, and reusable engineering lessons.",
+  "agent_instructions": "Treat code repositories and specs as source-of-truth outside Exomem. Use Exomem for cross-session conclusions, decisions, architecture orientation, failures, patterns, experiments, and project entities. Do not mirror code inventories that will drift.",
+  "default_note_types": [
+    "research-note",
+    "failure",
+    "pattern",
+    "experiment"
+  ],
+  "default_entity_types": [
+    "concept",
+    "library",
+    "decision"
+  ],
+  "default_block_types": [
+    "architecture",
+    "decision",
+    "incident",
+    "failure",
+    "runbook"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Sessions",
+    "Knowledge Base/Sources/Articles",
+    "Knowledge Base/Notes/Research/Technical",
+    "Knowledge Base/Notes/Failures",
+    "Knowledge Base/Notes/Patterns",
+    "Knowledge Base/Entities/Libraries",
+    "Knowledge Base/Entities/Decisions"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Save an architecture decision",
+      "intent": "Capture a decision, tradeoff, or implementation conclusion that should survive the coding session.",
+      "route": "note as research-note or link as decision entity with source/context links",
+      "example": "Save this architecture decision."
+    },
+    {
+      "title": "Review incidents and failures",
+      "intent": "Find failure modes, incident context, and reusable prevention patterns.",
+      "route": "find failures and patterns, then get cited notes for reasoning",
+      "example": "What failed in the last deployment?"
+    }
+  ],
   "primitives": [
     "source",
     "decision",

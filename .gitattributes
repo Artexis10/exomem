@@ -1,9 +1,29 @@
-# Normalize line endings so cross-platform scripts work regardless of a
-# contributor's core.autocrlf. A CRLF in a shell shebang breaks the script on
-# macOS/Linux ("bad interpreter: /usr/bin/env bash^M"), so these must stay LF.
+# Normalize line endings so cross-platform checkouts are stable regardless of
+# a contributor's core.autocrlf.
+*           text=auto
+
+# Source, docs, and generated schemas stay LF to avoid review churn.
+*.py        text eol=lf
+*.md        text eol=lf
+*.json      text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.lock      text eol=lf
 *.sh        text eol=lf
 *.service   text eol=lf
 *.plist     text eol=lf
 
-# PowerShell runs on Windows; CRLF is the native, expected ending there.
+# Windows command files stay native for shell execution.
 *.ps1       text eol=crlf
+*.bat       text eol=crlf
+*.cmd       text eol=crlf
+
+# Binary assets must never be normalized.
+*.png       binary
+*.jpg       binary
+*.jpeg      binary
+*.gif       binary
+*.ico       binary
+*.pdf       binary
+*.sqlite    binary

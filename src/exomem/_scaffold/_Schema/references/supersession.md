@@ -4,6 +4,13 @@ When information in the Knowledge Base needs to be replaced, **supersede; do not
 delete or rewrite in place**. Supersession preserves causal history (why is the
 current page the way it is?) and keeps the audit trail intact.
 
+## User-facing trigger
+
+When a user says "this replaces the old conclusion," "the old recommendation is
+wrong now," or "make the new version the current answer," use supersession. Do
+not create a parallel note unless the old page is not actually being replaced.
+Report it in user language: "Saved the new conclusion and marked the old one as
+superseded."
 ## When to supersede vs. edit
 
 **Edit in place** (small changes; same `updated` field bump):

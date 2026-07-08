@@ -56,7 +56,7 @@ diagnosed, a pattern is recognized — capture it:
   is how the corpus grows.
 - Raw material → **add**. A durable conclusion → draft the compiled
   **note**/**link**, run **suggest_links** and the near-duplicate check first,
-  then write and report one line: `Saved → <path>`.
+  then write and report one line: `Saved -> <path>`.
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit**/**replace** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
@@ -163,23 +163,44 @@ The Tier 2 filesystem ops below may be turned off on lean deployments
 
 ## Simple front door
 
-Speak to users in simple product actions; use the typed operations underneath.
+Speak to users in simple actions first. Use the typed operations underneath.
 Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, or
-`replace` unless that implementation detail matters.
+`replace` unless that implementation detail changes what will happen.
 
-| User action | Preferred route |
-|---|---|
-| save | `add` for raw material; `note`/`link` for durable conclusions; `preserve` only for proof-bound material |
-| adopt/import | `adopt(mode="scan-only")` first; then ask before `save-manifest`, `copy-as-sources`, or compile actions |
-| ask | `find` first, then `get` or `find(pack=true)` for synthesis context |
-| prove | `preserve` or upload to Evidence for cases, claims, warranties, disputes, records, and receipts |
-| review | `attention`, `audit`, or `propose_compilation` |
-| update | `edit` for small changes; `replace` for supersession; `reconcile` for out-of-band drift |
-| connect | `link` and `suggest_links` |
+Native assistant memory is for preferences, style, identity facts, and routing
+rules such as "use Exomem for my project knowledge." Exomem is for durable
+governed knowledge: sourced conclusions, project context, decisions, failures,
+experiments, proof-bearing records, review, and supersession.
 
-Built-in AI memory is for preferences, working rules, and routing instructions.
-Exomem is for durable governed knowledge with sources, proof, history, decisions,
-records, review, and compiled conclusions.
+| User phrasing | User-facing action | Preferred route |
+|---|---|---|
+| "remember this," "save this conclusion" | Save durable knowledge | `note` for the conclusion; `add` first if raw provenance matters |
+| "find what I concluded," "what do I know about X" | Search prior knowledge | `find` first, then `get` or `find(pack=true)` when synthesis needs context |
+| "save this article/source/transcript" | Preserve raw source | `add`; offer compilation only when there is a stable conclusion |
+| "keep this receipt/record/proof" | Preserve proof-bearing material | `preserve` or upload to Evidence for cases, claims, warranties, disputes, and records |
+| "compile this evidence" | Write a sourced conclusion | `note` with source/evidence links; run `suggest_links` before writing |
+| "review stale knowledge" | Surface review candidates | `attention`, `audit`, or stale-review checks; never auto-decay or down-rank |
+| "this replaces the old conclusion" | Supersede old knowledge | `replace`; do not create an unlinked duplicate |
+| "fix this small detail" | Patch an existing conclusion | `edit` when the core claim is unchanged |
+| "connect these ideas" | Improve the graph | `suggest_links` and `link` |
+| "what does this existing vault contain" | Assess before writing | `overview` or `adopt(mode="scan-only")` |
+
+Examples:
+
+- "Remember this decision" -> write a concise compiled note and report
+  `Saved -> <path>`.
+- "What did I conclude about onboarding?" -> `find` first, cite hits, and retry
+  with adjacent terms before treating a miss as meaningful.
+- "Save this article" -> `add` the source with provenance; ask about compiling
+  only if a conclusion is present.
+- "Keep this receipt for the warranty case" -> preserve it as proof-bearing
+  evidence, not as a general note.
+- "Compile these three sources" -> draft a sourced note, run `suggest_links`,
+  then write after the applicable approval rule.
+- "Show stale conclusions" -> run the review path and present candidates for
+  keep/edit/supersede/archive.
+- "This new strategy replaces the old one" -> use supersession so history stays
+  visible.
 
 ## Operations
 

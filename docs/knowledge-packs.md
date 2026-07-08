@@ -1,19 +1,30 @@
 # Knowledge packs
 
-Knowledge packs are declarative routing bundles. They help Exomem suggest how a messy vault might map onto durable primitives without hard-coding a new folder tree or asking users to understand the ontology first.
+Knowledge packs are product-level guidance for Exomem. They let a fresh user pick
+useful starting domains, and they let agents route simple intentions into the
+right governed layer without asking the user to understand Sources, Evidence,
+Notes, Entities, or supersession first.
 
-Built-in packs live in `src/exomem/packs/*.json`. The runtime loads them with `importlib.resources`, validates them strictly, and exposes the schema in `adopt` reports through `pack_schema`.
+Packs do not create a new storage engine. They compose Exomem's durable
+primitives and typed tools.
 
 ## Built-in packs
 
-- `legal-warranty` — cases, receipts, correspondence, deadlines, and proof.
-- `creative` — references, assets, drafts, productions, taste notes, and releases.
-- `technical` — projects, repositories, decisions, failures, incidents, and runbooks.
-- `health-athletic` — training, symptoms, measurements, protocols, injuries, and goals.
-- `business` — customers, meetings, commitments, contracts, risks, and decisions.
-- `personal-records` — purchases, travel, home, vehicles, admin records, and life logistics.
+- `legal-warranty` - receipts, disputes, insurance, contracts, deadlines, cases, and proof.
+- `creative` - references, assets, drafts, productions, taste notes, and releases.
+- `technical` - projects, repositories, decisions, failures, incidents, experiments, and runbooks.
+- `health-athletic` - training, symptoms, measurements, protocols, injuries, goals, and health records.
+- `business` - customers, meetings, commitments, contracts, invoices, risks, and decisions.
+- `personal-records` - everyday documents, purchases, travel, home, vehicles, admin records, and life logistics.
+
+`personal-records` is the default when Exomem cannot infer a more specific pack,
+which makes it suitable for fresh or empty vaults.
 
 ## Schema
+
+Built-in packs live in `src/exomem/packs/*.json`. The runtime loads them with
+`importlib.resources`, validates them strictly, and exposes the schema in
+`adopt` reports through `pack_schema`.
 
 Each pack is a JSON object with these required fields:
 
@@ -21,44 +32,75 @@ Each pack is a JSON object with these required fields:
 | --- | --- |
 | `id` | Stable slug. |
 | `name` | Human-readable pack name. |
-| `description` | One-sentence product description. |
+| `description` | Short catalog description. |
+| `purpose` | What the pack is for at product level. |
+| `audience` | Who should choose it. |
+| `beginner_description` | Plain-language onboarding copy. |
+| `agent_instructions` | Routing guidance for agents; user-facing replies should stay simple. |
+| `default_note_types` | Common compiled-note types for the pack. |
+| `default_entity_types` | Common entity types for the pack. |
+| `default_block_types` | Common conceptual blocks such as receipt, decision, protocol, or incident. |
+| `suggested_folders` | Governed KB locations the pack commonly uses; selection does not create them. |
+| `suggested_workflows` | Beginner-facing workflows with `title`, `intent`, `route`, and `example`. |
 | `primitives` | Durable primitives the pack commonly uses. |
 | `actions` | Simple actions the pack supports: `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`. |
 | `examples` | User-facing prompts that should route to this pack. |
 | `signals` | Structural tokens used by adoption scans to suggest the pack. |
 
-Allowed primitives are `source`, `evidence`, `case`, `decision`, `record`, `asset`, `production`, `entity`, `failure`, `pattern`, and `experiment`.
+Allowed primitives are `source`, `evidence`, `case`, `decision`, `record`,
+`asset`, `production`, `entity`, `failure`, `pattern`, and `experiment`.
 
-Unknown fields are rejected. That is intentional: a deployment should not believe a pack field is active when this Exomem version ignores it.
+Unknown pack fields are rejected. Unknown workflow fields are also rejected. This
+is intentional: a deployment should not believe a pack field is active when this
+Exomem version ignores it.
 
-## Example
+## Selection manifest
+
+Setup persists selected packs at:
+
+```text
+Knowledge Base/_Packs/selected-packs.json
+```
+
+Example:
 
 ```json
 {
-  "id": "legal-warranty",
-  "name": "Legal / warranty",
-  "description": "Cases, receipts, correspondence, deadlines, and proof.",
-  "primitives": ["source", "evidence", "case", "decision", "record"],
-  "actions": ["save", "prove", "review", "update"],
-  "examples": [
-    "Save this receipt for the laptop warranty case.",
-    "Show the evidence for the landlord dispute."
-  ],
-  "signals": ["legal", "warranty", "receipt", "invoice", "contract"]
+  "schema_version": 1,
+  "selected_pack_ids": ["personal-records"],
+  "source": "setup",
+  "updated": "2026-07-07",
+  "packs": [
+    {
+      "id": "personal-records",
+      "name": "Personal records",
+      "beginner_description": "Use this as the starter pack for everyday documents, purchases, travel, home, vehicles, and personal admin.",
+      "agent_instructions": "Use this as the default when no stronger domain pack is selected...",
+      "suggested_workflows": [],
+      "actions": ["save", "ask", "prove", "review", "update"]
+    }
+  ]
 }
 ```
 
-## Adoption behavior
+Selection is guidance only. It does not create folders, migrate content, rewrite
+old notes, or compile material. Setup writes the manifest only after the
+`Knowledge Base/` scaffold exists.
 
-Pack suggestions are deterministic. Exomem looks at structural signals from `overview`: folder names, sample file names, counts, and media mix. It does not read every note body or ask a model to classify the vault.
+## Adoption and setup behavior
 
-A pack suggestion is a proposed route, not a migration. The safe loop is:
+Pack suggestions are deterministic. Exomem looks at structural signals from
+`overview`: folder paths and sample file names. It does not read every note body
+or ask a model to classify the vault.
 
-1. Run `adopt(mode="scan-only")`.
-2. Review suggested packs and actions.
-3. Optionally save the manifest under `Knowledge Base/_Adoption/`.
-4. Copy selected legacy files as Sources when provenance matters.
-5. Compile selected material later, with citations.
+The safe loop is:
+
+1. Run `exomem setup` or `adopt(mode="scan-only")`.
+2. Review suggested packs or choose explicit packs for a fresh vault.
+3. Persist selected packs under `Knowledge Base/_Packs/`.
+4. Optionally save an adoption manifest under `Knowledge Base/_Adoption/`.
+5. Copy selected legacy files as Sources when provenance matters.
+6. Compile selected material later, with citations.
 
 ## Mapping to typed tools
 
@@ -73,3 +115,6 @@ Packs do not bypass governance. They help agents choose existing typed tools:
 | Review | `audit`, `attention`, `propose_compilation` |
 | Update | `edit`, `replace`, `reconcile` |
 | Connect | `link`, `suggest_links` |
+
+Agents should speak in product language. The user can say "save this warranty
+receipt"; the agent chooses the evidence/proof route and reports the saved path.

@@ -326,6 +326,7 @@ def test_pack_without_graph_enrichment_preserves_shape(cluster: Path) -> None:
     assert set(pack) == {
         "packed_paths",
         "claims",
+        "semantic_blocks",
         "neighborhood",
         "contradictions",
         "embeddings_available",

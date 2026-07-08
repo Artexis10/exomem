@@ -26,7 +26,7 @@ import os
 import re
 from pathlib import Path
 
-from . import corpus_aware, epistemic_graph
+from . import corpus_aware, epistemic_graph, semantic_blocks
 from . import find as find_module
 from . import vault as vault_module
 from .find import Hit, ParsedPage
@@ -47,20 +47,37 @@ _NEIGHBOR_LEDE_CHARS = 160
 # Headline sections whose lead line is a high-signal "claim". Matched case-insensitively
 # against the heading text (trailing colon stripped). Connections/See-also are links, not
 # claims, so they are deliberately absent.
-RECOGNIZED_SECTIONS: frozenset[str] = frozenset({
-    "summary", "problem", "conclusion", "decision", "pattern", "hypothesis",
-    "result", "results", "insight", "tl;dr", "tldr", "takeaway", "why",
-    "finding", "findings", "claim", "claims",
-})
+RECOGNIZED_SECTIONS: frozenset[str] = frozenset(
+    {
+        "summary",
+        "problem",
+        "conclusion",
+        "decision",
+        "pattern",
+        "hypothesis",
+        "result",
+        "results",
+        "insight",
+        "tl;dr",
+        "tldr",
+        "takeaway",
+        "why",
+        "finding",
+        "findings",
+        "claim",
+        "claims",
+    }
+)
 
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
-_H1_RE = re.compile(r"^#\s+")               # level-1 (the title line in body)
-_H2_RE = re.compile(r"^##\s+(.*)$")         # level-2 only (the outline skeleton)
+_H1_RE = re.compile(r"^#\s+")  # level-1 (the title line in body)
+_H2_RE = re.compile(r"^##\s+(.*)$")  # level-2 only (the outline skeleton)
 _HEADING_RE = re.compile(r"^(#{2,6})\s+(.*)$")  # level 2-6 (recognized-section scan)
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s")
 
 
 # ----------------------------- small text utils -----------------------------
+
 
 def _resolve_cap(value: int | None, env: str, default: int) -> int:
     if value is not None:
@@ -107,6 +124,7 @@ def _first_sentence(text: str) -> str:
 
 
 # ----------------------------- claim extraction -----------------------------
+
 
 def _lede(lines: list[str]) -> str:
     """The first content paragraph (collapsed), skipping leading blanks + the H1 title."""
@@ -182,7 +200,13 @@ def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS
     }
 
 
+def _extract_semantic_blocks(page: ParsedPage) -> list[dict]:
+    document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
+    return [block.to_dict() for block in document.blocks]
+
+
 # ----------------------------- neighbourhood -----------------------------
+
 
 def _neighborhood(
     vault_root: Path, packed_pages: list[ParsedPage], max_neighbors: int
@@ -221,19 +245,28 @@ def _neighborhood(
         page = find_module._CACHE.get(vault_root / entry["path"], vault_root)
         directions = entry["directions"]
         direction = "both" if len(directions) > 1 else next(iter(directions))
-        lede = _cap(_first_sentence(_lede(_strip_fences(page.body))), _NEIGHBOR_LEDE_CHARS) if page else ""
-        out.append({
-            "path": entry["path"],
-            "title": page.title if page else entry["path"].rsplit("/", 1)[-1].removesuffix(".md"),
-            "type": page.page_type if page else None,
-            "direction": direction,
-            "referenced_by": sorted(entry["referenced_by"]),
-            "lede": lede,
-        })
+        lede = (
+            _cap(_first_sentence(_lede(_strip_fences(page.body))), _NEIGHBOR_LEDE_CHARS)
+            if page
+            else ""
+        )
+        out.append(
+            {
+                "path": entry["path"],
+                "title": page.title
+                if page
+                else entry["path"].rsplit("/", 1)[-1].removesuffix(".md"),
+                "type": page.page_type if page else None,
+                "direction": direction,
+                "referenced_by": sorted(entry["referenced_by"]),
+                "lede": lede,
+            }
+        )
     return out, dropped
 
 
 # ----------------------------- contradictions -----------------------------
+
 
 def _wikilink_target(raw: str) -> str:
     t = raw.strip()
@@ -250,9 +283,7 @@ def _supersession_edges(packed_pages: list[ParsedPage]) -> list[dict]:
         for raw in page.superseded_by:
             canon = corpus_aware._canon(_wikilink_target(raw))
             if canon in by_canon and by_canon[canon] != page.rel_path:
-                edges.append(
-                    {"from": page.rel_path, "to": by_canon[canon], "kind": "supersession"}
-                )
+                edges.append({"from": page.rel_path, "to": by_canon[canon], "kind": "supersession"})
     return edges
 
 
@@ -273,9 +304,7 @@ def _tension_pairs(
 
     if floor < ceiling:
         for page in packed_pages:
-            cmap = corpus_aware._best_cosine_per_file(
-                vault_root, title=page.title, body=page.body
-            )
+            cmap = corpus_aware._best_cosine_per_file(vault_root, title=page.title, body=page.body)
             if cmap:
                 embeddings_available = True
             self_canon = corpus_aware._canon(page.rel_path)
@@ -292,12 +321,14 @@ def _tension_pairs(
     pairs: list[dict] = []
     for key, score in pair_best.items():
         a, b = sorted(key)
-        pairs.append({
-            "a": by_canon[a],
-            "b": by_canon[b],
-            "cosine": round(float(score), 4),
-            "note": "proximity, not polarity — reader decides",
-        })
+        pairs.append(
+            {
+                "a": by_canon[a],
+                "b": by_canon[b],
+                "cosine": round(float(score), 4),
+                "note": "proximity, not polarity — reader decides",
+            }
+        )
     pairs.sort(key=lambda d: (-d["cosine"], d["a"], d["b"]))
     shown = pairs[:max_tension] if max_tension > 0 else pairs
     dropped = len(pairs) - len(shown)
@@ -305,6 +336,7 @@ def _tension_pairs(
 
 
 # ----------------------------- assembly -----------------------------
+
 
 def assemble_pack(
     vault_root: Path,
@@ -357,9 +389,13 @@ def assemble_pack(
     if missing:
         truncation.append(f"{missing} packed hit(s) unreadable or missing, not packed")
 
-    claims = {
-        p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages
-    }
+    claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+    semantic_block_map: dict[str, list[dict]] = {}
+    for page in packed_pages:
+        blocks = _extract_semantic_blocks(page)
+        if blocks:
+            semantic_block_map[page.rel_path] = blocks
+
     neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
     if n_dropped > 0:
         truncation.append(
@@ -368,9 +404,7 @@ def assemble_pack(
         )
 
     superseded = _supersession_edges(packed_pages)
-    tension, t_dropped, embeddings_available = _tension_pairs(
-        vault_root, packed_pages, max_tension
-    )
+    tension, t_dropped, embeddings_available = _tension_pairs(vault_root, packed_pages, max_tension)
     if t_dropped > 0:
         truncation.append(
             f"tension pairs capped at {max_tension} "
@@ -380,6 +414,7 @@ def assemble_pack(
     result = {
         "packed_paths": [p.rel_path for p in packed_pages],
         "claims": claims,
+        "semantic_blocks": semantic_block_map,
         "neighborhood": neighborhood,
         "contradictions": {"superseded": superseded, "tension": tension},
         "embeddings_available": embeddings_available,

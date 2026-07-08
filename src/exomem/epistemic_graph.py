@@ -7,6 +7,7 @@ sidecar, then exposes read-only context and propose-only relation suggestions.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -22,12 +23,34 @@ from .kbdir import kb_dirname, kb_prefix
 
 SCHEMA_VERSION = 1
 
-RELATION_TYPES: frozenset[str] = frozenset({
-    "supports", "contradicts", "refines", "duplicates", "supersedes",
-    "derived_from", "evidenced_by", "depends_on", "implements", "mitigates",
-    "caused_by", "blocks", "answers", "raises_question", "used_for",
-    "observed_in", "mentions", "about_entity", "links_to",
-})
+RELATION_TYPES: frozenset[str] = frozenset(
+    {
+        "supports",
+        "contradicts",
+        "refines",
+        "duplicates",
+        "supersedes",
+        "derived_from",
+        "evidenced_by",
+        "depends_on",
+        "implements",
+        "mitigates",
+        "causes",
+        "caused_by",
+        "blocks",
+        "resolves",
+        "answers",
+        "raises_question",
+        "used_for",
+        "observed_in",
+        "mentions",
+        "about_entity",
+        "links_to",
+        "cites",
+        "tests",
+        "owns",
+    }
+)
 
 _RELATION_LINE_RE = re.compile(
     r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_-]{1,40})\s*:?[ \t]+"
@@ -91,7 +114,10 @@ class GraphEdge:
 
 def graph_enabled() -> bool:
     return os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "").strip().lower() not in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -109,6 +135,7 @@ class EpistemicGraphIndex:
         conn = sqlite3.connect(self.path)
         try:
             from . import embeddings
+
             embeddings._apply_sidecar_pragmas(conn)
         except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
             pass
@@ -134,7 +161,9 @@ class EpistemicGraphIndex:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
-        conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_edges_source_path ON graph_edges(source_path)"
+        )
         return conn
 
     def available(self) -> bool:
@@ -160,8 +189,14 @@ class EpistemicGraphIndex:
             with conn:
                 conn.execute("DELETE FROM graph_edges")
                 conn.execute("DELETE FROM graph_nodes")
-                conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", ("schema_version", str(SCHEMA_VERSION)))
-                conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", ("indexed_scope", "kb"))
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("schema_version", str(SCHEMA_VERSION)),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("indexed_scope", "kb"),
+                )
             indexed = 0
             kb = self.vault_root / kb_dirname()
             if kb.is_dir():
@@ -174,6 +209,7 @@ class EpistemicGraphIndex:
             return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
         finally:
             conn.close()
+
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
@@ -212,7 +248,9 @@ class EpistemicGraphIndex:
             if path is None:
                 rows = conn.execute(select + " ORDER BY node_key").fetchall()
             else:
-                rows = conn.execute(select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)).fetchall()
+                rows = conn.execute(
+                    select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
+                ).fetchall()
         finally:
             conn.close()
         return [_node_row_to_dict(r) for r in rows]
@@ -226,7 +264,9 @@ class EpistemicGraphIndex:
             if source_path is None:
                 rows = conn.execute(select + " ORDER BY edge_key").fetchall()
             else:
-                rows = conn.execute(select + " WHERE source_path = ? ORDER BY edge_key", (_with_md(source_path),)).fetchall()
+                rows = conn.execute(
+                    select + " WHERE source_path = ? ORDER BY edge_key", (_with_md(source_path),)
+                ).fetchall()
         finally:
             conn.close()
         return [_edge_row_to_dict(r) for r in rows]
@@ -248,12 +288,16 @@ class EpistemicGraphIndex:
         page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
         if page is None:
             return False
-        extraction = semantic_blocks.extract_semantic_blocks(path, vault_root=self.vault_root, text=raw)
+        document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
+        blocks = tuple(document.blocks)
         file_node = _file_node(page, raw)
-        block_nodes = [_block_node(block, page.title) for block in extraction.blocks]
-        edges = _edges_for_page(self.vault_root, page, extraction.blocks)
+        block_nodes = [_block_node(page, block, raw) for block in blocks]
+        edges = _edges_for_page(self.vault_root, page, blocks)
         with conn:
-            conn.execute("INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)", ("schema_version", str(SCHEMA_VERSION)))
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("schema_version", str(SCHEMA_VERSION)),
+            )
             for node in [file_node, *block_nodes]:
                 _insert_node(conn, node)
             for edge in edges:
@@ -261,7 +305,9 @@ class EpistemicGraphIndex:
         return True
 
     def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
-        node_rows = conn.execute("SELECT node_key FROM graph_nodes WHERE path = ?", (rel_path,)).fetchall()
+        node_rows = conn.execute(
+            "SELECT node_key FROM graph_nodes WHERE path = ?", (rel_path,)
+        ).fetchall()
         node_keys = [r[0] for r in node_rows]
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel_path,))
@@ -285,12 +331,26 @@ def graph_context(
     """Return a bounded, read-only graph neighborhood for a path or query."""
     idx = EpistemicGraphIndex(vault_root)
     if not idx.available():
-        return {"available": False, "reason": "graph sidecar unavailable", "seeds": [], "nodes": [], "edges": [], "truncation": []}
+        return {
+            "available": False,
+            "reason": "graph sidecar unavailable",
+            "seeds": [],
+            "nodes": [],
+            "edges": [],
+            "truncation": [],
+        }
     conn = idx._connect()
     try:
         seeds = _seed_nodes(conn, path=path, query=query)
         if not seeds:
-            return {"available": True, "reason": None, "seeds": [], "nodes": [], "edges": [], "truncation": []}
+            return {
+                "available": True,
+                "reason": None,
+                "seeds": [],
+                "nodes": [],
+                "edges": [],
+                "truncation": [],
+            }
         rel_filter = set(relation_types or [])
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
@@ -318,13 +378,23 @@ def graph_context(
         edges = list(seen_edges.values())
         truncation: list[str] = []
         if len(nodes) > max_nodes:
-            truncation.append(f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)")
+            truncation.append(
+                f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)"
+            )
             nodes = nodes[:max_nodes]
         if len(seen_edges) >= max_edges:
             truncation.append(f"edges capped at {max_edges}")
-        return {"available": True, "reason": None, "seeds": seeds, "nodes": nodes, "edges": edges, "truncation": truncation}
+        return {
+            "available": True,
+            "reason": None,
+            "seeds": seeds,
+            "nodes": nodes,
+            "edges": edges,
+            "truncation": truncation,
+        }
     finally:
         conn.close()
+
 
 def suggest_relations(
     vault_root: Path,
@@ -347,7 +417,9 @@ def suggest_relations(
             candidates.extend(_shared_source_candidates(vault_root, rel))
             candidates.extend(_embedding_proximity_candidates(vault_root, page))
     elif draft_body:
-        candidates.extend(_draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title))
+        candidates.extend(
+            _draft_wikilink_candidates(vault_root, draft_body, draft_title=draft_title)
+        )
     if include_model_suggestions:
         warnings.append("model-backed graph relation suggestions unavailable")
     return {
@@ -415,48 +487,157 @@ def _file_node(page, raw_text: str) -> GraphNode:
         title=page.title,
         text=page.title or page.rel_path,
         source_hash=vault_module.content_hash(raw_text),
-        metadata={"page_type": page.page_type, "status": page.status, "scope": page.scope, "origin": "file"},
+        metadata={
+            "page_type": page.page_type,
+            "status": page.status,
+            "scope": page.scope,
+            "origin": "file",
+        },
     )
 
 
-def _block_node(block: semantic_blocks.SemanticBlock, title: str | None) -> GraphNode:
+def _block_key(page, block: semantic_blocks.SemanticBlock) -> str:
+    block_id = block.id or f"line-{block.line}"
+    key_material = "\n".join([page.rel_path, block.type, block_id, block.title, block.body])
+    return f"block:{_hash(key_material)}"
+
+
+def _block_anchor(block: semantic_blocks.SemanticBlock) -> str:
+    return block.id or semantic_blocks.normalize_label(block.title) or f"line-{block.line}"
+
+
+def _block_node(page, block: semantic_blocks.SemanticBlock, raw_text: str) -> GraphNode:
     return GraphNode(
-        node_key=block.key,
-        kind=block.kind,
-        path=block.path,
-        anchor=block.anchor,
-        title=title,
-        text=block.text,
-        source_hash=block.source_hash,
-        line_start=block.line_start,
-        line_end=block.line_end,
-        metadata={**block.metadata, "origin": block.metadata.get("origin", "semantic_block")},
+        node_key=_block_key(page, block),
+        kind=block.type,
+        path=page.rel_path,
+        anchor=_block_anchor(block),
+        title=block.title,
+        text=block.body or block.title,
+        source_hash=vault_module.content_hash(raw_text),
+        line_start=block.line,
+        line_end=block.end_line,
+        metadata={**block.metadata, "origin": "semantic_block", "level": block.level},
     )
 
 
-def _edges_for_page(vault_root: Path, page, blocks: tuple[semantic_blocks.SemanticBlock, ...]) -> list[GraphEdge]:
+def _edges_for_page(
+    vault_root: Path, page, blocks: tuple[semantic_blocks.SemanticBlock, ...]
+) -> list[GraphEdge]:
     rel = page.rel_path
     file_key = _file_key(rel)
     edges: list[GraphEdge] = []
     for block in blocks:
-        edges.append(_edge(block.key, file_key, "derived_from", "semantic_block", source_path=rel, source_anchor=block.anchor, metadata={"block_kind": block.kind}))
+        block_key = _block_key(page, block)
+        block_anchor = _block_anchor(block)
+        edges.append(
+            _edge(
+                block_key,
+                file_key,
+                "derived_from",
+                "semantic_block",
+                source_path=rel,
+                source_anchor=block_anchor,
+                metadata={"block_kind": block.type},
+            )
+        )
+        for relation in block.relations:
+            if relation.kind not in RELATION_TYPES:
+                continue
+            target = relation.target
+            if target.startswith("[[") and target.endswith("]]"):
+                target = target[2:-2]
+            target = target.split("|", 1)[0].split("#", 1)[0].strip()
+            try:
+                canonical, warning = vault_module.normalize_wikilink(
+                    target, vault_root, strict=False
+                )
+            except Exception:  # noqa: BLE001 - malformed links are ignored
+                continue
+            if warning:
+                continue
+            edges.append(
+                _edge(
+                    block_key,
+                    _file_key(_with_md(canonical)),
+                    relation.kind,
+                    "semantic_relation",
+                    source_path=rel,
+                    source_anchor=block_anchor,
+                    metadata={
+                        "block_kind": block.type,
+                        "line": relation.line,
+                        "raw": relation.raw,
+                    },
+                )
+            )
     for target in _frontmatter_links(page.frontmatter.get("sources")):
-        edges.append(_edge(file_key, _file_key(_with_md(target)), "derived_from", "frontmatter", source_path=rel, source_anchor="sources"))
+        edges.append(
+            _edge(
+                file_key,
+                _file_key(_with_md(target)),
+                "derived_from",
+                "frontmatter",
+                source_path=rel,
+                source_anchor="sources",
+            )
+        )
     for field in ("evidence", "evidences", "evidence_paths"):
         for target in _frontmatter_links(page.frontmatter.get(field)):
-            edges.append(_edge(file_key, _file_key(_with_md(target)), "evidenced_by", "frontmatter", source_path=rel, source_anchor=field))
+            edges.append(
+                _edge(
+                    file_key,
+                    _file_key(_with_md(target)),
+                    "evidenced_by",
+                    "frontmatter",
+                    source_path=rel,
+                    source_anchor=field,
+                )
+            )
     for target in _frontmatter_links(page.frontmatter.get("supersedes")):
-        edges.append(_edge(file_key, _file_key(_with_md(target)), "supersedes", "frontmatter", source_path=rel, source_anchor="supersedes"))
+        edges.append(
+            _edge(
+                file_key,
+                _file_key(_with_md(target)),
+                "supersedes",
+                "frontmatter",
+                source_path=rel,
+                source_anchor="supersedes",
+            )
+        )
     for target in _frontmatter_links(page.frontmatter.get("superseded_by")):
-        edges.append(_edge(_file_key(_with_md(target)), file_key, "supersedes", "frontmatter", source_path=rel, source_anchor="superseded_by"))
+        edges.append(
+            _edge(
+                _file_key(_with_md(target)),
+                file_key,
+                "supersedes",
+                "frontmatter",
+                source_path=rel,
+                source_anchor="superseded_by",
+            )
+        )
     for target in _frontmatter_links(page.frontmatter.get("related")):
-        edges.append(_edge(file_key, _file_key(_with_md(target)), "links_to", "frontmatter", source_path=rel, source_anchor="related"))
+        edges.append(
+            _edge(
+                file_key,
+                _file_key(_with_md(target)),
+                "links_to",
+                "frontmatter",
+                source_path=rel,
+                source_anchor="related",
+            )
+        )
     for target in find_module._outbound_wikilink_paths(page, vault_root):
-        edges.append(_edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel))
+        edges.append(
+            _edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel)
+        )
     edges.extend(_relation_line_edges(vault_root, page.body, rel, file_key))
     return _dedupe_edges(edges)
 
-def _relation_line_edges(vault_root: Path, body: str, rel_path: str, file_key: str) -> list[GraphEdge]:
+
+def _relation_line_edges(
+    vault_root: Path, body: str, rel_path: str, file_key: str
+) -> list[GraphEdge]:
     edges: list[GraphEdge] = []
     in_fence = False
     for line_no, line in enumerate(body.splitlines(), start=1):
@@ -478,15 +659,17 @@ def _relation_line_edges(vault_root: Path, body: str, rel_path: str, file_key: s
             continue
         if warning:
             continue
-        edges.append(_edge(
-            file_key,
-            _file_key(_with_md(canonical)),
-            relation,
-            "semantic_relation",
-            source_path=rel_path,
-            source_anchor=f"line-{line_no}",
-            metadata={"line": line.strip()},
-        ))
+        edges.append(
+            _edge(
+                file_key,
+                _file_key(_with_md(canonical)),
+                relation,
+                "semantic_relation",
+                source_path=rel_path,
+                source_anchor=f"line-{line_no}",
+                metadata={"line": line.strip()},
+            )
+        )
     return edges
 
 
@@ -515,7 +698,7 @@ def _links_from_string(value: str) -> list[str]:
 
 def _with_md(path: str) -> str:
     cleaned = str(path).strip()
-    if cleaned.startswith("[[") and cleaned.endswith("]]" ):
+    if cleaned.startswith("[[") and cleaned.endswith("]]"):
         cleaned = cleaned[2:-2]
     cleaned = cleaned.split("|", 1)[0].split("#", 1)[0].strip().strip("/")
     if not cleaned:
@@ -529,6 +712,10 @@ def _file_key(rel_path: str) -> str:
     return f"file:{_with_md(rel_path)}"
 
 
+def _hash(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
+
+
 def _edge(
     src_key: str,
     dst_key: str,
@@ -539,38 +726,81 @@ def _edge(
     source_anchor: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> GraphEdge:
-    key_material = "\n".join([src_key, dst_key, relation_type, origin, source_path, source_anchor or ""])
-    edge_key = f"edge:{semantic_blocks._hash(key_material)}"
-    return GraphEdge(edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata or {})
+    key_material = "\n".join(
+        [src_key, dst_key, relation_type, origin, source_path, source_anchor or ""]
+    )
+    edge_key = f"edge:{_hash(key_material)}"
+    return GraphEdge(
+        edge_key,
+        src_key,
+        dst_key,
+        relation_type,
+        origin,
+        source_path,
+        source_anchor,
+        metadata or {},
+    )
 
 
 def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO graph_nodes (node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        (node.node_key, node.kind, node.path, node.anchor, node.title, node.text, node.source_hash, node.line_start, node.line_end, json.dumps(node.metadata or {}, sort_keys=True)),
+        (
+            node.node_key,
+            node.kind,
+            node.path,
+            node.anchor,
+            node.title,
+            node.text,
+            node.source_hash,
+            node.line_start,
+            node.line_end,
+            json.dumps(node.metadata or {}, sort_keys=True),
+        ),
     )
 
 
 def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
     conn.execute(
         "INSERT OR REPLACE INTO graph_edges (edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (edge.edge_key, edge.src_key, edge.dst_key, edge.relation_type, edge.origin, edge.source_path, edge.source_anchor, json.dumps(edge.metadata or {}, sort_keys=True)),
+        (
+            edge.edge_key,
+            edge.src_key,
+            edge.dst_key,
+            edge.relation_type,
+            edge.origin,
+            edge.source_path,
+            edge.source_anchor,
+            json.dumps(edge.metadata or {}, sort_keys=True),
+        ),
     )
 
 
 def _node_row_to_dict(row) -> dict[str, Any]:
     return {
-        "node_key": row[0], "kind": row[1], "path": row[2], "anchor": row[3],
-        "title": row[4], "text": row[5], "source_hash": row[6],
-        "line_start": row[7], "line_end": row[8], "metadata": _json(row[9]),
+        "node_key": row[0],
+        "kind": row[1],
+        "path": row[2],
+        "anchor": row[3],
+        "title": row[4],
+        "text": row[5],
+        "source_hash": row[6],
+        "line_start": row[7],
+        "line_end": row[8],
+        "metadata": _json(row[9]),
     }
 
 
 def _edge_row_to_dict(row) -> dict[str, Any]:
     return {
-        "edge_key": row[0], "src_key": row[1], "dst_key": row[2],
-        "relation_type": row[3], "origin": row[4], "source_path": row[5],
-        "source_anchor": row[6], "metadata": _json(row[7]),
+        "edge_key": row[0],
+        "src_key": row[1],
+        "dst_key": row[2],
+        "relation_type": row[3],
+        "origin": row[4],
+        "source_path": row[5],
+        "source_anchor": row[6],
+        "metadata": _json(row[7]),
     }
 
 
@@ -591,16 +821,22 @@ def _seed_nodes(conn: sqlite3.Connection, *, path: str | None, query: str | None
         return [_node_row_to_dict(row)] if row else []
     if query:
         like = f"%{query}%"
-        rows = conn.execute(select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5", (like, like)).fetchall()
+        rows = conn.execute(
+            select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5", (like, like)
+        ).fetchall()
         return [_node_row_to_dict(r) for r in rows]
     return []
 
 
-def _neighbor_edges(conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]) -> list[dict[str, Any]]:
+def _neighbor_edges(
+    conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]
+) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
     select = "SELECT edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata FROM graph_edges"
     for key in sorted(frontier):
-        rows = conn.execute(select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)).fetchall()
+        rows = conn.execute(
+            select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)
+        ).fetchall()
         for row in rows:
             edge = _edge_row_to_dict(row)
             if relation_filter and edge["relation_type"] not in relation_filter:
@@ -621,6 +857,7 @@ def _nodes_by_keys(conn: sqlite3.Connection, keys: set[str]) -> list[dict[str, A
     nodes = [_node_by_key(conn, key) for key in sorted(keys)]
     return [n for n in nodes if n is not None]
 
+
 def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     for match in vault_module.find_body_wikilinks(body):
@@ -631,13 +868,15 @@ def _wikilink_candidates(vault_root: Path, body: str, rel_path: str) -> list[dic
             continue
         if warning:
             continue
-        candidates.append({
-            "from": rel_path,
-            "to": _with_md(canonical),
-            "relation_type": "links_to",
-            "method": "wikilink",
-            "evidence": {"source_path": rel_path, "target": target},
-        })
+        candidates.append(
+            {
+                "from": rel_path,
+                "to": _with_md(canonical),
+                "relation_type": "links_to",
+                "method": "wikilink",
+                "evidence": {"source_path": rel_path, "target": target},
+            }
+        )
     return candidates
 
 
@@ -673,13 +912,15 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
         conn.close()
     out: list[dict[str, Any]] = []
     for other_key, shared_key in rows:
-        out.append({
-            "from": rel_path,
-            "to": other_key.removeprefix("file:"),
-            "relation_type": "refines",
-            "method": "shared_sources",
-            "evidence": {"shared_source": shared_key.removeprefix("file:")},
-        })
+        out.append(
+            {
+                "from": rel_path,
+                "to": other_key.removeprefix("file:"),
+                "relation_type": "refines",
+                "method": "shared_sources",
+                "evidence": {"shared_source": shared_key.removeprefix("file:")},
+            }
+        )
     return out
 
 
@@ -699,16 +940,21 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
         target_path = _with_md(target)
         if target_path == self_path:
             continue
-        out.append({
-            "from": self_path,
-            "to": target_path,
-            "relation_type": "refines",
-            "method": "embedding_proximity",
-            "evidence": {"cosine": round(float(score), 4)},
-        })
+        out.append(
+            {
+                "from": self_path,
+                "to": target_path,
+                "relation_type": "refines",
+                "method": "embedding_proximity",
+                "evidence": {"cosine": round(float(score), 4)},
+            }
+        )
     return out
 
-def _draft_wikilink_candidates(vault_root: Path, body: str, *, draft_title: str | None) -> list[dict[str, Any]]:
+
+def _draft_wikilink_candidates(
+    vault_root: Path, body: str, *, draft_title: str | None
+) -> list[dict[str, Any]]:
     pseudo = f"draft:{draft_title or 'untitled'}"
     candidates: list[dict[str, Any]] = []
     for match in vault_module.find_body_wikilinks(body):
@@ -719,13 +965,15 @@ def _draft_wikilink_candidates(vault_root: Path, body: str, *, draft_title: str 
             continue
         if warning:
             continue
-        candidates.append({
-            "from": pseudo,
-            "to": _with_md(canonical),
-            "relation_type": "links_to",
-            "method": "wikilink",
-            "evidence": {"target": target},
-        })
+        candidates.append(
+            {
+                "from": pseudo,
+                "to": _with_md(canonical),
+                "relation_type": "links_to",
+                "method": "wikilink",
+                "evidence": {"target": target},
+            }
+        )
     return candidates
 
 

@@ -532,7 +532,7 @@
     }
   },
   "adopt": {
-    "description": "Adopt / import an existing vault safely: scan first, preserve originals.\n\nThis is the product-facing first step for a vault that already contains\nnotes, media, records, or project folders. `mode=\"scan-only\"` returns a\nbounded read-only adoption report: what Exomem found, which content is\ngoverned versus read-only input, likely knowledge packs, and safe next\nactions. Explicit write modes only write under `Knowledge Base/`:\n`save-manifest` saves the report, and `copy-as-sources` copies selected\nlegacy text files into governed Sources with original path/hash provenance.\n\nUse this when the user says \"import my vault\", \"adopt these notes\", \"make\nthis existing knowledge base usable\", or asks what Exomem would do with an\nold folder before committing to migration.",
+    "description": "Adopt / import an existing vault safely: scan first, preserve originals.\n\nThis is the product-facing first step for a vault that already contains\nnotes, media, records, or project folders. `mode=\"scan-only\"` returns a\nbounded read-only adoption report: what Exomem found, which content is\ngoverned versus read-only input, likely knowledge packs, and safe next\nactions. Explicit write modes only write under `Knowledge Base/`:\n`save-manifest` saves the report, `copy-as-sources` copies selected\nlegacy text files into governed Sources with original path/hash provenance,\nand `compile-selected` copies selected legacy files when needed then returns\na reviewable compile plan. It does not create compiled notes automatically.\n\nUse this when the user says \"import my vault\", \"adopt these notes\", \"make\nthis existing knowledge base usable\", or asks what Exomem would do with an\nold folder before committing to migration.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -544,7 +544,7 @@
         "mode": {
           "default": "scan-only",
           "type": "string",
-          "description": "Adoption mode: scan-only, save-manifest, or copy-as-sources."
+          "description": "Adoption mode: scan-only, save-manifest, copy-as-sources, or compile-selected."
         },
         "max_depth": {
           "default": 3,
@@ -591,7 +591,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit vault-relative legacy files for copy-as-sources."
+          "description": "Explicit vault-relative legacy files for copy-as-sources or compile-selected."
         }
       },
       "type": "object"

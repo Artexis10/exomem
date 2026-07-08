@@ -2,6 +2,49 @@
   "id": "legal-warranty",
   "name": "Legal / warranty",
   "description": "Cases, receipts, correspondence, deadlines, and proof.",
+  "purpose": "Keep proof-bearing case material, receipts, correspondence, deadlines, and decisions organized with provenance.",
+  "audience": "People managing warranties, returns, disputes, insurance claims, legal matters, contracts, or other proof-heavy records.",
+  "beginner_description": "Use this for receipts, warranties, disputes, insurance, contracts, deadlines, and case files.",
+  "agent_instructions": "Treat proof-bearing material as evidence when it supports a case, claim, warranty, insurance issue, dispute, or record. Preserve provenance, cite originals, and avoid converting every ordinary source into evidence.",
+  "default_note_types": [
+    "research-note",
+    "failure",
+    "insight"
+  ],
+  "default_entity_types": [
+    "person",
+    "concept",
+    "decision"
+  ],
+  "default_block_types": [
+    "case",
+    "receipt",
+    "deadline",
+    "correspondence",
+    "proof"
+  ],
+  "suggested_folders": [
+    "Knowledge Base/Sources/Other",
+    "Knowledge Base/Evidence/Legal",
+    "Knowledge Base/Evidence/Warranty",
+    "Knowledge Base/Notes/Research/Legal",
+    "Knowledge Base/Entities/People",
+    "Knowledge Base/Entities/Decisions"
+  ],
+  "suggested_workflows": [
+    {
+      "title": "Save proof for a case",
+      "intent": "Preserve a receipt, document, message, or artifact as proof for a specific matter.",
+      "route": "preserve or upload to Evidence, then link or note the case context",
+      "example": "Save this receipt for the laptop warranty case."
+    },
+    {
+      "title": "Show case evidence",
+      "intent": "Retrieve the proof and source trail for a dispute, warranty, claim, or contract question.",
+      "route": "find evidence and compiled case notes, then get selected pages for citations",
+      "example": "Show the evidence for the landlord dispute."
+    }
+  ],
   "primitives": [
     "source",
     "evidence",
