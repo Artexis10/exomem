@@ -26,7 +26,7 @@ import os
 import re
 from pathlib import Path
 
-from . import corpus_aware
+from . import corpus_aware, semantic_blocks
 from . import find as find_module
 from . import vault as vault_module
 from .find import Hit, ParsedPage
@@ -180,6 +180,11 @@ def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS
         "sections": _sections(lines),
         "outline": _outline(lines),
     }
+
+
+def _extract_semantic_blocks(page: ParsedPage) -> list[dict]:
+    document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
+    return [block.to_dict() for block in document.blocks]
 
 
 # ----------------------------- neighbourhood -----------------------------
@@ -359,6 +364,12 @@ def assemble_pack(
     claims = {
         p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages
     }
+    semantic_block_map: dict[str, list[dict]] = {}
+    for page in packed_pages:
+        blocks = _extract_semantic_blocks(page)
+        if blocks:
+            semantic_block_map[page.rel_path] = blocks
+
     neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
     if n_dropped > 0:
         truncation.append(
@@ -379,6 +390,7 @@ def assemble_pack(
     return {
         "packed_paths": [p.rel_path for p in packed_pages],
         "claims": claims,
+        "semantic_blocks": semantic_block_map,
         "neighborhood": neighborhood,
         "contradictions": {"superseded": superseded, "tension": tension},
         "embeddings_available": embeddings_available,
