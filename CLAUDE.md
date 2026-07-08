@@ -7,6 +7,13 @@ sharing the primary working tree. The hazard is **not "touching the primary"** â
 it's **destroying or colliding with another session's in-flight (uncommitted)
 work**. So judge an operation by its *effect*, not by a memorized command list.
 
+The primary checkout is `C:\Users\hugoa\Desktop\projects\exomem`; keep it on
+`main` and treat it as coordination space, not a feature branch parking lot.
+Feature branches belong in sibling worktrees such as
+`C:\Users\hugoa\Desktop\projects\exomem-<topic>`. Do not leave `main` checked
+out in a stale sibling worktree, because that blocks switching the primary back
+to `main`.
+
 **Rule: never run a git operation that discards/overwrites uncommitted changes or
 rewrites the working tree in the shared primary checkout â€” unless the user
 explicitly approves that specific operation.** That covers `git checkout
