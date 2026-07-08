@@ -45,6 +45,34 @@ is safe: completed steps report `[skipped]`.
 Non-interactive (scripts/CI):
 `uv run python -m exomem setup --yes --vault "/path/to/vault" --lean`
 
+## Not CLI-comfortable? Ask an assistant to drive
+
+You do not need to understand Exomem internals to get started. Give Claude Code,
+Codex, or another terminal-capable assistant this prompt from the cloned repo:
+
+```text
+Set up Exomem for my local markdown or Obsidian vault. Use the recommended lean
+path unless I explicitly ask for embeddings. Run the setup wizard, explain each
+prompt in plain language before I answer it, and do not move or rewrite my
+existing vault files. After setup, verify with doctor, call
+bootstrap(profile="compact") if you are not using the Exomem skill, ask one
+known vault question with find, and
+save one harmless test conclusion so I can see where it lands.
+```
+
+The expected first-run verification is concrete:
+
+1. `exomem doctor` passes for the selected vault.
+2. The connected assistant can call `bootstrap(profile="compact")`, unless it has
+   already loaded the Exomem skill.
+3. A known question about your vault triggers `find()` before the answer.
+4. A safe test such as "remember that setup succeeded today" writes a compiled
+   note and reports `Saved -> <path>`.
+
+Existing vault material remains read-only input. Exomem writes governed knowledge
+under `Knowledge Base/` unless you deliberately configure a different governed
+folder.
+
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
 steps.
