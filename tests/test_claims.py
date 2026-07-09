@@ -20,7 +20,13 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from exomem import claims, corpus_aware, embeddings, find as find_module
+from exomem import (
+    claims,
+    corpus_aware,
+    embeddings,
+    find as find_module,
+    sidecar_store,
+)
 
 
 # ---------------- extraction (deterministic, torch-free) ----------------
@@ -218,7 +224,7 @@ def test_sidecar_upsert_get_and_all(vault: Path) -> None:
 def test_upsert_claims_after_write_noop_when_gate_off(vault: Path, monkeypatch) -> None:
     monkeypatch.delenv("EXOMEM_CLAIM_LEVEL", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
-    rel = _seed_claim_md(vault, "Notes/Insights/g.md", type_="insight", h1="G", claim="A claim.")
+    _seed_claim_md(vault, "Notes/Insights/g.md", type_="insight", h1="G", claim="A claim.")
     find_module.clear_cache()
     claims.clear_claim_indexes()
     claims.upsert_claims_after_write(vault, [vault / "Knowledge Base" / "Notes/Insights/g.md"])
@@ -227,7 +233,7 @@ def test_upsert_claims_after_write_noop_when_gate_off(vault: Path, monkeypatch) 
 
 
 def test_upsert_claims_incremental_skips_unchanged(vault: Path, _claims_on) -> None:
-    rel = _seed_claim_md(vault, "Notes/Insights/inc.md", type_="insight", h1="Inc", claim="Original claim.")
+    _seed_claim_md(vault, "Notes/Insights/inc.md", type_="insight", h1="Inc", claim="Original claim.")
     find_module.clear_cache()
     path = vault / "Knowledge Base" / "Notes/Insights/inc.md"
 
@@ -547,7 +553,7 @@ def test_claim_sidecar_deleted_and_recreated_aba_detected_via_instance(
     fresh = claims.ClaimIndex(vault)
     fresh.upsert_many([_claim_row("new.md", _cvec(0, 1), mtime=5.0)])  # new file's gen -> 1
 
-    new_epoch, new_gen, new_instance = embeddings._peek_sidecar_token(idx.path)
+    new_epoch, new_gen, new_instance = sidecar_store.peek_sidecar_token(idx.path)
     assert new_gen == old_gen  # (epoch, gen) ALONE would have looked "fresh"
     assert new_instance != old_instance  # the instance nonce catches it
 
@@ -596,11 +602,11 @@ def test_claim_sidecar_uses_wal(tmp_path) -> None:
 
 # ---------------- semantic (model-loading) ----------------
 
-pytest.importorskip("sentence_transformers")
-pytest.importorskip("torch")
-
 
 def test_rebuild_all_builds_real_claim_vectors(vault: Path, monkeypatch) -> None:
+    pytest.importorskip("sentence_transformers")
+    pytest.importorskip("torch")
+
     monkeypatch.setenv("EXOMEM_CLAIM_LEVEL", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     embeddings._IMPORT_FAILED = False

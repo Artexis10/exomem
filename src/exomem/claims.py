@@ -450,7 +450,7 @@ class ClaimIndex:
             loaded = self._load_all_rows()
             log.info(
                 "claim matrix full load: reason=%s rows=%d gen=%d epoch=%d",
-                embeddings._reload_reason(c, loaded.epoch, loaded.generation),
+                sidecar_store.reload_reason(c, loaded.epoch, loaded.generation),
                 len(loaded.metadata), loaded.generation, loaded.epoch,
             )
             self._cache = loaded
