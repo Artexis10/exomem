@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from exomem import claims, context_pack, find as find_module, semantic_blocks
+from exomem import claims, context_pack, semantic_blocks
+from exomem import find as find_module
 from exomem.find import Hit
 
 
@@ -62,24 +63,7 @@ The claim remains Markdown.
 
 
 def test_parses_all_required_relation_types() -> None:
-    relation_names = [
-        "supports",
-        "contradicts",
-        "refines",
-        "supersedes",
-        "derived_from",
-        "depends_on",
-        "evidenced_by",
-        "used_for",
-        "mitigates",
-        "causes",
-        "blocks",
-        "resolves",
-        "cites",
-        "implements",
-        "tests",
-        "owns",
-    ]
+    relation_names = sorted(semantic_blocks.RELATION_TYPES)
     relation_text = ", ".join(f"{name}: [[Target {i}]]" for i, name in enumerate(relation_names))
     markdown = f"## Finding\n- relations: {relation_text}\n\nFinding body.\n"
 
@@ -87,11 +71,15 @@ def test_parses_all_required_relation_types() -> None:
 
     assert document.is_valid
     assert [relation.kind for relation in document.blocks[0].relations] == relation_names
-    assert {relation.kind for relation in document.blocks[0].relations} == semantic_blocks.RELATION_TYPES
+    assert {
+        relation.kind for relation in document.blocks[0].relations
+    } == semantic_blocks.RELATION_TYPES
 
 
 def test_relation_split_ignores_commas_inside_wikilinks() -> None:
-    markdown = "## Evidence\n- relations: cites: [[Source, With Comma]], supports: [[Claim]]\n\nBody.\n"
+    markdown = (
+        "## Evidence\n- relations: cites: [[Source, With Comma]], supports: [[Claim]]\n\nBody.\n"
+    )
 
     document = semantic_blocks.parse_semantic_blocks(markdown)
 
@@ -167,6 +155,27 @@ C.
         "open_question",
         "open_question",
     ]
+
+
+def test_plural_heading_aliases_normalize_to_canonical_types() -> None:
+    markdown = """\
+## Findings
+
+F.
+
+## Risks
+
+R.
+
+## Actions
+
+A.
+"""
+
+    document = semantic_blocks.parse_semantic_blocks(markdown)
+
+    assert document.is_valid
+    assert [block.type for block in document.blocks] == ["finding", "risk", "action"]
 
 
 def test_fenced_code_is_ignored() -> None:

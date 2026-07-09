@@ -45,6 +45,8 @@ class ReconcileReport:
     indexes_updated: list[str] = field(default_factory=list)
     embeddings_refreshed: int = 0
     embeddings_status: str = "current"  # "current" | "refreshed" | "disabled"
+    graph_refreshed: int = 0
+    graph_status: str = "current"  # "current" | "refreshed" | "disabled"
     remaining_drift: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
@@ -53,6 +55,8 @@ class ReconcileReport:
             "indexes_updated": self.indexes_updated,
             "embeddings_refreshed": self.embeddings_refreshed,
             "embeddings_status": self.embeddings_status,
+            "graph_refreshed": self.graph_refreshed,
+            "graph_status": self.graph_status,
             "remaining_drift": self.remaining_drift,
             "dry_run": self.dry_run,
         }
@@ -126,9 +130,21 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         except Exception:  # noqa: BLE001 — best-effort, lanes soft-fail anyway
             log.exception("lexical sidecar reconcile failed; next use self-heals")
 
+    # ---- 2c. Derived epistemic graph sidecar ----
+    if os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX"):
+        report.graph_status = "disabled"
+    else:
+        from . import epistemic_graph
+
+        drift = epistemic_graph.graph_drift(vault_root)
+        if drift and not dry_run:
+            epistemic_graph.EpistemicGraphIndex(vault_root).rebuild_all()
+        report.graph_refreshed = len(drift)
+        report.graph_status = "refreshed" if drift else "current"
+
     # ---- 3. Remaining drift report ----
     post = audit_module.audit(
-        vault_root, categories=["index_drift", "embedding_drift"]
+        vault_root, categories=["index_drift", "embedding_drift", "graph_drift"]
     )
     report.remaining_drift = [f.as_dict() for f in post.findings]
 

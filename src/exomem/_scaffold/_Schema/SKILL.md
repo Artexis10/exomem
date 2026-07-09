@@ -152,7 +152,8 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 The KB tools may be **deferred** — the client lists them by name and you load a
 tool's schema before you can call it. Load the core set up front, in one shot:
 you'll almost always need `find` (search), `get` (read a page), and one or more
-of `note`, `add`, `link`, `suggest_links`, `edit`, `audit`. In Claude Code, load
+of `note`, `add`, `link`, `suggest_links`, `graph_context`,
+`suggest_relations`, `edit`, `audit`. In Claude Code, load
 them by exact name in a single call:
 
 `ToolSearch("select:adopt,overview,find,get,note,add,link,suggest_links,edit,audit")`
@@ -249,6 +250,8 @@ and index updates are determined by the operation, not the caller.
 | **edit** | In-place edit of a compiled page. One mode per call: whole `body` / `tags` / surgical `old_string`→`new_string`; `edits=[…]` several surgical pairs in one atomic batch; `row_key`+`take` fill a `[take: ]` row by its leading text; `field`+`value` patch ONE frontmatter field (requires `why:`). Bumps `updated:`. Optional `expected_hash` (drift guard) + `validate_only` | the page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
+| **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |
+| **suggest_relations** | Propose typed graph relations for a page or draft; review-only, never writes | — |
 | **get** | Read a full file by path; `frontmatter_only=true` returns just the frontmatter. Returns `content_hash` + `mtime` for the two-writer drift guard (echo `content_hash` to `edit` via `expected_hash`). Read-only | — |
 | **audit** | Lint pass: orphans, broken links, supersession integrity, aged unprocessed sources | proposals only |
 | **overview** | Bounded structure report of the vault or a subtree — folder tree, counts, frontmatter coverage, junk candidates. Works outside the KB and pre-init (read-only) | — |
@@ -357,6 +360,8 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - "why was this note changed," "show the history of this page" → **get** (`include_history=true`)
 - "what did I used to think about X," "show me the superseded version" → **find** (`prefer_active=false`)
 - "what should this link to," "densify this page's links" → **suggest_links**
+- "what does this connect to in the graph," "show typed relations" → **graph_context**
+- "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**
@@ -420,7 +425,9 @@ mode may auto-rerank when lanes strongly disagree or the query is long.
 
 Performance presets:
 - Normal lookup: `detail="compact"`, `rerank=false`.
-- Reasoning context: `pack=true` when you need a compressed evidence bundle.
+- Reasoning context: `pack=true` when you need a compressed evidence bundle;
+  add `graph_enrich=true` only when you need typed graph neighborhoods alongside
+  the normal pack contract.
 - Diagnostics: `include_timings=true`; add `rerank=true` only when you are
   intentionally measuring reranking or spending latency for precision. Interpret
   timing output with the returned compute mode, embedding backend, cache state,
