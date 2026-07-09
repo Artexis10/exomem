@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -70,8 +69,9 @@ def test_windows_service_installer_supports_release_env_and_cuda() -> None:
 
     assert "[switch]$Release" in install
     assert "exomem-service-release" in install
-    assert '"pip", "install", "--python", $venvPython, $pkg' in install
+    assert '"pip", "install", "--upgrade", "--python", $venvPython, $pkg' in install
     assert "AppEnvironmentExtra" in install
     assert "EXOMEM_MCP_LEGACY_COMPAT" in install
     assert "https://download.pytorch.org/whl/cu132" in install
     assert "torch==2.12.0+cu132" in install
+    assert "Test-McpEndpoint -HostName $BindHost -EndpointPort $Port" in install

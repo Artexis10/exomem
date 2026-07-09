@@ -130,6 +130,35 @@ function Invoke-LoggedNative {
     return $LASTEXITCODE
 }
 
+function Test-McpEndpoint {
+    param(
+        [string]$HostName,
+        [int]$EndpointPort,
+        [int]$TimeoutSec = 60
+    )
+    $verifyHost = if ($HostName -in @("0.0.0.0", "::", "[::]")) { "127.0.0.1" } else { $HostName }
+    $url = "http://${verifyHost}:${EndpointPort}/mcp"
+    $deadline = (Get-Date).AddSeconds($TimeoutSec)
+    $lastStatus = 0
+    while ((Get-Date) -lt $deadline) {
+        try {
+            $response = Invoke-WebRequest -Uri $url -Method Get -SkipHttpErrorCheck -TimeoutSec 2
+            $lastStatus = [int]$response.StatusCode
+        } catch {
+            $lastStatus = 0
+        }
+        if ($lastStatus -eq 401) {
+            Write-Host "Verified $url -> 401 (healthy, OAuth enforced)."
+            return
+        }
+        if ($lastStatus -eq 200) {
+            throw "$url returned 200; OAuth is not enforced."
+        }
+        Start-Sleep -Seconds 1
+    }
+    throw "$url did not return the expected OAuth 401 (last status: $lastStatus)."
+}
+
 function Install-ReleaseVenv {
     $root = if ($ServiceRoot) {
         $ServiceRoot
@@ -152,7 +181,7 @@ function Install-ReleaseVenv {
     }
 
     Write-Host "Installing $pkg into release service venv..."
-    $code = Invoke-LoggedNative @("uv", "pip", "install", "--python", $venvPython, $pkg)
+    $code = Invoke-LoggedNative @("uv", "pip", "install", "--upgrade", "--python", $venvPython, $pkg)
     if ($code -ne 0) { throw "uv pip install failed for $pkg" }
 
     $shouldCuda = $false
@@ -199,6 +228,14 @@ if ($LASTEXITCODE -ne 0) {
     throw "Doctor preflight failed for profile '$Profile'. Install the missing extras (for example: uv sync --frozen --extra embeddings) before installing the service."
 }
 
+$remoteDoctorArgs = @("-m", "exomem", "doctor", "--profile", "remote")
+if ($vault) { $remoteDoctorArgs += @("--vault", $vault) }
+Write-Host "Preflight: exomem doctor --profile remote..."
+& $python @remoteDoctorArgs
+if ($LASTEXITCODE -ne 0) {
+    throw "Remote doctor preflight failed. Fix the vault and OAuth environment before installing the service."
+}
+
 # Install
 & $NssmPath install $ServiceName $python "-m" "exomem" "--transport" "streamable-http" "--host" $BindHost "--port" $Port
 & $NssmPath set $ServiceName AppDirectory $repoRoot
@@ -214,6 +251,13 @@ if ($LASTEXITCODE -ne 0) {
 Set-NssmEnvironment -Map $serviceEnv
 
 & $NssmPath start $ServiceName
+
+try {
+    Test-McpEndpoint -HostName $BindHost -EndpointPort $Port
+} catch {
+    & $NssmPath stop $ServiceName | Out-Null
+    throw "Service endpoint verification failed and '$ServiceName' was stopped: $_"
+}
 
 # Grant the invoking user start/stop rights on this service so future restarts
 # don't require UAC. The ACL keeps SYSTEM/Admins/AuthenticatedUsers as-is and

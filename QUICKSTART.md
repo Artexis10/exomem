@@ -501,9 +501,12 @@ publicly-reachable, authenticated endpoint:
 3. **A GitHub OAuth app** (client id + secret) wired into the OAuthProxy —
    claude.ai connectors require OAuth; static tokens aren't accepted.
 4. **Lock it to your GitHub login** (the single-user verifier), then run it as a
-   background service with `--transport streamable-http` — `scripts/install-service.sh`
-   sets this up via **launchd** on macOS or **systemd** on Linux (the main
-   [docs/deployment.md](docs/deployment.md) covers all three platforms).
+   background service with `--transport streamable-http`. On macOS or Linux run
+   `bash scripts/install-service.sh --release --profile hybrid`; on Windows run
+   `pwsh -File scripts/install-service.ps1 -Release -Profile hybrid`. These
+   release commands create the PyPI service environment, load `.env`, doctor-gate,
+   start the OS service, and verify `/mcp` (the main
+   [docs/deployment.md](docs/deployment.md) covers all options, including repo-dev).
 5. **Add it as a custom connector** in claude.ai.
 
 [docs/deployment.md](docs/deployment.md) documents this path end-to-end. Rule of thumb: the **local path is ~90% of the value for ~20% of the
