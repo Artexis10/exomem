@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.14.0](https://github.com/Artexis10/exomem/compare/v0.13.0...v0.14.0) (2026-07-09)
+
+
+### Features
+
+* add one-command native release service bootstrap ([#179](https://github.com/Artexis10/exomem/issues/179)) ([9c663ed](https://github.com/Artexis10/exomem/commit/9c663edb0ff701921ffab393098bc4fc0133ea54))
+
+
+### Bug Fixes
+
+* validate product command adoption flow ([#176](https://github.com/Artexis10/exomem/issues/176)) ([ff22274](https://github.com/Artexis10/exomem/commit/ff22274b24eaf6a377264ec61380ca32278d7584))
+
 ## [0.13.0](https://github.com/Artexis10/exomem/compare/v0.12.0...v0.13.0) (2026-07-09)
 
 
