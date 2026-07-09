@@ -28,7 +28,6 @@ from __future__ import annotations
 
 import logging
 import os
-import platform
 import threading
 import time
 from pathlib import Path
@@ -47,18 +46,14 @@ def warmup_enabled() -> bool:
 def model_preload_allowed(mode_name: str | None = None) -> bool:
     """Whether startup may eagerly load model weights in this process.
 
-    Normal-mode Apple Silicon defaults to lazy model loads. Multiple local stdio
-    clients naturally mean multiple Python processes, and eager BGE/CLIP/ASR
-    preloads can multiply into a multi-GB-per-chat footprint during imports.
-    `EXOMEM_PRELOAD_MODELS=1` opts back into the old eager behavior.
+    Normal and quiet modes default to lazy model loads on every OS. Multiple local
+    clients naturally mean multiple Python processes, and eager BGE/CLIP preloads
+    multiply memory residency. `EXOMEM_PRELOAD_MODELS=1` explicitly opts in.
     """
     override = os.environ.get("EXOMEM_PRELOAD_MODELS")
     if override is not None and override.strip() != "":
         return override.strip().lower() not in {"0", "false", "no", "off"}
-    resolved_mode = mode_name or "normal"
-    if resolved_mode == "normal" and platform.system() == "Darwin" and platform.machine() == "arm64":
-        return False
-    return True
+    return (mode_name or "normal") == "performance"
 
 
 def warm_caches(
@@ -158,7 +153,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     from . import mode, readiness
 
     mode_name = mode.resolve_mode()
-    preload = mode.preload_models() and model_preload_allowed(mode_name)
+    preload = model_preload_allowed(mode_name)
     durations = warm_caches(
         vault_root,
         preload_models=preload,

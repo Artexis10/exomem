@@ -24,8 +24,8 @@ param(
     [string]$ServiceName = "exomem",
     [string]$BindHost = "127.0.0.1",
     [int]$Port = 8765,
-    [ValidateSet("lean", "hybrid", "media")]
-    [string]$Profile = "hybrid",
+    [ValidateSet("lean", "hybrid", "standard", "media")]
+    [string]$Profile = "standard",
     [switch]$Release,
     [string]$ServiceRoot = "",
     [string]$PackageVersion = "",
@@ -176,6 +176,8 @@ function Install-ReleaseVenv {
     $pkg = if ($PackageVersion) { "exomem==$PackageVersion" } else { "exomem" }
     if ($Profile -eq "hybrid") {
         $pkg = if ($PackageVersion) { "exomem[embeddings]==$PackageVersion" } else { "exomem[embeddings]" }
+    } elseif ($Profile -eq "standard") {
+        $pkg = if ($PackageVersion) { "exomem[embeddings,media]==$PackageVersion" } else { "exomem[embeddings,media]" }
     } elseif ($Profile -eq "media") {
         $pkg = if ($PackageVersion) { "exomem[embeddings,media,vision,diarization]==$PackageVersion" } else { "exomem[embeddings,media,vision,diarization]" }
     }

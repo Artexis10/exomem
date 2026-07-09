@@ -49,7 +49,7 @@ def test_worker_clip_embeds_video_via_keyframes(vault, monkeypatch: pytest.Monke
     called = {}
     monkeypatch.setattr(embeddings, "embed_video_frames", lambda p: called.setdefault("v", _three_frames()))
     monkeypatch.setattr(embeddings, "embed_image", lambda p: (_ for _ in ()).throw(AssertionError("used embed_image for video")))
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -102,7 +102,7 @@ def test_worker_gate_on_writes_frames_and_queues_ocr(
         "embed_video_frames",
         lambda p: (_ for _ in ()).throw(AssertionError("uniform path used with gate on")),
     )
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -135,7 +135,7 @@ def test_worker_gate_off_never_touches_scene_path(
         "embed_video_scenes",
         lambda p: (_ for _ in ()).throw(AssertionError("scene path used with gate off")),
     )
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -158,7 +158,7 @@ def test_worker_frame_write_failure_still_upserts_vectors(
         "write_scene_frames",
         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk on fire")),
     )
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -187,7 +187,7 @@ def test_startup_scan_skips_frame_children(vault, monkeypatch: pytest.MonkeyPatc
         "---\ntype: source\nmedia_type: image\nparent_media: Knowledge Base/Evidence/Test/clips/demo.mp4\n---\n",
         encoding="utf-8",
     )
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     n = w._scan_unindexed_images()
     assert n == 1
     job = w._q.get_nowait()
@@ -297,7 +297,7 @@ def test_worker_gate_on_enqueues_parent_reembed_after_ocr(
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -319,7 +319,7 @@ def test_worker_reembed_gate_off_not_enqueued(vault, monkeypatch: pytest.MonkeyP
         vault, scope="Yolo", category="clips", filename="demo.mp4", data=b"\x00video", text="x",
     )
     monkeypatch.setattr(embeddings, "embed_video_scenes", lambda p: _two_scenes())
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
         media_type="video", do_ocr=False, do_clip=True,
@@ -339,7 +339,7 @@ def test_process_reembed_calls_upsert(vault, monkeypatch: pytest.MonkeyPatch) ->
     sidecar = vault / "Knowledge Base/Evidence/T/clips/demo.mp4.md"
     sidecar.parent.mkdir(parents=True, exist_ok=True)
     sidecar.write_text("---\nmedia_type: video\n---\n", encoding="utf-8")
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     w._process(media_worker._Job(
         binary_path=sidecar.with_suffix(""), sidecar_path=sidecar,
         media_type="video", do_ocr=False, do_clip=False, do_reembed=True,
@@ -371,7 +371,7 @@ def test_scan_pending_enqueues_deduped_parent_reembed(
             f"parent_media: {parent_rel}\n---\n",
             encoding="utf-8",
         )
-    w = media_worker.MediaWorker(vault)
+    w = media_worker.MediaWorker(vault, execution_mode="inline")
     n = w._scan_pending_ocr()
     jobs = []
     while not w._q.empty():

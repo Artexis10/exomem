@@ -1,4 +1,4 @@
-"""Background media-extraction worker — fills pending media sidecars off the request path.
+"""Durable, disposable media extraction runtime.
 
 When a media binary is uploaded without text, `preserve()` writes a `pending` stub sidecar
 and the `/upload` route enqueues a job here. A single background thread (the GPU is
@@ -6,23 +6,37 @@ serialized) runs ASR/OCR/PDF extraction (`extract.extract_text`), writes the tra
 the sidecar (`preserve.update_sidecar_extraction`) and re-embeds it — so the 201 returns
 immediately and the binary becomes searchable shortly after.
 
-In-memory queue (no DB). A startup `scan_pending()` re-enqueues any `extracted_by: pending`
-sidecar so a restart doesn't strand jobs — mirroring exomem's reconcile-heals-drift approach.
-A genuine extraction error marks the sidecar `extracted_by: failed: …` so it won't loop.
+The long-lived service is a lightweight supervisor. Product mode records jobs in a
+SQLite ledger and starts one child process per vault on demand. The child serializes
+heavy work, stays warm for a bounded burst, then exits so RAM and accelerator contexts
+are returned to the host. Inline mode preserves a deterministic test/debug path.
 """
 
 from __future__ import annotations
 
+import contextlib
 import logging
+import os
 import queue
 import re
+import subprocess
+import sys
 import threading
-from dataclasses import dataclass
+import time
 from pathlib import Path
 
 from . import embeddings, extract, index_sync, preserve, scene_frames, semantic_segments
 from .backfill import iter_kb_files
 from .kbdir import kb_dirname
+from .media_jobs import (
+    BLOCKED,
+    FAILED,
+    MediaJobStore,
+    pid_alive,
+)
+from .media_jobs import (
+    MediaJob as _Job,
+)
 
 log = logging.getLogger(__name__)
 
@@ -32,44 +46,57 @@ _PENDING_MARKER = "extracted_by: pending"
 _PARENT_MEDIA_MARKER = "\nparent_media:"
 
 
-@dataclass
-class _Job:
-    binary_path: Path
-    sidecar_path: Path
-    media_type: str
-    do_ocr: bool = True    # transcribe/OCR/read → fill the sidecar text
-    do_clip: bool = False  # CLIP-embed (images only) → ClipIndex
-    do_reembed: bool = False  # re-embed the sidecar (semantic re-segmentation)
-
-
 class MediaWorker:
-    """A single-thread extraction queue. One worker = the GPU is used serially."""
+    """Media supervisor with process-default and inline execution modes."""
 
-    def __init__(self, vault_root: Path) -> None:
+    def __init__(
+        self,
+        vault_root: Path,
+        *,
+        execution_mode: str | None = None,
+        idle_seconds: float | None = None,
+    ) -> None:
         self._vault_root = vault_root
+        selected = execution_mode or os.environ.get("EXOMEM_MEDIA_WORKER_MODE", "process")
+        if selected not in {"process", "inline"}:
+            raise ValueError("media worker mode must be process or inline")
+        self._execution_mode = selected
+        self._idle_seconds = idle_seconds if idle_seconds is not None else _idle_seconds()
         self._q: queue.Queue[_Job | None] = queue.Queue()
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
         self._clip_index = embeddings.get_clip_index(vault_root)
+        self._store = MediaJobStore(vault_root) if selected == "process" else None
+        self._wake = threading.Event()
+        self._stop_event = threading.Event()
+        self._child: subprocess.Popen | None = None
 
     def start(self) -> None:
         with self._lock:
             if self._thread is not None and self._thread.is_alive():
                 return
+            self._stop_event.clear()
+            if self._execution_mode == "process":
+                assert self._store is not None
+                retried = self._store.retry()
+                if retried:
+                    log.info("media worker: retried %d blocked job(s)", retried)
+                target = self._supervise
+                name = "exomem-media-supervisor"
+            else:
+                target = self._run
+                name = "exomem-media-inline"
             self._thread = threading.Thread(
-                target=self._run, name="kb-media-worker", daemon=True
+                target=target, name=name, daemon=True
             )
             self._thread.start()
-            log.info("media extraction worker started")
-            # Warm the ASR model off the request path only when policy allows it.
-            # On Apple Silicon this defaults to lazy load to avoid multiplying
-            # multi-GB model residency across local stdio client processes.
-            if extract.asr_prewarm_enabled():
+            log.info("media extraction %s runtime started", self._execution_mode)
+            # Explicit opt-in is honored only for inline/debug mode. Product process
+            # mode starts no child and loads no model until durable work exists.
+            if self._execution_mode == "inline" and extract.asr_prewarm_enabled():
                 threading.Thread(
-                    target=extract.prewarm, name="kb-asr-prewarm", daemon=True
+                    target=extract.prewarm, name="exomem-asr-prewarm", daemon=True
                 ).start()
-            else:
-                log.info("ASR prewarm disabled by policy; first media job will lazy-load")
             # Boot-time diarization readiness line (cheap: a path check + small JSON
             # read) — the soft-fail design otherwise hides a broken stack entirely.
             extract.log_diarization_readiness(self._vault_root)
@@ -84,23 +111,49 @@ class MediaWorker:
         do_clip: bool = False,
         do_reembed: bool = False,
     ) -> None:
-        self._q.put(
-            _Job(
-                binary_path=binary_path,
-                sidecar_path=sidecar_path,
-                media_type=media_type,
-                do_ocr=do_ocr,
-                do_clip=do_clip,
-                do_reembed=do_reembed,
-            )
+        job = _Job(
+            id=None,
+            binary_path=binary_path,
+            sidecar_path=sidecar_path,
+            media_type=media_type,
+            do_ocr=do_ocr,
+            do_clip=do_clip,
+            do_reembed=do_reembed,
         )
+        if self._execution_mode == "process":
+            assert self._store is not None
+            self._store.enqueue(job)
+            self._wake.set()
+        else:
+            self._q.put(job)
 
     def stop(self) -> None:
-        self._q.put(None)
+        self._stop_event.set()
+        self._wake.set()
+        if self._execution_mode == "inline":
+            self._q.put(None)
+        child = self._child
+        if child is not None and child.poll() is None:
+            with contextlib.suppress(OSError):
+                child.terminate()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join(timeout=5)
 
     def join(self, timeout: float | None = None) -> None:
         """Block until the queue drains — used in tests."""
-        self._q.join() if timeout is None else _join_with_timeout(self._q, timeout)
+        if self._execution_mode == "inline":
+            self._q.join() if timeout is None else _join_with_timeout(self._q, timeout)
+            return
+        assert self._store is not None
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while True:
+            counts = self._store.counts()
+            if counts["pending"] == 0 and counts["running"] == 0:
+                return
+            if deadline is not None and time.monotonic() >= deadline:
+                raise TimeoutError("media worker queue did not drain")
+            time.sleep(0.02)
 
     def _run(self) -> None:
         while True:
@@ -114,13 +167,15 @@ class MediaWorker:
             finally:
                 self._q.task_done()
 
-    def _process(self, job: _Job) -> None:
+    def _process(self, job: _Job) -> str:
+        blocked = False
         if job.do_ocr:
-            self._run_extraction(job)
+            blocked = not self._run_extraction(job)
         if job.do_clip:
             self._run_clip(job)
         if job.do_reembed:
             self._run_reembed(job)
+        return BLOCKED if blocked else "complete"
 
     def _run_reembed(self, job: _Job) -> None:
         """Re-embed a sidecar so semantic segmentation re-runs with late signals.
@@ -135,7 +190,7 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
 
-    def _run_extraction(self, job: _Job) -> None:
+    def _run_extraction(self, job: _Job) -> bool:
         try:
             result = extract.extract_text(
                 job.binary_path, media_type=job.media_type, vault_root=self._vault_root
@@ -144,13 +199,13 @@ class MediaWorker:
             # Engine not installed on this box right now — leave the sidecar `pending`
             # so a properly-provisioned box picks it up on its next restart scan.
             log.warning("extraction unavailable for %s: %s", job.binary_path.name, e)
-            return
+            return False
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             log.exception("extraction failed for %s", job.binary_path.name)
             preserve.update_sidecar_extraction(
                 self._vault_root, job.sidecar_path, text="", engine=f"failed: {type(e).__name__}"
             )
-            return
+            return True
         text = result.text.strip() or "(no text detected)"
         preserve.update_sidecar_extraction(
             self._vault_root, job.sidecar_path, text=text, engine=result.engine,
@@ -159,6 +214,7 @@ class MediaWorker:
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
+        return True
 
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
@@ -232,6 +288,63 @@ class MediaWorker:
             log.info(
                 "scene frames: wrote %d frame(s) for %s", len(written), job.binary_path.name
             )
+
+    def _launch_child(self) -> subprocess.Popen:
+        args = [
+            sys.executable,
+            "-m",
+            "exomem.media_worker_child",
+            "--vault",
+            str(self._vault_root),
+            "--parent-pid",
+            str(os.getpid()),
+            "--idle-seconds",
+            str(self._idle_seconds),
+        ]
+        log.info("media worker: starting disposable child")
+        return subprocess.Popen(args)  # noqa: S603 - fixed interpreter/module command
+
+    def _supervise(self) -> None:
+        assert self._store is not None
+        relaunch_after = 0.0
+        try:
+            while not self._stop_event.is_set():
+                child = self._child
+                if child is not None and child.poll() is not None:
+                    returncode = child.returncode
+                    child_pid = child.pid
+                    self._child = None
+                    owns_runtime = self._store.worker_pid() == child_pid
+                    recovered = self._store.recover_interrupted() if owns_runtime else 0
+                    if owns_runtime:
+                        self._store.clear_worker(child_pid)
+                    if returncode:
+                        log.warning(
+                            "media child exited %s; recovered %d job(s)",
+                            returncode,
+                            recovered,
+                        )
+                    relaunch_after = time.monotonic() + (2.0 if returncode else 0.5)
+                if (
+                    self._child is None
+                    and time.monotonic() >= relaunch_after
+                    and self._store.needs_worker()
+                ):
+                    try:
+                        self._child = self._launch_child()
+                    except OSError:
+                        log.exception("media worker: could not start child")
+                        relaunch_after = time.monotonic() + 5.0
+                self._wake.wait(0.5)
+                self._wake.clear()
+        finally:
+            child = self._child
+            if child is not None and child.poll() is None:
+                with contextlib.suppress(OSError):
+                    child.terminate()
+                with contextlib.suppress(subprocess.TimeoutExpired):
+                    child.wait(timeout=5)
+            self._child = None
 
     def scan_pending(self) -> int:
         """Restart recovery: re-enqueue pending OCR + CLIP-index un-indexed images."""
@@ -342,3 +455,56 @@ def _join_with_timeout(q: queue.Queue, timeout: float) -> None:
     deadline = time.monotonic() + timeout
     while q.unfinished_tasks and time.monotonic() < deadline:
         time.sleep(0.02)
+
+
+def _idle_seconds() -> float:
+    try:
+        return max(0.1, float(os.environ.get("EXOMEM_MEDIA_IDLE_SECONDS") or "300"))
+    except ValueError:
+        return 300.0
+
+
+def run_child(vault_root: Path, *, parent_pid: int, idle_seconds: float) -> int:
+    """Claim and process durable jobs until idle or the parent disappears."""
+    store = MediaJobStore(vault_root)
+    store.recover_interrupted()
+    store.set_worker(os.getpid(), idle_seconds)
+    # Process mode makes scene-frame follow-up enqueue durable in this same ledger;
+    # the nested supervisor is never started because the child calls _process directly.
+    worker = MediaWorker(vault_root, execution_mode="process", idle_seconds=idle_seconds)
+    last_work = time.monotonic()
+    try:
+        if extract.asr_prewarm_enabled():
+            extract.prewarm()
+        extract.log_diarization_readiness(vault_root)
+        while _parent_alive(parent_pid):
+            job = store.claim_next()
+            if job is None:
+                if time.monotonic() - last_work >= idle_seconds:
+                    log.info("media worker: idle deadline reached; child exiting")
+                    return 0
+                time.sleep(min(0.25, idle_seconds))
+                continue
+            last_work = time.monotonic()
+            try:
+                outcome = worker._process(job)
+            except Exception as exc:  # noqa: BLE001 - preserve worker availability
+                log.exception("media child job crashed: %s", job.binary_path)
+                assert job.id is not None
+                store.mark(job.id, FAILED, f"{type(exc).__name__}: {exc}")
+            else:
+                assert job.id is not None
+                if outcome == BLOCKED:
+                    store.mark(job.id, BLOCKED, "optional extraction engine unavailable")
+                else:
+                    store.complete(job)
+        log.info("media worker: parent exited; child stopping")
+        return 0
+    finally:
+        store.clear_worker(os.getpid())
+
+
+def _parent_alive(parent_pid: int) -> bool:
+    if parent_pid <= 0:
+        return True
+    return pid_alive(parent_pid)

@@ -4,10 +4,10 @@
 # .venv path available for contributors.
 #
 # Product install:
-#   bash scripts/install-service.sh --release --profile hybrid
+#   bash scripts/install-service.sh --release
 #
 # Developer install:
-#   bash scripts/install-service.sh --repo-dev --profile hybrid
+#   bash scripts/install-service.sh --repo-dev --profile standard
 #
 # Re-run the same command after package or .env changes. No sudo is required.
 
@@ -16,7 +16,7 @@ set -euo pipefail
 LABEL="com.exomem"
 SERVICE_NAME="exomem"
 MODE="repo-dev"
-PROFILE="hybrid"
+PROFILE="standard"
 BIND_HOST="${EXOMEM_BIND_HOST:-127.0.0.1}"
 PORT="${EXOMEM_PORT:-8765}"
 SERVICE_ROOT=""
@@ -36,7 +36,7 @@ Modes:
   --repo-dev                Use the checkout .venv (default for compatibility)
 
 Options:
-  --profile lean|hybrid|media
+  --profile lean|hybrid|standard|media
   --service-root PATH       Override release state/venv location
   --package-version VERSION Pin the PyPI release version
   --env-file PATH           Dotenv file (default: <repo>/.env)
@@ -115,8 +115,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 case "$PROFILE" in
-    lean|hybrid|media) ;;
-    *) die "--profile must be lean, hybrid, or media" ;;
+    lean|hybrid|standard|media) ;;
+    *) die "--profile must be lean, hybrid, standard, or media" ;;
 esac
 if [[ ! "$PORT" =~ ^[0-9]+$ ]] || (( PORT < 1 || PORT > 65535 )); then
     die "--port must be an integer from 1 to 65535"
@@ -172,6 +172,12 @@ if [[ "$MODE" == "release" ]]; then
             ;;
         hybrid)
             EXTRAS="embeddings"
+            ;;
+        standard)
+            EXTRAS="embeddings,media"
+            if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
+                EXTRAS="$EXTRAS,media-mlx"
+            fi
             ;;
         media)
             EXTRAS="embeddings,media,vision,diarization"

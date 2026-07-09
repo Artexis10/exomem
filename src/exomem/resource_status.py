@@ -80,17 +80,9 @@ def _cache_residency() -> dict[str, Any]:
 
 
 def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
-    index_sync = sys.modules.get("exomem.index_sync")
-    if index_sync is None or not hasattr(index_sync, "deferred_work_status"):
-        return {
-            "semantic_upserts": {
-                "count": 0,
-                "paths": [],
-                "truncated": False,
-                "roots": 0,
-            }
-        }
-    return index_sync.deferred_work_status(vault_root)
+    from . import deferred_index
+
+    return {"semantic_upserts": deferred_index.status(vault_root)}
 
 
 def cuda_accounting_if_initialized() -> dict[str, Any]:
@@ -143,6 +135,8 @@ def runtime_info() -> dict[str, Any]:
 
 def collect(vault_root: Path | None = None) -> dict[str, Any]:
     """Collect process-local resource status without allocating heavy resources."""
+    from . import media_jobs
+
     policy = mode.resolved()
     return {
         "runtime": runtime_info(),
@@ -153,6 +147,7 @@ def collect(vault_root: Path | None = None) -> dict[str, Any]:
         "models": _model_residency(),
         "caches": _cache_residency(),
         "deferred_work": _deferred_work(vault_root),
+        "media": media_jobs.status(vault_root),
         "cuda": cuda_accounting_if_initialized(),
     }
 

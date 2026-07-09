@@ -113,3 +113,44 @@ def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(
     assert rep.embeddings_status == "refreshed"
     assert calls == [[target]]
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0
+
+
+def test_reconcile_preserves_deferred_work_after_embedding_failure(
+    vault: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    index_sync.clear_deferred_work(vault)
+
+    from exomem import find, lexstore
+
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda root, paths: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda root, changed, deleted: None)
+    target = vault / "Knowledge Base" / "Notes" / "reconcile-retry.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# reconcile retry\n", encoding="utf-8")
+    index_sync.upsert_after_write(vault, [target])
+
+    monkeypatch.setattr("exomem.embeddings.upsert_after_write", lambda root, paths: False)
+    monkeypatch.setattr(
+        audit_module,
+        "_check_embedding_drift",
+        lambda root: [SimpleNamespace(path=Path("Knowledge Base/Notes/reconcile-retry.md"))],
+    )
+    monkeypatch.setattr(
+        audit_module,
+        "audit",
+        lambda root, categories: SimpleNamespace(findings=[]),
+    )
+    monkeypatch.setattr(
+        reconcile_module.indexes,
+        "compute_subindex_writes",
+        lambda root, top_index_text: ([], top_index_text),
+    )
+    monkeypatch.setattr("exomem.lexstore.ensure_fresh", lambda root: None)
+
+    rep = reconcile_module.reconcile(vault)
+
+    assert rep.embeddings_status == "deferred"
+    assert rep.embeddings_refreshed == 0
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1

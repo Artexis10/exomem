@@ -333,10 +333,15 @@ CLI and REST share the same JSON envelope:
 {"success": true, "data": []}
 ```
 
-## Optional multimodal stack
+## Multimodal by default, resident only while working
 
-The lean install works with keyword/BM25 search. Optional extras add local
-embedding search and media extraction:
+The native release-service command installs the `standard` profile: local
+embeddings, PDFs/Office documents, OCR bindings, ASR, and CLIP. Heavy models are
+not loaded at service startup. Media jobs enter a durable queue, run serially in
+one disposable child process, and the child exits after five idle minutes so its
+RAM and MPS/MLX/CUDA state return to the host.
+
+Manual/source installs can select the same capabilities directly:
 
 ```bash
 uv sync --extra embeddings
@@ -346,6 +351,10 @@ uv sync --extra media
 - `embeddings`: local text embeddings plus CLIP image search.
 - `media`: OCR for images, PDF extraction, Office document extraction, and
   faster-whisper ASR for audio/video.
+
+`lean` and `hybrid` remain available for constrained machines. Generated image
+captioning and speaker diarization are advanced opt-ins, not requirements for
+the standard multimodal path.
 
 System tools: Tesseract is required for image OCR. On Windows:
 

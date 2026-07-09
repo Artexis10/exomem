@@ -112,12 +112,18 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
     else:
         drift = audit_module._check_embedding_drift(vault_root)
         drifted_abs = [vault_root / f.path for f in drift]
+        refresh_succeeded = True
         if drifted_abs and not dry_run:
             from . import embeddings, index_sync
-            embeddings.upsert_after_write(vault_root, drifted_abs)
-            index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
-        report.embeddings_refreshed = len(drifted_abs)
-        report.embeddings_status = "refreshed" if drifted_abs else "current"
+
+            refresh_succeeded = embeddings.upsert_after_write(vault_root, drifted_abs) is not False
+            if refresh_succeeded:
+                index_sync.clear_deferred_work(vault_root, paths=drifted_abs)
+        report.embeddings_refreshed = len(drifted_abs) if refresh_succeeded else 0
+        if not refresh_succeeded:
+            report.embeddings_status = "deferred"
+        else:
+            report.embeddings_status = "refreshed" if drifted_abs else "current"
 
     # ---- 2b. Lexical sidecar (count/mtime reconcile against the walk) ----
     # NOT behind the embeddings gate: the lexical index is a lean-install

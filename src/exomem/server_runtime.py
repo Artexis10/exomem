@@ -91,8 +91,18 @@ def _start_media_worker(vault_root: Path) -> Any | None:
 
     from . import media_worker as media_worker_module
 
-    worker = media_worker_module.MediaWorker(vault_root)
-    worker.start()
+    worker = None
+    try:
+        worker = media_worker_module.MediaWorker(vault_root)
+        worker.start()
+    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        if worker is not None:
+            try:
+                worker.stop()
+            except Exception:  # noqa: BLE001 - startup degradation must remain soft
+                pass
+        log.warning("media runtime unavailable; core service continuing: %s", exc)
+        return None
     try:
         worker.scan_pending()
     except Exception as exc:  # noqa: BLE001 - startup scan is best-effort

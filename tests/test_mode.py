@@ -101,7 +101,7 @@ def test_invalid_env_mode_falls_through_to_default(monkeypatch: pytest.MonkeyPat
 # ---- derived policy booleans ----
 
 @pytest.mark.parametrize(
-    "m, preload", [("quiet", False), ("normal", True), ("performance", True)]
+    "m, preload", [("quiet", False), ("normal", False), ("performance", True)]
 )
 def test_preload_models(monkeypatch: pytest.MonkeyPatch, m: str, preload: bool) -> None:
     monkeypatch.setenv("EXOMEM_MODE", m)
@@ -109,7 +109,7 @@ def test_preload_models(monkeypatch: pytest.MonkeyPatch, m: str, preload: bool) 
 
 
 @pytest.mark.parametrize(
-    "m, release", [("quiet", True), ("normal", False), ("performance", True)]
+    "m, release", [("quiet", True), ("normal", True), ("performance", True)]
 )
 def test_release_when_idle_by_mode(monkeypatch: pytest.MonkeyPatch, m: str, release: bool) -> None:
     monkeypatch.setenv("EXOMEM_MODE", m)
@@ -117,7 +117,7 @@ def test_release_when_idle_by_mode(monkeypatch: pytest.MonkeyPatch, m: str, rele
 
 
 def test_release_when_idle_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("EXOMEM_MODE", "normal")  # default off
+    monkeypatch.setenv("EXOMEM_MODE", "normal")  # default on
     monkeypatch.setenv("EXOMEM_RELEASE_GPU_WHEN_IDLE", "on")
     assert mode.release_when_idle() is True
     monkeypatch.setenv("EXOMEM_MODE", "performance")  # default on
@@ -156,8 +156,8 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
         (
             "normal",
             {
-                "preload_cpu_caches": True,
-                "retain_cpu_caches": True,
+                "preload_cpu_caches": False,
+                "retain_cpu_caches": False,
                 "defer_expensive_indexes": False,
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
@@ -166,7 +166,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
                     "max_reconcile_embed_files": 500,
                     "defer_expensive_indexes": False,
                 },
-                "release_when_idle": False,
+                "release_when_idle": True,
                 "bulk_gpu": False,
             },
         ),
@@ -301,12 +301,12 @@ def _patch_runtime(monkeypatch):
     return calls
 
 
-def test_apply_live_normal_unloads_and_stops_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_apply_live_normal_unloads_and_starts_reaper(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = _patch_runtime(monkeypatch)
     monkeypatch.setenv("EXOMEM_MODE", "normal")
     policy = mode.apply_live()
     assert calls["unload"] == 1  # models unloaded so they reload on the new device
-    assert calls["stop"] == 1 and calls["start"] == 0  # normal → reaper off
+    assert calls["start"] == 1 and calls["stop"] == 0
     assert policy["mode"] == "normal"
 
 

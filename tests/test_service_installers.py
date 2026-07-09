@@ -250,6 +250,22 @@ def test_linux_release_install_renders_env_gates_then_verifies(tmp_path: Path) -
     assert "-> 401 (healthy, OAuth enforced)" in result.stdout
 
 
+def test_default_release_profile_is_standard_multimodal(tmp_path: Path) -> None:
+    result, _, trace_path, _ = _run(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    trace = trace_path.read_text(encoding="utf-8")
+    assert "exomem[embeddings,media]" in trace
+    assert "doctor standard" in trace
+
+
+def test_macos_arm64_standard_adds_mlx(tmp_path: Path) -> None:
+    result, _, trace_path, _ = _run(tmp_path, os_name="Darwin", arch="arm64")
+
+    assert result.returncode == 0, result.stderr
+    assert "exomem[embeddings,media,media-mlx]" in trace_path.read_text(encoding="utf-8")
+
+
 def test_macos_arm64_media_adds_mlx_and_launchd_environment(tmp_path: Path) -> None:
     result, _, trace_path, env = _run(
         tmp_path,
@@ -353,13 +369,15 @@ def test_help_and_invalid_profile_are_non_mutating() -> None:
     assert "--repo-dev" in help_result.stdout
     assert 'MODE="repo-dev"' in INSTALL_SH.read_text(encoding="utf-8")
     assert invalid_result.returncode != 0
-    assert "lean, hybrid, or media" in invalid_result.stderr
+    assert "lean, hybrid, standard, or media" in invalid_result.stderr
 
 
 def test_windows_installer_gates_remote_and_verifies_before_success() -> None:
     text = (ROOT / "scripts" / "install-service.ps1").read_text(encoding="utf-8")
 
     assert '"pip", "install", "--upgrade", "--python", $venvPython, $pkg' in text
+    assert '[string]$Profile = "standard"' in text
+    assert '"exomem[embeddings,media]"' in text
     assert "Preflight: exomem doctor --profile remote" in text
     assert "function Test-McpEndpoint" in text
     assert "-SkipHttpErrorCheck" in text

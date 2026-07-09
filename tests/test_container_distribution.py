@@ -58,7 +58,7 @@ def test_windows_service_scripts_gate_selected_profile_before_success() -> None:
     assert "Invoke-DoctorGate -Profile $Profile" in restart
     assert restart.index("Invoke-DoctorGate -Profile $Profile") < restart.index('Write-Host "Stopping $ServiceName..."')
 
-    assert '[string]$Profile = "hybrid"' in install
+    assert '[string]$Profile = "standard"' in install
     assert '"-Profile", $Profile' in install
     assert "exomem\", \"doctor\", \"--profile\", $Profile" in install
     assert install.index("exomem\", \"doctor\", \"--profile\", $Profile") < install.index("& $NssmPath install")
