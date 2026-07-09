@@ -232,7 +232,9 @@ loginctl enable-linger "$USER"   # keep it running without an active login sessi
 # or download from https://nssm.cc/download and add nssm.exe to PATH
 # (or pass -NssmPath "C:\path\to\nssm.exe" to the script below).
 # The script self-elevates; approve the UAC prompt.
-pwsh -File scripts/install-service.ps1
+pwsh -File scripts/install-service.ps1 -Release
+# Developer checkout mode is still available when .venv already exists:
+#   pwsh -File scripts/install-service.ps1
 # Uninstall:
 #   nssm stop exomem && nssm remove exomem confirm
 # Restart (after .env edits): elevated shell required

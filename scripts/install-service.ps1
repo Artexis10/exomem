@@ -2,14 +2,18 @@
 #
 # Prereqs:
 #   - NSSM installed (https://nssm.cc/download) and on PATH, OR pass -NssmPath.
-#   - uv has been run (`uv sync` in repo root) so .venv exists.
+#   - uv installed and on PATH.
+#   - For repo-mode installs, `uv sync` has been run in repo root so .venv exists.
+#     For release installs, pass -Release and the script creates/updates a sibling
+#     PyPI-backed service venv.
 #   - .env exists in the repo root with the GitHub OAuth vars set
 #     (EXOMEM_BASE_URL, EXOMEM_GITHUB_USERNAME, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET).
 #
 # Usage:
-#   pwsh -File scripts/install-service.ps1
+#   pwsh -File scripts/install-service.ps1 -Release
 #   pwsh -File scripts/install-service.ps1 -NssmPath "C:\nssm\nssm.exe"
-#   pwsh -File scripts/install-service.ps1 -Profile lean    # lexical-only service
+#   pwsh -File scripts/install-service.ps1 -Release -Profile lean    # lexical-only service
+#   pwsh -File scripts/install-service.ps1 -Release -Profile media
 #
 # Uninstall:
 #   nssm stop exomem
@@ -21,7 +25,13 @@ param(
     [string]$BindHost = "127.0.0.1",
     [int]$Port = 8765,
     [ValidateSet("lean", "hybrid", "media")]
-    [string]$Profile = "hybrid"
+    [string]$Profile = "hybrid",
+    [switch]$Release,
+    [string]$ServiceRoot = "",
+    [string]$PackageVersion = "",
+    [ValidateSet("auto", "always", "never")]
+    [string]$CudaTorch = "auto",
+    [switch]$LegacyMcpCompat
 )
 
 $ErrorActionPreference = "Stop"
@@ -43,19 +53,20 @@ if (-not $isAdmin) {
         "-ServiceName", $ServiceName,
         "-BindHost", $BindHost,
         "-Port", $Port,
-        "-Profile", $Profile
+        "-Profile", $Profile,
+        "-CudaTorch", $CudaTorch
     )
+    if ($Release) { $relaunchArgs += "-Release" }
+    if ($ServiceRoot) { $relaunchArgs += @("-ServiceRoot", "`"$ServiceRoot`"") }
+    if ($PackageVersion) { $relaunchArgs += @("-PackageVersion", "`"$PackageVersion`"") }
+    if ($LegacyMcpCompat) { $relaunchArgs += "-LegacyMcpCompat" }
     Start-Process -FilePath $hostExe -Verb RunAs -ArgumentList $relaunchArgs
     exit
 }
 
 $repoRoot = (Resolve-Path "$PSScriptRoot\..").Path
-$python = Join-Path $repoRoot ".venv\Scripts\python.exe"
 $logDir = Join-Path $repoRoot "logs"
 
-if (-not (Test-Path $python)) {
-    throw "Python venv not found at $python. Run 'uv sync' in $repoRoot first."
-}
 if (-not (Test-Path (Join-Path $repoRoot ".env"))) {
     throw ".env file missing in $repoRoot. See the Install section of README.md for the required GitHub OAuth vars."
 }
@@ -76,6 +87,108 @@ function Get-DotenvValue {
     }
     return $null
 }
+
+function Read-DotenvMap {
+    $envPath = Join-Path $repoRoot ".env"
+    $map = [ordered]@{}
+    foreach ($line in Get-Content $envPath) {
+        if ($line -match '^\s*([^#][A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$') {
+            $name = $Matches[1].Trim()
+            $value = $Matches[2].Trim()
+            if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+                $value = $value.Substring(1, $value.Length - 2)
+            }
+            $map[$name] = $value
+        }
+    }
+    if ($LegacyMcpCompat) {
+        $map["EXOMEM_MCP_LEGACY_COMPAT"] = "1"
+    }
+    return $map
+}
+
+function Set-ProcessEnvFromMap {
+    param([System.Collections.IDictionary]$Map)
+    foreach ($entry in $Map.GetEnumerator()) {
+        [Environment]::SetEnvironmentVariable($entry.Key, [string]$entry.Value, "Process")
+    }
+}
+
+function Set-NssmEnvironment {
+    param([System.Collections.IDictionary]$Map)
+    $args = @("set", $ServiceName, "AppEnvironmentExtra")
+    foreach ($entry in $Map.GetEnumerator()) {
+        $args += "$($entry.Key)=$($entry.Value)"
+    }
+    & $NssmPath @args
+}
+
+function Invoke-LoggedNative {
+    param([string[]]$CommandArgs)
+    $out = & $CommandArgs[0] @($CommandArgs[1..($CommandArgs.Count - 1)]) 2>&1
+    foreach ($line in $out) { Write-Host $line }
+    return $LASTEXITCODE
+}
+
+function Install-ReleaseVenv {
+    $root = if ($ServiceRoot) {
+        $ServiceRoot
+    } else {
+        Join-Path (Split-Path -Parent $repoRoot) "exomem-service-release"
+    }
+    if (-not (Test-Path $root)) { New-Item -ItemType Directory -Path $root | Out-Null }
+    $venvPython = Join-Path $root ".venv\Scripts\python.exe"
+    if (-not (Test-Path $venvPython)) {
+        Write-Host "Creating release service venv at $root\.venv..."
+        $code = Invoke-LoggedNative @("uv", "venv", (Join-Path $root ".venv"), "--python", "3.13")
+        if ($code -ne 0) { throw "uv venv failed" }
+    }
+
+    $pkg = if ($PackageVersion) { "exomem==$PackageVersion" } else { "exomem" }
+    if ($Profile -eq "hybrid") {
+        $pkg = if ($PackageVersion) { "exomem[embeddings]==$PackageVersion" } else { "exomem[embeddings]" }
+    } elseif ($Profile -eq "media") {
+        $pkg = if ($PackageVersion) { "exomem[embeddings,media,vision,diarization]==$PackageVersion" } else { "exomem[embeddings,media,vision,diarization]" }
+    }
+
+    Write-Host "Installing $pkg into release service venv..."
+    $code = Invoke-LoggedNative @("uv", "pip", "install", "--python", $venvPython, $pkg)
+    if ($code -ne 0) { throw "uv pip install failed for $pkg" }
+
+    $shouldCuda = $false
+    if ($CudaTorch -eq "always") {
+        $shouldCuda = $true
+    } elseif ($CudaTorch -eq "auto" -and (Get-Command nvidia-smi -ErrorAction SilentlyContinue)) {
+        $shouldCuda = $true
+    }
+    if ($shouldCuda -and $Profile -ne "lean") {
+        Write-Host "Installing CUDA 13.2 Torch for Windows NVIDIA GPU support..."
+        $code = Invoke-LoggedNative @(
+            "uv",
+            "pip",
+            "install",
+            "--python",
+            $venvPython,
+            "--default-index",
+            "https://download.pytorch.org/whl/cu132",
+            "torch==2.12.0+cu132"
+        )
+        if ($code -ne 0) { throw "CUDA Torch install failed" }
+    }
+    return $venvPython
+}
+
+if ($Release) {
+    $python = Install-ReleaseVenv
+} else {
+    $python = Join-Path $repoRoot ".venv\Scripts\python.exe"
+    if (-not (Test-Path $python)) {
+        throw "Python venv not found at $python. Run 'uv sync' in $repoRoot first, or pass -Release to install a PyPI-backed service venv."
+    }
+}
+
+$serviceEnv = Read-DotenvMap
+Set-ProcessEnvFromMap -Map $serviceEnv
 
 $doctorArgs = @("-m", "exomem", "doctor", "--profile", $Profile)
 $vault = Get-DotenvValue "EXOMEM_VAULT_PATH"
@@ -98,6 +211,7 @@ if ($LASTEXITCODE -ne 0) {
 & $NssmPath set $ServiceName AppRestartDelay 5000
 & $NssmPath set $ServiceName AppThrottle 10000
 & $NssmPath set $ServiceName Description "exomem: Obsidian Knowledge Base MCP server for mobile claude.ai"
+Set-NssmEnvironment -Map $serviceEnv
 
 & $NssmPath start $ServiceName
 

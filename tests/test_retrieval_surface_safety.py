@@ -84,3 +84,24 @@ def test_product_mcp_retrieval_schemas_are_safe(
     assert read_schema["type"] == "object"
     assert read_schema["additionalProperties"] is True
     assert "path" in tools["read_memory"]["inputSchema"]["properties"]
+
+
+def test_legacy_mcp_leaf_names_are_opt_in(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_MCP_LEGACY_COMPAT", raising=False)
+    tools = _mcp_tools(_build_server(monkeypatch, vault))
+
+    assert "note" not in tools
+    assert "create_file" not in tools
+
+    monkeypatch.setenv("EXOMEM_MCP_LEGACY_COMPAT", "1")
+    compat_tools = _mcp_tools(_build_server(monkeypatch, vault))
+
+    assert "remember" in compat_tools
+    assert "manage_memory_file" in compat_tools
+    assert "note" in compat_tools
+    assert "create_file" in compat_tools
+    assert compat_tools["note"]["description"].startswith(
+        "[Deprecated compatibility alias; prefer product commands.]"
+    )
