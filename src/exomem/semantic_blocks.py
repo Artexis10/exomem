@@ -35,8 +35,53 @@ BLOCK_TYPES: frozenset[str] = frozenset(
         "action",
         "definition",
         "procedure",
+        "source",
+        "experiment",
+        "entity",
+        "project",
+        "media_segment",
     }
 )
+
+_BLOCK_TYPE_ALIASES: dict[str, str] = {
+    "claims": "claim",
+    "findings": "finding",
+    "proof": "evidence",
+    "proofs": "evidence",
+    "evidences": "evidence",
+    "decisions": "decision",
+    "assumptions": "assumption",
+    "inferences": "inference",
+    "constraints": "constraint",
+    "risks": "risk",
+    "open_questions": "open_question",
+    "questions": "open_question",
+    "hypotheses": "hypothesis",
+    "results": "result",
+    "outcome": "result",
+    "outcomes": "result",
+    "metrics": "metric",
+    "failures": "failure",
+    "patterns": "pattern",
+    "records": "record",
+    "cases": "case",
+    "timeline": "timeline_event",
+    "timelines": "timeline_event",
+    "timeline_events": "timeline_event",
+    "events": "timeline_event",
+    "requirements": "requirement",
+    "actions": "action",
+    "todo": "action",
+    "todos": "action",
+    "definitions": "definition",
+    "procedures": "procedure",
+    "sources": "source",
+    "experiments": "experiment",
+    "entities": "entity",
+    "projects": "project",
+    "media_segments": "media_segment",
+    "segments": "media_segment",
+}
 
 RELATION_TYPES: frozenset[str] = frozenset(
     {
@@ -56,6 +101,14 @@ RELATION_TYPES: frozenset[str] = frozenset(
         "implements",
         "tests",
         "owns",
+        "duplicates",
+        "caused_by",
+        "answers",
+        "raises_question",
+        "observed_in",
+        "mentions",
+        "about_entity",
+        "links_to",
     }
 )
 
@@ -139,7 +192,9 @@ class SemanticBlockDocument:
         return not self.errors
 
     def blocks_by_type(self, block_type: str) -> list[SemanticBlock]:
-        normalized = normalize_label(block_type)
+        normalized = normalize_block_type(block_type)
+        if normalized is None:
+            return []
         return [block for block in self.blocks if block.type == normalized]
 
     def to_dict(self) -> dict[str, Any]:
@@ -156,6 +211,13 @@ def normalize_label(label: str) -> str:
     normalized = _NORMALIZE_RE.sub("_", normalized)
     normalized = re.sub(r"_+", "_", normalized)
     return normalized.strip("_")
+
+
+def normalize_block_type(label: str) -> str | None:
+    """Return the canonical semantic block type for a heading label."""
+    normalized = normalize_label(label)
+    block_type = _BLOCK_TYPE_ALIASES.get(normalized, normalized)
+    return block_type if block_type in BLOCK_TYPES else None
 
 
 def parse_semantic_blocks(markdown: str, *, validate: bool = True) -> SemanticBlockDocument:
@@ -200,8 +262,8 @@ def parse_semantic_blocks(markdown: str, *, validate: bool = True) -> SemanticBl
         if heading and not in_fence:
             flush(line_number - 1)
             title = heading.group(2).strip()
-            block_type = normalize_label(title)
-            if block_type in BLOCK_TYPES:
+            block_type = normalize_block_type(title)
+            if block_type is not None:
                 current = (block_type, title, len(heading.group(1)), line_number, [])
             continue
 

@@ -62,8 +62,8 @@ log = logging.getLogger(__name__)
 ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink", "orphan_entity", "unprocessed_source",
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
-    "unregistered_project_key", "embedding_drift", "relevance_pairs_pending",
-    "stale_review", "corpus_contradictions",
+    "unregistered_project_key", "embedding_drift", "graph_drift",
+    "relevance_pairs_pending", "stale_review", "corpus_contradictions",
 )
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
@@ -172,6 +172,8 @@ def audit(
         findings.extend(_check_unregistered_project_keys(vault_root, pages))
     if "embedding_drift" in selected:
         findings.extend(_check_embedding_drift(vault_root))
+    if "graph_drift" in selected:
+        findings.extend(_check_graph_drift(vault_root))
     if "relevance_pairs_pending" in selected:
         findings.extend(_check_relevance_pairs_pending())
     if "stale_review" in selected:
@@ -761,6 +763,27 @@ def _check_unregistered_project_keys(
             ))
     return findings
 
+
+# ---------------- check: graph_drift ----------------
+
+
+def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
+    """Flag derived graph sidecar drift. Read-only and disabled-gate aware."""
+    from . import epistemic_graph
+
+    findings: list[AuditFinding] = []
+    for item in epistemic_graph.graph_drift(vault_root):
+        path = str(item.get("path") or kb_prefix())
+        reason = str(item.get("reason") or "graph drift")
+        findings.append(AuditFinding(
+            category="graph_drift",
+            severity="info",
+            path=path,
+            detail=reason,
+            proposed_fix="Run `reconcile` to refresh the derived graph sidecar.",
+            meta=item,
+        ))
+    return findings
 
 # ---------------- check: embedding_drift ----------------
 

@@ -2,6 +2,15 @@
 # Git config differs per machine; repository attributes are the source of truth.
 *           text=auto eol=lf
 
+# Source, docs, and generated schemas stay LF to avoid review churn.
+*.py        text eol=lf
+*.md        text eol=lf
+*.json      text eol=lf
+*.toml      text eol=lf
+*.yaml      text eol=lf
+*.yml       text eol=lf
+*.lock      text eol=lf
+
 # Shell and service files must stay LF on Unix-like systems.
 *.sh        text eol=lf
 *.service   text eol=lf

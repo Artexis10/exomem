@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import context_pack, corpus_aware
+from exomem import context_pack, corpus_aware, epistemic_graph
 from exomem import find as find_module
 from exomem.find import Hit
 
@@ -318,3 +318,40 @@ def test_op_find_pack_true_returns_hits_and_pack(vault: Path) -> None:
         "embeddings_available",
         "truncation",
     }
+
+def test_pack_without_graph_enrichment_preserves_shape(cluster: Path) -> None:
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P), _hit(BETA_P)])
+
+    assert "graph" not in pack
+    assert set(pack) == {
+        "packed_paths",
+        "claims",
+        "semantic_blocks",
+        "neighborhood",
+        "contradictions",
+        "embeddings_available",
+        "truncation",
+    }
+
+
+def test_graph_enriched_pack_includes_typed_neighborhood(cluster: Path) -> None:
+    epistemic_graph.EpistemicGraphIndex(cluster).rebuild_all()
+
+    pack = context_pack.assemble_pack(
+        cluster, [_hit(ALPHA_P), _hit(BETA_P)], graph_enrich=True
+    )
+
+    graph = pack["graph"]
+    assert graph["available"] is True
+    assert graph["nodes"]
+    assert any(edge["relation_type"] == "links_to" for edge in graph["edges"])
+    assert pack["packed_paths"] == [ALPHA_P, BETA_P]
+
+
+def test_graph_enriched_pack_missing_sidecar_soft_fails(cluster: Path) -> None:
+    pack = context_pack.assemble_pack(cluster, [_hit(ALPHA_P)], graph_enrich=True)
+
+    assert pack["graph"]["available"] is False
+    assert pack["graph"]["reason"] == "graph sidecar unavailable"
+    assert pack["claims"]
+    assert pack["neighborhood"]

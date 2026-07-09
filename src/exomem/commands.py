@@ -41,6 +41,7 @@ from . import create_file as create_file_module
 from . import delete_directory as delete_directory_module
 from . import delete_file as delete_file_module
 from . import edit as edit_module
+from . import epistemic_graph as epistemic_graph_module
 from . import evolution as evolution_module
 from . import find as find_module
 from . import get_frontmatter as get_frontmatter_module
@@ -64,21 +65,27 @@ from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from .command_surface import (
+    DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
+    GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
+    Command,
+    Param,  # noqa: F401 - re-exported for server.py
+    bind_vault,  # noqa: F401 - re-exported for server.py
+    mcp_tool_annotations,  # noqa: F401 - re-exported for server.py
+)
+from .command_surface import (
+    derive_params as _derive_params,
+)
+from .command_surface import (
+    parse_args_help as _parse_args_help,  # noqa: F401 - re-exported for server.py
+)
+from .command_surface import (
+    type_tag as _type_tag,  # noqa: F401 - re-exported for server.py
+)
 from .kbdir import kb_dirname
 from .vault import (
     VaultPathError,
     resolve_under_vault,
-)
-from .command_surface import (
-    DESTRUCTIVE_OPS,
-    GUARDED_WRITE_FIELDS,
-    Command,
-    Param,
-    bind_vault,
-    derive_params as _derive_params,
-    mcp_tool_annotations,
-    parse_args_help as _parse_args_help,
-    type_tag as _type_tag,
 )
 
 _link_summary = link_summary_module.link_summary
@@ -332,6 +339,7 @@ def op_find(
     prefer_active: bool = True,
     prefer_used: bool = False,
     pack: bool = False,
+    graph_enrich: bool = False,
     detail: str = "full",
     include_timings: bool = False,
 ) -> list[dict] | dict:
@@ -432,6 +440,11 @@ def op_find(
             reason over the matches in one shot instead of fanning out `get`
             calls. Bounded with explicit `truncation`; the tension part needs
             the embedding sidecar and reports `embeddings_available`.
+        graph_enrich: When true with `pack=true`, add typed graph neighborhood
+            data from the derived epistemic graph sidecar to the pack. Default
+            false; missing/disabled/stale graph state soft-fails inside
+            `pack.graph.available` without changing hits, hit ordering, or the
+            default pack contract.
         detail: Result verbosity. "full" (default) keeps the current hit
             shape including `excerpt` and `signals`. "compact" returns the
             SAME ranked hits as token-cheap routing stubs — path, title,
@@ -493,6 +506,7 @@ def op_find(
                 "scope": scope,
                 "detail": detail,
                 "pack": pack,
+                "graph_enrich": graph_enrich,
                 "graph": graph,
                 "rerank_requested": rerank,
                 "auto_rerank": auto_rerank,
@@ -531,7 +545,9 @@ def op_find(
     pack_obj: dict | None = None
     if pack:
         with find_module._span(timings, "pack"):
-            pack_obj = context_pack_module.assemble_pack(vault_root, hits)
+            pack_obj = context_pack_module.assemble_pack(
+                vault_root, hits, graph_enrich=graph_enrich
+            )
     with find_module._span(timings, "serialize"):
         if detail == "compact":
             hit_dicts = [h.as_compact_dict() for h in hits]
@@ -669,6 +685,93 @@ def op_suggest_links(
         )
     return [s.as_dict() for s in suggestions]
 
+
+def op_graph_context(
+    vault_root: Path,
+    path: str | None = None,
+    query: str | None = None,
+    depth: int = 1,
+    relation_types: list[str] | None = None,
+    node_types: list[str] | None = None,
+    max_nodes: int = 40,
+    max_edges: int = 80,
+) -> dict:
+    """Return a bounded typed-graph neighborhood for a page or query. Read-only.
+
+    Reads the derived `.graph.sqlite` sidecar created from Markdown,
+    frontmatter, wikilinks, source/evidence links, supersession fields, and
+    semantic blocks. Markdown remains the source of truth; this operation does
+    not build the sidecar, modify notes, accept suggested relations, or change
+    `find` ranking. If the graph sidecar is missing, disabled, or incompatible,
+    the response reports `available: false` instead of failing.
+
+    Args:
+        path: Existing page path to use as the graph seed. Optional when `query`
+            is supplied.
+        query: Text seed for matching graph node titles/content. Optional when
+            `path` is supplied.
+        depth: Traversal depth from seed nodes. Default 1.
+        relation_types: Optional allowlist of relation types, e.g.
+            `derived_from`, `evidenced_by`, `supports`, `contradicts`,
+            `supersedes`, `links_to`.
+        node_types: Optional allowlist of node kinds, e.g. `file`, `decision`,
+            `finding`, `risk`, `action`, `claim`, `evidence`.
+        max_nodes: Cap returned nodes. Default 40.
+        max_edges: Cap returned edges. Default 80.
+
+    Returns:
+        {available, reason, seeds, nodes, edges, truncation}. Nodes and edges
+        carry source path/anchor/hash provenance and relation metadata.
+    """
+    return epistemic_graph_module.graph_context(
+        vault_root,
+        path=path,
+        query=query,
+        depth=depth,
+        relation_types=relation_types,
+        node_types=node_types,
+        max_nodes=max_nodes,
+        max_edges=max_edges,
+    )
+
+
+def op_suggest_relations(
+    vault_root: Path,
+    path: str | None = None,
+    draft_title: str | None = None,
+    draft_body: str | None = None,
+    include_model_suggestions: bool = False,
+    limit: int = 10,
+) -> dict:
+    """Suggest candidate typed graph relations. Read-only and proposal-only.
+
+    Uses deterministic signals from wikilinks, frontmatter sources, shared
+    sources/entities, supersession, and optional embedding proximity when
+    available. Model-backed suggestions are default-off and soft-fail as
+    warnings; accepted relations still require an explicit `note` or `edit`
+    write. This operation never mutates Markdown or the graph sidecar.
+
+    Args:
+        path: Existing page to inspect. Mutually exclusive with draft-only use.
+        draft_title: Optional title for a not-yet-written draft.
+        draft_body: Draft body; wikilinks in it become proposal candidates.
+        include_model_suggestions: Request optional model-backed suggestion
+            paths. Default false; unavailable paths soft-fail with warnings.
+        limit: Max candidates to return. Default 10.
+
+    Returns:
+        {candidates, warnings, model_suggestions_available, mutated}. Each
+        candidate includes from/to, relation_type, method, and evidence.
+        `mutated` is always false.
+    """
+    return epistemic_graph_module.suggest_relations(
+        vault_root,
+        path=path,
+        draft_title=draft_title,
+        draft_body=draft_body,
+        include_model_suggestions=include_model_suggestions,
+        limit=limit,
+    )
 
 def op_add(
     vault_root: Path,
@@ -2350,6 +2453,8 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "replace": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
     "link": {"surface": "primary", "actions": ("connect", "save"), "first_run_safe": False},
     "suggest_links": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
+    "graph_context": {"surface": "primary", "actions": ("ask", "connect"), "first_run_safe": True},
+    "suggest_relations": {"surface": "primary", "actions": ("connect", "ask"), "first_run_safe": True},
     "propose_compilation": {"surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
     "provenance_report": {"surface": "advanced", "actions": ("ask", "prove"), "first_run_safe": True},
     "evolution": {"surface": "advanced", "actions": ("ask", "review"), "first_run_safe": True},
@@ -2365,6 +2470,8 @@ _SPEC: tuple[tuple, ...] = (
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
+    ("graph_context", op_graph_context, 1, False, False, "path", _MCRC),
+    ("suggest_relations", op_suggest_relations, 1, False, False, None, _MCRC),
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
     ("attention", op_attention, 1, False, False, None, _MCRC),
