@@ -39,5 +39,5 @@
 
 - [x] 6.1 Add a cross-platform desk-side resource verification script and document the acceptance envelope.
 - [x] 6.2 Run focused media/resource/profile tests, PowerShell and shell syntax checks, and installer tests.
-- [ ] 6.3 Run the full pytest suite, Ruff on touched Python, and strict OpenSpec validation.
+- [x] 6.3 Run the full pytest suite, Ruff on touched Python, and strict OpenSpec validation.
 - [x] 6.4 Review the final diff for compatibility and secret/personal-data leakage.
