@@ -204,24 +204,28 @@ macOS Apple Silicon GPU paths (MPS/MLX are native-only), and hosts where Docker
 isn't wanted.
 
 Pick your platform — all three run the same `streamable-http` server and differ
-only in the OS service manager.
+only in the OS service manager. The release commands create or update a separate
+PyPI-backed service venv, load the repository `.env` into the service manager,
+doctor-gate the selected profile and remote configuration, start the service, and
+verify that local `/mcp` returns the expected OAuth `401`.
 
 **macOS (launchd):**
 
 ```bash
-bash scripts/install-service.sh
-# Restart after .env edits:  bash scripts/restart.sh
+bash scripts/install-service.sh --release --profile hybrid
+# Re-run after a package or .env change to update and restart the service.
+# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile hybrid
 # Uninstall:                 launchctl bootout gui/$(id -u)/com.exomem && rm ~/Library/LaunchAgents/com.exomem.plist
 ```
 
 **Linux (systemd --user):**
 
 ```bash
-mkdir -p ~/.config/systemd/user
-sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" scripts/exomem.service > ~/.config/systemd/user/exomem.service
-systemctl --user daemon-reload && systemctl --user enable --now exomem
-loginctl enable-linger "$USER"   # keep it running without an active login session
-# Restart after .env edits:  systemctl --user restart exomem   (or: bash scripts/restart.sh)
+bash scripts/install-service.sh --release --profile hybrid
+# The installer attempts to enable user linger so the service survives logout.
+# Re-run after a package or .env change to update and restart the service.
+# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile hybrid
+# Uninstall: systemctl --user disable --now exomem && rm ~/.config/systemd/user/exomem.service
 ```
 
 **Windows (NSSM):**
@@ -232,7 +236,10 @@ loginctl enable-linger "$USER"   # keep it running without an active login sessi
 # or download from https://nssm.cc/download and add nssm.exe to PATH
 # (or pass -NssmPath "C:\path\to\nssm.exe" to the script below).
 # The script self-elevates; approve the UAC prompt.
-pwsh -File scripts/install-service.ps1
+pwsh -File scripts/install-service.ps1 -Release
+# The installer creates/updates the PyPI service venv and verifies /mcp -> 401.
+# Developer checkout mode is still available when .venv already exists:
+#   pwsh -File scripts/install-service.ps1
 # Uninstall:
 #   nssm stop exomem && nssm remove exomem confirm
 # Restart (after .env edits): elevated shell required

@@ -1,30 +1,16 @@
-# systemd --user unit for exomem (Linux). Cross-platform counterpart to the
-# macOS launchd agent (scripts/com.exomem.plist) and the Windows NSSM service
-# (scripts/install-service.ps1).
-#
-# This is a TEMPLATE: __REPO_ROOT__ and __VENV_PYTHON__ must be substituted with
-# absolute paths before installing. From the repo root:
-#
-#   mkdir -p ~/.config/systemd/user
-#   sed -e "s|__REPO_ROOT__|$PWD|g" -e "s|__VENV_PYTHON__|$PWD/.venv/bin/python|g" \
-#       scripts/exomem.service > ~/.config/systemd/user/exomem.service
-#   systemctl --user daemon-reload
-#   systemctl --user enable --now exomem
-#   loginctl enable-linger "$USER"     # so it runs without an active login session
-#
-# Restart after .env edits:  systemctl --user restart exomem   (or: bash scripts/restart.sh)
-# Logs:                       journalctl --user -u exomem -f   (plus logs/exomem.log)
-# Uninstall:                  systemctl --user disable --now exomem && rm ~/.config/systemd/user/exomem.service
+# systemd --user template for exomem. scripts/install-service.sh renders and
+# installs this unit; do not install the template directly.
 
 [Unit]
-Description=exomem: Obsidian Knowledge Base MCP server for mobile claude.ai
+Description=exomem: Obsidian Knowledge Base MCP server
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=__REPO_ROOT__
-ExecStart=__VENV_PYTHON__ -m exomem --transport streamable-http --host 127.0.0.1 --port 8765
+EnvironmentFile=__SERVICE_ENV_FILE__
+WorkingDirectory=__WORKING_DIRECTORY__
+ExecStart="__VENV_PYTHON__" -m exomem --transport streamable-http --host __BIND_HOST__ --port __PORT__
 Restart=always
 RestartSec=5
 
