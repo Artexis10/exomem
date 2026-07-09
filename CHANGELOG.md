@@ -5,6 +5,22 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.13.0](https://github.com/Artexis10/exomem/compare/v0.12.0...v0.13.0) (2026-07-09)
+
+
+### Features
+
+* add epistemic graph sidecar ([e508eac](https://github.com/Artexis10/exomem/commit/e508eac6e40a435e824f99d3aa879c03552a4cbd))
+* add epistemic graph sidecar ([021dab9](https://github.com/Artexis10/exomem/commit/021dab9179fdd96187c3548b9976f169df8e9f10))
+* add simple command surface ([8b7fd8c](https://github.com/Artexis10/exomem/commit/8b7fd8cc2fc9dbf3c18023872f1b8f28932dbe40))
+* redesign product command surface ([#174](https://github.com/Artexis10/exomem/issues/174)) ([c549c50](https://github.com/Artexis10/exomem/commit/c549c50ad34bb58ca2d230b09d24c7499bb84514))
+* simplify command surface ([59818dc](https://github.com/Artexis10/exomem/commit/59818dc0236da19747364ca5c7c82e66487d32cc))
+
+
+### Bug Fixes
+
+* harden mac imports and adoption ([#172](https://github.com/Artexis10/exomem/issues/172)) ([c25f7ab](https://github.com/Artexis10/exomem/commit/c25f7ab0a96779b9f0a1a0a05355f83cc36026f1))
+
 ## [0.12.0](https://github.com/Artexis10/exomem/compare/v0.11.0...v0.12.0) (2026-07-07)
 
 
