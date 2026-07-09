@@ -38,15 +38,16 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "workflow",
         "workflow_skills",
         "tool_defaults",
+        "product_commands",
         "performance_profiles",
         "memory_model",
         "knowledge_packs",
         "authoring_contract",
     } <= set(out)
     assert set(out["common_actions"]) == set(commands.simple_action_names())
-    assert out["simple_actions"]["ask"]["route"]["tool"] == "find"
-    assert out["simple_actions"]["remember"]["route"]["tool"] == "note"
-    assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve"
+    assert out["simple_actions"]["ask"]["route"]["tool"] == "ask_memory"
+    assert out["simple_actions"]["remember"]["route"]["tool"] == "remember"
+    assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve_evidence"
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
     assert [s["name"] for s in out["workflow_skills"]] == [
         "exomem-continue",
@@ -63,23 +64,26 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
     assert out["front_door_actions"]["save"]["selected_pack_guidance"][0]["pack_id"] == "personal-records"
-    assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt"
+    assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt_vault"
     authoring = out["authoring_contract"]
-    assert "suggest_links" in " ".join(authoring["canonical_loop"])
-    assert authoring["route_by_intent"]["new_durable_conclusion"] == "note"
-    assert authoring["route_by_intent"]["small_correction"] == "edit"
-    assert authoring["route_by_intent"]["substantial_rewrite"] == "replace"
+    assert "connect_memory" in " ".join(authoring["canonical_loop"])
+    assert authoring["route_by_intent"]["new_durable_conclusion"] == "remember"
+    assert authoring["route_by_intent"]["small_correction"] == "edit_memory"
+    assert authoring["route_by_intent"]["substantial_rewrite"] == "replace_memory"
     assert "near_duplicate_warnings" in authoring["preflight"]
     assert "write_feedback" in authoring["post_write"]
     assert "insight" in authoring["note_type_recipes"]
     assert any("write_feedback" in step for step in out["workflow"]["loop"])
-    assert "adopt" in out["common_tools"]
-    assert "search" in out["common_tools"]
-    assert "fetch" in out["common_tools"]
-    assert "find" in out["common_tools"]
-    assert "get" in out["common_tools"]
-    assert out["tool_defaults"]["normal_lookup"] == {"tool": "search", "args": {}}
-    assert out["tool_defaults"]["read_bounded_page"]["tool"] == "fetch"
+    assert "adopt_vault" in out["common_tools"]
+    assert "ask_memory" in out["common_tools"]
+    assert "read_memory" in out["common_tools"]
+    assert "remember" in out["common_tools"]
+    assert out["tool_defaults"]["normal_lookup"]["tool"] == "ask_memory"
+    assert out["tool_defaults"]["normal_lookup"]["args"] == {
+        "detail": "compact",
+        "rerank": False,
+    }
+    assert out["tool_defaults"]["read_full_page"]["tool"] == "read_memory"
     serialized = json.dumps(out)
     assert str(vault) not in serialized
     assert "Progressive disclosure" not in serialized
@@ -103,15 +107,12 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
     front_door = commands.product_front_door_catalog()
 
     assert {"save", "adopt", "ask", "prove", "review", "update", "connect"} <= set(front_door)
-    assert "adopt" in catalog["primary"]
-    assert "search" in catalog["primary"]
-    assert "fetch" in catalog["primary"]
-    assert "find" in catalog["primary"]
-    assert "get" in catalog["primary"]
-    assert "preserve" in front_door["prove"]["primary_tools"]
-    assert "audit" in front_door["review"]["primary_tools"]
-    assert "create_file" in catalog["advanced"]
-    assert "list_directory" in catalog["advanced"]
+    assert "adopt_vault" in catalog["primary"]
+    assert "ask_memory" in catalog["primary"]
+    assert "preserve_evidence" in front_door["prove"]["primary_tools"]
+    assert "review_memory" in front_door["review"]["primary_tools"]
+    assert "manage_memory_file" in catalog["advanced"]
+    assert "query_dataset" in catalog["advanced"]
     assert "scan-only" in front_door["adopt"]["contract"]
     assert "proof" in front_door["prove"]["contract"]
 
@@ -122,7 +123,7 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
                 "name": "Technical",
                 "actions": ["save", "ask"],
                 "agent_instructions": "Route technical work through governed notes.",
-                "suggested_workflows": [{"title": "Save", "intent": "x", "route": "note", "example": "x"}],
+                "suggested_workflows": [{"title": "Save", "intent": "x", "route": "remember", "example": "x"}],
             }
         ]
     }
@@ -131,9 +132,10 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
     assert "selected_pack_guidance" not in guided["prove"]
 
     actions = set(front_door)
-    for command in commands.COMMANDS:
+    for command in commands.PRODUCT_COMMANDS:
         assert command.product_surface in {"primary", "advanced"}
         assert set(command.product_actions) <= actions
+
 
 def test_simple_action_catalog_is_registry_routed() -> None:
     catalog = commands.simple_action_catalog()
@@ -148,19 +150,19 @@ def test_simple_action_catalog_is_registry_routed() -> None:
         "maintain",
     }
     assert catalog["ask"]["route"] == {
-        "tool": "find",
+        "tool": "ask_memory",
         "args": {"detail": "compact", "rerank": False},
     }
-    assert catalog["ask"]["deep_route"]["args"]["pack"] is True
-    assert catalog["remember"]["route"]["tool"] == "note"
-    assert catalog["capture"]["route"]["tool"] == "add"
-    assert catalog["capture"]["evidence_route"]["tool"] == "preserve"
-    assert catalog["review"]["route"]["tool"] == "attention"
-    assert catalog["connect"]["relations_route"]["tool"] == "suggest_relations"
-    assert catalog["adopt"]["route"]["args"] == {"mode": "scan-only"}
-    assert catalog["maintain"]["fix_route"]["tool"] == "audit_fix"
+    assert catalog["ask"]["deep_route"]["args"]["deep"] is True
+    assert catalog["remember"]["route"]["tool"] == "remember"
+    assert catalog["capture"]["route"]["tool"] == "capture_source"
+    assert catalog["capture"]["evidence_route"]["tool"] == "preserve_evidence"
+    assert catalog["review"]["route"]["tool"] == "review_memory"
+    assert catalog["connect"]["relations_route"]["tool"] == "connect_memory"
+    assert catalog["adopt"]["route"] == {"tool": "adopt_vault", "args": {"mode": "scan-only"}}
+    assert catalog["maintain"]["fix_route"]["tool"] == "maintain_memory"
 
-    known = {command.name for command in commands.COMMANDS} | {"doctor", "mint_upload_token"}
+    known = {command.name for command in commands.PRODUCT_COMMANDS} | {"doctor"}
     for action, item in catalog.items():
         routes = [item["route"]]
         routes.extend(
@@ -189,10 +191,11 @@ def test_simple_action_catalog_is_registry_routed() -> None:
     assert guided["review"]["selected_pack_guidance"][0]["pack_id"] == "legal-warranty"
     assert "selected_pack_guidance" not in guided["connect"]
 
+
 def test_bootstrap_is_registry_generated_on_public_surfaces(
     vault: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    cmd = next(c for c in commands.COMMANDS if c.name == "bootstrap")
+    cmd = next(c for c in commands.PRODUCT_COMMANDS if c.name == "bootstrap")
     assert cmd.read_only is True
     assert {"mcp", "rest", "cli"} <= set(cmd.surfaces)
     assert "bootstrap" not in commands.HAND_REGISTERED_EXCEPTIONS
@@ -202,7 +205,8 @@ def test_bootstrap_is_registry_generated_on_public_surfaces(
     mcp = server.build_server(require_auth=False)
     names = _tool_names(mcp)
     assert "bootstrap" in names
-    assert "adopt" in names
+    assert "adopt_vault" in names
+    assert "adopt" not in names
 
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(

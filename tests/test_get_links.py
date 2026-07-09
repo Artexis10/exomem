@@ -1,5 +1,5 @@
-"""get(links=True) inbound/outbound link summary — via the REST /api/get path
-(which calls the same `_link_summary` the MCP `get` tool uses) and the helper directly.
+"""get(links=True) inbound/outbound link summary — via the REST /api/read_memory path
+(which calls the same `_link_summary` the MCP `read_memory` tool uses) and the helper directly.
 """
 
 from __future__ import annotations
@@ -66,7 +66,7 @@ def test_outbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     _seed(vault)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
-        "/api/get",
+        "/api/read_memory",
         json={"path": SOURCE_REL, "links": True},
         headers={"Authorization": "Bearer sekret"},
     )
@@ -79,7 +79,7 @@ def test_inbound_links_populated(vault, monkeypatch: pytest.MonkeyPatch) -> None
     _seed(vault)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
-        "/api/get",
+        "/api/read_memory",
         json={"path": TARGET_REL, "links": True},
         headers={"Authorization": "Bearer sekret"},
     )
@@ -92,7 +92,7 @@ def test_links_absent_when_flag_off(vault, monkeypatch: pytest.MonkeyPatch) -> N
     _seed(vault)
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
-        "/api/get",
+        "/api/read_memory",
         json={"path": SOURCE_REL},  # links defaults False
         headers={"Authorization": "Bearer sekret"},
     )

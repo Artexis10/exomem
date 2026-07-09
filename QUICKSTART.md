@@ -18,12 +18,13 @@ shell; the few Windows (PowerShell) differences are called out inline.
 If you're comfortable in Claude Code, this is ~20–30 minutes.
 
 > **For Claude Code, exomem is two parts and you want both.** The **MCP server**
-> (steps 1–5) is the *hands* — the `find`/`add`/`note` tools. The **skill**
-> (step 6) is the *brain* — it tells Claude *when* to save, how to file a source,
-> and how to compile a note. Generic MCP clients that cannot load Skills should
-> call `bootstrap()` once after connecting; that returns the compact operating
-> contract through MCP, including the write loop: search, draft, `suggest_links`,
-> write, inspect warnings/suggestions, report path. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
+> (steps 1-5) is the *hands* — product commands such as `ask_memory`,
+> `remember`, `capture_source`, `preserve_evidence`, and `review_memory`. The
+> **skill** (step 6) is the *brain* — it tells Claude *when* to save, how to keep
+> raw sources and evidence separate from compiled conclusions, when to suggest
+> links, and how to update knowledge safely. Generic MCP clients that cannot load
+> Skills should call `bootstrap()` once after connecting; that returns the compact
+> operating contract through MCP. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
 > for Codex, hosted chat clients, Cursor/Windsurf/Gemini, and generic MCP setup.
 
 ---
@@ -57,7 +58,7 @@ path unless I explicitly ask for embeddings. Run the setup wizard, explain each
 prompt in plain language before I answer it, and do not move or rewrite my
 existing vault files. After setup, verify with doctor, call
 bootstrap(profile="compact") if you are not using the Exomem skill, ask one
-known vault question with find, and
+known vault question with `ask_memory`, and
 save one harmless test conclusion so I can see where it lands.
 ```
 
@@ -66,7 +67,7 @@ The expected first-run verification is concrete:
 1. `exomem doctor` passes for the selected vault.
 2. The connected assistant can call `bootstrap(profile="compact")`, unless it has
    already loaded the Exomem skill.
-3. A known question about your vault triggers `find()` before the answer.
+3. A known question about your vault triggers `ask_memory` before the answer.
 4. A safe test such as "remember that setup succeeded today" writes a compiled
    note and reports `Saved -> <path>`.
 
@@ -88,11 +89,12 @@ exomem connect --path "Notes/Insights/example" --json
 exomem maintain --json
 ```
 
-These aliases are thin routes over the governed operations: `ask` -> `find`,
-`remember` -> `note`, `capture` -> `add`/`preserve`, `review` ->
-`attention`/`audit`, `connect` -> `suggest_links`/`suggest_relations`, and
-`maintain` -> `audit` unless a fix flag is explicit. The full command registry
-remains available for advanced work.
+These aliases are thin routes over product commands: `ask` -> `ask_memory`,
+`remember` -> `remember`, `capture` -> `capture_source`/`preserve_evidence`,
+`review` -> `review_memory`, `connect` -> `connect_memory`, and `maintain` ->
+`maintain_memory` unless a fix flag is explicit. The canonical implementation
+leaves remain underneath for governance and validation, but new users do not need
+to learn them first.
 
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
@@ -111,11 +113,11 @@ That's the normal case, and it's safe:
   clobber anything. *(The governed folder is named `Knowledge Base/` by default;
   set `EXOMEM_KB_DIRNAME` to govern a differently-named folder — e.g. to adopt one
   your vault already uses.)*
-- **Your notes stay searchable.** `find` reaches sibling folders (the default
-  scope auto-widens; `scope="vault"` always walks everything), `overview`
-  gives Claude a bounded structural report of the whole vault, and `adopt`
-  turns that scan into a safe adoption report with likely knowledge packs and
-  manifest/copy/compile-planning next actions — one call, not one read per file.
+- **Your notes stay searchable.** `ask_memory` reaches sibling folders when you
+  use `scope="vault"`; `browse_memory` gives Claude a bounded structural report
+  of the whole vault, and `adopt_vault` turns that scan into a safe adoption
+  report with likely knowledge packs and manifest/copy/compile-planning next
+  actions — one call, not one read per file.
 - **Daily-notes vaults** (a `Daily/` or `Journal/` tree of dated logs): leave
   them exactly as they are. The Knowledge Base is a *compiled* layer beside
   your log, not a migration target — exomem never requires frontmatter, links,
@@ -336,8 +338,9 @@ Or by hand in `.mcp.json` (project) / your Claude Code settings:
 }
 ```
 
-Restart Claude Code; you should see the `exomem` tools (`find`, `note`, `add`,
-`audit`, `reconcile`, …). Quick test before wiring: `uv run python -m exomem
+Restart Claude Code; you should see the product `exomem` tools (`bootstrap`,
+`ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory`,
+`maintain_memory`, …). Quick test before wiring: `uv run python -m exomem
 --transport stdio` should start and wait on stdin without error.
 
 ---
@@ -413,9 +416,9 @@ variant too, for example `--settings ~/.claude/settings.json##os.Msys`.
 
 - **Write** — a `Stop` hook that re-checks "is this worth saving?" at the end of
   each turn, so conclusions get captured on their own.
-- **Read** — a `UserPromptSubmit` hook that reminds Claude to run a `find` first
-  when your message touches something the KB might hold, so it actually behaves as
-  your source of truth.
+- **Read** — a `UserPromptSubmit` hook that reminds Claude to run `ask_memory`
+  first when your message touches something the KB might hold, so it actually
+  behaves as your source of truth.
 
 Both are cheap: gated so they stay quiet on ordinary turns/prompts, plus a
 per-session cooldown. The read hook is still language-agnostic for substantive
@@ -454,16 +457,16 @@ the defaults (tuned for English) can under-fire. (These tunables were renamed fr
 `KB_*` to `EXOMEM_*`; the old `KB_*` names are still accepted for back-compat.)
 
 **Opt-in: upgrade the read-side reminder to real retrieved content.** By default
-the `UserPromptSubmit` hook only reminds Claude to run `find` — set
+the `UserPromptSubmit` hook only reminds Claude to run `ask_memory` — set
 `EXOMEM_RETRIEVE_INJECT=1` and it instead fetches the top 3 compact routing stubs
 (keyword mode, no embeddings) for the same gated prompt and appends them to the
 reminder, so relevant prior KB pages are already in context before Claude
 decides whether to search. It tries a short transport ladder and never blocks
-on a slow path: REST first (one `POST /api/find`, ~2s timeout) — only attempted
-when `EXOMEM_REST_API_KEY` is set **in the shell that launches the client**
-(not just the server's service environment — the hook can't read another
+on a slow path: REST first (one `POST /api/ask_memory`, ~2s timeout) — only
+attempted when `EXOMEM_REST_API_KEY` is set **in the shell that launches the
+client** (not just the server's service environment — the hook can't read another
 process's env, so export it in the same profile Claude Code or Codex inherits from);
-then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem find --json`
+then, only if you also set `EXOMEM_RETRIEVE_INJECT_CLI=1`, an `exomem ask_memory --json`
 subprocess call (~5s timeout, slower — cold Python start). If neither is
 configured or reachable, it falls straight back to the plain reminder — no
 network call is ever attempted unless `EXOMEM_RETRIEVE_INJECT` is on. (The legacy
@@ -477,9 +480,9 @@ kb"* or *"check the kb."*)
 
 ## You're up
 
-Try it in Claude Code: *"add this as a source and compile an insight from it,"*
-or *"find my notes on X,"* or *"audit the KB."* Then run **`reconcile`** once to
-sync the index counts after your manual `index.md` edit.
+Try it in Claude Code: *"capture this source and compile an insight from it,"*
+or *"ask Exomem what I know about X,"* or *"review the KB."* Then run
+**`exomem maintain --reconcile`** once to sync index counts after manual edits.
 
 ## Optional: mobile / claude.ai-web access
 

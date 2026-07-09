@@ -305,7 +305,7 @@ def test_mcp_tool_returns_metadata_then_images(video_vault, monkeypatch) -> None
     )
     mcp = _build_server(monkeypatch)
     result = asyncio.run(
-        mcp.call_tool("get_video_frames", {"path": VIDEO}, run_middleware=False)
+        mcp.call_tool("read_media", {"path": VIDEO}, run_middleware=False)
     )
     meta = result.structured_content
     assert meta["path"] == VIDEO
@@ -328,25 +328,25 @@ def test_mcp_tool_error_carries_code(video_vault, monkeypatch) -> None:
     with pytest.raises(Exception) as exc:
         asyncio.run(
             mcp.call_tool(
-                "get_video_frames", {"path": "../escape.mp4"}, run_middleware=False
+                "read_media", {"path": "../escape.mp4"}, run_middleware=False
             )
         )
     assert "INVALID_PATH" in str(exc.value)
 
 
 def test_mcp_only_surface() -> None:
-    assert "get_video_frames" in {c.name for c in commands_module.commands_for("mcp")}
-    assert "get_video_frames" not in {
-        c.name for c in commands_module.commands_for("rest")
+    assert "read_media" in {c.name for c in commands_module.product_commands_for("mcp")}
+    assert "read_media" not in {
+        c.name for c in commands_module.product_commands_for("rest")
     }
-    assert "get_video_frames" not in {
-        c.name for c in commands_module.commands_for("cli")
+    assert "read_media" not in {
+        c.name for c in commands_module.product_commands_for("cli")
     }
 
 
 def test_mcp_tool_is_read_only_tier2() -> None:
     cmd = next(
-        c for c in commands_module.commands_for("mcp") if c.name == "get_video_frames"
+        c for c in commands_module.product_commands_for("mcp") if c.name == "read_media"
     )
     assert cmd.read_only
     assert cmd.tier == 2

@@ -6,57 +6,42 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Registry commands: 33
-- Tier 1 commands: 23
-- Tier 2 commands: 10
-- Registry-generated MCP commands: 32
-- REST commands: 32
-- CLI commands: 32
-- Hand-registered MCP tools: mint_download_token, mint_upload_token, note
+- Product commands: 18
+- Tier 1 commands: 15
+- Tier 2 commands: 3
+- Registry-generated MCP commands: 18
+- REST commands: 17
+- CLI commands: 17
+- Hand-registered MCP tools: none
 
-## Command Registry
+## Product Command Registry
 
-| Command | Tier | Surfaces | Mode | Destructive | CLI positional | Parameters | Summary |
-| --- | ---: | --- | --- | --- | --- | --- | --- |
-| bootstrap | 1 | MCP, REST, CLI | read | no | - | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
-| search | 1 | MCP, REST, CLI | read | no | query | query, types, projects, tags, limit, scope | Search the Knowledge Base with a portable metadata-only response. Read-only. |
-| fetch | 1 | MCP, REST, CLI | read | no | id | id*, max_chars | Fetch one Knowledge Base document by `search` result ID with bounded text. Read-only. |
-| find | 1 | MCP, REST, CLI | read | no | query | query, types, projects, tags, speakers, file_types, exclude_file_types, limit, scope, mode, graph, rerank, prefer_compiled, prefer_active, prefer_used, pack, graph_enrich, detail, include_timings | Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within. |
-| suggest_links | 1 | MCP, REST, CLI | read | no | - | path, draft_title, draft_body, limit, scope | Suggest existing KB pages a note should link to. Read-only. |
-| graph_context | 1 | MCP, REST, CLI | read | no | path | path, query, depth, relation_types, node_types, max_nodes, max_edges | Return a bounded typed-graph neighborhood for a page or query. Read-only. |
-| suggest_relations | 1 | MCP, REST, CLI | read | no | - | path, draft_title, draft_body, include_model_suggestions, limit | Suggest candidate typed graph relations. Read-only and proposal-only. |
-| add | 1 | MCP, REST, CLI | write | no | - | content*, source_type*, title*, url, tags, why_captured | Capture raw content as an immutable source page in the Knowledge Base. |
-| audit | 1 | MCP, REST, CLI | read | no | - | categories | Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only. |
-| attention | 1 | MCP, REST, CLI | read | no | - | categories, limit | Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only. |
-| overview | 1 | MCP, REST, CLI | read | no | path | path, max_depth, include_hidden, samples | Bounded, read-only structure report of the vault (or a subtree). |
-| adopt | 1 | MCP, REST, CLI | write | no | path | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths | Adopt / import an existing vault safely: scan first, preserve originals. |
-| evolution | 1 | MCP, REST, CLI | read | no | query | query, limit, scope, projects, tags | How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only. |
-| audit_fix | 1 | MCP, REST, CLI | write | yes | - | dry_run, rebuild_embeddings | Run audit + auto-apply safe fixes; propose-only for risky categories. |
-| reconcile | 1 | MCP, REST, CLI | write | no | - | dry_run | Heal vault drift from out-of-band edits in one pass. |
-| provenance_report | 1 | MCP, REST, CLI | read | no | - | tag, key, value, path | Trace provenance: scan note bodies for `<!-- key:value -->` tags — where an opinion/take/flag came from. Read-only. |
-| propose_compilation | 1 | MCP, REST, CLI | read | no | - | sources*, suggested_title | Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only. |
-| get | 1 | MCP, REST, CLI | read | no | path | path*, frontmatter_only, include_history, links, include_raw, max_body_chars | Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request). |
-| edit | 1 | MCP, REST, CLI | write | yes | path | path*, why*, new_body, tags, old_string, new_string, replace_all, heading, section_position, edits, row_key, take, overwrite, field, value, allow_curated, expected_hash, validate_only | Lightweight in-place edit of a page (body, tags, a surgical snippet, |
-| replace | 1 | MCP, REST, CLI | write | yes | old_path | old_path*, content*, note_type*, title*, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, project_category | Supersede an existing compiled page with a new one. |
-| link | 1 | MCP, REST, CLI | write | no | - | entity_type*, name*, summary*, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status | Create a typed entity under Entities/<Folder>/<Name>.md. |
-| preserve | 1 | MCP, REST, CLI | write | no | - | scope*, category*, filename*, content*, description | Capture a TEXT artifact to Evidence/<scope>/<category>/. |
-| note | 1 | REST, CLI | write | no | - | content*, note_type*, title*, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, suggestions, project_category | Create a compiled note in the Knowledge Base. |
-| query_data | 2 | MCP, REST, CLI | read | no | path | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Tier 2: structured query over a CSV/JSON data file under the vault. |
-| create_file | 2 | MCP, REST, CLI | write | no | path | path*, content, frontmatter, overwrite, allow_curated, kind, parents | Tier 2: write a file — or, with `kind="dir"`, create a folder — at an |
-| list_directory | 2 | MCP, REST, CLI | read | no | path | path, recursive, include_hidden | Tier 2: list files and subfolders at a vault path. Read-only. |
-| move_file | 2 | MCP, REST, CLI | write | yes | - | old_path*, new_path*, update_wikilinks, allow_curated | Tier 2: relocate a file, optionally rewriting inbound wikilinks. |
-| delete | 2 | MCP, REST, CLI | write | yes | path | path*, confirm*, recursive, force_orphan, force_superseded, allow_curated, expected_dead_inbound | Tier 2: trash a file OR folder (auto-detected). Reversible — moves to |
-| append_to_file | 2 | MCP, REST, CLI | write | no | path | path*, content*, allow_curated | Tier 2: append text to an existing file. |
-| list_trash | 2 | MCP, REST, CLI | read | no | - | date | Tier 2: enumerate recoverable trash entries. Read-only. |
-| recover_from_trash | 2 | MCP, REST, CLI | write | no | trash_path | trash_path*, restore_path, allow_curated | Tier 2: undo a delete_file/delete_directory. |
-| list_inbound_links | 2 | MCP, REST, CLI | read | no | target | target* | Tier 2: find files whose wikilinks resolve to `target`. Read-only. |
-| get_video_frames | 2 | MCP | read | no | - | path*, max_frames, start_sec, end_sec | View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip. |
+| Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
+| --- | ---: | --- | --- | --- | --- | --- | --- | --- |
+| bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
+| ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, limit, scope, mode, detail, deep, graph, rerank, prefer_compiled, prefer_active, prefer_used, graph_enrich, include_timings | Recall durable knowledge from Exomem with product defaults. |
+| read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw | Read one memory page or curated vault file by path. |
+| browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault structure without reading many files. |
+| remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, suggestions, project_category | Remember a durable conclusion as compiled governed knowledge. |
+| edit_memory | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, new_body, tags, old_string, new_string, replace_all, heading, section_position, edits, row_key, take, overwrite, field, value, allow_curated, expected_hash, validate_only | Edit an existing memory page with an auditable reason. |
+| replace_memory | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, project_category | Supersede an existing compiled memory with a new version. |
+| capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | content*, title*, source_type, url, tags, why_captured, compile_guidance, suggested_title | Capture raw source material and optionally return compile guidance. |
+| compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |
+| preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description | Preserve text evidence as append-only proof material. |
+| transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation | Prepare out-of-band binary artifact transfer. |
+| review_memory | 1 | MCP, REST, CLI | read | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, query, sources, suggested_title, tag, key, value, path | Review memory health, provenance, drift, or source backlog. |
+| connect_memory | 1 | MCP, REST, CLI | write | no | - | suggest_links, graph_context, suggest_relations, link, list_inbound_links | operation, path, target, query, draft_title, draft_body, limit, scope, include_model_suggestions, depth, relation_types, node_types, max_nodes, max_edges, entity_type, name, summary, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status | Connect memory through links, typed graph context, or entities. |
+| adopt_vault | 1 | MCP, REST, CLI | write | no | path | adopt | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths | Adopt an existing vault safely without replacing originals. |
+| maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings | Maintain vault health with explicit write-capable modes. |
+| manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date | Manage files through one governed file operation. |
+| query_dataset | 2 | MCP, REST, CLI | read | no | path | query_data | path*, record_path, filters, columns, sort_by, descending, limit, offset, aggregate, date_from, date_to, date_column | Query a CSV, TSV, or JSON dataset under the vault. |
+| read_media | 2 | MCP | read | no | path | get_video_frames | path*, max_frames, start_sec, end_sec | Read sampled video frames inline for visual inspection. |
 
 ## Hand-registered MCP Tools
 
-`HAND_REGISTERED_EXCEPTIONS` are intentionally not generated by the generic MCP registry loop.
-`note` is also available through REST and CLI from the registry; the MCP registration is custom so it can expose live project-key guidance.
-`mint_upload_token` and `mint_download_token` are MCP-only helpers for remote file transfer flows.
+`HAND_REGISTERED_EXCEPTIONS` lists product tools that cannot be generated by the generic MCP registry loop.
+The default product surface currently has no hand-registered MCP exceptions.
+Artifact transfer is exposed through `transfer_artifact`; canonical token helpers remain implementation details.
 
 ## Notes
 

@@ -31,7 +31,6 @@ from exomem import get_page as get_module
 from exomem import server as server_module
 from exomem import vault as vault_module
 
-
 TODAY = dt.date(2026, 6, 23)
 TOKEN = "zqxconflicttoken"  # rare → only the notes we plant here match it
 EXISTING = (
@@ -211,10 +210,10 @@ def test_get_include_history_surfaces_why(
     _edit_with_why(vault, "WHY_GET_marker", "x")
     mcp = _build_server(monkeypatch)
 
-    out = _call(mcp, "get", {"path": EXISTING, "include_history": True})
+    out = _call(mcp, "read_memory", {"path": EXISTING, "include_history": True})
     assert "history" in out
     assert any("WHY_GET_marker" in e["summary"] for e in out["history"])
 
     # Without the flag, no history key is attached.
-    plain = _call(mcp, "get", {"path": EXISTING})
+    plain = _call(mcp, "read_memory", {"path": EXISTING})
     assert "history" not in plain

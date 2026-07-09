@@ -13,7 +13,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import cf_access, cli_ops, commands as commands_module, upload_tokens
+from . import cf_access, cli_ops, upload_tokens
+from . import commands as commands_module
 from .server_transfer import TransferConfig
 
 
@@ -47,7 +48,7 @@ def register_rest_facade(
     rest_api_key = os.environ.get("EXOMEM_REST_API_KEY", "").strip() or None
     rest_enabled = rest_api_key is not None
     expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
-    rest_commands = commands_module.commands_for("rest", expose_tier2=expose_tier2)
+    rest_commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
 
     def _rest_authorized(request: Request) -> bool:
         if rest_api_key is not None:

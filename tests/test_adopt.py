@@ -338,13 +338,13 @@ def test_pack_validation_rejects_invalid_primitives_and_actions() -> None:
 
 
 def test_adopt_registry_exposure_survives_tier2_optout() -> None:
-    from exomem.commands import commands_for
+    from exomem.commands import product_commands_for
 
     for surface in ("mcp", "cli", "rest"):
-        commands = {c.name: c for c in commands_for(surface, expose_tier2=False)}
-        assert "adopt" in commands, f"adopt missing from {surface} with Tier 2 off"
-        assert commands["adopt"].product_surface == "primary"
-        assert "adopt" in commands["adopt"].product_actions
+        commands = {c.name: c for c in product_commands_for(surface, expose_tier2=False)}
+        assert "adopt_vault" in commands, f"adopt_vault missing from {surface} with Tier 2 off"
+        assert commands["adopt_vault"].product_surface == "primary"
+        assert "adopt" in commands["adopt_vault"].product_actions
 
 
 def test_adopt_cli_door(vault: Path, capsys) -> None:

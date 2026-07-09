@@ -18,14 +18,13 @@ from exomem import create_file as create_file_module
 from exomem import delete_directory as rmdir_module
 from exomem import delete_file as delete_module
 from exomem import get_frontmatter as get_fm_module
+from exomem import get_page as get_module
 from exomem import list_directory as list_dir_module
 from exomem import list_inbound_links as inbound_module
 from exomem import list_trash as list_trash_module
 from exomem import move_file as move_module
 from exomem import recover_from_trash as recover_module
 from exomem import set_frontmatter_field as set_fm_module
-from exomem import get_page as get_module
-
 
 TODAY = dt.date(2026, 5, 24)
 
@@ -842,14 +841,9 @@ def test_list_inbound_links_returns_empty_for_unreferenced(vault: Path) -> None:
 # ---------------- Tier 2 registration gating (EXOMEM_DISABLE_TIER2) ----------------
 
 # Post-consolidation Tier 2 surface: create_directory folded into create_file
-# (kind="dir"); delete_file/delete_directory merged into `delete`;
-# get_frontmatter folded into `get` (frontmatter_only); set_frontmatter_field
-# folded into `edit` (field=). The latter two are now Tier 1.
-TIER2_TOOLS = {
-    "create_file", "list_directory", "move_file", "delete",
-    "append_to_file", "list_trash", "recover_from_trash",
-    "list_inbound_links",
-}
+# Product surface: file/data/media tier-2 behavior is exposed through product
+# commands while canonical filesystem leaves remain implementation details.
+TIER2_TOOLS = {"manage_memory_file", "query_dataset", "read_media"}
 
 
 def _registered_tool_names(monkeypatch: pytest.MonkeyPatch) -> set[str]:
@@ -874,7 +868,7 @@ def test_tier2_registered_by_default(
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
     names = _registered_tool_names(monkeypatch)
     # Tier 1 read/write ops are always present...
-    assert {"find", "get", "note", "add", "edit", "audit"} <= names
+    assert {"ask_memory", "read_memory", "remember", "capture_source", "edit_memory", "review_memory"} <= names
     # ...and so are the Tier 2 escape hatches when the flag is unset.
     assert TIER2_TOOLS <= names
 
@@ -885,5 +879,5 @@ def test_tier2_dropped_when_disabled(
     monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
     names = _registered_tool_names(monkeypatch)
     # Tier 1 stays fully registered — only the escape hatches drop.
-    assert {"find", "get", "note", "add", "edit", "audit", "link"} <= names
+    assert {"ask_memory", "read_memory", "remember", "capture_source", "edit_memory", "review_memory", "connect_memory"} <= names
     assert names.isdisjoint(TIER2_TOOLS)

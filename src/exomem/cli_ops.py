@@ -38,7 +38,7 @@ _REMEDIATION: dict[str, str] = {
     "BAD_BOOL": "Pass a boolean (true/false).",
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
-    "NOT_FOUND": "Check the path; try `find` to locate it.",
+    "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
 }
 
 # Error codes whose HTTP status is NOT the default 400.
@@ -198,7 +198,7 @@ def coerce(
     # `edit`'s batch mode carries each write payload in edits[].new_string — guard
     # those too (the top-level guarded_fields only covers new_body/new_string),
     # mirroring the MCP middleware so no surface lets a blob in through the nest.
-    if tool == "edit" and isinstance(raw.get("edits"), list):
+    if tool in ("edit", "edit_memory") and isinstance(raw.get("edits"), list):
         for item in raw["edits"]:
             if isinstance(item, dict):
                 guards.guard_text_content(

@@ -4,19 +4,20 @@
 The read-side mirror of the capture hook. The skill says to consult the KB
 proactively, but that prose is passive — Claude forgets, especially at the start
 of a thread. This re-arms the read side: when the user submits a substantial
-prompt, it injects a one-line reminder to run `find` first and fold prior
+prompt, it injects a one-line reminder to run `ask_memory` first and fold prior
 conclusions into the answer, so the KB actually functions as the source of truth.
 
 Cheap by default: gates on prompt length, an obvious-control-prompt filter, a
-per-session cooldown, and a client-wide cooldown. By default it injects only a *reminder* — Claude still
-runs the real (semantic) find only when the prompt actually needs prior KB
+per-session cooldown, and a client-wide cooldown. By default it injects only a
+*reminder* — Claude still runs the real recall only when the prompt actually
+needs prior KB
 context — so it never stalls the prompt. (UserPromptSubmit blocks model start
 until the hook returns, so the hook must be fast: stdlib only, no search here by
 default.)
 
 Opt-in **inject mode** (`EXOMEM_RETRIEVE_INJECT`) upgrades the reminder to real
 retrieved content: on the same gated prompt, it fetches the top compact routing
-stubs (`find(detail="compact")`, keyword mode only — no embeddings, no GPU) via a
+stubs (`ask_memory(detail="compact")`, keyword mode only — no embeddings, no GPU) via a
 short transport ladder — REST first (`EXOMEM_REST_API_KEY` in this env), then an
 opt-in CLI fallback (`EXOMEM_RETRIEVE_INJECT_CLI`) — and appends them to the
 reminder. Any transport failure (or the flag being off) falls straight through to
@@ -60,7 +61,7 @@ REMINDER = (
     "[Exomem retrieval check] Before answering: if this prompt touches a topic your "
     "Exomem knowledge base might hold — a project, a past decision, a domain you've taken "
     "notes on, or a 'what did I conclude / have I looked at' question — run a quiet "
-    "`find` only if recent conversation context does not already cover it, then fold "
+    "`ask_memory` only if recent conversation context does not already cover it, then fold "
     "any hits into the answer (cite them). Do not repeat a KB search just because this "
     "reminder appears again; reuse fresh KB context until the topic changes or the "
     "answer needs more evidence. The KB is the source of truth for prior conclusions; "
@@ -71,7 +72,7 @@ REMINDER = (
 
 # Inject-mode routing-stub block: header + up to 3 `- path (type, updated)` lines,
 # capped to keep the worst case (long titles/paths) small and predictable.
-_STUB_HEADER = "KB routing stubs — verify with `get` before relying on these:"
+_STUB_HEADER = "KB routing stubs — verify with `read_memory` before relying on these:"
 _STUB_BLOCK_MAX_CHARS = 400
 
 # Local mirror of extract.py::_env_flag's truthy-parse convention. This script
@@ -152,7 +153,7 @@ def _hook_client() -> str:
         return explicit
     try:
         parts = {p.lower() for p in Path(__file__).resolve().parts}
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         parts = set()
     if ".codex" in parts:
         return "codex"
@@ -221,7 +222,7 @@ def _touch(stamp: Path) -> None:
     try:
         stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(str(time.time()), encoding="utf-8")
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         pass
 
 
@@ -232,7 +233,7 @@ def _log(prompt: str) -> None:
         snippet = re.sub(r"\s+", " ", prompt)[:160]
         with open(logp, "a", encoding="utf-8") as f:
             f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} nudge fired | {snippet}\n")
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         pass
 
 
@@ -256,11 +257,11 @@ def _parse_hits(payload) -> list[dict] | None:
 def _fetch_via_rest(
     prompt: str, api_key: str, limit: int = 3, timeout: float = 2.0
 ) -> list[dict] | None:
-    """One POST to the local REST facade's `/api/find` (keyword mode, compact
+    """One POST to the local REST facade's `/api/ask_memory` (keyword mode, compact
     detail). Returns the compact hit list, or `None` on ANY failure — connection
     error, timeout, non-200, malformed JSON, `success: false` — never raises."""
     host = os.environ.get("EXOMEM_HOST") or "127.0.0.1"
-    url = f"http://{host}:8765/api/find"
+    url = f"http://{host}:8765/api/ask_memory"
     body = json.dumps(
         {"query": prompt, "detail": "compact", "limit": limit, "mode": "keyword"}
     ).encode("utf-8")
@@ -280,13 +281,13 @@ def _fetch_via_rest(
         if status != 200:
             return None
         payload = json.loads(raw.decode("utf-8"))
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         return None
     return _parse_hits(payload)
 
 
 def _fetch_via_cli(prompt: str, limit: int = 3, timeout: float = 5.0) -> list[dict] | None:
-    """Locate the installed `exomem`/`kb` console script and run its `find`
+    """Locate the installed `exomem`/`kb` console script and run its `ask_memory`
     subcommand. Returns the compact hit list, or `None` on ANY failure — script
     not found, non-zero exit, malformed JSON, timeout — never raises. Never falls
     back to `sys.executable -m exomem`: this hook's interpreter is not assumed to
@@ -297,7 +298,7 @@ def _fetch_via_cli(prompt: str, limit: int = 3, timeout: float = 5.0) -> list[di
     try:
         proc = subprocess.run(
             [
-                script, "find",
+                script, "ask_memory",
                 "--detail", "compact",
                 "--limit", str(limit),
                 "--mode", "keyword",
@@ -311,7 +312,7 @@ def _fetch_via_cli(prompt: str, limit: int = 3, timeout: float = 5.0) -> list[di
         if proc.returncode != 0:
             return None
         payload = json.loads(proc.stdout)
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         return None
     return _parse_hits(payload)
 
@@ -362,7 +363,7 @@ def main() -> int:
     try:
         raw = sys.stdin.read()
         data = json.loads(raw) if raw.strip() else {}
-    except Exception:
+    except Exception:  # noqa: BLE001 - hook must never break prompt submission
         return 0
 
     prompt = _prompt(data)
@@ -401,7 +402,7 @@ def main() -> int:
         # reminder-only floor, never raise past the hook.
         try:
             block = _format_inject_block(_gather_hits(prompt))
-        except Exception:
+        except Exception:  # noqa: BLE001 - hook must never break prompt submission
             block = ""
         if block:
             additional_context = REMINDER + "\n\n" + block

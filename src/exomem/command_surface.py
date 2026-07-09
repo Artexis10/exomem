@@ -11,7 +11,6 @@ from dataclasses import dataclass
 from mcp.types import ToolAnnotations
 from pydantic import Field
 
-
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
 # blob. The model pays for those characters as output tokens before the request
 # arrives, so they are rejected at every write boundary (MCP middleware + REST
@@ -24,6 +23,12 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "create_file": ("content",),
     "append_to_file": ("content",),
     "preserve": ("content",),
+    "remember": ("content",),
+    "capture_source": ("content",),
+    "preserve_evidence": ("content",),
+    "edit_memory": ("new_body", "new_string"),
+    "replace_memory": ("content",),
+    "manage_memory_file": ("content",),
 }
 
 
@@ -32,7 +37,17 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
 # preserve / recover_from_trash / reconcile). Drives the MCP `destructiveHint` so a
 # cautious client does not badge an append as destructive.
 DESTRUCTIVE_OPS: frozenset[str] = frozenset(
-    {"edit", "replace", "delete", "move_file", "audit_fix"}
+    {
+        "edit",
+        "replace",
+        "delete",
+        "move_file",
+        "audit_fix",
+        "edit_memory",
+        "replace_memory",
+        "manage_memory_file",
+        "maintain_memory",
+    }
 )
 
 
@@ -70,6 +85,7 @@ class Command:
     product_surface: str = "advanced"
     product_actions: tuple[str, ...] = ()
     first_run_safe: bool = False
+    routes: tuple[str, ...] = ()
 
     @property
     def doc(self) -> str:
