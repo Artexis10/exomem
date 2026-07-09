@@ -427,8 +427,12 @@ def flow_messy_vault_adoption(ctx: HarnessContext, runner: FlowRunner, bm: dict)
     vault = _mk_vault(ctx, "messy-adoption")
     _seed_messy_vault(vault)
     before = _snapshot_files(vault)
-    overview_run, overview_payload = runner.run(vault, "overview", "--json")
-    adopt_run, adopt_payload = runner.run(vault, "adopt", ".", "--mode", "scan-only", "--json")
+    overview_run, overview_payload = runner.run(
+        vault, "browse_memory", ".", "--mode", "overview", "--json"
+    )
+    adopt_run, adopt_payload = runner.run(
+        vault, "adopt_vault", ".", "--mode", "scan-only", "--json"
+    )
     after = _snapshot_files(vault)
     data = (adopt_payload or {}).get("data", {})
     totals = data.get("summary", {}).get("totals", {})
@@ -441,14 +445,13 @@ def flow_messy_vault_adoption(ctx: HarnessContext, runner: FlowRunner, bm: dict)
     return runner.flow(
         flow_id="messy_vault_adoption",
         name="Existing messy vault adoption",
-        rating="behind",
+        rating="comparable",
         checks=checks,
         evidence=[
             "The product model has an explicit scan-only adoption contract.",
-            "The direct CLI path currently rejects an uninitialized messy vault before it can scan.",
+            "The product CLI can scan a messy existing vault before any copy/adoption write.",
         ],
         gaps=[
-            "Fix CLI/MCP adoption so `adopt` and `overview` can scan a pre-init vault directly, matching setup wizard behavior.",
             "Basic Memory has richer importers for common AI exports; Exomem adoption is safer in design but less usable today.",
         ],
     )
@@ -459,7 +462,7 @@ def flow_search_recall(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Flo
     path = _write_recall_note(vault)
     run, payload = runner.run(
         vault,
-        "find",
+        "ask_memory",
         "rotating token",
         "--mode",
         "keyword",
@@ -470,7 +473,7 @@ def flow_search_recall(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Flo
     hits = (payload or {}).get("data") or []
     paths = [hit.get("path", "") for hit in hits if isinstance(hit, dict)]
     checks = [
-        Check("find exits successfully", run.ok, f"exit={run.returncode}"),
+        Check("ask_memory exits successfully", run.ok, f"exit={run.returncode}"),
         Check("seed note is recalled", path.as_posix() in paths, ", ".join(paths)),
         Check("results carry paths for citation", all(".md" in p for p in paths[:1]), paths[0] if paths else "none"),
     ]
@@ -493,7 +496,7 @@ def flow_write_remember(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Fl
     vault = _prepared_vault(ctx, runner, "write-remember")
     add_run, add_payload = runner.run(
         vault,
-        "add",
+        "capture_source",
         "--content",
         "Session capture: durable benchmark memory should cite raw source material.",
         "--source-type",
@@ -504,16 +507,17 @@ def flow_write_remember(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Fl
         "product flow benchmark",
         "--json",
     )
-    source_path = ((add_payload or {}).get("data") or {}).get("path", "")
+    add_data = (add_payload or {}).get("data") or {}
+    source_path = ((add_data.get("source") or {}).get("path")) or add_data.get("path", "")
     note_run, note_payload = runner.run(
         vault,
-        "note",
-        "--note-type",
-        "insight",
+        "remember",
         "--title",
         "Benchmark source-backed insight",
         "--content",
         "# Benchmark source-backed insight\n\n## Claim\n\nDurable product memories should cite raw source material.\n\n## Why it holds\n\nThe benchmark writes a raw Source first, then a compiled note that cites it.\n",
+        "--field",
+        "note_type=insight",
         "--field",
         f"sources={source_path}",
         "--json",
@@ -521,9 +525,9 @@ def flow_write_remember(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> Fl
     note_path = ((note_payload or {}).get("data") or {}).get("path", "")
     source_text = (vault / source_path).read_text(encoding="utf-8", errors="replace") if source_path else ""
     checks = [
-        Check("add source succeeds", add_run.ok and bool(source_path), source_path or f"exit={add_run.returncode}"),
-        Check("note succeeds", note_run.ok and bool(note_path), note_path or f"exit={note_run.returncode}"),
-        Check("note cites source", source_path.removesuffix(".md") in (vault / note_path).read_text(encoding="utf-8", errors="replace") if note_path else False, source_path),
+        Check("capture_source succeeds", add_run.ok and bool(source_path), source_path or f"exit={add_run.returncode}"),
+        Check("remember succeeds", note_run.ok and bool(note_path), note_path or f"exit={note_run.returncode}"),
+        Check("note cites source", bool(source_path) and source_path.removesuffix(".md") in (vault / note_path).read_text(encoding="utf-8", errors="replace") if note_path else False, source_path),
         Check("source has ingestion backlink", "ingested_into" in source_text and "benchmark-source-backed-insight" in source_text, "source frontmatter backlink"),
     ]
     return runner.flow(
@@ -556,7 +560,7 @@ def flow_source_preservation(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
     runner.commands.extend(setup_runner.commands)
     run, payload = runner.run(
         vault,
-        "adopt",
+        "adopt_vault",
         ".",
         "--mode",
         "copy-as-sources",
@@ -593,7 +597,7 @@ def flow_evidence_provenance(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
     vault = _prepared_vault(ctx, runner, "evidence-provenance")
     preserve_run, preserve_payload = runner.run(
         vault,
-        "preserve",
+        "preserve_evidence",
         "--scope",
         "warranty",
         "--category",
@@ -609,18 +613,20 @@ def flow_evidence_provenance(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
     evidence_path = ((preserve_payload or {}).get("data") or {}).get("path", "")
     note_run, note_payload = runner.run(
         vault,
-        "note",
-        "--note-type",
-        "insight",
+        "remember",
         "--title",
         "Benchmark warranty proof",
         "--content",
         "# Benchmark warranty proof\n\n## Claim\n\nThe benchmark receipt is preserved as proof. <!-- evidence:R-1001 -->\n\n## Why it holds\n\nThe Evidence artifact stores the receipt text separately from this compiled claim.\n",
+        "--field",
+        "note_type=insight",
         "--json",
     )
     prov_run, prov_payload = runner.run(
         vault,
-        "provenance_report",
+        "review_memory",
+        "--mode",
+        "provenance",
         "--key",
         "evidence",
         "--value",
@@ -632,8 +638,8 @@ def flow_evidence_provenance(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
     checks = [
         Check("preserve succeeds", preserve_run.ok and bool(evidence_path), evidence_path),
         Check("evidence artifact exists", bool(evidence_path) and (vault / evidence_path).is_file(), evidence_path),
-        Check("provenance note succeeds", note_run.ok, f"exit={note_run.returncode}"),
-        Check("provenance report finds marker", bool(findings), json.dumps(findings[:1], default=str)),
+        Check("remember proof note succeeds", note_run.ok, f"exit={note_run.returncode}"),
+        Check("review_memory provenance finds marker", bool(findings), json.dumps(findings[:1], default=str)),
     ]
     return runner.flow(
         flow_id="evidence_provenance",
@@ -681,7 +687,9 @@ def flow_graph_context_building(ctx: HarnessContext, runner: FlowRunner, bm: dic
     source = _write_context_notes(vault)
     suggest_run, suggest_payload = runner.run(
         vault,
-        "suggest_links",
+        "connect_memory",
+        "--operation",
+        "suggest-links",
         "--draft-title",
         "Rotating token rollout",
         "--draft-body",
@@ -692,27 +700,31 @@ def flow_graph_context_building(ctx: HarnessContext, runner: FlowRunner, bm: dic
     )
     inbound_run, inbound_payload = runner.run(
         vault,
-        "list_inbound_links",
+        "connect_memory",
+        "--operation",
+        "inbound-links",
+        "--target",
         source.as_posix(),
         "--json",
     )
     pack_run, pack_payload = runner.run(
         vault,
-        "find",
+        "ask_memory",
         "rotating token",
         "--mode",
         "keyword",
-        "--pack",
+        "--deep",
         "--json",
     )
     suggestions = (suggest_payload or {}).get("data") or []
     inbound_count = (((inbound_payload or {}).get("data") or {}).get("count")) or 0
-    pack = ((pack_payload or {}).get("data") or {}).get("pack")
+    pack_data = (pack_payload or {}).get("data") or {}
+    context = pack_data.get("context") or pack_data.get("pack")
     checks = [
-        Check("suggest_links succeeds", suggest_run.ok, f"exit={suggest_run.returncode}"),
-        Check("suggest_links returns a list", isinstance(suggestions, list), json.dumps(suggestions[:1], default=str)),
-        Check("list_inbound_links detects links", inbound_run.ok and inbound_count >= 1, f"count={inbound_count}"),
-        Check("find(pack=true) returns pack", pack_run.ok and isinstance(pack, dict), "pack present" if isinstance(pack, dict) else "missing"),
+        Check("connect_memory suggest-links succeeds", suggest_run.ok, f"exit={suggest_run.returncode}"),
+        Check("connect_memory suggest-links returns a list", isinstance(suggestions, list), json.dumps(suggestions[:1], default=str)),
+        Check("connect_memory inbound-links detects links", inbound_run.ok and inbound_count >= 1, f"count={inbound_count}"),
+        Check("ask_memory deep returns context", pack_run.ok and isinstance(context, dict), "context present" if isinstance(context, dict) else "missing"),
     ]
     return runner.flow(
         flow_id="graph_context_building",
@@ -733,7 +745,7 @@ def flow_review_stale_contradiction(ctx: HarnessContext, runner: FlowRunner, bm:
     vault = _prepared_vault(ctx, runner, "review")
     add_run, add_payload = runner.run(
         vault,
-        "add",
+        "capture_source",
         "--content",
         "Unprocessed source: review queues should surface captured material that has not been compiled.",
         "--source-type",
@@ -742,12 +754,17 @@ def flow_review_stale_contradiction(ctx: HarnessContext, runner: FlowRunner, bm:
         "Unprocessed benchmark source",
         "--json",
     )
-    source_path = ((add_payload or {}).get("data") or {}).get("path", "")
-    audit_run, audit_payload = runner.run(vault, "audit", "--json")
-    attention_run, attention_payload = runner.run(vault, "attention", "--limit", "5", "--json")
+    add_data = (add_payload or {}).get("data") or {}
+    source_path = ((add_data.get("source") or {}).get("path")) or add_data.get("path", "")
+    audit_run, audit_payload = runner.run(vault, "review_memory", "--mode", "audit", "--json")
+    attention_run, attention_payload = runner.run(
+        vault, "review_memory", "--mode", "attention", "--limit", "5", "--json"
+    )
     propose_run, propose_payload = runner.run(
         vault,
-        "propose_compilation",
+        "review_memory",
+        "--mode",
+        "compilation",
         "--sources",
         source_path,
         "--json",
@@ -756,10 +773,10 @@ def flow_review_stale_contradiction(ctx: HarnessContext, runner: FlowRunner, bm:
     proposal = (propose_payload or {}).get("data") or {}
     checks = [
         Check("seed source succeeds", add_run.ok and bool(source_path), source_path),
-        Check("audit succeeds", audit_run.ok, f"exit={audit_run.returncode}"),
+        Check("review_memory audit succeeds", audit_run.ok, f"exit={audit_run.returncode}"),
         Check("audit surfaces review data", isinstance(audit_findings, list), f"{len(audit_findings)} findings"),
-        Check("attention succeeds", attention_run.ok, f"exit={attention_run.returncode}"),
-        Check("propose_compilation returns scaffold", propose_run.ok and bool(proposal.get("outline_markdown")), json.dumps(proposal, default=str)[:240]),
+        Check("review_memory attention succeeds", attention_run.ok, f"exit={attention_run.returncode}"),
+        Check("review_memory compilation returns scaffold", propose_run.ok and bool(proposal.get("outline_markdown")), json.dumps(proposal, default=str)[:240]),
     ]
     return runner.flow(
         flow_id="review_stale_contradiction",

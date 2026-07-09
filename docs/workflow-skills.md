@@ -9,7 +9,7 @@ to return.
 
 | Layer | What it is | Example |
 | --- | --- | --- |
-| Exomem tools | Product MCP/REST/CLI commands that read and write the KB | `ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory` |
+| Exomem product commands | Product MCP/REST/CLI commands that read and write the KB | `ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory` |
 | Context packs | Retrieval-time evidence bundles returned by `ask_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
 | Knowledge packs | Product/domain guidance selected during setup | technical, creative, legal/warranty, personal records |
 | Workflow skills | Agent-visible workflows for common user intent | `exomem-continue`, `exomem-capture`, `exomem-review` |
