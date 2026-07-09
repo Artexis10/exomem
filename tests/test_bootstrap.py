@@ -41,6 +41,7 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "performance_profiles",
         "memory_model",
         "knowledge_packs",
+        "authoring_contract",
     } <= set(out)
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
     assert [s["name"] for s in out["workflow_skills"]] == [
@@ -59,11 +60,22 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
     assert out["front_door_actions"]["save"]["selected_pack_guidance"][0]["pack_id"] == "personal-records"
     assert out["tool_defaults"]["adopt_existing_vault"]["tool"] == "adopt"
+    authoring = out["authoring_contract"]
+    assert "suggest_links" in " ".join(authoring["canonical_loop"])
+    assert authoring["route_by_intent"]["new_durable_conclusion"] == "note"
+    assert authoring["route_by_intent"]["small_correction"] == "edit"
+    assert authoring["route_by_intent"]["substantial_rewrite"] == "replace"
+    assert "near_duplicate_warnings" in authoring["preflight"]
+    assert "write_feedback" in authoring["post_write"]
+    assert "insight" in authoring["note_type_recipes"]
+    assert any("write_feedback" in step for step in out["workflow"]["loop"])
     assert "adopt" in out["common_tools"]
-    assert out["tool_defaults"]["normal_lookup"]["args"] == {
-        "detail": "compact",
-        "rerank": False,
-    }
+    assert "search" in out["common_tools"]
+    assert "fetch" in out["common_tools"]
+    assert "find" in out["common_tools"]
+    assert "get" in out["common_tools"]
+    assert out["tool_defaults"]["normal_lookup"] == {"tool": "search", "args": {}}
+    assert out["tool_defaults"]["read_bounded_page"]["tool"] == "fetch"
     serialized = json.dumps(out)
     assert str(vault) not in serialized
     assert "Progressive disclosure" not in serialized
@@ -88,7 +100,10 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
 
     assert {"save", "adopt", "ask", "prove", "review", "update", "connect"} <= set(front_door)
     assert "adopt" in catalog["primary"]
+    assert "search" in catalog["primary"]
+    assert "fetch" in catalog["primary"]
     assert "find" in catalog["primary"]
+    assert "get" in catalog["primary"]
     assert "preserve" in front_door["prove"]["primary_tools"]
     assert "audit" in front_door["review"]["primary_tools"]
     assert "create_file" in catalog["advanced"]

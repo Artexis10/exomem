@@ -1,389 +1,4 @@
 {
-  "bootstrap": {
-    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, and how compiled notes differ from raw evidence.\nThe payload is deterministic instruction plus local compute policy; it does\nnot inspect or summarize vault content.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "profile": {
-          "default": "compact",
-          "type": "string",
-          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is\nenough for normal clients. Full adds examples. Diagnostics adds\nperformance interpretation guidance."
-        },
-        "workflow": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional caller-selected workflow label. Returned as context\nonly; it does not change server behavior."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "find": {
-    "description": "Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "query": {
-          "default": "",
-          "type": "string",
-          "description": "Free-text search string. In \"hybrid\"/\"vector\" mode it's\nembedded with bge-base for semantic recall. In \"keyword\" mode\nit's tokenized on whitespace and every token must appear in\ntitle or body (any order) — `contract employment` matches a\npage about \"employment contract\". Empty string always falls\nback to \"most-recent filtered\" behaviour regardless of mode."
-        },
-        "types": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Filter to these page types (source, research-note, insight, failure, pattern, experiment, production-log, entity)."
-        },
-        "projects": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Filter to pages whose `project` or `projects:` includes any of these keys."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Filter to pages whose `tags:` includes any of these (case-insensitive)."
-        },
-        "speakers": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Filter to diarized media whose `speakers:` frontmatter includes any of\nthese named speakers (case-insensitive) — e.g. \"what did Alice say about X\".\nAND'd with the query/other filters; OR'd within the list."
-        },
-        "file_types": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Scope results to these artifact kinds — note, pdf, image,\naudio, video, csv, json, tsv. A binary surfaces under its media\nkind (pdf/image/...); a data file under its dataset card's format\n(csv/json). Omit to return ALL kinds (the default — search never\nhides a type unless you ask)."
-        },
-        "exclude_file_types": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Drop these kinds from results (same vocabulary)."
-        },
-        "limit": {
-          "default": 15,
-          "type": "integer",
-          "description": "Max hits to return. Default 15, hard cap 100."
-        },
-        "scope": {
-          "default": "kb",
-          "type": "string",
-          "description": "\"kb\" (default) searches Knowledge Base/ first and\nAUTO-WIDENS to the whole vault when the KB doesn't fill\n`limit` — so content in sibling folders (Tracking/,\nReference/, Finance/, ... and curated, read-only trees kept\noutside Knowledge Base/) is never silently invisible. Widened\nhits carry `outside_kb: true`. \"vault\" always walks the\nwhole vault. \"kb-only\" is the strict opt-out: KB only,\nnever widens. Outside-KB recall is BM25/keyword (the\nvector sidecar is KB-scoped), with a relaxed gate so terse\nfiles (e.g. a numbers-heavy tracker) surface on a partial\ntoken match. `_Schema/`, `_trash/`, `_attachments/`, and\n`.obsidian/` are excluded under every scope. NOTE: an\nempty result means \"not found in what I searched,\" NOT\n\"doesn't exist\" — say so, and try \"vault\" before\nconcluding absence."
-        },
-        "mode": {
-          "default": "hybrid",
-          "type": "string",
-          "description": "Ranker. \"hybrid\" (default) fuses BM25 + local vector\nembeddings via reciprocal rank fusion — best recall on\nnatural-language queries. \"keyword\" preserves the original\ncase-insensitive substring matching, sorted by `updated:`.\n\"vector\" is vector-only (testing aid). BM25 corpus is\nSnowball-stemmed so \"regulation\" reaches pages with\n\"regulator\"; keyword mode stays strict-substring. If the\nembedding sidecar hasn't been built yet, hybrid degrades\nto BM25-only; run `audit_fix(rebuild_embeddings=true)` to\npopulate it."
-        },
-        "graph": {
-          "default": true,
-          "type": "boolean",
-          "description": "When true (default) and mode is hybrid/vector, outbound\nwikilinks of top BM25/vector candidates contribute a third\nranking — surfaces 1-hop neighbours of strong matches."
-        },
-        "rerank": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is mode-aware AUTO: in CPU steady-state modes it stays\noff for predictable latency; when the text/reranker device is\naccelerated, the server reranks only when ranking lanes\ndisagree or the query is long. Pass true to force reranking\nfor a high-value query, including on CPU; pass false to skip\nit entirely."
-        },
-        "prefer_compiled": {
-          "default": true,
-          "type": "boolean",
-          "description": "When true (default), applies a small boost to\ncompiled types (insight, pattern, failure, research-note,\nentity) and a small penalty to raw `source` after fusion\nAND rerank. Reflects the KB's epistemic hierarchy. Set\nfalse to retrieve raw source discussion verbatim (e.g.\n\"what did I capture from Dr. X\")."
-        },
-        "prefer_active": {
-          "default": true,
-          "type": "boolean",
-          "description": "When true (default), soft-demotes `status:\nsuperseded` pages so a replaced conclusion can't outrank the\npage that superseded it. The tombstone stays findable and its\nhit still carries `status` + `superseded_by` (the forward\npointer) so you can see it's superseded. Set false to rank a\nsuperseded page on its content alone (e.g. \"what did I used to\nthink about X\")."
-        },
-        "prefer_used": {
-          "default": false,
-          "type": "boolean",
-          "description": "When true (OFF by default — default ranking is\nusage-blind), applies a bounded, positive-only usage boost:\npages you actually read (`get`) and cite in written notes rank\nslightly higher, from ACT-R activation over the server's own\naccess logs. Capped below the compiled boost so usage breaks\nties but never overrides the epistemic hierarchy; never a\npenalty; never ADDS results — it only reorders pages the\ncontent lanes already matched. Boosted hits expose\n`signals.activation` + `signals.usage_boost` so you can see\nexactly why. Reading and citing pages IS the feedback loop —\nno separate feedback call exists or is needed. Use for \"what\nhave I been working with lately\" recall; leave off for\nneutral knowledge lookup."
-        },
-        "pack": {
-          "default": false,
-          "type": "boolean",
-          "description": "When true (off by default), ALSO assemble a reasoning-ready\ncontext pack from the top hits and change the return to\n{\"hits\": [...], \"pack\": {...}} (with pack off, the return is the\nusual hit list, unchanged). The pack is PURE MEASUREMENT over the\nnotes you already wrote — no server-side reasoning: each top note's\nstructurally-extracted key claims (lede + headline-section lines +\nheading outline), the 1-hop wikilink neighbourhood of those notes\nranked by co-citation, and the contradictions among them (recorded\nsupersession edges + proximity \"tension\" pairs in the embedding\nband, surfaced for you to judge — proximity, not polarity). Lets you\nreason over the matches in one shot instead of fanning out `get`\ncalls. Bounded with explicit `truncation`; the tension part needs\nthe embedding sidecar and reports `embeddings_available`."
-        },
-        "graph_enrich": {
-          "default": false,
-          "type": "boolean",
-          "description": "When true with `pack=true`, add typed graph neighborhood\ndata from the derived epistemic graph sidecar to the pack. Default\nfalse; missing/disabled/stale graph state soft-fails inside\n`pack.graph.available` without changing hits, hit ordering, or the\ndefault pack contract."
-        },
-        "detail": {
-          "default": "full",
-          "type": "string",
-          "description": "Result verbosity. \"full\" (default) keeps the current hit\nshape including `excerpt` and `signals`. \"compact\" returns the\nSAME ranked hits as token-cheap routing stubs — path, title,\ntype, scope, updated, plus lifecycle/media/outside_kb markers\nwhen present — omitting `excerpt` and `signals`. Use compact\nfor cheap proactive recall, then `get` a chosen page (or rerun\nwith detail=\"full\") when you need the why."
-        },
-        "include_timings": {
-          "default": false,
-          "type": "boolean",
-          "description": "When true (off by default), the return becomes an\nenvelope {\"hits\": [...], \"timings\": {...}} (with pack=true the\nenvelope also carries \"pack\"). `timings` reports total_ms,\nhot-cache status, and per-stage milliseconds for the retrieval\nlanes (skipped/failed optional lanes are marked, never fatal).\nDiagnostics only — timings never include note content. Omitted\n→ the response shape is unchanged."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "suggest_links": {
-    "description": "Suggest existing KB pages a note should link to. Read-only.\n\nCloses the corpus-blind-write gap: surfaces the related prior work a\ndraft (or an existing page) should connect to, so the graph gets denser\nwith every write instead of just bigger. For link suggestions only — it\nreuses the same hybrid ranker as `find`, prefers well-connected hubs, and excludes\nthe page itself plus anything it already links. Suggestions are\nnon-binding: YOU decide which to wire in (e.g. via a follow-up `edit`).\n\nTwo call shapes:\n- `path`: suggest links for an EXISTING page (densify it retroactively).\n  Same path conventions as `get`/`find`.\n- `draft_title` + `draft_body`: suggest links for a note you're about to\n  create, BEFORE calling `note` — so you can cite/connect on first write.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Existing page to suggest links for. Mutually exclusive with\nthe draft_* args."
-        },
-        "draft_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Title of a not-yet-written note."
-        },
-        "draft_body": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Body (markdown) of a not-yet-written note. Wikilinks\nalready present in it are treated as \"already linked\" and excluded."
-        },
-        "limit": {
-          "default": 8,
-          "type": "integer",
-          "description": "Max suggestions (default 8)."
-        },
-        "scope": {
-          "default": "kb",
-          "type": "string",
-          "description": "\"kb\" (default) or \"vault\" — same meaning as `find`."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "graph_context": {
-    "description": "Return a bounded typed-graph neighborhood for a page or query. Read-only.\n\nReads the derived `.graph.sqlite` sidecar created from Markdown,\nfrontmatter, wikilinks, source/evidence links, supersession fields, and\nsemantic blocks. Markdown remains the source of truth; this operation does\nnot build the sidecar, modify notes, accept suggested relations, or change\n`find` ranking. If the graph sidecar is missing, disabled, or incompatible,\nthe response reports `available: false` instead of failing.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Existing page path to use as the graph seed. Optional when `query`\nis supplied."
-        },
-        "query": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Text seed for matching graph node titles/content. Optional when\n`path` is supplied."
-        },
-        "depth": {
-          "default": 1,
-          "type": "integer",
-          "description": "Traversal depth from seed nodes. Default 1."
-        },
-        "relation_types": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional allowlist of relation types, e.g.\n`derived_from`, `evidenced_by`, `supports`, `contradicts`,\n`supersedes`, `links_to`."
-        },
-        "node_types": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional allowlist of node kinds, e.g. `file`, `decision`,\n`finding`, `risk`, `action`, `claim`, `evidence`."
-        },
-        "max_nodes": {
-          "default": 40,
-          "type": "integer",
-          "description": "Cap returned nodes. Default 40."
-        },
-        "max_edges": {
-          "default": 80,
-          "type": "integer",
-          "description": "Cap returned edges. Default 80."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "suggest_relations": {
-    "description": "Suggest candidate typed graph relations. Read-only and proposal-only.\n\nUses deterministic signals from wikilinks, frontmatter sources, shared\nsources/entities, supersession, and optional embedding proximity when\navailable. Model-backed suggestions are default-off and soft-fail as\nwarnings; accepted relations still require an explicit `note` or `edit`\nwrite. This operation never mutates Markdown or the graph sidecar.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Existing page to inspect. Mutually exclusive with draft-only use."
-        },
-        "draft_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional title for a not-yet-written draft."
-        },
-        "draft_body": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Draft body; wikilinks in it become proposal candidates."
-        },
-        "include_model_suggestions": {
-          "default": false,
-          "type": "boolean",
-          "description": "Request optional model-backed suggestion\npaths. Default false; unavailable paths soft-fail with warnings."
-        },
-        "limit": {
-          "default": 10,
-          "type": "integer",
-          "description": "Max candidates to return. Default 10."
-        }
-      },
-      "type": "object"
-    }
-  },
   "add": {
     "description": "Capture raw content as an immutable source page in the Knowledge Base.\n\nWrites a frontmatter-compliant page to Sources/<Type>/YYYY-MM-DD-<slug>.md\nand updates Sources/index.md, the top-level index.md (Recent activity\n+ Counts), and log.md. Per SKILL.md rule 7.",
     "inputSchema": {
@@ -446,88 +61,6 @@
         "source_type",
         "title"
       ],
-      "type": "object"
-    }
-  },
-  "audit": {
-    "description": "Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.\n\nReturns a structured report Claude can read to propose follow-up\nedits via `note`/`add`. Does NOT modify anything.\n\nCategories (default: all):\n- `broken_wikilink`: `[[X]]` whose target file doesn't exist.\n  Skips wikilinks inside fenced code blocks and inline code spans.\n  Bare names resolve against filename stems AND frontmatter `title:`\n  (so date-prefixed sources with a title match are not flagged).\n- `orphan_entity`: `Entities/...` file with no inbound wikilinks\n- `unprocessed_source`: source with empty `ingested_into:` (no notes\n  have compiled from it yet)\n- `index_drift`: top-level `index.md` Counts disagree with on-disk counts\n- `tag_inconsistency`: case/separator variants of the same tag\n  (`warning_letter_incident` vs `warning-letter-incident` vs\n  `Warning-Letter-Incident`). Mechanical drift only; semantic\n  near-duplicates like `workflow` vs `workflows` aren't flagged.\n- `frontmatter_compliance`: per-page-type required-field gaps,\n  a `tenant:` set without the expected project, patterns using singular\n  `project:` instead of plural `projects:`.\n- `unregistered_project_key`: a `project`/`projects` value not in the\n  registry (typo or genuinely new scope).\n- `embedding_drift`: vector sidecar rows out of sync with disk (a file\n  changed/added/removed since it was last embedded).\n- `relevance_pairs_pending`: real-usage (query -> cited_path) labels not\n  yet in the golden retrieval set.\n- `stale_review`: active compiled conclusion that is old AND rarely\n  surfaced in `find` AND low inbound-link degree — a measurement-only\n  review candidate (still true? keep / supersede / archive). Never\n  decays or down-ranks; `find` ordering is unchanged.\n- `corpus_contradictions`: corpus-wide pairs of active read-write\n  compiled conclusions whose embeddings sit just below the near-dup\n  threshold (close enough to restate/refine/contradict). A proximity\n  measurement surfaced for review (reconcile or supersede); never\n  auto-acted. The queue is ordered by review priority (cosine + ACT-R\n  dormancy), same-family `Notes/Research/<X>/` architecture noise is\n  demoted, and the surfaced set is capped at EXOMEM_CONTRADICTION_TOP_N\n  (default 40; 0 = uncapped) with an explicit \"N more not shown\" line.\n  No-ops when embeddings are disabled.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "categories": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional filter; only run these checks. Each must be\none of the categories above. Omit to run all."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "attention": {
-    "description": "Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.\n\nComposes the three measurement-only epistemic queues into a single list,\nranked by Reciprocal Rank Fusion over each queue's own ordering — a note\nflagged by more than one queue rises to the top:\n- `stale_review`: active conclusions that are old AND rarely surfaced in\n  `find` AND low inbound-degree (possibly stale — still true?).\n- `corpus_contradictions`: pairs of active conclusions whose embeddings sit\n  close enough to restate, refine, or contradict (do they conflict?).\n- `unprocessed_source`: sources captured but never compiled (nothing\n  distilled from them yet).\n\nEach item carries its reason(s), the related note(s) for a contradiction\npair, and severity. Surfaced for REVIEW only: the ranking is a deterministic\nmeasurement, not a judgment that anything is wrong — you decide keep /\n`replace` (supersede) / `reconcile` / `propose_compilation` / archive.\nNothing is auto-acted; `find` ordering is unchanged.\n\nFront door for daily review. Use `audit` instead for the full lint/health\nreport (broken wikilinks, frontmatter compliance, index drift, embedding\ndrift, etc.).",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "categories": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional subset of {corpus_contradictions, stale_review,\nunprocessed_source}. Omit to include all three."
-        },
-        "limit": {
-          "default": 25,
-          "type": "integer",
-          "description": "Max items to surface (default 25; 0 or negative = uncapped,\nsurface all). Lower-priority items beyond the cap are summarized in\na \"N more not shown\" note, never dropped silently."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "overview": {
-    "description": "Bounded, read-only structure report of the vault (or a subtree).\n\nAnswers \"what does this vault look like?\" in ONE call — use this instead\nof reading files one by one for structural questions. Reports totals,\nwhether a `Knowledge Base/` tree is present, a depth/breadth-capped folder\ntree (per-folder file counts, frontmatter coverage %, wikilink/md-link\ncounts, dominant filename patterns, sample names), junk candidates\n(zero-byte files, sync-conflict duplicates like `note 2.md`), largest and\noldest-unmodified files, and exactly what was skipped. Lists are capped;\ncounts are always exact. Works on vaults with no initialized\n`Knowledge Base/` (`kb.present` false).",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "",
-          "type": "string",
-          "description": "Vault-relative subtree to report on. Empty string (default)\nreports the whole vault. Auto-handles forward/back slashes."
-        },
-        "max_depth": {
-          "default": 3,
-          "type": "integer",
-          "description": "Tree depth cap; deeper folders roll up into their\nancestors (counts stay exact). Default 3."
-        },
-        "include_hidden": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, include dot-directories/dotfiles and\n`_trash`/`_attachments`. Default false."
-        },
-        "samples": {
-          "default": 5,
-          "type": "integer",
-          "description": "Filename samples listed per folder. Default 5."
-        }
-      },
       "type": "object"
     }
   },
@@ -597,27 +130,67 @@
       "type": "object"
     }
   },
-  "evolution": {
-    "description": "How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only.\n\nFor a topic `query`, finds the matching notes, follows each one's supersession\nchain (the `supersedes`/`superseded_by` links `replace` records), and returns one\nordered timeline per chain — oldest version → newest. Each version carries its own\nstructurally-extracted claims, its date, and the RECORDED reason it was superseded\n(the `why:` logged at that edit). The server only orders and surfaces what you\nwrote; it does NOT generate a \"here's how your thinking changed\" summary — you read\nthe consecutive versions and see the shift.\n\nUse this for \"how did my view on X evolve / what did I used to think / why did this\nchange\". Use `find` for plain lookup. Notes never superseded are omitted (no\nevolution to show); a topic with no supersession returns empty `timelines` — an\nhonest \"nothing changed here\", not an error. Read-only: mutates nothing; `find`\nordering is unchanged.",
+  "append_to_file": {
+    "description": "Tier 2: append text to an existing file.\n\nRefuses Sources/ (immutable). Allowed on Evidence/ sidecars and\ngeneral vault files. Curated trees need `allow_curated=true`.\nEnsures a single newline boundary between existing tail and new\ncontent.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "query": {
-          "default": "",
+        "path": {
           "type": "string",
-          "description": "The topic to trace (free text, like `find`)."
+          "description": "Vault-relative."
+        },
+        "content": {
+          "type": "string",
+          "description": "Text to append (text only; binaries go via /upload)."
+        },
+        "allow_curated": {
+          "default": false,
+          "type": "boolean",
+          "description": "Required under curated trees."
+        }
+      },
+      "required": [
+        "path",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  "attention": {
+    "description": "Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.\n\nComposes the three measurement-only epistemic queues into a single list,\nranked by Reciprocal Rank Fusion over each queue's own ordering — a note\nflagged by more than one queue rises to the top:\n- `stale_review`: active conclusions that are old AND rarely surfaced in\n  `find` AND low inbound-degree (possibly stale — still true?).\n- `corpus_contradictions`: pairs of active conclusions whose embeddings sit\n  close enough to restate, refine, or contradict (do they conflict?).\n- `unprocessed_source`: sources captured but never compiled (nothing\n  distilled from them yet).\n\nEach item carries its reason(s), the related note(s) for a contradiction\npair, and severity. Surfaced for REVIEW only: the ranking is a deterministic\nmeasurement, not a judgment that anything is wrong — you decide keep /\n`replace` (supersede) / `reconcile` / `propose_compilation` / archive.\nNothing is auto-acted; `find` ordering is unchanged.\n\nFront door for daily review. Use `audit` instead for the full lint/health\nreport (broken wikilinks, frontmatter compliance, index drift, embedding\ndrift, etc.).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional subset of {corpus_contradictions, stale_review,\nunprocessed_source}. Omit to include all three."
         },
         "limit": {
-          "default": 10,
+          "default": 25,
           "type": "integer",
-          "description": "Max chains (timelines) to return, by find relevance (default 10;\n0 or negative = uncapped). Chains beyond the cap are reported in\n`truncation`, never dropped silently."
-        },
-        "scope": {
-          "default": "kb",
-          "type": "string",
-          "description": "Search scope passed to `find` — \"kb\" (default) / \"vault\" / \"kb-only\"."
-        },
-        "projects": {
+          "description": "Max items to surface (default 25; 0 or negative = uncapped,\nsurface all). Lower-priority items beyond the cap are summarized in\na \"N more not shown\" note, never dropped silently."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "audit": {
+    "description": "Audit / lint / health-check the Knowledge Base: find orphans, broken wikilinks, supersession gaps, stale unprocessed sources, and stale-review candidates. Read-only.\n\nReturns a structured report Claude can read to propose follow-up\nedits via `note`/`add`. Does NOT modify anything.\n\nCategories (default: all):\n- `broken_wikilink`: `[[X]]` whose target file doesn't exist.\n  Skips wikilinks inside fenced code blocks and inline code spans.\n  Bare names resolve against filename stems AND frontmatter `title:`\n  (so date-prefixed sources with a title match are not flagged).\n- `orphan_entity`: `Entities/...` file with no inbound wikilinks\n- `unprocessed_source`: source with empty `ingested_into:` (no notes\n  have compiled from it yet)\n- `index_drift`: top-level `index.md` Counts disagree with on-disk counts\n- `tag_inconsistency`: case/separator variants of the same tag\n  (`warning_letter_incident` vs `warning-letter-incident` vs\n  `Warning-Letter-Incident`). Mechanical drift only; semantic\n  near-duplicates like `workflow` vs `workflows` aren't flagged.\n- `frontmatter_compliance`: per-page-type required-field gaps,\n  a `tenant:` set without the expected project, patterns using singular\n  `project:` instead of plural `projects:`.\n- `unregistered_project_key`: a `project`/`projects` value not in the\n  registry (typo or genuinely new scope).\n- `embedding_drift`: vector sidecar rows out of sync with disk (a file\n  changed/added/removed since it was last embedded).\n- `relevance_pairs_pending`: real-usage (query -> cited_path) labels not\n  yet in the golden retrieval set.\n- `stale_review`: active compiled conclusion that is old AND rarely\n  surfaced in `find` AND low inbound-link degree — a measurement-only\n  review candidate (still true? keep / supersede / archive). Never\n  decays or down-ranks; `find` ordering is unchanged.\n- `corpus_contradictions`: corpus-wide pairs of active read-write\n  compiled conclusions whose embeddings sit just below the near-dup\n  threshold (close enough to restate/refine/contradict). A proximity\n  measurement surfaced for review (reconcile or supersede); never\n  auto-acted. The queue is ordered by review priority (cosine + ACT-R\n  dormancy), same-family `Notes/Research/<X>/` architecture noise is\n  demoted, and the surfaced set is capped at EXOMEM_CONTRADICTION_TOP_N\n  (default 40; 0 = uncapped) with an explicit \"N more not shown\" line.\n  No-ops when embeddings are disabled.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "categories": {
           "anyOf": [
             {
               "items": {
@@ -630,22 +203,7 @@
             }
           ],
           "default": null,
-          "description": "Optional project-key filter passed to `find`."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional tag filter passed to `find`."
+          "description": "Optional filter; only run these checks. Each must be\none of the categories above. Omit to run all."
         }
       },
       "type": "object"
@@ -670,140 +228,138 @@
       "type": "object"
     }
   },
-  "reconcile": {
-    "description": "Heal vault drift from out-of-band edits in one pass.\n\nThe writers keep the embedding sidecar, index.md count rows, and log.md\ncurrent on every write. But editing the vault directly — in Obsidian,\non mobile, or via a manual filesystem edit — bypasses those hooks, so\nthe sidecar and the counts drift silently. `reconcile` is the\nfirst-class \"I edited around the system, fix it\" command:\n\n1. Index counts — recompute Sources/Notes/Entities count rows from\n   on-disk reality and rewrite any that drifted (curated descriptions\n   and Recent-activity are preserved; only count tokens move).\n2. Embeddings — incrementally re-embed only the *stale* files (those\n   `embedding_drift` flags: on-disk mtime newer than the sidecar row),\n   via the same path the writers use. Cheaper than\n   `audit_fix(rebuild_embeddings=true)`'s full wipe-and-rebuild.\n3. Drift report — re-run index_drift + embedding_drift, return what\n   remains.\n\nNarrower than `audit_fix`: it does NOT canonicalize wikilinks or\nbackfill frontmatter (those are content rewrites you opt into).\nIdempotent; `dry_run=true` reports without writing.",
+  "bootstrap": {
+    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, how compiled notes differ from raw sources/evidence,\nand how Exomem differs from built-in AI memory. The payload is deterministic\ninstruction plus local compute policy and product-surface metadata; it does\nnot inspect or summarize vault content.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "dry_run": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, compute what would change without writing.\nDefault false."
+        "profile": {
+          "default": "compact",
+          "type": "string",
+          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is\nenough for normal clients. Full adds examples. Diagnostics adds\nperformance interpretation guidance."
+        },
+        "workflow": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional caller-selected workflow label. Returned as context\nonly; it does not change server behavior."
         }
       },
       "type": "object"
     }
   },
-  "provenance_report": {
-    "description": "Trace provenance: scan note bodies for `<!-- key:value -->` tags — where an opinion/take/flag came from. Read-only.\n\nOn-demand scan over markdown bodies — no index, no sidecar. Use it to\nanswer \"show all conv:-derived takes\" or \"what's flagged add-to-imdb\"\nwithout grepping. The opinion/taste rows carry provenance as HTML\ncomments (e.g. `<!-- platform:imdb -->`, `<!-- conv:2026-06-01 -->`);\nthis reads them in place. Tags inside fenced code are ignored; multiple\ncomments and multiple key:value pairs on one line are all parsed.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "tag": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Shorthand filter — \"key\" or \"key:value\" (e.g. \"platform:imdb\")."
-        },
-        "key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Filter to rows carrying this provenance key."
-        },
-        "value": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "With key, require this exact value."
-        },
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Restrict the scan to one vault-relative file (else the whole\nKnowledge Base is walked)."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "propose_compilation": {
-    "description": "Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only.\n\nThe backlog-drain companion to `audit`'s `unprocessed_source` findings:\npoint it at one or more raw sources and it hands back a ready-to-fill\nnote skeleton — inferred note_type, a Question/Findings/Connections (or\nClaim/…) outline, the `sources[]` to cite, and adjacent compiled pages to\nlink (computed via the same hybrid retrieval as `suggest_links`). It\ndoes NOT write anything: you fill the prose and call `note()` with the\nreturned `suggested_sources` + `suggested_connections`.\n\nGroup sources yourself before calling — pass a set that genuinely belongs\nin one note (the audit list is aged oldest-first to help you triage).",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "sources": {
-          "items": {
-            "type": "string"
-          },
-          "type": "array",
-          "description": "Vault-relative paths/wikilinks to the source(s) to compile.\nSame path conventions as `note.sources` (brackets and the\nleading `Knowledge Base/` are tolerated)."
-        },
-        "suggested_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional title override; otherwise one is derived\nfrom the source titles."
-        }
-      },
-      "required": [
-        "sources"
-      ],
-      "type": "object"
-    }
-  },
-  "get": {
-    "description": "Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).\n\nReads anywhere under the vault root — not just `Knowledge Base/`.\nThis lets you cite from curated, read-only sibling folders (e.g.\n`Reference/`) kept outside Knowledge Base/ when compiling. Those are\nread-only by convention (marked in `_access.yaml`); `get` honors that\nby only reading.\n\nUse this when `find` gives you a path and you need the whole page\n(to cite, build on, or rewrite). `find` only returns excerpts.",
+  "create_file": {
+    "description": "Tier 2: write a file — or, with `kind=\"dir\"`, create a folder — at an\narbitrary vault path.\n\nWith `kind=\"dir\"`, this creates a folder (mkdir -p when `parents=true`)\nand ignores `content`/`frontmatter`/`overwrite` (folds in the former\n`create_directory` tool); returns {path, created, warnings}.\n\nEscape hatch for files that don't fit Tier 1 type routing — new folder\nstructures (`Identity/`, `Templates/`), skill files, scratch. For\ntyped notes use `note`/`add`/`link`/`preserve`.\n\nIf `frontmatter` is a dict, this op prepends a YAML block built from\nit (and auto-fills `created`/`updated` to today if not provided);\n`content` is the body in that case. If `frontmatter` is omitted,\n`content` is written verbatim — the caller is responsible for any\nfrontmatter already in it.\n\nRefuses:\n- Sources/, Evidence/ (append-only — use `add` or `preserve`).\n- Subtrees marked `readonly`/`excluded` in `_access.yaml` (curated,\n  read-only material) — a hard refusal with no override.\n- Existing files unless `overwrite=true`.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "path": {
           "type": "string",
-          "description": "Vault-relative path. Accepted shapes:\n- `Knowledge Base/Notes/Insights/foo.md`\n- `Reference/Strategy.md`\n- `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if\n  literal path doesn't resolve; auto-adds `.md`)."
+          "description": "Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.\nForward or back slashes accepted. Path-escape guarded."
         },
-        "frontmatter_only": {
+        "content": {
+          "default": "",
+          "type": "string",
+          "description": "File body (or full file if `frontmatter` is None). Text\nonly; for binaries use the /upload endpoint."
+        },
+        "frontmatter": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional dict prepended as YAML frontmatter."
+        },
+        "overwrite": {
           "default": false,
           "type": "boolean",
-          "description": "If true, return ONLY the frontmatter (no body) —\ncheap for scanning many files by field (folds in the former\n`get_frontmatter` tool). Returns {path, frontmatter,\nhas_frontmatter} instead of the full page below."
+          "description": "If true, replace existing file. Default false."
         },
-        "include_history": {
+        "allow_curated": {
           "default": false,
           "type": "boolean",
-          "description": "If true, attach a `history` list — the page's\nchange log from the append-only `log.md`, newest-first\n(`[{date, op, summary}]`, where `summary` is the `why:`\nrationale recorded at write time). Use this to answer \"why was\nthis note changed / what was the old version / show its history\"\nand to verify an edit's rationale. `[]` when the page has no\nrecorded edits."
+          "description": "Required to write under a curated tree. Default false."
         },
-        "links": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, attach a `links` summary —\n`{inbound: [...], outbound: [...]}`. `inbound` lists files whose\nwikilinks resolve to this page (each\n`{path, line_number, context, raw_target}`); `outbound` lists\nthe distinct wikilink targets in this page's body. Use it to\nsee a note's graph neighbourhood in one call. Default off (no\nbehaviour change)."
+        "kind": {
+          "default": "file",
+          "type": "string",
+          "description": "\"file\" (default) or \"dir\". With \"dir\", creates a folder\ninstead of a file (former `create_directory`)."
         },
-        "include_raw": {
-          "default": false,
+        "parents": {
+          "default": true,
           "type": "boolean",
-          "description": "If true, ALSO return `content` — the raw file text\nincluding the frontmatter delimiters. Off by default because it\nduplicates `frontmatter` + `body` (double the tokens on every\nread) and nothing in the normal workflow needs it: edits\nround-trip `body`, and the drift guard uses `content_hash`,\nwhich the server always computes over the raw bytes for you."
+          "description": "In \"dir\" mode, create intermediate folders (mkdir -p).\nDefault true."
         }
       },
       "required": [
         "path"
+      ],
+      "type": "object"
+    }
+  },
+  "delete": {
+    "description": "Tier 2: trash a file OR folder (auto-detected). Reversible — moves to\n_trash/, not /dev/null.\n\nDispatches on the path: a directory is trashed whole (needs\n`recursive=true` if non-empty; folds in the former `delete_directory`),\notherwise a single file. `force_superseded`/`expected_dead_inbound`\napply to files; `recursive` applies to folders.\n\nDeletes are NEVER permanent at this layer. The file moves to\n`Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`\nwith a `.meta.json` sidecar capturing original path, timestamp,\ninbound link count, and which force-flags were used. Recovery is\n`move_file` from the trash path back. Permanent removal happens\ndesk-side via `rm Knowledge Base/_trash/...`.\n\nPer SKILL.md rule 6, supersession via `replace` is still preferred\nfor compiled material. Use this op for scratch, mistakes outside the\ntyped-note set, and cleanup of files that genuinely shouldn't exist.\n\nRefuses:\n- Sources/, Evidence/ (append-only).\n- Files already in `_trash/` (already trashed — recover via move_file).\n- Curated trees unless `allow_curated=true`.\n- When `confirm=false`.\n- When `superseded_by:` is set (history) unless `force_superseded=true`.\n- When inbound wikilinks exist (after `expected_dead_inbound` filtering)\n  unless `force_orphan=true`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative."
+        },
+        "confirm": {
+          "type": "boolean",
+          "description": "Must be `true` explicitly. Marks the action deliberate."
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean",
+          "description": "For a non-empty FOLDER, required to confirm you know it\nhas contents. Ignored for files."
+        },
+        "force_orphan": {
+          "default": false,
+          "type": "boolean",
+          "description": "Allow trash even if inbound wikilinks exist."
+        },
+        "force_superseded": {
+          "default": false,
+          "type": "boolean",
+          "description": "Allow trash of a file in the supersession chain."
+        },
+        "allow_curated": {
+          "default": false,
+          "type": "boolean",
+          "description": "Required to trash under a curated tree."
+        },
+        "expected_dead_inbound": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Vault-relative paths whose inbound links\nto this file should be ignored. Use when you're trashing\nmultiple files in one workflow (e.g. cleaning a supersession\nchain) and don't want each step to false-positive on\nlinks that will die in the same batch."
+        }
+      },
+      "required": [
+        "path",
+        "confirm"
       ],
       "type": "object"
     }
@@ -1006,6 +562,1286 @@
       "required": [
         "path",
         "why"
+      ],
+      "type": "object"
+    }
+  },
+  "evolution": {
+    "description": "How a conclusion CHANGED over time — the supersession history of a topic, as timelines. Read-only.\n\n    For a topic `query`, finds the matching notes, follows each one's supersession\n    chain (the `supersedes`/`superseded_by` links `replace` records), and returns one\n    ordered timeline per chain — oldest version → newest. Each version carries its own\n    structurally-extracted claims, its date, and the RECORDED reason it was superseded\n    (the `why:` logged at that edit). The server only orders and surfaces what you\n    wrote; it does NOT generate a \"here's how your thinking changed\" summary — you read\n    the consecutive versions and see the shift.\n\n    Use this for \"how did my view on X evolve / what did I used to think / why did this\n    change\". Use `find` for plain lookup. Notes never superseded are omitted (no\n    evolution to show); a topic with no supersession returns empty `timelines` — an\n    honest \"nothing changed here\", not an error. Read-only: mutates nothing; `find`\n    ordering is unchanged.\n\n    Args:\n        query: The topic to trace (free text, like `find`).\n        limit: Max chains (timelines) to return, by find relevance (default 10;\n            0 or negative = uncapped). Chains beyond the cap are reported in\n            `truncation`, never dropped silently.\n        scope: Search scope passed to `find` — \"kb\" (default) / \"vault\" / \"kb-only\".\n        projects: Optional project-key filter passed to `find`.\n        tags: Optional tag filter passed to `find`.\n\n    Returns:\n        {query, timelines: [{chain_id, topic_anchor, span: {from, to, n_versions},\n         versions: [{path, title, status, date, claims: {title, type, lede, sections,\n         outline}, transition: {reason, date} | null}]}], truncation: [...]}.\n        `transition` is null on the active head; `versions` run oldest → newest by\n        supersession order; `span`/\n_versions` describe the whole chain.\n    ",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "type": "string"
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer"
+        },
+        "scope": {
+          "default": "kb",
+          "type": "string"
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "type": "object"
+    }
+  },
+  "fetch": {
+    "description": "Fetch one Knowledge Base document by `search` result ID with bounded text. Read-only.\n\nThis is a bounded read step between metadata-only `search` and full `get`.\nIt returns the markdown body without raw frontmatter and caps body text at\n6000 characters. Use `get` when the caller intentionally needs the full\nfrontmatter/body/edit hash envelope.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "A result `id` returned by `search` (the canonical vault-relative path)."
+        },
+        "max_chars": {
+          "default": 3000,
+          "type": "integer",
+          "description": "Maximum body characters to return. Values below 500 are raised\nto 500; values above 6000 are capped server-side."
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "type": "object"
+    }
+  },
+  "find": {
+    "description": "Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "query": {
+          "default": "",
+          "type": "string",
+          "description": "Free-text search string. In \"hybrid\"/\"vector\" mode it's\nembedded with bge-base for semantic recall. In \"keyword\" mode\nit's tokenized on whitespace and every token must appear in\ntitle or body (any order) — `contract employment` matches a\npage about \"employment contract\". Empty string always falls\nback to \"most-recent filtered\" behaviour regardless of mode."
+        },
+        "types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to these page types (source, research-note, insight, failure, pattern, experiment, production-log, entity)."
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to pages whose `project` or `projects:` includes any of these keys."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to pages whose `tags:` includes any of these (case-insensitive)."
+        },
+        "speakers": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to diarized media whose `speakers:` frontmatter includes any of\nthese named speakers (case-insensitive) — e.g. \"what did Alice say about X\".\nAND'd with the query/other filters; OR'd within the list."
+        },
+        "file_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Scope results to these artifact kinds — note, pdf, image,\naudio, video, csv, json, tsv. A binary surfaces under its media\nkind (pdf/image/...); a data file under its dataset card's format\n(csv/json). Omit to return ALL kinds (the default — search never\nhides a type unless you ask)."
+        },
+        "exclude_file_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Drop these kinds from results (same vocabulary)."
+        },
+        "limit": {
+          "default": 15,
+          "type": "integer",
+          "description": "Max hits to return. Default 15, hard cap 100."
+        },
+        "scope": {
+          "default": "kb",
+          "type": "string",
+          "description": "\"kb\" (default) searches Knowledge Base/ first and\nAUTO-WIDENS to the whole vault when the KB doesn't fill\n`limit` — so content in sibling folders (Tracking/,\nReference/, Finance/, ... and curated, read-only trees kept\noutside Knowledge Base/) is never silently invisible. Widened\nhits carry `outside_kb: true`. \"vault\" always walks the\nwhole vault. \"kb-only\" is the strict opt-out: KB only,\nnever widens. Outside-KB recall is BM25/keyword (the\nvector sidecar is KB-scoped), with a relaxed gate so terse\nfiles (e.g. a numbers-heavy tracker) surface on a partial\ntoken match. `_Schema/`, `_trash/`, `_attachments/`, and\n`.obsidian/` are excluded under every scope. NOTE: an\nempty result means \"not found in what I searched,\" NOT\n\"doesn't exist\" — say so, and try \"vault\" before\nconcluding absence."
+        },
+        "mode": {
+          "default": "hybrid",
+          "type": "string",
+          "description": "Ranker. \"hybrid\" (default) fuses BM25 + local vector\nembeddings via reciprocal rank fusion — best recall on\nnatural-language queries. \"keyword\" preserves the original\ncase-insensitive substring matching, sorted by `updated:`.\n\"vector\" is vector-only (testing aid). BM25 corpus is\nSnowball-stemmed so \"regulation\" reaches pages with\n\"regulator\"; keyword mode stays strict-substring. If the\nembedding sidecar hasn't been built yet, hybrid degrades\nto BM25-only; run `audit_fix(rebuild_embeddings=true)` to\npopulate it."
+        },
+        "graph": {
+          "default": true,
+          "type": "boolean",
+          "description": "When true (default) and mode is hybrid/vector, outbound\nwikilinks of top BM25/vector candidates contribute a third\nranking — surfaces 1-hop neighbours of strong matches."
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is mode-aware AUTO: in CPU steady-state modes it stays\noff for predictable latency; when the text/reranker device is\naccelerated, the server reranks only when ranking lanes\ndisagree or the query is long. Pass true to force reranking\nfor a high-value query, including on CPU; pass false to skip\nit entirely."
+        },
+        "prefer_compiled": {
+          "default": true,
+          "type": "boolean",
+          "description": "When true (default), applies a small boost to\ncompiled types (insight, pattern, failure, research-note,\nentity) and a small penalty to raw `source` after fusion\nAND rerank. Reflects the KB's epistemic hierarchy. Set\nfalse to retrieve raw source discussion verbatim (e.g.\n\"what did I capture from Dr. X\")."
+        },
+        "prefer_active": {
+          "default": true,
+          "type": "boolean",
+          "description": "When true (default), soft-demotes `status:\nsuperseded` pages so a replaced conclusion can't outrank the\npage that superseded it. The tombstone stays findable and its\nhit still carries `status` + `superseded_by` (the forward\npointer) so you can see it's superseded. Set false to rank a\nsuperseded page on its content alone (e.g. \"what did I used to\nthink about X\")."
+        },
+        "prefer_used": {
+          "default": false,
+          "type": "boolean",
+          "description": "When true (OFF by default — default ranking is\nusage-blind), applies a bounded, positive-only usage boost:\npages you actually read (`get`) and cite in written notes rank\nslightly higher, from ACT-R activation over the server's own\naccess logs. Capped below the compiled boost so usage breaks\nties but never overrides the epistemic hierarchy; never a\npenalty; never ADDS results — it only reorders pages the\ncontent lanes already matched. Boosted hits expose\n`signals.activation` + `signals.usage_boost` so you can see\nexactly why. Reading and citing pages IS the feedback loop —\nno separate feedback call exists or is needed. Use for \"what\nhave I been working with lately\" recall; leave off for\nneutral knowledge lookup."
+        },
+        "pack": {
+          "default": false,
+          "type": "boolean",
+          "description": "When true (off by default), ALSO assemble a reasoning-ready\ncontext pack from the top hits and change the return to\n{\"hits\": [...], \"pack\": {...}} (with pack off, the return is the\nusual hit list, unchanged). The pack is PURE MEASUREMENT over the\nnotes you already wrote — no server-side reasoning: each top note's\nstructurally-extracted key claims (lede + headline-section lines +\nheading outline), the 1-hop wikilink neighbourhood of those notes\nranked by co-citation, and the contradictions among them (recorded\nsupersession edges + proximity \"tension\" pairs in the embedding\nband, surfaced for you to judge — proximity, not polarity). Lets you\nreason over the matches in one shot instead of fanning out `get`\ncalls. Bounded with explicit `truncation`; the tension part needs\nthe embedding sidecar and reports `embeddings_available`."
+        },
+        "graph_enrich": {
+          "default": false,
+          "type": "boolean",
+          "description": "When true with `pack=true`, add typed graph neighborhood\ndata from the derived epistemic graph sidecar to the pack. Default\nfalse; missing/disabled/stale graph state soft-fails inside\n`pack.graph.available` without changing hits, hit ordering, or the\ndefault pack contract."
+        },
+        "detail": {
+          "default": "full",
+          "type": "string",
+          "description": "Result verbosity. \"full\" (default) keeps the current hit\nshape including `excerpt` and `signals`. \"compact\" returns the\nSAME ranked hits as token-cheap routing stubs — path, title,\ntype, scope, updated, plus lifecycle/media/outside_kb markers\nwhen present — omitting `excerpt` and `signals`. Use compact\nfor cheap proactive recall, then `get` a chosen page (or rerun\nwith detail=\"full\") when you need the why."
+        },
+        "include_timings": {
+          "default": false,
+          "type": "boolean",
+          "description": "When true (off by default), the return becomes an\nenvelope {\"hits\": [...], \"timings\": {...}} (with pack=true the\nenvelope also carries \"pack\"). `timings` reports total_ms,\nhot-cache status, and per-stage milliseconds for the retrieval\nlanes (skipped/failed optional lanes are marked, never fatal).\nDiagnostics only — timings never include note content. Omitted\n→ the response shape is unchanged."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "get": {
+    "description": "Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).\n\nReads anywhere under the vault root — not just `Knowledge Base/`.\nThis lets you cite from curated, read-only sibling folders (e.g.\n`Reference/`) kept outside Knowledge Base/ when compiling. Those are\nread-only by convention (marked in `_access.yaml`); `get` honors that\nby only reading.\n\nUse this when `find` gives you a path and you need the whole page\n(to cite, build on, or rewrite). `find` only returns excerpts.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path. Accepted shapes:\n- `Knowledge Base/Notes/Insights/foo.md`\n- `Reference/Strategy.md`\n- `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if\n  literal path doesn't resolve; auto-adds `.md`)."
+        },
+        "frontmatter_only": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, return ONLY the frontmatter (no body) —\ncheap for scanning many files by field (folds in the former\n`get_frontmatter` tool). Returns {path, frontmatter,\nhas_frontmatter} instead of the full page below."
+        },
+        "include_history": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, attach a `history` list — the page's\nchange log from the append-only `log.md`, newest-first\n(`[{date, op, summary}]`, where `summary` is the `why:`\nrationale recorded at write time). Use this to answer \"why was\nthis note changed / what was the old version / show its history\"\nand to verify an edit's rationale. `[]` when the page has no\nrecorded edits."
+        },
+        "links": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, attach a `links` summary —\n`{inbound: [...], outbound: [...]}`. `inbound` lists files whose\nwikilinks resolve to this page (each\n`{path, line_number, context, raw_target}`); `outbound` lists\nthe distinct wikilink targets in this page's body. Use it to\nsee a note's graph neighbourhood in one call. Default off (no\nbehaviour change)."
+        },
+        "include_raw": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, ALSO return `content` — the raw file text\nincluding the frontmatter delimiters. Off by default because it\nduplicates `frontmatter` + `body` (double the tokens on every\nread) and nothing in the normal workflow needs it: edits\nround-trip `body`, and the drift guard uses `content_hash`,\nwhich the server always computes over the raw bytes for you."
+        },
+        "max_body_chars": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional cap for the returned `body`. Use this when a\nclient wants bounded content instead of an arbitrary full-page read.\nValues above 12000 are capped server-side; negative values are rejected."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "get_video_frames": {
+    "description": "View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.\n\nUse this to see what a video actually contains (slides, screen\nrecordings, whiteboards, meetings) directly in the tool result. Frames\nare sampled evenly across the video (or the requested window),\nnear-duplicates are collapsed, and each frame comes back as a JPEG\nimage content block, preceded by one metadata block with per-frame\ntimestamps. Typical loop: overview call first, then zoom into a moment\nwith `start_sec`/`end_sec` — e.g. around a `find` hit's\n`clip_match_at`/`scene_match_at` timestamp.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "Vault-relative path to a video file\n(`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`)."
+        },
+        "max_frames": {
+          "default": 8,
+          "type": "integer",
+          "description": "Maximum frames to return. Default 8, hard-capped\nserver-side (16); out-of-range values clamp silently and the\nmetadata reports `max_frames_effective`. Each frame costs\nimage tokens — prefer a time window over raising this."
+        },
+        "start_sec": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional window start in seconds — sample at/after this\ntimestamp only."
+        },
+        "end_sec": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional window end in seconds — sample before this\ntimestamp only (clamped to the video's duration)."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "graph_context": {
+    "description": "Return a bounded typed-graph neighborhood for a page or query. Read-only.\n\nReads the derived `.graph.sqlite` sidecar created from Markdown,\nfrontmatter, wikilinks, source/evidence links, supersession fields, and\nsemantic blocks. Markdown remains the source of truth; this operation does\nnot build the sidecar, modify notes, accept suggested relations, or change\n`find` ranking. If the graph sidecar is missing, disabled, or incompatible,\nthe response reports `available: false` instead of failing.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing page path to use as the graph seed. Optional when `query`\nis supplied."
+        },
+        "query": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text seed for matching graph node titles/content. Optional when\n`path` is supplied."
+        },
+        "depth": {
+          "default": 1,
+          "type": "integer",
+          "description": "Traversal depth from seed nodes. Default 1."
+        },
+        "relation_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional allowlist of relation types, e.g.\n`derived_from`, `evidenced_by`, `supports`, `contradicts`,\n`supersedes`, `links_to`."
+        },
+        "node_types": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional allowlist of node kinds, e.g. `file`, `decision`,\n`finding`, `risk`, `action`, `claim`, `evidence`."
+        },
+        "max_nodes": {
+          "default": 40,
+          "type": "integer",
+          "description": "Cap returned nodes. Default 40."
+        },
+        "max_edges": {
+          "default": 80,
+          "type": "integer",
+          "description": "Cap returned edges. Default 80."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "link": {
+    "description": "Create a typed entity under Entities/<Folder>/<Name>.md.\n\nEntities are the typed nodes of the KB graph — people, concepts,\nlibraries, decisions. Name them after the thing they are (Title Case,\nnot slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.\n\nFour entity types with conditional frontmatter:\n- `person`   → Entities/People/. Optional: `affiliation`, `relationship`.\n- `concept`  → Entities/Concepts/. Optional: `domain` (e.g.\n  \"retrieval\", \"workflow\", \"infrastructure\").\n- `library`  → Entities/Libraries/. Optional: `language`, `repo`,\n  `license`, `used_in` (list of projects).\n- `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),\n  `project` (project key — any slug; unknown keys auto-register on first\n  use, same as `note`), `decision_status` ∈ {proposed, accepted,\n  superseded}.\n\nv1 is create-only. If the entity file already exists, returns\nENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index\n(e.g. Entities/Concepts/index.md categorization) is NOT auto-updated;\nreconcile via desk audit.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "entity_type": {
+          "type": "string",
+          "description": "One of person, concept, library, decision."
+        },
+        "name": {
+          "type": "string",
+          "description": "Title Case, the entity's actual name. Will be the filename."
+        },
+        "summary": {
+          "type": "string",
+          "description": "One-paragraph description for the `## Summary` section."
+        },
+        "why_in_kb": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional `## Why in the KB` paragraph — explains what\nthis entity is relevant to in your work."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowercase dash-separated; normalized by the server."
+        },
+        "connections": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "List of vault-relative wikilink targets to put under\n`## Connections`. Same path conventions as `note.sources`."
+        },
+        "affiliation": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "relationship": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "language": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "repo": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "license": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "used_in": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decided": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "decision_status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "entity_type",
+        "name",
+        "summary"
+      ],
+      "type": "object"
+    }
+  },
+  "list_directory": {
+    "description": "Tier 2: list files and subfolders at a vault path. Read-only.\n\nWorks anywhere under vault root including curated trees (consistent\nwith `get`). For .md files, surfaces the frontmatter `type` field\nso callers can scan typed content quickly.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "",
+          "type": "string",
+          "description": "Vault-relative. Empty string lists vault root. Auto-handles\nforward/back slashes."
+        },
+        "recursive": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, walk subfolders. Default false."
+        },
+        "include_hidden": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, include dotfiles and _attachments/.\nDefault false."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "list_inbound_links": {
+    "description": "Tier 2: find files whose wikilinks resolve to `target`. Read-only.\n\nUseful before `move_file` (preview what update_wikilinks will touch)\nor `delete_file` (preview what would break). Matches three forms:\n- Full path: `[[Knowledge Base/Notes/Insights/foo]]`\n- KB-stripped: `[[Notes/Insights/foo]]`\n- Bare basename (only when unique vault-wide): `[[foo]]`",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "target": {
+          "type": "string",
+          "description": "Vault-relative path or bare basename. `.md` optional."
+        }
+      },
+      "required": [
+        "target"
+      ],
+      "type": "object"
+    }
+  },
+  "list_trash": {
+    "description": "Tier 2: enumerate recoverable trash entries. Read-only.\n\nWalks Knowledge Base/_trash/YYYY-MM-DD/ and parses each .meta.json\nsidecar. Returns entries most-recent-first with original path,\ntimestamp, kind (file or directory), and which force-flags fired\nat trash time. Also surfaces drift: orphan_sidecars (sidecars with\nno target file) and orphan_files (trashed files with no sidecar).\nPair with `recover_from_trash` to undo.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "date": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional YYYY-MM-DD filter to scope to one day."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "mint_download_token": {
+    "description": "Mint a short-lived bearer token for the HTTP `/download` endpoint.\n\nUse to PULL a vault file into the sandbox — a dataset, an evidence\nbinary, a scan — so you can analyze it. Call this, then from the code\nsandbox GET `download_url?path=<vault-relative path>` with header\n`Authorization: Bearer <token>`. Read-only; the token is download-scoped\n(can't write) and expires after `ttl_seconds`.\n\nReturns: {token, ttl_seconds, download_url}.\nRaises: DOWNLOAD_DISABLED if the server has no upload token configured.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "mint_upload_token": {
+    "description": "Mint a short-lived bearer token for the HTTP `/upload` endpoint.\n\nThis is how you file BINARY evidence (images, PDFs, any file) from a\nclaude.ai web session — the bytes travel out-of-band, never through the\nmodel. Steps:\n\n1. Call this tool → `{token, ttl_seconds, upload_url[, large_upload_url]}`.\n2. In the code sandbox, multipart-POST the user's ATTACHED files to\n   `upload_url` with header `Authorization: Bearer <token>` and form\n   fields `file`, `scope`, `category` (optional `filename`, `description`,\n   `text`). Files must be ATTACHMENTS — inline-pasted images never reach\n   the sandbox disk and cannot be sent.\n3. To make the binary SEARCHABLE, extract its text in the sandbox (OCR an\n   image/scan, read a PDF, transcribe audio/video) and pass it as the\n   `text` field above — it lands in an embedded sidecar so the otherwise-\n   opaque file is findable by its content.\n\n**Large files (>100 MB):** `upload_url` is fronted by Cloudflare, which\n413s any body over ~100 MB at the edge. If a file exceeds ~100 MB (or a\nPOST to `upload_url` returns 413), send it to `large_upload_url` instead\nwhen that field is present — same token, same form fields, an alternate\nhost with no edge cap. If `large_upload_url` is absent, only `upload_url`\nis available and >100 MB must go desk-side.\n\nThe token is Evidence-write only and expires after `ttl_seconds`; the\nserver's long-lived secret never leaves the server.\n\nReturns: {token, ttl_seconds, upload_url, large_upload_url?}.\nRaises: UPLOAD_DISABLED if the server has no upload token configured.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
+  "move_file": {
+    "description": "Tier 2: relocate a file, optionally rewriting inbound wikilinks.\n\nRefuses moves out of OR into Sources/ and Evidence/ (append-only).\nCurated trees on either end need `allow_curated=true`. Refuses to\noverwrite existing destinations.\n\nWhen `update_wikilinks=true` (default), scans the full vault for\n`[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the\nbasename is unique vault-wide) and rewrites them to point at the\nnew location. Preserves full-form vs stripped-form per link.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "old_path": {
+          "type": "string",
+          "description": "Vault-relative source."
+        },
+        "new_path": {
+          "type": "string",
+          "description": "Vault-relative destination (must not exist)."
+        },
+        "update_wikilinks": {
+          "default": true,
+          "type": "boolean",
+          "description": "Default true."
+        },
+        "allow_curated": {
+          "default": false,
+          "type": "boolean",
+          "description": "Required if either end is in a curated tree."
+        }
+      },
+      "required": [
+        "old_path",
+        "new_path"
+      ],
+      "type": "object"
+    }
+  },
+  "note": {
+    "description": "Create a compiled note in the Knowledge Base.\n\n    Use this for distilled thinking — not raw capture. For raw capture\n    (an article you read, a session transcript), use `add` instead.\n\n    Six note types:\n    - `research-note`: project-scoped findings. `project` REQUIRED.\n      → `Notes/Research/<Project>/<slug>.md`\n    - `insight`: cross-cutting claim. Optional `projects` (plural).\n      → `Notes/Insights/<slug>.md`\n    - `failure`: documented failure mode. Optional `projects`, optional\n      `severity` ∈ {minor, moderate, serious, critical}.\n      → `Notes/Failures/<slug>.md`\n    - `pattern`: reusable cross-cutting pattern. Optional `projects`,\n      optional `pattern_type` ∈ {architectural, workflow, prompting,\n      governance, pedagogical}.\n      → `Notes/Patterns/<slug>.md`\n    - `experiment`: hypothesis + protocol. `domain`, `started` (YYYY-MM-DD),\n      and `duration` (e.g. \"30 days\", \"ongoing\") REQUIRED. Optional\n      `hypothesis`,\n` (default 1), `concluded`.\n      → `Notes/Experiments/<domain>/YYYY-MM-<slug>.md`\n    - `production-log`: creative artifact log. `medium` REQUIRED (e.g.\n      \"Posts\", \"Articles\"). Optional `recorded`, `published`, `host`,\n      `editor`, `projects`. Status enum is richer: {planned, recorded,\n      edited, published, reflected, dropped, archived}; defaults to\n      `planned`.\n      → `Notes/Productions/<medium>/YYYY-MM-<slug>.md`\n\n    For each `sources:` wikilink, appends this note's wikilink to that\n    source's `ingested_into:` frontmatter (maintaining the source→note graph).\n\n    The result includes `write_feedback`: deterministic structural feedback with\n    semantic block counts, source/link counts, unresolved wikilink warnings, and\n    suggested next actions. Treat it as write-shape feedback, not semantic truth.\n\n    Args:\n        content: Full markdown body, written verbatim after the\n            frontmatter. Should start with `# <title>` (the H1 matching\n            the title arg) followed by the section conventions per type:\n            research-note: `## Question`/`## Findings`/`## Connections`.\n            insight: `## Claim`/`## Why it holds`/`## Connections`.\n            failure: `## What happened`/`## Mechanism`/`## Detection`/`## Mitigation`/`## Connections`.\n            pattern: `## Problem`/`## Solution`/`## When to use`/`## When NOT to use`/`## Connections`.\n            experiment: `## Hypothesis`/`## Protocol`/`## Baseline`/`## Intervention`/`## Results`/`## Conclusion`/`## Connections`.\n            production-log: `## Frame`/`## Artifact`/`## Production session`/`## Outcomes`/`## Reflection`/`## Connections`.\n            Conventions only — no shape is enforced.\n        note_type: One of research-note, insight, failure, pattern,\n            experiment, production-log.\n        title: Human title; used to derive a kebab-case filename slug.\n            Experiments and production-logs auto-prefix with YYYY-MM.\n        project: REQUIRED for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work.\n        projects: List of project keys (plural). Optional for insight,\n            failure, pattern, production-log. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work.\n        sources: Vault-relative wikilinks to existing pages this note draws\n            from, e.g. `[\"Knowledge Base/Sources/Articles/2026-05-18-foo\"]`\n            or `[\"[[Knowledge Base/Sources/Articles/2026-05-18-foo]]\"]`.\n            Brackets and the leading `Knowledge Base/` are tolerated.\n        tags: Lowercase dash-separated; the server normalizes case/spacing.\n        status: Defaults to `active` for most types, `planned` for\n            production-log. Valid set varies by type.\n        severity: failure only. {minor, moderate, serious, critical}.\n        pattern_type: pattern only. {architectural, workflow, prompting,\n            governance, pedagogical}.\n        domain: experiment only. Becomes the subfolder name (lowercased).\n        started: experiment only. YYYY-MM-DD when the experiment began.\n        duration: experiment only. Freeform, e.g. \"30 days\", \"ongoing\".\n        hypothesis: experiment only. One-line claim being tested.\n        n: experiment only. Sample size. Defaults to 1 (n-of-1).\n        concluded: experiment only. YYYY-MM-DD when it ended (absent while ongoing).\n        medium: production-log only. Subfolder, e.g. \"Posts\", \"Articles\".\n        recorded: production-log only. YYYY-MM-DD of recording session.\n        published: production-log only. YYYY-MM-DD of publication.\n        host: production-log only. Creator/talent name.\n        editor: production-log only. Producer/editor name.\n\n        suggestions: When true (default), the result carries a `suggestions`\n            block: existing pages this note should probably link to, ranked\n            by the retrieval stack. Set false for a faster write when you\n            already know the note's links; the near-duplicate/overlap\n            warnings stay ON either way (dedupe is a guardrail, not a\n            suggestion). For important drafts, call `suggest_links` before\n            `note` and wire accepted links into the body or with a follow-up\n            `edit`.\n\n    Returns:\n        {path, warnings, suggestions?, write_feedback}. `write_feedback` is\n        deterministic structural feedback: semantic block counts, source/link\n        counts, unresolved wikilink warnings, and suggested next actions. On\n        validation failure, raises a structured error with code=INVALID_NOTE,\n        the missing fields, and the reason.\n    ",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "type": "string"
+        },
+        "note_type": {
+          "type": "string"
+        },
+        "title": {
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "severity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "pattern_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "started": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "hypothesis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "n": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "concluded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "published": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "suggestions": {
+          "default": true,
+          "type": "boolean"
+        },
+        "project_category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "content",
+        "note_type",
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "overview": {
+    "description": "Bounded, read-only structure report of the vault (or a subtree).\n\nAnswers \"what does this vault look like?\" in ONE call — use this instead\nof reading files one by one for structural questions. Reports totals,\nwhether a `Knowledge Base/` tree is present, a depth/breadth-capped folder\ntree (per-folder file counts, frontmatter coverage %, wikilink/md-link\ncounts, dominant filename patterns, sample names), junk candidates\n(zero-byte files, sync-conflict duplicates like `note 2.md`), largest and\noldest-unmodified files, and exactly what was skipped. Lists are capped;\ncounts are always exact. Works on vaults with no initialized\n`Knowledge Base/` (`kb.present` false).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "default": "",
+          "type": "string",
+          "description": "Vault-relative subtree to report on. Empty string (default)\nreports the whole vault. Auto-handles forward/back slashes."
+        },
+        "max_depth": {
+          "default": 3,
+          "type": "integer",
+          "description": "Tree depth cap; deeper folders roll up into their\nancestors (counts stay exact). Default 3."
+        },
+        "include_hidden": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, include dot-directories/dotfiles and\n`_trash`/`_attachments`. Default false."
+        },
+        "samples": {
+          "default": 5,
+          "type": "integer",
+          "description": "Filename samples listed per folder. Default 5."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "preserve": {
+    "description": "Capture a TEXT artifact to Evidence/<scope>/<category>/.\n\nFor raw factual artifacts that are text — transcripts, pasted letters,\nemail bodies — preserved as-received with no analytical processing. Per\nSKILL.md rule 2, Evidence is append-only; analytical takes go in compiled\nnotes that link to the evidence file.\n\nBINARY artifacts (PDFs, images, .docx — any non-text file) are delivered\nout-of-band, not through this tool: call `mint_upload_token` and POST the\nbytes to `/upload`, or drop the file into Evidence/ desk-side via Obsidian\nSync. The bytes never pass through the model.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "type": "string",
+          "description": "Incident or domain key (e.g. \"project-alpha\", \"incident-2026-04\").\nCreates the subfolder if it doesn't exist."
+        },
+        "category": {
+          "type": "string",
+          "description": "Sub-category within scope (e.g. \"letters\", \"labs\",\n\"court-docs\"). Creates the subfolder if it doesn't exist."
+        },
+        "filename": {
+          "type": "string",
+          "description": "The artifact's filename including extension\n(e.g. `2026-04-15-statement.txt`)."
+        },
+        "content": {
+          "type": "string",
+          "description": "UTF-8 text to preserve as-received."
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional. If supplied, a sidecar `<filename>.md`\nis written alongside the artifact with frontmatter and the\ndescription under `## Description`."
+        }
+      },
+      "required": [
+        "scope",
+        "category",
+        "filename",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  "propose_compilation": {
+    "description": "Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only.\n\nThe backlog-drain companion to `audit`'s `unprocessed_source` findings:\npoint it at one or more raw sources and it hands back a ready-to-fill\nnote skeleton — inferred note_type, a Question/Findings/Connections (or\nClaim/…) outline, the `sources[]` to cite, and adjacent compiled pages to\nlink (computed via the same hybrid retrieval as `suggest_links`). It\ndoes NOT write anything: you fill the prose and call `note()` with the\nreturned `suggested_sources` + `suggested_connections`.\n\nGroup sources yourself before calling — pass a set that genuinely belongs\nin one note (the audit list is aged oldest-first to help you triage).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "sources": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Vault-relative paths/wikilinks to the source(s) to compile.\nSame path conventions as `note.sources` (brackets and the\nleading `Knowledge Base/` are tolerated)."
+        },
+        "suggested_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional title override; otherwise one is derived\nfrom the source titles."
+        }
+      },
+      "required": [
+        "sources"
+      ],
+      "type": "object"
+    }
+  },
+  "provenance_report": {
+    "description": "Trace provenance: scan note bodies for `<!-- key:value -->` tags — where an opinion/take/flag came from. Read-only.\n\nOn-demand scan over markdown bodies — no index, no sidecar. Use it to\nanswer \"show all conv:-derived takes\" or \"what's flagged add-to-imdb\"\nwithout grepping. The opinion/taste rows carry provenance as HTML\ncomments (e.g. `<!-- platform:imdb -->`, `<!-- conv:2026-06-01 -->`);\nthis reads them in place. Tags inside fenced code are ignored; multiple\ncomments and multiple key:value pairs on one line are all parsed.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Shorthand filter — \"key\" or \"key:value\" (e.g. \"platform:imdb\")."
+        },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Filter to rows carrying this provenance key."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "With key, require this exact value."
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Restrict the scan to one vault-relative file (else the whole\nKnowledge Base is walked)."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "query_data": {
+    "description": "Tier 2: structured query over a CSV/JSON data file under the vault.\n\nThe retrieval half of the data-search pattern — `find` surfaces a\ndataset's markdown \"card\"; this reads the raw file the card points at\nand returns exact rows / aggregates (no whole-file dump). KB datasets\nare small, so it reads on demand — no index, no new infra.\n\nFormats: CSV / TSV, and JSON (a top-level array, or a nested array via\n`record_path` / common-key auto-detect). Column names may be dotted to\nreach nested JSON fields (e.g. \"performer.name\", \"id.extension\")\nanywhere a column is named (filters / columns / sort / aggregate).",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "vault-relative path to the `.csv` / `.tsv` / `.json` file."
+        },
+        "record_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "(JSON) dotted path to the array inside a nested\nobject, e.g. \"sections.work_incapacity\". Omit for a top-level\narray or the common keys result/results/data/rows/items/entries."
+        },
+        "filters": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "list of `{column, op, value}`. `op` ∈ eq, ne, gt, gte, lt,\nlte, contains, icontains, startswith, in, nin, exists, missing.\nNumeric compares coerce tolerantly (comma decimals; lab\noperators like \"<0.4\"/\">75\" are stripped for the comparison)."
+        },
+        "columns": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "project to these columns (dotted ok). Omit for all."
+        },
+        "sort_by": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "descending": {
+          "default": false,
+          "type": "boolean"
+        },
+        "limit": {
+          "default": 100,
+          "type": "integer"
+        },
+        "offset": {
+          "default": 0,
+          "type": "integer"
+        },
+        "aggregate": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "instead of rows — \"count\"; \"func:column\" where func ∈\nmin, max, sum, avg, latest, distinct; or \"profile\" to get a\ndeterministic content profile (per-column kind, distinct values,\nnumeric ranges, date span) under `aggregate.profile` PLUS a\nready-to-write markdown dataset card under `aggregate.dataset_card`.\nUse \"profile\" to make a CSV/JSON findable — write the card into\nthe KB (fill in its \"What this holds\" line) so the dataset is\ndiscoverable by content without ever embedding its raw rows."
+        },
+        "date_from": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "date_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "date_column": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
+  "reconcile": {
+    "description": "Heal vault drift from out-of-band edits in one pass.\n\nThe writers keep the embedding sidecar, index.md count rows, and log.md\ncurrent on every write. But editing the vault directly — in Obsidian,\non mobile, or via a manual filesystem edit — bypasses those hooks, so\nthe sidecar and the counts drift silently. `reconcile` is the\nfirst-class \"I edited around the system, fix it\" command:\n\n1. Index counts — recompute Sources/Notes/Entities count rows from\n   on-disk reality and rewrite any that drifted (curated descriptions\n   and Recent-activity are preserved; only count tokens move).\n2. Embeddings — incrementally re-embed only the *stale* files (those\n   `embedding_drift` flags: on-disk mtime newer than the sidecar row),\n   via the same path the writers use. Cheaper than\n   `audit_fix(rebuild_embeddings=true)`'s full wipe-and-rebuild.\n3. Drift report — re-run index_drift + embedding_drift, return what\n   remains.\n\nNarrower than `audit_fix`: it does NOT canonicalize wikilinks or\nbackfill frontmatter (those are content rewrites you opt into).\nIdempotent; `dry_run=true` reports without writing.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "dry_run": {
+          "default": false,
+          "type": "boolean",
+          "description": "If true, compute what would change without writing.\nDefault false."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "recover_from_trash": {
+    "description": "Tier 2: undo a delete_file/delete_directory.\n\nReads the .meta.json sidecar to discover where the file lived\nbefore being trashed, moves it back there, and cleans up the\nsidecar. If `restore_path` is provided, uses that instead of the\nsidecar's original location (useful when the original parent\ndirectory has been removed).\n\nRefuses to overwrite existing files at the restore destination.\nRefuses restore into Sources/Evidence (append-only). Curated trees\nneed `allow_curated=true`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "trash_path": {
+          "type": "string",
+          "description": "Vault-relative path to the trashed entry\n(under `Knowledge Base/_trash/...`)."
+        },
+        "restore_path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional override; defaults to the original\nlocation from the sidecar."
+        },
+        "allow_curated": {
+          "default": false,
+          "type": "boolean",
+          "description": "Required if restoring into a curated tree."
+        }
+      },
+      "required": [
+        "trash_path"
       ],
       "type": "object"
     }
@@ -1268,500 +2104,17 @@
       "type": "object"
     }
   },
-  "link": {
-    "description": "Create a typed entity under Entities/<Folder>/<Name>.md.\n\nEntities are the typed nodes of the KB graph — people, concepts,\nlibraries, decisions. Name them after the thing they are (Title Case,\nnot slugified): `Ada Lovelace`, `Agentic RAG`, `pgvector`.\n\nFour entity types with conditional frontmatter:\n- `person`   → Entities/People/. Optional: `affiliation`, `relationship`.\n- `concept`  → Entities/Concepts/. Optional: `domain` (e.g.\n  \"retrieval\", \"workflow\", \"infrastructure\").\n- `library`  → Entities/Libraries/. Optional: `language`, `repo`,\n  `license`, `used_in` (list of projects).\n- `decision` → Entities/Decisions/. Optional: `decided` (YYYY-MM-DD),\n  `project` (project key — any slug; unknown keys auto-register on first\n  use, same as `note`), `decision_status` ∈ {proposed, accepted,\n  superseded}.\n\nv1 is create-only. If the entity file already exists, returns\nENTITY_EXISTS — use `replace` to supersede instead. Sub-folder index\n(e.g. Entities/Concepts/index.md categorization) is NOT auto-updated;\nreconcile via desk audit.",
+  "search": {
+    "description": "Search the Knowledge Base with a portable metadata-only response. Read-only.\n\nThis is the conservative companion to `find`: it returns result IDs, titles,\nURLs, and string metadata only. It never returns note excerpts, graph/ranking\nsignals, context packs, timings, raw content, or page bodies. Use `fetch`\nwith one returned `id` to read bounded document text, or use `find`/`get`\ndirectly when the caller intentionally needs richer retrieval output.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "entity_type": {
-          "type": "string",
-          "description": "One of person, concept, library, decision."
-        },
-        "name": {
-          "type": "string",
-          "description": "Title Case, the entity's actual name. Will be the filename."
-        },
-        "summary": {
-          "type": "string",
-          "description": "One-paragraph description for the `## Summary` section."
-        },
-        "why_in_kb": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional `## Why in the KB` paragraph — explains what\nthis entity is relevant to in your work."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Lowercase dash-separated; normalized by the server."
-        },
-        "connections": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "List of vault-relative wikilink targets to put under\n`## Connections`. Same path conventions as `note.sources`."
-        },
-        "affiliation": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "relationship": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "domain": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "language": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "repo": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "license": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "used_in": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "decided": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "project": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "decision_status": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "entity_type",
-        "name",
-        "summary"
-      ],
-      "type": "object"
-    }
-  },
-  "preserve": {
-    "description": "Capture a TEXT artifact to Evidence/<scope>/<category>/.\n\nFor raw factual artifacts that are text — transcripts, pasted letters,\nemail bodies — preserved as-received with no analytical processing. Per\nSKILL.md rule 2, Evidence is append-only; analytical takes go in compiled\nnotes that link to the evidence file.\n\nBINARY artifacts (PDFs, images, .docx — any non-text file) are delivered\nout-of-band, not through this tool: call `mint_upload_token` and POST the\nbytes to `/upload`, or drop the file into Evidence/ desk-side via Obsidian\nSync. The bytes never pass through the model.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "scope": {
-          "type": "string",
-          "description": "Incident or domain key (e.g. \"project-alpha\", \"incident-2026-04\").\nCreates the subfolder if it doesn't exist."
-        },
-        "category": {
-          "type": "string",
-          "description": "Sub-category within scope (e.g. \"letters\", \"labs\",\n\"court-docs\"). Creates the subfolder if it doesn't exist."
-        },
-        "filename": {
-          "type": "string",
-          "description": "The artifact's filename including extension\n(e.g. `2026-04-15-statement.txt`)."
-        },
-        "content": {
-          "type": "string",
-          "description": "UTF-8 text to preserve as-received."
-        },
-        "description": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional. If supplied, a sidecar `<filename>.md`\nis written alongside the artifact with frontmatter and the\ndescription under `## Description`."
-        }
-      },
-      "required": [
-        "scope",
-        "category",
-        "filename",
-        "content"
-      ],
-      "type": "object"
-    }
-  },
-  "query_data": {
-    "description": "Tier 2: structured query over a CSV/JSON data file under the vault.\n\nThe retrieval half of the data-search pattern — `find` surfaces a\ndataset's markdown \"card\"; this reads the raw file the card points at\nand returns exact rows / aggregates (no whole-file dump). KB datasets\nare small, so it reads on demand — no index, no new infra.\n\nFormats: CSV / TSV, and JSON (a top-level array, or a nested array via\n`record_path` / common-key auto-detect). Column names may be dotted to\nreach nested JSON fields (e.g. \"performer.name\", \"id.extension\")\nanywhere a column is named (filters / columns / sort / aggregate).",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "vault-relative path to the `.csv` / `.tsv` / `.json` file."
-        },
-        "record_path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "(JSON) dotted path to the array inside a nested\nobject, e.g. \"sections.work_incapacity\". Omit for a top-level\narray or the common keys result/results/data/rows/items/entries."
-        },
-        "filters": {
-          "anyOf": [
-            {
-              "items": {
-                "additionalProperties": true,
-                "type": "object"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "list of `{column, op, value}`. `op` ∈ eq, ne, gt, gte, lt,\nlte, contains, icontains, startswith, in, nin, exists, missing.\nNumeric compares coerce tolerantly (comma decimals; lab\noperators like \"<0.4\"/\">75\" are stripped for the comparison)."
-        },
-        "columns": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "project to these columns (dotted ok). Omit for all."
-        },
-        "sort_by": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "descending": {
-          "default": false,
-          "type": "boolean"
-        },
-        "limit": {
-          "default": 100,
-          "type": "integer"
-        },
-        "offset": {
-          "default": 0,
-          "type": "integer"
-        },
-        "aggregate": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "instead of rows — \"count\"; \"func:column\" where func ∈\nmin, max, sum, avg, latest, distinct; or \"profile\" to get a\ndeterministic content profile (per-column kind, distinct values,\nnumeric ranges, date span) under `aggregate.profile` PLUS a\nready-to-write markdown dataset card under `aggregate.dataset_card`.\nUse \"profile\" to make a CSV/JSON findable — write the card into\nthe KB (fill in its \"What this holds\" line) so the dataset is\ndiscoverable by content without ever embedding its raw rows."
-        },
-        "date_from": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "date_to": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        },
-        "date_column": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    }
-  },
-  "create_file": {
-    "description": "Tier 2: write a file — or, with `kind=\"dir\"`, create a folder — at an\narbitrary vault path.\n\nWith `kind=\"dir\"`, this creates a folder (mkdir -p when `parents=true`)\nand ignores `content`/`frontmatter`/`overwrite` (folds in the former\n`create_directory` tool); returns {path, created, warnings}.\n\nEscape hatch for files that don't fit Tier 1 type routing — new folder\nstructures (`Identity/`, `Templates/`), skill files, scratch. For\ntyped notes use `note`/`add`/`link`/`preserve`.\n\nIf `frontmatter` is a dict, this op prepends a YAML block built from\nit (and auto-fills `created`/`updated` to today if not provided);\n`content` is the body in that case. If `frontmatter` is omitted,\n`content` is written verbatim — the caller is responsible for any\nfrontmatter already in it.\n\nRefuses:\n- Sources/, Evidence/ (append-only — use `add` or `preserve`).\n- Subtrees marked `readonly`/`excluded` in `_access.yaml` (curated,\n  read-only material) — a hard refusal with no override.\n- Existing files unless `overwrite=true`.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.\nForward or back slashes accepted. Path-escape guarded."
-        },
-        "content": {
+        "query": {
           "default": "",
           "type": "string",
-          "description": "File body (or full file if `frontmatter` is None). Text\nonly; for binaries use the /upload endpoint."
+          "description": "Free-text search string."
         },
-        "frontmatter": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional dict prepended as YAML frontmatter."
-        },
-        "overwrite": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, replace existing file. Default false."
-        },
-        "allow_curated": {
-          "default": false,
-          "type": "boolean",
-          "description": "Required to write under a curated tree. Default false."
-        },
-        "kind": {
-          "default": "file",
-          "type": "string",
-          "description": "\"file\" (default) or \"dir\". With \"dir\", creates a folder\ninstead of a file (former `create_directory`)."
-        },
-        "parents": {
-          "default": true,
-          "type": "boolean",
-          "description": "In \"dir\" mode, create intermediate folders (mkdir -p).\nDefault true."
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    }
-  },
-  "list_directory": {
-    "description": "Tier 2: list files and subfolders at a vault path. Read-only.\n\nWorks anywhere under vault root including curated trees (consistent\nwith `get`). For .md files, surfaces the frontmatter `type` field\nso callers can scan typed content quickly.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "default": "",
-          "type": "string",
-          "description": "Vault-relative. Empty string lists vault root. Auto-handles\nforward/back slashes."
-        },
-        "recursive": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, walk subfolders. Default false."
-        },
-        "include_hidden": {
-          "default": false,
-          "type": "boolean",
-          "description": "If true, include dotfiles and _attachments/.\nDefault false."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "move_file": {
-    "description": "Tier 2: relocate a file, optionally rewriting inbound wikilinks.\n\nRefuses moves out of OR into Sources/ and Evidence/ (append-only).\nCurated trees on either end need `allow_curated=true`. Refuses to\noverwrite existing destinations.\n\nWhen `update_wikilinks=true` (default), scans the full vault for\n`[[<old>]]`, `[[<old.md>]]`, and `[[<old_basename>]]` (only when the\nbasename is unique vault-wide) and rewrites them to point at the\nnew location. Preserves full-form vs stripped-form per link.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "old_path": {
-          "type": "string",
-          "description": "Vault-relative source."
-        },
-        "new_path": {
-          "type": "string",
-          "description": "Vault-relative destination (must not exist)."
-        },
-        "update_wikilinks": {
-          "default": true,
-          "type": "boolean",
-          "description": "Default true."
-        },
-        "allow_curated": {
-          "default": false,
-          "type": "boolean",
-          "description": "Required if either end is in a curated tree."
-        }
-      },
-      "required": [
-        "old_path",
-        "new_path"
-      ],
-      "type": "object"
-    }
-  },
-  "delete": {
-    "description": "Tier 2: trash a file OR folder (auto-detected). Reversible — moves to\n_trash/, not /dev/null.\n\nDispatches on the path: a directory is trashed whole (needs\n`recursive=true` if non-empty; folds in the former `delete_directory`),\notherwise a single file. `force_superseded`/`expected_dead_inbound`\napply to files; `recursive` applies to folders.\n\nDeletes are NEVER permanent at this layer. The file moves to\n`Knowledge Base/_trash/YYYY-MM-DD/HHMMSS-<sanitized-original-path>.md`\nwith a `.meta.json` sidecar capturing original path, timestamp,\ninbound link count, and which force-flags were used. Recovery is\n`move_file` from the trash path back. Permanent removal happens\ndesk-side via `rm Knowledge Base/_trash/...`.\n\nPer SKILL.md rule 6, supersession via `replace` is still preferred\nfor compiled material. Use this op for scratch, mistakes outside the\ntyped-note set, and cleanup of files that genuinely shouldn't exist.\n\nRefuses:\n- Sources/, Evidence/ (append-only).\n- Files already in `_trash/` (already trashed — recover via move_file).\n- Curated trees unless `allow_curated=true`.\n- When `confirm=false`.\n- When `superseded_by:` is set (history) unless `force_superseded=true`.\n- When inbound wikilinks exist (after `expected_dead_inbound` filtering)\n  unless `force_orphan=true`.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Vault-relative."
-        },
-        "confirm": {
-          "type": "boolean",
-          "description": "Must be `true` explicitly. Marks the action deliberate."
-        },
-        "recursive": {
-          "default": false,
-          "type": "boolean",
-          "description": "For a non-empty FOLDER, required to confirm you know it\nhas contents. Ignored for files."
-        },
-        "force_orphan": {
-          "default": false,
-          "type": "boolean",
-          "description": "Allow trash even if inbound wikilinks exist."
-        },
-        "force_superseded": {
-          "default": false,
-          "type": "boolean",
-          "description": "Allow trash of a file in the supersession chain."
-        },
-        "allow_curated": {
-          "default": false,
-          "type": "boolean",
-          "description": "Required to trash under a curated tree."
-        },
-        "expected_dead_inbound": {
+        "types": {
           "anyOf": [
             {
               "items": {
@@ -1774,185 +2127,7 @@
             }
           ],
           "default": null,
-          "description": "Vault-relative paths whose inbound links\nto this file should be ignored. Use when you're trashing\nmultiple files in one workflow (e.g. cleaning a supersession\nchain) and don't want each step to false-positive on\nlinks that will die in the same batch."
-        }
-      },
-      "required": [
-        "path",
-        "confirm"
-      ],
-      "type": "object"
-    }
-  },
-  "append_to_file": {
-    "description": "Tier 2: append text to an existing file.\n\nRefuses Sources/ (immutable). Allowed on Evidence/ sidecars and\ngeneral vault files. Curated trees need `allow_curated=true`.\nEnsures a single newline boundary between existing tail and new\ncontent.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Vault-relative."
-        },
-        "content": {
-          "type": "string",
-          "description": "Text to append (text only; binaries go via /upload)."
-        },
-        "allow_curated": {
-          "default": false,
-          "type": "boolean",
-          "description": "Required under curated trees."
-        }
-      },
-      "required": [
-        "path",
-        "content"
-      ],
-      "type": "object"
-    }
-  },
-  "list_trash": {
-    "description": "Tier 2: enumerate recoverable trash entries. Read-only.\n\nWalks Knowledge Base/_trash/YYYY-MM-DD/ and parses each .meta.json\nsidecar. Returns entries most-recent-first with original path,\ntimestamp, kind (file or directory), and which force-flags fired\nat trash time. Also surfaces drift: orphan_sidecars (sidecars with\nno target file) and orphan_files (trashed files with no sidecar).\nPair with `recover_from_trash` to undo.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "date": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional YYYY-MM-DD filter to scope to one day."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "recover_from_trash": {
-    "description": "Tier 2: undo a delete_file/delete_directory.\n\nReads the .meta.json sidecar to discover where the file lived\nbefore being trashed, moves it back there, and cleans up the\nsidecar. If `restore_path` is provided, uses that instead of the\nsidecar's original location (useful when the original parent\ndirectory has been removed).\n\nRefuses to overwrite existing files at the restore destination.\nRefuses restore into Sources/Evidence (append-only). Curated trees\nneed `allow_curated=true`.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "trash_path": {
-          "type": "string",
-          "description": "Vault-relative path to the trashed entry\n(under `Knowledge Base/_trash/...`)."
-        },
-        "restore_path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional override; defaults to the original\nlocation from the sidecar."
-        },
-        "allow_curated": {
-          "default": false,
-          "type": "boolean",
-          "description": "Required if restoring into a curated tree."
-        }
-      },
-      "required": [
-        "trash_path"
-      ],
-      "type": "object"
-    }
-  },
-  "list_inbound_links": {
-    "description": "Tier 2: find files whose wikilinks resolve to `target`. Read-only.\n\nUseful before `move_file` (preview what update_wikilinks will touch)\nor `delete_file` (preview what would break). Matches three forms:\n- Full path: `[[Knowledge Base/Notes/Insights/foo]]`\n- KB-stripped: `[[Notes/Insights/foo]]`\n- Bare basename (only when unique vault-wide): `[[foo]]`",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "target": {
-          "type": "string",
-          "description": "Vault-relative path or bare basename. `.md` optional."
-        }
-      },
-      "required": [
-        "target"
-      ],
-      "type": "object"
-    }
-  },
-  "get_video_frames": {
-    "description": "View / analyze / look inside a vault video: sampled keyframes returned INLINE as images — no download round-trip.\n\nUse this to see what a video actually contains (slides, screen\nrecordings, whiteboards, meetings) directly in the tool result. Frames\nare sampled evenly across the video (or the requested window),\nnear-duplicates are collapsed, and each frame comes back as a JPEG\nimage content block, preceded by one metadata block with per-frame\ntimestamps. Typical loop: overview call first, then zoom into a moment\nwith `start_sec`/`end_sec` — e.g. around a `find` hit's\n`clip_match_at`/`scene_match_at` timestamp.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "type": "string",
-          "description": "Vault-relative path to a video file\n(`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`)."
-        },
-        "max_frames": {
-          "default": 8,
-          "type": "integer",
-          "description": "Maximum frames to return. Default 8, hard-capped\nserver-side (16); out-of-range values clamp silently and the\nmetadata reports `max_frames_effective`. Each frame costs\nimage tokens — prefer a time window over raising this."
-        },
-        "start_sec": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional window start in seconds — sample at/after this\ntimestamp only."
-        },
-        "end_sec": {
-          "anyOf": [
-            {
-              "type": "number"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional window end in seconds — sample before this\ntimestamp only (clamped to the video's duration)."
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    }
-  },
-  "note": {
-    "description": "Create a compiled note in the Knowledge Base.\n\nUse this for distilled thinking — not raw capture. For raw capture\n(an article you read, a session transcript), use `add` instead.\n\nSix note types:\n- `research-note`: project-scoped findings. `project` REQUIRED.\n  → `Notes/Research/<Project>/<slug>.md`\n- `insight`: cross-cutting claim. Optional `projects` (plural).\n  → `Notes/Insights/<slug>.md`\n- `failure`: documented failure mode. Optional `projects`, optional\n  `severity` ∈ {minor, moderate, serious, critical}.\n  → `Notes/Failures/<slug>.md`\n- `pattern`: reusable cross-cutting pattern. Optional `projects`,\n  optional `pattern_type` ∈ {architectural, workflow, prompting,\n  governance, pedagogical}.\n  → `Notes/Patterns/<slug>.md`\n- `experiment`: hypothesis + protocol. `domain`, `started` (YYYY-MM-DD),\n  and `duration` (e.g. \"30 days\", \"ongoing\") REQUIRED. Optional\n  `hypothesis`, `n` (default 1), `concluded`.\n  → `Notes/Experiments/<domain>/YYYY-MM-<slug>.md`\n- `production-log`: creative artifact log. `medium` REQUIRED (e.g.\n  \"Posts\", \"Articles\"). Optional `recorded`, `published`, `host`,\n  `editor`, `projects`. Status enum is richer: {planned, recorded,\n  edited, published, reflected, dropped, archived}; defaults to\n  `planned`.\n  → `Notes/Productions/<medium>/YYYY-MM-<slug>.md`\n\nFor each `sources:` wikilink, appends this note's wikilink to that\nsource's `ingested_into:` frontmatter (maintaining the source→note graph).",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "content": {
-          "type": "string",
-          "description": "Full markdown body, written verbatim after the\nfrontmatter. Should start with `# <title>` (the H1 matching\nthe title arg) followed by the section conventions per type:\nresearch-note: `## Question`/`## Findings`/`## Connections`.\ninsight: `## Claim`/`## Why it holds`/`## Connections`.\nfailure: `## What happened`/`## Mechanism`/`## Detection`/`## Mitigation`/`## Connections`.\npattern: `## Problem`/`## Solution`/`## When to use`/`## When NOT to use`/`## Connections`.\nexperiment: `## Hypothesis`/`## Protocol`/`## Baseline`/`## Intervention`/`## Results`/`## Conclusion`/`## Connections`.\nproduction-log: `## Frame`/`## Artifact`/`## Production session`/`## Outcomes`/`## Reflection`/`## Connections`.\nConventions only — no shape is enforced."
-        },
-        "note_type": {
-          "type": "string",
-          "description": "One of research-note, insight, failure, pattern,\nexperiment, production-log."
-        },
-        "title": {
-          "type": "string",
-          "description": "Human title; used to derive a kebab-case filename slug.\nExperiments and production-logs auto-prefix with YYYY-MM."
-        },
-        "project": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "REQUIRED for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
+          "description": "Optional page-type filter; values are OR'd within the filter."
         },
         "projects": {
           "anyOf": [
@@ -1967,22 +2142,7 @@
             }
           ],
           "default": null,
-          "description": "List of project keys (plural). Optional for insight,\nfailure, pattern, production-log. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
-        },
-        "sources": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Vault-relative wikilinks to existing pages this note draws\nfrom, e.g. `[\"Knowledge Base/Sources/Articles/2026-05-18-foo\"]`\nor `[\"[[Knowledge Base/Sources/Articles/2026-05-18-foo]]\"]`.\nBrackets and the leading `Knowledge Base/` are tolerated."
+          "description": "Optional project filter; values are OR'd within the filter."
         },
         "tags": {
           "anyOf": [
@@ -1997,214 +2157,129 @@
             }
           ],
           "default": null,
-          "description": "Lowercase dash-separated; the server normalizes case/spacing."
+          "description": "Optional tag filter; values are OR'd within the filter."
         },
-        "status": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Defaults to `active` for most types, `planned` for\nproduction-log. Valid set varies by type."
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "description": "Maximum number of results. Capped to 50."
         },
-        "severity": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "failure only. {minor, moderate, serious, critical}."
-        },
-        "pattern_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "pattern only. {architectural, workflow, prompting,\ngovernance, pedagogical}."
-        },
-        "domain": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. Becomes the subfolder name (lowercased)."
-        },
-        "started": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. YYYY-MM-DD when the experiment began."
-        },
-        "duration": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. Freeform, e.g. \"30 days\", \"ongoing\"."
-        },
-        "hypothesis": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. One-line claim being tested."
-        },
-        "n": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. Sample size. Defaults to 1 (n-of-1)."
-        },
-        "concluded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "experiment only. YYYY-MM-DD when it ended (absent while ongoing)."
-        },
-        "medium": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "production-log only. Subfolder, e.g. \"Posts\", \"Articles\"."
-        },
-        "recorded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "production-log only. YYYY-MM-DD of recording session."
-        },
-        "published": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "production-log only. YYYY-MM-DD of publication."
-        },
-        "host": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "production-log only. Creator/talent name."
-        },
-        "editor": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "production-log only. Producer/editor name."
-        },
-        "suggestions": {
-          "default": true,
-          "type": "boolean",
-          "description": "When true (default), the result carries a `suggestions`\nblock — existing pages this note should probably link to, ranked\nby the retrieval stack. Set false for a faster write when you\nalready know the note's links; the near-duplicate/overlap\nwarnings stay ON either way (dedupe is a guardrail, not a\nsuggestion)."
-        },
-        "project_category": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null
+        "scope": {
+          "default": "kb",
+          "type": "string",
+          "description": "\"kb\" for Knowledge Base first, or \"vault\" to search the broader vault."
         }
       },
-      "required": [
-        "content",
-        "note_type",
-        "title"
-      ],
       "type": "object"
     }
   },
-  "mint_upload_token": {
-    "description": "Mint a short-lived bearer token for the HTTP `/upload` endpoint.\n\nThis is how you file BINARY evidence (images, PDFs, any file) from a\nclaude.ai web session — the bytes travel out-of-band, never through the\nmodel. Steps:\n\n1. Call this tool → `{token, ttl_seconds, upload_url[, large_upload_url]}`.\n2. In the code sandbox, multipart-POST the user's ATTACHED files to\n   `upload_url` with header `Authorization: Bearer <token>` and form\n   fields `file`, `scope`, `category` (optional `filename`, `description`,\n   `text`). Files must be ATTACHMENTS — inline-pasted images never reach\n   the sandbox disk and cannot be sent.\n3. To make the binary SEARCHABLE, extract its text in the sandbox (OCR an\n   image/scan, read a PDF, transcribe audio/video) and pass it as the\n   `text` field above — it lands in an embedded sidecar so the otherwise-\n   opaque file is findable by its content.\n\n**Large files (>100 MB):** `upload_url` is fronted by Cloudflare, which\n413s any body over ~100 MB at the edge. If a file exceeds ~100 MB (or a\nPOST to `upload_url` returns 413), send it to `large_upload_url` instead\nwhen that field is present — same token, same form fields, an alternate\nhost with no edge cap. If `large_upload_url` is absent, only `upload_url`\nis available and >100 MB must go desk-side.\n\nThe token is Evidence-write only and expires after `ttl_seconds`; the\nserver's long-lived secret never leaves the server.\n\nReturns: {token, ttl_seconds, upload_url, large_upload_url?}.\nRaises: UPLOAD_DISABLED if the server has no upload token configured.",
+  "suggest_links": {
+    "description": "Suggest existing KB pages a note should link to. Read-only.\n\nCloses the corpus-blind-write gap: surfaces the related prior work a\ndraft (or an existing page) should connect to, so the graph gets denser\nwith every write instead of just bigger. For link suggestions only — it\nreuses the same hybrid ranker as `find`, prefers well-connected hubs, and excludes\nthe page itself plus anything it already links. Suggestions are\nnon-binding: YOU decide which to wire in (e.g. via a follow-up `edit`).\n\nTwo call shapes:\n- `path`: suggest links for an EXISTING page (densify it retroactively).\n  Same path conventions as `get`/`find`.\n- `draft_title` + `draft_body`: suggest links for a note you're about to\n  create, BEFORE calling `note` — so you can cite/connect on first write.",
     "inputSchema": {
       "additionalProperties": false,
-      "properties": {},
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing page to suggest links for. Mutually exclusive with\nthe draft_* args."
+        },
+        "draft_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Title of a not-yet-written note."
+        },
+        "draft_body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Body (markdown) of a not-yet-written note. Wikilinks\nalready present in it are treated as \"already linked\" and excluded."
+        },
+        "limit": {
+          "default": 8,
+          "type": "integer",
+          "description": "Max suggestions (default 8)."
+        },
+        "scope": {
+          "default": "kb",
+          "type": "string",
+          "description": "\"kb\" (default) or \"vault\" — same meaning as `find`."
+        }
+      },
       "type": "object"
     }
   },
-  "mint_download_token": {
-    "description": "Mint a short-lived bearer token for the HTTP `/download` endpoint.\n\nUse to PULL a vault file into the sandbox — a dataset, an evidence\nbinary, a scan — so you can analyze it. Call this, then from the code\nsandbox GET `download_url?path=<vault-relative path>` with header\n`Authorization: Bearer <token>`. Read-only; the token is download-scoped\n(can't write) and expires after `ttl_seconds`.\n\nReturns: {token, ttl_seconds, download_url}.\nRaises: DOWNLOAD_DISABLED if the server has no upload token configured.",
+  "suggest_relations": {
+    "description": "Suggest candidate typed graph relations. Read-only and proposal-only.\n\nUses deterministic signals from wikilinks, frontmatter sources, shared\nsources/entities, supersession, and optional embedding proximity when\navailable. Model-backed suggestions are default-off and soft-fail as\nwarnings; accepted relations still require an explicit `note` or `edit`\nwrite. This operation never mutates Markdown or the graph sidecar.",
     "inputSchema": {
       "additionalProperties": false,
-      "properties": {},
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing page to inspect. Mutually exclusive with draft-only use."
+        },
+        "draft_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional title for a not-yet-written draft."
+        },
+        "draft_body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Draft body; wikilinks in it become proposal candidates."
+        },
+        "include_model_suggestions": {
+          "default": false,
+          "type": "boolean",
+          "description": "Request optional model-backed suggestion\npaths. Default false; unavailable paths soft-fail with warnings."
+        },
+        "limit": {
+          "default": 10,
+          "type": "integer",
+          "description": "Max candidates to return. Default 10."
+        }
+      },
       "type": "object"
     }
   }
