@@ -73,6 +73,8 @@ def main(argv: list[str] | None = None) -> int:
         return _list_speakers_main(raw[1:])
     if raw and raw[0] == "remove-speaker":
         return _remove_speaker_main(raw[1:])
+    if raw and raw[0] in _simple_cli_action_names():
+        return _simple_action_main(raw)
     # Registry-driven core operations (reads + writes): `kb find "…"`, `kb get …`,
     # `kb note …`, etc. — every command on the `cli` surface.
     if raw and raw[0] in _core_op_names():
@@ -780,6 +782,273 @@ def _install_hook_main(argv: list[str]) -> int:
         print(hook_module.snippet(report["installed"]))
     return 0
 
+
+# --------------------------------------------------------------------------- #
+# Simple product actions (friendly CLI aliases over canonical registry commands)
+# --------------------------------------------------------------------------- #
+_SIMPLE_CLI_ACTIONS = frozenset({"ask", "remember", "capture", "review", "connect", "maintain"})
+
+
+def _simple_cli_action_names() -> frozenset[str]:
+    return _SIMPLE_CLI_ACTIONS
+
+
+def _with_json(argv: list[str], enabled: bool) -> list[str]:
+    return argv + (["--json"] if enabled else [])
+
+
+def _append_repeated(argv: list[str], flag: str, values: list[str] | None) -> None:
+    for value in values or []:
+        argv.extend([flag, value])
+
+
+def _field(argv: list[str], name: str, value: object | None) -> None:
+    if value is None:
+        return
+    if isinstance(value, list):
+        if not value:
+            return
+        value = ",".join(str(item) for item in value)
+    argv.extend(["--field", f"{name}={value}"])
+
+
+def _simple_action_main(argv: list[str]) -> int:
+    action = argv[0]
+    rest = argv[1:]
+    if action == "ask":
+        return _simple_ask_main(rest)
+    if action == "remember":
+        return _simple_remember_main(rest)
+    if action == "capture":
+        return _simple_capture_main(rest)
+    if action == "review":
+        return _simple_review_main(rest)
+    if action == "connect":
+        return _simple_connect_main(rest)
+    if action == "maintain":
+        return _simple_maintain_main(rest)
+    raise AssertionError(f"unhandled simple action: {action}")
+
+
+def _simple_ask_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem ask",
+        description="Ask Exomem what it knows. Thin alias over find with compact recall defaults.",
+    )
+    parser.add_argument("query", help="question or search phrase")
+    parser.add_argument("--deep", action="store_true", help="include a packed reasoning context")
+    parser.add_argument(
+        "--graph-enrich",
+        action="store_true",
+        help="with --deep, include typed graph neighborhood data when available",
+    )
+    parser.add_argument("--limit", type=int, default=15, help="maximum hits to return")
+    parser.add_argument(
+        "--scope",
+        choices=("kb", "vault", "kb-only"),
+        default="kb",
+        help="search scope (default: kb, which can auto-widen)",
+    )
+    parser.add_argument("--type", dest="types", action="append", default=None, help="page type filter (repeatable)")
+    parser.add_argument("--project", dest="projects", action="append", default=None, help="project filter (repeatable)")
+    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag filter (repeatable)")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = [
+        "find",
+        args.query,
+        "--detail",
+        "compact",
+        "--no-rerank",
+        "--limit",
+        str(args.limit),
+        "--scope",
+        args.scope,
+    ]
+    _append_repeated(core, "--types", args.types)
+    _append_repeated(core, "--projects", args.projects)
+    _append_repeated(core, "--tags", args.tags)
+    if args.deep or args.graph_enrich:
+        core.append("--pack")
+    if args.graph_enrich:
+        core.append("--graph-enrich")
+    return _core_op_main(_with_json(core, args.json))
+
+
+def _simple_remember_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem remember",
+        description="Remember a durable conclusion. Thin alias over note.",
+    )
+    parser.add_argument("content", help="compiled note body markdown")
+    parser.add_argument("--title", required=True, help="note title")
+    parser.add_argument("--type", dest="note_type", default="insight", help="note type (default: insight)")
+    parser.add_argument("--project", help="research-note project key")
+    parser.add_argument("--project-ref", dest="projects", action="append", default=None, help="projects list entry (repeatable)")
+    parser.add_argument("--source", dest="sources", action="append", default=None, help="source/evidence path (repeatable)")
+    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag (repeatable)")
+    parser.add_argument("--status", help="status override")
+    parser.add_argument("--severity", help="failure severity")
+    parser.add_argument("--pattern-type", help="pattern subtype")
+    parser.add_argument("--domain", help="experiment domain")
+    parser.add_argument("--started", help="experiment start date")
+    parser.add_argument("--duration", help="experiment duration")
+    parser.add_argument("--medium", help="production-log medium")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = [
+        "note",
+        "--content",
+        args.content,
+        "--note-type",
+        args.note_type,
+        "--title",
+        args.title,
+    ]
+    _field(core, "project", args.project)
+    _field(core, "projects", args.projects)
+    _field(core, "sources", args.sources)
+    _field(core, "tags", args.tags)
+    _field(core, "status", args.status)
+    _field(core, "severity", args.severity)
+    _field(core, "pattern_type", args.pattern_type)
+    _field(core, "domain", args.domain)
+    _field(core, "started", args.started)
+    _field(core, "duration", args.duration)
+    _field(core, "medium", args.medium)
+    return _core_op_main(_with_json(core, args.json))
+
+
+def _simple_capture_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem capture",
+        description="Capture raw source or proof-bearing text. Thin alias over add/preserve.",
+    )
+    parser.add_argument("content", help="raw text to capture")
+    parser.add_argument("--as", dest="capture_kind", choices=("source", "evidence"), default="source")
+    parser.add_argument("--title", help="source title (required for --as source)")
+    parser.add_argument("--source-type", default="other", help="source type for --as source")
+    parser.add_argument("--url", help="source URL")
+    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag (repeatable)")
+    parser.add_argument("--why-captured", help="why this source is worth keeping")
+    parser.add_argument("--scope", help="evidence scope for --as evidence")
+    parser.add_argument("--category", help="evidence category for --as evidence")
+    parser.add_argument("--filename", help="evidence filename for --as evidence")
+    parser.add_argument("--description", help="evidence sidecar description")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    if args.capture_kind == "source":
+        if not args.title:
+            parser.error("--title is required when --as source")
+        core = [
+            "add",
+            "--content",
+            args.content,
+            "--source-type",
+            args.source_type,
+            "--title",
+            args.title,
+        ]
+        if args.url:
+            core.extend(["--url", args.url])
+        _append_repeated(core, "--tags", args.tags)
+        if args.why_captured:
+            core.extend(["--why-captured", args.why_captured])
+    else:
+        missing = [name for name in ("scope", "category", "filename") if not getattr(args, name)]
+        if missing:
+            parser.error("--as evidence requires " + ", ".join(f"--{name}" for name in missing))
+        core = [
+            "preserve",
+            "--scope",
+            args.scope,
+            "--category",
+            args.category,
+            "--filename",
+            args.filename,
+            "--content",
+            args.content,
+        ]
+        if args.description:
+            core.extend(["--description", args.description])
+    return _core_op_main(_with_json(core, args.json))
+
+
+def _simple_review_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem review",
+        description="Review knowledge needing attention. Thin alias over attention/audit.",
+    )
+    parser.add_argument("--audit", action="store_true", help="run the full audit report instead of attention queue")
+    parser.add_argument("--category", dest="categories", action="append", default=None, help="review/audit category (repeatable)")
+    parser.add_argument("--limit", type=int, default=25, help="attention item cap")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = ["audit"] if args.audit else ["attention", "--limit", str(args.limit)]
+    _append_repeated(core, "--categories", args.categories)
+    return _core_op_main(_with_json(core, args.json))
+
+
+def _simple_connect_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem connect",
+        description="Suggest links or typed graph relations. Proposal-only by default.",
+    )
+    parser.add_argument("--path", help="existing page path")
+    parser.add_argument("--draft-title", help="draft title")
+    parser.add_argument("--draft-body", help="draft body")
+    parser.add_argument("--relations", action="store_true", help="suggest typed graph relations instead of wikilinks")
+    parser.add_argument("--model-suggestions", action="store_true", help="opt into model-backed relation suggestions")
+    parser.add_argument("--limit", type=int, default=8, help="candidate cap")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = ["suggest_relations" if args.relations else "suggest_links"]
+    if args.path:
+        core.extend(["--path", args.path])
+    if args.draft_title:
+        core.extend(["--draft-title", args.draft_title])
+    if args.draft_body:
+        core.extend(["--draft-body", args.draft_body])
+    core.extend(["--limit", str(args.limit)])
+    if args.relations and args.model_suggestions:
+        core.append("--include-model-suggestions")
+    return _core_op_main(_with_json(core, args.json))
+
+
+def _simple_maintain_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem maintain",
+        description="Check vault health; write-capable fixes require explicit flags.",
+    )
+    parser.add_argument("--fix", action="store_true", help="run audit_fix instead of read-only audit")
+    parser.add_argument("--reconcile", action="store_true", help="run reconcile instead of read-only audit")
+    parser.add_argument("--dry-run", action="store_true", help="with --fix/--reconcile, report without writing")
+    parser.add_argument("--rebuild-embeddings", action="store_true", help="with --fix, rebuild text embeddings")
+    parser.add_argument("--category", dest="categories", action="append", default=None, help="audit category (repeatable)")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    if args.fix and args.reconcile:
+        parser.error("choose only one of --fix or --reconcile")
+    if args.fix:
+        core = ["audit_fix"]
+        if args.dry_run:
+            core.append("--dry-run")
+        if args.rebuild_embeddings:
+            core.append("--rebuild-embeddings")
+    elif args.reconcile:
+        core = ["reconcile"]
+        if args.dry_run:
+            core.append("--dry-run")
+    else:
+        core = ["audit"]
+        _append_repeated(core, "--categories", args.categories)
+    return _core_op_main(_with_json(core, args.json))
 
 # --------------------------------------------------------------------------- #
 # Registry-driven core operations (reads + writes)

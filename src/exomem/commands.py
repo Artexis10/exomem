@@ -268,6 +268,8 @@ def op_bootstrap(
                 "try pack=true for synthesis instead of many get calls",
             ],
         },
+        "simple_actions": simple_action_catalog(selected_packs),
+        "common_actions": list(simple_action_names()),
         "front_door_actions": product_front_door_catalog(selected_packs),
         "tool_catalog": product_tool_catalog(),
         "common_tools": [
@@ -2440,6 +2442,77 @@ def note_description(project_keys_hint: str) -> str:
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
 _PRODUCT_ACTIONS: tuple[str, ...] = ("save", "adopt", "ask", "prove", "review", "update", "connect")
+_SIMPLE_ACTIONS: tuple[str, ...] = (
+    "ask",
+    "remember",
+    "capture",
+    "review",
+    "connect",
+    "adopt",
+    "maintain",
+)
+_SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
+    "ask": ("ask",),
+    "remember": ("save", "update"),
+    "capture": ("save", "prove"),
+    "review": ("review",),
+    "connect": ("connect",),
+    "adopt": ("adopt",),
+    "maintain": ("review", "update"),
+}
+_SIMPLE_ACTION_DEFS: dict[str, dict] = {
+    "ask": {
+        "intent": "Recall durable knowledge and cite useful context.",
+        "route": {"tool": "find", "args": {"detail": "compact", "rerank": False}},
+        "deep_route": {
+            "tool": "find",
+            "args": {"detail": "compact", "rerank": False, "pack": True},
+        },
+        "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
+        "advanced": ["get", "graph_context", "evolution"],
+    },
+    "remember": {
+        "intent": "Save a durable conclusion as compiled governed knowledge.",
+        "route": {"tool": "note", "args": {"note_type": "insight"}},
+        "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
+        "advanced": ["replace", "edit", "link"],
+    },
+    "capture": {
+        "intent": "Capture raw material or proof-bearing text without turning it into a conclusion.",
+        "route": {"tool": "add", "args": {"source_type": "other"}},
+        "evidence_route": {"tool": "preserve", "args": {}},
+        "safety": "additive write; Sources and Evidence preserve originals/provenance",
+        "advanced": ["mint_upload_token", "propose_compilation"],
+    },
+    "review": {
+        "intent": "Review stale, contradictory, or unprocessed knowledge before acting.",
+        "route": {"tool": "attention", "args": {}},
+        "audit_route": {"tool": "audit", "args": {}},
+        "safety": "read-only by default; surfaces candidates for human judgment",
+        "advanced": ["audit", "propose_compilation", "evolution"],
+    },
+    "connect": {
+        "intent": "Find links or typed relations that make the knowledge graph denser.",
+        "route": {"tool": "suggest_links", "args": {}},
+        "relations_route": {"tool": "suggest_relations", "args": {}},
+        "safety": "proposal-only by default; suggested relations never write automatically",
+        "advanced": ["graph_context", "link"],
+    },
+    "adopt": {
+        "intent": "Assess or import an existing vault safely.",
+        "route": {"tool": "adopt", "args": {"mode": "scan-only"}},
+        "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
+        "advanced": ["overview", "propose_compilation"],
+    },
+    "maintain": {
+        "intent": "Check vault health and repair drift only when explicitly requested.",
+        "route": {"tool": "audit", "args": {}},
+        "fix_route": {"tool": "audit_fix", "args": {"dry_run": False}},
+        "reconcile_route": {"tool": "reconcile", "args": {"dry_run": False}},
+        "safety": "read-only by default; write-capable fixes require explicit flags",
+        "advanced": ["audit_fix", "reconcile", "doctor"],
+    },
+}
 _PRODUCT_METADATA: dict[str, dict] = {
     "bootstrap": {"surface": "primary", "actions": (), "first_run_safe": True},
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
@@ -2564,6 +2637,74 @@ def product_tool_catalog() -> dict:
         "advanced": advanced,
         "first_run_safe": [c.name for c in COMMANDS if c.first_run_safe],
     }
+
+
+def _catalog_route_tools(entry: dict) -> set[str]:
+    tools: set[str] = set()
+    for key, value in entry.items():
+        if key == "route" or key.endswith("_route"):
+            if isinstance(value, dict) and value.get("tool"):
+                tools.add(str(value["tool"]))
+    for value in entry.get("advanced", []):
+        tools.add(str(value))
+    return tools
+
+
+def simple_action_names() -> tuple[str, ...]:
+    """The stable, beginner-facing action vocabulary."""
+    return _SIMPLE_ACTIONS
+
+
+def simple_action_catalog(selected_packs: dict | None = None) -> dict:
+    """Product action map over canonical commands; no duplicate command logic."""
+    known_commands = {command.name for command in COMMANDS} | {
+        "doctor",
+        "mint_upload_token",
+    }
+    out: dict[str, dict] = {}
+    for action in _SIMPLE_ACTIONS:
+        definition = _SIMPLE_ACTION_DEFS[action]
+        missing = sorted(_catalog_route_tools(definition) - known_commands)
+        if missing:
+            raise RuntimeError(
+                f"simple action {action!r} references unknown route(s): {missing}"
+            )
+        out[action] = {
+            "intent": definition["intent"],
+            "route": definition["route"],
+            "safety": definition["safety"],
+            "advanced": definition.get("advanced", []),
+        }
+        for key in (
+            "deep_route",
+            "evidence_route",
+            "audit_route",
+            "relations_route",
+            "fix_route",
+            "reconcile_route",
+        ):
+            if key in definition:
+                out[action][key] = definition[key]
+
+    packs = (selected_packs or {}).get("packs") or []
+    if packs:
+        for action, aliases in _SIMPLE_ACTION_PACK_ALIASES.items():
+            alias_set = set(aliases)
+            guidance = []
+            for pack in packs:
+                if not (alias_set & set(pack.get("actions") or [])):
+                    continue
+                guidance.append(
+                    {
+                        "pack_id": pack.get("id"),
+                        "name": pack.get("name"),
+                        "agent_instructions": pack.get("agent_instructions"),
+                        "suggested_workflows": pack.get("suggested_workflows") or [],
+                    }
+                )
+            if guidance:
+                out[action]["selected_pack_guidance"] = guidance
+    return out
 
 
 def product_front_door_catalog(selected_packs: dict | None = None) -> dict:

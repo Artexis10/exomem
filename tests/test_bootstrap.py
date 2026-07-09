@@ -42,6 +42,10 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
         "memory_model",
         "knowledge_packs",
     } <= set(out)
+    assert set(out["common_actions"]) == set(commands.simple_action_names())
+    assert out["simple_actions"]["ask"]["route"]["tool"] == "find"
+    assert out["simple_actions"]["remember"]["route"]["tool"] == "note"
+    assert out["simple_actions"]["capture"]["evidence_route"]["tool"] == "preserve"
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
     assert [s["name"] for s in out["workflow_skills"]] == [
         "exomem-continue",
@@ -116,6 +120,59 @@ def test_product_front_door_metadata_is_registry_derived() -> None:
         assert command.product_surface in {"primary", "advanced"}
         assert set(command.product_actions) <= actions
 
+def test_simple_action_catalog_is_registry_routed() -> None:
+    catalog = commands.simple_action_catalog()
+
+    assert set(catalog) == {
+        "ask",
+        "remember",
+        "capture",
+        "review",
+        "connect",
+        "adopt",
+        "maintain",
+    }
+    assert catalog["ask"]["route"] == {
+        "tool": "find",
+        "args": {"detail": "compact", "rerank": False},
+    }
+    assert catalog["ask"]["deep_route"]["args"]["pack"] is True
+    assert catalog["remember"]["route"]["tool"] == "note"
+    assert catalog["capture"]["route"]["tool"] == "add"
+    assert catalog["capture"]["evidence_route"]["tool"] == "preserve"
+    assert catalog["review"]["route"]["tool"] == "attention"
+    assert catalog["connect"]["relations_route"]["tool"] == "suggest_relations"
+    assert catalog["adopt"]["route"]["args"] == {"mode": "scan-only"}
+    assert catalog["maintain"]["fix_route"]["tool"] == "audit_fix"
+
+    known = {command.name for command in commands.COMMANDS} | {"doctor", "mint_upload_token"}
+    for action, item in catalog.items():
+        routes = [item["route"]]
+        routes.extend(
+            value for key, value in item.items()
+            if key.endswith("_route") and isinstance(value, dict)
+        )
+        for route in routes:
+            assert route["tool"] in known, (action, route)
+        for tool in item["advanced"]:
+            assert tool in known, (action, tool)
+
+    selected = {
+        "packs": [
+            {
+                "id": "legal-warranty",
+                "name": "Legal and warranty",
+                "actions": ["save", "prove", "review"],
+                "agent_instructions": "Preserve proof before compiling claims.",
+                "suggested_workflows": [],
+            }
+        ]
+    }
+    guided = commands.simple_action_catalog(selected)
+    assert guided["remember"]["selected_pack_guidance"][0]["pack_id"] == "legal-warranty"
+    assert guided["capture"]["selected_pack_guidance"][0]["pack_id"] == "legal-warranty"
+    assert guided["review"]["selected_pack_guidance"][0]["pack_id"] == "legal-warranty"
+    assert "selected_pack_guidance" not in guided["connect"]
 
 def test_bootstrap_is_registry_generated_on_public_surfaces(
     vault: Path, monkeypatch: pytest.MonkeyPatch, capsys
