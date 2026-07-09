@@ -1,11 +1,11 @@
-"""The immovable gate: the live MCP tools must match a committed baseline
+"""The immovable gate: the live product MCP tools must match a committed baseline
 byte-for-byte.
 
 This is the safety net for the unified-command-surface migration. Claude reads
 every tool's `name`, `description`, and `inputSchema` (the parsed Google-style
-docstring Args become per-property descriptions). If the migration to a registry
+docstring Args become per-property descriptions). If the migration to a product registry
 + `bind_vault` generation changes ANY of those, Claude's view of the tools would
-silently drift. This test captures the pre-refactor schemas as
+silently drift. This test captures the product-command schemas as
 `tests/fixtures/mcp_tool_schemas.json` and asserts the live server reproduces
 them exactly, so the refactor provably cannot change what Claude sees.
 
@@ -103,7 +103,7 @@ def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch
     mcp = _build_server(monkeypatch)
     live = set(_live_schemas(mcp))
 
-    generated = {c.name for c in commands_module.COMMANDS if "mcp" in c.surfaces}
+    generated = {c.name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
     exceptions = set(commands_module.HAND_REGISTERED_EXCEPTIONS)
 
     # No tool is both generated and a hand-registered exception.

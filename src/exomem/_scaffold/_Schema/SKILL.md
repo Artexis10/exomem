@@ -150,18 +150,17 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 ## Loading the tools
 
 The KB tools may be **deferred** — the client lists them by name and you load a
-tool's schema before you can call it. Load the core set up front, in one shot:
-you'll almost always need `find` (search), `get` (read a page), and one or more
-of `note`, `add`, `link`, `suggest_links`, `graph_context`,
-`suggest_relations`, `edit`, `audit`. In Claude Code, load
-them by exact name in a single call:
+tool's schema before you can call it. Load the product surface up front, in one
+shot: you'll almost always need `ask_memory` (recall), `read_memory` (open a
+page), `remember` (compiled conclusions), `capture_source`, `preserve_evidence`,
+`review_memory`, `connect_memory`, `adopt_vault`, and `maintain_memory`. In
+Claude Code, load them by exact name in a single call:
 
-`ToolSearch("select:adopt,overview,find,get,note,add,link,suggest_links,edit,audit")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,remember,capture_source,preserve_evidence,review_memory,connect_memory,adopt_vault,maintain_memory")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
-resolves to the right tool. `find` is the read-only hybrid (semantic + keyword)
-search and your default entry point.
+resolves to the right product command. `ask_memory` is the normal first read.
 
 This skill is the rich behavioural contract for Exomem-aware agents. If this
 file has been read, routine KB work does not need a separate `bootstrap()` call.
@@ -179,7 +178,7 @@ continue, capture, ingest, research, reflect, curate, defrag, review, and media.
 
 Use the workflow skill when its trigger matches the user's intent, then preserve
 the same invariants from this file: search before claiming prior context, keep
-raw Sources/Evidence separate from compiled notes, prefer `replace` for changed
+raw Sources/Evidence separate from compiled notes, prefer `replace_memory` for changed
 conclusions, and cite the pages or artifacts used.
 
 The Tier 2 filesystem ops below may be turned off on lean deployments
@@ -188,10 +187,10 @@ The Tier 2 filesystem ops below may be turned off on lean deployments
 
 ## Simple front door
 
-Speak to users in simple actions first. Use the typed operations underneath.
-Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph
-sidecars, schema blocks, or `replace` unless that implementation detail changes
-what will happen.
+Speak to users in simple actions first. Call product commands by default; the
+canonical operations are implementation leaves underneath them. Do not ask the
+user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph sidecars, schema
+blocks, or supersession internals unless that detail changes what will happen.
 
 Native assistant memory (Claude, ChatGPT, Codex, and similar) is short-term or
 behavioural memory for preferences, style, identity facts, working context, and
@@ -199,39 +198,44 @@ routing rules such as "use Exomem for my project knowledge." Exomem is long-term
 governed memory for sourced conclusions, project context, decisions, failures,
 experiments, proof-bearing records, review, and supersession.
 
-| Simple action | User phrasing | Preferred route |
+| Simple action | User phrasing | Product route |
 |---|---|---|
-| `ask` | "what do I know," "find what I concluded," "show the context" | `find(detail="compact", rerank=false)` first; `get` or `find(pack=true)` when synthesis needs context |
-| `remember` | "remember this," "save this conclusion," "write this decision" | `note`; use `replace` when it supersedes old knowledge |
-| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `add` for Sources; `preserve` or upload for Evidence |
-| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `attention`, `audit`, `propose_compilation` |
-| `connect` | "connect these ideas," "suggest relations," "what does this link to" | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
-| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check vault health," "fix safe drift" | `audit` by default; `audit_fix` or `reconcile` only with explicit fix intent |
+| `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
+| `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
+| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory` |
+| `connect` | "connect these ideas," "suggest relations," "what does this link to" | `connect_memory` |
+| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
 
 Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
   `Saved -> <path>`.
-- "What did I conclude about onboarding?" -> `ask`/`find` first, cite hits, and
+- "What did I conclude about onboarding?" -> `ask_memory` first, cite hits, and
   retry with adjacent terms before treating a miss as meaningful.
-- "Save this article" -> `capture` via `add` with provenance; ask about compiling
+- "Save this article" -> `capture_source` with provenance; ask about compiling
   only if a conclusion is present.
-- "Keep this receipt for the warranty case" -> `capture` via Evidence, not as a
+- "Keep this receipt for the warranty case" -> `preserve_evidence` or `transfer_artifact`, not as a
   general note.
-- "Compile these three sources" -> draft a sourced note, run `suggest_links`,
+- "Compile these three sources" -> draft a sourced note with `remember` link suggestions,
   then write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
   visible.
 
-## Operations
+## Canonical Operations
+Product commands are the public interface. The operations below are canonical
+implementation leaves: product commands route here so filenames, folders,
+frontmatter, supersession, indexes, append-only rules, and binary guards stay in
+one place. Use them as reference material, not as the first mental model for a
+new user.
+
 Operations split into two tiers. **Tier 1 is primary** — every typed-note
 workflow goes through it because the type-routing IS the discipline. **Tier 2 is
 the escape hatch** for cases that don't fit a Tier 1 shape. If a write fits Tier
-1, use it. Operations are dispatched by intent — you phrase the request; the
-skill matches one of these.
+1, use it.
 
 ### Tier 1 — type-routed (primary)
 
@@ -292,7 +296,7 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - **Binaries go out-of-band — never inline through a tool argument.** Transcribe
   what's relevant into the note/evidence *text* (that's the queryable part), and
   deliver the *original file* separately. On claude.ai web, call
-  **`mint_upload_token`** for a short-lived `{token, upload_url}`, then have the
+  **`transfer_artifact(mode="upload")`** for a short-lived `{token, upload_url}`, then have the
   code sandbox multipart-`curl` the attached files to `upload_url`.
   **Searchable binaries are automatic:** the server transcribes audio/video
   (Whisper), OCRs images (Tesseract), reads PDFs (pymupdf), extracts office/web
@@ -304,22 +308,22 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   inline byte blobs (`BINARY_BLOB_REJECTED`). Full workflow:
   `references/operations.md` § preserve.
 - **Pull a vault file back out — the download channel.** Call
-  **`mint_download_token`** for a short-lived `{token, download_url}`, then GET
+  **`transfer_artifact(mode="download")`** for a short-lived `{token, download_url}`, then GET
   `download_url?path=<vault-relative path>` with `Authorization: Bearer <token>`.
   Read-only, download-scoped, path confined to the vault root.
 - **Media hits in `find` are first-class.** An extracted media sidecar carries
   `media_type` and `media_file` (a pointer to the original binary). Treat the
   *file* as the result and the matched transcript/OCR snippet as the "why"; offer
-  to pull the original via `mint_download_token`. Images and video are also
+  to pull the original via `transfer_artifact(mode="download")`. Images and video are also
   searchable by *visual content* (CLIP), not just text — a purely-visual hit
   carries a `clip_score`; a video visual hit also carries `clip_match_at` (e.g.
   `"14:32"`), the timestamp of the matching keyframe.
-- **View a video's frames on demand — `get_video_frames`.** To *see* what a vault
+- **View a video's frames on demand — `read_media`.** To *see* what a vault
   video shows (slides, screen recordings, meetings), call
-  `get_video_frames(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
+  `read_media(path, max_frames=8, start_sec=?, end_sec=?)` — it returns
   sampled keyframes INLINE as JPEG image blocks (no download round-trip needed),
   preceded by per-frame timestamps. The comprehension companion to visual search:
-  `find` locates the moment (`clip_match_at`), `get_video_frames` shows it — an
+  `ask_memory` locates the moment (`clip_match_at`), `read_media` shows it — an
   overview call first, then zoom with `start_sec`/`end_sec` around that timestamp.
   Bounded and read-only (default 8 frames, hard cap 16, JPEG ≤768px); soft-fails
   with a clear code when the server lacks the media extra.

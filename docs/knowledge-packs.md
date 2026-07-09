@@ -5,8 +5,8 @@ useful starting domains, and they let agents route simple intentions into the
 right governed layer without asking the user to understand Sources, Evidence,
 Notes, Entities, or supersession first.
 
-Packs do not create a new storage engine. They compose Exomem's durable
-primitives and typed tools.
+Packs do not create a new storage engine. They compose Exomem's product commands
+and governed canonical implementation leaves.
 
 ## Built-in packs
 
@@ -24,7 +24,7 @@ which makes it suitable for fresh or empty vaults.
 
 Built-in packs live in `src/exomem/packs/*.json`. The runtime loads them with
 `importlib.resources`, validates them strictly, and exposes the schema in
-`adopt` reports through `pack_schema`.
+`adopt_vault` reports through `pack_schema`.
 
 Each pack is a JSON object with these required fields:
 
@@ -95,26 +95,26 @@ or ask a model to classify the vault.
 
 The safe loop is:
 
-1. Run `exomem setup` or `adopt(mode="scan-only")`.
+1. Run `exomem setup` or `adopt_vault(mode="scan-only")`.
 2. Review suggested packs or choose explicit packs for a fresh vault.
 3. Persist selected packs under `Knowledge Base/_Packs/`.
 4. Optionally save an adoption manifest under `Knowledge Base/_Adoption/`.
 5. Copy selected legacy files as Sources when provenance matters.
 6. Compile selected material later, with citations.
 
-## Mapping to typed tools
+## Mapping to product commands
 
-Packs do not bypass governance. They help agents choose existing typed tools:
+Packs do not bypass governance. They help agents choose product commands:
 
-| Simple action | Typed operation |
+| Simple action | Product command |
 | --- | --- |
-| `capture` raw material | `add`; use `preserve` or upload for Evidence |
-| `remember` durable conclusion | `note` or `link`; use `replace` for supersession |
-| `ask` | `find`, optionally `get` or `find(pack=true)` |
-| `review` | `attention`, `audit`, `propose_compilation` |
-| `connect` | `suggest_links`, `suggest_relations`, `graph_context`, `link` |
-| `adopt` | `adopt(mode="scan-only")` before copy/compile modes |
-| `maintain` | `audit`; explicit `audit_fix` or `reconcile` for repairs |
+| `capture` raw material | `capture_source`; use `preserve_evidence` or `transfer_artifact` for Evidence |
+| `remember` durable conclusion | `remember`; use `replace_memory` for supersession |
+| `ask` | `ask_memory`, optionally `read_memory` or `ask_memory(deep=true)` |
+| `review` | `review_memory` |
+| `connect` | `connect_memory` |
+| `adopt` | `adopt_vault(mode="scan-only")` before copy/compile modes |
+| `maintain` | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes for repairs |
 
 Agents should speak in product language. The user can say "save this warranty
 receipt"; the agent chooses the evidence/proof route and reports the saved path.

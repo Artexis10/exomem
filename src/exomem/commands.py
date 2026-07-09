@@ -20,6 +20,7 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 from __future__ import annotations
 
 import json
+import os
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any
@@ -60,7 +61,7 @@ from . import note as note_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, vault
+from . import query_log, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
@@ -258,12 +259,12 @@ def op_bootstrap(
             "requested": requested_workflow,
             "loop": [
                 "bootstrap",
-                "adopt or overview when first seeing an existing vault",
-                "search for cheap metadata-only recall",
-                "fetch a bounded page, or use find/get when richer context is needed",
+                "adopt_vault or browse_memory when first seeing an existing vault",
+                "ask_memory for cheap product recall",
+                "read_memory or ask_memory(deep=true) when more context is needed",
                 "reason in the agent",
-                "run suggest_links before important writes",
-                "note, edit, or replace when there is a durable conclusion",
+                "use connect_memory(operation='suggest-links') before important compiled writes",
+                "remember, edit_memory, or replace_memory when there is a durable conclusion",
                 "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
             ],
             "save_rule": (
@@ -279,31 +280,31 @@ def op_bootstrap(
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "authoring_contract": {
             "canonical_loop": [
-                "find relevant prior notes and sources",
-                "get enough context; use max_body_chars for bounded reads or find(pack=true) for synthesis",
+                "ask_memory for relevant prior notes and sources",
+                "read_memory enough context; use ask_memory(deep=true) for synthesis",
                 "draft the smallest durable compiled conclusion",
-                "run suggest_links on the draft",
-                "write with note, edit, replace, add, preserve, or link as appropriate",
+                "run connect_memory(operation='suggest-links') on the draft",
+                "write with remember, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
-                "apply any accepted links through edit",
+                "apply any accepted links through edit_memory",
                 "report the written path",
             ],
             "route_by_intent": {
-                "raw_material": "add",
-                "raw_evidence_or_artifact": "preserve or upload",
-                "new_durable_conclusion": "note",
-                "small_correction": "edit",
-                "substantial_rewrite": "replace",
-                "named_person_concept_library_or_decision": "link",
+                "raw_material": "capture_source",
+                "raw_evidence_or_artifact": "preserve_evidence or transfer_artifact",
+                "new_durable_conclusion": "remember",
+                "small_correction": "edit_memory",
+                "substantial_rewrite": "replace_memory",
+                "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
             },
             "preflight": {
-                "suggest_links": "standard read-only check before a compiled note write",
+                "connect_memory": "standard read-only suggest-links check before a compiled note write",
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
             },
             "post_write": {
-                "note_suggestions": "non-binding related pages returned by note(suggestions=true)",
+                "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
                 "write_feedback": "structural feedback returned by note(): semantic block counts, source/link counts, unresolved wikilinks, and next actions",
-                "accepted_links": "persist only through normal edit/note/replace; never auto-write suggestions",
+                "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
                 "research-note": "Project-scoped finding with Question, Findings, and Connections.",
@@ -316,60 +317,59 @@ def op_bootstrap(
         },
         "tool_defaults": {
             "normal_lookup": {
-                "tool": "search",
-                "args": {},
+                "tool": "ask_memory",
+                "args": {"detail": "compact", "rerank": False},
+                "when": "normal cheap product recall",
             },
             "metadata_lookup": {
-                "tool": "find",
+                "tool": "ask_memory",
                 "args": {"detail": "compact", "rerank": False},
                 "when": "caller needs the richer find filters or compact stubs",
             },
             "reasoning_lookup": {
-                "tool": "find",
-                "args": {"pack": True},
+                "tool": "ask_memory",
+                "args": {"deep": True},
             },
             "adopt_existing_vault": {
-                "tool": "adopt",
+                "tool": "adopt_vault",
                 "args": {"mode": "scan-only"},
                 "when": "first-run import/adoption of an existing vault",
             },
             "diagnostics_lookup": {
-                "tool": "find",
+                "tool": "ask_memory",
                 "args": {
                     "detail": "compact",
                     "include_timings": True,
                     "rerank": True,
                 },
             },
-            "read_bounded_page": {"tool": "fetch", "when": "after choosing a search result"},
-            "read_full_page": {"tool": "get", "when": "after choosing a hit and needing the full body/frontmatter"},
+            "read_full_page": {"tool": "read_memory", "when": "after choosing a hit"},
             "write_compiled_note": {
-                "tool": "note",
+                "tool": "remember",
                 "when": "new durable conclusion",
             },
-            "minor_edit": {"tool": "edit", "when": "small correction to an existing page"},
+            "minor_edit": {"tool": "edit_memory", "when": "small correction to an existing page"},
             "supersede": {
-                "tool": "replace",
+                "tool": "replace_memory",
                 "when": "substantial rewrite of compiled material",
             },
             "binary_upload": {
-                "tool": "mint_upload_token",
+                "tool": "transfer_artifact",
                 "endpoint": "/upload",
                 "fields": ["file", "scope", "category", "description", "text"],
             },
         },
         "performance_profiles": {
             "normal": {
-                "tool": "find",
-                "find_args": {"detail": "compact", "rerank": False},
-                "interpretation": "cheap compact routing recall; follow with get(max_body_chars=...) if needed",
+                "ask_memory_args": {"detail": "compact", "rerank": False},
+                "interpretation": "cheap product recall; follow with read_memory if needed",
             },
             "reasoning": {
-                "find_args": {"pack": True},
+                "ask_memory_args": {"deep": True},
                 "interpretation": "bounded context assembly for synthesis",
             },
             "diagnostics": {
-                "find_args": {"include_timings": True, "rerank": True},
+                "ask_memory_args": {"include_timings": True, "rerank": True},
                 "interpretation": (
                     "timings measure retrieval stages; unset rerank is mode-aware "
                     "and CPU steady-state modes keep auto-rerank off; compute_policy "
@@ -385,28 +385,26 @@ def op_bootstrap(
                 "try synonyms and singular/plural forms",
                 "try adjacent domain terms",
                 "try scope='vault' if Knowledge Base recall is sparse",
-                "use adopt(mode='scan-only') before proposing migration/copy actions",
-                "try pack=true for synthesis instead of many get calls",
-                "use get(max_body_chars=...) for bounded reads before full get",
+                "use adopt_vault(mode='scan-only') before proposing migration/copy actions",
+                "try ask_memory(deep=true) for synthesis instead of many read_memory calls",
             ],
         },
         "simple_actions": simple_action_catalog(selected_packs),
         "common_actions": list(simple_action_names()),
         "front_door_actions": product_front_door_catalog(selected_packs),
+        "product_commands": product_tool_catalog(),
         "tool_catalog": product_tool_catalog(),
         "common_tools": [
-            "adopt",
-            "overview",
-            "search",
-            "fetch",
-            "find",
-            "get",
-            "note",
-            "edit",
-            "replace",
-            "suggest_links",
-            "mint_upload_token",
-            "get_video_frames",
+            "adopt_vault",
+            "browse_memory",
+            "ask_memory",
+            "read_memory",
+            "remember",
+            "edit_memory",
+            "replace_memory",
+            "connect_memory",
+            "transfer_artifact",
+            "read_media",
         ],
     }
 
@@ -414,19 +412,19 @@ def op_bootstrap(
         payload["examples"] = [
             {
                 "goal": "safe existing-vault adoption",
-                "call": "adopt(mode='scan-only')",
+                "call": "adopt_vault(mode='scan-only')",
             },
             {
                 "goal": "cheap proactive recall",
-                "call": "find(query='...', detail='compact', rerank=false)",
+                "call": "ask_memory(query='...', detail='compact', rerank=false)",
             },
             {
                 "goal": "reason across top matches",
-                "call": "find(query='...', pack=true)",
+                "call": "ask_memory(query='...', deep=true)",
             },
             {
                 "goal": "capture a durable conclusion",
-                "call": "note(note_type='research-note'|'insight'|..., title='...', content='...')",
+                "call": "remember(note_type='research-note'|'insight'|..., title='...', content='...')",
             },
         ]
     if profile == "diagnostics":
@@ -2752,6 +2750,966 @@ def op_get_video_frames(
     )
 
 
+
+# ----- product command wrappers: public surface over canonical leaves -----
+
+def op_ask_memory(
+    vault_root: Path,
+    query: str = "",
+    types: list[str] | None = None,
+    projects: list[str] | None = None,
+    tags: list[str] | None = None,
+    speakers: list[str] | None = None,
+    file_types: list[str] | None = None,
+    exclude_file_types: list[str] | None = None,
+    limit: int = 15,
+    scope: str = "kb",
+    mode: str = "hybrid",
+    detail: str = "compact",
+    deep: bool = False,
+    graph: bool = True,
+    rerank: bool | None = None,
+    prefer_compiled: bool = True,
+    prefer_active: bool = True,
+    prefer_used: bool = False,
+    graph_enrich: bool = False,
+    include_timings: bool = False,
+) -> list[dict] | dict:
+    """Recall durable knowledge from Exomem with product defaults.
+
+    This is the normal first read: search compiled knowledge, sources,
+    evidence, media sidecars, and curated vault files without making the
+    caller choose internal primitives. Set `deep=true` to return a packed
+    reasoning context instead of only hits. Heavy behavior stays explicit:
+    rerank is only forced when `rerank=true`, and graph enrichment is only
+    requested when `graph_enrich=true`.
+
+    Args:
+        query: Question or search phrase. Empty means recent/filtered recall.
+        types: Optional page-type filters.
+        projects: Optional project-key filters.
+        tags: Optional tag filters.
+        speakers: Optional diarized speaker filters.
+        file_types: Optional artifact kind filters such as pdf, image, csv, json.
+        exclude_file_types: Optional artifact kinds to exclude.
+        limit: Max hits. Default 15.
+        scope: kb, vault, or kb-only.
+        mode: hybrid, keyword, or vector.
+        detail: compact or full hit detail.
+        deep: Return a packed context for reasoning.
+        graph: Include graph-neighbour ranking in hybrid/vector search.
+        rerank: Force or suppress cross-encoder reranking; omit for mode-aware auto.
+        prefer_compiled: Prefer compiled notes over raw sources by default.
+        prefer_active: Prefer active conclusions over superseded ones.
+        prefer_used: Apply usage boost when explicitly requested.
+        graph_enrich: With deep mode, include typed graph neighborhood data.
+        include_timings: Include retrieval timings for diagnostics.
+    """
+    return op_find(
+        vault_root,
+        query=query,
+        types=types,
+        projects=projects,
+        tags=tags,
+        speakers=speakers,
+        file_types=file_types,
+        exclude_file_types=exclude_file_types,
+        limit=limit,
+        scope=scope,
+        mode=mode,
+        graph=graph,
+        rerank=rerank,
+        prefer_compiled=prefer_compiled,
+        prefer_active=prefer_active,
+        prefer_used=prefer_used,
+        pack=deep,
+        graph_enrich=graph_enrich,
+        detail=detail,
+        include_timings=include_timings,
+    )
+
+
+def op_read_memory(
+    vault_root: Path,
+    path: str,
+    frontmatter_only: bool = False,
+    include_history: bool = False,
+    links: bool = False,
+    include_raw: bool = False,
+) -> dict:
+    """Read one memory page or curated vault file by path.
+
+    Use after `ask_memory` chooses a hit, or when a caller already knows the
+    path. This wraps the canonical page reader and can include history and
+    link summaries in the same call.
+
+    Args:
+        path: Vault-relative path or Knowledge Base-relative shorthand.
+        frontmatter_only: Return only frontmatter for cheap scanning.
+        include_history: Include recorded edit/supersession history.
+        links: Include inbound and outbound wikilink summaries.
+        include_raw: Include the raw markdown file text.
+    """
+    return op_get(
+        vault_root,
+        path=path,
+        frontmatter_only=frontmatter_only,
+        include_history=include_history,
+        links=links,
+        include_raw=include_raw,
+    )
+
+
+def op_browse_memory(
+    vault_root: Path,
+    path: str = "",
+    mode: str = "overview",
+    max_depth: int = 3,
+    include_hidden: bool = False,
+    samples: int = 5,
+    recursive: bool = False,
+) -> dict:
+    """Browse vault structure without reading many files.
+
+    `mode="overview"` returns a bounded product adoption/structure report.
+    `mode="list"` returns entries for a folder. Both are read-only.
+
+    Args:
+        path: Vault-relative subtree. Empty means vault root.
+        mode: overview or list.
+        max_depth: Overview tree depth cap.
+        include_hidden: Include dotfiles and hidden/system folders.
+        samples: Filename samples per folder for overview mode.
+        recursive: In list mode, walk subfolders.
+    """
+    if mode == "overview":
+        return op_overview(
+            vault_root,
+            path=path,
+            max_depth=max_depth,
+            include_hidden=include_hidden,
+            samples=samples,
+        )
+    if mode == "list":
+        return op_list_directory(
+            vault_root,
+            path=path,
+            recursive=recursive,
+            include_hidden=include_hidden,
+        )
+    raise ValueError("INVALID_MODE: browse_memory mode must be 'overview' or 'list'")
+
+
+def op_remember(
+    vault_root: Path,
+    content: str,
+    title: str,
+    note_type: str = "insight",
+    project: str | None = None,
+    projects: list[str] | None = None,
+    sources: list[str] | None = None,
+    tags: list[str] | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    pattern_type: str | None = None,
+    domain: str | None = None,
+    started: str | None = None,
+    duration: str | None = None,
+    hypothesis: str | None = None,
+    n: int | None = None,
+    concluded: str | None = None,
+    medium: str | None = None,
+    recorded: str | None = None,
+    published: str | None = None,
+    host: str | None = None,
+    editor: str | None = None,
+    suggestions: bool = True,
+    project_category: str | None = None,
+) -> dict:
+    """Remember a durable conclusion as compiled governed knowledge.
+
+    This is for distilled thinking, decisions, findings, failures, patterns,
+    experiments, and production logs. Raw material belongs in `capture_source`;
+    proof artifacts belong in `preserve_evidence`.
+
+    Args:
+        content: Full markdown body to write after frontmatter.
+        title: Human title used for the note slug.
+        note_type: research-note, insight, failure, pattern, experiment, or production-log.
+        project: Required for research-note. __PROJECT_KEYS_HINT__
+        projects: Optional project keys for cross-project notes. __PROJECT_KEYS_HINT__
+        sources: Source/evidence paths this conclusion draws from.
+        tags: Lowercase tags.
+        status: Optional status override.
+        severity: Failure severity.
+        pattern_type: Pattern subtype.
+        domain: Experiment domain.
+        started: Experiment start date.
+        duration: Experiment duration.
+        hypothesis: Experiment hypothesis.
+        n: Experiment sample size.
+        concluded: Experiment conclusion date.
+        medium: Production-log medium.
+        recorded: Production recording date.
+        published: Production publication date.
+        host: Production host/creator.
+        editor: Production editor/producer.
+        suggestions: Include link suggestions in the result.
+        project_category: Category for a new project key.
+    """
+    return op_note(
+        vault_root,
+        content=content,
+        note_type=note_type,
+        title=title,
+        project=project,
+        projects=projects,
+        sources=sources,
+        tags=tags,
+        status=status,
+        severity=severity,
+        pattern_type=pattern_type,
+        domain=domain,
+        started=started,
+        duration=duration,
+        hypothesis=hypothesis,
+        n=n,
+        concluded=concluded,
+        medium=medium,
+        recorded=recorded,
+        published=published,
+        host=host,
+        editor=editor,
+        suggestions=suggestions,
+        project_category=project_category,
+    )
+
+
+def op_edit_memory(
+    vault_root: Path,
+    path: str,
+    why: str,
+    new_body: str | None = None,
+    tags: list[str] | None = None,
+    old_string: str | None = None,
+    new_string: str | None = None,
+    replace_all: bool = False,
+    heading: str | None = None,
+    section_position: str = "append",
+    edits: list[dict] | None = None,
+    row_key: str | None = None,
+    take: str | None = None,
+    overwrite: bool = False,
+    field: str | None = None,
+    value: str | int | float | bool | list | dict | None = None,
+    allow_curated: bool = False,
+    expected_hash: str | None = None,
+    validate_only: bool = False,
+) -> dict:
+    """Edit an existing memory page with an auditable reason.
+
+    Use for small corrections, section edits, batch string edits, opinion-row
+    fills, or one frontmatter field. Substantial rewrites should use
+    `replace_memory` so history stays explicit.
+
+    Args:
+        path: Page to edit.
+        why: One-line rationale recorded in the log.
+        new_body: Replace the whole markdown body.
+        tags: Replace tags.
+        old_string: Exact body snippet to replace.
+        new_string: Replacement text.
+        replace_all: Replace every occurrence of old_string.
+        heading: Section heading for section-targeted edits.
+        section_position: append, prepend, or replace.
+        edits: Batch edits, each with old_string/new_string/replace_all.
+        row_key: Opinion-row key to fill.
+        take: Opinion-row text.
+        overwrite: Allow replacing an existing take.
+        field: Frontmatter field to set.
+        value: New frontmatter value.
+        allow_curated: Permit frontmatter patch under curated trees.
+        expected_hash: Refuse write if content changed since read.
+        validate_only: Preview a surgical match without writing.
+    """
+    return op_edit(
+        vault_root,
+        path=path,
+        why=why,
+        new_body=new_body,
+        tags=tags,
+        old_string=old_string,
+        new_string=new_string,
+        replace_all=replace_all,
+        heading=heading,
+        section_position=section_position,
+        edits=edits,
+        row_key=row_key,
+        take=take,
+        overwrite=overwrite,
+        field=field,
+        value=value,
+        allow_curated=allow_curated,
+        expected_hash=expected_hash,
+        validate_only=validate_only,
+    )
+
+
+def op_replace_memory(
+    vault_root: Path,
+    old_path: str,
+    content: str,
+    title: str,
+    note_type: str = "insight",
+    reason: str | None = None,
+    project: str | None = None,
+    projects: list[str] | None = None,
+    sources: list[str] | None = None,
+    tags: list[str] | None = None,
+    status: str | None = None,
+    severity: str | None = None,
+    pattern_type: str | None = None,
+    domain: str | None = None,
+    started: str | None = None,
+    duration: str | None = None,
+    hypothesis: str | None = None,
+    n: int | None = None,
+    concluded: str | None = None,
+    medium: str | None = None,
+    recorded: str | None = None,
+    published: str | None = None,
+    host: str | None = None,
+    editor: str | None = None,
+    project_category: str | None = None,
+) -> dict:
+    """Supersede an existing compiled memory with a new version.
+
+    The old page remains readable and points to the new page. Use this for
+    meaningful changes in conclusion, not small edits.
+
+    Args:
+        old_path: Existing page to supersede.
+        content: Full markdown body for the new page.
+        title: New page title.
+        note_type: New page type.
+        reason: Why the old page is being superseded.
+        project: Required for research-note.
+        projects: Optional project keys.
+        sources: Source/evidence paths for the new conclusion.
+        tags: Lowercase tags.
+        status: Optional status override.
+        severity: Failure severity.
+        pattern_type: Pattern subtype.
+        domain: Experiment domain.
+        started: Experiment start date.
+        duration: Experiment duration.
+        hypothesis: Experiment hypothesis.
+        n: Experiment sample size.
+        concluded: Experiment conclusion date.
+        medium: Production-log medium.
+        recorded: Production recording date.
+        published: Production publication date.
+        host: Production host/creator.
+        editor: Production editor/producer.
+        project_category: Category for a new project key.
+    """
+    return op_replace(
+        vault_root,
+        old_path=old_path,
+        content=content,
+        note_type=note_type,
+        title=title,
+        reason=reason,
+        project=project,
+        projects=projects,
+        sources=sources,
+        tags=tags,
+        status=status,
+        severity=severity,
+        pattern_type=pattern_type,
+        domain=domain,
+        started=started,
+        duration=duration,
+        hypothesis=hypothesis,
+        n=n,
+        concluded=concluded,
+        medium=medium,
+        recorded=recorded,
+        published=published,
+        host=host,
+        editor=editor,
+        project_category=project_category,
+    )
+
+
+def op_capture_source(
+    vault_root: Path,
+    source_schema: object,
+    content: str,
+    title: str,
+    source_type: str = "other",
+    url: str | None = None,
+    tags: list[str] | None = None,
+    why_captured: str | None = None,
+    compile_guidance: bool = False,
+    suggested_title: str | None = None,
+) -> dict:
+    """Capture raw source material and optionally return compile guidance.
+
+    The raw source is preserved first. If `compile_guidance=true`, Exomem then
+    returns a proposal for a future compiled note, without silently converting
+    raw provenance into a conclusion.
+
+    Args:
+        content: Raw source text.
+        title: Source title.
+        source_type: article, session, book, paper, video, or other.
+        url: Required for article, paper, or video sources.
+        tags: Lowercase tags.
+        why_captured: Short reason this source matters.
+        compile_guidance: Return a compilation proposal for the captured source.
+        suggested_title: Optional title hint for the compilation proposal.
+    """
+    source = op_add(
+        vault_root,
+        source_schema,
+        content=content,
+        source_type=source_type,
+        title=title,
+        url=url,
+        tags=tags,
+        why_captured=why_captured,
+    )
+    out: dict = {"source": source}
+    if compile_guidance:
+        try:
+            out["compile_guidance"] = op_propose_compilation(
+                vault_root,
+                sources=[source["path"]],
+                suggested_title=suggested_title,
+            )
+        except ValueError as exc:
+            out["compile_guidance"] = {"available": False, "error": str(exc)}
+    return out
+
+
+def op_compile_source(
+    vault_root: Path,
+    sources: list[str],
+    suggested_title: str | None = None,
+) -> dict:
+    """Plan a compiled note from one or more raw sources.
+
+    This is read-only: it returns a note skeleton, suggested source links, and
+    adjacent compiled pages. The agent or user still writes the conclusion via
+    `remember`.
+
+    Args:
+        sources: Source paths or wikilinks to compile from.
+        suggested_title: Optional title override.
+    """
+    return op_propose_compilation(vault_root, sources=sources, suggested_title=suggested_title)
+
+
+def op_preserve_evidence(
+    vault_root: Path,
+    scope: str,
+    category: str,
+    filename: str,
+    content: str,
+    description: str | None = None,
+) -> dict:
+    """Preserve text evidence as append-only proof material.
+
+    Use for receipts, letters, transcripts, warranty records, legal/dispute
+    material, and other factual artifacts. Binary files use `transfer_artifact`
+    plus the `/upload` endpoint so bytes do not pass through the model.
+
+    Args:
+        scope: Incident, case, project, or domain key.
+        category: Evidence category within the scope.
+        filename: Artifact filename, including extension.
+        content: UTF-8 text to preserve as received.
+        description: Optional sidecar description.
+    """
+    return op_preserve(
+        vault_root,
+        scope=scope,
+        category=category,
+        filename=filename,
+        content=content,
+        description=description,
+    )
+
+
+def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
+    """Prepare out-of-band binary artifact transfer.
+
+    Returns a short-lived token and URL for uploading evidence binaries or
+    downloading a vault file into a sandbox. The long-lived server secret never
+    leaves the server.
+
+    Args:
+        operation: upload or download.
+    """
+    _ = vault_root
+    if operation not in ("upload", "download"):
+        raise ValueError("INVALID_MODE: transfer_artifact operation must be 'upload' or 'download'")
+    secret = os.environ.get("EXOMEM_UPLOAD_TOKEN", "").strip() or None
+    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    large_base_url = os.environ.get("EXOMEM_LARGE_UPLOAD_BASE_URL", "").strip().rstrip("/") or None
+    return upload_tokens.mint_for_endpoint(
+        secret,
+        base_url,
+        scope=operation,
+        large_base_url=large_base_url if operation == "upload" else None,
+    )
+
+
+def op_read_media(
+    vault_root: Path,
+    path: str,
+    max_frames: int = 8,
+    start_sec: float | None = None,
+    end_sec: float | None = None,
+) -> ToolResult:
+    """Read sampled video frames inline for visual inspection.
+
+    This is MCP-only because it returns image content blocks. Heavy media
+    extraction remains explicit and dependency-gated.
+
+    Args:
+        path: Vault-relative video path.
+        max_frames: Maximum frames to return.
+        start_sec: Optional start timestamp in seconds.
+        end_sec: Optional end timestamp in seconds.
+    """
+    return op_get_video_frames(
+        vault_root,
+        path=path,
+        max_frames=max_frames,
+        start_sec=start_sec,
+        end_sec=end_sec,
+    )
+
+
+def op_review_memory(
+    vault_root: Path,
+    mode: str = "attention",
+    categories: list[str] | None = None,
+    limit: int = 25,
+    query: str = "",
+    sources: list[str] | None = None,
+    suggested_title: str | None = None,
+    tag: str | None = None,
+    key: str | None = None,
+    value: str | None = None,
+    path: str | None = None,
+) -> dict:
+    """Review memory health, provenance, drift, or source backlog.
+
+    Default mode is read-only attention review. Write-capable repairs are in
+    `maintain_memory`, not here.
+
+    Args:
+        mode: attention, audit, provenance, evolution, compilation, stale, contradiction, or unprocessed-sources.
+        categories: Optional category filter for attention/audit.
+        limit: Attention/evolution result cap.
+        query: Topic for evolution review.
+        sources: Source paths for compilation mode.
+        suggested_title: Optional compilation title hint.
+        tag: Provenance tag shorthand.
+        key: Provenance key filter.
+        value: Provenance value filter.
+        path: Restrict provenance scan to one path.
+    """
+    if mode == "attention":
+        return op_attention(vault_root, categories=categories, limit=limit)
+    if mode == "audit":
+        return op_audit(vault_root, categories=categories)
+    if mode == "stale":
+        return op_attention(vault_root, categories=["stale_review"], limit=limit)
+    if mode == "contradiction":
+        return op_attention(vault_root, categories=["corpus_contradictions"], limit=limit)
+    if mode == "unprocessed-sources":
+        return op_attention(vault_root, categories=["unprocessed_source"], limit=limit)
+    if mode == "provenance":
+        return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
+    if mode == "evolution":
+        return op_evolution(vault_root, query=query, limit=limit)
+    if mode == "compilation":
+        if not sources:
+            raise ValueError("INVALID_REVIEW: compilation mode requires `sources`")
+        return op_propose_compilation(vault_root, sources=sources, suggested_title=suggested_title)
+    raise ValueError(
+        "INVALID_MODE: review_memory mode must be attention, audit, provenance, "
+        "evolution, compilation, stale, contradiction, or unprocessed-sources"
+    )
+
+
+def op_connect_memory(
+    vault_root: Path,
+    operation: str = "suggest-links",
+    path: str | None = None,
+    target: str | None = None,
+    query: str | None = None,
+    draft_title: str | None = None,
+    draft_body: str | None = None,
+    limit: int = 8,
+    scope: str = "kb",
+    include_model_suggestions: bool = False,
+    depth: int = 1,
+    relation_types: list[str] | None = None,
+    node_types: list[str] | None = None,
+    max_nodes: int = 40,
+    max_edges: int = 80,
+    entity_type: str | None = None,
+    name: str | None = None,
+    summary: str | None = None,
+    why_in_kb: str | None = None,
+    tags: list[str] | None = None,
+    connections: list[str] | None = None,
+    affiliation: str | None = None,
+    relationship: str | None = None,
+    domain: str | None = None,
+    language: str | None = None,
+    repo: str | None = None,
+    license: str | None = None,
+    used_in: list[str] | None = None,
+    decided: str | None = None,
+    project: str | None = None,
+    decision_status: str | None = None,
+) -> dict | list[dict]:
+    """Connect memory through links, typed graph context, or entities.
+
+    Proposal modes are read-only. `operation="create-entity"` is an explicit
+    additive write that creates a typed graph node through the canonical entity
+    writer.
+
+    Args:
+        operation: suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.
+        path: Existing page path for link, graph, or relation context.
+        target: Target path for inbound-links; defaults to path.
+        query: Query seed for graph-context.
+        draft_title: Draft title for suggestion modes.
+        draft_body: Draft body for suggestion modes.
+        limit: Candidate cap for suggestion modes.
+        scope: Search scope for link suggestions.
+        include_model_suggestions: Request optional model-backed relation suggestions.
+        depth: Graph traversal depth.
+        relation_types: Graph relation-type allowlist.
+        node_types: Graph node-type allowlist.
+        max_nodes: Graph node cap.
+        max_edges: Graph edge cap.
+        entity_type: Entity type for create-entity.
+        name: Entity name for create-entity.
+        summary: Entity summary for create-entity.
+        why_in_kb: Optional entity relevance paragraph.
+        tags: Entity tags.
+        connections: Entity connection paths.
+        affiliation: Person affiliation.
+        relationship: Person relationship.
+        domain: Concept domain.
+        language: Library language.
+        repo: Library repository.
+        license: Library license.
+        used_in: Library usage project keys.
+        decided: Decision date.
+        project: Decision project key.
+        decision_status: Decision status.
+    """
+    if operation == "suggest-links":
+        return op_suggest_links(
+            vault_root,
+            path=path,
+            draft_title=draft_title,
+            draft_body=draft_body,
+            limit=limit,
+            scope=scope,
+        )
+    if operation == "suggest-relations":
+        return op_suggest_relations(
+            vault_root,
+            path=path,
+            draft_title=draft_title,
+            draft_body=draft_body,
+            include_model_suggestions=include_model_suggestions,
+            limit=limit,
+        )
+    if operation == "graph-context":
+        return op_graph_context(
+            vault_root,
+            path=path,
+            query=query,
+            depth=depth,
+            relation_types=relation_types,
+            node_types=node_types,
+            max_nodes=max_nodes,
+            max_edges=max_edges,
+        )
+    if operation == "inbound-links":
+        target_path = target or path
+        if not target_path:
+            raise ValueError("INVALID_TARGET: inbound-links requires `target` or `path`")
+        return op_list_inbound_links(vault_root, target=target_path)
+    if operation == "create-entity":
+        missing = [
+            field
+            for field, value in (("entity_type", entity_type), ("name", name), ("summary", summary))
+            if not value
+        ]
+        if missing:
+            raise ValueError("INVALID_LINK: create-entity requires " + ", ".join(missing))
+        return op_link(
+            vault_root,
+            entity_type=entity_type or "",
+            name=name or "",
+            summary=summary or "",
+            why_in_kb=why_in_kb,
+            tags=tags,
+            connections=connections,
+            affiliation=affiliation,
+            relationship=relationship,
+            domain=domain,
+            language=language,
+            repo=repo,
+            license=license,
+            used_in=used_in,
+            decided=decided,
+            project=project,
+            decision_status=decision_status,
+        )
+    raise ValueError(
+        "INVALID_MODE: connect_memory operation must be suggest-links, "
+        "suggest-relations, graph-context, inbound-links, or create-entity"
+    )
+
+
+def op_adopt_vault(
+    vault_root: Path,
+    path: str = "",
+    mode: str = "scan-only",
+    max_depth: int = overview_module.DEFAULT_MAX_DEPTH,
+    include_hidden: bool = False,
+    samples: int = 5,
+    pack_limit: int = 6,
+    manifest_path: str | None = None,
+    selected_paths: list[str] | None = None,
+) -> dict:
+    """Adopt an existing vault safely without replacing originals.
+
+    Default mode scans only. Copy/compile modes write under the governed
+    Knowledge Base layer and preserve original path/hash provenance.
+
+    Args:
+        path: Vault subtree to scan.
+        mode: scan-only, save-manifest, copy-as-sources, or compile-selected.
+        max_depth: Folder tree depth cap.
+        include_hidden: Include hidden files/directories.
+        samples: Filename sample count per folder.
+        pack_limit: Max suggested knowledge packs.
+        manifest_path: Optional manifest destination.
+        selected_paths: Explicit legacy files for copy/compile modes.
+    """
+    return op_adopt(
+        vault_root,
+        path=path,
+        mode=mode,
+        max_depth=max_depth,
+        include_hidden=include_hidden,
+        samples=samples,
+        pack_limit=pack_limit,
+        manifest_path=manifest_path,
+        selected_paths=selected_paths,
+    )
+
+
+def op_maintain_memory(
+    vault_root: Path,
+    mode: str = "audit",
+    categories: list[str] | None = None,
+    dry_run: bool = True,
+    rebuild_embeddings: bool = False,
+) -> dict:
+    """Maintain vault health with explicit write-capable modes.
+
+    Default mode is read-only audit. `mode="fix"` and `mode="reconcile"`
+    preserve the canonical dry-run/write semantics and default to dry-run here.
+
+    Args:
+        mode: audit, fix, or reconcile.
+        categories: Optional audit category filter.
+        dry_run: For fix/reconcile, report without writing when true.
+        rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
+    """
+    if mode == "audit":
+        return op_audit(vault_root, categories=categories)
+    if mode == "fix":
+        return op_audit_fix(vault_root, dry_run=dry_run, rebuild_embeddings=rebuild_embeddings)
+    if mode == "reconcile":
+        return op_reconcile(vault_root, dry_run=dry_run)
+    raise ValueError("INVALID_MODE: maintain_memory mode must be audit, fix, or reconcile")
+
+
+def op_manage_memory_file(
+    vault_root: Path,
+    operation: str = "list",
+    path: str = "",
+    content: str = "",
+    frontmatter: dict | None = None,
+    overwrite: bool = False,
+    allow_curated: bool = False,
+    kind: str = "file",
+    parents: bool = True,
+    recursive: bool = False,
+    include_hidden: bool = False,
+    old_path: str | None = None,
+    new_path: str | None = None,
+    update_wikilinks: bool = True,
+    confirm: bool = False,
+    force_orphan: bool = False,
+    force_superseded: bool = False,
+    expected_dead_inbound: list[str] | None = None,
+    trash_path: str | None = None,
+    restore_path: str | None = None,
+    date: str | None = None,
+) -> dict:
+    """Manage files through one governed file operation.
+
+    This is the tier-2 escape hatch for structures that do not fit typed
+    memory commands. Destructive operations require the same explicit flags as
+    their canonical leaves.
+
+    Args:
+        operation: list, create, append, move, delete, trash-list, or recover.
+        path: Path for list/create/append/delete, or default recover trash path.
+        content: Text body for create/append.
+        frontmatter: Optional frontmatter for create.
+        overwrite: Allow create to replace an existing file.
+        allow_curated: Permit operations in curated trees where canonical leaves allow it.
+        kind: file or dir for create.
+        parents: Create parent folders in dir mode.
+        recursive: Recurse for list or delete-directory.
+        include_hidden: Include hidden files for list.
+        old_path: Source path for move.
+        new_path: Destination path for move.
+        update_wikilinks: Rewrite inbound wikilinks on move.
+        confirm: Required for delete.
+        force_orphan: Allow delete despite inbound links.
+        force_superseded: Allow delete of superseded history.
+        expected_dead_inbound: Links expected to die in the same workflow.
+        trash_path: Trash entry to recover.
+        restore_path: Optional recovery destination.
+        date: YYYY-MM-DD filter for trash-list.
+    """
+    if operation == "list":
+        return op_list_directory(vault_root, path=path, recursive=recursive, include_hidden=include_hidden)
+    if operation == "create":
+        return op_create_file(
+            vault_root,
+            path=path,
+            content=content,
+            frontmatter=frontmatter,
+            overwrite=overwrite,
+            allow_curated=allow_curated,
+            kind=kind,
+            parents=parents,
+        )
+    if operation == "append":
+        return op_append_to_file(vault_root, path=path, content=content, allow_curated=allow_curated)
+    if operation == "move":
+        if not old_path or not new_path:
+            raise ValueError("INVALID_MOVE: move requires `old_path` and `new_path`")
+        return op_move_file(
+            vault_root,
+            old_path=old_path,
+            new_path=new_path,
+            update_wikilinks=update_wikilinks,
+            allow_curated=allow_curated,
+        )
+    if operation == "delete":
+        return op_delete(
+            vault_root,
+            path=path,
+            confirm=confirm,
+            recursive=recursive,
+            force_orphan=force_orphan,
+            force_superseded=force_superseded,
+            allow_curated=allow_curated,
+            expected_dead_inbound=expected_dead_inbound,
+        )
+    if operation == "trash-list":
+        return op_list_trash(vault_root, date=date)
+    if operation == "recover":
+        target = trash_path or path
+        if not target:
+            raise ValueError("INVALID_PATH: recover requires `trash_path` or `path`")
+        return op_recover_from_trash(
+            vault_root,
+            trash_path=target,
+            restore_path=restore_path,
+            allow_curated=allow_curated,
+        )
+    raise ValueError(
+        "INVALID_MODE: manage_memory_file operation must be list, create, append, "
+        "move, delete, trash-list, or recover"
+    )
+
+
+def op_query_dataset(
+    vault_root: Path,
+    path: str,
+    record_path: str | None = None,
+    filters: list[dict] | None = None,
+    columns: list[str] | None = None,
+    sort_by: str | None = None,
+    descending: bool = False,
+    limit: int = 100,
+    offset: int = 0,
+    aggregate: str | None = None,
+    date_from: str | None = None,
+    date_to: str | None = None,
+    date_column: str | None = None,
+) -> dict:
+    """Query a CSV, TSV, or JSON dataset under the vault.
+
+    Use after `ask_memory` or `browse_memory` identifies a dataset card or raw
+    file. This returns exact rows or aggregates without dumping whole files.
+
+    Args:
+        path: Vault-relative dataset path.
+        record_path: Dotted JSON array path.
+        filters: List of filter objects.
+        columns: Columns to project.
+        sort_by: Column to sort by.
+        descending: Sort descending.
+        limit: Row cap.
+        offset: Pagination offset.
+        aggregate: count, profile, or func:column.
+        date_from: Date range start.
+        date_to: Date range end.
+        date_column: Date column name.
+    """
+    return op_query_data(
+        vault_root,
+        path=path,
+        record_path=record_path,
+        filters=filters,
+        columns=columns,
+        sort_by=sort_by,
+        descending=descending,
+        limit=limit,
+        offset=offset,
+        aggregate=aggregate,
+        date_from=date_from,
+        date_to=date_to,
+        date_column=date_column,
+    )
+
+def remember_description(project_keys_hint: str) -> str:
+    """The `remember` MCP description with the live project-key hint substituted."""
+    return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
+
 def note_description(project_keys_hint: str) -> str:
     """The `note` MCP description with the live project-key hint substituted in.
 
@@ -2788,54 +3746,54 @@ _SIMPLE_ACTION_PACK_ALIASES: dict[str, tuple[str, ...]] = {
 _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     "ask": {
         "intent": "Recall durable knowledge and cite useful context.",
-        "route": {"tool": "find", "args": {"detail": "compact", "rerank": False}},
+        "route": {"tool": "ask_memory", "args": {"detail": "compact", "rerank": False}},
         "deep_route": {
-            "tool": "find",
-            "args": {"detail": "compact", "rerank": False, "pack": True},
+            "tool": "ask_memory",
+            "args": {"detail": "compact", "rerank": False, "deep": True},
         },
         "safety": "read-only; deep mode assembles context and graph enrichment stays explicit",
-        "advanced": ["get", "graph_context", "evolution"],
+        "advanced": ["read_memory", "connect_memory", "review_memory"],
     },
     "remember": {
         "intent": "Save a durable conclusion as compiled governed knowledge.",
-        "route": {"tool": "note", "args": {"note_type": "insight"}},
+        "route": {"tool": "remember", "args": {"note_type": "insight"}},
         "safety": "additive write; uses note validation and does not preserve raw provenance unless sources are provided",
-        "advanced": ["replace", "edit", "link"],
+        "advanced": ["replace_memory", "edit_memory", "connect_memory"],
     },
     "capture": {
         "intent": "Capture raw material or proof-bearing text without turning it into a conclusion.",
-        "route": {"tool": "add", "args": {"source_type": "other"}},
-        "evidence_route": {"tool": "preserve", "args": {}},
+        "route": {"tool": "capture_source", "args": {"source_type": "other"}},
+        "evidence_route": {"tool": "preserve_evidence", "args": {}},
         "safety": "additive write; Sources and Evidence preserve originals/provenance",
-        "advanced": ["mint_upload_token", "propose_compilation"],
+        "advanced": ["transfer_artifact", "compile_source"],
     },
     "review": {
         "intent": "Review stale, contradictory, or unprocessed knowledge before acting.",
-        "route": {"tool": "attention", "args": {}},
-        "audit_route": {"tool": "audit", "args": {}},
+        "route": {"tool": "review_memory", "args": {"mode": "attention"}},
+        "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; surfaces candidates for human judgment",
-        "advanced": ["audit", "propose_compilation", "evolution"],
+        "advanced": ["review_memory", "compile_source"],
     },
     "connect": {
         "intent": "Find links or typed relations that make the knowledge graph denser.",
-        "route": {"tool": "suggest_links", "args": {}},
-        "relations_route": {"tool": "suggest_relations", "args": {}},
+        "route": {"tool": "connect_memory", "args": {"operation": "suggest-links"}},
+        "relations_route": {"tool": "connect_memory", "args": {"operation": "suggest-relations"}},
         "safety": "proposal-only by default; suggested relations never write automatically",
-        "advanced": ["graph_context", "link"],
+        "advanced": ["connect_memory"],
     },
     "adopt": {
         "intent": "Assess or import an existing vault safely.",
-        "route": {"tool": "adopt", "args": {"mode": "scan-only"}},
+        "route": {"tool": "adopt_vault", "args": {"mode": "scan-only"}},
         "safety": "scan-only by default; copy/compile modes require explicit options and preserve originals",
-        "advanced": ["overview", "propose_compilation"],
+        "advanced": ["browse_memory", "compile_source"],
     },
     "maintain": {
         "intent": "Check vault health and repair drift only when explicitly requested.",
-        "route": {"tool": "audit", "args": {}},
-        "fix_route": {"tool": "audit_fix", "args": {"dry_run": False}},
-        "reconcile_route": {"tool": "reconcile", "args": {"dry_run": False}},
+        "route": {"tool": "maintain_memory", "args": {"mode": "audit"}},
+        "fix_route": {"tool": "maintain_memory", "args": {"mode": "fix", "dry_run": False}},
+        "reconcile_route": {"tool": "maintain_memory", "args": {"mode": "reconcile", "dry_run": False}},
         "safety": "read-only by default; write-capable fixes require explicit flags",
-        "advanced": ["audit_fix", "reconcile", "doctor"],
+        "advanced": ["maintain_memory", "doctor"],
     },
 }
 _PRODUCT_METADATA: dict[str, dict] = {
@@ -2937,36 +3895,311 @@ def _build_commands() -> tuple[Command, ...]:
 
 COMMANDS: tuple[Command, ...] = _build_commands()
 
-# MCP tools that are NOT produced by the generic registry loop and stay
-# hand-registered in server.py:
-#   - note: per-vault description (live project-key hint) — registered via
-#     bind_vault(op_note, …, description=note_description(hint));
-#   - mint_upload_token / mint_download_token: bound to server env (upload token,
-#     base URL), take no vault_root, and have no REST/CLI surface.
-# The fidelity test asserts every live MCP tool is either registry-generated or
-# named here — no silent gaps.
-HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset(
-    {"note", "mint_upload_token", "mint_download_token"}
+_PRODUCT_SPEC: tuple[tuple, ...] = (
+    (
+        "bootstrap",
+        op_bootstrap,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("bootstrap",),
+        {"surface": "primary", "actions": (), "first_run_safe": True},
+    ),
+    (
+        "ask_memory",
+        op_ask_memory,
+        1,
+        False,
+        False,
+        "query",
+        _MCRC,
+        ("search", "find"),
+        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    ),
+    (
+        "read_memory",
+        op_read_memory,
+        1,
+        False,
+        False,
+        "path",
+        _MCRC,
+        ("fetch", "get"),
+        {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    ),
+    (
+        "browse_memory",
+        op_browse_memory,
+        1,
+        False,
+        False,
+        "path",
+        _MCRC,
+        ("overview", "list_directory"),
+        {"surface": "primary", "actions": ("adopt", "ask"), "first_run_safe": True},
+    ),
+    (
+        "remember",
+        op_remember,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("note",),
+        {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
+    ),
+    (
+        "edit_memory",
+        op_edit_memory,
+        1,
+        True,
+        False,
+        "path",
+        _MCRC,
+        ("edit",),
+        {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    ),
+    (
+        "replace_memory",
+        op_replace_memory,
+        1,
+        True,
+        False,
+        "old_path",
+        _MCRC,
+        ("replace",),
+        {"surface": "primary", "actions": ("update",), "first_run_safe": False},
+    ),
+    (
+        "capture_source",
+        op_capture_source,
+        1,
+        True,
+        True,
+        None,
+        _MCRC,
+        ("add", "propose_compilation"),
+        {"surface": "primary", "actions": ("save",), "first_run_safe": False},
+    ),
+    (
+        "compile_source",
+        op_compile_source,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("propose_compilation",),
+        {"surface": "primary", "actions": ("review", "save"), "first_run_safe": True},
+    ),
+    (
+        "preserve_evidence",
+        op_preserve_evidence,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("preserve",),
+        {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
+    ),
+    (
+        "transfer_artifact",
+        op_transfer_artifact,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("transfer_token",),
+        {"surface": "primary", "actions": ("prove",), "first_run_safe": True},
+    ),
+    (
+        "review_memory",
+        op_review_memory,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("attention", "audit", "evolution", "provenance_report", "propose_compilation"),
+        {"surface": "primary", "actions": ("review", "ask", "prove"), "first_run_safe": True},
+    ),
+    (
+        "connect_memory",
+        op_connect_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("suggest_links", "graph_context", "suggest_relations", "link", "list_inbound_links"),
+        {"surface": "primary", "actions": ("connect", "ask", "save"), "first_run_safe": True},
+    ),
+    (
+        "adopt_vault",
+        op_adopt_vault,
+        1,
+        True,
+        False,
+        "path",
+        _MCRC,
+        ("adopt",),
+        {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
+    ),
+    (
+        "maintain_memory",
+        op_maintain_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("audit", "audit_fix", "reconcile"),
+        {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
+    ),
+    (
+        "manage_memory_file",
+        op_manage_memory_file,
+        2,
+        True,
+        False,
+        None,
+        _MCRC,
+        (
+            "create_file",
+            "list_directory",
+            "move_file",
+            "delete",
+            "append_to_file",
+            "list_trash",
+            "recover_from_trash",
+        ),
+        {"surface": "advanced", "actions": ("update", "ask"), "first_run_safe": False},
+    ),
+    (
+        "query_dataset",
+        op_query_dataset,
+        2,
+        False,
+        False,
+        "path",
+        _MCRC,
+        ("query_data",),
+        {"surface": "advanced", "actions": ("ask",), "first_run_safe": True},
+    ),
+    (
+        "read_media",
+        op_read_media,
+        2,
+        False,
+        False,
+        "path",
+        _M,
+        ("get_video_frames",),
+        {"surface": "advanced", "actions": ("ask",), "first_run_safe": True},
+    ),
 )
 
 
+def _build_product_commands() -> tuple[Command, ...]:
+    cmds: list[Command] = []
+    for name, leaf, tier, writes, needs_schema, positional, surfaces, routes, meta in _PRODUCT_SPEC:
+        skip = 2 if needs_schema else 1
+        desc = leaf.__doc__ or ""
+        params = _derive_params(leaf, skip=skip, positional=positional)
+        if name == "remember":
+            generic_hint = "(any slug; unknown keys auto-register on first use)"
+            desc = desc.replace("__PROJECT_KEYS_HINT__", generic_hint)
+            params = tuple(
+                Param(
+                    name=p.name,
+                    type=p.type,
+                    required=p.required,
+                    help=p.help.replace("__PROJECT_KEYS_HINT__", generic_hint),
+                    cli_positional=p.cli_positional,
+                )
+                for p in params
+            )
+        cmds.append(
+            Command(
+                name=name,
+                leaf=leaf,
+                params=params,
+                surfaces=surfaces,
+                tier=tier,
+                cli_writes=writes,
+                needs_schema=needs_schema,
+                description=desc,
+                product_surface=meta.get("surface", "advanced"),
+                product_actions=tuple(meta.get("actions", ())),
+                first_run_safe=bool(meta.get("first_run_safe", False)),
+                routes=tuple(routes),
+            )
+        )
+    return tuple(cmds)
+
+
+PRODUCT_COMMANDS: tuple[Command, ...] = _build_product_commands()
+PRODUCT_PUBLIC_NAMES: tuple[str, ...] = tuple(c.name for c in PRODUCT_COMMANDS)
+PRODUCT_ROUTE_HELPERS: frozenset[str] = frozenset({"transfer_token"})
+HAND_REGISTERED_EXCEPTIONS: frozenset[str] = frozenset()
+
+
 def commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
-    """The commands exposed on `surface`, honoring the tier-2 opt-out."""
+    """Canonical implementation commands exposed by the old primitive registry."""
     return tuple(
         c for c in COMMANDS if surface in c.surfaces and (expose_tier2 or c.tier == 1)
     )
 
 
+def product_commands_for(surface: str, *, expose_tier2: bool = True) -> tuple[Command, ...]:
+    """Product commands exposed on a public surface, honoring tier-2 opt-out."""
+    return tuple(
+        c
+        for c in PRODUCT_COMMANDS
+        if surface in c.surfaces and (expose_tier2 or c.tier == 1)
+    )
+
+
+def validate_product_registry() -> dict:
+    """Validate product route metadata against canonical implementation leaves."""
+    canonical = {c.name for c in COMMANDS}
+    route_refs = {route for cmd in PRODUCT_COMMANDS for route in cmd.routes}
+    unknown = route_refs - canonical - PRODUCT_ROUTE_HELPERS
+    if unknown:
+        raise RuntimeError(f"product command route(s) reference unknown leaves: {sorted(unknown)}")
+
+    covered = route_refs & canonical
+    public_canonical = {
+        c.name for c in COMMANDS if c.surfaces & _MCRC
+    }
+    missing = public_canonical - covered
+    if missing:
+        raise RuntimeError(f"canonical capability missing product route: {sorted(missing)}")
+    return {
+        "product_commands": [c.name for c in PRODUCT_COMMANDS],
+        "canonical_covered": sorted(covered),
+        "helpers": sorted(PRODUCT_ROUTE_HELPERS & route_refs),
+    }
+
+
+validate_product_registry()
+
+
 def product_tool_catalog() -> dict:
     """Registry-derived product surface: primary tools first, advanced tools visible."""
-    primary = [c.name for c in COMMANDS if c.product_surface == "primary"]
-    advanced = [c.name for c in COMMANDS if c.product_surface != "primary"]
+    primary = [c.name for c in PRODUCT_COMMANDS if c.product_surface == "primary"]
+    advanced = [c.name for c in PRODUCT_COMMANDS if c.product_surface != "primary"]
     return {
         "primary": primary,
         "advanced": advanced,
-        "first_run_safe": [c.name for c in COMMANDS if c.first_run_safe],
+        "first_run_safe": [c.name for c in PRODUCT_COMMANDS if c.first_run_safe],
+        "routes": {c.name: list(c.routes) for c in PRODUCT_COMMANDS},
     }
-
 
 def _catalog_route_tools(entry: dict) -> set[str]:
     tools: set[str] = set()
@@ -2985,11 +4218,8 @@ def simple_action_names() -> tuple[str, ...]:
 
 
 def simple_action_catalog(selected_packs: dict | None = None) -> dict:
-    """Product action map over canonical commands; no duplicate command logic."""
-    known_commands = {command.name for command in COMMANDS} | {
-        "doctor",
-        "mint_upload_token",
-    }
+    """Product action map over product commands; no duplicate command logic."""
+    known_commands = {command.name for command in PRODUCT_COMMANDS} | {"doctor"}
     out: dict[str, dict] = {}
     for action in _SIMPLE_ACTIONS:
         definition = _SIMPLE_ACTION_DEFS[action]
@@ -3042,7 +4272,7 @@ def product_front_door_catalog(selected_packs: dict | None = None) -> dict:
         action: {"primary_tools": [], "advanced_tools": []}
         for action in _PRODUCT_ACTIONS
     }
-    for command in COMMANDS:
+    for command in PRODUCT_COMMANDS:
         bucket = "primary_tools" if command.product_surface == "primary" else "advanced_tools"
         for action in command.product_actions:
             if action in out:

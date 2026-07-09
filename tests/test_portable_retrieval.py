@@ -77,37 +77,32 @@ def test_fetch_returns_bounded_document_text(vault: Path) -> None:
     assert "content" not in out
 
 
-def test_search_fetch_mcp_shape_is_portable(
+def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tools = _mcp_tools(_build_server(monkeypatch, vault))
 
-    for name in ("search", "fetch"):
+    assert "search" not in tools
+    assert "fetch" not in tools
+
+    for name in ("ask_memory", "read_memory"):
         annotations = tools[name]["annotations"]
         assert annotations["readOnlyHint"] is True
         assert annotations["destructiveHint"] is False
         assert annotations["openWorldHint"] is False
 
-    search_schema = tools["search"]["outputSchema"]
-    assert search_schema["type"] == "object"
-    assert search_schema["required"] == ["results"]
-    result_schema = search_schema["properties"]["results"]["items"]
-    assert result_schema["required"] == ["id", "title", "url", "metadata"]
-    assert set(result_schema["properties"]) == {"id", "title", "url", "metadata"}
-    assert result_schema["properties"]["metadata"]["additionalProperties"] == {
-        "type": "string"
-    }
+    ask_schema = tools["ask_memory"]["outputSchema"]
+    assert ask_schema["type"] == "object"
+    assert ask_schema["required"] == ["result"]
+    assert ask_schema["properties"]["result"]["anyOf"][0]["type"] == "array"
+    assert ask_schema["properties"]["result"]["anyOf"][1]["type"] == "object"
 
-    fetch_schema = tools["fetch"]["outputSchema"]
-    assert fetch_schema["type"] == "object"
-    assert fetch_schema["required"] == ["id", "title", "text", "url"]
-    assert set(fetch_schema["properties"]) == {"id", "title", "text", "url", "metadata"}
-    assert fetch_schema["properties"]["metadata"]["additionalProperties"] == {
-        "type": "string"
-    }
+    read_schema = tools["read_memory"]["outputSchema"]
+    assert read_schema["type"] == "object"
+    assert read_schema["additionalProperties"] is True
 
-    search_inputs = tools["search"]["inputSchema"]["properties"]
-    fetch_inputs = tools["fetch"]["inputSchema"]["properties"]
-    for forbidden in ("pack", "detail", "include_timings", "include_raw", "frontmatter_only"):
-        assert forbidden not in search_inputs
-        assert forbidden not in fetch_inputs
+    ask_inputs = tools["ask_memory"]["inputSchema"]["properties"]
+    read_inputs = tools["read_memory"]["inputSchema"]["properties"]
+    assert {"query", "detail", "deep", "include_timings"} <= set(ask_inputs)
+    assert "pack" not in ask_inputs
+    assert {"path", "frontmatter_only", "include_raw", "links"} <= set(read_inputs)

@@ -1,4 +1,4 @@
-"""The registry-driven CLI core operations (`kb find`/`get`/`audit`/`note` …).
+"""The registry-driven product CLI operations (`ask_memory`/`read_memory`/`remember` …).
 
 Drives `exomem.__main__.main` in-process with explicit argv against a temp vault,
 asserting the human vs `--json` envelope output and the 0/1/2 exit-code contract.
@@ -25,25 +25,25 @@ def _run(argv: list[str], capsys) -> tuple[int, str, str]:
     return code, captured.out, captured.err
 
 
-def test_find_json_envelope(vault: Path, capsys) -> None:
-    code, out, _ = _run(["find", "metabolism", "--mode", "keyword", "--json"], capsys)
+def test_ask_memory_json_envelope(vault: Path, capsys) -> None:
+    code, out, _ = _run(["ask_memory", "metabolism", "--mode", "keyword", "--json"], capsys)
     assert code == 0
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert isinstance(payload["data"], list)
-    assert payload["data"], "keyword find for 'metabolism' should surface fixture notes"
+    assert payload["data"], "keyword ask_memory for 'metabolism' should surface fixture notes"
 
 
-def test_find_human_output(vault: Path, capsys) -> None:
-    code, out, _ = _run(["find", "metabolism", "--mode", "keyword"], capsys)
+def test_ask_memory_human_output(vault: Path, capsys) -> None:
+    code, out, _ = _run(["ask_memory", "metabolism", "--mode", "keyword"], capsys)
     assert code == 0
-    assert ".md" in out  # one path-per-line human listing, not an envelope
+    assert ".md" in out
     assert '"success"' not in out
 
 
-def test_get_reads_a_page(vault: Path, capsys) -> None:
+def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     code, out, _ = _run(
-        ["get", "Notes/Insights/progressive-disclosure-without-mode-fragmentation", "--json"],
+        ["read_memory", "Notes/Insights/progressive-disclosure-without-mode-fragmentation", "--json"],
         capsys,
     )
     assert code == 0
@@ -52,36 +52,36 @@ def test_get_reads_a_page(vault: Path, capsys) -> None:
     assert payload["data"]["frontmatter"]["type"] == "insight"
 
 
-def test_attention_runs(vault: Path, capsys) -> None:
-    """`kb attention` is the registry-generated CLI surface of the review queue."""
-    code, out, _ = _run(["attention", "--limit", "5", "--json"], capsys)
+def test_review_memory_attention_runs(vault: Path, capsys) -> None:
+    code, out, _ = _run(["review_memory", "--mode", "attention", "--limit", "5", "--json"], capsys)
     assert code == 0
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     data = payload["data"]
     assert {"items", "summary", "shown", "total", "truncated", "upstream_truncated"} <= set(data)
     assert data["shown"] == len(data["items"]) <= 5
-    # category subset is accepted on the CLI too (list[str] via repeated/append flag)
-    code2, out2, _ = _run(["attention", "--categories", "stale_review", "--json"], capsys)
+    code2, out2, _ = _run(
+        ["review_memory", "--mode", "attention", "--categories", "stale_review", "--json"],
+        capsys,
+    )
     assert code2 == 0
     data2 = json.loads(out2.strip().splitlines()[-1])["data"]
     surfaced = {c for it in data2["items"] for c in it["categories"]}
     assert surfaced <= {"stale_review"}
 
 
-def test_audit_runs(vault: Path, capsys) -> None:
-    code, out, _ = _run(["audit", "--json"], capsys)
+def test_review_memory_audit_runs(vault: Path, capsys) -> None:
+    code, out, _ = _run(["review_memory", "--mode", "audit", "--json"], capsys)
     assert code == 0
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert "findings" in payload["data"]
 
 
-def test_note_write(vault: Path, capsys) -> None:
+def test_remember_write(vault: Path, capsys) -> None:
     code, out, _ = _run(
         [
-            "note",
-            "--note-type", "insight",
+            "remember",
             "--title", "CLI can write",
             "--content", "# CLI can write\n\n## Claim\n\nThe kb CLI writes notes.\n",
             "--json",
@@ -96,14 +96,13 @@ def test_note_write(vault: Path, capsys) -> None:
     assert "CLI can write" in written.read_text(encoding="utf-8")
 
 
-def test_note_field_escape(vault: Path, capsys) -> None:
-    """`note`'s type-specific args go through the repeatable --field key=value escape."""
+def test_remember_field_escape(vault: Path, capsys) -> None:
     code, out, _ = _run(
         [
-            "note",
-            "--note-type", "research-note",
+            "remember",
             "--title", "Field escape works",
             "--content", "# Field escape works\n\n## Question\n\nq\n",
+            "--field", "note_type=research-note",
             "--field", "project=project-alpha",
             "--json",
         ],
@@ -115,14 +114,9 @@ def test_note_field_escape(vault: Path, capsys) -> None:
     assert "Project Alpha" in payload["data"]["path"]
 
 
-def test_edit_value_plain_string(vault: Path, capsys) -> None:
-    """`kb edit --field K --value <plain string>` works without quoting as JSON.
-
-    `value` is a genuine union (coercion tag "json"); on the CLI a bare unquoted
-    string must be taken as itself, not rejected as BAD_JSON.
-    """
+def test_edit_memory_value_plain_string(vault: Path, capsys) -> None:
     code, out, err = _run(
-        ["edit", _INSIGHT, "--why", "set domain", "--field", "domain",
+        ["edit_memory", _INSIGHT, "--why", "set domain", "--field", "domain",
          "--value", "retrieval", "--json"],
         capsys,
     )
@@ -134,14 +128,12 @@ def test_edit_value_plain_string(vault: Path, capsys) -> None:
 
 
 def test_malformed_field_exits_2(vault: Path, capsys) -> None:
-    """A `--field` token with no `=` is a usage error → exit 2 (not exit 1)."""
     code, _out, err = _run(
         [
-            "note",
-            "--note-type", "insight",
+            "remember",
             "--title", "x",
             "--content", "# x\n\n## Claim\n\ny\n",
-            "--field", "bogus",  # no KEY=VALUE separator
+            "--field", "bogus",
         ],
         capsys,
     )
@@ -153,29 +145,28 @@ def test_malformed_field_exits_2(vault: Path, capsys) -> None:
 def test_tier2_op_disabled_emits_unavailable(
     vault: Path, capsys, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`kb <tier2-op>` with EXOMEM_DISABLE_TIER2 set names the gap, exit 2."""
     monkeypatch.setenv("EXOMEM_DISABLE_TIER2", "1")
-    code, _out, err = _run(["query_data", "some.csv"], capsys)
+    code, _out, err = _run(["query_dataset", "some.csv"], capsys)
     assert code == 2
     assert "Error [UNAVAILABLE]" in err
     assert "tier-2 disabled" in err
-    assert "query_data" in err
+    assert "query_dataset" in err
 
 
 def test_missing_required_arg_exits_2(vault: Path, capsys) -> None:
-    code, _out, err = _run(["get"], capsys)  # `path` is required
+    code, _out, err = _run(["read_memory"], capsys)
     assert code == 2
     assert "Error [USAGE]" in err
 
 
 def test_op_error_exits_1_with_code(vault: Path, capsys) -> None:
-    code, _out, err = _run(["get", "Notes/Insights/does-not-exist"], capsys)
+    code, _out, err = _run(["read_memory", "Notes/Insights/does-not-exist"], capsys)
     assert code == 1
     assert "Error [NOT_FOUND]" in err
 
 
 def test_op_error_json_envelope(vault: Path, capsys) -> None:
-    code, out, _ = _run(["get", "Notes/Insights/does-not-exist", "--json"], capsys)
+    code, out, _ = _run(["read_memory", "Notes/Insights/does-not-exist", "--json"], capsys)
     assert code == 1
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is False
@@ -185,8 +176,7 @@ def test_op_error_json_envelope(vault: Path, capsys) -> None:
 def test_unknown_field_key_rejected(vault: Path, capsys) -> None:
     code, _out, err = _run(
         [
-            "note",
-            "--note-type", "insight",
+            "remember",
             "--title", "x",
             "--content", "# x\n\n## Claim\n\ny\n",
             "--field", "bogus=1",
@@ -196,7 +186,8 @@ def test_unknown_field_key_rejected(vault: Path, capsys) -> None:
     assert code == 1
     assert "UNKNOWN_PARAM" in err
 
-def test_simple_ask_alias_uses_compact_find_defaults(vault: Path, capsys) -> None:
+
+def test_simple_ask_alias_uses_compact_product_defaults(vault: Path, capsys) -> None:
     code, out, err = _run(["ask", "metabolism", "--json"], capsys)
     assert code == 0, err
     payload = json.loads(out.strip().splitlines()[-1])
@@ -214,13 +205,14 @@ def test_simple_ask_alias_can_request_deep_context(vault: Path, capsys) -> None:
     assert {"hits", "pack"} <= set(payload["data"])
 
 
-def test_simple_remember_alias_routes_to_note(vault: Path, capsys) -> None:
+def test_generated_remember_command_writes(vault: Path, capsys) -> None:
     code, out, err = _run(
         [
             "remember",
-            "# Simple action memory\n\n## Claim\n\nSimple aliases write through note.\n",
+            "--content",
+            "# Product command memory\n\n## Claim\n\nProduct commands write through canonical note.\n",
             "--title",
-            "Simple action memory",
+            "Product command memory",
             "--json",
         ],
         capsys,
@@ -230,7 +222,7 @@ def test_simple_remember_alias_routes_to_note(vault: Path, capsys) -> None:
     assert payload["success"] is True
     written = vault / payload["data"]["path"]
     assert written.exists()
-    assert "Simple aliases write through note" in written.read_text(encoding="utf-8")
+    assert "Product commands write through canonical note" in written.read_text(encoding="utf-8")
 
 
 def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys) -> None:
@@ -249,7 +241,7 @@ def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys)
     assert code == 0, err
     source_payload = json.loads(out.strip().splitlines()[-1])
     assert source_payload["success"] is True
-    assert "/Sources/Other/" in source_payload["data"]["path"]
+    assert "/Sources/Other/" in source_payload["data"]["source"]["path"]
 
     code2, out2, err2 = _run(
         [

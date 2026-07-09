@@ -18,13 +18,16 @@ from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
 
 from . import commands as commands_module
-from . import guards, upload_tokens
+from . import guards
 from .server_assets import (
     register_asset_routes,
     register_oauth_metadata_route,
     server_icons,
 )
-from .server_auth import SingleUserGitHubVerifier, build_oauth
+from .server_auth import (  # noqa: F401 - re-exported for compatibility
+    SingleUserGitHubVerifier,
+    build_oauth,
+)
 from .server_rest import register_rest_facade
 from .server_runtime import initialize_runtime
 from .server_transfer import register_transfer_routes
@@ -46,7 +49,7 @@ class CallTraceMiddleware(Middleware):
             args = _extract_tool_args(context.message)
             for field in guarded_fields:
                 guards.guard_text_content(args.get(field), tool=tool_name, field=field)
-            if tool_name == "edit":
+            if tool_name in ("edit", "edit_memory"):
                 for item in args.get("edits") or []:
                     if isinstance(item, dict):
                         guards.guard_text_content(
@@ -55,7 +58,7 @@ class CallTraceMiddleware(Middleware):
                             field="edits[].new_string",
                         )
 
-        extras = _find_call_summary(context.message) if tool_name == "find" else ""
+        extras = _find_call_summary(context.message) if tool_name == "ask_memory" else ""
         _call_log.info(f"event=tool_start tool={tool_name}{extras}")
         t0 = time.perf_counter()
         try:
@@ -141,7 +144,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         transfer_config=transfer_config,
     )
 
-    for cmd in commands_module.commands_for("mcp", expose_tier2=expose_tier2):
+    for cmd in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2):
         if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
             continue
         injected = (
@@ -149,84 +152,14 @@ def build_server(*, require_auth: bool) -> FastMCP:
             if cmd.needs_schema
             else (runtime.vault_root,)
         )
+        description = cmd.doc
+        if cmd.name == "remember":
+            description = commands_module.remember_description(runtime.project_keys_hint)
         mcp.tool(
             commands_module.bind_vault(
-                cmd.leaf, *injected, name=cmd.name, description=cmd.doc
+                cmd.leaf, *injected, name=cmd.name, description=description
             ),
             annotations=cmd.mcp_annotations,
-        )
-
-    mcp.tool(
-        commands_module.bind_vault(
-            commands_module.op_note,
-            runtime.vault_root,
-            name="note",
-            description=commands_module.note_description(runtime.project_keys_hint),
-        ),
-        annotations=commands_module.mcp_tool_annotations("note", read_only=False),
-    )
-
-    @mcp.tool(
-        annotations=commands_module.mcp_tool_annotations(
-            "mint_upload_token", read_only=False
-        )
-    )
-    def mint_upload_token() -> dict:
-        """Mint a short-lived bearer token for the HTTP `/upload` endpoint.
-
-        This is how you file BINARY evidence (images, PDFs, any file) from a
-        claude.ai web session — the bytes travel out-of-band, never through the
-        model. Steps:
-
-        1. Call this tool → `{token, ttl_seconds, upload_url[, large_upload_url]}`.
-        2. In the code sandbox, multipart-POST the user's ATTACHED files to
-           `upload_url` with header `Authorization: Bearer <token>` and form
-           fields `file`, `scope`, `category` (optional `filename`, `description`,
-           `text`). Files must be ATTACHMENTS — inline-pasted images never reach
-           the sandbox disk and cannot be sent.
-        3. To make the binary SEARCHABLE, extract its text in the sandbox (OCR an
-           image/scan, read a PDF, transcribe audio/video) and pass it as the
-           `text` field above — it lands in an embedded sidecar so the otherwise-
-           opaque file is findable by its content.
-
-        **Large files (>100 MB):** `upload_url` is fronted by Cloudflare, which
-        413s any body over ~100 MB at the edge. If a file exceeds ~100 MB (or a
-        POST to `upload_url` returns 413), send it to `large_upload_url` instead
-        when that field is present — same token, same form fields, an alternate
-        host with no edge cap. If `large_upload_url` is absent, only `upload_url`
-        is available and >100 MB must go desk-side.
-
-        The token is Evidence-write only and expires after `ttl_seconds`; the
-        server's long-lived secret never leaves the server.
-
-        Returns: {token, ttl_seconds, upload_url, large_upload_url?}.
-        Raises: UPLOAD_DISABLED if the server has no upload token configured.
-        """
-        return upload_tokens.mint_for_endpoint(
-            transfer_config.upload_token,
-            runtime.base_url,
-            large_base_url=transfer_config.large_upload_base,
-        )
-
-    @mcp.tool(
-        annotations=commands_module.mcp_tool_annotations(
-            "mint_download_token", read_only=True
-        )
-    )
-    def mint_download_token() -> dict:
-        """Mint a short-lived bearer token for the HTTP `/download` endpoint.
-
-        Use to PULL a vault file into the sandbox — a dataset, an evidence
-        binary, a scan — so you can analyze it. Call this, then from the code
-        sandbox GET `download_url?path=<vault-relative path>` with header
-        `Authorization: Bearer <token>`. Read-only; the token is download-scoped
-        (can't write) and expires after `ttl_seconds`.
-
-        Returns: {token, ttl_seconds, download_url}.
-        Raises: DOWNLOAD_DISABLED if the server has no upload token configured.
-        """
-        return upload_tokens.mint_for_endpoint(
-            transfer_config.upload_token, runtime.base_url, scope="download"
         )
 
     return mcp

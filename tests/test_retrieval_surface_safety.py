@@ -66,24 +66,21 @@ def test_get_can_return_bounded_body(vault: Path) -> None:
     assert out["body_chars"] == len(out["body"])
 
 
-def test_find_get_mcp_output_schemas_are_concrete(
+def test_product_mcp_retrieval_schemas_are_safe(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     tools = _mcp_tools(_build_server(monkeypatch, vault))
 
-    find_schema = tools["find"]["outputSchema"]
-    find_result = find_schema["properties"]["result"]
-    first_shape = find_result["anyOf"][0]
-    hit_schema = first_shape["items"]
-    assert {"path", "type", "scope", "title", "updated"} <= set(
-        hit_schema["required"]
-    )
-    assert "excerpt" in hit_schema["properties"]
-    assert hit_schema["type"] == "object"
+    assert "find" not in tools
+    assert "get" not in tools
 
-    get_schema = tools["get"]["outputSchema"]
-    assert get_schema["type"] == "object"
-    assert get_schema["required"] == ["path", "frontmatter"]
-    assert "body" in get_schema["properties"]
-    assert "body_truncated" in get_schema["properties"]
-    assert "max_body_chars" in tools["get"]["inputSchema"]["properties"]
+    ask_schema = tools["ask_memory"]["outputSchema"]
+    ask_result = ask_schema["properties"]["result"]
+    assert ask_result["anyOf"][0]["type"] == "array"
+    assert ask_result["anyOf"][0]["items"]["type"] == "object"
+    assert ask_result["anyOf"][1]["type"] == "object"
+
+    read_schema = tools["read_memory"]["outputSchema"]
+    assert read_schema["type"] == "object"
+    assert read_schema["additionalProperties"] is True
+    assert "path" in tools["read_memory"]["inputSchema"]["properties"]

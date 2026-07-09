@@ -220,7 +220,7 @@ def test_fetch_via_rest_success_returns_hits(monkeypatch: pytest.MonkeyPatch) ->
     result = hook_mod._fetch_via_rest("what did I conclude about X?", "secret-key")
 
     assert result == hits
-    assert captured["url"] == "http://127.0.0.1:8765/api/find"
+    assert captured["url"] == "http://127.0.0.1:8765/api/ask_memory"
     assert captured["method"] == "POST"
     assert captured["headers"]["Authorization"] == "Bearer secret-key"
     assert captured["body"] == {
@@ -241,7 +241,7 @@ def test_fetch_via_rest_respects_exomem_host(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(urllib_request, "urlopen", fake_urlopen)
     hook_mod._fetch_via_rest("prompt", "key")
-    assert captured["url"] == "http://10.0.0.5:8765/api/find"
+    assert captured["url"] == "http://10.0.0.5:8765/api/ask_memory"
 
 
 def test_fetch_via_rest_success_false_returns_none(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -303,7 +303,7 @@ def test_fetch_via_cli_success_invokes_expected_command(monkeypatch: pytest.Monk
 
     assert result == hits
     assert captured["cmd"] == [
-        "/usr/local/bin/exomem", "find",
+        "/usr/local/bin/exomem", "ask_memory",
         "--detail", "compact",
         "--limit", "3",
         "--mode", "keyword",

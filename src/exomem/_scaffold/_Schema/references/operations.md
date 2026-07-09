@@ -4,19 +4,19 @@ Detailed specs for the Knowledge Base operations. Read on first use of an operat
 
 ## Plain-language routing
 
-Agents should hear user intent first and choose the operation second. Use the
-simple action names as the routing layer; canonical tools remain the exact
-implementation.
+Agents should hear user intent first and choose the product command second.
+Canonical tools remain the exact implementation leaves underneath product
+commands.
 
-| Simple action | User intent | Operation path |
+| Simple action | User intent | Product route |
 |---|---|---|
-| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `find`, then `get`; use `find(pack=true)` for synthesis |
-| `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `note`; use `replace` if it supersedes old knowledge |
-| `capture` | Preserve raw material, a source, proof, receipt, or record | `add` for Sources; `preserve` or upload for Evidence |
-| `review` | Review stale, contradictory, or unprocessed knowledge | `attention`, `audit`, `propose_compilation` |
-| `connect` | Suggest links, relations, or graph context | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
-| `adopt` | Assess or import an existing vault safely | `adopt(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
-| `maintain` | Check or repair vault health | `audit` by default; `audit_fix`/`reconcile` only with explicit fix intent |
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `ask_memory`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
+| `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
+| `connect` | Suggest links, relations, or graph context | `connect_memory`; entity writes stay explicit |
+| `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | Check or repair vault health | `maintain_memory(mode="audit")`; explicit `fix`/`reconcile` modes only with fix intent |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
@@ -220,9 +220,9 @@ preservation.
 ### Delivering the bytes — out-of-band (never inline through the model)
 
 Binaries are delivered out-of-band — never inline as a tool argument (the
-`preserve` tool takes text only). Pick the channel by where the file actually is:
+`preserve_evidence` command takes text only). Pick the channel by where the file actually is:
 
-- **On claude.ai web — hands-off (preferred):** (1) call **`mint_upload_token`** →
+- **On claude.ai web — hands-off (preferred):** (1) call **`transfer_artifact(mode="upload")`** →
   a short-lived `{token, ttl_seconds, upload_url}`; (2) in the code sandbox,
   multipart-`curl` each attached file to `upload_url` with `Authorization: Bearer
   <token>` and form fields `file` / `scope` / `category` (optional `filename`,
@@ -280,13 +280,13 @@ through the model.
 - needing the raw bytes of a dataset, an evidence scan, or any stored artifact to process locally
 
 ### Procedure
-1. Call **`mint_download_token`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
+1. Call **`transfer_artifact(mode="download")`** → `{token, ttl_seconds, download_url}` (download-scoped, short-lived).
 2. In the sandbox, `GET {download_url}?path=<vault-relative path>` with header `Authorization: Bearer <token>`.
 3. The server resolves the path under the vault root (traversal-safe) and streams the file. An out-of-vault or missing path is refused.
 
 ### Notes
 - The token is **download-scoped** — it can read but not write.
-- Whole-vault read, like `get` — datasets and evidence live in sibling folders, all reachable by path.
+- Whole-vault read, like `read_memory` — datasets and evidence live in sibling folders, all reachable by path.
 
 ### Writes performed
 - None — read-only.
@@ -435,8 +435,8 @@ See `supersession.md`. Summary:
 ## query_data
 
 Structured query over a CSV/JSON **data file** under the vault — the retrieval
-half of the data-search pattern. `find` surfaces a dataset's markdown card;
-`query_data` reads the raw file the card's `data_file:` points at and returns
+half of the data-search pattern. `ask_memory` surfaces a dataset's markdown card;
+`query_dataset` reads the raw file the card's `data_file:` points at and returns
 exact rows or an aggregate. Read-only. Raw CSV/JSON are not `find`-searchable;
 this is how you query their values.
 

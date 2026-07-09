@@ -63,7 +63,7 @@ def test_open_world_hint_false_for_all(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     ann = _live_annotations(_build_server(monkeypatch))
-    for cmd in commands_module.COMMANDS:
+    for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces:
             continue  # note: hand-registered for MCP, checked below
         assert ann[cmd.name]["readOnlyHint"] is cmd.read_only, (
@@ -74,7 +74,7 @@ def test_read_only_hint_matches_registry(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_destructive_hint_only_for_overwrite_ops(monkeypatch: pytest.MonkeyPatch) -> None:
     ann = _live_annotations(_build_server(monkeypatch))
-    for cmd in commands_module.COMMANDS:
+    for cmd in commands_module.PRODUCT_COMMANDS:
         if "mcp" not in cmd.surfaces or cmd.read_only:
             continue
         expected = cmd.name in commands_module.DESTRUCTIVE_OPS
@@ -83,19 +83,18 @@ def test_destructive_hint_only_for_overwrite_ops(monkeypatch: pytest.MonkeyPatch
         )
 
 
-def test_find_is_a_safe_read(monkeypatch: pytest.MonkeyPatch) -> None:
-    # The exact regression ChatGPT surfaced.
-    a = _live_annotations(_build_server(monkeypatch))["find"]
+def test_ask_memory_is_a_safe_read(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The public recall command remains a safe read.
+    a = _live_annotations(_build_server(monkeypatch))["ask_memory"]
     assert a["readOnlyHint"] is True
     assert a["destructiveHint"] is False
     assert a["openWorldHint"] is False
 
 
-def test_hand_registered_tools_annotated(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_no_hand_registered_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     ann = _live_annotations(_build_server(monkeypatch))
-    # note is an additive write (creates/updates a note, never overwrites blindly).
-    assert ann["note"]["readOnlyHint"] is False
-    assert ann["note"]["destructiveHint"] is False
-    # mint_upload_token issues a write-capable credential; mint_download_token is read-only.
-    assert ann["mint_upload_token"]["readOnlyHint"] is False
-    assert ann["mint_download_token"]["readOnlyHint"] is True
+    assert set(commands_module.HAND_REGISTERED_EXCEPTIONS) == set()
+    assert "mint_upload_token" not in ann
+    assert "mint_download_token" not in ann
+    assert "note" not in ann
+    assert ann["transfer_artifact"]["readOnlyHint"] is False

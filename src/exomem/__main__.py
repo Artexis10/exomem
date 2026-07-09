@@ -73,12 +73,13 @@ def main(argv: list[str] | None = None) -> int:
         return _list_speakers_main(raw[1:])
     if raw and raw[0] == "remove-speaker":
         return _remove_speaker_main(raw[1:])
-    if raw and raw[0] in _simple_cli_action_names():
-        return _simple_action_main(raw)
-    # Registry-driven core operations (reads + writes): `kb find "…"`, `kb get …`,
-    # `kb note …`, etc. — every command on the `cli` surface.
+    # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
+    # `exomem remember ...`, etc. Product commands take precedence over old
+    # short aliases when a name overlaps.
     if raw and raw[0] in _core_op_names():
         return _core_op_main(raw)
+    if raw and raw[0] in _simple_cli_action_names():
+        return _simple_action_main(raw)
     # A real tier-2 op invoked while EXOMEM_DISABLE_TIER2 is set would otherwise fall
     # through to the serve parser and emit a confusing argparse error — name it instead.
     if raw and not _expose_tier2() and raw[0] in _core_op_names(expose_tier2=True):
@@ -786,7 +787,7 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
-_SIMPLE_CLI_ACTIONS = frozenset({"ask", "remember", "capture", "review", "connect", "maintain"})
+_SIMPLE_CLI_ACTIONS = frozenset({"ask", "remember", "capture", "review", "connect", "adopt", "maintain"})
 
 
 def _simple_cli_action_names() -> frozenset[str]:
@@ -825,6 +826,8 @@ def _simple_action_main(argv: list[str]) -> int:
         return _simple_review_main(rest)
     if action == "connect":
         return _simple_connect_main(rest)
+    if action == "adopt":
+        return _simple_adopt_main(rest)
     if action == "maintain":
         return _simple_maintain_main(rest)
     raise AssertionError(f"unhandled simple action: {action}")
@@ -833,7 +836,7 @@ def _simple_action_main(argv: list[str]) -> int:
 def _simple_ask_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem ask",
-        description="Ask Exomem what it knows. Thin alias over find with compact recall defaults.",
+        description="Ask Exomem what it knows. Thin alias over ask_memory with compact recall defaults.",
     )
     parser.add_argument("query", help="question or search phrase")
     parser.add_argument("--deep", action="store_true", help="include a packed reasoning context")
@@ -856,7 +859,7 @@ def _simple_ask_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     core = [
-        "find",
+        "ask_memory",
         args.query,
         "--detail",
         "compact",
@@ -870,7 +873,7 @@ def _simple_ask_main(argv: list[str]) -> int:
     _append_repeated(core, "--projects", args.projects)
     _append_repeated(core, "--tags", args.tags)
     if args.deep or args.graph_enrich:
-        core.append("--pack")
+        core.append("--deep")
     if args.graph_enrich:
         core.append("--graph-enrich")
     return _core_op_main(_with_json(core, args.json))
@@ -879,7 +882,7 @@ def _simple_ask_main(argv: list[str]) -> int:
 def _simple_remember_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem remember",
-        description="Remember a durable conclusion. Thin alias over note.",
+        description="Remember a durable conclusion. Thin alias over remember.",
     )
     parser.add_argument("content", help="compiled note body markdown")
     parser.add_argument("--title", required=True, help="note title")
@@ -899,7 +902,7 @@ def _simple_remember_main(argv: list[str]) -> int:
     args = parser.parse_args(argv)
 
     core = [
-        "note",
+        "remember",
         "--content",
         args.content,
         "--note-type",
@@ -944,7 +947,7 @@ def _simple_capture_main(argv: list[str]) -> int:
         if not args.title:
             parser.error("--title is required when --as source")
         core = [
-            "add",
+            "capture_source",
             "--content",
             args.content,
             "--source-type",
@@ -962,7 +965,7 @@ def _simple_capture_main(argv: list[str]) -> int:
         if missing:
             parser.error("--as evidence requires " + ", ".join(f"--{name}" for name in missing))
         core = [
-            "preserve",
+            "preserve_evidence",
             "--scope",
             args.scope,
             "--category",
@@ -988,7 +991,7 @@ def _simple_review_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
-    core = ["audit"] if args.audit else ["attention", "--limit", str(args.limit)]
+    core = ["review_memory", "--mode", "audit"] if args.audit else ["review_memory", "--mode", "attention", "--limit", str(args.limit)]
     _append_repeated(core, "--categories", args.categories)
     return _core_op_main(_with_json(core, args.json))
 
@@ -1007,7 +1010,7 @@ def _simple_connect_main(argv: list[str]) -> int:
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
-    core = ["suggest_relations" if args.relations else "suggest_links"]
+    core = ["connect_memory", "--operation", "suggest-relations" if args.relations else "suggest-links"]
     if args.path:
         core.extend(["--path", args.path])
     if args.draft_title:
@@ -1019,6 +1022,43 @@ def _simple_connect_main(argv: list[str]) -> int:
         core.append("--include-model-suggestions")
     return _core_op_main(_with_json(core, args.json))
 
+
+def _simple_adopt_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem adopt",
+        description="Adopt an existing vault safely. Thin alias over adopt_vault.",
+    )
+    parser.add_argument("path", nargs="?", help="vault subtree to scan")
+    parser.add_argument(
+        "--mode",
+        choices=("scan-only", "save-manifest", "copy-as-sources", "compile-selected"),
+        default="scan-only",
+        help="adoption mode (default: scan-only)",
+    )
+    parser.add_argument("--max-depth", type=int, help="folder tree depth cap")
+    parser.add_argument("--include-hidden", action="store_true", help="include hidden files/directories")
+    parser.add_argument("--samples", type=int, help="filename sample count per folder")
+    parser.add_argument("--pack-limit", type=int, help="maximum suggested knowledge packs")
+    parser.add_argument("--manifest-path", help="optional adoption manifest destination")
+    parser.add_argument("--selected-path", dest="selected_paths", action="append", default=None, help="legacy file to copy/compile (repeatable)")
+    parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+    args = parser.parse_args(argv)
+
+    core = ["adopt_vault", "--mode", args.mode]
+    if args.path:
+        core.append(args.path)
+    if args.max_depth is not None:
+        core.extend(["--max-depth", str(args.max_depth)])
+    if args.include_hidden:
+        core.append("--include-hidden")
+    if args.samples is not None:
+        core.extend(["--samples", str(args.samples)])
+    if args.pack_limit is not None:
+        core.extend(["--pack-limit", str(args.pack_limit)])
+    if args.manifest_path:
+        core.extend(["--manifest-path", args.manifest_path])
+    _append_repeated(core, "--selected-paths", args.selected_paths)
+    return _core_op_main(_with_json(core, args.json))
 
 def _simple_maintain_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
@@ -1036,17 +1076,17 @@ def _simple_maintain_main(argv: list[str]) -> int:
     if args.fix and args.reconcile:
         parser.error("choose only one of --fix or --reconcile")
     if args.fix:
-        core = ["audit_fix"]
+        core = ["maintain_memory", "--mode", "fix"]
         if args.dry_run:
             core.append("--dry-run")
         if args.rebuild_embeddings:
             core.append("--rebuild-embeddings")
     elif args.reconcile:
-        core = ["reconcile"]
+        core = ["maintain_memory", "--mode", "reconcile"]
         if args.dry_run:
             core.append("--dry-run")
     else:
-        core = ["audit"]
+        core = ["maintain_memory", "--mode", "audit"]
         _append_repeated(core, "--categories", args.categories)
     return _core_op_main(_with_json(core, args.json))
 
@@ -1056,7 +1096,7 @@ def _simple_maintain_main(argv: list[str]) -> int:
 # `note`/`replace` carry a wide, type-specific signature; rather than dozens of
 # flags, their REQUIRED params stay flags and everything else is reachable via a
 # repeatable `--field key=value`, so the CLI stays clean.
-_FIELD_ESCAPE = frozenset({"note", "replace"})
+_FIELD_ESCAPE = frozenset({"remember", "replace_memory"})
 
 
 def _expose_tier2() -> bool:
@@ -1069,7 +1109,7 @@ def _core_op_names(*, expose_tier2: bool | None = None) -> frozenset[str]:
     if expose_tier2 is None:
         expose_tier2 = _expose_tier2()
     return frozenset(
-        c.name for c in commands_module.commands_for("cli", expose_tier2=expose_tier2)
+        c.name for c in commands_module.product_commands_for("cli", expose_tier2=expose_tier2)
     )
 
 
@@ -1215,7 +1255,7 @@ def _print_adopt_human(result: dict) -> None:
 
 
 def _print_human(result, *, op: str | None = None) -> None:
-    if op == "adopt" and isinstance(result, dict):
+    if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return
     if isinstance(result, list):
@@ -1240,7 +1280,7 @@ def _core_op_main(argv: list[str]) -> int:
 
     cmds = {
         c.name: c
-        for c in commands_module.commands_for("cli", expose_tier2=_expose_tier2())
+        for c in commands_module.product_commands_for("cli", expose_tier2=_expose_tier2())
     }
 
     parser = _CLIParser(prog="kb", description=f"Query and write the local {kb_dirname()}.")

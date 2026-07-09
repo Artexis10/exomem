@@ -156,11 +156,11 @@ def test_subtree_scan_and_errors(messy: Path) -> None:
 
 
 def test_registry_exposure_survives_tier2_optout() -> None:
-    from exomem.commands import commands_for
+    from exomem.commands import product_commands_for
 
     for surface in ("mcp", "cli", "rest"):
-        names = {c.name for c in commands_for(surface, expose_tier2=False)}
-        assert "overview" in names, f"overview missing from {surface} with Tier 2 off"
+        names = {c.name for c in product_commands_for(surface, expose_tier2=False)}
+        assert "browse_memory" in names, f"browse_memory missing from {surface} with Tier 2 off"
 
 
 def _run(argv: list[str], capsys) -> tuple[int, str]:
@@ -172,7 +172,7 @@ def _run(argv: list[str], capsys) -> tuple[int, str]:
 
 
 def test_cli_door(vault: Path, capsys) -> None:
-    code, out = _run(["overview", "--json"], capsys)
+    code, out = _run(["browse_memory", "--json"], capsys)
     assert code == 0
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True

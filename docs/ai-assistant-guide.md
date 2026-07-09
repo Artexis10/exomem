@@ -43,24 +43,24 @@ Capture raw material separately when provenance matters.
 
 ## Simple actions for agents
 
-Use the simple product actions as the first mental model. The canonical tool is
-still the implementation route.
+Use the simple product actions as the first mental model. Product commands are
+what agents should call; canonical leaves stay underneath as implementation
+routes.
 
-| Simple action | User intent | Canonical route |
+| Simple action | User intent | Product command |
 | --- | --- | --- |
-| `ask` | "What do I know?", "find what I concluded", "show the context" | `find(detail="compact", rerank=false)`, then `get`; use `find(pack=true)` for synthesis |
-| `remember` | "remember this conclusion", "save this decision", "write this up" | `note`; use `replace` when it supersedes an old conclusion |
-| `capture` | "save this source", "preserve this receipt", "keep this proof" | `add` for raw sources; `preserve` or upload for Evidence |
-| `review` | "what needs review?", "show stale knowledge", "what is unprocessed?" | `attention`, `audit`, `propose_compilation` |
-| `connect` | "what should this link to?", "suggest relations", "show related ideas" | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
-| `adopt` | "import/adopt this existing vault safely" | `adopt(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
-| `maintain` | "check/fix vault health" | `audit` by default; `audit_fix`/`reconcile` only when explicitly requested |
+| `ask` | "What do I know?", "find what I concluded", "show the context" | `ask_memory(detail="compact", rerank=false)`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
+| `remember` | "remember this conclusion", "save this decision", "write this up" | `remember`; use `replace_memory` when it supersedes an old conclusion |
+| `capture` | "save this source", "preserve this receipt", "keep this proof" | `capture_source` for raw sources; `preserve_evidence` or `transfer_artifact` for Evidence |
+| `review` | "what needs review?", "show stale knowledge", "what is unprocessed?" | `review_memory` |
+| `connect` | "what should this link to?", "suggest relations", "show related ideas" | `connect_memory`; entity writes stay explicit through its write-capable mode |
+| `adopt` | "import/adopt this existing vault safely" | `adopt_vault(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check/fix vault health" | `maintain_memory(mode="audit")`; `fix`/`reconcile` modes only when explicitly requested |
 
 Do not make the user choose `Sources`, `Evidence`, `Notes`, `Entities`, pack
 metadata, graph sidecars, or schema terms unless the distinction changes the
 outcome. With the user, say "ask", "remember", "capture", "review", "connect",
-"adopt", or "maintain"; use canonical tool names only when reporting exact
-implementation steps or debugging.
+"adopt", or "maintain"; use canonical leaf names only when debugging internals.
 
 For CLI use, these actions are also available as friendly aliases:
 
@@ -105,7 +105,7 @@ What did I conclude about Exomem vs built-in memory?
 
 Agent behavior:
 
-1. Run `find(query="Exomem built-in memory boundary", detail="compact")`.
+1. Run `ask_memory(query="Exomem built-in memory boundary", detail="compact")`.
 2. Cite relevant hits.
 3. If results are thin, retry with adjacent terms such as `native memory`,
    `assistant memory`, `custom instructions`, or `durable governed knowledge`.
@@ -120,7 +120,7 @@ Save this article as a source and keep the URL.
 
 Agent behavior:
 
-1. Use `add` for the raw article or excerpt.
+1. Use `capture_source` for the raw article or excerpt.
 2. Keep the URL and capture rationale.
 3. Offer to compile a note only if there is a durable conclusion to extract.
 
@@ -135,7 +135,7 @@ Keep this receipt for the warranty case.
 Agent behavior:
 
 1. Treat it as a proof-bearing record, not a research source.
-2. Preserve the original file or text under the evidence workflow.
+2. Preserve the original file or text with `preserve_evidence` or `transfer_artifact`.
 3. Report the stored path and any metadata the server returns.
 
 ### Compile evidence
@@ -150,7 +150,7 @@ Agent behavior:
 
 1. Search or read the named sources.
 2. Draft a compiled conclusion that links back to the sources.
-3. Use `suggest_links` before writing so the new note connects to prior work.
+3. Use `remember` with link suggestions enabled so the new note connects to prior work.
 
 ### Review stale knowledge
 
@@ -162,7 +162,7 @@ Show me conclusions that may be stale.
 
 Agent behavior:
 
-1. Run the stale-review audit path.
+1. Run `review_memory` with the appropriate review mode.
 2. Present candidates as review items only.
 3. Ask whether to keep, edit, supersede, or archive. Do not auto-decay old
    knowledge.
@@ -178,7 +178,7 @@ The old setup recommendation is wrong now; this new one replaces it.
 Agent behavior:
 
 1. Find and confirm the old compiled page.
-2. Use `replace` to write the new conclusion and mark the old page superseded.
+2. Use `replace_memory` to write the new conclusion and mark the old page superseded.
 3. Surface downstream pages that may need review; do not silently rewrite them.
 
 ## Client setup
@@ -218,8 +218,8 @@ scope="vault" when absence matters.
 Save durable conclusions on your own: decisions, solved problems, diagnosed
 failures, reusable patterns, and stable project context. Save concise compiled
 notes, not transcripts. Preserve raw sources or proof-bearing records separately
-when provenance matters. Use edit for small corrections and replace when a newer
-conclusion supersedes an older one.
+when provenance matters. Use `edit_memory` for small corrections and
+`replace_memory` when a newer conclusion supersedes an older one.
 ```
 
 ## Codex CLI
@@ -290,9 +290,9 @@ decisions, sources, failures, experiments, or domains.
 
 | Use case | Tool shape | Meaning |
 | --- | --- | --- |
-| Normal lookup | `find(detail="compact", rerank=false)` | Cheap routing recall |
-| Reasoning | `find(pack=true)` | Bounded context assembly for synthesis |
-| Diagnostics | `find(detail="compact", include_timings=true, rerank=true)` | Explain latency and ranking behavior |
+| Normal lookup | `ask_memory(detail="compact", rerank=false)` | Cheap routing recall |
+| Reasoning | `ask_memory(deep=true)` | Bounded context assembly for synthesis |
+| Diagnostics | `ask_memory(detail="compact", include_timings=true, rerank=true)` | Explain latency and ranking behavior |
 
 Resource mode is separate from search knobs:
 
@@ -318,7 +318,7 @@ exomem install-hook --check
 Then ask the client to call `bootstrap(profile="compact")`. A good response
 includes a `contract_version`, server compute policy, tool defaults, and the
 search/save workflow. Ask one known vault question next and confirm it uses
-`find()` before answering.
+`ask_memory` before answering.
 
 For remote connectors, use [remote-quickstart.md](remote-quickstart.md). For the
 memory boundary, see [vs-built-in-memory.md](vs-built-in-memory.md).
