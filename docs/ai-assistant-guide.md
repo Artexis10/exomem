@@ -3,9 +3,9 @@
 This guide is for agents using Exomem after the MCP server or connector is
 available. It keeps the contract simple:
 
-- Use the assistant's native memory or custom instructions for preferences and
-  routing rules.
-- Use Exomem for durable governed knowledge: project context, decisions, sourced
+- Use the assistant's native memory or custom instructions as short-term or
+  behavioural memory: preferences, routing rules, and working context.
+- Use Exomem as long-term governed memory: project context, decisions, sourced
   conclusions, failures, experiments, proof-bearing records, and anything that
   should be searchable, citeable, reviewable, or supersedable across clients.
 - Do not make the user choose internal folders or page types unless the choice
@@ -184,6 +184,11 @@ instructions. Trim the tone line to your preference.
 
 ```text
 Use Exomem as my durable Knowledge Base.
+
+Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
+or behavioural memory for preferences, routing, and working context. Exomem is
+the long-term governed store for project/domain knowledge, sources, evidence,
+decisions, and reusable conclusions.
 
 If no Exomem skill is loaded, call bootstrap(profile="compact") once at the
 start of a session and follow the returned contract.
