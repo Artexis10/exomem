@@ -74,6 +74,26 @@ Existing vault material remains read-only input. Exomem writes governed knowledg
 under `Knowledge Base/` unless you deliberately configure a different governed
 folder.
 
+After setup, you can use simple action aliases instead of learning every
+canonical operation first:
+
+```bash
+exomem ask "what do I know about this project?"
+exomem ask "what supports this decision?" --deep --graph-enrich --json
+exomem remember "# Setup succeeded\n\n## Claim\n\nExomem setup completed today." --title "Setup succeeded today" --json
+exomem capture "raw source text" --title "Source title" --source-type other --json
+exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
+exomem review --json
+exomem connect --path "Notes/Insights/example" --json
+exomem maintain --json
+```
+
+These aliases are thin routes over the governed operations: `ask` -> `find`,
+`remember` -> `note`, `capture` -> `add`/`preserve`, `review` ->
+`attention`/`audit`, `connect` -> `suggest_links`/`suggest_relations`, and
+`maintain` -> `audit` unless a fix flag is explicit. The full command registry
+remains available for advanced work.
+
 The numbered steps below are the **manual path** — exactly what `setup` does
 under the hood, kept for troubleshooting and for people who prefer explicit
 steps.

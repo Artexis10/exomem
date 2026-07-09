@@ -189,8 +189,9 @@ The Tier 2 filesystem ops below may be turned off on lean deployments
 ## Simple front door
 
 Speak to users in simple actions first. Use the typed operations underneath.
-Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, or
-`replace` unless that implementation detail changes what will happen.
+Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, graph
+sidecars, schema blocks, or `replace` unless that implementation detail changes
+what will happen.
 
 Native assistant memory (Claude, ChatGPT, Codex, and similar) is short-term or
 behavioural memory for preferences, style, identity facts, working context, and
@@ -198,29 +199,26 @@ routing rules such as "use Exomem for my project knowledge." Exomem is long-term
 governed memory for sourced conclusions, project context, decisions, failures,
 experiments, proof-bearing records, review, and supersession.
 
-| User phrasing | User-facing action | Preferred route |
+| Simple action | User phrasing | Preferred route |
 |---|---|---|
-| "remember this," "save this conclusion" | Save durable knowledge | `note` for the conclusion; `add` first if raw provenance matters |
-| "find what I concluded," "what do I know about X" | Search prior knowledge | `find` first, then `get` or `find(pack=true)` when synthesis needs context |
-| "save this article/source/transcript" | Preserve raw source | `add`; offer compilation only when there is a stable conclusion |
-| "keep this receipt/record/proof" | Preserve proof-bearing material | `preserve` or upload to Evidence for cases, claims, warranties, disputes, and records |
-| "compile this evidence" | Write a sourced conclusion | `note` with source/evidence links; run `suggest_links` before writing |
-| "review stale knowledge" | Surface review candidates | `attention`, `audit`, or stale-review checks; never auto-decay or down-rank |
-| "this replaces the old conclusion" | Supersede old knowledge | `replace`; do not create an unlinked duplicate |
-| "fix this small detail" | Patch an existing conclusion | `edit` when the core claim is unchanged |
-| "connect these ideas" | Improve the graph | `suggest_links` and `link` |
-| "what does this existing vault contain" | Assess before writing | `overview` or `adopt(mode="scan-only")` |
+| `ask` | "what do I know," "find what I concluded," "show the context" | `find(detail="compact", rerank=false)` first; `get` or `find(pack=true)` when synthesis needs context |
+| `remember` | "remember this," "save this conclusion," "write this decision" | `note`; use `replace` when it supersedes old knowledge |
+| `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `add` for Sources; `preserve` or upload for Evidence |
+| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `attention`, `audit`, `propose_compilation` |
+| `connect` | "connect these ideas," "suggest relations," "what does this link to" | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
+| `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check vault health," "fix safe drift" | `audit` by default; `audit_fix` or `reconcile` only with explicit fix intent |
 
 Examples:
 
 - "Remember this decision" -> write a concise compiled note and report
   `Saved -> <path>`.
-- "What did I conclude about onboarding?" -> `find` first, cite hits, and retry
-  with adjacent terms before treating a miss as meaningful.
-- "Save this article" -> `add` the source with provenance; ask about compiling
+- "What did I conclude about onboarding?" -> `ask`/`find` first, cite hits, and
+  retry with adjacent terms before treating a miss as meaningful.
+- "Save this article" -> `capture` via `add` with provenance; ask about compiling
   only if a conclusion is present.
-- "Keep this receipt for the warranty case" -> preserve it as proof-bearing
-  evidence, not as a general note.
+- "Keep this receipt for the warranty case" -> `capture` via Evidence, not as a
+  general note.
 - "Compile these three sources" -> draft a sourced note, run `suggest_links`,
   then write after the applicable approval rule.
 - "Show stale conclusions" -> run the review path and present candidates for
@@ -229,7 +227,6 @@ Examples:
   visible.
 
 ## Operations
-
 Operations split into two tiers. **Tier 1 is primary** — every typed-note
 workflow goes through it because the type-routing IS the discipline. **Tier 2 is
 the escape hatch** for cases that don't fit a Tier 1 shape. If a write fits Tier

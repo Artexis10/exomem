@@ -43,24 +43,39 @@ Capture raw material separately when provenance matters.
 
 ## Simple actions for agents
 
-| User intent | What the agent should do | Typical Exomem action |
-| --- | --- | --- |
-| "Remember this" | Decide whether it is raw material, a durable conclusion, or both. Save the conclusion as a compiled note; preserve the raw input if it matters. | `note`, sometimes `add` first |
-| "Find what I concluded" | Search first, cite relevant hits, and treat misses as scoped misses. Read full pages only when needed. | `find`, then `get` or `find(pack=true)` |
-| "Preserve this source" | Keep the raw material with provenance. Do not rewrite it into a conclusion unless asked or clearly useful. | `add` |
-| "Preserve this proof/record" | Store as proof-bearing material for a case, claim, receipt, warranty, dispute, or record. | `preserve` or upload |
-| "Compile this evidence" | Turn raw sources/evidence into a concise conclusion with links back to the originals. | `note` with citations |
-| "Review stale knowledge" | Surface old or low-use conclusions for human review; do not hide, decay, or auto-rank them down. | `audit`, stale-review checks |
-| "This replaces the old conclusion" | Supersede the old compiled page instead of creating an unlinked duplicate. | `replace` |
-| "Update this small detail" | Patch a compiled page when the claim is still the same. | `edit` |
-| "Connect these ideas" | Add links or entity pages only when they clarify retrieval and future reasoning. | `suggest_links`, `link` |
+Use the simple product actions as the first mental model. The canonical tool is
+still the implementation route.
 
-Use internal names only as implementation details. With the user, say "save the
-source," "write the conclusion," "preserve the record," "review stale notes," or
-"replace the old conclusion."
+| Simple action | User intent | Canonical route |
+| --- | --- | --- |
+| `ask` | "What do I know?", "find what I concluded", "show the context" | `find(detail="compact", rerank=false)`, then `get`; use `find(pack=true)` for synthesis |
+| `remember` | "remember this conclusion", "save this decision", "write this up" | `note`; use `replace` when it supersedes an old conclusion |
+| `capture` | "save this source", "preserve this receipt", "keep this proof" | `add` for raw sources; `preserve` or upload for Evidence |
+| `review` | "what needs review?", "show stale knowledge", "what is unprocessed?" | `attention`, `audit`, `propose_compilation` |
+| `connect` | "what should this link to?", "suggest relations", "show related ideas" | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
+| `adopt` | "import/adopt this existing vault safely" | `adopt(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
+| `maintain` | "check/fix vault health" | `audit` by default; `audit_fix`/`reconcile` only when explicitly requested |
+
+Do not make the user choose `Sources`, `Evidence`, `Notes`, `Entities`, pack
+metadata, graph sidecars, or schema terms unless the distinction changes the
+outcome. With the user, say "ask", "remember", "capture", "review", "connect",
+"adopt", or "maintain"; use canonical tool names only when reporting exact
+implementation steps or debugging.
+
+For CLI use, these actions are also available as friendly aliases:
+
+```bash
+exomem ask "what did I conclude about onboarding?" --json
+exomem ask "warranty dispute context" --deep --graph-enrich --json
+exomem remember "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
+exomem capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
+exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
+exomem review --json
+exomem connect --path "Notes/Insights/example" --json
+exomem maintain --json
+```
 
 ## Examples
-
 ### Remember this
 
 User:

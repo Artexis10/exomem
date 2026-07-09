@@ -195,3 +195,107 @@ def test_unknown_field_key_rejected(vault: Path, capsys) -> None:
     )
     assert code == 1
     assert "UNKNOWN_PARAM" in err
+
+def test_simple_ask_alias_uses_compact_find_defaults(vault: Path, capsys) -> None:
+    code, out, err = _run(["ask", "metabolism", "--json"], capsys)
+    assert code == 0, err
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    assert isinstance(payload["data"], list)
+    assert payload["data"], "ask should surface fixture notes"
+    assert "excerpt" not in payload["data"][0]
+
+
+def test_simple_ask_alias_can_request_deep_context(vault: Path, capsys) -> None:
+    code, out, err = _run(["ask", "metabolism", "--deep", "--json"], capsys)
+    assert code == 0, err
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    assert {"hits", "pack"} <= set(payload["data"])
+
+
+def test_simple_remember_alias_routes_to_note(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "remember",
+            "# Simple action memory\n\n## Claim\n\nSimple aliases write through note.\n",
+            "--title",
+            "Simple action memory",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code == 0, err
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    written = vault / payload["data"]["path"]
+    assert written.exists()
+    assert "Simple aliases write through note" in written.read_text(encoding="utf-8")
+
+
+def test_simple_capture_alias_routes_to_source_and_evidence(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "capture",
+            "raw source body",
+            "--title",
+            "Simple raw source",
+            "--source-type",
+            "other",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code == 0, err
+    source_payload = json.loads(out.strip().splitlines()[-1])
+    assert source_payload["success"] is True
+    assert "/Sources/Other/" in source_payload["data"]["path"]
+
+    code2, out2, err2 = _run(
+        [
+            "capture",
+            "proof body",
+            "--as",
+            "evidence",
+            "--scope",
+            "simple-case",
+            "--category",
+            "receipts",
+            "--filename",
+            "proof.txt",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code2 == 0, err2
+    evidence_payload = json.loads(out2.strip().splitlines()[-1])
+    assert evidence_payload["success"] is True
+    assert "Evidence/simple-case/receipts/proof.txt" in evidence_payload["data"]["path"]
+
+
+def test_simple_review_connect_and_maintain_aliases(vault: Path, capsys) -> None:
+    code, out, err = _run(["review", "--limit", "3", "--json"], capsys)
+    assert code == 0, err
+    review_payload = json.loads(out.strip().splitlines()[-1])
+    assert review_payload["success"] is True
+    assert "items" in review_payload["data"]
+
+    code2, out2, err2 = _run(["maintain", "--json"], capsys)
+    assert code2 == 0, err2
+    maintain_payload = json.loads(out2.strip().splitlines()[-1])
+    assert maintain_payload["success"] is True
+    assert "findings" in maintain_payload["data"]
+
+    code3, out3, err3 = _run(
+        [
+            "connect",
+            "--path",
+            "Notes/Insights/progressive-disclosure-without-mode-fragmentation",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code3 == 0, err3
+    connect_payload = json.loads(out3.strip().splitlines()[-1])
+    assert connect_payload["success"] is True
+    assert isinstance(connect_payload["data"], list)

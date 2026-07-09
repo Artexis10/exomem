@@ -4,24 +4,25 @@ Detailed specs for the Knowledge Base operations. Read on first use of an operat
 
 ## Plain-language routing
 
-Agents should hear user intent first and choose the operation second:
+Agents should hear user intent first and choose the operation second. Use the
+simple action names as the routing layer; canonical tools remain the exact
+implementation.
 
-| User intent | Operation path |
-|---|---|
-| Remember a durable conclusion | `note`; use `add` first when raw provenance matters |
-| Find a prior conclusion | `find`, then `get` or `find(pack=true)` if needed |
-| Preserve a source | `add` |
-| Preserve proof or a record | `preserve` or upload |
-| Compile evidence into a conclusion | `note` with source/evidence links |
-| Review stale knowledge | `audit` / stale-review checks |
-| Supersede old knowledge | `replace` |
-| Patch a small detail | `edit` |
+| Simple action | User intent | Operation path |
+|---|---|---|
+| `ask` | Ask what Exomem knows, find a prior conclusion, gather context | `find`, then `get`; use `find(pack=true)` for synthesis |
+| `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `note`; use `replace` if it supersedes old knowledge |
+| `capture` | Preserve raw material, a source, proof, receipt, or record | `add` for Sources; `preserve` or upload for Evidence |
+| `review` | Review stale, contradictory, or unprocessed knowledge | `attention`, `audit`, `propose_compilation` |
+| `connect` | Suggest links, relations, or graph context | `suggest_links`, `suggest_relations`, `graph_context`; `link` only for explicit writes |
+| `adopt` | Assess or import an existing vault safely | `adopt(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
+| `maintain` | Check or repair vault health | `audit` by default; `audit_fix`/`reconcile` only with explicit fix intent |
 
-Do not ask users to choose internal folders or page types unless the distinction
-changes the write. Translate back to simple language when reporting results.
+Do not ask users to choose internal folders, graph sidecars, or page types unless
+the distinction changes the write. Translate back to simple language when
+reporting results.
 
 ## Index and log discipline (applies to every write)
-
 Every confirmed write that creates, moves, or supersedes a page performs two
 bookkeeping updates:
 

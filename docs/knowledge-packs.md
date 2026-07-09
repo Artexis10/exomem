@@ -43,7 +43,7 @@ Each pack is a JSON object with these required fields:
 | `suggested_folders` | Governed KB locations the pack commonly uses; selection does not create them. |
 | `suggested_workflows` | Beginner-facing workflows with `title`, `intent`, `route`, and `example`. |
 | `primitives` | Durable primitives the pack commonly uses. |
-| `actions` | Simple actions the pack supports: `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`. |
+| `actions` | Simple actions the pack supports. Existing packs may use legacy product verbs `save`, `adopt`, `ask`, `prove`, `review`, `update`, `connect`; new packs may also use `remember`, `capture`, and `maintain`. |
 | `examples` | User-facing prompts that should route to this pack. |
 | `signals` | Structural tokens used by adoption scans to suggest the pack. |
 
@@ -108,13 +108,13 @@ Packs do not bypass governance. They help agents choose existing typed tools:
 
 | Simple action | Typed operation |
 | --- | --- |
-| Save raw material | `add` |
-| Save durable conclusion | `note` or `link` |
-| Preserve proof | `preserve` or upload to Evidence |
-| Ask | `find` and `get` |
-| Review | `audit`, `attention`, `propose_compilation` |
-| Update | `edit`, `replace`, `reconcile` |
-| Connect | `link`, `suggest_links` |
+| `capture` raw material | `add`; use `preserve` or upload for Evidence |
+| `remember` durable conclusion | `note` or `link`; use `replace` for supersession |
+| `ask` | `find`, optionally `get` or `find(pack=true)` |
+| `review` | `attention`, `audit`, `propose_compilation` |
+| `connect` | `suggest_links`, `suggest_relations`, `graph_context`, `link` |
+| `adopt` | `adopt(mode="scan-only")` before copy/compile modes |
+| `maintain` | `audit`; explicit `audit_fix` or `reconcile` for repairs |
 
 Agents should speak in product language. The user can say "save this warranty
 receipt"; the agent chooses the evidence/proof route and reports the saved path.

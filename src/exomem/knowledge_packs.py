@@ -19,7 +19,6 @@ from typing import Any
 from .kbdir import kb_dirname, kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
-
 PACK_DIRECTORY = "packs"
 PACK_SELECTION_DIR = "_Packs"
 PACK_SELECTION_FILE = "selected-packs.json"
@@ -67,7 +66,18 @@ PACK_ALLOWED_PRIMITIVES: frozenset[str] = frozenset(
     }
 )
 PACK_ALLOWED_ACTIONS: frozenset[str] = frozenset(
-    {"save", "adopt", "ask", "prove", "review", "update", "connect"}
+    {
+        "save",
+        "adopt",
+        "ask",
+        "prove",
+        "review",
+        "update",
+        "connect",
+        "remember",
+        "capture",
+        "maintain",
+    }
 )
 
 
