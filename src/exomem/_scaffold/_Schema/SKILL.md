@@ -192,9 +192,10 @@ Speak to users in simple actions first. Use the typed operations underneath.
 Do not ask the user to choose `Sources`, `Notes`, `Entities`, `Evidence`, or
 `replace` unless that implementation detail changes what will happen.
 
-Native assistant memory is for preferences, style, identity facts, and routing
-rules such as "use Exomem for my project knowledge." Exomem is for durable
-governed knowledge: sourced conclusions, project context, decisions, failures,
+Native assistant memory (Claude, ChatGPT, Codex, and similar) is short-term or
+behavioural memory for preferences, style, identity facts, working context, and
+routing rules such as "use Exomem for my project knowledge." Exomem is long-term
+governed memory for sourced conclusions, project context, decisions, failures,
 experiments, proof-bearing records, review, and supersession.
 
 | User phrasing | User-facing action | Preferred route |

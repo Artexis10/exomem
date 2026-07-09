@@ -5,11 +5,11 @@ to.** Everything else is downstream.
 
 ## Memory boundary
 
-Built-in assistant memory and custom instructions are the right place for small
-preferences, style rules, identity facts, and reminders to use Exomem. Exomem is
-the right place for durable governed knowledge: sourced conclusions, project
-context, decisions, failures, experiments, proof-bearing records, review, and
-supersession.
+Built-in assistant memory and custom instructions are short-term or behavioural
+memory for small preferences, style rules, identity facts, working context, and
+reminders to use Exomem. Exomem is long-term governed memory for durable
+knowledge: sourced conclusions, project context, decisions, failures,
+experiments, proof-bearing records, review, and supersession.
 
 Do not turn transient scratch, reminders, tasks, credentials, or every passing
 chat remark into KB material. Capture only raw material worth preserving or a

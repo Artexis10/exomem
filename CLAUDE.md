@@ -59,6 +59,13 @@ to an allowlist.
 `scripts/rebuild-schema-zip.py` **from this same scaffold**, overlaying only your real
 `project-keys.yaml` — no private canonical, no markers. Needs no version bump here.)
 
+## Memory boundary
+
+Treat Claude, ChatGPT, Codex, and other assistants' native memory as short-term
+or behavioural memory for preferences, routing, and working context. Exomem is
+the long-term governed store for project/domain knowledge, sources, evidence,
+decisions, and reusable conclusions.
+
 ## Connector triage ("MCP not working" / slow first call / forced reconnect)
 
 claude.ai connector problems are almost always **connection-side, not the service**.

@@ -237,12 +237,13 @@ def op_bootstrap(
         },
         "memory_model": {
             "built_in_ai_memory": (
-                "Use for user preferences, working rules, and the instruction to route "
-                "durable knowledge into Exomem."
+                "Use as short-term or behavioural memory for user preferences, working "
+                "rules, routing instructions, and current working context."
             ),
             "exomem": (
-                "Use for durable governed knowledge: sources, proof/evidence, "
-                "history, decisions, records, review, and compiled conclusions."
+                "Use as long-term governed memory for durable governed knowledge: "
+                "sources, proof/evidence, history, decisions, records, review, and "
+                "compiled conclusions."
             ),
         },
         "knowledge_packs": {

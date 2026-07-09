@@ -5,11 +5,11 @@ when the boundary is explicit.
 
 ## Short version
 
-Use built-in memory or custom instructions for small preferences that should
-shape every chat. Use Exomem for durable governed knowledge: project context,
-sourced conclusions, decisions, failures, experiments, evidence, and anything you
-may need to inspect, cite, edit, review, supersede, or use from more than one
-client.
+Use built-in memory or custom instructions as short-term or behavioural memory:
+small preferences, routing rules, and working context that should shape every
+chat. Use Exomem as long-term governed memory: project context, sourced
+conclusions, decisions, failures, experiments, evidence, and anything you may
+need to inspect, cite, edit, review, supersede, or use from more than one client.
 
 Exomem is not a replacement for every native memory feature. It is the portable,
 user-owned knowledge layer behind Claude, Codex, ChatGPT, Cursor, hosted chat
@@ -34,8 +34,8 @@ clients, scripts, and future MCP clients.
 
 ## The boundary in one sentence
 
-Native assistant memory tells the assistant how to behave. Exomem tells the
-assistant what durable, governed knowledge the user has accumulated.
+Native assistant memory tells the assistant how to behave right now. Exomem tells
+the assistant what durable, governed knowledge the user has accumulated.
 
 A good native-memory entry is tiny:
 
