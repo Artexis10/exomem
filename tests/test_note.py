@@ -58,6 +58,29 @@ def test_note_body_with_no_h1_is_written_verbatim(vault: Path) -> None:
     assert body.lstrip().startswith("## Claim")
 
 
+def test_note_returns_structural_write_feedback(vault: Path) -> None:
+    result = note_module.note(
+        vault,
+        content=(
+            "# Feedback note\n\n"
+            "## Claim\n\n"
+            "The writer should report the note structure.\n\n"
+            "## Connections\n\n"
+            "This relates to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n"
+        ),
+        note_type="insight",
+        title="Feedback note",
+        today=TODAY,
+    )
+
+    feedback = result.write_feedback
+    assert feedback["contract"] == "compiled-note"
+    assert feedback["note_type"] == "insight"
+    assert feedback["semantic_blocks"]["by_kind"]["claim"] >= 1
+    assert feedback["links"]["body_wikilinks"] == 1
+    assert feedback["links"]["unresolved_count"] == 0
+    assert "write_feedback" in result.as_dict()
+
 def test_note_slug_truncation_emits_warning(vault: Path) -> None:
     """A title that exceeds SLUG_MAX_LENGTH should produce a slug_warning."""
     very_long_title = (

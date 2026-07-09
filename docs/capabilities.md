@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Registry commands: 31
-- Tier 1 commands: 21
+- Registry commands: 33
+- Tier 1 commands: 23
 - Tier 2 commands: 10
-- Registry-generated MCP commands: 30
-- REST commands: 30
-- CLI commands: 30
+- Registry-generated MCP commands: 32
+- REST commands: 32
+- CLI commands: 32
 - Hand-registered MCP tools: mint_download_token, mint_upload_token, note
 
 ## Command Registry
@@ -19,6 +19,8 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
+| search | 1 | MCP, REST, CLI | read | no | query | query, types, projects, tags, limit, scope | Search the Knowledge Base with a portable metadata-only response. Read-only. |
+| fetch | 1 | MCP, REST, CLI | read | no | id | id*, max_chars | Fetch one Knowledge Base document by `search` result ID with bounded text. Read-only. |
 | find | 1 | MCP, REST, CLI | read | no | query | query, types, projects, tags, speakers, file_types, exclude_file_types, limit, scope, mode, graph, rerank, prefer_compiled, prefer_active, prefer_used, pack, graph_enrich, detail, include_timings | Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within. |
 | suggest_links | 1 | MCP, REST, CLI | read | no | - | path, draft_title, draft_body, limit, scope | Suggest existing KB pages a note should link to. Read-only. |
 | graph_context | 1 | MCP, REST, CLI | read | no | path | path, query, depth, relation_types, node_types, max_nodes, max_edges | Return a bounded typed-graph neighborhood for a page or query. Read-only. |
@@ -33,7 +35,7 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | reconcile | 1 | MCP, REST, CLI | write | no | - | dry_run | Heal vault drift from out-of-band edits in one pass. |
 | provenance_report | 1 | MCP, REST, CLI | read | no | - | tag, key, value, path | Trace provenance: scan note bodies for `<!-- key:value -->` tags — where an opinion/take/flag came from. Read-only. |
 | propose_compilation | 1 | MCP, REST, CLI | read | no | - | sources*, suggested_title | Draft / scaffold a compiled note from unprocessed source(s) — what to compile next, drain the source backlog. Read-only. |
-| get | 1 | MCP, REST, CLI | read | no | path | path*, frontmatter_only, include_history, links, include_raw | Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request). |
+| get | 1 | MCP, REST, CLI | read | no | path | path*, frontmatter_only, include_history, links, include_raw, max_body_chars | Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request). |
 | edit | 1 | MCP, REST, CLI | write | yes | path | path*, why*, new_body, tags, old_string, new_string, replace_all, heading, section_position, edits, row_key, take, overwrite, field, value, allow_curated, expected_hash, validate_only | Lightweight in-place edit of a page (body, tags, a surgical snippet, |
 | replace | 1 | MCP, REST, CLI | write | yes | old_path | old_path*, content*, note_type*, title*, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, project_category | Supersede an existing compiled page with a new one. |
 | link | 1 | MCP, REST, CLI | write | no | - | entity_type*, name*, summary*, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status | Create a typed entity under Entities/<Folder>/<Name>.md. |

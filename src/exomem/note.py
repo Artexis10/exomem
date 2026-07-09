@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import corpus_aware, indexes
+from . import corpus_aware, indexes, semantic_blocks
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -85,15 +85,20 @@ STATUS_PRODUCTION = (
 class NoteResult:
     path: str  # vault-relative
     warnings: list[str]
-    # Corpus-aware "you might want to link these" hints. Non-binding — the
+    # Corpus-aware "you might want to link these" hints. Non-binding; the
     # client decides. Omitted from as_dict() when empty so existing callers
-    # (and the ~256 tests) see no shape change unless a suggestion fires.
+    # see no shape change unless a suggestion fires.
     suggestions: list[dict] = field(default_factory=list)
+    # Deterministic structural feedback for agents. This is a write-quality
+    # checklist over the Markdown shape, not a semantic truth judgment.
+    write_feedback: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
         out: dict = {"path": self.path, "warnings": self.warnings}
         if self.suggestions:
             out["suggestions"] = self.suggestions
+        if self.write_feedback:
+            out["write_feedback"] = self.write_feedback
         return out
 
 
@@ -105,6 +110,71 @@ class NoteError(Exception):
 
     def as_dict(self) -> dict:
         return {"code": self.code, "missing": self.missing, "reason": self.reason}
+
+
+def _build_write_feedback(
+    *,
+    vault_root: Path,
+    note_path: Path,
+    note_md: str,
+    note_type: str,
+    sources_norm: list[str],
+    body_clean: str,
+    body_warnings: list[str],
+    source_warnings: list[str],
+    backrefs_planned: int,
+    suggestions_count: int,
+) -> dict:
+    document = semantic_blocks.parse_semantic_blocks(note_md)
+    by_kind: dict[str, int] = {}
+    for block in document.blocks:
+        by_kind[block.type] = by_kind.get(block.type, 0) + 1
+
+    body_targets: list[str] = []
+    seen_targets: set[str] = set()
+    for match in find_body_wikilinks(body_clean):
+        target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
+        if target and target not in seen_targets:
+            seen_targets.add(target)
+            body_targets.append(target)
+
+    unresolved = list(source_warnings) + list(body_warnings)
+    next_actions: list[str] = []
+    if unresolved:
+        next_actions.append("resolve or intentionally leave unresolved wikilinks")
+    if suggestions_count:
+        next_actions.append("review related-page suggestions and edit in accepted links")
+    if not sources_norm:
+        next_actions.append("add a source link later if this conclusion came from raw material")
+    if not body_targets and not sources_norm:
+        next_actions.append("add at least one meaningful connection when one exists")
+    if not next_actions:
+        next_actions.append("no immediate structural follow-up")
+
+    return {
+        "contract": "compiled-note",
+        "note_type": note_type,
+        "semantic_blocks": {
+            "total": len(document.blocks),
+            "by_kind": by_kind,
+            "errors": [error.to_dict() for error in document.errors],
+            "warnings": [warning.to_dict() for warning in document.warnings],
+        },
+        "sources": {
+            "cited": len(sources_norm),
+            "backrefs_planned": backrefs_planned,
+        },
+        "links": {
+            "body_wikilinks": len(body_targets),
+            "source_wikilinks": len(sources_norm),
+            "unresolved_count": len(unresolved),
+            "unresolved": unresolved,
+        },
+        "suggestions": {
+            "related_pages": suggestions_count,
+        },
+        "next_actions": next_actions,
+    }
 
 
 def note(
@@ -337,6 +407,18 @@ def note(
     )
 
     kb = kb_root(vault_root)
+    write_feedback = _build_write_feedback(
+        vault_root=vault_root,
+        note_path=note_path,
+        note_md=note_md,
+        note_type=note_type,
+        sources_norm=sources_norm,
+        body_clean=body_clean,
+        body_warnings=body_warnings,
+        source_warnings=source_warnings,
+        backrefs_planned=0,
+        suggestions_count=len(corpus_suggestions),
+    )
     writes: list[PlannedWrite] = [PlannedWrite(path=note_path, content=note_md)]
     warnings: list[str] = (
         list(autoregister_warnings)
@@ -349,6 +431,7 @@ def note(
         warnings.append(slug_warning)
 
     # Back-refs: append the new note's wikilink to each cited source's ingested_into.
+    backrefs_planned = 0
     for src in sources_norm:
         src_path = _resolve_source_path(vault_root, src)
         if src_path is None or not src_path.exists():
@@ -360,6 +443,7 @@ def note(
         updated = _append_to_ingested_into(original, new_note_wikilink)
         if updated != original:
             writes.append(PlannedWrite(path=src_path, content=updated))
+            backrefs_planned += 1
         else:
             warnings.append(
                 f"could not locate ingested_into: field in {src}, back-ref skipped"
@@ -454,10 +538,13 @@ def note(
     if rotate_note:
         warnings.append(rotate_note)
 
+    write_feedback["sources"]["backrefs_planned"] = backrefs_planned
+
     return NoteResult(
         path=note_path.relative_to(vault_root).as_posix(),
         warnings=warnings,
         suggestions=corpus_suggestions,
+        write_feedback=write_feedback,
     )
 
 

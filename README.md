@@ -100,7 +100,10 @@ see
 Other MCP clients can still use the server. If they do not support Skills,
 have them call `bootstrap()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to
-save, workflow-skill discovery, upload guidance, and performance profiles.
+save, workflow-skill discovery, upload guidance, and performance profiles. It
+also teaches the authoring loop: search first, draft the typed note, run
+`suggest_links`, write with the right tool, inspect warnings/suggestions, then
+report the path.
 
 For client-specific assistant instructions, see
 [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md). For the boundary
@@ -175,7 +178,8 @@ env = { EXOMEM_VAULT_PATH = "/path/to/vault" }
 
 After connecting, ask the agent to call `bootstrap()` before using the KB. Claude
 Skills are still the best UX where available, but `bootstrap()` lets generic MCP
-clients learn Exomem's search/save/upload contract without a separate skill file.
+clients learn Exomem's search/save/upload contract without a separate skill file,
+including the write loop for compiled notes.
 See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md) for the copyable
 standing instruction.
 

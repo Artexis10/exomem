@@ -22,6 +22,8 @@ from __future__ import annotations
 import json
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
+from typing import Any
+from typing_extensions import NotRequired, TypedDict
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -91,6 +93,16 @@ from .vault import (
 
 _link_summary = link_summary_module.link_summary
 
+# Keep commands.py as the public command-surface facade for server, CLI, docs,
+# and tests while the implementation lives in command_surface.py.
+_COMMAND_SURFACE_EXPORTS = (
+    DESTRUCTIVE_OPS,
+    GUARDED_WRITE_FIELDS,
+    Param,
+    bind_vault,
+    mcp_tool_annotations,
+)
+
 
 def _preserve_module():
     from . import preserve as preserve_module
@@ -102,6 +114,67 @@ def _video_frames_module():
     from . import video_frames as video_frames_module
 
     return video_frames_module
+
+
+
+class FindHit(TypedDict):
+    path: str
+    type: str
+    scope: str
+    title: str
+    updated: str
+    excerpt: NotRequired[str]
+    outside_kb: NotRequired[bool]
+    status: NotRequired[str]
+    superseded_by: NotRequired[str]
+    signals: NotRequired[dict[str, Any]]
+    media_type: NotRequired[str]
+    media_file: NotRequired[str]
+    clip_match_at: NotRequired[str]
+    scene_frame: NotRequired[str]
+    scene_match_at: NotRequired[str]
+    transcript_match_at: NotRequired[str]
+
+
+class FindEnvelope(TypedDict):
+    hits: list[FindHit]
+    pack: NotRequired[dict[str, Any]]
+    timings: NotRequired[dict[str, Any]]
+    warming: NotRequired[dict[str, Any]]
+    degraded: NotRequired[list[str]]
+
+
+class SearchResult(TypedDict):
+    id: str
+    title: str
+    url: str
+    metadata: dict[str, str]
+
+
+class SearchResponse(TypedDict):
+    results: list[SearchResult]
+
+
+class FetchResponse(TypedDict):
+    id: str
+    title: str
+    text: str
+    url: str
+    metadata: NotRequired[dict[str, str]]
+
+
+class GetResponse(TypedDict):
+    path: str
+    frontmatter: dict[str, Any]
+    body: NotRequired[str]
+    content_hash: NotRequired[str]
+    mtime: NotRequired[float]
+    content: NotRequired[str]
+    has_frontmatter: NotRequired[bool]
+    body_truncated: NotRequired[bool]
+    body_chars: NotRequired[int]
+    history: NotRequired[list[dict[str, Any]]]
+    links: NotRequired[dict[str, Any]]
 
 
 # ----- op-leaves: the former per-surface wrapper bodies (vault_root injected) -----
@@ -119,8 +192,9 @@ def op_bootstrap(
     Call this once at the start of a session when the client does not have the
     Exomem Claude Skill loaded. It teaches the agent how to use the tools: when
     to search, when to save, how to interpret scoped misses, which `find` knobs
-    are cheap vs diagnostic, and how compiled notes differ from raw evidence.
-    The payload is deterministic instruction plus local compute policy; it does
+    are cheap vs diagnostic, how compiled notes differ from raw sources/evidence,
+    and how Exomem differs from built-in AI memory. The payload is deterministic
+    instruction plus local compute policy and product-surface metadata; it does
     not inspect or summarize vault content.
 
     Args:
@@ -184,26 +258,70 @@ def op_bootstrap(
             "loop": [
                 "bootstrap",
                 "adopt or overview when first seeing an existing vault",
-                "find",
-                "get or find(pack=true) when more context is needed",
+                "search for cheap metadata-only recall",
+                "fetch a bounded page, or use find/get when richer context is needed",
                 "reason in the agent",
+                "run suggest_links before important writes",
                 "note, edit, or replace when there is a durable conclusion",
+                "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
             ],
             "save_rule": (
                 "Save durable decisions, solved problems, diagnosed failures, "
                 "and reusable patterns as compiled notes; keep raw artifacts in "
-                "Sources or Evidence."
+                "Sources and case-bound proof in Evidence."
             ),
             "miss_rule": (
-                "An empty search means not found in that query/scope. Try synonyms, "
+                "An empty find result means not found in that query/scope. Try synonyms, "
                 "related terms, compact recall, or scope='vault' before concluding absence."
             ),
         },
         "workflow_skills": workflow_skills_module.bootstrap_entries(),
+        "authoring_contract": {
+            "canonical_loop": [
+                "find relevant prior notes and sources",
+                "get enough context; use max_body_chars for bounded reads or find(pack=true) for synthesis",
+                "draft the smallest durable compiled conclusion",
+                "run suggest_links on the draft",
+                "write with note, edit, replace, add, preserve, or link as appropriate",
+                "inspect warnings, suggestions, and write_feedback from the write result",
+                "apply any accepted links through edit",
+                "report the written path",
+            ],
+            "route_by_intent": {
+                "raw_material": "add",
+                "raw_evidence_or_artifact": "preserve or upload",
+                "new_durable_conclusion": "note",
+                "small_correction": "edit",
+                "substantial_rewrite": "replace",
+                "named_person_concept_library_or_decision": "link",
+            },
+            "preflight": {
+                "suggest_links": "standard read-only check before a compiled note write",
+                "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
+            },
+            "post_write": {
+                "note_suggestions": "non-binding related pages returned by note(suggestions=true)",
+                "write_feedback": "structural feedback returned by note(): semantic block counts, source/link counts, unresolved wikilinks, and next actions",
+                "accepted_links": "persist only through normal edit/note/replace; never auto-write suggestions",
+            },
+            "note_type_recipes": {
+                "research-note": "Project-scoped finding with Question, Findings, and Connections.",
+                "insight": "Cross-cutting claim with Claim, Why it holds, and Connections.",
+                "failure": "Failure mode with mechanism, detection, mitigation, and Connections.",
+                "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and Connections.",
+                "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
+                "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and Connections.",
+            },
+        },
         "tool_defaults": {
             "normal_lookup": {
+                "tool": "search",
+                "args": {},
+            },
+            "metadata_lookup": {
                 "tool": "find",
                 "args": {"detail": "compact", "rerank": False},
+                "when": "caller needs the richer find filters or compact stubs",
             },
             "reasoning_lookup": {
                 "tool": "find",
@@ -222,7 +340,8 @@ def op_bootstrap(
                     "rerank": True,
                 },
             },
-            "read_full_page": {"tool": "get", "when": "after choosing a hit"},
+            "read_bounded_page": {"tool": "fetch", "when": "after choosing a search result"},
+            "read_full_page": {"tool": "get", "when": "after choosing a hit and needing the full body/frontmatter"},
             "write_compiled_note": {
                 "tool": "note",
                 "when": "new durable conclusion",
@@ -240,8 +359,9 @@ def op_bootstrap(
         },
         "performance_profiles": {
             "normal": {
+                "tool": "find",
                 "find_args": {"detail": "compact", "rerank": False},
-                "interpretation": "cheap routing recall; follow with get if needed",
+                "interpretation": "cheap compact routing recall; follow with get(max_body_chars=...) if needed",
             },
             "reasoning": {
                 "find_args": {"pack": True},
@@ -266,6 +386,7 @@ def op_bootstrap(
                 "try scope='vault' if Knowledge Base recall is sparse",
                 "use adopt(mode='scan-only') before proposing migration/copy actions",
                 "try pack=true for synthesis instead of many get calls",
+                "use get(max_body_chars=...) for bounded reads before full get",
             ],
         },
         "front_door_actions": product_front_door_catalog(selected_packs),
@@ -273,6 +394,8 @@ def op_bootstrap(
         "common_tools": [
             "adopt",
             "overview",
+            "search",
+            "fetch",
             "find",
             "get",
             "note",
@@ -344,7 +467,7 @@ def op_find(
     graph_enrich: bool = False,
     detail: str = "full",
     include_timings: bool = False,
-) -> list[dict] | dict:
+) -> list[FindHit] | FindEnvelope:
     """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
@@ -599,6 +722,178 @@ def op_find(
     return out
 
 
+
+
+
+
+def _citation_url(_path: str) -> str:
+    """Citation URL placeholder for portable clients.
+
+    The local vault path is the stable citation ID; exposing file:// URLs here
+    would make remote clients less portable.
+    """
+    return ""
+
+
+def _string_metadata(**items: object) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for key, value in items.items():
+        if value is None:
+            continue
+        if isinstance(value, bool):
+            out[key] = "true" if value else "false"
+        elif isinstance(value, (list, tuple, dict)):
+            out[key] = json.dumps(value, ensure_ascii=False)
+        else:
+            out[key] = str(value)
+    return out
+
+
+def _search_result_from_hit(hit: dict) -> SearchResult:
+    path = str(hit.get("path") or "")
+    title = str(hit.get("title") or path)
+    metadata = _string_metadata(
+        path=path,
+        type=hit.get("type"),
+        scope=hit.get("scope"),
+        updated=hit.get("updated"),
+        status=hit.get("status"),
+        superseded_by=hit.get("superseded_by"),
+        outside_kb=hit.get("outside_kb"),
+        media_type=hit.get("media_type"),
+        media_file=hit.get("media_file"),
+    )
+    return {"id": path, "title": title, "url": _citation_url(path), "metadata": metadata}
+
+
+def _frontmatter_metadata(path: str, frontmatter: dict[str, Any]) -> dict[str, str]:
+    allowed = (
+        "type",
+        "status",
+        "created",
+        "updated",
+        "project",
+        "projects",
+        "tags",
+        "severity",
+        "pattern_type",
+        "domain",
+    )
+    items = {key: frontmatter.get(key) for key in allowed if key in frontmatter}
+    items["path"] = path
+    return _string_metadata(**items)
+
+
+def _title_from_page(path: str, frontmatter: dict[str, Any]) -> str:
+    title = frontmatter.get("title")
+    if title:
+        return str(title)
+    return Path(path).stem.replace("-", " ").replace("_", " ").strip() or path
+
+
+def _bounded_text(text: str, max_chars: int) -> tuple[str, bool]:
+    max_chars = max(500, min(int(max_chars), 6000))
+    if len(text) <= max_chars:
+        return text, False
+    marker = "\n\n[truncated]"
+    keep = max(0, max_chars - len(marker))
+    return text[:keep].rstrip() + marker, True
+
+
+def op_search(
+    vault_root: Path,
+    query: str = "",
+    types: list[str] | None = None,
+    projects: list[str] | None = None,
+    tags: list[str] | None = None,
+    limit: int = 10,
+    scope: str = "kb",
+) -> SearchResponse:
+    """Search the Knowledge Base with a portable metadata-only response. Read-only.
+
+    This is the conservative companion to `find`: it returns result IDs, titles,
+    URLs, and string metadata only. It never returns note excerpts, graph/ranking
+    signals, context packs, timings, raw content, or page bodies. Use `fetch`
+    with one returned `id` to read bounded document text, or use `find`/`get`
+    directly when the caller intentionally needs richer retrieval output.
+
+    Args:
+        query: Free-text search string.
+        types: Optional page-type filter; values are OR'd within the filter.
+        projects: Optional project filter; values are OR'd within the filter.
+        tags: Optional tag filter; values are OR'd within the filter.
+        limit: Maximum number of results. Capped to 50.
+        scope: "kb" for Knowledge Base first, or "vault" to search the broader vault.
+
+    Returns:
+        {"results": [{"id", "title", "url", "metadata"}, ...]}. `id` is the
+        canonical vault-relative path to pass to `fetch` or `get`; `metadata`
+        contains string-only routing fields such as path, type, scope, updated,
+        status, and media markers.
+    """
+    limit = max(1, min(int(limit), 50))
+    raw = op_find(
+        vault_root,
+        query=query,
+        types=types,
+        projects=projects,
+        tags=tags,
+        limit=limit,
+        scope=scope,
+        mode="hybrid",
+        graph=True,
+        rerank=False,
+        prefer_compiled=True,
+        prefer_active=True,
+        prefer_used=False,
+        pack=False,
+        detail="compact",
+        include_timings=False,
+    )
+    hits = raw.get("hits", []) if isinstance(raw, dict) else raw
+    return {"results": [_search_result_from_hit(hit) for hit in hits]}
+
+
+def op_fetch(
+    vault_root: Path,
+    id: str,
+    max_chars: int = 3000,
+) -> FetchResponse:
+    """Fetch one Knowledge Base document by `search` result ID with bounded text. Read-only.
+
+    This is a bounded read step between metadata-only `search` and full `get`.
+    It returns the markdown body without raw frontmatter and caps body text at
+    6000 characters. Use `get` when the caller intentionally needs the full
+    frontmatter/body/edit hash envelope.
+
+    Args:
+        id: A result `id` returned by `search` (the canonical vault-relative path).
+        max_chars: Maximum body characters to return. Values below 500 are raised
+            to 500; values above 6000 are capped server-side.
+
+    Returns:
+        {"id", "title", "text", "url", "metadata"}. `text` is the markdown body;
+        it ends with `[truncated]` when the body exceeded the effective cap.
+    """
+    try:
+        page = get_page_module.get_page(vault_root, path=id)
+    except get_page_module.GetError as e:
+        raise ValueError(f"{e.code}: {e.reason}") from e
+    text_out, truncated = _bounded_text(page.body, max_chars)
+    metadata = _frontmatter_metadata(page.path, page.frontmatter)
+    metadata.update(_string_metadata(truncated=truncated))
+    query_log.log_get_call(
+        read_path=page.path,
+        frontmatter_only=False,
+        include_history=False,
+    )
+    return {
+        "id": page.path,
+        "title": _title_from_page(page.path, page.frontmatter),
+        "text": text_out,
+        "url": _citation_url(page.path),
+        "metadata": metadata,
+    }
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
     """Query-log-safe slice of a timings envelope: totals + per-stage ms only
     (never content; stage entries drop skip/error detail to stay compact)."""
@@ -959,7 +1254,8 @@ def op_evolution(
          versions: [{path, title, status, date, claims: {title, type, lede, sections,
          outline}, transition: {reason, date} | null}]}], truncation: [...]}.
         `transition` is null on the active head; `versions` run oldest → newest by
-        supersession order; `span`/`n_versions` describe the whole chain.
+        supersession order; `span`/
+_versions` describe the whole chain.
     """
     return evolution_module.evolution(
         vault_root,
@@ -1151,7 +1447,8 @@ def op_get(
     include_history: bool = False,
     links: bool = False,
     include_raw: bool = False,
-) -> dict:
+    max_body_chars: int | None = None,
+) -> GetResponse:
     """Read / open / fetch / load the full contents of a KB or vault page by path. Returns frontmatter + body (+ raw content on request).
 
     Reads anywhere under the vault root — not just `Knowledge Base/`.
@@ -1193,6 +1490,9 @@ def op_get(
             read) and nothing in the normal workflow needs it: edits
             round-trip `body`, and the drift guard uses `content_hash`,
             which the server always computes over the raw bytes for you.
+        max_body_chars: Optional cap for the returned `body`. Use this when a
+            client wants bounded content instead of an arbitrary full-page read.
+            Values above 12000 are capped server-side; negative values are rejected.
 
     Returns:
         {path, frontmatter, body, content_hash, mtime}.
@@ -1202,6 +1502,7 @@ def op_get(
         refuse a write if the file changed on disk since this read
         (two-writer drift guard); `mtime` is advisory.
         Adds `content` (raw file text) when `include_raw=true`.
+        Adds `body_truncated` and `body_chars` when `max_body_chars` is supplied.
         Adds `history` when `include_history=true`.
 
     Errors:
@@ -1222,6 +1523,19 @@ def op_get(
         except get_page_module.GetError as e:
             raise ValueError(f"{e.code}: {e.reason}") from e
         out = result.as_dict(include_raw=include_raw)
+    if max_body_chars is not None and not frontmatter_only:
+        if max_body_chars < 0:
+            raise ValueError("get: max_body_chars must be non-negative")
+        max_body_chars = min(max_body_chars, 12000)
+        body = str(out.get("body", ""))
+        if len(body) > max_body_chars:
+            marker = "\n\n[truncated]"
+            keep = max(0, max_body_chars - len(marker))
+            out["body"] = body[:keep].rstrip() + marker
+            out["body_truncated"] = True
+        else:
+            out["body_truncated"] = False
+        out["body_chars"] = len(str(out.get("body", "")))
     query_log.log_get_call(
         read_path=out["path"],
         frontmatter_only=frontmatter_only,
@@ -1700,7 +2014,8 @@ def op_note(
       → `Notes/Patterns/<slug>.md`
     - `experiment`: hypothesis + protocol. `domain`, `started` (YYYY-MM-DD),
       and `duration` (e.g. "30 days", "ongoing") REQUIRED. Optional
-      `hypothesis`, `n` (default 1), `concluded`.
+      `hypothesis`,
+` (default 1), `concluded`.
       → `Notes/Experiments/<domain>/YYYY-MM-<slug>.md`
     - `production-log`: creative artifact log. `medium` REQUIRED (e.g.
       "Posts", "Articles"). Optional `recorded`, `published`, `host`,
@@ -1711,6 +2026,10 @@ def op_note(
 
     For each `sources:` wikilink, appends this note's wikilink to that
     source's `ingested_into:` frontmatter (maintaining the source→note graph).
+
+    The result includes `write_feedback`: deterministic structural feedback with
+    semantic block counts, source/link counts, unresolved wikilink warnings, and
+    suggested next actions. Treat it as write-shape feedback, not semantic truth.
 
     Args:
         content: Full markdown body, written verbatim after the
@@ -1753,15 +2072,20 @@ def op_note(
         editor: production-log only. Producer/editor name.
 
         suggestions: When true (default), the result carries a `suggestions`
-            block — existing pages this note should probably link to, ranked
+            block: existing pages this note should probably link to, ranked
             by the retrieval stack. Set false for a faster write when you
             already know the note's links; the near-duplicate/overlap
             warnings stay ON either way (dedupe is a guardrail, not a
-            suggestion).
+            suggestion). For important drafts, call `suggest_links` before
+            `note` and wire accepted links into the body or with a follow-up
+            `edit`.
 
     Returns:
-        {path, warnings}. On validation failure, raises a structured error
-        with code=INVALID_NOTE, the missing fields, and the reason.
+        {path, warnings, suggestions?, write_feedback}. `write_feedback` is
+        deterministic structural feedback: semantic block counts, source/link
+        counts, unresolved wikilink warnings, and suggested next actions. On
+        validation failure, raises a structured error with code=INVALID_NOTE,
+        the missing fields, and the reason.
     """
     try:
         result = note_module.note(
@@ -2444,6 +2768,8 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "bootstrap": {"surface": "primary", "actions": (), "first_run_safe": True},
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
+    "search": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
+    "fetch": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "find": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "get": {"surface": "primary", "actions": ("ask",), "first_run_safe": True},
     "add": {"surface": "primary", "actions": ("save",), "first_run_safe": False},
@@ -2470,6 +2796,8 @@ _RC = frozenset({"rest", "cli"})
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
+    ("search", op_search, 1, False, False, "query", _MCRC),
+    ("fetch", op_fetch, 1, False, False, "id", _MCRC),
     ("find", op_find, 1, False, False, "query", _MCRC),
     ("suggest_links", op_suggest_links, 1, False, False, None, _MCRC),
     ("graph_context", op_graph_context, 1, False, False, "path", _MCRC),

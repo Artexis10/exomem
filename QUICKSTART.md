@@ -22,7 +22,8 @@ If you're comfortable in Claude Code, this is ~20–30 minutes.
 > (step 6) is the *brain* — it tells Claude *when* to save, how to file a source,
 > and how to compile a note. Generic MCP clients that cannot load Skills should
 > call `bootstrap()` once after connecting; that returns the compact operating
-> contract through MCP. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
+> contract through MCP, including the write loop: search, draft, `suggest_links`,
+> write, inspect warnings/suggestions, report path. See [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md)
 > for Codex, hosted chat clients, Cursor/Windsurf/Gemini, and generic MCP setup.
 
 ---
@@ -362,8 +363,8 @@ own — or just start writing; the writer auto-registers new keys as you use the
 >
 > **Other MCP clients.** ChatGPT, Codex, Cursor, Gemini, Windsurf, or any client
 > without Skill support should call `bootstrap()` once after connecting. It returns
-> Exomem's search/save/upload defaults and performance guidance in a structured
-> MCP response. The copyable standing instruction lives in
+> Exomem's search/save/upload defaults, the compiled-note write loop, and
+> performance guidance in a structured MCP response. The copyable standing instruction lives in
 > [docs/ai-assistant-guide.md](docs/ai-assistant-guide.md).
 
 ---
