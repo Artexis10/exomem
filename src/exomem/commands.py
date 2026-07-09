@@ -22,7 +22,8 @@ from __future__ import annotations
 import json
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, NotRequired, TypedDict
+from typing import Any
+from typing_extensions import NotRequired, TypedDict
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
