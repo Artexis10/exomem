@@ -41,10 +41,10 @@ triggers.)
 **Proactive retrieval (read) — quiet, surface only hits.** When a turn
 references something the KB plausibly holds — a project, a domain, a named
 entity, or phrasings like "what did I conclude about X," "have I looked at Y,"
-"where did we land on Z" — run a quiet `find` **first** and fold what you find
+"where did we land on Z" — run a quiet `ask_memory` **first** and fold what you find
 into the answer. Don't narrate the search; mention the KB only when it returned
 something relevant, and cite the page(s) you used. A miss means "not found in
-what I searched," never "it doesn't exist" — an empty find means *no coverage
+what I searched," never "it doesn't exist" — an empty `ask_memory` result means *no coverage
 yet*, which is a reason to consider capturing, not to disengage.
 
 **Stepping-stone capture (write) — then report.** When the conversation reaches
@@ -54,11 +54,12 @@ diagnosed, a pattern is recognized — capture it:
 - Capture whether or not the KB already holds the topic. A durable conclusion on
   brand-new ground is first-class: it becomes the first page on that topic, which
   is how the corpus grows.
-- Raw material → **add**. A durable conclusion → draft the compiled
-  **note**/**link**, run **suggest_links** and the near-duplicate check first,
+- Raw material -> `capture_source`. A durable conclusion -> draft with
+  `remember` or `connect_memory`, run
+  `connect_memory(operation="suggest-links")` and the near-duplicate check first,
   then write and report one line: `Saved -> <path>`.
 - The guardrails that remain are the ones that matter: dedupe (prefer
-  **edit**/**replace** over a parallel page; surface a near-duplicate warning when
+  **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
   it fires) and clean links.
 - Pause and ask only when type or scope is genuinely ambiguous (research vs.
   insight vs. experiment; which `Notes/Research/<scope>`).
@@ -70,12 +71,12 @@ questions. Capture at the landing, not during the flight.
 
 Use this loop whenever a durable conclusion should enter Exomem:
 
-1. `find` relevant prior notes and sources.
-2. `get` the chosen pages, or use `find(pack=true)` when synthesis needs a bounded context pack.
-3. Draft the typed page at the right layer: `add` for raw source, `note` for compiled conclusion, `link` for entity, `edit` for small correction, `replace` for supersession.
-4. Run `suggest_links` on the draft before writing; accept only links that genuinely clarify provenance or context.
+1. `ask_memory` for relevant prior notes and sources.
+2. `read_memory` for chosen pages, or use `ask_memory(deep=true)` when synthesis needs bounded context.
+3. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
+4. Run `connect_memory(operation="suggest-links")` on the draft before writing; accept only links that genuinely clarify provenance or context.
 5. Write, then inspect the returned `warnings` and optional `suggestions`.
-6. If a near-duplicate warning fires, prefer `edit` or `replace` over a parallel page. If suggestions are useful, add them with a follow-up `edit`.
+6. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
 7. Report one line: `Saved -> <path>`.
 
 **Comprehensive coverage, minimal expression.** Capturing at the landing is about
@@ -135,7 +136,7 @@ notes stay distilled in form but never context-pruned.
 The vault around it is yours: any top-level folders you keep (`Daily/`, `Projects/`,
 `Reference/`, a journal — whatever) sit *beside* `Knowledge Base/` and are **read-only
 input** to this skill. Don't infer a fixed vault shape from the tree above. On your
-first engagement in a vault, run `overview` once to learn its real top-level layout
+first engagement in a vault, run `browse_memory` once to learn its real top-level layout
 (see § Assessing a vault you didn't build), then treat everything outside
 `Knowledge Base/` as read-only. Only `Knowledge Base/` is governed and writeable.
 
@@ -151,12 +152,14 @@ small set (e.g. `personal`, `project-alpha`, `work`) and add their own.
 
 The KB tools may be **deferred** — the client lists them by name and you load a
 tool's schema before you can call it. Load the product surface up front, in one
-shot: you'll almost always need `ask_memory` (recall), `read_memory` (open a
-page), `remember` (compiled conclusions), `capture_source`, `preserve_evidence`,
-`review_memory`, `connect_memory`, `adopt_vault`, and `maintain_memory`. In
-Claude Code, load them by exact name in a single call:
+shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
+`read_memory` (open a page), `browse_memory` (vault shape), `remember`
+(compiled conclusions), `edit_memory`, `replace_memory`, `capture_source`,
+`compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
+`connect_memory`, `adopt_vault`, `maintain_memory`, `query_dataset`, and
+`read_media`. In Claude Code, load them by exact name in a single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,remember,capture_source,preserve_evidence,review_memory,connect_memory,adopt_vault,maintain_memory")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,connect_memory,adopt_vault,maintain_memory,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -229,8 +232,9 @@ Examples:
 Product commands are the public interface. The operations below are canonical
 implementation leaves: product commands route here so filenames, folders,
 frontmatter, supersession, indexes, append-only rules, and binary guards stay in
-one place. Use them as reference material, not as the first mental model for a
-new user.
+one place. Agents should call product commands by default; use the leaf names
+below for debugging internals, interpreting old notes, or understanding exactly
+what a product command routes to.
 
 Operations split into two tiers. **Tier 1 is primary** — every typed-note
 workflow goes through it because the type-routing IS the discipline. **Tier 2 is
@@ -346,7 +350,10 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   `delete` refuses on files with inbound links unless `force_orphan=true`. The KB
   is a graph; ops that fragment it are explicit.
 
-### Phrasing → operation mapping (heuristic, not exhaustive)
+### Phrasing → operation mapping (canonical leaf reference)
+
+For normal agent work, use the Simple front door table above. This mapping is a
+reference for the canonical operation leaves that product commands route to.
 
 - "save this," "log this," "capture this," "add to my KB" → **add**
 - "compile this into a note," "make a note on this," "write this up," "distill this" → **note** (typically preceded by an implicit **add**)
@@ -380,15 +387,17 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
 - "what's in the trash," "undelete," "put it back" → **list_trash** / **recover_from_trash** (Tier 2)
 
 **Implicit (no explicit ask) — proactive engagement:**
-- topic maps to a project/domain/entity, or "what did I conclude about X" → proactive **find** first, fold the hits into the answer
-- a decision is made or a problem just got solved → stepping-stone: capture via **add**/**note**, then report the path
+- topic maps to a project/domain/entity, or "what did I conclude about X" -> proactive **ask_memory** first, fold the hits into the answer
+- a decision is made or a problem just got solved -> stepping-stone: capture via **capture_source**/**remember**, then report the path
 
-When you say something oblique like "interesting, save it," default to **add** +
-ask whether to compile a note.
+When you say something oblique like "interesting, save it," default to
+**capture_source** and ask whether to compile only if there is a durable
+conclusion.
 
 ## Search
 
-`find` runs in **hybrid mode** by default: BM25 + local vector embeddings
+`ask_memory` is the normal product command for recall. Underneath, `find` runs in
+**hybrid mode** by default: BM25 + local vector embeddings
 (BAAI/bge-base-en-v1.5, 768-dim) fused via reciprocal rank fusion.
 Natural-language queries reach pages that don't contain the literal terms.
 
@@ -412,9 +421,9 @@ Empty queries degrade to filtered-most-recent regardless of mode.
   opt-out (KB only, never widens).
 - **Never report a search-miss as absence.** An empty result means *"not found in
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
-  try `scope="vault"`, vary the query terms, or `get` a path you suspect.
+  try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
 
-Additional knobs on `find`: `graph=true` (1-hop neighbours of strong matches),
+Additional knobs exposed through `ask_memory`/`find`: `graph=true` (1-hop neighbours of strong matches),
 `rerank=true` (CrossEncoder re-sort, explicit precision spend),
 `prefer_compiled=true` (default; favours compiled types over raw `source`),
 `prefer_active=true` (default; soft-demotes superseded pages), `file_types` /
@@ -426,11 +435,11 @@ mode-aware auto: CPU steady-state modes keep it off; accelerated/performance
 mode may auto-rerank when lanes strongly disagree or the query is long.
 
 Performance presets:
-- Normal lookup: `detail="compact"`, `rerank=false`.
-- Reasoning context: `pack=true` when you need a compressed evidence bundle;
+- Normal lookup: `ask_memory(detail="compact", rerank=false)`.
+- Reasoning context: `ask_memory(deep=true)` when you need a compressed evidence bundle;
   add `graph_enrich=true` only when you need typed graph neighborhoods alongside
   the normal pack contract.
-- Diagnostics: `include_timings=true`; add `rerank=true` only when you are
+- Diagnostics: `ask_memory(include_timings=true)`; add `rerank=true` only when you are
   intentionally measuring reranking or spending latency for precision. Interpret
   timing output with the returned compute mode, embedding backend, cache state,
   rerank flag, and search profile.
@@ -439,8 +448,8 @@ Performance presets:
 data files aren't `find`-searchable. To make a dataset findable, write a
 **dataset card** — a small `type: dataset` page (frontmatter `data_file:` +
 `format:`, a one-line "What this holds", and a column profile) via `create_file`.
-`query_data(aggregate="profile")` emits a ready-to-write card; pull exact rows
-from the `data_file` with `query_data`.
+`query_dataset(aggregate="profile")` emits a ready-to-write card; pull exact rows
+from the `data_file` with `query_dataset`.
 
 Vector embeddings live in a per-machine sidecar at
 `<vault>/Knowledge Base/.embeddings.sqlite` (a dotfile that file-sync tools like Obsidian Sync ignore).
@@ -449,18 +458,18 @@ drift, call `audit_fix(rebuild_embeddings=true)`.
 
 ### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance.
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt_vault(mode="scan-only")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance.
 
 For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in
-here" — and simply to learn the layout before you write, run **overview** first: one bounded,
+here" — and simply to learn the layout before you write, run **browse_memory** first: one bounded,
 read-only report of folder structure, counts, frontmatter coverage, naming
 patterns, and junk candidates (zero-byte files, sync-conflict duplicates). It
 works on any folder under the vault root, including trees outside
 `Knowledge Base/` (a `Daily/` or `Journal/` folder), and on vaults with no KB at
 all. The folders it reports *outside* `Knowledge Base/` are read-only input — link
-to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `list_directory` on folders of interest,
-`find scope="vault"` for content, targeted `get` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
+to them, never write them; only `Knowledge Base/` is governed. Drill down from there: `browse_memory` on folders of interest,
+`ask_memory scope="vault"` for content, targeted `read_memory` for individual files. Use adoption output to decide whether to save a manifest, copy selected originals into Sources, or compile selected material into governed notes; do not rewrite the old vault by default. **Never
 bulk-read a vault file-by-file to answer a structural question** — the report
 answers in one call what would otherwise cost hundreds of reads.
 
@@ -518,10 +527,11 @@ These rules are non-negotiable.
    the same append-only tree (into a themed sub-folder) is allowed via
    `move_file`; crossing the boundary is forbidden.
 
-3. **Propose before writing compiled material.** For `note`, `link`, and
-   `replace` (and any hand-edit of `_Schema/` files), show the proposed content
-   (or diff) and wait for confirmation. The exception is `add` (raw capture),
-   `preserve` (raw evidence), and `find`/`audit` (read-only).
+3. **Propose before writing compiled material.** For `remember`,
+   `connect_memory` entity writes, and `replace_memory` (and any hand-edit of
+   `_Schema/` files), show the proposed content (or diff) and wait for
+   confirmation. The exception is `capture_source` (raw capture),
+   `preserve_evidence` (raw evidence), and read-only recall/review operations.
 
     **Batch waiver:** you may approve a *scope* of multiple files upfront ("draft
     all Tier 1," "write all four hubs + concepts") rather than each individually.
@@ -586,8 +596,9 @@ most-specific scope first. A typical starter set:
 For **patterns** that apply across multiple projects, use `projects:` (plural
 list) instead of `project:` (singular), e.g. `projects: [project-alpha, project-beta]`.
 
-**Auto-registration of new project keys.** The `note`, `replace`, `edit`
-(frontmatter-patch), and `link` (decision-entity) writers auto-append unknown
+**Auto-registration of new project keys.** The `remember`, `replace_memory`,
+`edit_memory` (frontmatter-patch), and `connect_memory` (decision-entity)
+writers auto-append unknown
 slug-shaped project keys to `_Schema/project-keys.yaml` and create the matching
 `Notes/Research/<Folder>/` directory on first use — no manual YAML edit needed.
 Pass `project_category` to bucket the new key (product / activity / domain /
@@ -608,7 +619,7 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
 ## Workflow: typical add-then-compile session
 
 1. **You paste raw material or ask to log something.**
-2. **Skill creates a `source` file.** Picks the subfolder from the input shape —
+2. **Skill calls `capture_source` to create a source file.** Picks the subfolder from the input shape —
    `Sources/Articles/`, `Sources/Sessions/`, `Sources/Books/`, `Sources/Papers/`,
    `Sources/Videos/`, or `Sources/Other/`. Filename: ISO-date + slug. Updates
    `Sources/index.md`.
@@ -616,13 +627,15 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    insight, failure, pattern, experiment, production-log? And what scope?"** Skip
    if you already specified.
 4. **Skill drafts the compiled page** with frontmatter, a sources block linking
-   back to the source file, and a Connections section. **Run `suggest_links` on
-   the draft first** — it surfaces related existing pages you'd otherwise miss.
+   back to the source file, and a Connections section. **Run
+   `connect_memory(operation="suggest-links")` on the draft first** — it surfaces
+   related existing pages you'd otherwise miss.
 5. **Skill shows the draft, waits for confirmation.** You can revise inline.
-6. **On confirm: writes the page**, updates the relevant `index.md`, appends to
-   `log.md`, and reports paths. The `note` result carries a `suggestions` block
-   and any near-duplicate `warning` — wire in the relevant links via **edit** (or,
-   for a genuine duplicate, prefer `replace`/`append` over a parallel page).
+6. **On confirm: calls `remember` to write the page**, updates the relevant
+   `index.md`, appends to `log.md`, and reports paths. The write result carries a
+   `suggestions` block and any near-duplicate `warning` — wire in the relevant
+   links via **edit_memory** (or, for a genuine duplicate, prefer
+   `replace_memory` over a parallel page).
 
 When you approve a scope of multiple files upfront, the workflow collapses to a
 single batch write (see Write discipline § 3, batch waiver).
@@ -643,9 +656,9 @@ through `vault.normalize_wikilink()` before writing — bare names, KB-relative
 paths, `.md` suffixes, and stale paths get rewritten to canonical full form. You
 can write in any form; the on-disk file lands canonical.
 
-If a wikilink target doesn't exist yet, prefer creating the entity stub via the
-**link** operation rather than leaving a dangling link. Dangling links accumulate
-and surface in **audit** as `broken_wikilink`.
+If a wikilink target doesn't exist yet, prefer creating the entity stub via
+**connect_memory** rather than leaving a dangling link. Dangling links accumulate
+and surface in **review_memory(mode="audit")** as `broken_wikilink`.
 
 When creating an entity that points at a **currently-evolving external artifact**
 (a live spec, a code library, a service config), use **pointer-style** — summary
@@ -654,7 +667,7 @@ file inventories, command lines copied verbatim). Mirroring guarantees drift.
 
 ## Audit (lint) checks
 
-The **audit** operation runs read-only checks and proposes fixes (never
+The **review_memory(mode="audit")** operation runs read-only checks and proposes fixes (never
 auto-fixes); the report is reviewed before anything is written. It covers:
 orphans, broken wikilinks, supersession integrity, stale frontmatter,
 `index.md`/`log.md` drift, aged unprocessed sources (oldest-first — pair with
@@ -679,10 +692,10 @@ is in **`references/audit-checks.md`**.
 - Assign numeric confidence scores. Use citation count and recency as the trust
   signal.
 - Apply retention decay or "forgetting curves." Old material stays. If superseded,
-  mark it; if irrelevant, archive into an `_archive/` subfolder. (`audit`'s
+  mark it; if irrelevant, archive into an `_archive/` subfolder. (`review_memory`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
   candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
-  anything; `find` ordering is unchanged. Surfacing a candidate ≠ a forgetting curve.)
+  anything; `ask_memory`/`find` ordering is unchanged. Surfacing a candidate ≠ a forgetting curve.)
 - Run on hooks, schedules, or background triggers. Operations happen because you
   asked, or because the conversation reached a point where consulting or capturing
   is clearly warranted.
@@ -704,11 +717,11 @@ is in **`references/audit-checks.md`**.
 - Marking an existing page `superseded`.
 
 **Proceed without asking:**
-- Proactive `find` for context (read-only).
+- Proactive `ask_memory` for context (read-only).
 - Capturing a clear stepping-stone conclusion whose type and scope are
   unambiguous — write under the standing waiver and report the path.
-- `add` and `preserve` operations — raw capture.
-- `find` and `audit` — read-only.
+- `capture_source` and `preserve_evidence` operations — raw capture.
+- `ask_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
 - Updating `index.md`, `log.md`, and `ingested_into:` frontmatter after a
   confirmed write.
 - Resolving obvious wikilink targets when the entity exists exactly.

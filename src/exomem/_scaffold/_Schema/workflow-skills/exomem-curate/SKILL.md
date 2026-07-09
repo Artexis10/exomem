@@ -13,10 +13,10 @@ Improve the KB graph and compiled-note quality without damaging provenance.
 Use when the user asks to clean up, organize, link, tidy, or improve a set of Exomem notes.
 
 ## Workflow
-1. Search related notes with `find`; use `graph_context`, inbound links, or `suggest_links` when graph shape matters.
+1. Search related notes with `ask_memory`; use `connect_memory` for graph context, inbound links, or link suggestions when graph shape matters.
 2. Identify safe improvements: missing links, stale wording, weak titles, duplicate tags, or unlinked entities.
-3. Use `edit` for small compiled-note fixes.
-4. Use `replace` for substantial rewrites or changed conclusions.
+3. Use `edit_memory` for small compiled-note fixes.
+4. Use `replace_memory` for substantial rewrites or changed conclusions.
 5. Leave raw `Sources/` and `Evidence/` untouched except for metadata the core contract explicitly allows.
 
 ## Output contract

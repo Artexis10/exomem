@@ -43,7 +43,7 @@ skills:
       - reconcile these notes
       - what's stale?
   - name: exomem-review
-    purpose: Drain Exomem attention and review queues safely.
+    purpose: Drain Exomem review and audit queues safely.
     triggers:
       - review my KB
       - what needs attention?

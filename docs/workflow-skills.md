@@ -9,8 +9,8 @@ to return.
 
 | Layer | What it is | Example |
 | --- | --- | --- |
-| Exomem tools | Typed MCP/REST/CLI operations that read and write the KB | `find`, `get`, `note`, `add`, `replace`, `attention` |
-| Context packs | Retrieval-time evidence bundles returned by `find(pack=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
+| Exomem tools | Product MCP/REST/CLI commands that read and write the KB | `ask_memory`, `read_memory`, `remember`, `capture_source`, `review_memory` |
+| Context packs | Retrieval-time evidence bundles returned by `ask_memory(deep=true)` | top hits, extracted claims, graph neighborhood, contradiction signals |
 | Knowledge packs | Product/domain guidance selected during setup | technical, creative, legal/warranty, personal records |
 | Workflow skills | Agent-visible workflows for common user intent | `exomem-continue`, `exomem-capture`, `exomem-review` |
 
@@ -26,7 +26,7 @@ agent is doing right now.
 - `exomem-reflect` - extract decisions, failures, patterns, open questions, and next actions.
 - `exomem-curate` - improve links and compiled-note quality safely.
 - `exomem-defrag` - reconcile duplicate, stale, or conflicting memory.
-- `exomem-review` - drain attention and audit queues.
+- `exomem-review` - drain review and audit queues.
 - `exomem-media` - search and inspect PDFs, images, audio, video, and other artifacts.
 
 ## Installation and discovery
@@ -55,6 +55,6 @@ Every workflow skill preserves the same Exomem contract:
 - Search before claiming prior context.
 - Keep raw `Sources/` and `Evidence/` separate from compiled notes.
 - Use compiled notes for durable conclusions only.
-- Prefer `replace` over silent rewrites when a conclusion changes.
+- Prefer `replace_memory` over silent rewrites when a conclusion changes.
 - Treat review, stale, and contradiction signals as measurement, not judgment.
 - Cite the pages, sources, or artifacts used.

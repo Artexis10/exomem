@@ -13,14 +13,14 @@ Answer a focused question and save what should compound.
 Use when the user asks to research a topic, compare options, investigate a claim, or save findings from a research pass.
 
 ## Workflow
-1. Search Exomem first for prior conclusions and related sources.
-2. Gather external sources only as needed; preserve important raw sources with `add` or `preserve`.
+1. Search Exomem first with `ask_memory` for prior conclusions and related sources.
+2. Gather external sources only as needed; preserve important raw sources with `capture_source`, `preserve_evidence`, or `transfer_artifact`.
 3. Attribute findings to sources and distinguish evidence from interpretation.
-4. Compile the result with `note` as a `research-note` unless another type clearly fits.
-5. Use `suggest_links` and connect related prior notes.
+4. Compile the result with `remember` as a `research-note` unless another type clearly fits.
+5. Use `connect_memory(operation="suggest-links")` and connect related prior notes.
 
 ## Output contract
-Return findings, cited sources, confidence/limits, saved path, and follow-up questions.
+Return findings, cited sources, limits, saved path, and follow-up questions.
 
 ## Save rules
 Save findings that answer the question, change a decision, or create reusable context. Keep source attribution explicit.

@@ -13,11 +13,11 @@ Convert experience into reusable memory.
 Use when the user asks what was learned, asks to reflect, closes a project episode, or wants patterns extracted from a session.
 
 ## Workflow
-1. Search Exomem for the project/topic so reflection builds on existing memory.
+1. Search Exomem with `ask_memory` for the project/topic so reflection builds on existing memory.
 2. Extract durable decisions, solved problems, diagnosed failures, reusable patterns, open questions, and next actions.
-3. Save each durable conclusion at the right type: `insight`, `failure`, `pattern`, or `research-note`.
+3. Save each durable conclusion with `remember` at the right type: `insight`, `failure`, `pattern`, or `research-note`.
 4. Prefer one strong note over many weak notes unless the conclusions are genuinely different.
-5. Link related pages with `suggest_links`.
+5. Link related pages with `connect_memory(operation="suggest-links")`.
 
 ## Output contract
 Return what was saved, what was intentionally not saved, and remaining open questions.
