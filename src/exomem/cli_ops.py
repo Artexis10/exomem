@@ -88,7 +88,7 @@ def error_dict(exc: Exception) -> dict:
     if isinstance(exc, OpError):
         return {"code": exc.code, "message": exc.message, "remediation": exc.remediation}
     text = str(exc)
-    if isinstance(exc, (ValueError, TypeError)):
+    if isinstance(exc, (ValueError, TypeError, RuntimeError)):
         m = _CODE_PREFIX.match(text)
         if m:
             code, message = m.group(1), m.group(2).strip()

@@ -15,13 +15,13 @@ Users and agents should think in verbs first. Exomem's internal page types still
 
 | User action | What it means | Backed by |
 | --- | --- | --- |
-| Save | Keep raw material or a durable conclusion | `add`, `note`, `link`, sometimes `preserve` |
-| Adopt/import | Understand an existing vault safely before changing anything | `adopt`, `overview` |
-| Ask | Retrieve what the vault already knows with citations | `find`, `get`, `find(pack=true)` |
-| Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `preserve`, `find`, `get`, upload/download tools |
-| Review | Surface stale, unprocessed, broken, or contradictory areas | `attention`, `audit`, `propose_compilation` |
-| Update | Correct, edit, or supersede knowledge while preserving history | `edit`, `replace`, `reconcile` |
-| Connect | Link related notes, entities, decisions, and sources | `link`, `suggest_links` |
+| Save | Keep raw material or a durable conclusion | `capture_source` for raw material; `remember` for compiled conclusions; `preserve_evidence` for proof |
+| Adopt/import | Understand an existing vault safely before changing anything | `adopt_vault(mode="scan-only")`, then explicit copy/manifest/compile modes |
+| Ask | Retrieve what the vault already knows with citations | `ask_memory`, then `read_memory`; `ask_memory(deep=true)` for bounded context |
+| Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `preserve_evidence`, `transfer_artifact`, `review_memory(mode="provenance")` |
+| Review | Surface stale, unprocessed, broken, or contradictory areas | `review_memory` |
+| Update | Correct, edit, or supersede knowledge while preserving history | `edit_memory`, `replace_memory`, `maintain_memory` |
+| Connect | Link related notes, entities, decisions, and sources | `connect_memory` |
 
 ## Existing vaults
 
@@ -34,9 +34,9 @@ The adoption modes are explicit:
 | `scan-only` | No | Report structure, likely packs, governed vs read-only areas, and next actions |
 | `save-manifest` | Yes, under `Knowledge Base/_Adoption/` only | Save the scan as a durable onboarding artifact |
 | `copy-as-sources` | Yes, under `Knowledge Base/Sources/Imported/` only | Copy selected legacy text files with original path and SHA-256 provenance |
-| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `note` |
+| `compile-selected` | Yes, under `Knowledge Base/Sources/Imported/` when legacy files need source copies | Copy selected legacy text files when needed, then return a reviewable compile plan; compiled notes are written later through `remember` |
 
-There is no rewrite-in-place onboarding path in the normal product flow. `compile-selected` is a planning step, not auto-migration: it prepares governed sources and a note scaffold so the user or agent can deliberately compile with `note`.
+There is no rewrite-in-place onboarding path in the normal product flow. `compile-selected` is a planning step, not auto-migration: it prepares governed sources and a note scaffold so the user or agent can deliberately compile with `remember`.
 
 ## Sources versus evidence
 

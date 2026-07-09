@@ -1301,17 +1301,17 @@ def _core_op_main(argv: list[str]) -> int:
     as_json = getattr(args, "json", False)
 
     try:
-        vault_root = resolve_vault()
         raw = _collect_raw_args(cmd, args, parser)
         kwargs = cli_ops.coerce(
             cmd.params, raw, guarded_fields=cmd.guarded_fields, tool=cmd.name, cli=True
         )
+        vault_root = _resolve_core_op_vault(cmd.name, kwargs, resolve_vault)
         if cmd.needs_schema:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
         else:
             injected = (vault_root,)
         result = cmd.leaf(*injected, **kwargs)
-    except (cli_ops.OpError, ValueError, TypeError) as e:
+    except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:
             print(json.dumps(cli_ops.envelope(False, error=err), default=str))
@@ -1326,6 +1326,30 @@ def _core_op_main(argv: list[str]) -> int:
     else:
         _print_human(result, op=cmd.name)
     return 0
+
+
+def _resolve_core_op_vault(op: str, kwargs: dict, resolve_vault_func) -> Path:
+    """Resolve the CLI vault root, allowing read-only first-run scans pre-init."""
+    try:
+        return resolve_vault_func()
+    except RuntimeError:
+        if not _core_op_allows_uninitialized_vault(op, kwargs):
+            raise
+        override = os.environ.get("EXOMEM_VAULT_PATH")
+        if not override:
+            raise
+        path = Path(override)
+        if not path.is_dir():
+            raise
+        return path
+
+
+def _core_op_allows_uninitialized_vault(op: str, kwargs: dict) -> bool:
+    if op == "browse_memory":
+        return True
+    if op == "adopt_vault":
+        return (kwargs.get("mode") or "scan-only") == "scan-only"
+    return False
 
 
 if __name__ == "__main__":

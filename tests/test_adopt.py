@@ -358,6 +358,53 @@ def test_adopt_cli_door(vault: Path, capsys) -> None:
     assert payload["data"]["summary"]["kb"]["present"] is True
 
 
+def test_product_cli_scan_only_adoption_allows_pre_init_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+
+    code = main(["adopt_vault", ".", "--mode", "scan-only", "--json"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    assert payload["data"]["mode"] == "scan-only"
+    assert payload["data"]["summary"]["kb"]["present"] is False
+
+
+def test_product_cli_browse_memory_allows_pre_init_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+
+    code = main(["browse_memory", ".", "--mode", "overview", "--json"])
+    out = capsys.readouterr().out
+
+    assert code == 0
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is True
+    assert payload["data"]["kb"]["present"] is False
+    assert payload["data"]["totals"]["markdown"] >= 3
+
+
+def test_product_cli_write_adoption_still_requires_initialized_vault(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+
+    code = main(["adopt_vault", ".", "--mode", "copy-as-sources", "--json"])
+    out = capsys.readouterr().out
+
+    assert code == 1
+    payload = json.loads(out.strip().splitlines()[-1])
+    assert payload["success"] is False
+    assert "does not look like a vault" in payload["error"]["message"]
+
+
 def test_adopt_cli_human_output_is_product_shaped(vault: Path, capsys) -> None:
     code = main(["adopt"])
     out = capsys.readouterr().out
@@ -368,4 +415,3 @@ def test_adopt_cli_human_output_is_product_shaped(vault: Path, capsys) -> None:
     assert "Safe next actions" in out
     assert "Originals: untouched" in out
     assert '"mode"' not in out
-
