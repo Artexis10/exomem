@@ -140,7 +140,9 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
     return clear_deferred_work(vault_root, paths=paths)
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
+def upsert_after_write(
+    vault_root: Path, written_paths: list[Path], *, defer_semantic: bool = False
+) -> None:
     """Fan a writer's markdown change out to every index sidecar.
 
     Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
@@ -175,7 +177,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     except Exception:  # noqa: BLE001 -- resolver sync must never fail a write
         log.debug("resolver re-sync after write failed", exc_info=True)
     epistemic_graph.upsert_after_write(vault_root, eligible)
-    if mode.defer_expensive_indexes():
+    if defer_semantic or mode.defer_expensive_indexes():
         added = _record_deferred_semantic_upserts(vault_root, eligible)
         if added:
             log.info("deferred semantic indexing for %d markdown file(s)", added)

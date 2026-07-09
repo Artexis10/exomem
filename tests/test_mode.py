@@ -162,7 +162,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
                     "reconcile_interval_seconds": 300.0,
-                    "max_embed_files_per_batch": None,
+                    "max_embed_files_per_batch": 32,
                     "max_reconcile_embed_files": 500,
                     "defer_expensive_indexes": False,
                 },
@@ -179,7 +179,7 @@ def test_bulk_gpu_opted(monkeypatch: pytest.MonkeyPatch, m: str, bulk: bool) -> 
                 "watcher_policy": {
                     "debounce_seconds": 0.5,
                     "reconcile_interval_seconds": 300.0,
-                    "max_embed_files_per_batch": None,
+                    "max_embed_files_per_batch": 32,
                     "max_reconcile_embed_files": 500,
                     "defer_expensive_indexes": False,
                 },
@@ -200,6 +200,13 @@ def test_resolved_resource_policy_fields(
     assert mode.retain_cpu_caches() is expected["retain_cpu_caches"]
     assert mode.defer_expensive_indexes() is expected["defer_expensive_indexes"]
     assert mode.watcher_policy().as_dict() == expected["watcher_policy"]
+
+
+def test_watcher_live_embed_cap_env_override(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setenv("EXOMEM_WATCHER_MAX_EMBED_FILES", "7")
+
+    assert mode.watcher_policy().max_embed_files_per_batch == 7
 
 
 def test_policy_helpers_do_not_import_torch(monkeypatch: pytest.MonkeyPatch) -> None:

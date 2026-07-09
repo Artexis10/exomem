@@ -51,19 +51,27 @@ def test_extraction_enabled_flag(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_prewarm_loads_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_ASR_PREWARM", "1")
     called: list[bool] = []
-    monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
+
+    class _FakeTranscriber:
+        def prewarm(self) -> None:
+            called.append(True)
+
+    monkeypatch.setattr(extract, "get_transcriber", lambda: _FakeTranscriber())
     extract.prewarm()
     assert called == [True]  # warmed eagerly
 
 
 def test_prewarm_soft_fails_when_engine_unavailable(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    monkeypatch.setenv("EXOMEM_ASR_PREWARM", "1")
 
-    def unavailable():
-        raise extract.ExtractionUnavailable("faster-whisper not installed")
+    class _UnavailableTranscriber:
+        def prewarm(self) -> None:
+            raise extract.ExtractionUnavailable("faster-whisper not installed")
 
-    monkeypatch.setattr(extract, "_get_whisper", unavailable)
+    monkeypatch.setattr(extract, "get_transcriber", lambda: _UnavailableTranscriber())
     extract.prewarm()  # must not raise — a lean box just stays lazy
 
 
@@ -73,6 +81,20 @@ def test_prewarm_skipped_when_extraction_disabled(monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(extract, "_get_whisper", lambda: called.append(True))
     extract.prewarm()
     assert called == []  # disabled → never touches the model
+
+
+def test_asr_prewarm_defaults_off_on_apple_silicon(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_ASR_PREWARM", raising=False)
+    monkeypatch.delenv("EXOMEM_ENABLE_ASR_PREWARM", raising=False)
+    monkeypatch.delenv("EXOMEM_DISABLE_ASR_PREWARM", raising=False)
+    monkeypatch.setattr(extract.sys, "platform", "darwin")
+    monkeypatch.setattr(extract.platform, "machine", lambda: "arm64")
+
+    assert extract.asr_prewarm_enabled() is False
+
+    monkeypatch.setenv("EXOMEM_ASR_PREWARM", "1")
+    assert extract.asr_prewarm_enabled() is True
+
 
 
 def test_extract_text_routes_by_media_type(monkeypatch: pytest.MonkeyPatch) -> None:

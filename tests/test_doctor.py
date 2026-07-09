@@ -10,11 +10,17 @@ import io
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from exomem import doctor as doctor_module
 from exomem.__main__ import main
+
+
+@pytest.fixture(autouse=True)
+def _clear_profile_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_PROFILE", raising=False)
 
 
 def _run(argv: list[str], capsys) -> tuple[int, str, str]:
@@ -45,6 +51,13 @@ def test_doctor_json_cli(vault: Path, capsys) -> None:
     assert payload["success"] is True
     assert payload["profile"] == "lean"
     assert {"id", "status", "message", "remediation"} <= set(payload["checks"][0])
+
+
+def test_doctor_infers_profile_from_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_PROFILE", "hybrid")
+
+    assert doctor_module.infer_profile() == "hybrid"
+
 
 
 def test_doctor_missing_vault_fails(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -309,3 +322,47 @@ def test_resource_posture_reports_container_variant_without_cuda_import(
     assert details["runtime"]["kind"] == "container"
     assert details["runtime"]["variant"] == "cuda"
     assert details["cuda"] == {"torch_imported": False, "initialized": False, "memory": None}
+
+
+def test_runtime_process_check_warns_for_multiple_stdio_servers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        doctor_module,
+        "_list_exomem_processes",
+        lambda: [
+            {"pid": 101, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+            {"pid": 102, "rss_mb": 4096.0, "command": "python -m exomem --transport stdio"},
+        ],
+    )
+
+    check = doctor_module._check_runtime_processes()
+
+    assert check is not None
+    assert check.status == "warn"
+    assert "Each stdio MCP client/session launches its own process" in check.message
+    assert check.details["count"] == 2
+
+
+
+def test_mps_headroom_reports_policy_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import extract, mode, warmup
+
+    monkeypatch.setattr(doctor_module, "_mps_available_for_doctor", lambda: True)
+    monkeypatch.setattr(mode, "resolve_mode", lambda: "normal")
+    monkeypatch.setattr(
+        mode,
+        "watcher_policy",
+        lambda: SimpleNamespace(max_embed_files_per_batch=32),
+    )
+    monkeypatch.setattr(warmup, "model_preload_allowed", lambda _mode: False)
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+
+    check = doctor_module._check_mps_headroom()
+
+    assert check is not None
+    assert check.status == "pass"
+    assert "macOS does not expose" in check.message
+    assert check.details["model_preload_allowed"] is False
+    assert check.details["asr_prewarm_enabled"] is False
+    assert check.details["watcher_max_embed_files"] == 32

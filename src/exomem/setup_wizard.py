@@ -36,6 +36,7 @@ from . import personalize as personalize_module
 from .kbdir import kb_dirname, kb_prefix
 
 _SKILL_NAME_MARKER = "name: exomem"
+_CLAUDE_SCOPES = ("user", "local", "project")
 
 
 def _format_pack_suggestions(packs: list[dict], *, limit: int = 3) -> str:
@@ -131,6 +132,33 @@ def _server_command(which_fn) -> list[str]:
     if console_script:
         return [console_script, "--transport", "stdio"]
     return ["uvx", "exomem", "--transport", "stdio"]
+
+
+def _output_mentions_exomem(output: str) -> bool:
+    for line in output.splitlines():
+        stripped = line.strip().lower()
+        if not stripped:
+            continue
+        if stripped.startswith("exomem") or '"exomem"' in stripped or "name: exomem" in stripped:
+            return True
+    return False
+
+
+def _claude_registered_scopes(claude: str, run_fn, run_kwargs: dict) -> list[str]:
+    scopes: list[str] = []
+    for item in _CLAUDE_SCOPES:
+        try:
+            result = run_fn([claude, "mcp", "list", "--scope", item], **run_kwargs)
+        except Exception:  # noqa: BLE001 - registration can still try the requested add
+            continue
+        output = (result.stdout or "") + (result.stderr or "")
+        if result.returncode == 0 and _output_mentions_exomem(output):
+            scopes.append(item)
+    return scopes
+
+
+def _format_scopes(scopes: list[str]) -> str:
+    return ", ".join(scopes) if scopes else "none"
 
 
 def run_setup(
@@ -352,23 +380,39 @@ def run_setup(
             # encoding pinned: Windows-native Python otherwise decodes pipes as
             # cp1252 and multibyte output crashes the reader thread
             run_kwargs = dict(capture_output=True, text=True, encoding="utf-8", errors="replace")
-            result = run_fn(argv, **run_kwargs)
-            output = (result.stderr or "") + (result.stdout or "")
-            if result.returncode == 0:
-                report("register", f"[done] registered with Claude Code (scope {scope})")
-            elif "already exists" in output:
-                if not yes and _ask_yn(input_fn, "exomem is already registered. Replace it?", False):
-                    run_fn([claude, "mcp", "remove", "exomem", "--scope", scope], **run_kwargs)
+            existing_scopes = _claude_registered_scopes(claude, run_fn, run_kwargs)
+            if existing_scopes:
+                scope_text = _format_scopes(existing_scopes)
+                if yes:
+                    report("register", f"[skipped: already registered in {scope_text}]")
+                elif _ask_yn(input_fn, f"exomem is already registered in {scope_text}. Replace it?", False):
+                    for existing_scope in existing_scopes:
+                        run_fn([claude, "mcp", "remove", "exomem", "--scope", existing_scope], **run_kwargs)
                     result = run_fn(argv, **run_kwargs)
                     if result.returncode == 0:
-                        report("register", "[done] re-registered")
+                        report("register", f"[done] re-registered with Claude Code (scope {scope})")
                     else:
                         report("register", f"[failed: {(result.stderr or '').strip()}]")
                 else:
-                    report("register", "[skipped: already registered]")
+                    report("register", f"[skipped: already registered in {scope_text}]")
             else:
-                detail = (result.stderr or "").strip() or f"claude mcp add exited {result.returncode}"
-                report("register", f"[failed: {detail}]")
+                result = run_fn(argv, **run_kwargs)
+                output = (result.stderr or "") + (result.stdout or "")
+                if result.returncode == 0:
+                    report("register", f"[done] registered with Claude Code (scope {scope})")
+                elif "already exists" in output:
+                    if not yes and _ask_yn(input_fn, "exomem is already registered. Replace it?", False):
+                        run_fn([claude, "mcp", "remove", "exomem", "--scope", scope], **run_kwargs)
+                        result = run_fn(argv, **run_kwargs)
+                        if result.returncode == 0:
+                            report("register", "[done] re-registered")
+                        else:
+                            report("register", f"[failed: {(result.stderr or '').strip()}]")
+                    else:
+                        report("register", "[skipped: already registered]")
+                else:
+                    detail = (result.stderr or "").strip() or f"claude mcp add exited {result.returncode}"
+                    report("register", f"[failed: {detail}]")
 
     # 7. skill — the brain; without it the tools sit unused
     skill_target = (home / "skills" / "exomem") if home else None

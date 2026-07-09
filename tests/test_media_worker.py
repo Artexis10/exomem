@@ -100,6 +100,7 @@ def test_start_prewarms_asr_off_the_request_path(vault, monkeypatch: pytest.Monk
     import threading
 
     warmed = threading.Event()
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: True)
     monkeypatch.setattr(extract, "prewarm", warmed.set)
     w = media_worker.MediaWorker(vault)
     w.start()
@@ -107,6 +108,20 @@ def test_start_prewarms_asr_off_the_request_path(vault, monkeypatch: pytest.Monk
         assert warmed.wait(timeout=5.0), "start() should warm ASR in a background thread"
     finally:
         w.stop()
+
+
+def test_start_skips_asr_prewarm_when_policy_disables_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "prewarm", lambda: pytest.fail("prewarm should be skipped"))
+    w = media_worker.MediaWorker(vault)
+    w.start()
+    try:
+        pass
+    finally:
+        w.stop()
+
 
 
 def test_start_logs_diarization_readiness(vault, monkeypatch: pytest.MonkeyPatch) -> None:

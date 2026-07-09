@@ -170,6 +170,18 @@ def test_setup_generates_access_policy(tmp_path: Path) -> None:
     assert "[skipped: no sibling folders need governing]" in out2
 
 
+def test_setup_skips_registration_when_exomem_exists_in_another_scope(tmp_path: Path) -> None:
+    vault, home = _messy_vault(tmp_path), tmp_path / "home"
+    recorder = Recorder(results={"mcp list --scope local": (0, "exomem\n", "")})
+
+    code, out = _setup(vault, home, recorder, scope="user")
+
+    assert code == 0
+    assert "[skipped: already registered in local]" in out
+    assert not [c for c in recorder.calls if "add" in c]
+
+
+
 def test_no_claude_cli_prints_snippet(tmp_path: Path) -> None:
     vault, home = _messy_vault(tmp_path), tmp_path / "home"
     recorder = Recorder()

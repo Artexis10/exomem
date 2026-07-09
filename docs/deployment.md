@@ -407,7 +407,7 @@ re-runs ASR; combine with `--rediarize` to gain both markers in one pass).
 
 **Install:** `uv sync --extra media --extra diarization`, then build the isolated
 sidecar with `pwsh -File scripts/setup-diarizer.ps1 -Prewarm` on Windows or
-`uv sync --directory sidecar/diarizer` on Linux/macOS.
+`sh scripts/setup-diarizer.sh --prewarm` on Linux/macOS.
 
 Named-speaker diarization's ECAPA voice embedder (`diarization` extra) runs on
 torch and follows the same precedent: it defaults to **CPU when ASR is active** (and

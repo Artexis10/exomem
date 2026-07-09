@@ -52,6 +52,7 @@ _DEFAULT_DEBOUNCE_SECONDS = 0.5
 _QUIET_DEBOUNCE_SECONDS = 2.0
 _DEFAULT_RECONCILE_INTERVAL_SECONDS = 300.0
 _QUIET_RECONCILE_INTERVAL_SECONDS = 900.0
+_DEFAULT_LIVE_MAX_EMBED_FILES = 32
 _DEFAULT_RECONCILE_MAX_EMBED_FILES = 500
 _QUIET_EXPENSIVE_INDEX_CAP = 0
 
@@ -59,6 +60,7 @@ _MODE_ENV = "EXOMEM_MODE"
 _QUIET_ALIAS_ENV = "EXOMEM_QUIET_MODE"
 _CONFIG_PATH_ENV = "EXOMEM_CONFIG_PATH"
 _RELEASE_ENV = "EXOMEM_RELEASE_GPU_WHEN_IDLE"
+_WATCHER_MAX_EMBED_FILES_ENV = "EXOMEM_WATCHER_MAX_EMBED_FILES"
 
 
 @dataclass(frozen=True)
@@ -78,6 +80,17 @@ class WatcherPolicy:
 def _truthy(value: str | None) -> bool:
     """Shared truthiness convention (mirrors `freshness._truthy`)."""
     return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _int_env(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log.warning("ignoring invalid %s=%r; using %d", name, raw, default)
+        return default
 
 
 def normalize(value: str | None) -> str | None:
@@ -167,7 +180,9 @@ def watcher_policy() -> WatcherPolicy:
     return WatcherPolicy(
         debounce_seconds=_DEFAULT_DEBOUNCE_SECONDS,
         reconcile_interval_seconds=_DEFAULT_RECONCILE_INTERVAL_SECONDS,
-        max_embed_files_per_batch=None,
+        max_embed_files_per_batch=_int_env(
+            _WATCHER_MAX_EMBED_FILES_ENV, _DEFAULT_LIVE_MAX_EMBED_FILES
+        ),
         max_reconcile_embed_files=_DEFAULT_RECONCILE_MAX_EMBED_FILES,
         defer_expensive_indexes=False,
     )
