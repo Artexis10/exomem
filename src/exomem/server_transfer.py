@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import secrets
 from dataclasses import dataclass
@@ -18,6 +19,7 @@ from . import cf_access, upload_tokens
 from .vault import VaultPathError, resolve_under_vault
 
 DEFAULT_UPLOAD_MAX_BYTES = 100 * 1024 * 1024
+log = logging.getLogger(__name__)
 
 
 def _extract_module():
@@ -170,13 +172,20 @@ def register_transfer_routes(
                     "EXOMEM_DISABLE_CLIP"
                 )
                 if do_ocr or do_clip:
-                    media_worker.enqueue(
-                        binary_path=vault_root / result.path,
-                        sidecar_path=vault_root / result.sidecar_path,
-                        media_type=media_type,
-                        do_ocr=do_ocr,
-                        do_clip=do_clip,
-                    )
+                    try:
+                        media_worker.enqueue(
+                            binary_path=vault_root / result.path,
+                            sidecar_path=vault_root / result.sidecar_path,
+                            media_type=media_type,
+                            do_ocr=do_ocr,
+                            do_clip=do_clip,
+                        )
+                    except Exception:  # noqa: BLE001 - pending sidecar enables later recovery
+                        log.warning(
+                            "media enqueue failed for %s; evidence remains pending",
+                            result.path,
+                            exc_info=True,
+                        )
         return JSONResponse(result.as_dict(), status_code=201)
 
     @mcp_app.custom_route("/upload", methods=["GET"])

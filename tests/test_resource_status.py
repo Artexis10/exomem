@@ -46,6 +46,8 @@ def test_collect_does_not_import_torch_or_probe_cuda(monkeypatch, tmp_path: Path
         "reranker": False,
         "clip": False,
     }
+    assert status["media"]["worker_active"] is False
+    assert not (tmp_path / "Knowledge Base" / ".media-jobs.sqlite").exists()
 
 
 def test_collect_reports_already_loaded_modules_without_loading_missing_ones(
@@ -76,20 +78,12 @@ def test_collect_reports_already_loaded_modules_without_loading_missing_ones(
             "hot_results": {"entries": 1, "hits": 3},
         }
     )
-    fake_index_sync = types.SimpleNamespace(
-        deferred_work_status=lambda root: {
-            "semantic_upserts": {
-                "count": 1,
-                "paths": ["Knowledge Base/Notes/x.md"],
-                "truncated": False,
-                "roots": 1,
-            }
-        }
-    )
     monkeypatch.setitem(sys.modules, "exomem.embeddings", fake_embeddings)
     monkeypatch.setitem(sys.modules, "exomem.bm25", fake_bm25)
     monkeypatch.setitem(sys.modules, "exomem.find", fake_find)
-    monkeypatch.setitem(sys.modules, "exomem.index_sync", fake_index_sync)
+    from exomem import deferred_index
+
+    deferred_index.add(tmp_path, ["Knowledge Base/Notes/x.md"])
 
     status = resource_status.collect(tmp_path)
 
@@ -111,5 +105,5 @@ def test_status_cli_json_is_resource_status(monkeypatch, capsys, tmp_path: Path)
     assert main(["status", "--resources", "--json", "--vault", str(tmp_path)]) == 0
     data = json.loads(capsys.readouterr().out)
     assert data["mode"] == "normal"
-    assert data["policy"]["retain_cpu_caches"] is True
+    assert data["policy"]["retain_cpu_caches"] is False
     assert data["cuda"]["torch_imported"] is False

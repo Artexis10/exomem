@@ -36,8 +36,8 @@ from typing import Literal
 from .kbdir import kb_dirname, kb_prefix
 
 Status = Literal["pass", "warn", "fail"]
-Profile = Literal["lean", "hybrid", "media", "remote"]
-VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "media", "remote")
+Profile = Literal["lean", "hybrid", "standard", "media", "remote"]
+VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "standard", "media", "remote")
 PROFILE_ENV = "EXOMEM_PROFILE"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -528,6 +528,42 @@ def _check_asr_prewarm() -> DoctorCheck:
     )
 
 
+def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
+    if vault_root is None:
+        return None
+    from . import media_jobs
+
+    status = media_jobs.status(vault_root)
+    if not status["healthy"]:
+        return _check(
+            "media.runtime",
+            "warn",
+            "The durable media job store is unreadable.",
+            "Check permissions on Knowledge Base/.media-jobs.sqlite or remove the derived "
+            "sidecar and restart so pending evidence can be reconstructed.",
+            details=status,
+        )
+    counts = status["counts"]
+    blocked = int(counts.get("blocked", 0))
+    failed = int(counts.get("failed", 0))
+    if blocked or failed:
+        return _check(
+            "media.runtime",
+            "warn",
+            f"Media work needs attention: {blocked} blocked, {failed} failed.",
+            "Install the missing media engine or fix the failed input, then restart the "
+            "service to retry blocked work.",
+            details=status,
+        )
+    queued = int(counts.get("pending", 0)) + int(counts.get("running", 0))
+    return _check(
+        "media.runtime",
+        "pass",
+        f"Durable media runtime healthy ({queued} queued/running).",
+        details=status,
+    )
+
+
 def _list_exomem_processes() -> list[dict[str, object]]:
     if os.name == "nt":
         return []
@@ -564,6 +600,8 @@ def _list_exomem_processes() -> list[dict[str, object]]:
             continue
         command_l = command.lower()
         if "exomem" not in command_l:
+            continue
+        if "exomem.media_worker_child" in command_l:
             continue
         if "--transport" not in command_l and "python -m exomem" not in command_l:
             continue
@@ -714,7 +752,7 @@ def _check_models_cache() -> DoctorCheck:
     )
 
 
-def _check_tesseract() -> DoctorCheck:
+def _check_tesseract(*, required: bool = True) -> DoctorCheck:
     configured = os.environ.get("EXOMEM_TESSERACT_CMD")
     if configured and Path(configured).exists():
         return _check("tool.tesseract", "pass", f"Tesseract configured at {configured}.")
@@ -723,7 +761,7 @@ def _check_tesseract() -> DoctorCheck:
         return _check("tool.tesseract", "pass", f"Tesseract found at {found}.")
     return _check(
         "tool.tesseract",
-        "fail",
+        "fail" if required else "warn",
         "Tesseract OCR binary was not found.",
         "Install Tesseract (Windows: `winget install UB-Mannheim.TesseractOCR`) or set "
         "EXOMEM_TESSERACT_CMD.",
@@ -917,8 +955,11 @@ def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: b
     runtime_processes = _check_runtime_processes()
     if runtime_processes is not None:
         checks.append(runtime_processes)
+    media_runtime = _check_media_runtime(vault_root)
+    if media_runtime is not None:
+        checks.append(media_runtime)
 
-    if profile in ("hybrid", "media"):
+    if profile in ("hybrid", "standard", "media"):
         checks.extend([
             _check_embeddings_disabled(),
             _check_dependency("sentence-transformers", "embeddings", import_name="sentence_transformers"),
@@ -936,13 +977,13 @@ def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: b
         if sidecar is not None:
             checks.append(sidecar)
 
-    if profile == "media":
+    if profile in ("standard", "media"):
         checks.extend([
             _check_dependency("faster-whisper", "media", import_name="faster_whisper"),
             _check_dependency("pytesseract", "media"),
             _check_dependency("pymupdf", "media", import_name="fitz"),
             _check_dependency("markitdown", "media"),
-            _check_tesseract(),
+            _check_tesseract(required=profile == "media"),
             _check_asr_backend(),
             _check_asr_prewarm(),
         ])

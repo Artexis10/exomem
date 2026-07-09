@@ -11,7 +11,7 @@ Three canonical modes (aliases in `_ALIASES` so whatever a user types works):
                    models when idle. Idle VRAM ~0. ("I'm gaming / low power.")
 - **normal**     — the safe default. CPU steady-state (MPS on Apple Silicon), never
                    auto-selects CUDA; bulk index may still use the GPU in a separate
-                   process. Boot preloads onto CPU RAM.
+                   process. Models and O(vault) caches stay lazy at boot.
 - **performance** — use my GPU for speed. Steady-state on CUDA when a capable GPU is
                    present; release when idle. Aliases: `gpu`, `turbo`.
 
@@ -148,18 +148,18 @@ def resolve_mode() -> str:
 
 
 def preload_models() -> bool:
-    """Whether boot should eagerly preload models. Off only in quiet mode."""
-    return resolve_mode() != "quiet"
+    """Whether policy permits eager model preload (performance only)."""
+    return resolve_mode() == "performance"
 
 
 def preload_cpu_caches() -> bool:
     """Whether startup warm-up may materialize O(vault) CPU caches."""
-    return resolve_mode() != "quiet"
+    return resolve_mode() == "performance"
 
 
 def retain_cpu_caches() -> bool:
     """Whether large CPU caches may stay resident after use."""
-    return resolve_mode() != "quiet"
+    return resolve_mode() == "performance"
 
 
 def defer_expensive_indexes() -> bool:
@@ -191,13 +191,13 @@ def watcher_policy() -> WatcherPolicy:
 def release_when_idle() -> bool:
     """Whether the idle-unload reaper should run.
 
-    `EXOMEM_RELEASE_GPU_WHEN_IDLE` (truthy/falsy) overrides; otherwise on for quiet
-    and performance (where a model may become resident and idle), off for normal.
+    `EXOMEM_RELEASE_GPU_WHEN_IDLE` (truthy/falsy) overrides; otherwise enabled in
+    every mode. Process exit/reaping is the default product resource contract.
     """
     override = os.environ.get(_RELEASE_ENV)
     if override is not None and override.strip() != "":
         return _truthy(override)
-    return resolve_mode() in ("quiet", "performance")
+    return True
 
 
 def bulk_gpu_opted() -> bool:

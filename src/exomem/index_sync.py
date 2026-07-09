@@ -24,21 +24,11 @@ wrappers as the outermost belt.
 from __future__ import annotations
 
 import logging
-import threading
 from pathlib import Path
 
+from . import deferred_index
+
 log = logging.getLogger(__name__)
-
-_DEFERRED_LOCK = threading.Lock()
-_DEFERRED_SEMANTIC_UPSERTS: dict[str, set[str]] = {}
-
-
-def _root_key(vault_root: Path) -> str:
-    try:
-        return str(vault_root.resolve())
-    except OSError:
-        return str(vault_root)
-
 
 def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
     """Vault-relative POSIX .md paths for `paths` (non-md / outside-vault skipped)."""
@@ -56,33 +46,14 @@ def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
 
 def _record_deferred_semantic_upserts(vault_root: Path, paths: list[Path]) -> int:
     rels = _rel_md_paths(vault_root, paths)
-    if not rels:
-        return 0
-    with _DEFERRED_LOCK:
-        pending = _DEFERRED_SEMANTIC_UPSERTS.setdefault(_root_key(vault_root), set())
-        before = len(pending)
-        pending.update(rels)
-        return len(pending) - before
+    before = deferred_index.status(vault_root)["count"]
+    deferred_index.add(vault_root, rels)
+    return max(0, deferred_index.status(vault_root)["count"] - before)
 
 
 def deferred_work_status(vault_root: Path | None = None) -> dict:
-    """No-allocation summary of expensive index work queued by quiet mode."""
-    with _DEFERRED_LOCK:
-        if vault_root is not None:
-            root = _root_key(vault_root)
-            roots = {root: set(_DEFERRED_SEMANTIC_UPSERTS.get(root, set()))}
-        else:
-            roots = {root: set(rels) for root, rels in _DEFERRED_SEMANTIC_UPSERTS.items()}
-    count = sum(len(rels) for rels in roots.values())
-    paths = sorted({rel for rels in roots.values() for rel in rels})
-    return {
-        "semantic_upserts": {
-            "count": count,
-            "paths": paths[:50],
-            "truncated": len(paths) > 50,
-            "roots": len([rels for rels in roots.values() if rels]),
-        }
-    }
+    """No-allocation summary of durable expensive index work."""
+    return {"semantic_upserts": deferred_index.status(vault_root)}
 
 
 def clear_deferred_work(
@@ -91,32 +62,19 @@ def clear_deferred_work(
     paths: list[Path] | list[str] | None = None,
 ) -> int:
     """Clear deferred semantic work after an explicit index/reconcile heal."""
-    with _DEFERRED_LOCK:
-        if vault_root is None:
-            count = sum(len(rels) for rels in _DEFERRED_SEMANTIC_UPSERTS.values())
-            _DEFERRED_SEMANTIC_UPSERTS.clear()
-            return count
-        root = _root_key(vault_root)
-        pending = _DEFERRED_SEMANTIC_UPSERTS.get(root)
-        if not pending:
-            return 0
-        if paths is None:
-            count = len(pending)
-            _DEFERRED_SEMANTIC_UPSERTS.pop(root, None)
-            return count
-        rels: set[str] = set()
-        for item in paths:
-            if isinstance(item, Path):
-                rels.update(_rel_md_paths(vault_root, [item]))
-            else:
-                rel = str(item).replace("\\", "/")
-                if rel.lower().endswith(".md"):
-                    rels.add(rel)
-        before = len(pending)
-        pending.difference_update(rels)
-        if not pending:
-            _DEFERRED_SEMANTIC_UPSERTS.pop(root, None)
-        return before - len(pending)
+    if vault_root is None:
+        return 0
+    if paths is None:
+        return deferred_index.clear(vault_root)
+    rels: list[str] = []
+    for item in paths:
+        if isinstance(item, Path):
+            rels.extend(_rel_md_paths(vault_root, [item]))
+        else:
+            rel = str(item).replace("\\", "/")
+            if rel.lower().endswith(".md"):
+                rels.append(rel)
+    return deferred_index.clear(vault_root, rels)
 
 
 def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
@@ -126,17 +84,20 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
     the normal writer path. Crash/restart recovery still comes from drift audit
     and explicit reconcile/index.
     """
-    root = _root_key(vault_root)
-    with _DEFERRED_LOCK:
-        pending = sorted(_DEFERRED_SEMANTIC_UPSERTS.get(root, set()))
-        if limit is not None:
-            pending = pending[:max(0, limit)]
+    pending = deferred_index.list_paths(vault_root, limit=limit)
     if not pending:
         return 0
     from . import embeddings
 
     paths = [vault_root / rel for rel in pending]
-    embeddings.upsert_after_write(vault_root, paths)
+    try:
+        dispatched = embeddings.upsert_after_write(vault_root, paths)
+    except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
+        log.warning("deferred semantic dispatch failed; work remains queued", exc_info=True)
+        return 0
+    if dispatched is False:
+        log.warning("deferred semantic dispatch incomplete; work remains queued")
+        return 0
     return clear_deferred_work(vault_root, paths=paths)
 
 

@@ -221,12 +221,10 @@ def test_defer_and_mark_ready_race_no_loss_no_duplication() -> None:
 # ============================================================================
 
 
-def test_model_preload_allowed_defaults_lazy_on_apple_silicon(
+def test_model_preload_allowed_defaults_lazy_in_normal_mode(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
-    monkeypatch.setattr(warmup.platform, "system", lambda: "Darwin")
-    monkeypatch.setattr(warmup.platform, "machine", lambda: "arm64")
 
     assert warmup.model_preload_allowed("normal") is False
 
@@ -290,6 +288,7 @@ def test_warm_all_quiet_mode_skips_preloads_but_marks_ready(
     so finds during the lexical warm don't carry a bogus "warming" marker. This is
     the idle-VRAM win: no model touches CUDA at boot."""
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     cache_policy: dict = {}
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **kw: cache_policy.update(kw) or {})
@@ -358,7 +357,9 @@ def test_warm_caches_gates_matrix_warm_on_preload_models(
     assert "clip_matrix" not in d_quiet
     assert calls == []
 
-    d_default = warmup.warm_caches(tmp_path, preload_models=True)
+    d_default = warmup.warm_caches(
+        tmp_path, preload_models=True, preload_cpu_caches=True
+    )
     assert "embedding_matrix" in d_default
     assert "clip_matrix" in d_default
     assert calls == [1, 1]

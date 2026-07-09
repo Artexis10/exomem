@@ -299,8 +299,11 @@ def run_setup(
     # 4. profile
     if profile is None:
         has_embeddings = importlib.util.find_spec("sentence_transformers") is not None
+        has_media = importlib.util.find_spec("faster_whisper") is not None
         if yes or not has_embeddings:
-            profile = "hybrid" if has_embeddings else "lean"
+            profile = "standard" if has_embeddings and has_media else (
+                "hybrid" if has_embeddings else "lean"
+            )
             if not has_embeddings:
                 print_fn(
                     "  Lean profile (keyword/BM25 search). For semantic search later: "
@@ -502,6 +505,8 @@ def setup_main(argv: list[str]) -> int:
                          help="Keyword/BM25 search only (no embeddings).")
     profile.add_argument("--hybrid", action="store_const", const="hybrid", dest="profile",
                          help="Hybrid semantic search (needs the embeddings extra).")
+    profile.add_argument("--standard", action="store_const", const="standard", dest="profile",
+                         help="Default multimodal profile (embeddings + media extras).")
     hooks = parser.add_mutually_exclusive_group()
     hooks.add_argument("--with-hooks", action="store_const", const=True, dest="with_hooks",
                        help="Also install the capture/retrieval nudge hooks.")

@@ -355,6 +355,7 @@ def _status_main(argv: list[str]) -> int:
         print(f"mode: {status['mode']}  (source: {status['source']})")
         print(f"  config: {status['config_path']}")
         print(f"  models: {status['models']}")
+        print(f"  media: {status['media']}")
         print(f"  deferred_work: {status['deferred_work']}")
         print(f"  cuda: {status['cuda']}")
     return 0
@@ -371,7 +372,7 @@ def _doctor_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=("lean", "hybrid", "media", "remote"),
+        choices=("lean", "hybrid", "standard", "media", "remote"),
         default=None,
         help="capability profile to validate (default: infer from EXOMEM_PROFILE, else lean)",
     )

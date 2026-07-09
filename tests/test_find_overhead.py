@@ -221,7 +221,7 @@ def test_warm_caches_populates(vault: Path, monkeypatch) -> None:
     from exomem import lexstore
 
     monkeypatch.delenv("EXOMEM_DISABLE_WARMUP", raising=False)
-    warmup.warm_caches(vault)
+    warmup.warm_caches(vault, preload_cpu_caches=True)
     assert find_module._CACHE.entries  # pages parsed
     if lexstore.backend() != "python" and lexstore.fts5_available():
         assert lexstore.lexical_path(vault).exists()  # sidecar built by warm

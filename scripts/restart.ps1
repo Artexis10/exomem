@@ -9,7 +9,7 @@
 param(
     [switch]$Force,
     [string]$ServiceName = "exomem",
-    [ValidateSet("lean", "hybrid", "media")]
+    [ValidateSet("lean", "hybrid", "standard", "media")]
     [string]$Profile = "hybrid"
 )
 

@@ -274,9 +274,7 @@ def asr_prewarm_enabled() -> bool:
     legacy_enable = os.environ.get("EXOMEM_ENABLE_ASR_PREWARM")
     if legacy_enable is not None:
         return _env_flag("EXOMEM_ENABLE_ASR_PREWARM")
-    if sys.platform == "darwin" and platform.machine() == "arm64":
-        return False
-    return True
+    return False
 
 
 def prewarm() -> None:
@@ -415,8 +413,6 @@ class MlxWhisperBackend:
 
 def _mlx_available() -> bool:
     """True on Apple Silicon with mlx-whisper importable (the [media-mlx] extra)."""
-    import platform
-    import sys
 
     if sys.platform != "darwin" or platform.machine() != "arm64":
         return False

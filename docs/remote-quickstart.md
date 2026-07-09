@@ -97,8 +97,9 @@ exomem doctor --profile remote
 For always-on service install (auto-start on boot), pick your OS — see
 [deployment.md § 6](deployment.md#6-install-as-a-service-auto-start-on-boot)
 for the full commands. The blessed paths are macOS/Linux
-(`bash scripts/install-service.sh --release --profile hybrid`) and Windows
-(`pwsh -File scripts/install-service.ps1 -Release -Profile hybrid`). Each path
+(`bash scripts/install-service.sh --release`) and Windows
+(`pwsh -File scripts/install-service.ps1 -Release`). Each path defaults to the
+standard multimodal profile and
 installs the profile extras into a PyPI-backed service venv, loads `.env`, runs
 doctor, starts the native service, and verifies `/mcp` before reporting success.
 Or run it in the foreground for a first test:

@@ -281,8 +281,9 @@ uv run python -m exomem doctor --vault "/path/to/your/Obsidian" --profile hybrid
 
 ### Resource modes
 
-The safe default is `normal`: CPU steady-state, no automatic CUDA residency, and
-warm CPU caches allowed. For gaming or other foreground work, switch to quiet:
+The safe default is `normal`: no automatic CUDA residency, no startup model or
+whole-vault cache preload, and idle reclamation enabled. For gaming or other
+foreground work, quiet additionally defers expensive indexing:
 
 ```bash
 uv run python -m exomem mode quiet
@@ -502,8 +503,9 @@ publicly-reachable, authenticated endpoint:
    claude.ai connectors require OAuth; static tokens aren't accepted.
 4. **Lock it to your GitHub login** (the single-user verifier), then run it as a
    background service with `--transport streamable-http`. On macOS or Linux run
-   `bash scripts/install-service.sh --release --profile hybrid`; on Windows run
-   `pwsh -File scripts/install-service.ps1 -Release -Profile hybrid`. These
+   `bash scripts/install-service.sh --release`; on Windows run
+   `pwsh -File scripts/install-service.ps1 -Release`. These default to the
+   resource-bounded standard multimodal profile,
    release commands create the PyPI service environment, load `.env`, doctor-gate,
    start the OS service, and verify `/mcp` (the main
    [docs/deployment.md](docs/deployment.md) covers all options, including repo-dev).

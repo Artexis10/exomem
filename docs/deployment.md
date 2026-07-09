@@ -209,22 +209,31 @@ PyPI-backed service venv, load the repository `.env` into the service manager,
 doctor-gate the selected profile and remote configuration, start the service, and
 verify that local `/mcp` returns the expected OAuth `401`.
 
+The default `standard` profile is multimodal but not permanently model-resident.
+Evidence work is durable and serialized through one disposable child; after
+`EXOMEM_MEDIA_IDLE_SECONDS` (default 300) without work, that child exits and returns
+its RAM plus MPS/MLX/CUDA state. After the deadline, maintainers can verify the
+persistent-core envelope with `python scripts/verify-resource-envelope.py` (targets:
+one service, zero media children, <=512 MiB pre-cache RSS, and <1% idle CPU). GPU
+acceptance is checked separately with `nvidia-smi` or Activity Monitor: the idle
+core must not be a CUDA compute process and targets <200 MiB GPU delta.
+
 **macOS (launchd):**
 
 ```bash
-bash scripts/install-service.sh --release --profile hybrid
+bash scripts/install-service.sh --release
 # Re-run after a package or .env change to update and restart the service.
-# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile hybrid
+# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile standard
 # Uninstall:                 launchctl bootout gui/$(id -u)/com.exomem && rm ~/Library/LaunchAgents/com.exomem.plist
 ```
 
 **Linux (systemd --user):**
 
 ```bash
-bash scripts/install-service.sh --release --profile hybrid
+bash scripts/install-service.sh --release
 # The installer attempts to enable user linger so the service survives logout.
 # Re-run after a package or .env change to update and restart the service.
-# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile hybrid
+# Developer checkout mode: bash scripts/install-service.sh --repo-dev --profile standard
 # Uninstall: systemctl --user disable --now exomem && rm ~/.config/systemd/user/exomem.service
 ```
 

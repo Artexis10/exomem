@@ -258,3 +258,22 @@ def test_drain_deferred_work_processes_and_clears_semantic_upserts(
     assert processed == 1
     assert calls == [[good]]
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 0
+
+
+def test_drain_deferred_work_preserves_failed_semantic_upserts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "quiet")
+    index_sync.clear_deferred_work(vault)
+    from exomem import embeddings, find, lexstore
+
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda root, paths: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda root, changed, deleted: None)
+    monkeypatch.setattr(embeddings, "upsert_after_write", lambda root, paths: False)
+    good = vault / "Knowledge Base" / "Notes" / "Insights" / "retry-me.md"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text("# retry\n", encoding="utf-8")
+
+    index_sync.upsert_after_write(vault, [good])
+    assert index_sync.drain_deferred_work(vault) == 0
+    assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1

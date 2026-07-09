@@ -59,6 +59,23 @@ def test_doctor_infers_profile_from_env(monkeypatch: pytest.MonkeyPatch) -> None
     assert doctor_module.infer_profile() == "hybrid"
 
 
+def test_standard_profile_is_valid_for_env_inference(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_PROFILE", "standard")
+    assert doctor_module.infer_profile() == "standard"
+
+
+def test_standard_profile_accepts_missing_tesseract_as_degraded_warning(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_TESSERACT_CMD", raising=False)
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda _name: None)
+
+    check = doctor_module._check_tesseract(required=False)
+
+    assert check.status == "warn"
+    assert "Tesseract" in check.message
+
+
 
 def test_doctor_missing_vault_fails(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_VAULT_PATH", raising=False)

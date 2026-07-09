@@ -1001,23 +1001,24 @@ def index_cache_status() -> dict:
     }
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
+def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     """Re-embed each markdown file in `written_paths` and refresh the sidecar.
 
     Soft no-op when sentence-transformers/torch aren't importable — keyword
     mode keeps working in stripped environments. Non-`.md` paths are skipped
-    silently (writers pass log.md, index.md, etc. through here too).
+    silently (writers pass log.md, index.md, etc. through here too). Returns
+    whether all eligible semantic writes completed, for durable queue draining.
     """
     global _IMPORT_FAILED
     if _IMPORT_FAILED:
-        return
+        return False
     # Test runs disable the heavy embedding path to keep the suite fast.
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return
+        return False
     md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
     if not md_paths:
-        return
+        return True
 
     # While the background warm-up is loading the model, don't block this
     # write on the singleton lock — park the batch; the warm thread drains it
@@ -1026,7 +1027,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     from . import readiness
     if readiness.defer("embeddings", (vault_root, tuple(md_paths))):
         log.info("write-embed deferred until the embedding model is warm (%d file(s))", len(md_paths))
-        return
+        return False
 
     try:
         get_model()  # triggers the heavy import; cheap thereafter.
@@ -1038,14 +1039,18 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
                 e,
             )
             _IMPORT_FAILED = True
-        return
-    except Exception as e:
+        return False
+    except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
         log.warning("embedding model load failed: %s; skipping upsert", e)
-        return
+        return False
 
     from . import find as find_module
 
-    index = get_embedding_index(vault_root)
+    try:
+        index = get_embedding_index(vault_root)
+    except Exception as e:  # noqa: BLE001 - derived index open is best-effort
+        log.warning("could not open embedding sidecar for upsert: %s", e)
+        return False
     per_file: list[tuple[str, list[str], float]] = []
     for md in md_paths:
         try:
@@ -1069,23 +1074,17 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
         per_file.append((page.rel_path, chunks, mtime))
 
     if not per_file:
-        return
+        return True
 
-    # Single batch encode across all files for throughput.
-    flat: list[str] = []
-    for _, chunks, _ in per_file:
-        flat.extend(chunks)
-    try:
-        vectors = embed_texts(flat, is_query=False)
-    except Exception as e:
-        log.warning("embedding encode failed: %s; sidecar left stale", e)
-        return
-
-    offset = 0
+    succeeded = True
     for rel_path, chunks, mtime in per_file:
-        n = len(chunks)
-        index.upsert_file(rel_path, chunks, vectors[offset:offset + n], mtime)
-        offset += n
+        try:
+            vectors = _embed_live_chunks(chunks)
+            index.upsert_file(rel_path, chunks, vectors, mtime)
+        except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
+            log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, e)
+            succeeded = False
+            continue
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
     # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
@@ -1098,6 +1097,28 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
             claims.upsert_claims_after_write(vault_root, md_paths)
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
+    return succeeded
+
+
+def _live_embed_max_chunks() -> int:
+    try:
+        return max(1, int(os.environ.get("EXOMEM_LIVE_EMBED_MAX_CHUNKS") or "256"))
+    except ValueError:
+        return 256
+
+
+def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
+    """Encode one file in bounded slices while preserving chunk order."""
+    limit = _live_embed_max_chunks()
+    parts = [
+        embed_texts(chunks[offset : offset + limit], is_query=False)
+        for offset in range(0, len(chunks), limit)
+    ]
+    if not parts:
+        return np.zeros((0, VECTOR_DIM), dtype=np.float32)
+    if len(parts) == 1:
+        return np.asarray(parts[0], dtype=np.float32)
+    return np.concatenate(parts, axis=0)
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
@@ -1110,13 +1131,13 @@ def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
         return
     try:
         index = get_embedding_index(vault_root)
-    except Exception as e:
+    except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
         log.warning("could not open embedding sidecar for delete: %s", e)
         return
     for rel in removed_rel_paths:
         try:
             index.delete_file(rel)
-        except Exception as e:
+        except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
             log.warning("delete_file(%s) failed in sidecar: %s", rel, e)
 
 
