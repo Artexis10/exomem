@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import platform
 import threading
 import time
 from pathlib import Path
@@ -41,6 +42,23 @@ _WARM_THREAD: threading.Thread | None = None
 
 def warmup_enabled() -> bool:
     return not os.environ.get("EXOMEM_DISABLE_WARMUP")
+
+
+def model_preload_allowed(mode_name: str | None = None) -> bool:
+    """Whether startup may eagerly load model weights in this process.
+
+    Normal-mode Apple Silicon defaults to lazy model loads. Multiple local stdio
+    clients naturally mean multiple Python processes, and eager BGE/CLIP/ASR
+    preloads can multiply into a multi-GB-per-chat footprint during imports.
+    `EXOMEM_PRELOAD_MODELS=1` opts back into the old eager behavior.
+    """
+    override = os.environ.get("EXOMEM_PRELOAD_MODELS")
+    if override is not None and override.strip() != "":
+        return override.strip().lower() not in {"0", "false", "no", "off"}
+    resolved_mode = mode_name or "normal"
+    if resolved_mode == "normal" and platform.system() == "Darwin" and platform.machine() == "arm64":
+        return False
+    return True
 
 
 def warm_caches(
@@ -139,7 +157,8 @@ def warm_all(vault_root: Path) -> dict[str, float]:
     """
     from . import mode, readiness
 
-    preload = mode.preload_models()
+    mode_name = mode.resolve_mode()
+    preload = mode.preload_models() and model_preload_allowed(mode_name)
     durations = warm_caches(
         vault_root,
         preload_models=preload,
@@ -183,7 +202,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # idle-unload reaper reclaims them). Mark the model components ready either
         # way so finds during the lexical warm don't carry a "warming" marker for
         # models that won't preload, and writers stop deferring.
-        reason = "EXOMEM_DISABLE_EMBEDDINGS" if disabled else "quiet mode"
+        reason = "EXOMEM_DISABLE_EMBEDDINGS" if disabled else "mode/preload policy"
         log.info("model preloads skipped (%s); models lazy-load on first use", reason)
         readiness.mark_ready("reranker")
         readiness.mark_ready("clip")

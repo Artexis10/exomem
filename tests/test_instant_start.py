@@ -39,7 +39,8 @@ from exomem.__main__ import main
 
 
 @pytest.fixture(autouse=True)
-def _reset_readiness():
+def _reset_readiness(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("EXOMEM_PRELOAD_MODELS", "1")
     readiness.reset()
     yield
     readiness.reset()
@@ -218,6 +219,20 @@ def test_defer_and_mark_ready_race_no_loss_no_duplication() -> None:
 # ============================================================================
 # exomem.warmup.warm_all — lexical caches, then model preloads
 # ============================================================================
+
+
+def test_model_preload_allowed_defaults_lazy_on_apple_silicon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_PRELOAD_MODELS", raising=False)
+    monkeypatch.setattr(warmup.platform, "system", lambda: "Darwin")
+    monkeypatch.setattr(warmup.platform, "machine", lambda: "arm64")
+
+    assert warmup.model_preload_allowed("normal") is False
+
+    monkeypatch.setenv("EXOMEM_PRELOAD_MODELS", "1")
+    assert warmup.model_preload_allowed("normal") is True
+
 
 
 def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_order(

@@ -145,6 +145,50 @@ def test_index_sync_quiet_defers_semantic_upserts(
         index_sync.clear_deferred_work(vault)
 
 
+def test_index_sync_explicit_defer_semantic_upserts(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    index_sync.clear_deferred_work(vault)
+    from exomem import embeddings, find, lexstore
+
+    seen: dict[str, list] = {"lexstore": [], "embeddings": [], "resolver": []}
+    monkeypatch.setattr(
+        lexstore,
+        "upsert_after_write",
+        lambda root, paths: seen["lexstore"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write",
+        lambda root, paths: seen["embeddings"].append(list(paths)),
+    )
+    monkeypatch.setattr(
+        find,
+        "on_resolver_files_changed",
+        lambda root, changed, deleted: seen["resolver"].append(
+            (list(changed), list(deleted))
+        ),
+    )
+
+    good = vault / "Knowledge Base" / "Notes" / "Insights" / "defer-explicit.md"
+    good.parent.mkdir(parents=True, exist_ok=True)
+    good.write_text("# defer\n", encoding="utf-8")
+
+    try:
+        index_sync.upsert_after_write(vault, [good], defer_semantic=True)
+
+        assert seen["lexstore"] == [[good]]
+        assert seen["embeddings"] == []
+        assert seen["resolver"] == [(["Knowledge Base/Notes/Insights/defer-explicit.md"], [])]
+        status = index_sync.deferred_work_status(vault)["semantic_upserts"]
+        assert status["count"] == 1
+        assert status["paths"] == ["Knowledge Base/Notes/Insights/defer-explicit.md"]
+    finally:
+        index_sync.clear_deferred_work(vault)
+
+
+
 def test_index_sync_nonquiet_keeps_immediate_embedding_upsert(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

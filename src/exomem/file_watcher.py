@@ -535,6 +535,7 @@ class FileWatcher:
         kb_ups = [p for p in ups if self._is_kb(p)]
         kb_del_rels = [r for r in del_rels if r.startswith(kb_prefix())]
         policy = self._watcher_policy()
+        defer_semantic = False
         if cap and not policy.defer_expensive_indexes:
             max_files = policy.max_reconcile_embed_files
             if max_files is not None and len(kb_ups) > max_files:
@@ -545,6 +546,17 @@ class FileWatcher:
                     max_files, len(kb_ups),
                 )
                 kb_ups = kb_ups[:max_files]
+        elif not cap and not policy.defer_expensive_indexes:
+            max_files = policy.max_embed_files_per_batch
+            if max_files is not None and len(kb_ups) > max_files:
+                log.warning(
+                    "file watcher: live import/sync burst has %d KB file(s), above "
+                    "EXOMEM_WATCHER_MAX_EMBED_FILES=%d; lexical indexes updated but "
+                    "semantic indexing deferred. Run `exomem index --scope vault` "
+                    "after the import.",
+                    len(kb_ups), max_files,
+                )
+                defer_semantic = True
         elif policy.defer_expensive_indexes and kb_ups:
             log.info(
                 "file watcher: quiet mode deferring semantic indexing for %d KB file(s)",
@@ -552,7 +564,9 @@ class FileWatcher:
             )
         if kb_ups:
             try:
-                index_sync.upsert_after_write(self._vault_root, kb_ups)
+                index_sync.upsert_after_write(
+                    self._vault_root, kb_ups, defer_semantic=defer_semantic
+                )
             except Exception:  # noqa: BLE001
                 log.exception("file watcher: upsert_after_write failed for %d file(s)", len(kb_ups))
         if kb_del_rels:

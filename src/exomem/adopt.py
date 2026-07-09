@@ -369,6 +369,19 @@ def _resolve_selected_text_file(root: Path, raw: str) -> tuple[Path, str] | dict
     return abs_path, rel
 
 
+def _unique_import_path(folder: Path, stem: str, reserved: set[Path]) -> Path:
+    """Return a path unique on disk and within the pending batch."""
+    i = 1
+    while True:
+        suffix = "" if i == 1 else f"-{i}"
+        candidate = folder / f"{stem}{suffix}.md"
+        if not candidate.exists() and candidate not in reserved:
+            reserved.add(candidate)
+            return candidate
+        i += 1
+
+
+
 def _copy_as_sources(
     root: Path,
     *,
@@ -389,6 +402,7 @@ def _copy_as_sources(
     copied: list[dict] = []
     skipped: list[dict] = []
     writes: list[PlannedWrite] = []
+    reserved_targets: set[Path] = set()
 
     for raw in selected_paths:
         resolved = _resolve_selected_text_file(root, raw)
@@ -401,7 +415,7 @@ def _copy_as_sources(
         text = data.decode("utf-8", errors="replace")
         title = _title_from_text(abs_path, text)
         slug, slug_warning = slugify_with_truncation_check(title)
-        target = unique_path(folder, f"{date_iso}-{slug}")
+        target = _unique_import_path(folder, f"{date_iso}-{slug}", reserved_targets)
         rel_target = target.relative_to(root).as_posix()
         if slug_warning:
             skipped.append({"path": rel, "code": "SLUG_TRUNCATED", "reason": slug_warning})

@@ -369,8 +369,8 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--profile",
         choices=("lean", "hybrid", "media", "remote"),
-        default="lean",
-        help="capability profile to validate (default: lean)",
+        default=None,
+        help="capability profile to validate (default: infer from EXOMEM_PROFILE, else lean)",
     )
     parser.add_argument("--json", action="store_true", help="emit stable JSON")
     parser.add_argument(

@@ -61,12 +61,15 @@ class MediaWorker:
             )
             self._thread.start()
             log.info("media extraction worker started")
-            # Warm the ASR model off the request path so the first audio/video upload
-            # isn't a multi-minute cold-start (large-v3 ~3 GB loads lazily on first use).
-            # Separate daemon thread so image/PDF/CLIP jobs aren't blocked while it loads.
-            threading.Thread(
-                target=extract.prewarm, name="kb-asr-prewarm", daemon=True
-            ).start()
+            # Warm the ASR model off the request path only when policy allows it.
+            # On Apple Silicon this defaults to lazy load to avoid multiplying
+            # multi-GB model residency across local stdio client processes.
+            if extract.asr_prewarm_enabled():
+                threading.Thread(
+                    target=extract.prewarm, name="kb-asr-prewarm", daemon=True
+                ).start()
+            else:
+                log.info("ASR prewarm disabled by policy; first media job will lazy-load")
             # Boot-time diarization readiness line (cheap: a path check + small JSON
             # read) — the soft-fail design otherwise hides a broken stack entirely.
             extract.log_diarization_readiness(self._vault_root)

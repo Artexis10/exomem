@@ -136,6 +136,37 @@ def test_adopt_copy_as_sources_preserves_original_and_records_provenance(tmp_pat
     assert "# Laptop receipt" in source_text
 
 
+def test_adopt_copy_as_sources_disambiguates_same_basename_batch(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    for folder, body in (("Mercor A", "alpha answer"), ("Mercor B", "beta answer")):
+        target = vault / folder / "Task1.md"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(f"# Task1\n\n{body}\n", encoding="utf-8")
+
+    report = adopt_module.adopt(
+        vault,
+        mode="copy-as-sources",
+        selected_paths=["Mercor A/Task1.md", "Mercor B/Task1.md"],
+        today=dt.date(2026, 7, 7),
+    )
+
+    copied = report["copy"]["copied_sources"]
+    source_paths = [item["source_path"] for item in copied]
+    assert len(copied) == 2
+    assert len(set(source_paths)) == 2
+    assert source_paths == [
+        "Knowledge Base/Sources/Imported/2026-07-07-task1.md",
+        "Knowledge Base/Sources/Imported/2026-07-07-task1-2.md",
+    ]
+    source_texts = {
+        item["original_path"]: (vault / item["source_path"]).read_text(encoding="utf-8")
+        for item in copied
+    }
+    assert "alpha answer" in source_texts["Mercor A/Task1.md"]
+    assert "beta answer" in source_texts["Mercor B/Task1.md"]
+
+
+
 def test_adopt_compile_selected_copies_and_returns_reviewable_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

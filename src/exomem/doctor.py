@@ -27,6 +27,7 @@ import importlib.util
 import os
 import shutil
 import sqlite3
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,6 +38,7 @@ from .kbdir import kb_dirname, kb_prefix
 Status = Literal["pass", "warn", "fail"]
 Profile = Literal["lean", "hybrid", "media", "remote"]
 VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "media", "remote")
+PROFILE_ENV = "EXOMEM_PROFILE"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -97,6 +99,18 @@ def _check(
 
 def _module_available(module: str) -> bool:
     return importlib.util.find_spec(module) is not None
+
+
+def infer_profile() -> Profile:
+    """Infer the doctor capability profile when --profile is omitted."""
+    raw = (os.environ.get(PROFILE_ENV) or "").strip().lower()
+    if raw:
+        if raw not in VALID_PROFILES:
+            raise ValueError(f"unknown {PROFILE_ENV}: {raw!r}. Valid: {list(VALID_PROFILES)}")
+        return raw  # type: ignore[return-value]
+    if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        return "lean"
+    return "lean"
 
 
 def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:
@@ -464,6 +478,116 @@ def _check_asr_backend() -> DoctorCheck:
     )
 
 
+def _mps_available_for_doctor() -> bool:
+    if sys.platform != "darwin" or not _module_available("torch"):
+        return False
+    try:
+        import torch
+
+        mps = getattr(torch.backends, "mps", None)
+        return bool(mps is not None and mps.is_available() and mps.is_built())
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def _check_mps_headroom() -> DoctorCheck | None:
+    if not _mps_available_for_doctor():
+        return None
+    from . import extract, mode, warmup
+
+    policy = mode.watcher_policy()
+    return _check(
+        "mps.headroom",
+        "pass",
+        "Apple Silicon MPS is available. macOS does not expose a stable non-torch "
+        "free-memory probe for Metal, so Exomem uses policy controls: lazy model "
+        "preload by default, live-write burst deferral, and explicit indexing for imports.",
+        details={
+            "model_preload_allowed": warmup.model_preload_allowed(mode.resolve_mode()),
+            "asr_prewarm_enabled": extract.asr_prewarm_enabled(),
+            "watcher_max_embed_files": policy.max_embed_files_per_batch,
+        },
+    )
+
+
+def _check_asr_prewarm() -> DoctorCheck:
+    from . import extract
+
+    enabled = extract.asr_prewarm_enabled()
+    if enabled:
+        return _check(
+            "asr.prewarm",
+            "pass",
+            "ASR prewarm is enabled; the media worker may load the ASR model at startup.",
+            "Set EXOMEM_ASR_PREWARM=0 to lazy-load ASR on the first media job.",
+        )
+    return _check(
+        "asr.prewarm",
+        "pass",
+        "ASR prewarm is disabled by policy; the model lazy-loads on the first media job.",
+    )
+
+
+def _list_exomem_processes() -> list[dict[str, object]]:
+    if os.name == "nt":
+        return []
+    ps = shutil.which("ps")
+    if not ps:
+        return []
+    try:
+        result = subprocess.run(
+            [ps, "-axo", "pid=,rss=,command="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=2.0,
+            check=False,
+        )
+    except Exception:  # noqa: BLE001
+        return []
+    if result.returncode != 0:
+        return []
+    rows: list[dict[str, object]] = []
+    current_pid = os.getpid()
+    for line in result.stdout.splitlines():
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid = int(parts[0])
+            rss_kb = int(parts[1])
+        except ValueError:
+            continue
+        command = parts[2]
+        if pid == current_pid:
+            continue
+        command_l = command.lower()
+        if "exomem" not in command_l:
+            continue
+        if "--transport" not in command_l and "python -m exomem" not in command_l:
+            continue
+        rows.append({"pid": pid, "rss_mb": round(rss_kb / 1024, 1), "command": command[:180]})
+    return rows
+
+
+def _check_runtime_processes() -> DoctorCheck | None:
+    rows = _list_exomem_processes()
+    if not rows:
+        return None
+    total = round(sum(float(row.get("rss_mb") or 0.0) for row in rows), 1)
+    count = len(rows)
+    status: Status = "warn" if count > 1 else "pass"
+    return _check(
+        "runtime.processes",
+        status,
+        f"Detected {count} other exomem server process(es) using about {total} MB RSS total. "
+        "Each stdio MCP client/session launches its own process; use HTTP service mode "
+        "or lazy/quiet policies on small-memory Macs.",
+        details={"count": count, "rss_mb_total": total, "processes": rows[:8]},
+    )
+
+
 def _check_embedding_sidecar(vault_root: Path | None) -> DoctorCheck | None:
     """LIVE embed+search probe of the embedding sidecar.
 
@@ -772,7 +896,8 @@ def _check_remote_probes() -> list[DoctorCheck]:
     return checks
 
 
-def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool = False) -> DoctorReport:
+def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: bool = False) -> DoctorReport:
+    profile = profile or infer_profile()
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
 
@@ -789,6 +914,9 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
         _check_resource_posture(profile),
         _check_lexical(vault_root),
     ]
+    runtime_processes = _check_runtime_processes()
+    if runtime_processes is not None:
+        checks.append(runtime_processes)
 
     if profile in ("hybrid", "media"):
         checks.extend([
@@ -801,6 +929,9 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_models_cache(),
             _check_sqlite_vec(),
         ])
+        mps_headroom = _check_mps_headroom()
+        if mps_headroom is not None:
+            checks.append(mps_headroom)
         sidecar = _check_embedding_sidecar(vault_root)
         if sidecar is not None:
             checks.append(sidecar)
@@ -813,6 +944,7 @@ def doctor(*, vault: str | None = None, profile: Profile = "lean", probe: bool =
             _check_dependency("markitdown", "media"),
             _check_tesseract(),
             _check_asr_backend(),
+            _check_asr_prewarm(),
         ])
 
     if profile == "remote":

@@ -36,8 +36,10 @@ from __future__ import annotations
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
+import sys
 import tempfile
 import threading
 from collections.abc import Iterable
@@ -262,6 +264,21 @@ def _get_whisper():
     return _WHISPER
 
 
+def asr_prewarm_enabled() -> bool:
+    """Whether the media worker should eagerly load the ASR backend at start."""
+    if _env_flag("EXOMEM_DISABLE_ASR_PREWARM"):
+        return False
+    override = os.environ.get("EXOMEM_ASR_PREWARM")
+    if override is not None:
+        return _env_flag("EXOMEM_ASR_PREWARM")
+    legacy_enable = os.environ.get("EXOMEM_ENABLE_ASR_PREWARM")
+    if legacy_enable is not None:
+        return _env_flag("EXOMEM_ENABLE_ASR_PREWARM")
+    if sys.platform == "darwin" and platform.machine() == "arm64":
+        return False
+    return True
+
+
 def prewarm() -> None:
     """Eagerly load the ASR model so the first real transcription isn't a cold-start.
 
@@ -273,6 +290,9 @@ def prewarm() -> None:
     just stays lazy and transcribes nothing until configured.
     """
     if not extraction_enabled():
+        return
+    if not asr_prewarm_enabled():
+        log.info("ASR prewarm skipped by policy; model will lazy-load on first media job")
         return
     try:
         get_transcriber().prewarm()

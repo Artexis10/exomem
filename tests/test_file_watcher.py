@@ -8,6 +8,7 @@ the lazy import.
 
 from __future__ import annotations
 
+import logging
 import os
 import threading
 import time
@@ -118,6 +119,41 @@ def test_file_watcher_reads_policy_without_restart(vault, monkeypatch: pytest.Mo
     assert w._reconcile_interval_seconds() == pytest.approx(300.0)
 
 
+def test_live_import_burst_defers_semantic_indexing(
+    vault, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    calls: list[tuple[list[Path], dict]] = []
+    monkeypatch.setattr(
+        file_watcher.index_sync,
+        "upsert_after_write",
+        lambda root, paths, **kw: calls.append((list(paths), dict(kw))),
+    )
+    monkeypatch.setattr(
+        file_watcher.mode,
+        "watcher_policy",
+        lambda: file_watcher.mode.WatcherPolicy(
+            debounce_seconds=0.05,
+            reconcile_interval_seconds=999.0,
+            max_embed_files_per_batch=1,
+            max_reconcile_embed_files=500,
+            defer_expensive_indexes=False,
+        ),
+    )
+    w = file_watcher.FileWatcher(vault)
+    a = vault / "Knowledge Base" / "Notes" / "burst-a.md"
+    b = vault / "Knowledge Base" / "Notes" / "burst-b.md"
+    with caplog.at_level(logging.WARNING, logger="exomem.file_watcher"):
+        w._record(a, deleted=False)
+        w._record(b, deleted=False)
+        w._flush()
+
+    assert len(calls) == 1
+    assert sorted(calls[0][0]) == sorted([a, b])
+    assert calls[0][1] == {"defer_semantic": True}
+    assert "live import/sync burst" in caplog.text
+
+
+
 def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -125,7 +161,7 @@ def test_dispatch_thread_uses_quiet_policy_for_burst_coalescing(
     monkeypatch.setattr(
         file_watcher.index_sync,
         "upsert_after_write",
-        lambda root, paths: calls.append(list(paths)),
+        lambda root, paths, **_kw: calls.append(list(paths)),
     )
     monkeypatch.setattr(
         file_watcher.mode,
@@ -300,7 +336,7 @@ def _spy_reconcile_fanout(monkeypatch: pytest.MonkeyPatch) -> dict[str, list]:
     )
     monkeypatch.setattr(
         file_watcher.index_sync, "upsert_after_write",
-        lambda root, paths: calls["upsert"].append(list(paths)),
+        lambda root, paths, **_kw: calls["upsert"].append(list(paths)),
     )
     monkeypatch.setattr(
         file_watcher.index_sync, "delete_after_remove",
