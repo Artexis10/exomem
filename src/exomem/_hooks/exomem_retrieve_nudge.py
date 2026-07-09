@@ -7,8 +7,8 @@ of a thread. This re-arms the read side: when the user submits a substantial
 prompt, it injects a one-line reminder to run `find` first and fold prior
 conclusions into the answer, so the KB actually functions as the source of truth.
 
-Cheap by default: gates on prompt length, an obvious-control-prompt filter, and
-a per-session cooldown. By default it injects only a *reminder* — Claude still
+Cheap by default: gates on prompt length, an obvious-control-prompt filter, a
+per-session cooldown, and a client-wide cooldown. By default it injects only a *reminder* — Claude still
 runs the real (semantic) find only when the prompt actually needs prior KB
 context — so it never stalls the prompt. (UserPromptSubmit blocks model start
 until the hook returns, so the hook must be fast: stdlib only, no search here by
@@ -27,12 +27,14 @@ EXOMEM_RETRIEVE_NUDGE_MIN_CHARS (default 20 — short, since prompts are short a
 a dense script like Japanese packs more per char),
 EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS (default 180 — only prompts at or below
 this length are eligible for the obvious-control-prompt skip gate),
-EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300), EXOMEM_RETRIEVE_INJECT (opt-in,
-default off — truthy-parsed: unset/""/"0"/"false"/"no"/"off", any case, count as
-off) to turn on retrieve-and-inject, and EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same
-truthy parse) to additionally allow the slower CLI transport when REST isn't
-configured or fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT
-/ KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
+EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC (default 300),
+EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC (default 900; set 0 to disable),
+EXOMEM_RETRIEVE_INJECT (opt-in, default off — truthy-parsed:
+unset/""/"0"/"false"/"no"/"off", any case, count as off) to turn on
+retrieve-and-inject, and EXOMEM_RETRIEVE_INJECT_CLI (opt-in, same truthy parse)
+to additionally allow the slower CLI transport when REST isn't configured or
+fails. The legacy KB_RETRIEVE_* names (including KB_RETRIEVE_INJECT /
+KB_RETRIEVE_INJECT_CLI) are still accepted for back-compat, aliased to the
 EXOMEM_* names at startup.
 
 Contract (Claude Code / Codex UserPromptSubmit hook): read the event JSON on
@@ -124,6 +126,7 @@ _ENV_ALIASES = (
     ("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", "KB_RETRIEVE_NUDGE_MIN_CHARS"),
     ("EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS", "KB_RETRIEVE_NUDGE_CONTROL_MAX_CHARS"),
     ("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", "KB_RETRIEVE_NUDGE_COOLDOWN_SEC"),
+    ("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "KB_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC"),
     ("EXOMEM_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT"),
     ("EXOMEM_RETRIEVE_INJECT_CLI", "KB_RETRIEVE_INJECT_CLI"),
 )
@@ -187,18 +190,31 @@ def _is_obvious_control_prompt(prompt: str, max_chars: int) -> bool:
     return bool(_CONTROL_PROMPT_RE.match(text))
 
 
-def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
-    """Per-session timestamp file (mtime-based). Namespaced so it never collides
-    with the capture hook's cooldown stamp for the same session."""
+def _cooldown_stamp_ok(key: str, cooldown: int) -> tuple[bool, Path]:
+    """Timestamp-file cooldown (mtime-based)."""
     state_dir = _hook_home() / ".cache" / "exomem-nudge"
-    key = "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
     stamp = state_dir / key
+    if cooldown <= 0:
+        return True, stamp
     try:
         if stamp.exists() and (time.time() - stamp.stat().st_mtime) < cooldown:
             return False, stamp
     except OSError:
         pass
     return True, stamp
+
+
+def _cooldown_ok(session_id: str, cooldown: int) -> tuple[bool, Path]:
+    """Per-session timestamp file. Namespaced so it never collides with the
+    capture hook's cooldown stamp for the same session."""
+    key = "retrieve_" + re.sub(r"[^A-Za-z0-9_.-]", "_", session_id or "default")[:120]
+    return _cooldown_stamp_ok(key, cooldown)
+
+
+def _global_cooldown_ok(cooldown: int) -> tuple[bool, Path]:
+    """Client-wide retrieval nudge cooldown. This keeps multi-tab Codex/Claude
+    setups from seeing the same reminder in every fresh session."""
+    return _cooldown_stamp_ok("retrieve_global", cooldown)
 
 
 def _touch(stamp: Path) -> None:
@@ -356,6 +372,7 @@ def main() -> int:
     min_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_MIN_CHARS", 20)
     control_max_chars = _env_int("EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS", 180)
     cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC", 300)
+    global_cooldown = _env_int("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", 900)
 
     if len(prompt.strip()) < min_chars:  # trivial prompt ("yes", "go", "thanks")
         return 0
@@ -367,7 +384,13 @@ def main() -> int:
     if not ok:  # already nudged recently this session — keep it quiet
         return 0
 
+    global_ok, global_stamp = _global_cooldown_ok(global_cooldown)
+    if not global_ok:  # another tab/session already got the reminder recently
+        return 0
+
     _touch(stamp)
+    if global_cooldown > 0:
+        _touch(global_stamp)
     _log(prompt)
 
     additional_context = REMINDER

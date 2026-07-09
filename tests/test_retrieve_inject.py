@@ -52,6 +52,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "EXOMEM_RETRIEVE_NUDGE_MIN_CHARS",
         "EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS",
         "EXOMEM_RETRIEVE_NUDGE_COOLDOWN_SEC",
+        "EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC",
         "EXOMEM_RETRIEVE_INJECT",
         "EXOMEM_RETRIEVE_INJECT_CLI",
         "EXOMEM_REST_API_KEY",
@@ -61,6 +62,7 @@ def _clean_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "KB_RETRIEVE_NUDGE_MIN_CHARS",
         "KB_RETRIEVE_NUDGE_CONTROL_MAX_CHARS",
         "KB_RETRIEVE_NUDGE_COOLDOWN_SEC",
+        "KB_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC",
         "KB_RETRIEVE_INJECT",
         "KB_RETRIEVE_INJECT_CLI",
     ):
@@ -612,6 +614,33 @@ def test_cooldown_gate_short_circuits_second_transport_attempt(
     assert call_count["n"] == 1
 
 
+def test_global_cooldown_suppresses_nearby_sessions(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+
+    first = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-a"}, home)
+    second = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-b"}, home)
+
+    assert "additionalContext" in first
+    assert second.strip() == ""
+
+
+def test_global_cooldown_can_be_disabled(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC", "0")
+
+    first = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-a"}, home)
+    second = _call_main(monkeypatch, capsys, {"prompt": PROMPT, "session_id": "tab-b"}, home)
+
+    assert "additionalContext" in first
+    assert "additionalContext" in second
+
+
 def test_exomem_retrieve_inject_zero_is_disabled_end_to_end(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture, tmp_path: Path,
 ) -> None:
@@ -638,7 +667,9 @@ def _run_subprocess(event: dict, home: Path) -> subprocess.CompletedProcess:
     env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
     for key in (
         "EXOMEM_RETRIEVE_INJECT", "EXOMEM_RETRIEVE_INJECT_CLI", "EXOMEM_REST_API_KEY", "EXOMEM_HOST",
+        "EXOMEM_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC",
         "KB_RETRIEVE_INJECT", "KB_RETRIEVE_INJECT_CLI",  # legacy aliases, cleared too
+        "KB_RETRIEVE_NUDGE_GLOBAL_COOLDOWN_SEC",
     ):
         env.pop(key, None)
     return subprocess.run(
