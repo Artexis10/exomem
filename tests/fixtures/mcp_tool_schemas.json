@@ -5,16 +5,16 @@
       "additionalProperties": false,
       "properties": {
         "content": {
-          "type": "string",
-          "description": "Full text body to capture (markdown / plain text). For\nfiles or binaries, use the /upload endpoint instead."
+          "description": "Full text body to capture (markdown / plain text). For files or binaries, use the /upload endpoint instead.",
+          "type": "string"
         },
         "source_type": {
-          "type": "string",
-          "description": "One of article, session, book, paper, video, other."
+          "description": "One of article, session, book, paper, video, other.",
+          "type": "string"
         },
         "title": {
-          "type": "string",
-          "description": "Human title; used to derive the filename slug."
+          "description": "Human title; used to derive the filename slug.",
+          "type": "string"
         },
         "url": {
           "anyOf": [
@@ -53,7 +53,7 @@
             }
           ],
           "default": null,
-          "description": "One short paragraph on why this is worth keeping.\nRendered as a leading blockquote in the source body, between\nthe `# Source: ...` header and the `## Capture` section."
+          "description": "One short paragraph on why this is worth keeping. Rendered as a leading blockquote in the source body, between the `# Source: ...` header and the `## Capture` section."
         }
       },
       "required": [
@@ -71,33 +71,33 @@
       "properties": {
         "path": {
           "default": "",
-          "type": "string",
-          "description": "Optional vault subtree to scan. Defaults to the vault root."
+          "description": "Optional vault subtree to scan. Defaults to the vault root.",
+          "type": "string"
         },
         "mode": {
           "default": "scan-only",
-          "type": "string",
-          "description": "Adoption mode: scan-only, save-manifest, copy-as-sources, or compile-selected."
+          "description": "Adoption mode: scan-only, save-manifest, copy-as-sources, or compile-selected.",
+          "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "type": "integer",
-          "description": "Folder-tree depth cap for the scan."
+          "description": "Folder-tree depth cap for the scan.",
+          "type": "integer"
         },
         "include_hidden": {
           "default": false,
-          "type": "boolean",
-          "description": "Include hidden files/directories in the scan."
+          "description": "Include hidden files/directories in the scan.",
+          "type": "boolean"
         },
         "samples": {
           "default": 5,
-          "type": "integer",
-          "description": "Sample filename count per folder."
+          "description": "Sample filename count per folder.",
+          "type": "integer"
         },
         "pack_limit": {
           "default": 6,
-          "type": "integer",
-          "description": "Maximum knowledge-pack suggestions to return."
+          "description": "Maximum knowledge-pack suggestions to return.",
+          "type": "integer"
         },
         "manifest_path": {
           "anyOf": [
@@ -109,7 +109,7 @@
             }
           ],
           "default": null,
-          "description": "Optional markdown destination under Knowledge Base/ for\nsave-manifest. A default under _Adoption/ is used when omitted."
+          "description": "Optional markdown destination under Knowledge Base/ for save-manifest. A default under _Adoption/ is used when omitted."
         },
         "selected_paths": {
           "anyOf": [
@@ -136,17 +136,17 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative."
+          "description": "Vault-relative.",
+          "type": "string"
         },
         "content": {
-          "type": "string",
-          "description": "Text to append (text only; binaries go via /upload)."
+          "description": "Text to append (text only; binaries go via /upload).",
+          "type": "string"
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Required under curated trees."
+          "description": "Required under curated trees.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -174,12 +174,12 @@
             }
           ],
           "default": null,
-          "description": "Optional subset of {corpus_contradictions, stale_review,\nunprocessed_source}. Omit to include all three."
+          "description": "Optional subset of {corpus_contradictions, stale_review, unprocessed_source}. Omit to include all three."
         },
         "limit": {
           "default": 25,
-          "type": "integer",
-          "description": "Max items to surface (default 25; 0 or negative = uncapped,\nsurface all). Lower-priority items beyond the cap are summarized in\na \"N more not shown\" note, never dropped silently."
+          "description": "Max items to surface (default 25; 0 or negative = uncapped, surface all). Lower-priority items beyond the cap are summarized in a \"N more not shown\" note, never dropped silently.",
+          "type": "integer"
         }
       },
       "type": "object"
@@ -203,7 +203,7 @@
             }
           ],
           "default": null,
-          "description": "Optional filter; only run these checks. Each must be\none of the categories above. Omit to run all."
+          "description": "Optional filter; only run these checks. Each must be one of the categories above. Omit to run all."
         }
       },
       "type": "object"
@@ -216,13 +216,13 @@
       "properties": {
         "dry_run": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, compute what would change without writing.\nDefault false."
+          "description": "If true, compute what would change without writing. Default false.",
+          "type": "boolean"
         },
         "rebuild_embeddings": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, wipe and rebuild the vector sidecar\nat `<vault>/Knowledge Base/.embeddings.sqlite` after the fix\nsweep. Use on first run, after a machine swap, or when the\nsidecar has drifted from disk. Ignored when `dry_run=true`."
+          "description": "If true, wipe and rebuild the vector sidecar at `<vault>/Knowledge Base/.embeddings.sqlite` after the fix sweep. Use on first run, after a machine swap, or when the sidecar has drifted from disk. Ignored when `dry_run=true`.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -235,8 +235,8 @@
       "properties": {
         "profile": {
           "default": "compact",
-          "type": "string",
-          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is\nenough for normal clients. Full adds examples. Diagnostics adds\nperformance interpretation guidance."
+          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is enough for normal clients. Full adds examples. Diagnostics adds performance interpretation guidance.",
+          "type": "string"
         },
         "workflow": {
           "anyOf": [
@@ -248,7 +248,7 @@
             }
           ],
           "default": null,
-          "description": "Optional caller-selected workflow label. Returned as context\nonly; it does not change server behavior."
+          "description": "Optional caller-selected workflow label. Returned as context only; it does not change server behavior."
         }
       },
       "type": "object"
@@ -260,13 +260,13 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative, e.g. `Knowledge Base/Identity/Career.md`.\nForward or back slashes accepted. Path-escape guarded."
+          "description": "Vault-relative, e.g. `Knowledge Base/Identity/Career.md`. Forward or back slashes accepted. Path-escape guarded.",
+          "type": "string"
         },
         "content": {
           "default": "",
-          "type": "string",
-          "description": "File body (or full file if `frontmatter` is None). Text\nonly; for binaries use the /upload endpoint."
+          "description": "File body (or full file if `frontmatter` is None). Text only; for binaries use the /upload endpoint.",
+          "type": "string"
         },
         "frontmatter": {
           "anyOf": [
@@ -283,23 +283,23 @@
         },
         "overwrite": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, replace existing file. Default false."
+          "description": "If true, replace existing file. Default false.",
+          "type": "boolean"
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Required to write under a curated tree. Default false."
+          "description": "Required to write under a curated tree. Default false.",
+          "type": "boolean"
         },
         "kind": {
           "default": "file",
-          "type": "string",
-          "description": "\"file\" (default) or \"dir\". With \"dir\", creates a folder\ninstead of a file (former `create_directory`)."
+          "description": "\"file\" (default) or \"dir\". With \"dir\", creates a folder instead of a file (former `create_directory`).",
+          "type": "string"
         },
         "parents": {
           "default": true,
-          "type": "boolean",
-          "description": "In \"dir\" mode, create intermediate folders (mkdir -p).\nDefault true."
+          "description": "In \"dir\" mode, create intermediate folders (mkdir -p). Default true.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -314,32 +314,32 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative."
+          "description": "Vault-relative.",
+          "type": "string"
         },
         "confirm": {
-          "type": "boolean",
-          "description": "Must be `true` explicitly. Marks the action deliberate."
+          "description": "Must be `true` explicitly. Marks the action deliberate.",
+          "type": "boolean"
         },
         "recursive": {
           "default": false,
-          "type": "boolean",
-          "description": "For a non-empty FOLDER, required to confirm you know it\nhas contents. Ignored for files."
+          "description": "For a non-empty FOLDER, required to confirm you know it has contents. Ignored for files.",
+          "type": "boolean"
         },
         "force_orphan": {
           "default": false,
-          "type": "boolean",
-          "description": "Allow trash even if inbound wikilinks exist."
+          "description": "Allow trash even if inbound wikilinks exist.",
+          "type": "boolean"
         },
         "force_superseded": {
           "default": false,
-          "type": "boolean",
-          "description": "Allow trash of a file in the supersession chain."
+          "description": "Allow trash of a file in the supersession chain.",
+          "type": "boolean"
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Required to trash under a curated tree."
+          "description": "Required to trash under a curated tree.",
+          "type": "boolean"
         },
         "expected_dead_inbound": {
           "anyOf": [
@@ -354,7 +354,7 @@
             }
           ],
           "default": null,
-          "description": "Vault-relative paths whose inbound links\nto this file should be ignored. Use when you're trashing\nmultiple files in one workflow (e.g. cleaning a supersession\nchain) and don't want each step to false-positive on\nlinks that will die in the same batch."
+          "description": "Vault-relative paths whose inbound links to this file should be ignored. Use when you're trashing multiple files in one workflow (e.g. cleaning a supersession chain) and don't want each step to false-positive on links that will die in the same batch."
         }
       },
       "required": [
@@ -370,12 +370,12 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative path to the compiled page (same shape as\n`get` accepts)."
+          "description": "Vault-relative path to the compiled page (same shape as `get` accepts).",
+          "type": "string"
         },
         "why": {
-          "type": "string",
-          "description": "One-line rationale for the edit. Required — lands in the\nlog entry so the change is auditable."
+          "description": "One-line rationale for the edit. Required — lands in the log entry so the change is auditable.",
+          "type": "string"
         },
         "new_body": {
           "anyOf": [
@@ -387,7 +387,7 @@
             }
           ],
           "default": null,
-          "description": "New markdown body (everything after frontmatter).\nOmit to keep the existing body."
+          "description": "New markdown body (everything after frontmatter). Omit to keep the existing body."
         },
         "tags": {
           "anyOf": [
@@ -402,7 +402,7 @@
             }
           ],
           "default": null,
-          "description": "New tags list (replaces existing). Lowercase dash-\nseparated; the server normalizes. Omit to keep existing tags."
+          "description": "New tags list (replaces existing). Lowercase dash- separated; the server normalizes. Omit to keep existing tags."
         },
         "old_string": {
           "anyOf": [
@@ -426,12 +426,12 @@
             }
           ],
           "default": null,
-          "description": "Replacement snippet (required with old_string; must\ndiffer from it)."
+          "description": "Replacement snippet (required with old_string; must differ from it)."
         },
         "replace_all": {
           "default": false,
-          "type": "boolean",
-          "description": "Replace every occurrence instead of requiring a\nunique match. Default False."
+          "description": "Replace every occurrence instead of requiring a unique match. Default False.",
+          "type": "boolean"
         },
         "heading": {
           "anyOf": [
@@ -443,12 +443,12 @@
             }
           ],
           "default": null,
-          "description": "Section-targeted mode — the `## Heading` (the `#` markers\nare optional) under which to place `new_string`. The section\nspans from that heading to the next heading of equal-or-higher\nlevel (or EOF). Mutually exclusive with new_body/old_string.\nRaises HEADING_NOT_FOUND if absent."
+          "description": "Section-targeted mode — the `## Heading` (the `#` markers are optional) under which to place `new_string`. The section spans from that heading to the next heading of equal-or-higher level (or EOF). Mutually exclusive with new_body/old_string. Raises HEADING_NOT_FOUND if absent."
         },
         "section_position": {
           "default": "append",
-          "type": "string",
-          "description": "With `heading`, where to put `new_string`:\n\"append\" (default), \"prepend\", or \"replace\" the section body."
+          "description": "With `heading`, where to put `new_string`: \"append\" (default), \"prepend\", or \"replace\" the section body.",
+          "type": "string"
         },
         "edits": {
           "anyOf": [
@@ -464,7 +464,7 @@
             }
           ],
           "default": null,
-          "description": "Batch-surgical mode — list of {old_string, new_string,\nreplace_all?} applied sequentially in one atomic commit."
+          "description": "Batch-surgical mode — list of {old_string, new_string, replace_all?} applied sequentially in one atomic commit."
         },
         "row_key": {
           "anyOf": [
@@ -476,7 +476,7 @@
             }
           ],
           "default": null,
-          "description": "Take-row mode — natural leading text of the row to fill\n(e.g. \"Whiplash (2014)\"). Requires `take`."
+          "description": "Take-row mode — natural leading text of the row to fill (e.g. \"Whiplash (2014)\"). Requires `take`."
         },
         "take": {
           "anyOf": [
@@ -492,8 +492,8 @@
         },
         "overwrite": {
           "default": false,
-          "type": "boolean",
-          "description": "In take-row mode, also replace an already-filled take."
+          "description": "In take-row mode, also replace an already-filled take.",
+          "type": "boolean"
         },
         "field": {
           "anyOf": [
@@ -505,7 +505,7 @@
             }
           ],
           "default": null,
-          "description": "Frontmatter-patch mode — the single frontmatter key to set\n(cannot be `updated`, which is auto-bumped)."
+          "description": "Frontmatter-patch mode — the single frontmatter key to set (cannot be `updated`, which is auto-bumped)."
         },
         "value": {
           "anyOf": [
@@ -538,8 +538,8 @@
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Allow a frontmatter patch under a curated tree."
+          "description": "Allow a frontmatter patch under a curated tree.",
+          "type": "boolean"
         },
         "expected_hash": {
           "anyOf": [
@@ -551,12 +551,12 @@
             }
           ],
           "default": null,
-          "description": "Optional drift guard. Pass the `content_hash` you\ngot from `get`; the edit refuses (STALE_EDIT) if the file\nchanged on disk since, so you never clobber another writer."
+          "description": "Optional drift guard. Pass the `content_hash` you got from `get`; the edit refuses (STALE_EDIT) if the file changed on disk since, so you never clobber another writer."
         },
         "validate_only": {
           "default": false,
-          "type": "boolean",
-          "description": "Preview a surgical match without writing. Needs\n`old_string`. Reports how many rows would be hit instead of\ncommitting — use it before a `replace_all` to avoid an\nambiguous match silently touching more rows than intended."
+          "description": "Preview a surgical match without writing. Needs `old_string`. Reports how many rows would be hit instead of committing — use it before a `replace_all` to avoid an ambiguous match silently touching more rows than intended.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -573,14 +573,17 @@
       "properties": {
         "query": {
           "default": "",
+          "description": "The topic to trace (free text, like `find`).",
           "type": "string"
         },
         "limit": {
           "default": 10,
+          "description": "Max chains (timelines) to return, by find relevance (default 10; 0 or negative = uncapped). Chains beyond the cap are reported in `truncation`, never dropped silently.",
           "type": "integer"
         },
         "scope": {
           "default": "kb",
+          "description": "Search scope passed to `find` — \"kb\" (default) / \"vault\" / \"kb-only\".",
           "type": "string"
         },
         "projects": {
@@ -595,7 +598,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Optional project-key filter passed to `find`."
         },
         "tags": {
           "anyOf": [
@@ -609,7 +613,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Optional tag filter passed to `find`."
         }
       },
       "type": "object"
@@ -621,13 +626,13 @@
       "additionalProperties": false,
       "properties": {
         "id": {
-          "type": "string",
-          "description": "A result `id` returned by `search` (the canonical vault-relative path)."
+          "description": "A result `id` returned by `search` (the canonical vault-relative path).",
+          "type": "string"
         },
         "max_chars": {
           "default": 3000,
-          "type": "integer",
-          "description": "Maximum body characters to return. Values below 500 are raised\nto 500; values above 6000 are capped server-side."
+          "description": "Maximum body characters to return. Values below 500 are raised to 500; values above 6000 are capped server-side.",
+          "type": "integer"
         }
       },
       "required": [
@@ -643,8 +648,8 @@
       "properties": {
         "query": {
           "default": "",
-          "type": "string",
-          "description": "Free-text search string. In \"hybrid\"/\"vector\" mode it's\nembedded with bge-base for semantic recall. In \"keyword\" mode\nit's tokenized on whitespace and every token must appear in\ntitle or body (any order) — `contract employment` matches a\npage about \"employment contract\". Empty string always falls\nback to \"most-recent filtered\" behaviour regardless of mode."
+          "description": "Free-text search string. In \"hybrid\"/\"vector\" mode it's embedded with bge-base for semantic recall. In \"keyword\" mode it's tokenized on whitespace and every token must appear in title or body (any order) — `contract employment` matches a page about \"employment contract\". Empty string always falls back to \"most-recent filtered\" behaviour regardless of mode.",
+          "type": "string"
         },
         "types": {
           "anyOf": [
@@ -704,7 +709,7 @@
             }
           ],
           "default": null,
-          "description": "Filter to diarized media whose `speakers:` frontmatter includes any of\nthese named speakers (case-insensitive) — e.g. \"what did Alice say about X\".\nAND'd with the query/other filters; OR'd within the list."
+          "description": "Filter to diarized media whose `speakers:` frontmatter includes any of these named speakers (case-insensitive) — e.g. \"what did Alice say about X\". AND'd with the query/other filters; OR'd within the list."
         },
         "file_types": {
           "anyOf": [
@@ -719,7 +724,7 @@
             }
           ],
           "default": null,
-          "description": "Scope results to these artifact kinds — note, pdf, image,\naudio, video, csv, json, tsv. A binary surfaces under its media\nkind (pdf/image/...); a data file under its dataset card's format\n(csv/json). Omit to return ALL kinds (the default — search never\nhides a type unless you ask)."
+          "description": "Scope results to these artifact kinds — note, pdf, image, audio, video, csv, json, tsv. A binary surfaces under its media kind (pdf/image/...); a data file under its dataset card's format (csv/json). Omit to return ALL kinds (the default — search never hides a type unless you ask)."
         },
         "exclude_file_types": {
           "anyOf": [
@@ -738,23 +743,23 @@
         },
         "limit": {
           "default": 15,
-          "type": "integer",
-          "description": "Max hits to return. Default 15, hard cap 100."
+          "description": "Max hits to return. Default 15, hard cap 100.",
+          "type": "integer"
         },
         "scope": {
           "default": "kb",
-          "type": "string",
-          "description": "\"kb\" (default) searches Knowledge Base/ first and\nAUTO-WIDENS to the whole vault when the KB doesn't fill\n`limit` — so content in sibling folders (Tracking/,\nReference/, Finance/, ... and curated, read-only trees kept\noutside Knowledge Base/) is never silently invisible. Widened\nhits carry `outside_kb: true`. \"vault\" always walks the\nwhole vault. \"kb-only\" is the strict opt-out: KB only,\nnever widens. Outside-KB recall is BM25/keyword (the\nvector sidecar is KB-scoped), with a relaxed gate so terse\nfiles (e.g. a numbers-heavy tracker) surface on a partial\ntoken match. `_Schema/`, `_trash/`, `_attachments/`, and\n`.obsidian/` are excluded under every scope. NOTE: an\nempty result means \"not found in what I searched,\" NOT\n\"doesn't exist\" — say so, and try \"vault\" before\nconcluding absence."
+          "description": "\"kb\" (default) searches Knowledge Base/ first and AUTO-WIDENS to the whole vault when the KB doesn't fill `limit` — so content in sibling folders (Tracking/, Reference/, Finance/, ... and curated, read-only trees kept outside Knowledge Base/) is never silently invisible. Widened hits carry `outside_kb: true`. \"vault\" always walks the whole vault. \"kb-only\" is the strict opt-out: KB only, never widens. Outside-KB recall is BM25/keyword (the vector sidecar is KB-scoped), with a relaxed gate so terse files (e.g. a numbers-heavy tracker) surface on a partial token match. `_Schema/`, `_trash/`, `_attachments/`, and `.obsidian/` are excluded under every scope. NOTE: an empty result means \"not found in what I searched,\" NOT \"doesn't exist\" — say so, and try \"vault\" before concluding absence.",
+          "type": "string"
         },
         "mode": {
           "default": "hybrid",
-          "type": "string",
-          "description": "Ranker. \"hybrid\" (default) fuses BM25 + local vector\nembeddings via reciprocal rank fusion — best recall on\nnatural-language queries. \"keyword\" preserves the original\ncase-insensitive substring matching, sorted by `updated:`.\n\"vector\" is vector-only (testing aid). BM25 corpus is\nSnowball-stemmed so \"regulation\" reaches pages with\n\"regulator\"; keyword mode stays strict-substring. If the\nembedding sidecar hasn't been built yet, hybrid degrades\nto BM25-only; run `audit_fix(rebuild_embeddings=true)` to\npopulate it."
+          "description": "Ranker. \"hybrid\" (default) fuses BM25 + local vector embeddings via reciprocal rank fusion — best recall on natural-language queries. \"keyword\" preserves the original case-insensitive substring matching, sorted by `updated:`. \"vector\" is vector-only (testing aid). BM25 corpus is Snowball-stemmed so \"regulation\" reaches pages with \"regulator\"; keyword mode stays strict-substring. If the embedding sidecar hasn't been built yet, hybrid degrades to BM25-only; run `audit_fix(rebuild_embeddings=true)` to populate it.",
+          "type": "string"
         },
         "graph": {
           "default": true,
-          "type": "boolean",
-          "description": "When true (default) and mode is hybrid/vector, outbound\nwikilinks of top BM25/vector candidates contribute a third\nranking — surfaces 1-hop neighbours of strong matches."
+          "description": "When true (default) and mode is hybrid/vector, outbound wikilinks of top BM25/vector candidates contribute a third ranking — surfaces 1-hop neighbours of strong matches.",
+          "type": "boolean"
         },
         "rerank": {
           "anyOf": [
@@ -766,42 +771,42 @@
             }
           ],
           "default": null,
-          "description": "Cross-encoder re-sort of the top fused candidates\n(bge-reranker-base) for higher-precision ordering. Default\n(unset) is mode-aware AUTO: in CPU steady-state modes it stays\noff for predictable latency; when the text/reranker device is\naccelerated, the server reranks only when ranking lanes\ndisagree or the query is long. Pass true to force reranking\nfor a high-value query, including on CPU; pass false to skip\nit entirely."
+          "description": "Cross-encoder re-sort of the top fused candidates (bge-reranker-base) for higher-precision ordering. Default (unset) is mode-aware AUTO: in CPU steady-state modes it stays off for predictable latency; when the text/reranker device is accelerated, the server reranks only when ranking lanes disagree or the query is long. Pass true to force reranking for a high-value query, including on CPU; pass false to skip it entirely."
         },
         "prefer_compiled": {
           "default": true,
-          "type": "boolean",
-          "description": "When true (default), applies a small boost to\ncompiled types (insight, pattern, failure, research-note,\nentity) and a small penalty to raw `source` after fusion\nAND rerank. Reflects the KB's epistemic hierarchy. Set\nfalse to retrieve raw source discussion verbatim (e.g.\n\"what did I capture from Dr. X\")."
+          "description": "When true (default), applies a small boost to compiled types (insight, pattern, failure, research-note, entity) and a small penalty to raw `source` after fusion AND rerank. Reflects the KB's epistemic hierarchy. Set false to retrieve raw source discussion verbatim (e.g. \"what did I capture from Dr. X\").",
+          "type": "boolean"
         },
         "prefer_active": {
           "default": true,
-          "type": "boolean",
-          "description": "When true (default), soft-demotes `status:\nsuperseded` pages so a replaced conclusion can't outrank the\npage that superseded it. The tombstone stays findable and its\nhit still carries `status` + `superseded_by` (the forward\npointer) so you can see it's superseded. Set false to rank a\nsuperseded page on its content alone (e.g. \"what did I used to\nthink about X\")."
+          "description": "When true (default), soft-demotes `status: superseded` pages so a replaced conclusion can't outrank the page that superseded it. The tombstone stays findable and its hit still carries `status` + `superseded_by` (the forward pointer) so you can see it's superseded. Set false to rank a superseded page on its content alone (e.g. \"what did I used to think about X\").",
+          "type": "boolean"
         },
         "prefer_used": {
           "default": false,
-          "type": "boolean",
-          "description": "When true (OFF by default — default ranking is\nusage-blind), applies a bounded, positive-only usage boost:\npages you actually read (`get`) and cite in written notes rank\nslightly higher, from ACT-R activation over the server's own\naccess logs. Capped below the compiled boost so usage breaks\nties but never overrides the epistemic hierarchy; never a\npenalty; never ADDS results — it only reorders pages the\ncontent lanes already matched. Boosted hits expose\n`signals.activation` + `signals.usage_boost` so you can see\nexactly why. Reading and citing pages IS the feedback loop —\nno separate feedback call exists or is needed. Use for \"what\nhave I been working with lately\" recall; leave off for\nneutral knowledge lookup."
+          "description": "When true (OFF by default — default ranking is usage-blind), applies a bounded, positive-only usage boost: pages you actually read (`get`) and cite in written notes rank slightly higher, from ACT-R activation over the server's own access logs. Capped below the compiled boost so usage breaks ties but never overrides the epistemic hierarchy; never a penalty; never ADDS results — it only reorders pages the content lanes already matched. Boosted hits expose `signals.activation` + `signals.usage_boost` so you can see exactly why. Reading and citing pages IS the feedback loop — no separate feedback call exists or is needed. Use for \"what have I been working with lately\" recall; leave off for neutral knowledge lookup.",
+          "type": "boolean"
         },
         "pack": {
           "default": false,
-          "type": "boolean",
-          "description": "When true (off by default), ALSO assemble a reasoning-ready\ncontext pack from the top hits and change the return to\n{\"hits\": [...], \"pack\": {...}} (with pack off, the return is the\nusual hit list, unchanged). The pack is PURE MEASUREMENT over the\nnotes you already wrote — no server-side reasoning: each top note's\nstructurally-extracted key claims (lede + headline-section lines +\nheading outline), the 1-hop wikilink neighbourhood of those notes\nranked by co-citation, and the contradictions among them (recorded\nsupersession edges + proximity \"tension\" pairs in the embedding\nband, surfaced for you to judge — proximity, not polarity). Lets you\nreason over the matches in one shot instead of fanning out `get`\ncalls. Bounded with explicit `truncation`; the tension part needs\nthe embedding sidecar and reports `embeddings_available`."
+          "description": "When true (off by default), ALSO assemble a reasoning-ready context pack from the top hits and change the return to {\"hits\": [...], \"pack\": {...}} (with pack off, the return is the usual hit list, unchanged). The pack is PURE MEASUREMENT over the notes you already wrote — no server-side reasoning: each top note's structurally-extracted key claims (lede + headline-section lines + heading outline), the 1-hop wikilink neighbourhood of those notes ranked by co-citation, and the contradictions among them (recorded supersession edges + proximity \"tension\" pairs in the embedding band, surfaced for you to judge — proximity, not polarity). Lets you reason over the matches in one shot instead of fanning out `get` calls. Bounded with explicit `truncation`; the tension part needs the embedding sidecar and reports `embeddings_available`.",
+          "type": "boolean"
         },
         "graph_enrich": {
           "default": false,
-          "type": "boolean",
-          "description": "When true with `pack=true`, add typed graph neighborhood\ndata from the derived epistemic graph sidecar to the pack. Default\nfalse; missing/disabled/stale graph state soft-fails inside\n`pack.graph.available` without changing hits, hit ordering, or the\ndefault pack contract."
+          "description": "When true with `pack=true`, add typed graph neighborhood data from the derived epistemic graph sidecar to the pack. Default false; missing/disabled/stale graph state soft-fails inside `pack.graph.available` without changing hits, hit ordering, or the default pack contract.",
+          "type": "boolean"
         },
         "detail": {
           "default": "full",
-          "type": "string",
-          "description": "Result verbosity. \"full\" (default) keeps the current hit\nshape including `excerpt` and `signals`. \"compact\" returns the\nSAME ranked hits as token-cheap routing stubs — path, title,\ntype, scope, updated, plus lifecycle/media/outside_kb markers\nwhen present — omitting `excerpt` and `signals`. Use compact\nfor cheap proactive recall, then `get` a chosen page (or rerun\nwith detail=\"full\") when you need the why."
+          "description": "Result verbosity. \"full\" (default) keeps the current hit shape including `excerpt` and `signals`. \"compact\" returns the SAME ranked hits as token-cheap routing stubs — path, title, type, scope, updated, plus lifecycle/media/outside_kb markers when present — omitting `excerpt` and `signals`. Use compact for cheap proactive recall, then `get` a chosen page (or rerun with detail=\"full\") when you need the why.",
+          "type": "string"
         },
         "include_timings": {
           "default": false,
-          "type": "boolean",
-          "description": "When true (off by default), the return becomes an\nenvelope {\"hits\": [...], \"timings\": {...}} (with pack=true the\nenvelope also carries \"pack\"). `timings` reports total_ms,\nhot-cache status, and per-stage milliseconds for the retrieval\nlanes (skipped/failed optional lanes are marked, never fatal).\nDiagnostics only — timings never include note content. Omitted\n→ the response shape is unchanged."
+          "description": "When true (off by default), the return becomes an envelope {\"hits\": [...], \"timings\": {...}} (with pack=true the envelope also carries \"pack\"). `timings` reports total_ms, hot-cache status, and per-stage milliseconds for the retrieval lanes (skipped/failed optional lanes are marked, never fatal). Diagnostics only — timings never include note content. Omitted → the response shape is unchanged.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -813,28 +818,28 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative path. Accepted shapes:\n- `Knowledge Base/Notes/Insights/foo.md`\n- `Reference/Strategy.md`\n- `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if\n  literal path doesn't resolve; auto-adds `.md`)."
+          "description": "Vault-relative path. Accepted shapes: - `Knowledge Base/Notes/Insights/foo.md` - `Reference/Strategy.md` - `Notes/Insights/foo` (auto-prepends `Knowledge Base/` if literal path doesn't resolve; auto-adds `.md`).",
+          "type": "string"
         },
         "frontmatter_only": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, return ONLY the frontmatter (no body) —\ncheap for scanning many files by field (folds in the former\n`get_frontmatter` tool). Returns {path, frontmatter,\nhas_frontmatter} instead of the full page below."
+          "description": "If true, return ONLY the frontmatter (no body) — cheap for scanning many files by field (folds in the former `get_frontmatter` tool). Returns {path, frontmatter, has_frontmatter} instead of the full page below.",
+          "type": "boolean"
         },
         "include_history": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, attach a `history` list — the page's\nchange log from the append-only `log.md`, newest-first\n(`[{date, op, summary}]`, where `summary` is the `why:`\nrationale recorded at write time). Use this to answer \"why was\nthis note changed / what was the old version / show its history\"\nand to verify an edit's rationale. `[]` when the page has no\nrecorded edits."
+          "description": "If true, attach a `history` list — the page's change log from the append-only `log.md`, newest-first (`[{date, op, summary}]`, where `summary` is the `why:` rationale recorded at write time). Use this to answer \"why was this note changed / what was the old version / show its history\" and to verify an edit's rationale. `[]` when the page has no recorded edits.",
+          "type": "boolean"
         },
         "links": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, attach a `links` summary —\n`{inbound: [...], outbound: [...]}`. `inbound` lists files whose\nwikilinks resolve to this page (each\n`{path, line_number, context, raw_target}`); `outbound` lists\nthe distinct wikilink targets in this page's body. Use it to\nsee a note's graph neighbourhood in one call. Default off (no\nbehaviour change)."
+          "description": "If true, attach a `links` summary — `{inbound: [...], outbound: [...]}`. `inbound` lists files whose wikilinks resolve to this page (each `{path, line_number, context, raw_target}`); `outbound` lists the distinct wikilink targets in this page's body. Use it to see a note's graph neighbourhood in one call. Default off (no behaviour change).",
+          "type": "boolean"
         },
         "include_raw": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, ALSO return `content` — the raw file text\nincluding the frontmatter delimiters. Off by default because it\nduplicates `frontmatter` + `body` (double the tokens on every\nread) and nothing in the normal workflow needs it: edits\nround-trip `body`, and the drift guard uses `content_hash`,\nwhich the server always computes over the raw bytes for you."
+          "description": "If true, ALSO return `content` — the raw file text including the frontmatter delimiters. Off by default because it duplicates `frontmatter` + `body` (double the tokens on every read) and nothing in the normal workflow needs it: edits round-trip `body`, and the drift guard uses `content_hash`, which the server always computes over the raw bytes for you.",
+          "type": "boolean"
         },
         "max_body_chars": {
           "anyOf": [
@@ -846,7 +851,7 @@
             }
           ],
           "default": null,
-          "description": "Optional cap for the returned `body`. Use this when a\nclient wants bounded content instead of an arbitrary full-page read.\nValues above 12000 are capped server-side; negative values are rejected."
+          "description": "Optional cap for the returned `body`. Use this when a client wants bounded content instead of an arbitrary full-page read. Values above 12000 are capped server-side; negative values are rejected."
         }
       },
       "required": [
@@ -861,13 +866,13 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "Vault-relative path to a video file\n(`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`)."
+          "description": "Vault-relative path to a video file (`.mp4 .mov .mkv .webm .avi .m4v .wmv .flv .mpeg .mpg`).",
+          "type": "string"
         },
         "max_frames": {
           "default": 8,
-          "type": "integer",
-          "description": "Maximum frames to return. Default 8, hard-capped\nserver-side (16); out-of-range values clamp silently and the\nmetadata reports `max_frames_effective`. Each frame costs\nimage tokens — prefer a time window over raising this."
+          "description": "Maximum frames to return. Default 8, hard-capped server-side (16); out-of-range values clamp silently and the metadata reports `max_frames_effective`. Each frame costs image tokens — prefer a time window over raising this.",
+          "type": "integer"
         },
         "start_sec": {
           "anyOf": [
@@ -879,7 +884,7 @@
             }
           ],
           "default": null,
-          "description": "Optional window start in seconds — sample at/after this\ntimestamp only."
+          "description": "Optional window start in seconds — sample at/after this timestamp only."
         },
         "end_sec": {
           "anyOf": [
@@ -891,7 +896,7 @@
             }
           ],
           "default": null,
-          "description": "Optional window end in seconds — sample before this\ntimestamp only (clamped to the video's duration)."
+          "description": "Optional window end in seconds — sample before this timestamp only (clamped to the video's duration)."
         }
       },
       "required": [
@@ -915,7 +920,7 @@
             }
           ],
           "default": null,
-          "description": "Existing page path to use as the graph seed. Optional when `query`\nis supplied."
+          "description": "Existing page path to use as the graph seed. Optional when `query` is supplied."
         },
         "query": {
           "anyOf": [
@@ -927,12 +932,12 @@
             }
           ],
           "default": null,
-          "description": "Text seed for matching graph node titles/content. Optional when\n`path` is supplied."
+          "description": "Text seed for matching graph node titles/content. Optional when `path` is supplied."
         },
         "depth": {
           "default": 1,
-          "type": "integer",
-          "description": "Traversal depth from seed nodes. Default 1."
+          "description": "Traversal depth from seed nodes. Default 1.",
+          "type": "integer"
         },
         "relation_types": {
           "anyOf": [
@@ -947,7 +952,7 @@
             }
           ],
           "default": null,
-          "description": "Optional allowlist of relation types, e.g.\n`derived_from`, `evidenced_by`, `supports`, `contradicts`,\n`supersedes`, `links_to`."
+          "description": "Optional allowlist of relation types, e.g. `derived_from`, `evidenced_by`, `supports`, `contradicts`, `supersedes`, `links_to`."
         },
         "node_types": {
           "anyOf": [
@@ -962,17 +967,17 @@
             }
           ],
           "default": null,
-          "description": "Optional allowlist of node kinds, e.g. `file`, `decision`,\n`finding`, `risk`, `action`, `claim`, `evidence`."
+          "description": "Optional allowlist of node kinds, e.g. `file`, `decision`, `finding`, `risk`, `action`, `claim`, `evidence`."
         },
         "max_nodes": {
           "default": 40,
-          "type": "integer",
-          "description": "Cap returned nodes. Default 40."
+          "description": "Cap returned nodes. Default 40.",
+          "type": "integer"
         },
         "max_edges": {
           "default": 80,
-          "type": "integer",
-          "description": "Cap returned edges. Default 80."
+          "description": "Cap returned edges. Default 80.",
+          "type": "integer"
         }
       },
       "type": "object"
@@ -984,16 +989,16 @@
       "additionalProperties": false,
       "properties": {
         "entity_type": {
-          "type": "string",
-          "description": "One of person, concept, library, decision."
+          "description": "One of person, concept, library, decision.",
+          "type": "string"
         },
         "name": {
-          "type": "string",
-          "description": "Title Case, the entity's actual name. Will be the filename."
+          "description": "Title Case, the entity's actual name. Will be the filename.",
+          "type": "string"
         },
         "summary": {
-          "type": "string",
-          "description": "One-paragraph description for the `## Summary` section."
+          "description": "One-paragraph description for the `## Summary` section.",
+          "type": "string"
         },
         "why_in_kb": {
           "anyOf": [
@@ -1005,7 +1010,7 @@
             }
           ],
           "default": null,
-          "description": "Optional `## Why in the KB` paragraph — explains what\nthis entity is relevant to in your work."
+          "description": "Optional `## Why in the KB` paragraph — explains what this entity is relevant to in your work."
         },
         "tags": {
           "anyOf": [
@@ -1035,7 +1040,7 @@
             }
           ],
           "default": null,
-          "description": "List of vault-relative wikilink targets to put under\n`## Connections`. Same path conventions as `note.sources`."
+          "description": "List of vault-relative wikilink targets to put under `## Connections`. Same path conventions as `note.sources`. (per-type fields): see the bullet list above."
         },
         "affiliation": {
           "anyOf": [
@@ -1166,18 +1171,18 @@
       "properties": {
         "path": {
           "default": "",
-          "type": "string",
-          "description": "Vault-relative. Empty string lists vault root. Auto-handles\nforward/back slashes."
+          "description": "Vault-relative. Empty string lists vault root. Auto-handles forward/back slashes.",
+          "type": "string"
         },
         "recursive": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, walk subfolders. Default false."
+          "description": "If true, walk subfolders. Default false.",
+          "type": "boolean"
         },
         "include_hidden": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, include dotfiles and _attachments/.\nDefault false."
+          "description": "If true, include dotfiles and _attachments/. Default false.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1189,8 +1194,8 @@
       "additionalProperties": false,
       "properties": {
         "target": {
-          "type": "string",
-          "description": "Vault-relative path or bare basename. `.md` optional."
+          "description": "Vault-relative path or bare basename. `.md` optional.",
+          "type": "string"
         }
       },
       "required": [
@@ -1242,22 +1247,22 @@
       "additionalProperties": false,
       "properties": {
         "old_path": {
-          "type": "string",
-          "description": "Vault-relative source."
+          "description": "Vault-relative source.",
+          "type": "string"
         },
         "new_path": {
-          "type": "string",
-          "description": "Vault-relative destination (must not exist)."
+          "description": "Vault-relative destination (must not exist).",
+          "type": "string"
         },
         "update_wikilinks": {
           "default": true,
-          "type": "boolean",
-          "description": "Default true."
+          "description": "Default true.",
+          "type": "boolean"
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Required if either end is in a curated tree."
+          "description": "Required if either end is in a curated tree.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1273,12 +1278,15 @@
       "additionalProperties": false,
       "properties": {
         "content": {
+          "description": "Full markdown body, written verbatim after the frontmatter. Should start with `# <title>` (the H1 matching the title arg) followed by the section conventions per type: research-note: `## Question`/`## Findings`/`## Connections`.",
           "type": "string"
         },
         "note_type": {
+          "description": "One of research-note, insight, failure, pattern, experiment, production-log.",
           "type": "string"
         },
         "title": {
+          "description": "Human title; used to derive a kebab-case filename slug. Experiments and production-logs auto-prefix with YYYY-MM.",
           "type": "string"
         },
         "project": {
@@ -1290,7 +1298,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "REQUIRED for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
         },
         "projects": {
           "anyOf": [
@@ -1304,7 +1313,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "List of project keys (plural). Optional for insight, failure, pattern, production-log. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
         },
         "sources": {
           "anyOf": [
@@ -1318,7 +1328,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Vault-relative wikilinks to existing pages this note draws from, e.g. `[\"Knowledge Base/Sources/Articles/2026-05-18-foo\"]` or `[\"[[Knowledge Base/Sources/Articles/2026-05-18-foo]]\"]`. Brackets and the leading `Knowledge Base/` are tolerated."
         },
         "tags": {
           "anyOf": [
@@ -1332,7 +1343,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Lowercase dash-separated; the server normalizes case/spacing."
         },
         "status": {
           "anyOf": [
@@ -1343,7 +1355,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "Defaults to `active` for most types, `planned` for production-log. Valid set varies by type."
         },
         "severity": {
           "anyOf": [
@@ -1354,7 +1367,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "failure only. {minor, moderate, serious, critical}."
         },
         "pattern_type": {
           "anyOf": [
@@ -1365,7 +1379,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "pattern only. {architectural, workflow, prompting, governance, pedagogical}."
         },
         "domain": {
           "anyOf": [
@@ -1376,7 +1391,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. Becomes the subfolder name (lowercased)."
         },
         "started": {
           "anyOf": [
@@ -1387,7 +1403,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. YYYY-MM-DD when the experiment began."
         },
         "duration": {
           "anyOf": [
@@ -1398,7 +1415,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. Freeform, e.g. \"30 days\", \"ongoing\"."
         },
         "hypothesis": {
           "anyOf": [
@@ -1409,7 +1427,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. One-line claim being tested."
         },
         "n": {
           "anyOf": [
@@ -1420,7 +1439,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. Sample size. Defaults to 1 (n-of-1)."
         },
         "concluded": {
           "anyOf": [
@@ -1431,7 +1451,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "experiment only. YYYY-MM-DD when it ended (absent while ongoing)."
         },
         "medium": {
           "anyOf": [
@@ -1442,7 +1463,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "production-log only. Subfolder, e.g. \"Posts\", \"Articles\"."
         },
         "recorded": {
           "anyOf": [
@@ -1453,7 +1475,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "production-log only. YYYY-MM-DD of recording session."
         },
         "published": {
           "anyOf": [
@@ -1464,7 +1487,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "production-log only. YYYY-MM-DD of publication."
         },
         "host": {
           "anyOf": [
@@ -1475,7 +1499,8 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "production-log only. Creator/talent name."
         },
         "editor": {
           "anyOf": [
@@ -1486,10 +1511,12 @@
               "type": "null"
             }
           ],
-          "default": null
+          "default": null,
+          "description": "production-log only. Producer/editor name."
         },
         "suggestions": {
           "default": true,
+          "description": "When true (default), the result carries a `suggestions`",
           "type": "boolean"
         },
         "project_category": {
@@ -1519,23 +1546,23 @@
       "properties": {
         "path": {
           "default": "",
-          "type": "string",
-          "description": "Vault-relative subtree to report on. Empty string (default)\nreports the whole vault. Auto-handles forward/back slashes."
+          "description": "Vault-relative subtree to report on. Empty string (default) reports the whole vault. Auto-handles forward/back slashes.",
+          "type": "string"
         },
         "max_depth": {
           "default": 3,
-          "type": "integer",
-          "description": "Tree depth cap; deeper folders roll up into their\nancestors (counts stay exact). Default 3."
+          "description": "Tree depth cap; deeper folders roll up into their ancestors (counts stay exact). Default 3.",
+          "type": "integer"
         },
         "include_hidden": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, include dot-directories/dotfiles and\n`_trash`/`_attachments`. Default false."
+          "description": "If true, include dot-directories/dotfiles and `_trash`/`_attachments`. Default false.",
+          "type": "boolean"
         },
         "samples": {
           "default": 5,
-          "type": "integer",
-          "description": "Filename samples listed per folder. Default 5."
+          "description": "Filename samples listed per folder. Default 5.",
+          "type": "integer"
         }
       },
       "type": "object"
@@ -1547,20 +1574,20 @@
       "additionalProperties": false,
       "properties": {
         "scope": {
-          "type": "string",
-          "description": "Incident or domain key (e.g. \"project-alpha\", \"incident-2026-04\").\nCreates the subfolder if it doesn't exist."
+          "description": "Incident or domain key (e.g. \"project-alpha\", \"incident-2026-04\"). Creates the subfolder if it doesn't exist.",
+          "type": "string"
         },
         "category": {
-          "type": "string",
-          "description": "Sub-category within scope (e.g. \"letters\", \"labs\",\n\"court-docs\"). Creates the subfolder if it doesn't exist."
+          "description": "Sub-category within scope (e.g. \"letters\", \"labs\", \"court-docs\"). Creates the subfolder if it doesn't exist.",
+          "type": "string"
         },
         "filename": {
-          "type": "string",
-          "description": "The artifact's filename including extension\n(e.g. `2026-04-15-statement.txt`)."
+          "description": "The artifact's filename including extension (e.g. `2026-04-15-statement.txt`).",
+          "type": "string"
         },
         "content": {
-          "type": "string",
-          "description": "UTF-8 text to preserve as-received."
+          "description": "UTF-8 text to preserve as-received.",
+          "type": "string"
         },
         "description": {
           "anyOf": [
@@ -1572,7 +1599,7 @@
             }
           ],
           "default": null,
-          "description": "Optional. If supplied, a sidecar `<filename>.md`\nis written alongside the artifact with frontmatter and the\ndescription under `## Description`."
+          "description": "Optional. If supplied, a sidecar `<filename>.md` is written alongside the artifact with frontmatter and the description under `## Description`."
         }
       },
       "required": [
@@ -1590,11 +1617,11 @@
       "additionalProperties": false,
       "properties": {
         "sources": {
+          "description": "Vault-relative paths/wikilinks to the source(s) to compile. Same path conventions as `note.sources` (brackets and the leading `Knowledge Base/` are tolerated).",
           "items": {
             "type": "string"
           },
-          "type": "array",
-          "description": "Vault-relative paths/wikilinks to the source(s) to compile.\nSame path conventions as `note.sources` (brackets and the\nleading `Knowledge Base/` are tolerated)."
+          "type": "array"
         },
         "suggested_title": {
           "anyOf": [
@@ -1606,7 +1633,7 @@
             }
           ],
           "default": null,
-          "description": "Optional title override; otherwise one is derived\nfrom the source titles."
+          "description": "Optional title override; otherwise one is derived from the source titles."
         }
       },
       "required": [
@@ -1666,7 +1693,7 @@
             }
           ],
           "default": null,
-          "description": "Restrict the scan to one vault-relative file (else the whole\nKnowledge Base is walked)."
+          "description": "Restrict the scan to one vault-relative file (else the whole Knowledge Base is walked)."
         }
       },
       "type": "object"
@@ -1678,8 +1705,8 @@
       "additionalProperties": false,
       "properties": {
         "path": {
-          "type": "string",
-          "description": "vault-relative path to the `.csv` / `.tsv` / `.json` file."
+          "description": "vault-relative path to the `.csv` / `.tsv` / `.json` file.",
+          "type": "string"
         },
         "record_path": {
           "anyOf": [
@@ -1691,7 +1718,7 @@
             }
           ],
           "default": null,
-          "description": "(JSON) dotted path to the array inside a nested\nobject, e.g. \"sections.work_incapacity\". Omit for a top-level\narray or the common keys result/results/data/rows/items/entries."
+          "description": "(JSON) dotted path to the array inside a nested object, e.g. \"sections.work_incapacity\". Omit for a top-level array or the common keys result/results/data/rows/items/entries."
         },
         "filters": {
           "anyOf": [
@@ -1707,7 +1734,7 @@
             }
           ],
           "default": null,
-          "description": "list of `{column, op, value}`. `op` ∈ eq, ne, gt, gte, lt,\nlte, contains, icontains, startswith, in, nin, exists, missing.\nNumeric compares coerce tolerantly (comma decimals; lab\noperators like \"<0.4\"/\">75\" are stripped for the comparison)."
+          "description": "list of `{column, op, value}`. `op` ∈ eq, ne, gt, gte, lt, lte, contains, icontains, startswith, in, nin, exists, missing. Numeric compares coerce tolerantly (comma decimals; lab operators like \"<0.4\"/\">75\" are stripped for the comparison)."
         },
         "columns": {
           "anyOf": [
@@ -1722,7 +1749,7 @@
             }
           ],
           "default": null,
-          "description": "project to these columns (dotted ok). Omit for all."
+          "description": "project to these columns (dotted ok). Omit for all. sort_by / descending: sort by a column (numeric-aware). limit / offset: pagination (limit default 100, hard cap 1000)."
         },
         "sort_by": {
           "anyOf": [
@@ -1757,7 +1784,7 @@
             }
           ],
           "default": null,
-          "description": "instead of rows — \"count\"; \"func:column\" where func ∈\nmin, max, sum, avg, latest, distinct; or \"profile\" to get a\ndeterministic content profile (per-column kind, distinct values,\nnumeric ranges, date span) under `aggregate.profile` PLUS a\nready-to-write markdown dataset card under `aggregate.dataset_card`.\nUse \"profile\" to make a CSV/JSON findable — write the card into\nthe KB (fill in its \"What this holds\" line) so the dataset is\ndiscoverable by content without ever embedding its raw rows."
+          "description": "instead of rows — \"count\"; \"func:column\" where func ∈ min, max, sum, avg, latest, distinct; or \"profile\" to get a deterministic content profile (per-column kind, distinct values, numeric ranges, date span) under `aggregate.profile` PLUS a ready-to-write markdown dataset card under `aggregate.dataset_card`. Use \"profile\" to make a CSV/JSON findable — write the card into the KB (fill in its \"What this holds\" line) so the dataset is discoverable by content without ever embedding its raw rows. date_from / date_to / date_column: convenience date-range filter on `date_column` (defaults to a \"date\" column if present); ISO date strings, compared lexicographically."
         },
         "date_from": {
           "anyOf": [
@@ -1806,8 +1833,8 @@
       "properties": {
         "dry_run": {
           "default": false,
-          "type": "boolean",
-          "description": "If true, compute what would change without writing.\nDefault false."
+          "description": "If true, compute what would change without writing. Default false.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -1819,8 +1846,8 @@
       "additionalProperties": false,
       "properties": {
         "trash_path": {
-          "type": "string",
-          "description": "Vault-relative path to the trashed entry\n(under `Knowledge Base/_trash/...`)."
+          "description": "Vault-relative path to the trashed entry (under `Knowledge Base/_trash/...`).",
+          "type": "string"
         },
         "restore_path": {
           "anyOf": [
@@ -1832,12 +1859,12 @@
             }
           ],
           "default": null,
-          "description": "Optional override; defaults to the original\nlocation from the sidecar."
+          "description": "Optional override; defaults to the original location from the sidecar."
         },
         "allow_curated": {
           "default": false,
-          "type": "boolean",
-          "description": "Required if restoring into a curated tree."
+          "description": "Required if restoring into a curated tree.",
+          "type": "boolean"
         }
       },
       "required": [
@@ -1852,8 +1879,8 @@
       "additionalProperties": false,
       "properties": {
         "old_path": {
-          "type": "string",
-          "description": "Vault-relative path of the page being superseded.\nSame path conventions as `get` and `find`."
+          "description": "Vault-relative path of the page being superseded. Same path conventions as `get` and `find`.",
+          "type": "string"
         },
         "content": {
           "type": "string"
@@ -1874,7 +1901,7 @@
             }
           ],
           "default": null,
-          "description": "Optional one-line explanation of why this replacement is\nhappening; lands in the log entry body."
+          "description": "Optional one-line explanation of why this replacement is happening; lands in the log entry body. (all other args): Same as the `note` tool — define the new page's content, type, project/projects, sources, etc."
         },
         "project": {
           "anyOf": [
@@ -2111,8 +2138,8 @@
       "properties": {
         "query": {
           "default": "",
-          "type": "string",
-          "description": "Free-text search string."
+          "description": "Free-text search string.",
+          "type": "string"
         },
         "types": {
           "anyOf": [
@@ -2161,13 +2188,13 @@
         },
         "limit": {
           "default": 10,
-          "type": "integer",
-          "description": "Maximum number of results. Capped to 50."
+          "description": "Maximum number of results. Capped to 50.",
+          "type": "integer"
         },
         "scope": {
           "default": "kb",
-          "type": "string",
-          "description": "\"kb\" for Knowledge Base first, or \"vault\" to search the broader vault."
+          "description": "\"kb\" for Knowledge Base first, or \"vault\" to search the broader vault.",
+          "type": "string"
         }
       },
       "type": "object"
@@ -2188,7 +2215,7 @@
             }
           ],
           "default": null,
-          "description": "Existing page to suggest links for. Mutually exclusive with\nthe draft_* args."
+          "description": "Existing page to suggest links for. Mutually exclusive with the draft_* args."
         },
         "draft_title": {
           "anyOf": [
@@ -2212,17 +2239,17 @@
             }
           ],
           "default": null,
-          "description": "Body (markdown) of a not-yet-written note. Wikilinks\nalready present in it are treated as \"already linked\" and excluded."
+          "description": "Body (markdown) of a not-yet-written note. Wikilinks already present in it are treated as \"already linked\" and excluded."
         },
         "limit": {
           "default": 8,
-          "type": "integer",
-          "description": "Max suggestions (default 8)."
+          "description": "Max suggestions (default 8).",
+          "type": "integer"
         },
         "scope": {
           "default": "kb",
-          "type": "string",
-          "description": "\"kb\" (default) or \"vault\" — same meaning as `find`."
+          "description": "\"kb\" (default) or \"vault\" — same meaning as `find`.",
+          "type": "string"
         }
       },
       "type": "object"
@@ -2271,13 +2298,13 @@
         },
         "include_model_suggestions": {
           "default": false,
-          "type": "boolean",
-          "description": "Request optional model-backed suggestion\npaths. Default false; unavailable paths soft-fail with warnings."
+          "description": "Request optional model-backed suggestion paths. Default false; unavailable paths soft-fail with warnings.",
+          "type": "boolean"
         },
         "limit": {
           "default": 10,
-          "type": "integer",
-          "description": "Max candidates to return. Default 10."
+          "description": "Max candidates to return. Default 10.",
+          "type": "integer"
         }
       },
       "type": "object"

@@ -9,6 +9,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from mcp.types import ToolAnnotations
+from pydantic import Field
 
 
 # Text-write ops -> the argument field(s) whose value must not be a base64 binary
@@ -107,7 +108,15 @@ def bind_vault(
     except Exception:  # noqa: BLE001 - fall back to inspect's annotations
         resolved = {}
 
-    visible = [p.replace(annotation=resolved.get(p.name, p.annotation)) for p in visible]
+    help_text = parse_args_help(description if description is not None else leaf.__doc__)
+    visible = [
+        p.replace(
+            annotation=_annotate_description(
+                resolved.get(p.name, p.annotation), help_text.get(p.name, "")
+            )
+        )
+        for p in visible
+    ]
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
@@ -126,6 +135,16 @@ def bind_vault(
         ann["return"] = resolved["return"]
     wrapper.__annotations__ = ann
     return wrapper
+
+
+def _annotate_description(annotation: object, description: str) -> object:
+    if (
+        not description
+        or annotation is inspect.Parameter.empty
+        or typing.get_origin(annotation) is typing.Annotated
+    ):
+        return annotation
+    return typing.Annotated[annotation, Field(description=description)]
 
 
 def parse_args_help(doc: str | None) -> dict[str, str]:
