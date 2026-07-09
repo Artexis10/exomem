@@ -1,0 +1,56 @@
+version: 1
+skills:
+  - name: exomem-continue
+    purpose: Resume prior project or session context from Exomem.
+    triggers:
+      - continue where we left off
+      - what was I doing on X?
+      - pick this back up
+  - name: exomem-capture
+    purpose: Save a durable conclusion from a conversation or session.
+    triggers:
+      - save this
+      - file this to KB
+      - remember this decision
+  - name: exomem-ingest
+    purpose: Add an external artifact to Exomem and compile what matters.
+    triggers:
+      - ingest this
+      - add this to Exomem
+      - process this source
+  - name: exomem-research
+    purpose: Run a focused research loop and save attributed findings.
+    triggers:
+      - research X and save what matters
+      - compare A and B
+      - investigate this
+  - name: exomem-reflect
+    purpose: Turn a session or project episode into reusable memory.
+    triggers:
+      - reflect on this
+      - what did we learn?
+      - turn this into patterns
+  - name: exomem-curate
+    purpose: Improve links, structure, and compiled note quality.
+    triggers:
+      - clean this up
+      - organize these notes
+      - link this better
+  - name: exomem-defrag
+    purpose: Reconcile duplicate, stale, or conflicting memory.
+    triggers:
+      - defrag this topic
+      - reconcile these notes
+      - what's stale?
+  - name: exomem-review
+    purpose: Drain Exomem attention and review queues safely.
+    triggers:
+      - review my KB
+      - what needs attention?
+      - drain the backlog
+  - name: exomem-media
+    purpose: Retrieve and reason over Exomem media artifacts.
+    triggers:
+      - find the video where
+      - look inside this recording
+      - what image/PDF/audio evidence do I have?

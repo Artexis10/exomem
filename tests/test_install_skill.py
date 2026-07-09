@@ -14,6 +14,18 @@ import pytest
 
 from exomem import install_skill as install_module
 
+EXPECTED_WORKFLOW_SKILLS = [
+    "exomem-continue",
+    "exomem-capture",
+    "exomem-ingest",
+    "exomem-research",
+    "exomem-reflect",
+    "exomem-curate",
+    "exomem-defrag",
+    "exomem-review",
+    "exomem-media",
+]
+
 
 def test_install_skill_copies_into_target(tmp_path: Path) -> None:
     target = tmp_path / "exomem"
@@ -24,6 +36,12 @@ def test_install_skill_copies_into_target(tmp_path: Path) -> None:
     assert (target / "SKILL.md").exists()
     assert (target / "references").is_dir()
     assert (target / "references" / "operations.md").exists()
+    assert (target / "workflow-skills" / "index.yaml").exists()
+
+    workflow_names = [s["name"] for s in report["workflow_skills"]]
+    assert workflow_names == EXPECTED_WORKFLOW_SKILLS
+    for name in EXPECTED_WORKFLOW_SKILLS:
+        assert (tmp_path / name / "SKILL.md").exists()
 
     assert report["target"] == str(target)
     assert report["mode"] == "copy"
@@ -57,6 +75,7 @@ def test_install_skill_force_overwrites_cleanly(tmp_path: Path) -> None:
     # A faithful mirror: canonical SKILL.md present, stale leftovers gone.
     assert (target / "SKILL.md").exists()
     assert not (target / "stale.md").exists()
+    assert (tmp_path / "exomem-review" / "SKILL.md").exists()
 
 
 def test_install_skill_via_cli(tmp_path: Path) -> None:

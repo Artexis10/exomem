@@ -46,9 +46,9 @@ from . import evolution as evolution_module
 from . import find as find_module
 from . import get_frontmatter as get_frontmatter_module
 from . import get_page as get_page_module
+from . import knowledge_packs as knowledge_packs_module
 from . import link as link_module
 from . import link_summary as link_summary_module
-from . import knowledge_packs as knowledge_packs_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
@@ -65,6 +65,7 @@ from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import workflow_skills as workflow_skills_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
     GUARDED_WRITE_FIELDS,  # noqa: F401 - re-exported for server.py
@@ -150,7 +151,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-07.1",
+        "contract_version": "2026-07-08.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -198,6 +199,7 @@ def op_bootstrap(
                 "related terms, compact recall, or scope='vault' before concluding absence."
             ),
         },
+        "workflow_skills": workflow_skills_module.bootstrap_entries(),
         "tool_defaults": {
             "normal_lookup": {
                 "tool": "find",

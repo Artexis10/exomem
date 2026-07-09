@@ -7,8 +7,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from exomem import commands
-from exomem import server
+from exomem import commands, server
 from exomem.__main__ import main
 
 
@@ -35,8 +34,27 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert out["server"]["content_included"] is False
     assert out["server"]["pure_substrate"] is True
     assert "compute_policy" in out["server"]
-    assert {"workflow", "tool_defaults", "performance_profiles", "memory_model", "knowledge_packs"} <= set(out)
+    assert {
+        "workflow",
+        "workflow_skills",
+        "tool_defaults",
+        "performance_profiles",
+        "memory_model",
+        "knowledge_packs",
+    } <= set(out)
     assert "durable governed knowledge" in out["memory_model"]["exomem"]
+    assert [s["name"] for s in out["workflow_skills"]] == [
+        "exomem-continue",
+        "exomem-capture",
+        "exomem-ingest",
+        "exomem-research",
+        "exomem-reflect",
+        "exomem-curate",
+        "exomem-defrag",
+        "exomem-review",
+        "exomem-media",
+    ]
+    assert out["workflow_skills"][0]["path"].startswith("Knowledge Base/_Schema/")
     assert out["knowledge_packs"]["selected"]["selected_pack_ids"] == ["personal-records"]
     assert out["knowledge_packs"]["available"][0]["beginner_description"]
     assert out["front_door_actions"]["save"]["selected_pack_guidance"][0]["pack_id"] == "personal-records"

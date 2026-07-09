@@ -678,6 +678,9 @@ def _install_skill_main(argv: list[str]) -> int:
         f"{report['files']} files):"
     )
     print(f"  {report['target']}")
+    if report.get("workflow_skills"):
+        names = ", ".join(s["name"] for s in report["workflow_skills"])
+        print(f"  Workflow skills: {names}")
     # Installing to the default location supersedes any pre-rename `knowledge-base`
     # skill; retire it so Claude Code doesn't load both.
     if target is None:
