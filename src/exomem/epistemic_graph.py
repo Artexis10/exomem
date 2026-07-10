@@ -17,43 +17,16 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import semantic_blocks
+from . import relation_registry, semantic_blocks
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
-RELATION_TYPES: frozenset[str] = frozenset(
-    {
-        "supports",
-        "contradicts",
-        "refines",
-        "duplicates",
-        "supersedes",
-        "derived_from",
-        "evidenced_by",
-        "depends_on",
-        "implements",
-        "mitigates",
-        "causes",
-        "caused_by",
-        "blocks",
-        "resolves",
-        "answers",
-        "raises_question",
-        "used_for",
-        "observed_in",
-        "mentions",
-        "about_entity",
-        "links_to",
-        "cites",
-        "tests",
-        "owns",
-    }
-)
+RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
 _RELATION_LINE_RE = re.compile(
-    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_-]{1,40})\s*:?[ \t]+"
+    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_.-]{1,80})\s*(?P<colon>:?)[ \t]+"
     r"(?P<link>\[\[[^\]\n]+\]\])",
     re.IGNORECASE,
 )
@@ -93,7 +66,12 @@ class GraphEdge:
     edge_key: str
     src_key: str
     dst_key: str
-    relation_type: str
+    relation_type: str | None
+    raw_relation: str
+    parent_relation: str | None
+    registry_status: str
+    registry_version: int
+    registry_hash: str
     origin: str
     source_path: str
     source_anchor: str | None = None
@@ -105,6 +83,11 @@ class GraphEdge:
             "src_key": self.src_key,
             "dst_key": self.dst_key,
             "relation_type": self.relation_type,
+            "raw_relation": self.raw_relation,
+            "parent_relation": self.parent_relation,
+            "registry_status": self.registry_status,
+            "registry_version": self.registry_version,
+            "registry_hash": self.registry_hash,
             "origin": self.origin,
             "source_path": self.source_path,
             "source_anchor": self.source_anchor,
@@ -129,6 +112,7 @@ class EpistemicGraphIndex:
     def __init__(self, vault_root: Path):
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
+        self.registry = relation_registry.load_registry(self.vault_root)
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -139,6 +123,12 @@ class EpistemicGraphIndex:
             embeddings._apply_sidecar_pragmas(conn)
         except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
             pass
+        columns = {
+            row[1]
+            for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()
+        }
+        if columns and "raw_relation" not in columns:
+            conn.execute("DROP TABLE graph_edges")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_nodes (
                 node_key TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL,
@@ -149,7 +139,9 @@ class EpistemicGraphIndex:
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_edges (
                 edge_key TEXT PRIMARY KEY, src_key TEXT NOT NULL, dst_key TEXT NOT NULL,
-                relation_type TEXT NOT NULL, origin TEXT NOT NULL, source_path TEXT NOT NULL,
+                relation_type TEXT, raw_relation TEXT NOT NULL, parent_relation TEXT,
+                registry_status TEXT NOT NULL, registry_version INTEGER NOT NULL,
+                registry_hash TEXT NOT NULL, origin TEXT NOT NULL, source_path TEXT NOT NULL,
                 source_anchor TEXT, metadata TEXT NOT NULL
             )
         """)
@@ -172,14 +164,19 @@ class EpistemicGraphIndex:
         try:
             conn = sqlite3.connect(self.path)
             try:
-                row = conn.execute(
-                    "SELECT value FROM graph_meta WHERE key = 'schema_version'"
-                ).fetchone()
+                values = dict(conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'core_registry_version', 'extension_registry_hash')"
+                ).fetchall())
             finally:
                 conn.close()
         except sqlite3.Error:
             return False
-        return row is not None and str(row[0]) == str(SCHEMA_VERSION)
+        return (
+            values.get("schema_version") == str(SCHEMA_VERSION)
+            and values.get("core_registry_version") == str(self.registry.core_version)
+            and values.get("extension_registry_hash") == self.registry.extension_hash
+        )
 
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
@@ -192,6 +189,14 @@ class EpistemicGraphIndex:
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("core_registry_version", str(self.registry.core_version)),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("extension_registry_hash", self.registry.extension_hash),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -260,7 +265,7 @@ class EpistemicGraphIndex:
             return []
         conn = self._connect()
         try:
-            select = "SELECT edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata FROM graph_edges"
+            select = "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata FROM graph_edges"
             if source_path is None:
                 rows = conn.execute(select + " ORDER BY edge_key").fetchall()
             else:
@@ -288,15 +293,31 @@ class EpistemicGraphIndex:
         page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
         if page is None:
             return False
-        document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
+        document = semantic_blocks.parse_semantic_blocks(
+            page.body, validate=False, registry=self.registry
+        )
         blocks = tuple(document.blocks)
         file_node = _file_node(page, raw)
         block_nodes = [_block_node(page, block, raw) for block in blocks]
-        edges = _edges_for_page(self.vault_root, page, blocks)
+        edges = _edges_for_page(
+            self.vault_root,
+            page,
+            blocks,
+            registry=self.registry,
+            source_hash=file_node.source_hash,
+        )
         with conn:
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("core_registry_version", str(self.registry.core_version)),
+            )
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("extension_registry_hash", self.registry.extension_hash),
             )
             for node in [file_node, *block_nodes]:
                 _insert_node(conn, node)
@@ -534,8 +555,27 @@ def _block_node(page, block: semantic_blocks.SemanticBlock, raw_text: str) -> Gr
 
 
 def _edges_for_page(
-    vault_root: Path, page, blocks: tuple[semantic_blocks.SemanticBlock, ...]
+    vault_root: Path,
+    page,
+    blocks: tuple[semantic_blocks.SemanticBlock, ...],
+    *,
+    registry: relation_registry.RelationRegistry | None = None,
+    source_hash: str | None = None,
 ) -> list[GraphEdge]:
+    registry = registry or relation_registry.load_registry(vault_root)
+    source_hash = source_hash or vault_module.content_hash(page.body)
+    project = _page_project(page.frontmatter)
+
+    def page_edge(*args, **kwargs) -> GraphEdge:
+        return _edge(
+            *args,
+            **kwargs,
+            registry=registry,
+            project=project,
+            page_type=page.page_type,
+            source_hash=source_hash,
+        )
+
     rel = page.rel_path
     file_key = _file_key(rel)
     edges: list[GraphEdge] = []
@@ -543,7 +583,7 @@ def _edges_for_page(
         block_key = _block_key(page, block)
         block_anchor = _block_anchor(block)
         edges.append(
-            _edge(
+            page_edge(
                 block_key,
                 file_key,
                 "derived_from",
@@ -554,8 +594,6 @@ def _edges_for_page(
             )
         )
         for relation in block.relations:
-            if relation.kind not in RELATION_TYPES:
-                continue
             target = relation.target
             if target.startswith("[[") and target.endswith("]]"):
                 target = target[2:-2]
@@ -569,13 +607,16 @@ def _edges_for_page(
             if not canonical:
                 continue
             edges.append(
-                _edge(
+                page_edge(
                     block_key,
                     _file_key(_with_md(canonical)),
                     relation.kind,
                     "semantic_relation",
                     source_path=rel,
                     source_anchor=block_anchor,
+                    raw_relation=relation.raw.split(":", 1)[0].strip(),
+                    source_kind=block.type,
+                    target_kind=_target_kind(vault_root, canonical),
                     metadata={
                         "block_kind": block.type,
                         "line": relation.line,
@@ -586,7 +627,7 @@ def _edges_for_page(
             )
     for target in _frontmatter_links(page.frontmatter.get("sources")):
         edges.append(
-            _edge(
+            page_edge(
                 file_key,
                 _file_key(_with_md(target)),
                 "derived_from",
@@ -598,7 +639,7 @@ def _edges_for_page(
     for field in ("evidence", "evidences", "evidence_paths"):
         for target in _frontmatter_links(page.frontmatter.get(field)):
             edges.append(
-                _edge(
+                page_edge(
                     file_key,
                     _file_key(_with_md(target)),
                     "evidenced_by",
@@ -609,7 +650,7 @@ def _edges_for_page(
             )
     for target in _frontmatter_links(page.frontmatter.get("supersedes")):
         edges.append(
-            _edge(
+            page_edge(
                 file_key,
                 _file_key(_with_md(target)),
                 "supersedes",
@@ -620,7 +661,7 @@ def _edges_for_page(
         )
     for target in _frontmatter_links(page.frontmatter.get("superseded_by")):
         edges.append(
-            _edge(
+            page_edge(
                 _file_key(_with_md(target)),
                 file_key,
                 "supersedes",
@@ -631,7 +672,7 @@ def _edges_for_page(
         )
     for target in _frontmatter_links(page.frontmatter.get("related")):
         edges.append(
-            _edge(
+            page_edge(
                 file_key,
                 _file_key(_with_md(target)),
                 "links_to",
@@ -642,15 +683,35 @@ def _edges_for_page(
         )
     for target in find_module._outbound_wikilink_paths(page, vault_root):
         edges.append(
-            _edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel)
+            page_edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel)
         )
-    edges.extend(_relation_line_edges(vault_root, page.body, rel, file_key))
+    edges.extend(
+        _relation_line_edges(
+            vault_root,
+            page.body,
+            rel,
+            file_key,
+            registry=registry,
+            project=project,
+            page_type=page.page_type,
+            source_hash=source_hash,
+        )
+    )
     return _dedupe_edges(edges)
 
 
 def _relation_line_edges(
-    vault_root: Path, body: str, rel_path: str, file_key: str
+    vault_root: Path,
+    body: str,
+    rel_path: str,
+    file_key: str,
+    *,
+    registry: relation_registry.RelationRegistry | None = None,
+    project: str | None = None,
+    page_type: str | None = None,
+    source_hash: str = "",
 ) -> list[GraphEdge]:
+    registry = registry or relation_registry.load_registry(vault_root)
     edges: list[GraphEdge] = []
     in_fence = False
     for line_no, line in enumerate(body.splitlines(), start=1):
@@ -662,8 +723,10 @@ def _relation_line_edges(
         m = _RELATION_LINE_RE.match(line)
         if not m:
             continue
-        relation = m.group("rel").strip().lower().replace("-", "_")
-        if relation not in RELATION_TYPES:
+        raw_relation = m.group("rel").strip()
+        relation = relation_registry.normalize_relation(raw_relation)
+        resolution = registry.resolve(relation, origin="semantic_relation")
+        if resolution.canonical is None and not m.group("colon"):
             continue
         target = m.group("link")[2:-2].split("|", 1)[0].strip()
         try:
@@ -680,6 +743,13 @@ def _relation_line_edges(
                 "semantic_relation",
                 source_path=rel_path,
                 source_anchor=f"line-{line_no}",
+                raw_relation=raw_relation,
+                registry=registry,
+                project=project,
+                page_type=page_type,
+                source_kind="file",
+                target_kind=_target_kind(vault_root, canonical),
+                source_hash=source_hash,
                 metadata={
                     "line": line.strip(),
                     "target_resolution": "unresolved" if warning else "resolved",
@@ -724,6 +794,20 @@ def _with_md(path: str) -> str:
     return cleaned if cleaned.lower().endswith(".md") else cleaned + ".md"
 
 
+def _page_project(frontmatter: dict[str, Any]) -> str | None:
+    value = frontmatter.get("project")
+    if value not in (None, ""):
+        return str(value)
+    projects = frontmatter.get("projects")
+    if isinstance(projects, list) and len(projects) == 1:
+        return str(projects[0])
+    return None
+
+
+def _target_kind(vault_root: Path, target: str) -> str:
+    return "file" if (Path(vault_root) / _with_md(target)).exists() else "unresolved"
+
+
 def _file_key(rel_path: str) -> str:
     return f"file:{_with_md(rel_path)}"
 
@@ -741,20 +825,48 @@ def _edge(
     source_path: str,
     source_anchor: str | None = None,
     metadata: dict[str, Any] | None = None,
+    raw_relation: str | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+    project: str | None = None,
+    page_type: str | None = None,
+    source_kind: str | None = None,
+    target_kind: str | None = None,
+    source_hash: str = "",
 ) -> GraphEdge:
+    registry = registry or relation_registry.core_registry()
+    raw_relation = raw_relation or relation_type
+    resolution = registry.resolve(
+        raw_relation,
+        project=project,
+        page_type=page_type,
+        source_kind=source_kind,
+        target_kind=target_kind,
+        origin=origin,
+    )
+    canonical = resolution.canonical
     key_material = "\n".join(
-        [src_key, dst_key, relation_type, origin, source_path, source_anchor or ""]
+        [src_key, dst_key, raw_relation, origin, source_path, source_anchor or ""]
     )
     edge_key = f"edge:{_hash(key_material)}"
     return GraphEdge(
         edge_key,
         src_key,
         dst_key,
-        relation_type,
+        canonical,
+        raw_relation,
+        resolution.parent,
+        resolution.status,
+        registry.core_version,
+        registry.extension_hash,
         origin,
         source_path,
         source_anchor,
-        metadata or {},
+        {
+            **(metadata or {}),
+            "source_hash": source_hash,
+            "replacement": resolution.replacement,
+            "registry_findings": list(resolution.findings),
+        },
     )
 
 
@@ -778,12 +890,17 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
 
 def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO graph_edges (edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO graph_edges (edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             edge.edge_key,
             edge.src_key,
             edge.dst_key,
             edge.relation_type,
+            edge.raw_relation,
+            edge.parent_relation,
+            edge.registry_status,
+            edge.registry_version,
+            edge.registry_hash,
             edge.origin,
             edge.source_path,
             edge.source_anchor,
@@ -813,10 +930,15 @@ def _edge_row_to_dict(row) -> dict[str, Any]:
         "src_key": row[1],
         "dst_key": row[2],
         "relation_type": row[3],
-        "origin": row[4],
-        "source_path": row[5],
-        "source_anchor": row[6],
-        "metadata": _json(row[7]),
+        "raw_relation": row[4],
+        "parent_relation": row[5],
+        "registry_status": row[6],
+        "registry_version": row[7],
+        "registry_hash": row[8],
+        "origin": row[9],
+        "source_path": row[10],
+        "source_anchor": row[11],
+        "metadata": _json(row[12]),
     }
 
 
@@ -848,7 +970,7 @@ def _neighbor_edges(
     conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    select = "SELECT edge_key, src_key, dst_key, relation_type, origin, source_path, source_anchor, metadata FROM graph_edges"
+    select = "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata FROM graph_edges"
     for key in sorted(frontier):
         rows = conn.execute(
             select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)

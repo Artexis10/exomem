@@ -1,0 +1,26 @@
+schema_version: 1
+relations:
+  supports: {description: Provides support for, family: support, direction: directed, origins: [semantic_relation]}
+  contradicts: {description: Conflicts with, family: contradiction, direction: symmetric, origins: [semantic_relation]}
+  refines: {description: Makes more precise, family: refinement, direction: directed, origins: [semantic_relation]}
+  duplicates: {description: Duplicates, family: duplication, direction: symmetric, origins: [semantic_relation]}
+  supersedes: {description: Replaces as the current view, family: supersession, direction: directed, origins: [semantic_relation, frontmatter]}
+  derived_from: {description: Is derived from, family: derivation, direction: directed, origins: [semantic_relation, semantic_block, frontmatter]}
+  evidenced_by: {description: Is evidenced by, family: evidence, direction: directed, origins: [semantic_relation, frontmatter]}
+  depends_on: {description: Depends on, family: dependency, direction: directed, origins: [semantic_relation]}
+  implements: {description: Implements, family: implementation, direction: directed, origins: [semantic_relation]}
+  mitigates: {description: Reduces a risk or effect of, family: mitigation, direction: directed, origins: [semantic_relation]}
+  causes: {description: Causes, family: causality, direction: directed, inverse: caused_by, origins: [semantic_relation]}
+  caused_by: {description: Is caused by, family: causality, direction: directed, inverse: causes, origins: [semantic_relation]}
+  blocks: {description: Prevents progress on, family: blocking, direction: directed, origins: [semantic_relation]}
+  resolves: {description: Resolves, family: resolution, direction: directed, origins: [semantic_relation]}
+  answers: {description: Answers, family: answer, direction: directed, origins: [semantic_relation]}
+  raises_question: {description: Raises a question about, family: question, direction: directed, origins: [semantic_relation]}
+  used_for: {description: Is used for, family: use, direction: directed, origins: [semantic_relation]}
+  observed_in: {description: Was observed in, family: observation, direction: directed, origins: [semantic_relation]}
+  mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation]}
+  about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation]}
+  links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, frontmatter, wikilink]}
+  cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
+  tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}
+  owns: {description: Owns, family: ownership, direction: directed, origins: [semantic_relation]}

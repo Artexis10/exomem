@@ -98,7 +98,7 @@ def test_invalid_relation_name_reports_error() -> None:
     assert not document.is_valid
     assert document.errors[0].code == "unsupported_relation"
     assert "agrees_with" in document.errors[0].message
-    assert document.blocks[0].relations == []
+    assert document.blocks[0].relations[0].kind == "agrees_with"
 
 
 def test_malformed_relation_reports_error() -> None:

@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from . import relation_registry
+
 BLOCK_TYPES: frozenset[str] = frozenset(
     {
         "claim",
@@ -83,34 +85,7 @@ _BLOCK_TYPE_ALIASES: dict[str, str] = {
     "segments": "media_segment",
 }
 
-RELATION_TYPES: frozenset[str] = frozenset(
-    {
-        "supports",
-        "contradicts",
-        "refines",
-        "supersedes",
-        "derived_from",
-        "depends_on",
-        "evidenced_by",
-        "used_for",
-        "mitigates",
-        "causes",
-        "blocks",
-        "resolves",
-        "cites",
-        "implements",
-        "tests",
-        "owns",
-        "duplicates",
-        "caused_by",
-        "answers",
-        "raises_question",
-        "observed_in",
-        "mentions",
-        "about_entity",
-        "links_to",
-    }
-)
+RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
@@ -220,7 +195,12 @@ def normalize_block_type(label: str) -> str | None:
     return block_type if block_type in BLOCK_TYPES else None
 
 
-def parse_semantic_blocks(markdown: str, *, validate: bool = True) -> SemanticBlockDocument:
+def parse_semantic_blocks(
+    markdown: str,
+    *,
+    validate: bool = True,
+    registry: relation_registry.RelationRegistry | None = None,
+) -> SemanticBlockDocument:
     """Parse semantic blocks from Markdown.
 
     Unknown headings are treated as normal Markdown structure. A recognized
@@ -245,6 +225,7 @@ def parse_semantic_blocks(markdown: str, *, validate: bool = True) -> SemanticBl
             start_line=start_line,
             end_line=max(start_line, end_line),
             lines=body_lines,
+            registry=registry or relation_registry.core_registry(),
         )
         blocks.append(block)
         if validate:
@@ -294,9 +275,10 @@ def _build_block(
     start_line: int,
     end_line: int,
     lines: list[tuple[int, str]],
+    registry: relation_registry.RelationRegistry,
 ) -> tuple[SemanticBlock, list[SemanticBlockValidationError]]:
     metadata, relation_values, body_lines = _split_metadata(lines)
-    relations, errors = _parse_relations(relation_values)
+    relations, errors = _parse_relations(relation_values, registry)
     body = "\n".join(body_lines).strip()
     block = SemanticBlock(
         type=block_type,
@@ -341,6 +323,7 @@ def _split_metadata(
 
 def _parse_relations(
     values: list[tuple[str, int]],
+    registry: relation_registry.RelationRegistry,
 ) -> tuple[list[SemanticRelation], list[SemanticBlockValidationError]]:
     relations: list[SemanticRelation] = []
     errors: list[SemanticBlockValidationError] = []
@@ -369,7 +352,8 @@ def _parse_relations(
             raw_kind, raw_target = entry.split(":", 1)
             kind = normalize_label(raw_kind)
             target = raw_target.strip()
-            if kind not in RELATION_TYPES:
+            resolution = registry.resolve(kind, origin="semantic_relation")
+            if resolution.canonical is None:
                 errors.append(
                     SemanticBlockValidationError(
                         code="unsupported_relation",
@@ -377,7 +361,6 @@ def _parse_relations(
                         line=line_number,
                     )
                 )
-                continue
             if not target:
                 errors.append(
                     SemanticBlockValidationError(
