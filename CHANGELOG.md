@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.1](https://github.com/Artexis10/exomem/compare/v0.16.0...v0.16.1) (2026-07-10)
+
+
+### Bug Fixes
+
+* render wikilinks for Obsidian vault root ([#193](https://github.com/Artexis10/exomem/issues/193)) ([7becced](https://github.com/Artexis10/exomem/commit/7becced6e9470d5853b922d4f47b007c0cc31906))
+
 ## [0.16.0](https://github.com/Artexis10/exomem/compare/v0.15.0...v0.16.0) (2026-07-10)
 
 
