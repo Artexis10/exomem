@@ -3379,10 +3379,10 @@ def op_review_memory(
     `maintain_memory`, not here.
 
     Args:
-        mode: attention, item, audit, provenance, evolution, compilation, stale,
-            contradiction, unprocessed-sources, or relation-debt.
-        categories: Optional category filter for attention/audit.
-        limit: Attention/evolution result cap.
+        mode: attention, activation, item, audit, provenance, evolution,
+            compilation, stale, contradiction, unprocessed-sources, or relation-debt.
+        categories: Optional category filter for attention/activation/audit.
+        limit: Attention/activation/evolution result cap.
         query: Topic for evolution review.
         sources: Source paths for compilation mode.
         suggested_title: Optional compilation title hint.
@@ -3390,13 +3390,20 @@ def op_review_memory(
         key: Provenance key filter.
         value: Provenance value filter.
         path: Restrict provenance scan to one path.
-        state: For attention, open (default), all, snoozed, or dismissed.
+        state: For attention/activation, open (default), all, snoozed, or dismissed.
         ref: Stable `exomem://review/<id>` reference for item mode.
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if mode == "attention":
         return op_attention(vault_root, categories=categories, limit=limit, state=state)
+    if mode == "activation":
+        return attention_module.activation(
+            vault_root,
+            categories=categories,
+            limit=limit,
+            state=state,
+        ).as_dict()
     if mode == "item":
         if not ref:
             raise ValueError("INVALID_REVIEW: item mode requires `ref`")
@@ -3434,8 +3441,9 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: compilation mode requires `sources`")
         return op_propose_compilation(vault_root, sources=sources, suggested_title=suggested_title)
     raise ValueError(
-        "INVALID_MODE: review_memory mode must be attention, item, audit, provenance, "
-        "evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt"
+        "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
+        "provenance, evolution, compilation, stale, contradiction, "
+        "unprocessed-sources, or relation-debt"
     )
 
 

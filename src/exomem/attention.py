@@ -18,6 +18,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import activation as activation_module
 from . import audit as audit_module
 from . import fusion
 from . import review_state as review_state_module
@@ -31,12 +32,8 @@ ATTENTION_CATEGORIES: tuple[str, ...] = (
     "unprocessed_source",
     "relation_debt",
 )
-_CATEGORY_ORDER: dict[str, int] = {c: i for i, c in enumerate(ATTENTION_CATEGORIES)}
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
-# Equal default weights — the order is then a clean rank-major interleave, except a note
-# flagged by >1 queue accumulates votes and rises. Weights are a seam, not env-exposed.
-_DEFAULT_WEIGHTS: dict[str, float] = {c: 1.0 for c in ATTENTION_CATEGORIES}
 _RRF_K: int = 60  # the conventional default `fusion` and `find` use
 
 _PROPOSED_FIX: str = (
@@ -45,6 +42,12 @@ _PROPOSED_FIX: str = (
     "`replace` (supersede) / `reconcile` / `propose_compilation` / "
     "`connect_memory` / archive. Nothing is "
     "auto-acted; `find` ordering is unchanged."
+)
+
+_ACTIVATION_FIX: str = (
+    "Surfaced for REVIEW only. Coverage and ranking measure explicit Markdown "
+    "structure; they do not judge truth or quality. Follow a reason's `next_actions` "
+    "only after review. Nothing is auto-written or auto-registered."
 )
 
 
@@ -100,6 +103,7 @@ class AttentionReport:
     note: str | None
     all_total: int | None = None
     state_summary: dict[str, int] | None = None
+    coverage: dict[str, int] | None = None
 
     def as_dict(self) -> dict:
         out = {
@@ -114,6 +118,8 @@ class AttentionReport:
         if self.all_total is not None:
             out["all_total"] = self.all_total
             out["state_summary"] = self.state_summary or {}
+        if self.coverage is not None:
+            out["coverage"] = self.coverage
         return out
 
 
@@ -153,6 +159,8 @@ def _rank(
     categories: set[str] | None = None,
     limit: int = 25,
     weights: dict[str, float] | None = None,
+    category_order: tuple[str, ...] = ATTENTION_CATEGORIES,
+    proposed_fix: str = _PROPOSED_FIX,
 ) -> AttentionReport:
     """Compose findings into one ranked, deduped review surface. Pure — no vault access.
 
@@ -160,12 +168,13 @@ def _rank(
     by anchor path (votes add → multi-flagged notes rise), drop+fold the contradiction
     queue's trailing summary finding, then cap at `limit` with an explicit count.
     """
-    selected = set(ATTENTION_CATEGORIES) if categories is None else (
-        set(categories) & set(ATTENTION_CATEGORIES)
+    selected = set(category_order) if categories is None else (
+        set(categories) & set(category_order)
     )
-    weights = _DEFAULT_WEIGHTS if weights is None else weights
+    weights = ({c: 1.0 for c in category_order} if weights is None else weights)
+    category_rank = {category: rank for rank, category in enumerate(category_order)}
 
-    per_cat: dict[str, list[AuditFinding]] = {c: [] for c in ATTENTION_CATEGORIES}
+    per_cat: dict[str, list[AuditFinding]] = {c: [] for c in category_order}
     upstream_truncated = 0
     for f in findings:
         if f.category not in selected:
@@ -180,7 +189,7 @@ def _rank(
     # One best-first anchor-path list per populated category, plus aligned weights.
     result_lists: list[list[str]] = []
     weight_list: list[float] = []
-    for c in ATTENTION_CATEGORIES:
+    for c in category_order:
         if c in selected and per_cat[c]:
             result_lists.append([f.path for f in per_cat[c]])
             weight_list.append(float(weights.get(c, 1.0)))
@@ -195,7 +204,7 @@ def _rank(
     # All reasons (every contributing finding) + max severity per anchor path.
     reasons_by_path: dict[str, list[dict]] = {}
     severity_by_path: dict[str, int] = {}
-    for c in ATTENTION_CATEGORIES:
+    for c in category_order:
         if c not in selected:
             continue
         for rank, f in enumerate(per_cat[c], start=1):
@@ -209,7 +218,7 @@ def _rank(
         scores,
         key=lambda p: (
             -scores[p],
-            min(_CATEGORY_ORDER[r["category"]] for r in reasons_by_path[p]),
+            min(category_rank[r["category"]] for r in reasons_by_path[p]),
             p,
         ),
     )
@@ -220,22 +229,22 @@ def _rank(
     for p in shown_paths:
         reasons = sorted(
             reasons_by_path[p],
-            key=lambda r: (r["rank"], _CATEGORY_ORDER[r["category"]]),
+            key=lambda r: (r["rank"], category_rank[r["category"]]),
         )
-        cats = sorted({r["category"] for r in reasons}, key=lambda c: _CATEGORY_ORDER[c])
+        cats = sorted({r["category"] for r in reasons}, key=lambda c: category_rank[c])
         items.append(AttentionItem(
             path=p,
             score=round(scores[p], 6),
             severity=_SEVERITY_BY_RANK[severity_by_path[p]],
             categories=cats,
             reasons=reasons,
-            proposed_fix=_PROPOSED_FIX,
+            proposed_fix=proposed_fix,
         ))
 
     truncated = total - len(items)
     summary = {
         c: len(per_cat[c])
-        for c in ATTENTION_CATEGORIES
+        for c in category_order
         if c in selected and per_cat[c]
     }
     note = _build_note(len(items), total, truncated, upstream_truncated)
@@ -287,6 +296,44 @@ def attention(
     )
 
 
+def activation(
+    vault_root: Path,
+    *,
+    categories: list[str] | None = None,
+    limit: int = 25,
+    today=None,
+    state: str = "open",
+) -> AttentionReport:
+    """Rank deterministic existing-corpus activation measurements. Read-only."""
+    resolved = (
+        set(activation_module.ACTIVATION_CATEGORIES)
+        if not categories
+        else set(categories)
+    )
+    invalid = resolved - set(activation_module.ACTIVATION_CATEGORIES)
+    if invalid:
+        raise ValueError(
+            f"unknown activation categories: {sorted(invalid)}. "
+            f"Valid: {list(activation_module.ACTIVATION_CATEGORIES)}"
+        )
+    state = str(state or "open").strip().lower()
+    if state not in review_state_module.VALID_VIEWS:
+        raise ValueError(
+            f"INVALID_REVIEW_STATE: state must be one of "
+            f"{sorted(review_state_module.VALID_VIEWS)}"
+        )
+    scan = activation_module.scan(vault_root)
+    ranked = _rank(
+        scan.findings,
+        categories=resolved,
+        limit=0,
+        category_order=activation_module.ACTIVATION_CATEGORIES,
+        proposed_fix=_ACTIVATION_FIX,
+    )
+    ranked.coverage = scan.coverage
+    return _apply_review_state(vault_root, ranked, state=state, limit=limit, today=today)
+
+
 def item_by_ref(
     vault_root: Path,
     reference: str,
@@ -295,10 +342,13 @@ def item_by_ref(
 ) -> AttentionItem:
     """Resolve one current review item by its stable review reference."""
     wanted = review_state_module.parse_review_ref(reference)
-    report = attention(vault_root, limit=0, state="all", today=today)
-    for item in report.items:
-        if item.item_id == wanted:
-            return item
+    for report in (
+        attention(vault_root, limit=0, state="all", today=today),
+        activation(vault_root, limit=0, state="all", today=today),
+    ):
+        for item in report.items:
+            if item.item_id == wanted:
+                return item
     raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}")
 
 
@@ -376,4 +426,5 @@ def _apply_review_state(
         note=note,
         all_total=len(report.items),
         state_summary=state_summary,
+        coverage=report.coverage,
     )
