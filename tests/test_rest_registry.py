@@ -177,7 +177,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     schema_contract = doc["paths"]["/api/schema_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
-    assert {"operation", "name"} <= set(schema_contract.get("required", []))
+    assert set(schema_contract.get("required", [])) == {"operation"}
+    assert {"name", "subject", "proposal", "include_model_suggestions"} <= set(
+        schema_contract["properties"]
+    )
     assert {"project", "page_type", "save", "expected_hash", "strict", "compare_to"} <= set(
         schema_contract["properties"]
     )

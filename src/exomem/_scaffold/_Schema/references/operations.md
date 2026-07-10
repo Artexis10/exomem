@@ -17,7 +17,7 @@ commands.
 | `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | Check or repair vault health | `maintain_memory(mode="audit")`; explicit `fix`/`reconcile` modes only with fix intent |
-| `schema` | Infer, validate, or diff recurring corpus structure | `schema_memory`; contracts are optional and saving is explicit |
+| `schema` | Govern recurring structure, relation vocabulary, or graph lenses | `schema_memory`; inference is proposal-only and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
@@ -370,10 +370,12 @@ compatibility alias with the same response.
 1. Provide `path`, canonical reference, or `query`. Use a known identifier when
    you have one; use `query` to retrieve seed pages before graph assembly.
 2. Keep `depth` small unless the caller asks for a wider neighborhood. Use
-   `relation_types` / `node_types` filters when a narrower answer is better.
+   `traversal_profile` for an `epistemic`, `provenance`, `causal`, `decision`,
+   or broad `all` lens. Runtime `relation_types` / `node_types` only narrow it.
 3. Inspect the returned truncation fields before claiming the context is
-   exhaustive. Unresolved observed relations appear as placeholder nodes instead
-   of disappearing.
+   exhaustive. Inspect the active profile, registry metadata, excluded counts,
+   and warnings. Unregistered typed observations are warned but are not traversed
+   or promoted to a portable relation family.
 4. Treat unavailable derived graph data as a soft fallback. Stored page content,
    search, and provenance remain useful when a sidecar must be rebuilt.
 
@@ -385,8 +387,8 @@ Markdown.
 
 ## schema_memory
 
-**Goal:** Infer, validate, or diff an optional corpus-backed contract for
-frontmatter, semantic blocks, and relation vocabulary.
+**Goal:** Govern optional corpus contracts, relation extensions, and traversal
+profiles through one proposal-first surface.
 
 ### Procedure
 1. Run `operation="infer"` with a contract `name` and optional `project` or
@@ -400,10 +402,23 @@ frontmatter, semantic blocks, and relation vocabulary.
    CLI/CI outcome but does not block normal writes.
 5. Use `operation="diff"` to compare a saved contract with current corpus
    reality or another named contract.
+6. Use `subject="relations"` to count core, extension, alias, deprecated,
+   out-of-scope, and unregistered typed observations. Core meanings are packaged
+   and universal. A vault extension must be a lowercase namespaced refinement
+   of one core parent with a reviewed description. Inference never supplies
+   missing semantics or saves automatically.
+7. Return a complete reviewed `proposal` with `save=true` to adopt extensions.
+   Alias collisions, incomplete parents/descriptions, stale hashes, invalid
+   scopes, and deletion of observed keys are refused atomically. Deprecate an
+   observed relation with a valid replacement instead of deleting its history.
+8. Use `subject="traversal-profiles"` for custom read-only graph lenses. A custom
+   profile must extend a built-in and may only narrow its bounds. Profiles change
+   context selection, never Markdown, graph truth, confidence, or search ranking.
 
 ### Writes performed
-Only an explicitly saved inferred contract. Validation and diff never mutate
-the vault.
+Only an explicitly saved contract, relation registry, or traversal-profile
+proposal. Inference, validation, diff, and model suggestions never mutate the
+vault or assign truth.
 
 ---
 

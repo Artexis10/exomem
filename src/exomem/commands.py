@@ -65,6 +65,7 @@ from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
 from . import query_log, upload_tokens, vault
+from . import relation_registry as relation_registry_module
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
@@ -72,6 +73,7 @@ from . import replace as replace_module
 from . import review_state as review_state_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
+from . import traversal_profiles as traversal_profiles_module
 from . import workflow_skills as workflow_skills_module
 from .command_surface import (
     DESTRUCTIVE_OPS,  # noqa: F401 - re-exported for server.py
@@ -1021,6 +1023,7 @@ def op_graph_context(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -1044,6 +1047,8 @@ def op_graph_context(
             `finding`, `risk`, `action`, `claim`, `evidence`.
         max_nodes: Cap returned nodes. Default 40.
         max_edges: Cap returned edges. Default 80.
+        traversal_profile: Deterministic traversal lens. One of `epistemic`,
+            `provenance`, `causal`, `decision`, `all`, or a governed custom profile.
 
     Returns:
         {available, reason, seeds, nodes, edges, truncation}. Nodes and edges
@@ -1060,6 +1065,7 @@ def op_graph_context(
         node_types=node_types,
         max_nodes=max_nodes,
         max_edges=max_edges,
+        traversal_profile=traversal_profile,
     )
 
 
@@ -3486,6 +3492,7 @@ def op_connect_memory(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
     max_body_chars: int = 3000,
     entity_type: str | None = None,
     name: str | None = None,
@@ -3525,6 +3532,7 @@ def op_connect_memory(
         node_types: Graph node-type allowlist.
         max_nodes: Graph node cap.
         max_edges: Graph edge cap.
+        traversal_profile: Deterministic graph lens; omission preserves `all`.
         max_body_chars: Per-document stored-body cap for context.
         entity_type: Entity type for create-entity.
         name: Entity name for create-entity.
@@ -3575,6 +3583,7 @@ def op_connect_memory(
             node_types=node_types,
             max_nodes=max_nodes,
             max_edges=max_edges,
+            traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
         )
@@ -3690,15 +3699,18 @@ def op_maintain_memory(
 def op_schema_memory(
     vault_root: Path,
     operation: str,
-    name: str,
+    name: str | None = None,
+    subject: str = "contract",
     project: str | None = None,
     page_type: str | None = None,
     save: bool = False,
     expected_hash: str | None = None,
     strict: bool = False,
     compare_to: str | None = None,
+    proposal: dict | None = None,
+    include_model_suggestions: bool = False,
 ) -> dict:
-    """Infer, validate, or diff an optional corpus-backed memory contract.
+    """Infer, validate, diff, or save governed memory schemas.
 
     Contracts describe recurring frontmatter fields, semantic blocks, and typed
     relations without changing ordinary write validation. Inference is read-only
@@ -3707,18 +3719,117 @@ def op_schema_memory(
 
     Args:
         operation: infer, validate, or diff.
-        name: Lowercase contract slug under `_Schema/contracts/`.
+        name: Lowercase contract slug; required only for `subject="contract"`.
+        subject: `contract`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Persist an inferred proposal. Default false.
         expected_hash: Required current hash when overwriting a saved contract.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
+        proposal: Reviewed relation registry or traversal-profile proposal.
+        include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
         A structured profile/proposal, validation report, or contract diff.
     """
     operation = operation.strip().lower()
+    subject = subject.strip().lower()
+    if subject == "relations":
+        if operation == "infer":
+            result = memory_schema_module.infer_relation_registry(
+                vault_root,
+                project=project,
+                page_type=page_type,
+                include_model_suggestions=include_model_suggestions,
+            )
+            if save:
+                if proposal is None:
+                    raise ValueError("INCOMPLETE_RELATION_PROPOSAL: save requires a reviewed proposal")
+                observed = {
+                    item["raw_relation"]
+                    for item in memory_schema_module.relation_observations(vault_root)
+                }
+                result["saved"] = relation_registry_module.save_registry(
+                    vault_root,
+                    proposal,
+                    expected_hash=expected_hash,
+                    observed_keys=observed,
+                )
+            return result
+        if save:
+            raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")
+        if operation == "validate":
+            return memory_schema_module.validate_relation_registry(
+                vault_root,
+                proposal=proposal,
+                project=project,
+                page_type=page_type,
+                strict=strict,
+            )
+        if operation == "diff":
+            before = relation_registry_module.load_registry(vault_root)
+            if proposal is not None:
+                after = relation_registry_module.load_registry(vault_root, proposal=proposal)
+                comparison = "proposal"
+            else:
+                inferred = memory_schema_module.infer_relation_registry(
+                    vault_root, project=project, page_type=page_type
+                )
+                after = relation_registry_module.load_registry(
+                    vault_root, proposal=inferred["proposal"]
+                )
+                comparison = "corpus"
+            result = memory_schema_module.diff_relation_registries(before, after)
+            result.update({"content_hash": before.extension_hash, "comparison": comparison})
+            return result
+        raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+    if subject == "traversal-profiles":
+        if operation == "infer":
+            result = memory_schema_module.infer_traversal_profiles(vault_root)
+            if save:
+                if proposal is None:
+                    raise ValueError("INCOMPLETE_PROFILE_PROPOSAL: save requires a reviewed proposal")
+                result["saved"] = traversal_profiles_module.save_profiles(
+                    vault_root, proposal, expected_hash=expected_hash
+                )
+            return result
+        if save:
+            raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")
+        current = traversal_profiles_module.load_profiles(vault_root)
+        candidate = (
+            traversal_profiles_module.load_profiles(vault_root, proposal=proposal)
+            if proposal is not None
+            else current
+        )
+        if operation == "validate":
+            findings = list(candidate.findings)
+            return {
+                "subject": subject,
+                "valid": not findings,
+                "strict": strict,
+                "strict_failed": bool(strict and findings),
+                "content_hash": current.content_hash,
+                "findings": findings,
+            }
+        if operation == "diff":
+            before = {key: value.as_dict() for key, value in current.profiles.items()}
+            after = {key: value.as_dict() for key, value in candidate.profiles.items()}
+            return {
+                "subject": subject,
+                "changed": before != after,
+                "content_hash": current.content_hash,
+                "changes": {
+                    "added": sorted(set(after) - set(before)),
+                    "removed": sorted(set(before) - set(after)),
+                    "modified": sorted(key for key in set(before) & set(after) if before[key] != after[key]),
+                },
+            }
+        raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
+    if subject != "contract":
+        raise ValueError("INVALID_SCHEMA_SUBJECT: subject must be contract, relations, or traversal-profiles")
+    if not name:
+        raise ValueError("INVALID_CONTRACT: name is required for contract governance")
     if operation == "infer":
         inferred = memory_schema_module.infer_contract(
             vault_root, name=name, project=project, page_type=page_type

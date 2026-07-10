@@ -20,6 +20,7 @@ def assemble_context(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
     limit: int = 5,
     max_body_chars: int = 3000,
 ) -> dict[str, Any]:
@@ -91,6 +92,7 @@ def assemble_context(
         node_types=node_types,
         max_nodes=max_nodes,
         max_edges=max_edges,
+        traversal_profile=traversal_profile,
     )
     truncation.extend(str(item) for item in graph.get("truncation", []))
     resolved_seed_path = hits[0].path if path and hits else path
@@ -161,15 +163,20 @@ def _merge_graph_contexts(
     node_types: list[str] | None,
     max_nodes: int,
     max_edges: int,
+    traversal_profile: str | None = None,
 ) -> dict[str, Any]:
     nodes: dict[str, dict[str, Any]] = {}
     edges: dict[str, dict[str, Any]] = {}
     seeds: dict[str, dict[str, Any]] = {}
-    warnings: list[str] = []
+    warnings: list[Any] = []
     truncation: list[str] = []
     dropped_nodes = 0
     dropped_edges = 0
     available = False
+    resolved_profile: dict[str, Any] | None = None
+    registry_metadata: dict[str, Any] | None = None
+    included_families: set[str] = set()
+    excluded = {"profile": 0, "scope_violation": 0, "unregistered": 0}
     for page in pages:
         context = epistemic_graph.graph_context(
             vault_root,
@@ -179,11 +186,17 @@ def _merge_graph_contexts(
             node_types=node_types,
             max_nodes=max_nodes,
             max_edges=max_edges,
+            traversal_profile=traversal_profile,
         )
         if not context.get("available"):
             warnings.append(str(context.get("reason") or "graph unavailable"))
             continue
         available = True
+        resolved_profile = resolved_profile or context.get("profile")
+        registry_metadata = registry_metadata or context.get("registry")
+        included_families.update(context.get("included_relation_families", []))
+        for key in excluded:
+            excluded[key] += int(context.get("excluded", {}).get(key, 0))
         for seed in context.get("seeds", []):
             seeds.setdefault(seed["node_key"], seed)
         for node in context.get("nodes", []):
@@ -203,14 +216,11 @@ def _merge_graph_contexts(
             else:
                 dropped_edges += 1
         truncation.extend(str(item) for item in context.get("truncation", []))
+        warnings.extend(context.get("warnings", []))
     if dropped_nodes:
-        truncation.append(
-            f"merged nodes capped at {max_nodes} ({dropped_nodes} more not shown)"
-        )
+        truncation.append(f"merged nodes capped at {max_nodes} ({dropped_nodes} more not shown)")
     if dropped_edges:
-        truncation.append(
-            f"merged edges capped at {max_edges} ({dropped_edges} more not shown)"
-        )
+        truncation.append(f"merged edges capped at {max_edges} ({dropped_edges} more not shown)")
     return {
         "available": available,
         "reason": None if available else (warnings[0] if warnings else "no graph seeds"),
@@ -219,6 +229,10 @@ def _merge_graph_contexts(
         "edges": list(edges.values()),
         "truncation": _dedupe(truncation),
         "warnings": _dedupe(warnings),
+        "profile": resolved_profile,
+        "registry": registry_metadata,
+        "included_relation_families": sorted(included_families),
+        "excluded": excluded,
     }
 
 
@@ -243,4 +257,8 @@ def _link_values(value: Any) -> list[str]:
 
 
 def _dedupe(values) -> list:
-    return list(dict.fromkeys(values))
+    out: list[Any] = []
+    for value in values:
+        if value not in out:
+            out.append(value)
+    return out

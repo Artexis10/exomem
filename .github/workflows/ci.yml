@@ -180,11 +180,16 @@ jobs:
           src/exomem/memory_refs.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
+          src/exomem/relation_registry.py
+          src/exomem/traversal_profiles.py
+          src/exomem/epistemic_graph.py
           scripts/e2e_product_loop.py
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
           tests/test_memory_refs.py
           tests/test_memory_schema.py
+          tests/test_relation_registry.py
+          tests/test_traversal_profiles.py
           --select E,F,I,B,UP,BLE
       - name: Targeted contract type check
         run: >-
@@ -192,3 +197,6 @@ jobs:
           src/exomem/memory_refs.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
+          src/exomem/relation_registry.py
+          src/exomem/traversal_profiles.py
+          src/exomem/epistemic_graph.py

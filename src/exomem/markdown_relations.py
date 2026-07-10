@@ -9,46 +9,21 @@ as an authoring contract.
 from __future__ import annotations
 
 import re
+from collections.abc import Set
 from dataclasses import dataclass
 
-RELATION_TYPES: frozenset[str] = frozenset(
-    {
-        "supports",
-        "contradicts",
-        "refines",
-        "duplicates",
-        "supersedes",
-        "derived_from",
-        "evidenced_by",
-        "depends_on",
-        "implements",
-        "mitigates",
-        "causes",
-        "caused_by",
-        "blocks",
-        "resolves",
-        "answers",
-        "raises_question",
-        "used_for",
-        "observed_in",
-        "mentions",
-        "about_entity",
-        "relates_to",
-        "links_to",
-        "cites",
-        "tests",
-        "owns",
-    }
-)
+from . import relation_registry
+
+RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
 _HEADING_RE = re.compile(r"^(?P<marks>#{1,6})\s+(?P<title>.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
 _CANONICAL_RE = re.compile(
-    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_]{1,40})[ \t]+"
+    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_.-]{1,80})[ \t]+"
     r"(?P<link>\[\[[^\[\]\n]+\]\])\s*$"
 )
 _LEGACY_RE = re.compile(
-    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_-]{1,40})\s*:?[ \t]+"
+    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_.-]{1,80})\s*(?P<colon>:?)[ \t]+"
     r"(?P<link>\[\[[^\]\n]+\]\])",
     re.IGNORECASE,
 )
@@ -98,6 +73,8 @@ def parse_markdown_relations(
     markdown: str,
     *,
     include_legacy: bool = False,
+    relation_types: Set[str] | None = None,
+    retain_unknown: bool = False,
 ) -> MarkdownRelationDocument:
     """Parse canonical note relations and optionally legacy typed bullets.
 
@@ -109,6 +86,7 @@ def parse_markdown_relations(
     errors: list[RelationValidationError] = []
     in_fence = False
     relations_level: int | None = None
+    allowed_relations = RELATION_TYPES if relation_types is None else relation_types
 
     for line_no, line in enumerate(markdown.splitlines(), start=1):
         if _FENCE_RE.match(line):
@@ -158,7 +136,7 @@ def parse_markdown_relations(
                 )
             )
             continue
-        if kind not in RELATION_TYPES:
+        if kind not in allowed_relations:
             if canonical:
                 errors.append(
                     RelationValidationError(
@@ -168,7 +146,10 @@ def parse_markdown_relations(
                         raw=line.strip(),
                     )
                 )
-            continue
+            if not retain_unknown:
+                continue
+            if not canonical and not match.groupdict().get("colon"):
+                continue
 
         target = match.group("link")[2:-2].split("|", 1)[0].strip()
         if not target:

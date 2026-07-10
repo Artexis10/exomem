@@ -544,6 +544,18 @@
           "description": "Graph edge cap.",
           "type": "integer"
         },
+        "traversal_profile": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Deterministic graph lens; omission preserves `all`."
+        },
         "max_body_chars": {
           "default": 3000,
           "description": "Per-document stored-body cap for context.",
@@ -2095,7 +2107,7 @@
     }
   },
   "schema_memory": {
-    "description": "Infer, validate, or diff an optional corpus-backed memory contract.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
+    "description": "Infer, validate, diff, or save governed memory schemas.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -2104,7 +2116,20 @@
           "type": "string"
         },
         "name": {
-          "description": "Lowercase contract slug under `_Schema/contracts/`.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowercase contract slug; required only for `subject=\"contract\"`."
+        },
+        "subject": {
+          "default": "contract",
+          "description": "`contract`, `relations`, or `traversal-profiles`.",
           "type": "string"
         },
         "project": {
@@ -2164,11 +2189,28 @@
           ],
           "default": null,
           "description": "In diff mode, compare to this saved contract instead of corpus reality."
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation registry or traversal-profile proposal."
+        },
+        "include_model_suggestions": {
+          "default": false,
+          "description": "Request response-only optional relation suggestions.",
+          "type": "boolean"
         }
       },
       "required": [
-        "operation",
-        "name"
+        "operation"
       ],
       "type": "object"
     }

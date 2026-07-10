@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import commands, memory_schema
+from exomem import audit, commands, memory_schema
 from exomem.__main__ import main
 
 
@@ -166,8 +166,7 @@ def test_schema_memory_registry_parity_and_strict_cli_exit(
     monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
 
     product = next(
-        command for command in commands.PRODUCT_COMMANDS
-        if command.name == "schema_memory"
+        command for command in commands.PRODUCT_COMMANDS if command.name == "schema_memory"
     )
     assert product.surfaces == frozenset({"mcp", "rest", "cli"})
     assert product.routes == ("schema_memory",)
@@ -184,3 +183,155 @@ def test_schema_memory_registry_parity_and_strict_cli_exit(
     )
     assert exit_code == 1
     assert '"strict_failed": true' in capsys.readouterr().out
+
+
+def test_relation_inference_is_evidence_backed_and_proposal_first(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    pages[0].write_text(
+        pages[0].read_text(encoding="utf-8")
+        + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    before = pages[0].read_text(encoding="utf-8")
+
+    inferred = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        project="atlas",
+        include_model_suggestions=True,
+    )
+
+    candidate = next(
+        item for item in inferred["relations"] if item["raw_relation"] == "science.replicates"
+    )
+    assert candidate["registry_status"] == "unregistered"
+    assert candidate["count"] == 1
+    assert candidate["examples"][0]["path"].endswith("page-0.md")
+    assert inferred["proposal"]["extensions"]["science.replicates"] == {
+        "parent": None,
+        "description": None,
+    }
+    assert inferred["warnings"][0]["code"] == "model_suggestions_unavailable"
+    assert pages[0].read_text(encoding="utf-8") == before
+
+    with pytest.raises(ValueError, match="INCOMPLETE_RELATION_PROPOSAL"):
+        commands.op_schema_memory(vault, operation="infer", subject="relations", save=True)
+    with pytest.raises(ValueError, match="INVALID_RELATION_REGISTRY"):
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="relations",
+            save=True,
+            proposal=inferred["proposal"],
+        )
+
+
+def test_reviewed_relation_proposal_saves_and_observed_deletion_is_refused(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    pages[0].write_text(
+        pages[0].read_text(encoding="utf-8")
+        + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    reviewed = {
+        "schema_version": 1,
+        "extensions": {
+            "science.replicates": {
+                "parent": "supports",
+                "description": "Reports an independent reproduction",
+            }
+        },
+    }
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="relations",
+        save=True,
+        proposal=reviewed,
+    )["saved"]
+    validation = commands.op_schema_memory(
+        vault, operation="validate", subject="relations", strict=True
+    )
+    assert validation["valid"] is True
+
+    with pytest.raises(ValueError, match="OBSERVED_RELATION_DELETION"):
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="relations",
+            project="different-project",
+            save=True,
+            expected_hash=saved["content_hash"],
+            proposal={"schema_version": 1, "extensions": {}},
+        )
+
+
+def test_traversal_profile_governance_validates_diffs_and_saves(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    proposal = {
+        "schema_version": 1,
+        "profiles": {
+            "evidence-only": {
+                "extends": "provenance",
+                "remove_families": ["citation"],
+                "max_nodes": 20,
+            }
+        },
+    }
+    diff = commands.op_schema_memory(
+        vault, operation="diff", subject="traversal-profiles", proposal=proposal
+    )
+    assert diff["changed"] is True
+    assert diff["changes"]["added"] == ["evidence-only"]
+    validated = commands.op_schema_memory(
+        vault, operation="validate", subject="traversal-profiles", proposal=proposal
+    )
+    assert validated["valid"] is True
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="traversal-profiles",
+        proposal=proposal,
+        save=True,
+    )
+    assert saved["saved"]["created"] is True
+    assert (
+        "evidence-only" in saved["profiles"]
+        or "evidence-only"
+        in commands.op_schema_memory(vault, operation="infer", subject="traversal-profiles")[
+            "profiles"
+        ]
+    )
+
+
+def test_relation_registry_audit_is_explicit_and_not_default_attention_noise(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    pages[0].write_text(
+        pages[0].read_text(encoding="utf-8")
+        + "\n- science.unknown: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    assert "relation_registry" not in audit.ALL_CATEGORIES
+    report = commands.op_audit(vault, categories=["relation_registry"])
+    assert report["summary"]["relation_registry"] == 1
+    assert report["findings"][0]["meta"]["code"] == "unregistered"
+
+
+def test_relation_diff_without_proposal_compares_corpus_reality(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    pages[0].write_text(
+        pages[0].read_text(encoding="utf-8")
+        + "\n- science.replicates: [[Knowledge Base/Notes/future]]\n",
+        encoding="utf-8",
+    )
+    result = commands.op_schema_memory(vault, operation="diff", subject="relations")
+    assert result["comparison"] == "corpus"
+    assert result["changed"] is True
+    assert result["changes"]["added"] == ["science.replicates"]
