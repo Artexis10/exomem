@@ -78,9 +78,11 @@ cmd_start() {
   mkdir -p "$wt/.task"
   cp "$brief" "$wt/.task/TASK.md"
   local excl
-  excl=$(git -C "$wt" rev-parse --absolute-git-dir)/info/exclude
+  # Linked worktrees read ignore rules from the COMMON git dir's info/exclude,
+  # not the per-worktree gitdir — write there (harmlessly repo-wide).
+  excl=$(git -C "$wt" rev-parse --path-format=absolute --git-common-dir)/info/exclude
   mkdir -p "$(dirname "$excl")"
-  echo ".task/" >> "$excl"
+  grep -qxF ".task/" "$excl" 2>/dev/null || echo ".task/" >> "$excl"
 
   (cd "$wt" && uv sync)
 
