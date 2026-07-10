@@ -17,7 +17,12 @@ from functools import cache
 from pathlib import Path
 
 from .kbdir import kb_prefix
-from .vault import PlannedWrite, escape_wikilinks_for_log, kb_root
+from .vault import (
+    PlannedWrite,
+    escape_wikilinks_for_log,
+    kb_root,
+    render_wikilinks_for_vault,
+)
 
 
 RECENT_ACTIVITY_CAP = 50
@@ -94,9 +99,9 @@ def compute_updates(
     )
 
     return IndexUpdate(
-        sources_index_content=sources_index_new,
-        top_index_content=top_index_new,
-        log_content=log_new,
+        sources_index_content=render_wikilinks_for_vault(sources_index_new, vault_root),
+        top_index_content=render_wikilinks_for_vault(top_index_new, vault_root),
+        log_content=render_wikilinks_for_vault(log_new, vault_root),
         trim_note=trim_note,
     )
 
@@ -403,7 +408,7 @@ _NOTES_H3_COUNT = re.compile(
 @cache
 def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
     return re.compile(
-        r"^(- \[\[" + re.escape(kb_prefix_str)
+        r"^(- \[\[(?:" + re.escape(kb_prefix_str) + r")?"
         + r"Notes/(?P<typef>[A-Za-z]+)/(?P<sub>[^|\]/]+)/?(?:\|[^\]]+)?\]\])"
         r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
         re.MULTILINE,
@@ -414,7 +419,7 @@ def _notes_subfolder_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
 @cache
 def _entities_bullet_re(kb_prefix_str: str) -> re.Pattern[str]:
     return re.compile(
-        r"^(- \[\[" + re.escape(kb_prefix_str)
+        r"^(- \[\[(?:" + re.escape(kb_prefix_str) + r")?"
         + r"Entities/(?P<folder>People|Concepts|Libraries|Decisions)/?(?:\|[^\]]+)?\]\])"
         r"( \((?P<count>\d+)\))?(?P<rest>(?:\s+—[^\n]*)?)\s*$",
         re.MULTILINE,
@@ -611,6 +616,7 @@ def compute_subindex_writes(
             notes_counts=notes_counts,
             entities_counts=entities_counts,
         )
+        new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
@@ -625,6 +631,7 @@ def compute_subindex_writes(
                 counts_by_type=notes_counts,
                 counts_by_subfolder=notes_by_subfolder,
             )
+            new = render_wikilinks_for_vault(new, vault_root)
             if new != current:
                 writes.append(PlannedWrite(path=notes_index, content=new))
 
@@ -639,6 +646,7 @@ def compute_subindex_writes(
             new = _refresh_entities_subindex_text(
                 current, counts_by_type=entities_counts
             )
+            new = render_wikilinks_for_vault(new, vault_root)
             if new != current:
                 writes.append(PlannedWrite(path=entities_index, content=new))
 

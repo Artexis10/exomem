@@ -63,6 +63,26 @@ def test_replace_writes_new_and_flips_old(vault: Path) -> None:
     assert old_rel.removesuffix(".md") in str(supersedes)
 
 
+def test_replace_renders_supersession_links_for_kb_rooted_obsidian(vault: Path) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    old_rel = _make_insight(vault, "Nested Root Old")
+
+    result = replace_module.replace(
+        vault,
+        old_path=old_rel,
+        content="# Nested Root New\n\nrevised.\n",
+        note_type="insight",
+        title="Nested Root New",
+        today=TODAY,
+    )
+
+    old_text = _read(vault / result.old_path)
+    new_text = _read(vault / result.new_path)
+    assert "[[Notes/Insights/nested-root-new]]" in old_text
+    assert "[[Notes/Insights/nested-root-old]]" in new_text
+    assert "[[Knowledge Base/" not in old_text + new_text
+
+
 def test_replace_bumps_old_updated_date(vault: Path) -> None:
     old_rel = _make_insight(vault, "Bumped Insight")
     later = dt.date(2026, 6, 1)

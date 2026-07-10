@@ -181,6 +181,27 @@ def test_add_updates_sources_index_count(
     assert "2026-05-18 — [[Knowledge Base/Sources/Articles/2026-05-18-new-article]]" in after
 
 
+def test_add_renders_generated_indexes_for_nested_obsidian_root(
+    vault: Path, source_schema: schema_module.SourceSchema
+) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+
+    add_module.add(
+        vault,
+        source_schema,
+        content="body",
+        source_type="article",
+        title="Nested root article",
+        url="https://example.com/nested",
+        today=TODAY,
+    )
+
+    sources_index = _read(vault / "Knowledge Base" / "Sources" / "index.md")
+    assert "[[Sources/Articles/|Articles]]" in sources_index
+    assert "[[Sources/Articles/2026-05-18-nested-root-article]]" in sources_index
+    assert "[[Knowledge Base/" not in sources_index
+
+
 def test_add_updates_sources_index_for_new_folder(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:

@@ -47,6 +47,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    render_wikilink_target,
     rotate_log_if_needed,
     slugify_with_truncation_check,
     unique_path,
@@ -331,7 +332,7 @@ def note(
         date_iso=date_iso,
     )
     rel_note_no_ext = note_path.relative_to(vault_root).with_suffix("").as_posix()
-    new_note_wikilink = f"[[{rel_note_no_ext}]]"
+    new_note_wikilink = f"[[{render_wikilink_target(rel_note_no_ext, vault_root)}]]"
 
     # Resolver: the process-shared, freshness-checked instance (find's graph-
     # lane cache) — a fresh build reads + YAML-parses the whole vault per
@@ -422,7 +423,7 @@ def note(
         projects=projects,
         status=status,
         date_iso=date_iso,
-        sources=sources_norm,
+        sources=[render_wikilink_target(source, vault_root) for source in sources_norm],
         tags=tags_clean,
         content=body_clean,
         severity=severity,

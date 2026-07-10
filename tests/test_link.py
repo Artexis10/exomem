@@ -224,3 +224,22 @@ def test_link_connections_normalize_and_render(vault: Path) -> None:
     assert "- relates_to [[Knowledge Base/Notes/Insights/foo]]" in text
     assert "- relates_to [[Knowledge Base/Notes/Patterns/bar]]" in text
     assert "- relates_to [[Reference/Strategy]]" in text
+
+
+def test_link_connections_use_kb_relative_form_for_nested_obsidian_root(
+    vault: Path,
+) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+
+    result = link_module.link(
+        vault,
+        entity_type="concept",
+        name="Nested Root Connection",
+        summary="x",
+        connections=["Knowledge Base/Notes/Insights/foo"],
+        today=TODAY,
+    )
+
+    text = _read(vault / result.path)
+    assert "- relates_to [[Notes/Insights/foo]]" in text
+    assert "[[Knowledge Base/" not in text

@@ -136,6 +136,34 @@ def test_link_updates_entities_subindex_bullet(vault: Path) -> None:
     assert "- [[Knowledge Base/Entities/Concepts/|Concepts]] (4)" in text, text
 
 
+def test_subindex_refresh_supports_nested_obsidian_root(vault: Path) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    notes_idx = _seed_notes_index(vault)
+    entities_idx = _seed_entities_index(vault)
+
+    note_module.note(
+        vault,
+        content="# t\n\n## Question\n\nBody.\n",
+        note_type="research-note",
+        title="Nested root subindex note",
+        project="project-alpha",
+        today=TODAY,
+    )
+    link_module.link(
+        vault,
+        entity_type="concept",
+        name="Nested Root Subindex Concept",
+        summary="x",
+        today=TODAY,
+    )
+
+    notes_text = notes_idx.read_text(encoding="utf-8")
+    entities_text = entities_idx.read_text(encoding="utf-8")
+    assert "[[Notes/Research/Project Alpha/|Project Alpha]] (2)" in notes_text
+    assert "[[Entities/Concepts/|Concepts]] (4)" in entities_text
+    assert "[[Knowledge Base/" not in notes_text + entities_text
+
+
 def test_subindex_preserves_hand_curated_descriptions(vault: Path) -> None:
     """The auto-refresh must not touch the `— description` tail on bullets."""
     notes_idx = _seed_notes_index(vault)

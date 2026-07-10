@@ -34,6 +34,7 @@ from .vault import (
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
+    render_wikilink_target,
     rotate_log_if_needed,
 )
 
@@ -181,7 +182,10 @@ def link(
         why_in_kb=why_clean,
         date_iso=date_iso,
         tags=tags_clean,
-        connections=connections_norm,
+        connections=[
+            render_wikilink_target(connection, vault_root)
+            for connection in connections_norm
+        ],
         affiliation=affiliation,
         relationship=relationship,
         domain=domain,

@@ -29,7 +29,7 @@ from . import indexes
 from . import note as note_module
 from . import memory_refs
 from .kbdir import kb_prefix
-from .vault import PlannedWrite, batch_atomic_write, kb_root
+from .vault import PlannedWrite, batch_atomic_write, kb_root, render_wikilink_target
 
 
 log = logging.getLogger(__name__)
@@ -139,7 +139,8 @@ def replace(
 
     # Inject `supersedes:` into the freshly-written new page's frontmatter.
     new_text = new_resolved.read_text(encoding="utf-8")
-    new_text_updated = _inject_supersedes(new_text, rel_old_no_ext)
+    old_link_target = render_wikilink_target(rel_old_no_ext, vault_root)
+    new_text_updated = _inject_supersedes(new_text, old_link_target)
     if new_text_updated == new_text:
         warnings.append(
             "could not inject supersedes: into new page frontmatter — "
@@ -148,7 +149,8 @@ def replace(
 
     # Patch old page: status -> superseded, add superseded_by, refresh updated.
     old_text = old_resolved.read_text(encoding="utf-8")
-    old_text_updated = _mark_superseded(old_text, rel_new_no_ext, date_iso)
+    new_link_target = render_wikilink_target(rel_new_no_ext, vault_root)
+    old_text_updated = _mark_superseded(old_text, new_link_target, date_iso)
     if old_text_updated == old_text:
         warnings.append(
             "could not patch old page frontmatter (status/superseded_by/updated) — "

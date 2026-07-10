@@ -39,6 +39,31 @@ def test_note_writes_caller_h1_verbatim_no_duplicate(vault: Path) -> None:
     assert body.lstrip().startswith("# A note about retrieval pipelines")
 
 
+def test_note_renders_links_for_kb_rooted_obsidian_vault(vault: Path) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    source = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements"
+    target = (
+        "Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+    )
+
+    result = note_module.note(
+        vault,
+        content=f"## Claim\n\nSee [[{target}]].\n",
+        note_type="insight",
+        title="KB-rooted Obsidian links",
+        sources=[source],
+        today=TODAY,
+    )
+
+    written = (vault / result.path).read_text(encoding="utf-8")
+    assert "[[Notes/Insights/progressive-disclosure" in written
+    assert "[[Sources/Articles/2026-05-04-best-egcg-supplements]]" in written
+    assert "[[Knowledge Base/" not in written
+    source_text = (vault / f"{source}.md").read_text(encoding="utf-8")
+    assert "[[Notes/Insights/kb-rooted-obsidian-links]]" in source_text
+
+
 def test_note_body_with_no_h1_is_written_verbatim(vault: Path) -> None:
     """If the caller declines to supply an H1, the tool doesn't invent one."""
     result = note_module.note(

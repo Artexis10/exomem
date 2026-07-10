@@ -1,5 +1,5 @@
 """One-shot cleanup: rewrite every wikilink under `Knowledge Base/` to the
-canonical full vault-rooted form, plus refresh sub-folder indexes.
+preferred form for the detected Obsidian vault root, plus refresh indexes.
 
 This is the "drain the lake" Phase 5 step from the plan. The exomem writer
 now enforces canonical form on every write going forward (Phase 1), but
@@ -12,7 +12,7 @@ Usage:
 By default runs against the vault resolved via `exomem.vault.resolve_vault()`
 (the `EXOMEM_VAULT_PATH` env var). Use --vault to override.
 
-The script:
+Canonical path resolution remains vault-rooted internally. The script:
 1. Builds a WikilinkResolver against the vault (one walk; includes
    frontmatter `title:` index for date-prefixed bare-name resolution).
 2. Walks every `.md` under `Knowledge Base/`, normalizes wikilinks in both
@@ -51,6 +51,7 @@ from exomem.vault import (  # noqa: E402
     normalize_body_wikilinks,
     normalize_wikilink,
     parse_frontmatter,
+    render_wikilink_target,
     resolve_vault,
 )
 
@@ -106,12 +107,13 @@ def normalize_frontmatter_wikilinks(
         if warning:
             warnings.append(warning)
             continue
-        if canonical == target and not alias:
+        rendered = render_wikilink_target(canonical, vault_root)
+        if rendered == target and not alias:
             continue
         if alias:
-            replacement = f"[[{canonical}{alias}]]"
+            replacement = f"[[{rendered}{alias}]]"
         else:
-            replacement = f"[[{canonical}]]"
+            replacement = f"[[{rendered}]]"
         if replacement != m.group(0):
             new_text = new_text[: m.start()] + replacement + new_text[m.end():]
     return new_text, warnings

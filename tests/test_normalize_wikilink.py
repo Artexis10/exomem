@@ -18,6 +18,9 @@ from exomem.vault import (
     find_body_wikilinks,
     normalize_body_wikilinks,
     normalize_wikilink,
+    obsidian_uses_kb_root,
+    render_wikilink_target,
+    render_wikilinks_for_vault,
 )
 
 
@@ -219,6 +222,58 @@ def test_body_normalization_rewrites_kb_relative_to_full(vault: Path) -> None:
         in new_body
     )
     assert warnings == []
+
+
+def test_body_normalization_uses_kb_relative_links_for_nested_obsidian_root(
+    vault: Path,
+) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    target = (
+        "Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+    )
+
+    new_body, warnings = normalize_body_wikilinks(
+        f"See [[{target}#mechanism|the mechanism]].", vault
+    )
+
+    assert obsidian_uses_kb_root(vault) is True
+    assert warnings == []
+    assert (
+        "[[Notes/Insights/progressive-disclosure-without-mode-fragmentation"
+        "#mechanism|the mechanism]]"
+    ) in new_body
+    assert "[[Knowledge Base/" not in new_body
+    canonical, warning = normalize_wikilink(
+        "Notes/Insights/progressive-disclosure-without-mode-fragmentation", vault
+    )
+    assert warning is None
+    assert canonical.startswith("Knowledge Base/")
+    assert render_wikilink_target(canonical, vault).startswith("Notes/")
+
+
+def test_parent_obsidian_root_keeps_full_vault_rooted_links(vault: Path) -> None:
+    (vault / ".obsidian").mkdir()
+    target = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation"
+
+    new_body, warnings = normalize_body_wikilinks(f"See [[{target}]].", vault)
+
+    assert obsidian_uses_kb_root(vault) is False
+    assert warnings == []
+    assert f"[[{target}]]" in new_body
+
+
+def test_generated_markdown_renderer_preserves_code_and_aliases(vault: Path) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    text = (
+        "[[Knowledge Base/Notes/Insights/foo|Foo]]\n"
+        "`[[Knowledge Base/Notes/Insights/in-code]]`\n"
+    )
+
+    rendered = render_wikilinks_for_vault(text, vault)
+
+    assert "[[Notes/Insights/foo|Foo]]" in rendered
+    assert "`[[Knowledge Base/Notes/Insights/in-code]]`" in rendered
 
 
 def test_body_normalization_preserves_alias(vault: Path) -> None:
