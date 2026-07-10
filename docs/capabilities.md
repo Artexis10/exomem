@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 19
-- Tier 1 commands: 16
+- Product commands: 20
+- Tier 1 commands: 17
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 19
-- REST commands: 18
-- CLI commands: 18
+- Registry-generated MCP commands: 20
+- REST commands: 19
+- CLI commands: 19
 - Hand-registered MCP tools: none
 
 ## Product Command Registry
@@ -29,7 +29,8 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description | Preserve text evidence as append-only proof material. |
 | transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation | Prepare out-of-band binary artifact transfer. |
-| review_memory | 1 | MCP, REST, CLI | read | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, query, sources, suggested_title, tag, key, value, path | Review memory health, provenance, drift, or source backlog. |
+| review_memory | 1 | MCP, REST, CLI | read | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, query, sources, suggested_title, tag, key, value, path, state, ref | Review memory health, provenance, drift, or source backlog. |
+| triage_memory | 1 | MCP, REST, CLI | write | no | ref | attention | ref*, action*, until, why | Triage one Epistemic Inbox item explicitly. |
 | connect_memory | 1 | MCP, REST, CLI | write | no | - | suggest_links, graph_context, suggest_relations, link, list_inbound_links | operation, path, target, query, draft_title, draft_body, limit, scope, include_model_suggestions, depth, relation_types, node_types, max_nodes, max_edges, max_body_chars, entity_type, name, summary, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status | Connect memory through links, typed graph context, or entities. |
 | adopt_vault | 1 | MCP, REST, CLI | write | no | path | adopt | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths | Adopt an existing vault safely without replacing originals. |
 | maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings | Maintain vault health with explicit write-capable modes. |

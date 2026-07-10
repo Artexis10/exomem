@@ -1,7 +1,7 @@
 """The `attention` review surface — one ranked "what needs your review today" list.
 
-Composes the three measurement-only epistemic queues that `audit` already produces —
-`corpus_contradictions`, `stale_review`, `unprocessed_source` — into a single ranked
+Composes the four measurement-only epistemic queues that `audit` already produces —
+`corpus_contradictions`, `stale_review`, `unprocessed_source`, `relation_debt` — into a single ranked
 list. The composition is pure measurement: each queue already emits its findings in
 intra-queue rank order, and this module fuses those ranks with Reciprocal Rank Fusion
 (the same `fusion` utility `find` uses) and dedups by anchor path. No note content is
@@ -20,6 +20,7 @@ from pathlib import Path
 
 from . import audit as audit_module
 from . import fusion
+from . import review_state as review_state_module
 from .audit import AuditFinding
 
 # The queues this surface composes, in tiebreak-preference order (highest first):
@@ -28,6 +29,7 @@ ATTENTION_CATEGORIES: tuple[str, ...] = (
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
+    "relation_debt",
 )
 _CATEGORY_ORDER: dict[str, int] = {c: i for i, c in enumerate(ATTENTION_CATEGORIES)}
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
@@ -40,7 +42,8 @@ _RRF_K: int = 60  # the conventional default `fusion` and `find` use
 _PROPOSED_FIX: str = (
     "Surfaced for REVIEW only — this ranking is a deterministic measurement, not a "
     "judgment that anything conflicts or is wrong. You decide per reason: keep / "
-    "`replace` (supersede) / `reconcile` / `propose_compilation` / archive. Nothing is "
+    "`replace` (supersede) / `reconcile` / `propose_compilation` / "
+    "`connect_memory` / archive. Nothing is "
     "auto-acted; `find` ordering is unchanged."
 )
 
@@ -53,9 +56,16 @@ class AttentionItem:
     categories: list[str]     # queues that flagged this note, in preference order
     reasons: list[dict]       # one per contributing finding: {category, rank, detail, related_paths?, meta?}
     proposed_fix: str
+    item_id: str | None = None
+    ref: str | None = None
+    target_ref: str | None = None
+    related_refs: list[str] | None = None
+    fingerprint: str | None = None
+    state: str | None = None
+    state_detail: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "path": self.path,
             "score": self.score,
             "severity": self.severity,
@@ -63,6 +73,20 @@ class AttentionItem:
             "reasons": self.reasons,
             "proposed_fix": self.proposed_fix,
         }
+        if self.item_id is not None:
+            out.update(
+                {
+                    "item_id": self.item_id,
+                    "ref": self.ref,
+                    "target_ref": self.target_ref,
+                    "related_refs": self.related_refs or [],
+                    "fingerprint": self.fingerprint,
+                    "state": self.state or "open",
+                }
+            )
+            if self.state_detail is not None:
+                out["state_detail"] = self.state_detail
+        return out
 
 
 @dataclass
@@ -74,9 +98,11 @@ class AttentionReport:
     truncated: int                # anchors beyond `limit` not shown
     upstream_truncated: int       # contradiction pairs the upstream cap omitted (folded in)
     note: str | None
+    all_total: int | None = None
+    state_summary: dict[str, int] | None = None
 
     def as_dict(self) -> dict:
-        return {
+        out = {
             "items": [it.as_dict() for it in self.items],
             "summary": self.summary,
             "shown": self.shown,
@@ -85,6 +111,10 @@ class AttentionReport:
             "upstream_truncated": self.upstream_truncated,
             "note": self.note,
         }
+        if self.all_total is not None:
+            out["all_total"] = self.all_total
+            out["state_summary"] = self.state_summary or {}
+        return out
 
 
 def _reason(category: str, rank: int, finding: AuditFinding) -> dict:
@@ -226,6 +256,7 @@ def attention(
     categories: list[str] | None = None,
     limit: int = 25,
     today=None,
+    state: str = "open",
 ) -> AttentionReport:
     """Compose the three epistemic queues into one ranked review surface. Read-only.
 
@@ -239,5 +270,110 @@ def attention(
             f"unknown attention categories: {sorted(invalid)}. "
             f"Valid: {list(ATTENTION_CATEGORIES)}"
         )
+    state = str(state or "open").strip().lower()
+    if state not in review_state_module.VALID_VIEWS:
+        raise ValueError(
+            f"INVALID_REVIEW_STATE: state must be one of "
+            f"{sorted(review_state_module.VALID_VIEWS)}"
+        )
     report = audit_module.audit(vault_root, categories=sorted(resolved), today=today)
-    return _rank(report.findings, categories=resolved, limit=limit)
+    ranked = _rank(report.findings, categories=resolved, limit=0)
+    return _apply_review_state(
+        vault_root,
+        ranked,
+        state=state,
+        limit=limit,
+        today=today,
+    )
+
+
+def item_by_ref(
+    vault_root: Path,
+    reference: str,
+    *,
+    today=None,
+) -> AttentionItem:
+    """Resolve one current review item by its stable review reference."""
+    wanted = review_state_module.parse_review_ref(reference)
+    report = attention(vault_root, limit=0, state="all", today=today)
+    for item in report.items:
+        if item.item_id == wanted:
+            return item
+    raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}")
+
+
+def _apply_review_state(
+    vault_root: Path,
+    report: AttentionReport,
+    *,
+    state: str,
+    limit: int,
+    today=None,
+) -> AttentionReport:
+    all_paths: list[str] = []
+    for item in report.items:
+        all_paths.append(item.path)
+        for reason in item.reasons:
+            all_paths.extend(reason.get("related_paths") or [])
+    refs = review_state_module.refs_for_paths(vault_root, all_paths)
+    store = review_state_module.ReviewStateStore(vault_root)
+    state_payload = store.load()
+    state_summary = {"open": 0, "snoozed": 0, "dismissed": 0}
+
+    for item in report.items:
+        target_ref = refs[item.path]
+        review_id = review_state_module.item_id(target_ref)
+        related_paths = sorted(
+            {
+                path
+                for reason in item.reasons
+                for path in (reason.get("related_paths") or [])
+                if path != item.path
+            }
+        )
+        related_refs = [refs[path] for path in related_paths if path in refs]
+        signal_fingerprint = review_state_module.fingerprint(
+            target_ref=target_ref,
+            categories=item.categories,
+            reasons=item.reasons,
+            related_refs=related_refs,
+        )
+        effective, decision = store.effective_state(
+            review_id,
+            signal_fingerprint,
+            today=today,
+            payload=state_payload,
+        )
+        item.item_id = review_id
+        item.ref = review_state_module.review_ref(review_id)
+        item.target_ref = target_ref
+        item.related_refs = related_refs
+        item.fingerprint = signal_fingerprint
+        item.state = effective
+        item.state_detail = decision.as_dict() if decision is not None else None
+        state_summary[effective] += 1
+
+    if state == "all":
+        eligible = list(report.items)
+    else:
+        eligible = [item for item in report.items if item.state == state]
+    shown_items = eligible[:limit] if limit > 0 else eligible
+    total = len(eligible)
+    truncated = total - len(shown_items)
+    note = _build_note(
+        len(shown_items),
+        total,
+        truncated,
+        report.upstream_truncated,
+    )
+    return AttentionReport(
+        items=shown_items,
+        summary=report.summary,
+        shown=len(shown_items),
+        total=total,
+        truncated=truncated,
+        upstream_truncated=report.upstream_truncated,
+        note=note,
+        all_total=len(report.items),
+        state_summary=state_summary,
+    )

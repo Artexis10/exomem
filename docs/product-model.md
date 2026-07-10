@@ -19,9 +19,20 @@ Users and agents should think in verbs first. Exomem's internal page types still
 | Adopt/import | Understand an existing vault safely before changing anything | `adopt_vault(mode="scan-only")`, then explicit copy/manifest/compile modes |
 | Ask | Retrieve what the vault already knows with citations | `ask_memory`, then `read_memory`; `ask_memory(deep=true)` for bounded context |
 | Prove | Show or preserve proof for a claim, case, warranty, dispute, record, or receipt | `preserve_evidence`, `transfer_artifact`, `review_memory(mode="provenance")` |
-| Review | Surface stale, unprocessed, broken, or contradictory areas | `review_memory` |
+| Review | Surface stale, unprocessed, disconnected, or contradictory areas; explicitly snooze/dismiss reviewed signals | `review_memory`; `triage_memory` for state changes |
 | Update | Correct, edit, or supersede knowledge while preserving history | `edit_memory`, `replace_memory`, `maintain_memory` |
 | Connect | Link related notes, entities, decisions, and sources | `connect_memory` |
+
+Compiled notes use visible typed Markdown for directional note-level edges:
+
+```markdown
+## Relations
+- refines [[Knowledge Base/Notes/Insights/Earlier Conclusion]]
+- evidenced_by [[Knowledge Base/Sources/Articles/Original Source]]
+```
+
+Claim/finding/evidence-level edges remain semantic-block metadata. See
+[semantic blocks](semantic-blocks.md) and the [Epistemic Inbox](epistemic-inbox.md).
 
 ## Existing vaults
 

@@ -72,9 +72,9 @@ What problem or topic this note addresses.
 
 The substance. Multiple subsections OK.
 
-## Connections
+## Relations
 
-- [[Knowledge Base/Entities/Concepts/Agentic RAG]]
+- relates_to [[Knowledge Base/Entities/Concepts/Agentic RAG]]
 
 ## Open threads
 
@@ -121,9 +121,9 @@ Concrete domains, projects, decisions this should influence.
 
 What could weaken or invalidate this insight.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ## failure
@@ -164,9 +164,9 @@ How it was noticed (or how it would be noticed earlier next time).
 
 What changed (or should change) to prevent recurrence.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ## pattern
@@ -207,9 +207,9 @@ Conditions where it fits.
 
 Conditions where it's a regression.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ## experiment
@@ -265,9 +265,9 @@ What happened. Updated as the experiment runs; finalized at conclusion.
 
 What you learned. May be inconclusive — that's a valid result.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ### Experiments are not research notes
@@ -342,9 +342,9 @@ To be filled across the lifecycle. Engagement metrics, post-publish observations
 
 Filled once outcomes have settled. What worked, what to keep / change / drop next time.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ### Production-log vs experiment
@@ -407,9 +407,9 @@ One paragraph.
 
 What this person is relevant to in your work.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ### Concepts
@@ -456,9 +456,9 @@ Brief; one paragraph each.
 
 What this commits us to and what it forecloses.
 
-## Connections
+## Relations
 
-- [[...]]
+- relates_to [[...]]
 ```
 
 ## Naming conventions summary

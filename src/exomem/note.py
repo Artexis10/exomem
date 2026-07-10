@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import corpus_aware, indexes, memory_refs, semantic_blocks
+from . import corpus_aware, indexes, markdown_relations, memory_refs, semantic_blocks
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -115,9 +115,6 @@ class NoteError(Exception):
 
 def _build_write_feedback(
     *,
-    vault_root: Path,
-    note_path: Path,
-    note_md: str,
     note_type: str,
     sources_norm: list[str],
     body_clean: str,
@@ -126,29 +123,57 @@ def _build_write_feedback(
     backrefs_planned: int,
     suggestions_count: int,
 ) -> dict:
-    document = semantic_blocks.parse_semantic_blocks(note_md)
+    document = semantic_blocks.parse_semantic_blocks(body_clean)
+    relation_document = markdown_relations.parse_markdown_relations(body_clean)
     by_kind: dict[str, int] = {}
     for block in document.blocks:
         by_kind[block.type] = by_kind.get(block.type, 0) + 1
 
+    note_relation_lines = {relation.line for relation in relation_document.relations}
+    block_relation_lines = {
+        relation.line
+        for block in document.blocks
+        for relation in block.relations
+    }
+    typed_lines = note_relation_lines | block_relation_lines
+
     body_targets: list[str] = []
+    generic_targets: list[str] = []
     seen_targets: set[str] = set()
+    seen_generic_targets: set[str] = set()
     for match in find_body_wikilinks(body_clean):
         target = match.group(0)[2:-2].split("|", 1)[0].split("#", 1)[0].strip()
         if target and target not in seen_targets:
             seen_targets.add(target)
             body_targets.append(target)
+        line = body_clean.count("\n", 0, match.start()) + 1
+        if target and line not in typed_lines and target not in seen_generic_targets:
+            seen_generic_targets.add(target)
+            generic_targets.append(target)
+
+    typed_note_relations = len(relation_document.relations)
+    typed_block_relations = sum(len(block.relations) for block in document.blocks)
+    relation_debt = not (
+        typed_note_relations
+        or typed_block_relations
+        or generic_targets
+        or sources_norm
+    )
 
     unresolved = list(source_warnings) + list(body_warnings)
     next_actions: list[str] = []
     if unresolved:
         next_actions.append("resolve or intentionally leave unresolved wikilinks")
     if suggestions_count:
-        next_actions.append("review related-page suggestions and edit in accepted links")
+        next_actions.append(
+            "review related-page suggestions and add accepted note edges under `## Relations`"
+        )
     if not sources_norm:
         next_actions.append("add a source link later if this conclusion came from raw material")
-    if not body_targets and not sources_norm:
-        next_actions.append("add at least one meaningful connection when one exists")
+    if relation_debt:
+        next_actions.append(
+            "review relation debt with `connect_memory(operation='suggest-relations')`"
+        )
     if not next_actions:
         next_actions.append("no immediate structural follow-up")
 
@@ -167,9 +192,16 @@ def _build_write_feedback(
         },
         "links": {
             "body_wikilinks": len(body_targets),
+            "generic_wikilinks": len(generic_targets),
             "source_wikilinks": len(sources_norm),
             "unresolved_count": len(unresolved),
             "unresolved": unresolved,
+        },
+        "relations": {
+            "typed_note": typed_note_relations,
+            "typed_block": typed_block_relations,
+            "errors": [error.as_dict() for error in relation_document.errors],
+            "relation_debt": relation_debt,
         },
         "suggestions": {
             "related_pages": suggestions_count,
@@ -411,9 +443,6 @@ def note(
 
     kb = kb_root(vault_root)
     write_feedback = _build_write_feedback(
-        vault_root=vault_root,
-        note_path=note_path,
-        note_md=note_md,
         note_type=note_type,
         sources_norm=sources_norm,
         body_clean=body_clean,

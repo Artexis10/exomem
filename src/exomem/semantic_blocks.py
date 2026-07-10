@@ -12,6 +12,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from .markdown_relations import RELATION_TYPES
+
 BLOCK_TYPES: frozenset[str] = frozenset(
     {
         "claim",
@@ -82,35 +84,6 @@ _BLOCK_TYPE_ALIASES: dict[str, str] = {
     "media_segments": "media_segment",
     "segments": "media_segment",
 }
-
-RELATION_TYPES: frozenset[str] = frozenset(
-    {
-        "supports",
-        "contradicts",
-        "refines",
-        "supersedes",
-        "derived_from",
-        "depends_on",
-        "evidenced_by",
-        "used_for",
-        "mitigates",
-        "causes",
-        "blocks",
-        "resolves",
-        "cites",
-        "implements",
-        "tests",
-        "owns",
-        "duplicates",
-        "caused_by",
-        "answers",
-        "raises_question",
-        "observed_in",
-        "mentions",
-        "about_entity",
-        "links_to",
-    }
-)
 
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.*?)\s*#*\s*$")
 _FENCE_RE = re.compile(r"^\s*(?:```|~~~)")

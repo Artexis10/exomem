@@ -982,17 +982,53 @@ def _simple_capture_main(argv: list[str]) -> int:
 
 
 def _simple_review_main(argv: list[str]) -> int:
+    triage_actions = {"dismiss", "snooze", "reopen"}
+    if argv and argv[0] in triage_actions:
+        action = argv[0]
+        parser = argparse.ArgumentParser(
+            prog=f"exomem review {action}",
+            description=f"{action.title()} one Epistemic Inbox item.",
+        )
+        parser.add_argument("ref", help="stable exomem://review/<id> reference")
+        if action == "snooze":
+            parser.add_argument(
+                "--until", required=True, help="snooze through YYYY-MM-DD"
+            )
+        parser.add_argument("--why", help="optional review rationale")
+        parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
+        args = parser.parse_args(argv[1:])
+        core = ["triage_memory", args.ref, "--action", action]
+        if action == "snooze":
+            core.extend(["--until", args.until])
+        if args.why:
+            core.extend(["--why", args.why])
+        return _core_op_main(_with_json(core, args.json))
+
     parser = argparse.ArgumentParser(
         prog="exomem review",
-        description="Review knowledge needing attention. Thin alias over attention/audit.",
+        description="Review the Epistemic Inbox or run the full vault audit.",
     )
     parser.add_argument("--audit", action="store_true", help="run the full audit report instead of attention queue")
     parser.add_argument("--category", dest="categories", action="append", default=None, help="review/audit category (repeatable)")
     parser.add_argument("--limit", type=int, default=25, help="attention item cap")
+    parser.add_argument(
+        "--state",
+        choices=("open", "all", "snoozed", "dismissed"),
+        default="open",
+        help="review state view",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
-    core = ["review_memory", "--mode", "audit"] if args.audit else ["review_memory", "--mode", "attention", "--limit", str(args.limit)]
+    core = ["review_memory", "--mode", "audit"] if args.audit else [
+        "review_memory",
+        "--mode",
+        "attention",
+        "--limit",
+        str(args.limit),
+        "--state",
+        args.state,
+    ]
     _append_repeated(core, "--categories", args.categories)
     return _core_op_main(_with_json(core, args.json))
 
@@ -1259,6 +1295,12 @@ def _print_human(result, *, op: str | None = None) -> None:
     if op in {"adopt", "adopt_vault"} and isinstance(result, dict):
         _print_adopt_human(result)
         return
+    if op == "review_memory" and isinstance(result, dict) and "items" in result:
+        _print_review_human(result)
+        return
+    if op == "triage_memory" and isinstance(result, dict):
+        _print_triage_human(result)
+        return
     if isinstance(result, list):
         if not result:
             print("(no results)")
@@ -1271,6 +1313,51 @@ def _print_human(result, *, op: str | None = None) -> None:
                 print(json.dumps(item, ensure_ascii=False, default=str))
     else:
         print(json.dumps(result, indent=2, ensure_ascii=False, default=str))
+
+
+def _print_review_human(result: dict) -> None:
+    items = result.get("items") or []
+    states = result.get("state_summary") or {}
+    all_total = result.get("all_total", result.get("total", len(items)))
+    print("Epistemic Inbox")
+    print(
+        "  "
+        f"{result.get('shown', len(items))} shown, {result.get('total', len(items))} in view, "
+        f"{all_total} total"
+    )
+    hidden = []
+    for name in ("snoozed", "dismissed"):
+        if states.get(name):
+            hidden.append(f"{states[name]} {name}")
+    if hidden:
+        print(f"  Hidden: {', '.join(hidden)}")
+    if not items:
+        print("\nNothing needs attention in this view.")
+        return
+
+    for index, item in enumerate(items, start=1):
+        categories = ", ".join(
+            str(category).replace("_", " ") for category in item.get("categories") or []
+        )
+        severity = str(item.get("severity") or "info").upper()
+        print(f"\n{index}. [{severity}] {categories}")
+        print(f"   {item.get('path')}")
+        reasons = item.get("reasons") or []
+        if reasons:
+            print(f"   {reasons[0].get('detail', '')}")
+            if len(reasons) > 1:
+                print(f"   + {len(reasons) - 1} additional reason(s)")
+        print(f"   {item.get('ref')}")
+    if result.get("note"):
+        print(f"\n{result['note']}")
+
+
+def _print_triage_human(result: dict) -> None:
+    print(f"Review item {result.get('state', 'updated')}")
+    if result.get("path"):
+        print(f"  {result['path']}")
+    if result.get("ref"):
+        print(f"  {result['ref']}")
 
 
 def _core_op_main(argv: list[str]) -> int:

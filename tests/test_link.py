@@ -10,7 +10,6 @@ import yaml
 
 from exomem import link as link_module
 
-
 TODAY = dt.date(2026, 5, 25)
 
 
@@ -221,6 +220,7 @@ def test_link_connections_normalize_and_render(vault: Path) -> None:
     # KB-relative inputs get promoted to full vault-rooted form. Read-only
     # sibling-tree references (`Reference/...`, marked readonly in _access.yaml)
     # stay vault-relative — they don't live under Knowledge Base/.
-    assert "- [[Knowledge Base/Notes/Insights/foo]]" in text
-    assert "- [[Knowledge Base/Notes/Patterns/bar]]" in text
-    assert "- [[Reference/Strategy]]" in text
+    assert "## Relations" in text
+    assert "- relates_to [[Knowledge Base/Notes/Insights/foo]]" in text
+    assert "- relates_to [[Knowledge Base/Notes/Patterns/bar]]" in text
+    assert "- relates_to [[Reference/Strategy]]" in text

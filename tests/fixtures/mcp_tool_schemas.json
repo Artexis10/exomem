@@ -1970,7 +1970,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, audit, provenance, evolution, compilation, stale, contradiction, or unprocessed-sources.",
+          "description": "attention, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt.",
           "type": "string"
         },
         "categories": {
@@ -2072,6 +2072,23 @@
           ],
           "default": null,
           "description": "Restrict provenance scan to one path."
+        },
+        "state": {
+          "default": "open",
+          "description": "For attention, open (default), all, snoozed, or dismissed.",
+          "type": "string"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable `exomem://review/<id>` reference for item mode."
         }
       },
       "type": "object"
@@ -2167,6 +2184,51 @@
           "type": "string"
         }
       },
+      "type": "object"
+    }
+  },
+  "triage_memory": {
+    "description": "Triage one Epistemic Inbox item explicitly.\n\nThis is the write-capable companion to read-only `review_memory`. Decisions\nbind to the current signal fingerprint, so materially changed knowledge\nresurfaces automatically.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "description": "Stable `exomem://review/<id>` reference from review_memory.",
+          "type": "string"
+        },
+        "action": {
+          "description": "dismiss, snooze, or reopen.",
+          "type": "string"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Snooze-through date as YYYY-MM-DD; required only for snooze."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional short rationale stored with the review decision."
+        }
+      },
+      "required": [
+        "ref",
+        "action"
+      ],
       "type": "object"
     }
   }

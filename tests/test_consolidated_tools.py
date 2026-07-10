@@ -227,7 +227,19 @@ def test_review_memory_attention_mode_composes_review_surface(vault: Path, monke
     assert isinstance(out["items"], list)
     assert out["shown"] == len(out["items"]) <= 10
     for item in out["items"]:
-        assert {"path", "score", "severity", "categories", "reasons", "proposed_fix"} <= set(item)
+        assert {
+            "path",
+            "score",
+            "severity",
+            "categories",
+            "reasons",
+            "proposed_fix",
+            "item_id",
+            "ref",
+            "target_ref",
+            "fingerprint",
+            "state",
+        } <= set(item)
         assert item["categories"], "every item must name at least one queue"
         assert "review only" in item["proposed_fix"].lower()
 
@@ -235,3 +247,24 @@ def test_review_memory_attention_mode_composes_review_surface(vault: Path, monke
     only_sources = _call(mcp, "review_memory", {"mode": "attention", "categories": ["unprocessed_source"]})
     surfaced = {c for it in only_sources["items"] for c in it["categories"]}
     assert surfaced <= {"unprocessed_source"}
+
+
+def test_triage_memory_mcp_write_is_explicit_and_reversible(vault: Path, monkeypatch) -> None:
+    mcp = _build(monkeypatch)
+    review = _call(mcp, "review_memory", {"mode": "attention", "limit": 1})
+    item = review["items"][0]
+
+    dismissed = _call(
+        mcp,
+        "triage_memory",
+        {"ref": item["ref"], "action": "dismiss", "why": "reviewed"},
+    )
+    assert dismissed["state"] == "dismissed"
+    assert (vault / "Knowledge Base/.review-state.json").exists()
+
+    reopened = _call(
+        mcp,
+        "triage_memory",
+        {"ref": item["ref"], "action": "reopen"},
+    )
+    assert reopened["state"] == "open"

@@ -23,6 +23,7 @@ PRODUCT_ROUTES = [
     "preserve_evidence",
     "transfer_artifact",
     "review_memory",
+    "triage_memory",
     "connect_memory",
     "adopt_vault",
     "maintain_memory",
@@ -81,7 +82,13 @@ def test_replace_memory_route_exists(vault, monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_product_review_connection_dataset_and_file_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
-    for name in ("connect_memory", "review_memory", "query_dataset", "manage_memory_file"):
+    for name in (
+        "connect_memory",
+        "review_memory",
+        "triage_memory",
+        "query_dataset",
+        "manage_memory_file",
+    ):
         r = client.post(f"/api/{name}", json={}, headers=_auth())
         assert r.status_code != 404, f"/api/{name} missing"
 
@@ -190,9 +197,25 @@ def test_review_memory_route_and_openapi_params(vault, monkeypatch: pytest.Monke
     schema = doc["paths"]["/api/review_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]
-    assert {"mode", "categories", "limit", "query", "sources"} <= set(schema["properties"])
+    assert {"mode", "categories", "limit", "query", "sources", "state", "ref"} <= set(
+        schema["properties"]
+    )
     assert schema["properties"]["limit"]["type"] == "integer"
     assert schema["properties"]["categories"]["type"] == "array"
+
+    item = body["data"]["items"][0]
+    triage = client.post(
+        "/api/triage_memory",
+        json={"ref": item["ref"], "action": "snooze", "until": "2099-01-01"},
+        headers=_auth(),
+    )
+    assert triage.status_code == 200, triage.text
+    assert triage.json()["data"]["state"] == "snoozed"
+    assert "/api/triage_memory" in doc["paths"]
+    triage_schema = doc["paths"]["/api/triage_memory"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert {"ref", "action"} <= set(triage_schema.get("required", []))
 
 
 def test_openapi_has_no_hand_list(vault, monkeypatch: pytest.MonkeyPatch) -> None:
