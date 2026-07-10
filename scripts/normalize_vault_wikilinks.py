@@ -41,6 +41,7 @@ SRC = HERE.parent / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
+from exomem import access  # noqa: E402
 from exomem import audit as audit_module  # noqa: E402
 from exomem import indexes  # noqa: E402
 from exomem.vault import (  # noqa: E402
@@ -56,28 +57,45 @@ from exomem.vault import (  # noqa: E402
 )
 
 
-# Skip these subtrees of Knowledge Base/ entirely.
-SKIP_KB_SUBDIRS = frozenset({"_Schema", "_trash", "_archive", "_attachments"})
+# Skip append-only and infrastructure subtrees entirely. Per-vault readonly and
+# excluded policy is checked separately through ``access_tier`` below.
+SKIP_KB_SUBDIRS = frozenset({
+    "Sources", "Evidence", "_Schema", "_trash", "_archive", "_attachments",
+})
+
+
+def _is_writable_tree(vault_root: Path, path: Path) -> bool:
+    rel = path.relative_to(vault_root).as_posix()
+    return access.access_tier(vault_root, rel) == access.TIER_READ_WRITE
 
 
 def walk_kb_md(kb_dir: Path):
-    """Yield every .md under Knowledge Base/, skipping infra/archive subtrees."""
+    """Yield writable compiled Markdown, preserving protected provenance trees."""
+    vault_root = kb_dir.parent
     for child in sorted(kb_dir.iterdir()):
         if child.is_dir():
-            if child.name in SKIP_KB_SUBDIRS:
+            if child.name in SKIP_KB_SUBDIRS or not _is_writable_tree(vault_root, child):
                 continue
-            yield from _walk(child)
-        elif child.is_file() and child.suffix.lower() == ".md":
+            yield from _walk(child, vault_root)
+        elif (
+            child.is_file()
+            and child.suffix.lower() == ".md"
+            and _is_writable_tree(vault_root, child)
+        ):
             yield child
 
 
-def _walk(dir_: Path):
+def _walk(dir_: Path, vault_root: Path):
     for child in sorted(dir_.iterdir()):
         if child.is_dir():
-            if child.name in SKIP_KB_SUBDIRS:
+            if child.name in SKIP_KB_SUBDIRS or not _is_writable_tree(vault_root, child):
                 continue
-            yield from _walk(child)
-        elif child.is_file() and child.suffix.lower() == ".md":
+            yield from _walk(child, vault_root)
+        elif (
+            child.is_file()
+            and child.suffix.lower() == ".md"
+            and _is_writable_tree(vault_root, child)
+        ):
             yield child
 
 
@@ -238,7 +256,7 @@ def main() -> int:
         # Split into batches to keep the atomic-write tempfile count reasonable.
         BATCH = 100
         for i in range(0, len(writes), BATCH):
-            batch_atomic_write(writes[i : i + BATCH])
+            batch_atomic_write(writes[i : i + BATCH], vault_root=vault_root)
         print(f"  wrote {len(writes)} files.")
         print()
 
