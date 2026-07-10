@@ -221,6 +221,21 @@ def test_review_memory_route_and_openapi_params(vault, monkeypatch: pytest.Monke
     assert {"ref", "action"} <= set(triage_schema.get("required", []))
 
 
+def test_review_memory_activation_route(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    response = client.post(
+        "/api/review_memory",
+        json={"mode": "activation", "limit": 3},
+        headers=_auth(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["coverage"]["eligible_pages"] > 0
+    assert data["shown"] == len(data["items"]) <= 3
+    assert all(item["ref"].startswith("exomem://review/") for item in data["items"])
+
+
 def test_openapi_has_no_hand_list(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     doc = client.get("/api/openapi.json").json()
