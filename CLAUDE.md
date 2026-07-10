@@ -80,3 +80,36 @@ the request then executes in normal time; (2) Cloudflare's edge caps a single
 request at ~100 s. **Diagnose from the access log before touching the server**
 (claude.ai gateway IPs `160.79.104.0/21` still appear through the tunnel); don't
 restart the service reflexively — restarts CAUSE pattern (1) for live sessions.
+
+## Codex worker protocol (GPT-5.6 fan-out)
+
+Codex CLI agents are first-class implementation workers; Claude Code stays the
+orchestrator and merge gate. If you are a **Codex worker**: your task is
+`.task/TASK.md` in this worktree — implement it exactly, do not redesign or
+expand scope, commit to the current branch, never push, and write
+`.task/RESULT.md` when done.
+
+Routing (orchestrator applies):
+
+| Task class | Route |
+|---|---|
+| Adversarial review / architecture critique | Sol xhigh, read-only (`omc ask codex --agent-prompt critic\|architect`) |
+| Branch/PR review | `codex review` in the lane worktree |
+| Standard implementation with tests | `scripts/codex_task.sh start <lane> <brief>` (Terra high) |
+| Design-sensitive / hard lanes | Sol xhigh, or a Claude executor |
+| Mechanical sweeps, docs | `--profile luna-sweep` (Luna medium) |
+| Shared-primary ops, merges, KB writes, MCP-needing tasks | Claude only — never Codex |
+
+Lane mechanics: one lane = one sibling worktree (`../exomem-<lane>`, branch
+`codex/<lane>`, from `origin/main`) = one self-contained `.task/TASK.md` brief
+(`codex_task.sh template`) naming the OpenSpec artifacts as source of truth,
+a scope allowlist, and exact acceptance commands. `codex exec` runs
+`workspace-write`, sandboxed to the worktree — never on the primary checkout
+(the runner enforces this). Results come back as commits on the lane branch
+plus `.task/RESULT.md`; briefs live under `.task/` (git-excluded, never
+committed). Before merging, `scripts/codex_task.sh verify <worktree>` must
+pass: clean tree, diff within the brief's allowlist, guarded files untouched
+(`tests/golden/`, gate tests, `.github/`), lean pytest + latency gate green.
+On failure: write `.task/FEEDBACK.md`, retry once, escalate Terra→Sol, then
+reassign to a Claude executor. Cap concurrent workers at 4–6; run benchmarks
+only on a quiesced machine.
