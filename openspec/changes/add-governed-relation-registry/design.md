@@ -24,6 +24,8 @@ unified-context, and schema-governance surfaces this design extends.
 **Goals:**
 
 - Establish one versioned source of truth for portable core relation semantics.
+- Preserve a zero-configuration experience and current behavior for users who
+  never create an extension or custom profile.
 - Permit precise namespaced extension relations without fragmenting
   cross-domain traversal.
 - Preserve unknown observed relation labels and their provenance for review.
@@ -63,6 +65,25 @@ vault. The core must mean the same thing across installations and must not be
 silently overridden by vault configuration. A Python-only enum was rejected
 because the registry needs structured metadata and stable serialization for
 API responses and tests.
+
+### Adoption is universal at the core and opt-in at the precision layer
+
+Every installation uses the consolidated core internally, but this requires no
+setup and preserves current parsing and broad-context defaults. The scaffold
+contains an empty extension registry and no domain assumptions. Built-in
+profiles are available without configuration; `all` remains the omitted-profile
+behavior.
+
+Custom extensions, custom profiles, corpus inference, registry persistence, and
+Markdown migration are opt-in actions. No startup prompt, automatic ontology
+wizard, mandatory schema validation, or background corpus rewrite is added.
+Unregistered observations remain advisory and do not enter the default
+attention queue or make otherwise healthy ordinary writes fail.
+
+This gradient was selected because most users need portable graph behavior, not
+ontology administration. Advanced broad-corpus users can add precision as the
+corpus demonstrates a need, while every other user receives internal
+consistency with effectively no new product surface.
 
 ### Extensions are namespaced refinements of a core parent
 
@@ -116,16 +137,21 @@ reviewable.
 
 ### Unknown relation observations are preserved but semantically inert
 
-The parser recognizes syntactically valid typed-relation observations even when
-their label is not registered. The graph stores the observed edge with
+The parser recognizes unregistered labels only where typed intent is explicit:
+semantic-block relation metadata or a relation bullet with a colon, such as
+`- medicine.replicates: [[Target]]`. Existing registered labels keep their
+backward-compatible colon-optional grammar. This prevents ordinary navigation
+bullets such as `- See [[Target]]` from becoming ontology findings merely because
+they begin with a word and a link. The graph stores an explicit unknown edge with
 `registry_status="unregistered"`, its raw label, target resolution, and source
 provenance. It does not assign a core parent, inverse, symmetry, or epistemic
 meaning.
 
 Normal traversal profiles exclude unregistered edges. Unified context reports
-their count and examples as warnings; the unrestricted diagnostic profile may
-include them explicitly. Audit reports them, and corpus inference can propose
-registry skeletons.
+their bounded count and examples as advisory warnings; the unrestricted
+diagnostic profile may include them explicitly. A dedicated registry audit and
+explicit corpus inference report them, but they do not enter default attention
+or change ordinary write validity.
 
 Preservation was selected over the current ignore behavior because dropped
 observations cannot be governed later. Treating unknown labels as generic

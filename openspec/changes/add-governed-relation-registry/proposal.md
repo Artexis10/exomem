@@ -11,10 +11,14 @@ without turning relation labels into unreviewed truth.
 
 - Replace duplicated hard-coded relation enums with one versioned core relation
   registry shared by semantic parsing, graph indexing, validation, and context.
+- Keep ordinary use zero-config: the portable core and current broad traversal
+  remain the defaults, while custom extensions, profiles, and corpus inference
+  are explicitly opt-in.
 - Add optional vault- and project-scoped relation extensions using namespaced
   identifiers and explicit mappings to a core parent relation.
 - Preserve unregistered observed relation labels in derived graph state with
-  source provenance and audit findings instead of silently dropping them.
+  source provenance and advisory governance findings instead of silently
+  dropping them or adding them to default attention queues.
 - Infer relation frequencies and extension candidates from a selected corpus,
   but require explicit, hash-guarded adoption before an extension becomes
   registered.

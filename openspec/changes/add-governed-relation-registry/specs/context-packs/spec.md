@@ -15,9 +15,10 @@ their more precise canonical key in the response.
 
 ### Requirement: Context never hides unknown relation observations
 Normal context SHALL exclude unregistered edges from traversal but SHALL report
-their bounded count and source examples as warnings. An explicit diagnostic view
-MAY include the semantically inert observed edges while clearly marking them
-unregistered.
+their bounded count and source examples as advisory warnings when they occur in
+the selected neighborhood. An explicit diagnostic view MAY include the
+semantically inert observed edges while clearly marking them unregistered. These
+warnings MUST NOT add items to default attention or alter ordinary retrieval.
 
 #### Scenario: Unknown edge is warned without semantic promotion
 - **WHEN** a seed page contains a valid but unregistered typed relation

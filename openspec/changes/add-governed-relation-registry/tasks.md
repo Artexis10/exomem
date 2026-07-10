@@ -16,9 +16,10 @@
 
 - [ ] 3.1 Bump the graph sidecar schema and persist raw/canonical relation identity, parent, registry status/version/hash, and existing source provenance
 - [ ] 3.2 Preserve syntactically valid unregistered observations as semantically inert derived edges with resolved or placeholder targets
-- [ ] 3.3 Resolve aliases, deprecated keys, and scope violations deterministically without rewriting Markdown
-- [ ] 3.4 Extend graph audit and reconcile for unknown, deprecated, out-of-scope, invalid, and registry-hash drift
-- [ ] 3.5 Add rebuild, edit, move, watcher, delete, and registry-change tests for incremental and full graph freshness
+- [ ] 3.3 Restrict unknown capture to explicit typed intent and add regression tests proving navigation bullets do not create ontology or attention noise
+- [ ] 3.4 Resolve aliases, deprecated keys, and scope violations deterministically without rewriting Markdown
+- [ ] 3.5 Extend opt-in graph governance audit and reconcile for unknown, deprecated, out-of-scope, invalid, and registry-hash drift
+- [ ] 3.6 Add rebuild, edit, move, watcher, delete, and registry-change tests for incremental and full graph freshness
 
 ## 4. Corpus relation governance
 
