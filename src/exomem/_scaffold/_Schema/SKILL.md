@@ -156,10 +156,11 @@ shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 `read_memory` (open a page), `browse_memory` (vault shape), `remember`
 (compiled conclusions), `edit_memory`, `replace_memory`, `capture_source`,
 `compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
-`connect_memory`, `adopt_vault`, `maintain_memory`, `query_dataset`, and
-`read_media`. In Claude Code, load them by exact name in a single call:
+`connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
+`query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
+single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,connect_memory,adopt_vault,maintain_memory,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -207,9 +208,10 @@ experiments, proof-bearing records, review, and supersession.
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory` |
-| `connect` | "connect these ideas," "suggest relations," "what does this link to" | `connect_memory` |
+| `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
+| `schema` | "what structure recurs," "validate this corpus contract" | `schema_memory`; infer before saving, and keep contracts optional |
 
 Examples:
 
@@ -227,6 +229,20 @@ Examples:
   keep/edit/supersede/archive.
 - "This new strategy replaces the old one" -> use supersession so history stays
   visible.
+
+## Durable references
+
+New governed pages and evidence sidecars carry an immutable `exomem_id`, and
+write responses return both a current `path` and a canonical
+`exomem://memory/<uuid>` reference. Use the reference when a later workflow must
+survive moves or renames; paths remain valid and are usually easier to show to a
+person. Never invent, copy, or edit an `exomem_id` by hand.
+
+Legacy pages are not rewritten automatically. To add IDs, first run
+`maintain_memory(mode="backfill-ids")` in its default dry-run mode, inspect the
+proposed files, and write only after explicit confirmation with `dry_run=false`.
+Duplicate or malformed IDs are audit findings; do not guess which duplicate a
+reference means.
 
 ## Canonical Operations
 Product commands are the public interface. The operations below are canonical

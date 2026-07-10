@@ -55,6 +55,9 @@ from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
+from . import memory_refs as memory_refs_module
+from . import memory_context as memory_context_module
+from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
 from . import note as note_module
@@ -679,6 +682,11 @@ def op_find(
             hit_dicts = [h.as_compact_dict() for h in hits]
         else:
             hit_dicts = [h.as_dict() for h in hits]
+        ref_index = memory_refs_module.ReferenceIndex(vault_root)
+        for hit in hit_dicts:
+            ref = ref_index.ref_for_path(str(hit.get("path") or ""))
+            if ref:
+                hit["ref"] = ref
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -736,6 +744,20 @@ def _citation_url(_path: str) -> str:
     return ""
 
 
+def _resolve_memory_identifier(vault_root: Path, value: str) -> str:
+    try:
+        return memory_refs_module.resolve_identifier(vault_root, value)
+    except memory_refs_module.ReferenceError as exc:
+        raise ValueError(f"{exc.code}: {exc.reason}") from exc
+
+
+def _attach_memory_ref(vault_root: Path, out: dict, path: str) -> dict:
+    ref = memory_refs_module.ReferenceIndex(vault_root).ref_for_path(path)
+    if ref:
+        out["ref"] = ref
+    return out
+
+
 def _string_metadata(**items: object) -> dict[str, str]:
     out: dict[str, str] = {}
     for key, value in items.items():
@@ -763,6 +785,7 @@ def _search_result_from_hit(hit: dict) -> SearchResult:
         outside_kb=hit.get("outside_kb"),
         media_type=hit.get("media_type"),
         media_file=hit.get("media_file"),
+        ref=hit.get("ref"),
     )
     return {"id": path, "title": title, "url": _citation_url(path), "metadata": metadata}
 
@@ -876,6 +899,7 @@ def op_fetch(
         {"id", "title", "text", "url", "metadata"}. `text` is the markdown body;
         it ends with `[truncated]` when the body exceeded the effective cap.
     """
+    id = _resolve_memory_identifier(vault_root, id)
     try:
         page = get_page_module.get_page(vault_root, path=id)
     except get_page_module.GetError as e:
@@ -888,13 +912,14 @@ def op_fetch(
         frontmatter_only=False,
         include_history=False,
     )
-    return {
+    out = {
         "id": page.path,
         "title": _title_from_page(page.path, page.frontmatter),
         "text": text_out,
         "url": _citation_url(page.path),
         "metadata": metadata,
     }
+    return _attach_memory_ref(vault_root, out, page.path)
 def _timing_log_summary(timings_dict: dict | None) -> dict | None:
     """Query-log-safe slice of a timings envelope: totals + per-stage ms only
     (never content; stage entries drop skip/error detail to stay compact)."""
@@ -953,6 +978,7 @@ def op_suggest_links(
         path errors (NOT_FOUND, INVALID_PATH) when `path` doesn't resolve.
     """
     if path:
+        path = _resolve_memory_identifier(vault_root, path)
         try:
             gp = get_page_module.get_page(vault_root, path=path)
         except get_page_module.GetError as e:
@@ -1021,6 +1047,8 @@ def op_graph_context(
         {available, reason, seeds, nodes, edges, truncation}. Nodes and edges
         carry source path/anchor/hash provenance and relation metadata.
     """
+    if path:
+        path = _resolve_memory_identifier(vault_root, path)
     return epistemic_graph_module.graph_context(
         vault_root,
         path=path,
@@ -1062,6 +1090,8 @@ def op_suggest_relations(
         candidate includes from/to, relation_type, method, and evidence.
         `mutated` is always false.
     """
+    if path:
+        path = _resolve_memory_identifier(vault_root, path)
     return epistemic_graph_module.suggest_relations(
         vault_root,
         path=path,
@@ -1510,6 +1540,7 @@ def op_get(
         INVALID_PATH (path escapes vault root or empty);
         NOT_FOUND (no such file); UNREADABLE (parse failure).
     """
+    path = _resolve_memory_identifier(vault_root, path)
     if frontmatter_only:
         try:
             fm_result = get_frontmatter_module.get_frontmatter(
@@ -1548,7 +1579,7 @@ def op_get(
         out["links"] = _link_summary(
             vault_root, out.get("path", ""), out.get("body", "")
         )
-    return out
+    return _attach_memory_ref(vault_root, out, str(out["path"]))
 
 
 def op_edit(
@@ -1687,6 +1718,7 @@ def op_edit(
         raise ValueError(
             f"INVALID_EDIT: one edit mode at a time; got {', '.join(active)}"
         )
+    path = _resolve_memory_identifier(vault_root, path)
     try:
         if edits is not None:
             result = multi_edit_module.multi_edit(
@@ -1785,6 +1817,7 @@ def op_replace(
         supersedable type); OLD_NOT_FOUND; ALREADY_SUPERSEDED
         (old page is already marked superseded).
     """
+    old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
         result = replace_module.replace(
             vault_root,
@@ -2441,6 +2474,7 @@ def op_move_file(
     Errors: INVALID_PATH; NOT_FOUND; DEST_EXISTS; APPEND_ONLY;
             CURATED_PROTECTED.
     """
+    old_path = _resolve_memory_identifier(vault_root, old_path)
     try:
         result = move_file_module.move_file(
             vault_root,
@@ -2514,6 +2548,7 @@ def op_delete(
             APPEND_ONLY; CURATED_PROTECTED; SUPERSEDED_HISTORY;
             INBOUND_LINKS; TRASH_FAILED; (dir) NOT_A_DIR; NOT_EMPTY.
     """
+    path = _resolve_memory_identifier(vault_root, path)
     try:
         abs_path, _rel = resolve_under_vault(vault_root, path)
         is_dir = abs_path.is_dir()
@@ -2645,8 +2680,7 @@ def op_recover_from_trash(
     return result.as_dict()
 
 
-def op_list_inbound_links(
-    vault_root: Path,target: str) -> dict:
+def op_list_inbound_links(vault_root: Path, target: str) -> dict:
     """Tier 2: find files whose wikilinks resolve to `target`. Read-only.
 
     Useful before `move_file` (preview what update_wikilinks will touch)
@@ -2662,6 +2696,7 @@ def op_list_inbound_links(
              count}.
     Errors: INVALID_TARGET; INVALID_PATH.
     """
+    target = _resolve_memory_identifier(vault_root, target)
     try:
         result = list_inbound_links_module.list_inbound_links(
             vault_root, target=target
@@ -2805,7 +2840,7 @@ def op_ask_memory(
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
     """
-    return op_find(
+    result = op_find(
         vault_root,
         query=query,
         types=types,
@@ -2827,6 +2862,14 @@ def op_ask_memory(
         detail=detail,
         include_timings=include_timings,
     )
+    hits = result.get("hits", []) if isinstance(result, dict) else result
+    ref_index = memory_refs_module.ReferenceIndex(vault_root)
+    for hit in hits:
+        if isinstance(hit, dict) and hit.get("path"):
+            ref = ref_index.ref_for_path(str(hit["path"]))
+            if ref:
+                hit["ref"] = ref
+    return result
 
 
 def op_read_memory(
@@ -3323,6 +3366,8 @@ def op_review_memory(
         value: Provenance value filter.
         path: Restrict provenance scan to one path.
     """
+    if path:
+        path = _resolve_memory_identifier(vault_root, path)
     if mode == "attention":
         return op_attention(vault_root, categories=categories, limit=limit)
     if mode == "audit":
@@ -3363,6 +3408,7 @@ def op_connect_memory(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    max_body_chars: int = 3000,
     entity_type: str | None = None,
     name: str | None = None,
     summary: str | None = None,
@@ -3387,7 +3433,7 @@ def op_connect_memory(
     writer.
 
     Args:
-        operation: suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.
+        operation: context, suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
@@ -3401,6 +3447,7 @@ def op_connect_memory(
         node_types: Graph node-type allowlist.
         max_nodes: Graph node cap.
         max_edges: Graph edge cap.
+        max_body_chars: Per-document stored-body cap for context.
         entity_type: Entity type for create-entity.
         name: Entity name for create-entity.
         summary: Entity summary for create-entity.
@@ -3418,6 +3465,10 @@ def op_connect_memory(
         project: Decision project key.
         decision_status: Decision status.
     """
+    if path:
+        path = _resolve_memory_identifier(vault_root, path)
+    if target:
+        target = _resolve_memory_identifier(vault_root, target)
     if operation == "suggest-links":
         return op_suggest_links(
             vault_root,
@@ -3436,8 +3487,8 @@ def op_connect_memory(
             include_model_suggestions=include_model_suggestions,
             limit=limit,
         )
-    if operation == "graph-context":
-        return op_graph_context(
+    if operation in ("context", "graph-context"):
+        return memory_context_module.assemble_context(
             vault_root,
             path=path,
             query=query,
@@ -3446,6 +3497,8 @@ def op_connect_memory(
             node_types=node_types,
             max_nodes=max_nodes,
             max_edges=max_edges,
+            limit=limit,
+            max_body_chars=max_body_chars,
         )
     if operation == "inbound-links":
         target_path = target or path
@@ -3480,7 +3533,7 @@ def op_connect_memory(
             decision_status=decision_status,
         )
     raise ValueError(
-        "INVALID_MODE: connect_memory operation must be suggest-links, "
+        "INVALID_MODE: connect_memory operation must be context, suggest-links, "
         "suggest-relations, graph-context, inbound-links, or create-entity"
     )
 
@@ -3533,11 +3586,12 @@ def op_maintain_memory(
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
-    Default mode is read-only audit. `mode="fix"` and `mode="reconcile"`
+    Default mode is read-only audit. `mode="fix"`, `mode="reconcile"`, and
+    `mode="backfill-ids"`
     preserve the canonical dry-run/write semantics and default to dry-run here.
 
     Args:
-        mode: audit, fix, or reconcile.
+        mode: audit, fix, reconcile, or backfill-ids.
         categories: Optional audit category filter.
         dry_run: For fix/reconcile, report without writing when true.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
@@ -3548,7 +3602,90 @@ def op_maintain_memory(
         return op_audit_fix(vault_root, dry_run=dry_run, rebuild_embeddings=rebuild_embeddings)
     if mode == "reconcile":
         return op_reconcile(vault_root, dry_run=dry_run)
-    raise ValueError("INVALID_MODE: maintain_memory mode must be audit, fix, or reconcile")
+    if mode == "backfill-ids":
+        return memory_refs_module.backfill_ids(vault_root, dry_run=dry_run)
+    raise ValueError(
+        "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, or backfill-ids"
+    )
+
+
+def op_schema_memory(
+    vault_root: Path,
+    operation: str,
+    name: str,
+    project: str | None = None,
+    page_type: str | None = None,
+    save: bool = False,
+    expected_hash: str | None = None,
+    strict: bool = False,
+    compare_to: str | None = None,
+) -> dict:
+    """Infer, validate, or diff an optional corpus-backed memory contract.
+
+    Contracts describe recurring frontmatter fields, semantic blocks, and typed
+    relations without changing ordinary write validation. Inference is read-only
+    unless `save=true`; an existing contract can only be overwritten with its
+    current content hash.
+
+    Args:
+        operation: infer, validate, or diff.
+        name: Lowercase contract slug under `_Schema/contracts/`.
+        project: Optional project scope for inference.
+        page_type: Optional page-type scope for inference.
+        save: Persist an inferred proposal. Default false.
+        expected_hash: Required current hash when overwriting a saved contract.
+        strict: In validate mode, signal a failing CLI/CI outcome on findings.
+        compare_to: In diff mode, compare to this saved contract instead of corpus reality.
+
+    Returns:
+        A structured profile/proposal, validation report, or contract diff.
+    """
+    operation = operation.strip().lower()
+    if operation == "infer":
+        inferred = memory_schema_module.infer_contract(
+            vault_root, name=name, project=project, page_type=page_type
+        )
+        if save:
+            inferred["saved"] = memory_schema_module.save_contract(
+                vault_root,
+                inferred["proposal"],
+                expected_hash=expected_hash,
+            )
+        return inferred
+    if save:
+        raise ValueError("INVALID_SCHEMA_OPERATION: save is supported only for infer")
+    contract, content_hash, path = memory_schema_module.load_contract(vault_root, name)
+    if operation == "validate":
+        result = memory_schema_module.validate_contract(
+            vault_root, contract, strict=strict
+        )
+        result.update({"path": path, "content_hash": content_hash})
+        return result
+    if operation == "diff":
+        if compare_to:
+            after, after_hash, after_path = memory_schema_module.load_contract(
+                vault_root, compare_to
+            )
+            comparison = {"kind": "contract", "path": after_path, "content_hash": after_hash}
+        else:
+            inferred = memory_schema_module.infer_contract(
+                vault_root,
+                name=name,
+                project=contract.scope.project,
+                page_type=contract.scope.page_type,
+            )
+            after = memory_schema_module.contract_from_dict(inferred["proposal"])
+            comparison = {"kind": "corpus", "sample_size": inferred["sample_size"]}
+        result = memory_schema_module.diff_contracts(contract, after)
+        result.update(
+            {
+                "path": path,
+                "content_hash": content_hash,
+                "comparison": comparison,
+            }
+        )
+        return result
+    raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
 
 
 def op_manage_memory_file(
@@ -3861,6 +3998,7 @@ _SPEC: tuple[tuple, ...] = (
     ("list_trash", op_list_trash, 2, False, False, None, _MCRC),
     ("recover_from_trash", op_recover_from_trash, 2, True, False, "trash_path", _MCRC),
     ("list_inbound_links", op_list_inbound_links, 2, False, False, "target", _MCRC),
+    ("schema_memory", op_schema_memory, 1, True, False, None, _MCRC),
     ("get_video_frames", op_get_video_frames, 2, False, False, None, _M),
 )
 
@@ -4059,6 +4197,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         None,
         _MCRC,
         ("audit", "audit_fix", "reconcile"),
+        {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
+    ),
+    (
+        "schema_memory",
+        op_schema_memory,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("schema_memory",),
         {"surface": "advanced", "actions": ("review", "update"), "first_run_safe": True},
     ),
     (

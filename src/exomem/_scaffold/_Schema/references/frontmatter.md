@@ -11,6 +11,7 @@ These appear on every page type:
 
 | Field | Required | Type | Notes |
 |---|---|---|---|
+| `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
 | `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `experiment`, `production-log`, `entity` |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
 | `created` | yes | ISO date | `YYYY-MM-DD`, set on creation, never edited |
@@ -141,6 +142,7 @@ write. You can paste in any shape; the file on disk lands canonical.
 
 ```yaml
 ---
+exomem_id: 123e4567-e89b-42d3-a456-426614174000
 type: research-note
 project: project-alpha
 status: active
@@ -158,6 +160,7 @@ tags: [retrieval, agentic-rag, knowledge-graph, governance]
 
 ```yaml
 ---
+exomem_id: 123e4567-e89b-42d3-a456-426614174001
 type: experiment
 domain: workflow
 status: active

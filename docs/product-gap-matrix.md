@@ -16,7 +16,14 @@ The harness creates temporary vaults under `.pytest-tmp/product-flow-benchmark/`
 
 ## Verdict
 
-Exomem is stronger where the product needs governance: source/evidence separation, provenance, review queues, and safe copied-source preservation. Basic Memory is stronger where the product needs low-friction adoption: cloud/no-install path, sync, importers, schema tools, multi-project UX, context/canvas workflows, and packaged assistant ecosystem.
+Exomem is stronger where the product needs governance: stable object identity,
+source/evidence separation, provenance, supersession, review queues, optional
+hash-guarded schema contracts, and safe copied-source preservation. Basic Memory
+is stronger where the product needs low-friction adoption and breadth:
+cloud/no-install paths, sync, importers, multi-project UX, canvas workflows, and
+the packaged assistant ecosystem. The earlier technical schema and unified
+context gaps are now closed; the remaining lead is primarily product surface,
+not knowledge-substrate depth.
 
 The earlier largest product gap was first-run adoption: direct CLI scans of a messy uninitialized vault failed before they could report anything useful. That is now fixed for the product surface: `browse_memory(mode="overview")` and `adopt_vault(mode="scan-only")` can inspect a pre-init vault, while write-capable adoption modes still require an initialized governed KB.
 
@@ -30,12 +37,13 @@ The earlier largest product gap was first-run adoption: direct CLI scans of a me
 | Write / remember | Ahead | Pass | Basic Memory `write_note` is easier; Exomem is more governed. | Exomem writes raw Sources and compiled notes separately, canonicalizes the source citation, and updates the source `ingested_into` backlink. |
 | Source preservation | Ahead | Pass | Basic Memory importers cover more formats. | Exomem `adopt_vault(mode="copy-as-sources")` preserves the original file, records `imported_from`, SHA-256, and byte count. |
 | Evidence / provenance | Ahead | Pass | Basic Memory is primarily note/knowledge-graph oriented. | Exomem has an explicit Evidence tree plus `review_memory(mode="provenance")` over durable `<!-- key:value -->` markers. The marker workflow is still hidden. |
-| Schema inference / validation | Missing | Not measured | Basic Memory publicly exposes `schema_infer`, `schema_validate`, and `schema_diff`. | Exomem validates its own page types but has no comparable user-facing schema inference/validation flow. |
-| Graph / context building | Behind | Pass | Basic Memory exposes `build_context` and `canvas` as clearer user/assistant workflows. | Exomem can do inbound links, `ask_memory(deep=true)`, and `connect_memory(operation="suggest-links")`, but Basic Memory's context/canvas story is still easier to explain. |
+| Schema inference / validation | Comparable | Pass | Basic Memory publicly exposes `schema_infer`, `schema_validate`, and `schema_diff`. | Exomem's `schema_memory` now infers from corpus frequencies, saves optional contracts with hash-guarded overwrite, validates with strict CI status, and diffs corpus or contract drift. |
+| Graph / context building | Comparable | Pass | Basic Memory still exposes a broader canvas workflow. | Exomem now has one bounded `connect_memory(operation="context")` response over stored documents, semantic blocks, typed graph edges, provenance, evidence, supersession, history, unresolved targets, and explicit truncation. |
 | Review / stale / contradiction workflow | Ahead | Pass | Basic Memory has recent activity and graph navigation, but less explicit epistemic review. | Exomem `review_memory` surfaces unprocessed source work, audit findings, attention queues, provenance, and compilation scaffolds. |
 | Assistant onboarding | Comparable | Pass | Basic Memory has broader packaged plugins, skills, and public docs across clients. | Exomem `bootstrap` exposes front-door actions and product commands; `demo --json` proves doctor/retrieval/review against a sample vault. |
 
-Current harness summary: 10 flows; 4 ahead, 3 comparable, 2 behind, 1 missing. Status: 9 pass, 1 not measured.
+Current harness summary: 10 flows; 4 ahead, 5 comparable, 1 behind, 0 missing.
+Status: 10 pass.
 
 ## Prioritized backlog
 
@@ -43,18 +51,29 @@ Current harness summary: 10 flows; 4 ahead, 3 comparable, 2 behind, 1 missing. S
 
 2. **Collapse onboarding into one obvious first action.** Keep `setup`'s safety, but reduce the user's mental model to: demo, choose vault, scan, initialize. Basic Memory is ahead because its first-run story is easier to explain and it has a cloud escape hatch.
 
-3. **Make graph/context a single product story.** Exomem has good pieces (`ask_memory(deep=true)`, inbound links, suggestions), but Basic Memory's `build_context`/canvas story is easier to use. Document the front-door `connect_memory`/deep-context flow so it returns the relevant notes, links, and surrounding graph.
+3. **Make evidence/provenance discoverable.** The Evidence tree and
+   `review_memory(mode="provenance")` are a real differentiator, but the
+   HTML-comment marker workflow is too implicit. Add assistant guidance so users
+   do not need to know the comment syntax.
 
-4. **Decide whether schema inference belongs in Exomem.** Basic Memory is plainly ahead here. If Exomem wants this capability, expose it as a governed validation/audit flow, not as a Basic Memory clone.
+4. **Polish write ergonomics without dropping governance.** `capture_source` +
+   `remember --field sources=...` is safer than a plain note write, but heavier.
+   The product remember flow should guide the assistant through Source vs Note vs
+   Evidence without requiring the user to name page types.
 
-5. **Make evidence/provenance discoverable.** The Evidence tree and `review_memory(mode="provenance")` are a real differentiator, but the HTML-comment marker workflow is too implicit. Add assistant guidance so users do not need to know the comment syntax.
-
-6. **Polish write ergonomics without dropping governance.** `capture_source` + `remember --field sources=...` is safer than a plain note write, but heavier. The product remember flow should guide the assistant through Source vs Note vs Evidence without requiring the user to name page types.
+5. **Keep the heavy proof lanes operational.** Lean stdio/HTTP product E2E now
+   runs on every pull request; real embeddings/reranking remain in the model job,
+   and OCR/PDF/ASR/CLIP/video run scheduled or on demand. Treat failures in those
+   configured lanes as product regressions, not optional noise.
 
 ## Harness coverage notes
 
 - The benchmark intentionally runs real Exomem CLI commands through subprocesses.
 - Heavy embedding/media paths are disabled so the harness stays local, fast, and deterministic.
-- `schema_inference_validation` is rated `missing` rather than failed because there is no Exomem command to run.
+- `schema_inference_validation` seeds five consistent pages, then exercises
+  infer/save, strict validate, and corpus diff through the CLI product surface.
+- `graph_context_building` reconciles derived graph state and checks the unified
+  bounded context envelope in addition to suggestions, inbound links, and deep
+  recall.
 - `messy_vault_adoption` covers the fixed pre-init scan path and confirms scan-only leaves originals untouched.
 - The Basic Memory reference detector reads public-facing README/docs text and records observed product promises; it does not execute or copy Basic Memory code.

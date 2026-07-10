@@ -46,7 +46,6 @@ from exomem import indexes  # noqa: E402
 from exomem.vault import (  # noqa: E402
     PlannedWrite,
     WikilinkResolver,
-    _WIKILINK_PATTERN,
     batch_atomic_write,
     kb_root,
     normalize_body_wikilinks,

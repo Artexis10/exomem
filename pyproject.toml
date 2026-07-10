@@ -125,6 +125,7 @@ vision = [
 [dependency-groups]
 dev = [
     "pytest>=8.0",
+    "pytest-timeout>=2.3",
     "httpx>=0.27",
 ]
 
@@ -148,6 +149,8 @@ packages = ["src/exomem", "src/kb_mcp"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-ra"
+timeout = 60
+timeout_method = "thread"
 markers = [
     # Heavy tests that load the real bge/reranker models (needs `--extra embeddings`
     # and the HF model cache). Excluded from the lean matrix; run in the dedicated

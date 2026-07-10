@@ -83,7 +83,7 @@ def test_edit_accepts_page_without_type_field(vault: Path) -> None:
         "---\ncreated: 2026-05-24\nupdated: 2026-05-24\n---\n# Identity\n\nhub.\n",
         encoding="utf-8",
     )
-    result = edit_module.edit(
+    edit_module.edit(
         vault, path=rel, why="hub update",
         new_body="# Identity\n\nrevised hub.\n", today=TODAY,
     )

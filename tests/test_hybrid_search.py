@@ -671,6 +671,7 @@ def test_writer_updates_sidecar(vault, embeddings_enabled) -> None:
     )
 
 
+@pytest.mark.embeddings
 def test_rerank_reorders_top_k(vault, embeddings_enabled) -> None:
     """rerank=True should at minimum populate Hit.rerank_score.
 

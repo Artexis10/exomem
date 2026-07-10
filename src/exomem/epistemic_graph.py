@@ -355,6 +355,8 @@ def graph_context(
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
+        placeholder_nodes: dict[str, dict[str, Any]] = {}
+        node_cap_hit = False
         frontier = set(seen_nodes)
         for _ in range(max(0, depth)):
             if not frontier:
@@ -368,13 +370,21 @@ def graph_context(
                     if key not in seen_nodes:
                         node = _node_by_key(conn, key)
                         if node is None:
-                            continue
+                            node = _placeholder_node(key)
                         if type_filter and node["kind"] not in type_filter:
                             continue
+                        if len(seen_nodes) >= max_nodes:
+                            node_cap_hit = True
+                            continue
                         seen_nodes.add(key)
-                        next_frontier.add(key)
+                        if node["kind"] == "unresolved":
+                            placeholder_nodes[key] = node
+                        else:
+                            next_frontier.add(key)
             frontier = next_frontier
-        nodes = _nodes_by_keys(conn, seen_nodes)
+        nodes = _nodes_by_keys(conn, seen_nodes) + [
+            placeholder_nodes[key] for key in sorted(placeholder_nodes)
+        ]
         edges = list(seen_edges.values())
         truncation: list[str] = []
         if len(nodes) > max_nodes:
@@ -382,6 +392,8 @@ def graph_context(
                 f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)"
             )
             nodes = nodes[:max_nodes]
+        elif node_cap_hit:
+            truncation.append(f"nodes capped at {max_nodes}")
         if len(seen_edges) >= max_edges:
             truncation.append(f"edges capped at {max_edges}")
         return {
@@ -554,7 +566,7 @@ def _edges_for_page(
                 )
             except Exception:  # noqa: BLE001 - malformed links are ignored
                 continue
-            if warning:
+            if not canonical:
                 continue
             edges.append(
                 _edge(
@@ -568,6 +580,7 @@ def _edges_for_page(
                         "block_kind": block.type,
                         "line": relation.line,
                         "raw": relation.raw,
+                        "target_resolution": "unresolved" if warning else "resolved",
                     },
                 )
             )
@@ -657,7 +670,7 @@ def _relation_line_edges(
             canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
-        if warning:
+        if not canonical:
             continue
         edges.append(
             _edge(
@@ -667,7 +680,10 @@ def _relation_line_edges(
                 "semantic_relation",
                 source_path=rel_path,
                 source_anchor=f"line-{line_no}",
-                metadata={"line": line.strip()},
+                metadata={
+                    "line": line.strip(),
+                    "target_resolution": "unresolved" if warning else "resolved",
+                },
             )
         )
     return edges
@@ -851,6 +867,23 @@ def _node_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
         (key,),
     ).fetchone()
     return _node_row_to_dict(row) if row else None
+
+
+def _placeholder_node(key: str) -> dict[str, Any]:
+    path = key.removeprefix("file:") if key.startswith("file:") else key
+    title = Path(path).stem.replace("-", " ").replace("_", " ").strip() or path
+    return {
+        "node_key": key,
+        "kind": "unresolved",
+        "path": path,
+        "anchor": None,
+        "title": title,
+        "text": "",
+        "source_hash": "",
+        "line_start": None,
+        "line_end": None,
+        "metadata": {"placeholder": True, "resolution": "unresolved"},
+    }
 
 
 def _nodes_by_keys(conn: sqlite3.Connection, keys: set[str]) -> list[dict[str, Any]]:

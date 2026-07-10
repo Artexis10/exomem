@@ -56,7 +56,6 @@ def _rewrite_in_text(text: str, replacements: list[tuple[str, str]]) -> tuple[st
     matches = list(_WIKILINK_PATTERN.finditer(masked))
     # Walk back-to-front so positions don't shift.
     for m in reversed(matches):
-        inner = m.group(1).strip()
         # Preserve alias if present in the actual text.
         actual_full = text[m.start(): m.end()]
         actual_inner = actual_full[2:-2]

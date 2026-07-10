@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import indexes
+from . import indexes, memory_refs
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -55,10 +55,11 @@ DECISION_STATUS_VALUES = ("proposed", "accepted", "superseded")
 @dataclass
 class LinkResult:
     path: str  # vault-relative
+    ref: str
     warnings: list[str]
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "warnings": self.warnings}
+        return {"path": self.path, "ref": self.ref, "warnings": self.warnings}
 
 
 @dataclass
@@ -130,6 +131,7 @@ def link(
     today = today or dt.date.today()
     date_iso = today.isoformat()
     tags_clean = _clean_tags(tags)
+    exomem_id = memory_refs.new_id()
 
     name_safe = _sanitize_name(name)
     folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
@@ -190,6 +192,7 @@ def link(
         decided=decided,
         project=project,
         decision_status=decision_status,
+        exomem_id=exomem_id,
     )
 
     rel_entity = entity_path.relative_to(vault_root).as_posix()
@@ -266,7 +269,11 @@ def link(
     if rotate_note:
         warnings.append(rotate_note)
 
-    return LinkResult(path=rel_entity, warnings=warnings)
+    return LinkResult(
+        path=rel_entity,
+        ref=memory_refs.memory_ref(exomem_id),
+        warnings=warnings,
+    )
 
 
 # ---------------- validation ----------------
@@ -351,9 +358,11 @@ def _render_entity(
     decided: str | None,
     project: str | None,
     decision_status: str | None,
+    exomem_id: str,
 ) -> str:
     lines = ["---"]
     lines.append("type: entity")
+    lines.append(f"exomem_id: {exomem_id}")
     lines.append(f"entity_type: {entity_type}")
     lines.append("status: active")
     lines.append(f"created: {date_iso}")

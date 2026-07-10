@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
+from types import SimpleNamespace
 
 from exomem import epistemic_graph
 
@@ -108,6 +109,7 @@ evidence:
 The current graph finding cites [[Knowledge Base/Notes/Insights/related-view]].
 
 - supports [[Knowledge Base/Notes/Insights/related-view]]
+- supports [[Knowledge Base/Notes/Insights/future-view]]
 - made_up_relation [[Knowledge Base/Notes/Insights/old-view]]
 """,
     )
@@ -218,6 +220,132 @@ def test_graph_context_unavailable_soft_fails(tmp_path: Path) -> None:
         "edges": [],
         "truncation": [],
     }
+
+
+def test_graph_context_keeps_unresolved_relation_as_placeholder(tmp_path: Path) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    context = epistemic_graph.graph_context(vault, path=CURRENT, depth=1)
+
+    placeholder = next(
+        node for node in context["nodes"] if node["path"].endswith("future-view.md")
+    )
+    assert placeholder["kind"] == "unresolved"
+    assert placeholder["metadata"] == {
+        "placeholder": True,
+        "resolution": "unresolved",
+    }
+    assert any(
+        edge["dst_key"] == placeholder["node_key"]
+        and edge["relation_type"] == "supports"
+        for edge in context["edges"]
+    )
+
+
+def test_unified_context_matches_quality_golden_and_is_markdown_read_only(
+    tmp_path: Path,
+) -> None:
+    import yaml
+
+    from exomem import commands
+
+    vault = _seed_graph_vault(tmp_path)
+    _write(
+        vault,
+        "Knowledge Base/log.md",
+        "## [2026-07-09] edit | Notes/Insights/current-view\n\n"
+        "why: clarified the active finding\n",
+    )
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    before = {
+        path.relative_to(vault).as_posix(): path.read_text(encoding="utf-8")
+        for path in vault.rglob("*.md")
+    }
+    golden = yaml.safe_load(
+        (Path(__file__).parent / "golden" / "context_quality.yaml").read_text(
+            encoding="utf-8"
+        )
+    )["current_view"]
+
+    context = commands.op_connect_memory(
+        vault,
+        operation="context",
+        path=CURRENT,
+        depth=golden["depth"],
+    )
+    alias = commands.op_connect_memory(
+        vault,
+        operation="graph-context",
+        path=CURRENT,
+        depth=golden["depth"],
+    )
+    shorthand = commands.op_connect_memory(
+        vault,
+        operation="context",
+        path=CURRENT.removeprefix("Knowledge Base/"),
+        depth=golden["depth"],
+    )
+
+    node_paths = {node["path"] for node in context["graph"]["nodes"]}
+    relation_types = {edge["relation_type"] for edge in context["graph"]["edges"]}
+    assert set(golden["expected_paths"]).issubset(node_paths)
+    assert set(golden["expected_relation_types"]).issubset(relation_types)
+    assert sum(map(len, context["semantic_blocks"].values())) >= golden["min_blocks"]
+    assert context["provenance"][0]["sources"]
+    assert context["provenance"][0]["evidence"]
+    assert context["supersession"][0]["supersedes"]
+    assert context["history"][CURRENT]
+    assert any(node["kind"] == "unresolved" for node in context["graph"]["nodes"])
+    assert alias == context
+    assert shorthand == context
+    after = {
+        path.relative_to(vault).as_posix(): path.read_text(encoding="utf-8")
+        for path in vault.rglob("*.md")
+    }
+    assert after == before
+
+
+def test_unified_context_reports_cross_seed_merge_truncation(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from exomem import memory_context
+
+    calls = {"count": 0}
+
+    def fake_graph_context(*args, **kwargs):
+        calls["count"] += 1
+        suffix = str(calls["count"])
+        return {
+            "available": True,
+            "reason": None,
+            "seeds": [{"node_key": f"seed:{suffix}"}],
+            "nodes": [
+                {"node_key": f"node:{suffix}:a"},
+                {"node_key": f"node:{suffix}:b"},
+            ],
+            "edges": [
+                {"edge_key": f"edge:{suffix}:a"},
+                {"edge_key": f"edge:{suffix}:b"},
+            ],
+            "truncation": [],
+        }
+
+    monkeypatch.setattr(epistemic_graph, "graph_context", fake_graph_context)
+    result = memory_context._merge_graph_contexts(
+        tmp_path,
+        [SimpleNamespace(rel_path="one.md"), SimpleNamespace(rel_path="two.md")],
+        depth=1,
+        relation_types=None,
+        node_types=None,
+        max_nodes=2,
+        max_edges=2,
+    )
+
+    assert len(result["nodes"]) == 2
+    assert len(result["edges"]) == 2
+    assert any("merged nodes capped" in item for item in result["truncation"])
+    assert any("merged edges capped" in item for item in result["truncation"])
 
 
 def test_graph_commands_are_registry_exposed_on_all_surfaces() -> None:

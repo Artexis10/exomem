@@ -26,6 +26,7 @@ PRODUCT_ROUTES = [
     "connect_memory",
     "adopt_vault",
     "maintain_memory",
+    "schema_memory",
     "manage_memory_file",
     "query_dataset",
 ]
@@ -166,6 +167,13 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "application/json"
     ]["schema"]
     assert "path" in read_schema.get("required", [])
+    schema_contract = doc["paths"]["/api/schema_memory"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert {"operation", "name"} <= set(schema_contract.get("required", []))
+    assert {"project", "page_type", "save", "expected_hash", "strict", "compare_to"} <= set(
+        schema_contract["properties"]
+    )
 
 
 def test_review_memory_route_and_openapi_params(vault, monkeypatch: pytest.MonkeyPatch) -> None:

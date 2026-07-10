@@ -96,7 +96,7 @@ def test_index_walk_vault_includes_out_of_kb(vault, monkeypatch) -> None:
     monkeypatch.setenv("EXOMEM_INDEX_SCOPE", "vault")
     walked = {p.resolve().relative_to(vault.resolve()).as_posix()
               for p in index_paths.iter_index_markdown(vault)}
-    assert _PROBE_REL in walked, f"vault scope must reach the out-of-KB probe; got probe missing"
+    assert _PROBE_REL in walked, "vault scope must reach the out-of-KB probe; got probe missing"
     assert any(p.startswith("Knowledge Base/") for p in walked), (
         "vault scope should still include KB notes"
     )

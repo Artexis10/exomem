@@ -29,9 +29,23 @@ jobs:
       - name: Sample vault smoke (the exact command users run)
         run: uv run --python ${{ matrix.python-version }} exomem demo --json
 
+  product-e2e:
+    name: product E2E (installed wheel, stdio + HTTP)
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+      - name: Governed lifecycle, restart persistence, and transport shutdown
+        run: uv run python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
+
   retrieval-eval:
     name: retrieval eval (golden gate, embeddings)
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
@@ -152,14 +166,29 @@ jobs:
         run: uv run python scripts/generate-capabilities.py --check
 
   lint:
-    name: ruff (advisory)
+    name: lint + targeted types
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
         uses: astral-sh/setup-uv@v5
-      - name: Ruff check (advisory — not yet gating)
-        # Non-blocking until the lint baseline is curated; surfaces issues without
-        # failing the build. Flip to gating once the tree is clean.
-        continue-on-error: true
-        run: uvx ruff check .
+      - name: Ruff correctness baseline (required)
+        run: uvx ruff check . --select F
+      - name: Full Ruff gate for new memory contracts
+        run: >-
+          uvx ruff check
+          src/exomem/memory_refs.py
+          src/exomem/memory_context.py
+          src/exomem/memory_schema.py
+          scripts/e2e_product_loop.py
+          scripts/e2e_http_server.py
+          scripts/smoke-media-pipeline.py
+          tests/test_memory_refs.py
+          tests/test_memory_schema.py
+          --select E,F,I,B,UP,BLE
+      - name: Targeted contract type check
+        run: >-
+          uvx mypy --follow-imports skip --ignore-missing-imports --check-untyped-defs
+          src/exomem/memory_refs.py
+          src/exomem/memory_context.py
+          src/exomem/memory_schema.py

@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import corpus_aware, indexes, semantic_blocks
+from . import corpus_aware, indexes, memory_refs, semantic_blocks
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -84,6 +84,7 @@ STATUS_PRODUCTION = (
 @dataclass
 class NoteResult:
     path: str  # vault-relative
+    ref: str
     warnings: list[str]
     # Corpus-aware "you might want to link these" hints. Non-binding; the
     # client decides. Omitted from as_dict() when empty so existing callers
@@ -94,7 +95,7 @@ class NoteResult:
     write_feedback: dict = field(default_factory=dict)
 
     def as_dict(self) -> dict:
-        out: dict = {"path": self.path, "warnings": self.warnings}
+        out: dict = {"path": self.path, "ref": self.ref, "warnings": self.warnings}
         if self.suggestions:
             out["suggestions"] = self.suggestions
         if self.write_feedback:
@@ -285,6 +286,7 @@ def note(
     today = today or dt.date.today()
     date_iso = today.isoformat()
     tags_clean = _clean_tags(tags)
+    exomem_id = memory_refs.new_id()
 
     note_path, slug_warning = _resolve_path(
         vault_root=vault_root,
@@ -404,6 +406,7 @@ def note(
         published=published,
         host=host,
         editor=editor,
+        exomem_id=exomem_id,
     )
 
     kb = kb_root(vault_root)
@@ -542,6 +545,7 @@ def note(
 
     return NoteResult(
         path=note_path.relative_to(vault_root).as_posix(),
+        ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
         suggestions=corpus_suggestions,
         write_feedback=write_feedback,
@@ -796,9 +800,11 @@ def _render_note(
     published: str | None = None,
     host: str | None = None,
     editor: str | None = None,
+    exomem_id: str,
 ) -> str:
     lines = ["---"]
     lines.append(f"type: {note_type}")
+    lines.append(f"exomem_id: {exomem_id}")
 
     # Type-specific required fields, ordered per fixture convention.
     if note_type == "research-note":

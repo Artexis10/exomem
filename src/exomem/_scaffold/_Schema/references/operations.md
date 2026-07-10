@@ -14,9 +14,10 @@ commands.
 | `remember` | Remember a durable conclusion, decision, solved problem, or pattern | `remember`; use `replace_memory` if it supersedes old knowledge |
 | `capture` | Preserve raw material, a source, proof, receipt, or record | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
 | `review` | Review stale, contradictory, or unprocessed knowledge | `review_memory` |
-| `connect` | Suggest links, relations, or graph context | `connect_memory`; entity writes stay explicit |
+| `connect` | Suggest links or return graph, evidence, provenance, and history context | `connect_memory`; use `operation="context"` for the unified read-only view |
 | `adopt` | Assess or import an existing vault safely | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | Check or repair vault health | `maintain_memory(mode="audit")`; explicit `fix`/`reconcile` modes only with fix intent |
+| `schema` | Infer, validate, or diff recurring corpus structure | `schema_memory`; contracts are optional and saving is explicit |
 
 Do not ask users to choose internal folders, graph sidecars, or page types unless
 the distinction changes the write. Translate back to simple language when
@@ -44,6 +45,21 @@ operations such as `bootstrap`, `find`, `get`, `suggest_links`, `graph_context`,
 `propose_compilation`, `query_data`, `provenance_report`, and `download` do not
 update indexes or logs. The per-operation specs note their primary writes; the
 index + log update is implicit.
+
+## Stable identity and references
+
+Every new governed page and evidence Markdown sidecar receives an immutable
+`exomem_id` UUID. Writers return both its current vault-relative `path` and a
+canonical `exomem://memory/<uuid>` reference. Commands that accept a governed
+page identifier accept either form. Prefer the reference for durable automation
+or citations that must survive moves; keep showing paths when they are clearer
+to a person.
+
+Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
+`maintain_memory(mode="backfill-ids")` is requested. That mode is a dry run by
+default and writes only with `dry_run=false`. Duplicate and malformed IDs are
+reported by audit and make canonical resolution fail rather than selecting an
+arbitrary page.
 
 ---
 
@@ -332,12 +348,13 @@ None.
 
 ---
 
-## graph_context
+## context / graph_context
 
-**Goal:** Return a bounded, read-only typed graph neighborhood from the derived
-`.graph.sqlite` sidecar. This is the explicit knowledge-graph surface for
-semantic blocks, files, and deterministic relations such as `derived_from`,
-`evidenced_by`, `supports`, `contradicts`, `supersedes`, and `links_to`.
+**Goal:** Return one bounded, read-only context envelope containing stored page
+bodies and semantic blocks, typed graph edges, provenance, evidence,
+supersession history, unresolved targets, warnings, and explicit truncation.
+Call `connect_memory(operation="context")`; `graph-context` remains a
+compatibility alias with the same response.
 
 ### Triggers
 - "what does this connect to in the graph"
@@ -345,17 +362,60 @@ semantic blocks, files, and deterministic relations such as `derived_from`,
 - needing graph context around a search result without changing the page
 
 ### Procedure
-1. Provide either `path` or `query`. Use `path` when you already know the page;
-   use `query` to seed the neighborhood from matching node labels/content.
+1. Provide `path`, canonical reference, or `query`. Use a known identifier when
+   you have one; use `query` to retrieve seed pages before graph assembly.
 2. Keep `depth` small unless the caller asks for a wider neighborhood. Use
    `relation_types` / `node_types` filters when a narrower answer is better.
-3. Treat `available=false` as a soft fallback, not a failure. Existing search and
-   pack behavior remains valid when the sidecar is missing, disabled, stale, or
-   schema-incompatible.
+3. Inspect the returned truncation fields before claiming the context is
+   exhaustive. Unresolved observed relations appear as placeholder nodes instead
+   of disappearing.
+4. Treat unavailable derived graph data as a soft fallback. Stored page content,
+   search, and provenance remain useful when a sidecar must be rebuilt.
 
 ### Writes performed
 None. The graph sidecar is derived state only; this operation never mutates
 Markdown.
+
+---
+
+## schema_memory
+
+**Goal:** Infer, validate, or diff an optional corpus-backed contract for
+frontmatter, semantic blocks, and relation vocabulary.
+
+### Procedure
+1. Run `operation="infer"` with a contract `name` and optional `project` or
+   `page_type` scope. Fewer than five pages remain advisory; required elements
+   are proposed only when present in every page of a sufficiently large sample.
+2. Review frequencies and the proposed contract. Persist only when explicitly
+   requested with `save=true`.
+3. Overwriting a saved contract requires its current `expected_hash`; never
+   bypass a mismatch. Contracts live under `_Schema/contracts/`.
+4. Use `operation="validate"` for read-only findings. `strict=true` changes the
+   CLI/CI outcome but does not block normal writes.
+5. Use `operation="diff"` to compare a saved contract with current corpus
+   reality or another named contract.
+
+### Writes performed
+Only an explicitly saved inferred contract. Validation and diff never mutate
+the vault.
+
+---
+
+## backfill_ids
+
+**Goal:** Add stable IDs to legacy governed Markdown without an automatic
+migration.
+
+### Procedure
+1. Call `maintain_memory(mode="backfill-ids")`; the default `dry_run=true`
+   reports affected pages and identity problems without writing.
+2. Review the complete proposal and resolve duplicate or malformed IDs first.
+3. After explicit confirmation, repeat with `dry_run=false`. The batch is atomic
+   and preserves all existing valid IDs.
+
+### Writes performed
+Missing frontmatter IDs only, and only in explicit write mode.
 
 ---
 

@@ -47,6 +47,8 @@ class ReconcileReport:
     embeddings_status: str = "current"  # "current" | "refreshed" | "disabled"
     graph_refreshed: int = 0
     graph_status: str = "current"  # "current" | "refreshed" | "disabled"
+    references_refreshed: int = 0
+    references_status: str = "current"  # "current" | "refreshed"
     remaining_drift: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
@@ -57,6 +59,8 @@ class ReconcileReport:
             "embeddings_status": self.embeddings_status,
             "graph_refreshed": self.graph_refreshed,
             "graph_status": self.graph_status,
+            "references_refreshed": self.references_refreshed,
+            "references_status": self.references_status,
             "remaining_drift": self.remaining_drift,
             "dry_run": self.dry_run,
         }
@@ -148,13 +152,23 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         report.graph_refreshed = len(drift)
         report.graph_status = "refreshed" if drift else "current"
 
-    # ---- 3. Remaining drift report ----
+    # ---- 3. Stable-reference sidecar ----
+    from . import memory_refs
+
+    reference_drift = memory_refs.drift(vault_root)
+    if reference_drift and not dry_run:
+        memory_refs.ReferenceIndex(vault_root).rebuild_all()
+    report.references_refreshed = len(reference_drift)
+    report.references_status = "refreshed" if reference_drift else "current"
+
+    # ---- 4. Remaining drift report ----
     post = audit_module.audit(
-        vault_root, categories=["index_drift", "embedding_drift", "graph_drift"]
+        vault_root,
+        categories=["index_drift", "embedding_drift", "graph_drift", "reference_identity"],
     )
     report.remaining_drift = [f.as_dict() for f in post.findings]
 
-    # ---- 4. Invalidate the event-maintained registries ----
+    # ---- 5. Invalidate the event-maintained registries ----
     # reconcile is the "I edited around the system, heal it" command — after it
     # runs, no in-memory freshness/inbound registry should keep trusting
     # pre-reconcile state. Freshness re-seeds on the watcher's next reconcile

@@ -47,6 +47,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "replace_memory",
         "manage_memory_file",
         "maintain_memory",
+        "schema_memory",
     }
 )
 

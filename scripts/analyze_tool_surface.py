@@ -175,7 +175,6 @@ def measure_static_surface() -> dict:
 # M2 — confusability matrix                                                   #
 # --------------------------------------------------------------------------- #
 def measure_confusability(rows: list[dict]) -> dict | None:
-    import numpy as np
 
     from exomem import embeddings
 
@@ -502,7 +501,7 @@ def main() -> None:
           f"({m1['tok_total'] * 2} across two connectors)")
     print(f"  SKILL.md: {m1['skill_words']} words ≈ {m1['skill_tokens']} tokens")
     if conf:
-        print(f"  Confusable clusters: "
+        print("  Confusable clusters: "
               + " ; ".join("{" + ", ".join(sorted(c)) + "}" for c in conf["clusters"]))
     if usage["available"]:
         cov = "full" if usage["full_coverage"] else "partial (find+writes only)"

@@ -212,7 +212,7 @@ def edit(
         tags_clean = _clean_tags(tags)
         fm_text = _remove_yaml_key(fm_text, "tags")
         if tags_clean:
-            fm_text = fm_text.rstrip() + f"\ntags: [" + ", ".join(tags_clean) + "]"
+            fm_text = fm_text.rstrip() + "\ntags: [" + ", ".join(tags_clean) + "]"
         else:
             fm_text = fm_text.rstrip() + "\ntags: []"
 

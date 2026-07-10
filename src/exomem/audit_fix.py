@@ -56,8 +56,6 @@ from . import indexes
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
-    _mask_code_spans,
-    _WIKILINK_PATTERN,
     batch_atomic_write,
     kb_root,
     normalize_body_wikilinks,

@@ -656,30 +656,77 @@ def flow_evidence_provenance(ctx: HarnessContext, runner: FlowRunner, bm: dict) 
 
 
 def flow_schema_inference_validation(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowResult:
+    vault = _prepared_vault(ctx, runner, "schema")
+    _write_schema_corpus(vault)
+    infer_run, infer_payload = runner.run(
+        vault,
+        "schema_memory",
+        "--operation",
+        "infer",
+        "--name",
+        "benchmark-insights",
+        "--page-type",
+        "insight",
+        "--save",
+        "--json",
+    )
+    validate_run, validate_payload = runner.run(
+        vault,
+        "schema_memory",
+        "--operation",
+        "validate",
+        "--name",
+        "benchmark-insights",
+        "--strict",
+        "--json",
+    )
+    diff_run, diff_payload = runner.run(
+        vault,
+        "schema_memory",
+        "--operation",
+        "diff",
+        "--name",
+        "benchmark-insights",
+        "--json",
+    )
+    inferred = (infer_payload or {}).get("data") or {}
+    validated = (validate_payload or {}).get("data") or {}
+    diffed = (diff_payload or {}).get("data") or {}
     checks = [
         Check(
-            "Exomem exposes no schema inference CLI flow",
-            False,
-            "No product-facing `schema_infer`/`schema_validate` equivalent is in docs/capabilities.",
-        )
+            "schema inference profiles a five-page corpus",
+            infer_run.ok and inferred.get("sample_size", 0) >= 5,
+            f"sample_size={inferred.get('sample_size')}",
+        ),
+        Check(
+            "inferred contract persists explicitly",
+            bool((inferred.get("saved") or {}).get("path")),
+            str(inferred.get("saved") or {}),
+        ),
+        Check(
+            "strict validation accepts the unchanged corpus",
+            validate_run.ok and validated.get("valid") is True,
+            f"valid={validated.get('valid')}",
+        ),
+        Check(
+            "contract-to-corpus diff reports no drift",
+            diff_run.ok and diffed.get("changed") is False,
+            f"changed={diffed.get('changed')}",
+        ),
     ]
-    result = FlowResult(
-        id="schema_inference_validation",
+    return runner.flow(
+        flow_id="schema_inference_validation",
         name="Schema inference/validation",
-        status="not_measured",
-        rating="missing",
-        commands=[],
+        rating="comparable",
         checks=checks,
         evidence=[
             "Basic Memory public docs list `schema_infer`, `schema_validate`, and `schema_diff`.",
-            "Exomem has internal page-type validation, but not a user-facing schema inference/validation product flow.",
+            "Exomem infers optional corpus-backed contracts, validates them strictly, and diffs corpus drift through one registry-generated command.",
         ],
         gaps=[
-            "Add a product-facing schema/audit flow only if it fits Exomem's governed source/evidence model.",
+            "Basic Memory's schema workflow is more established publicly; Exomem's hash-guarded contract persistence is more conservative.",
         ],
-        elapsed_seconds=0.0,
     )
-    return result
 
 
 def flow_graph_context_building(ctx: HarnessContext, runner: FlowRunner, bm: dict) -> FlowResult:
@@ -716,27 +763,57 @@ def flow_graph_context_building(ctx: HarnessContext, runner: FlowRunner, bm: dic
         "--deep",
         "--json",
     )
+    reconcile_run, _ = runner.run(
+        vault,
+        "maintain_memory",
+        "--mode",
+        "reconcile",
+        "--no-dry-run",
+        "--json",
+    )
+    context_run, context_payload = runner.run(
+        vault,
+        "connect_memory",
+        "--operation",
+        "context",
+        "--path",
+        "Knowledge Base/Notes/Research/Auth/auth-memory.md",
+        "--depth",
+        "2",
+        "--json",
+    )
     suggestions = (suggest_payload or {}).get("data") or []
     inbound_count = (((inbound_payload or {}).get("data") or {}).get("count")) or 0
     pack_data = (pack_payload or {}).get("data") or {}
     context = pack_data.get("context") or pack_data.get("pack")
+    unified = (context_payload or {}).get("data") or {}
     checks = [
         Check("connect_memory suggest-links succeeds", suggest_run.ok, f"exit={suggest_run.returncode}"),
         Check("connect_memory suggest-links returns a list", isinstance(suggestions, list), json.dumps(suggestions[:1], default=str)),
         Check("connect_memory inbound-links detects links", inbound_run.ok and inbound_count >= 1, f"count={inbound_count}"),
         Check("ask_memory deep returns context", pack_run.ok and isinstance(context, dict), "context present" if isinstance(context, dict) else "missing"),
+        Check("reconcile builds derived graph state", reconcile_run.ok, f"exit={reconcile_run.returncode}"),
+        Check(
+            "connect_memory context returns one bounded envelope",
+            context_run.ok
+            and bool(unified.get("documents"))
+            and bool((unified.get("graph") or {}).get("nodes"))
+            and "provenance" in unified
+            and "supersession" in unified
+            and "truncation" in unified,
+            json.dumps({key: bool(unified.get(key)) for key in ("documents", "graph", "provenance", "supersession")}),
+        ),
     ]
     return runner.flow(
         flow_id="graph_context_building",
         name="Graph/context building",
-        rating="behind",
+        rating="comparable",
         checks=checks,
         evidence=[
-            "Exomem has graph primitives (`suggest_links`, inbound links, context packs).",
+            "Exomem has graph primitives plus one bounded context operation over stored documents, typed edges, provenance, evidence, and history.",
         ],
         gaps=[
-            "Basic Memory exposes `build_context` and `canvas` as more obvious assistant/user workflows.",
-            "Exomem's context building is capable but fragmented across multiple tools.",
+            "Basic Memory still exposes a broader canvas workflow; Exomem now matches the technical context-building front door without adding a canvas product.",
         ],
     )
 
@@ -925,6 +1002,25 @@ def _write_context_notes(vault: Path) -> Path:
         encoding="utf-8",
     )
     return source
+
+
+def _write_schema_corpus(vault: Path) -> None:
+    folder = vault / "Knowledge Base" / "Notes" / "Insights"
+    folder.mkdir(parents=True, exist_ok=True)
+    for index in range(1, 6):
+        (folder / f"benchmark-schema-{index}.md").write_text(
+            "---\n"
+            "type: insight\n"
+            "status: active\n"
+            "created: 2026-07-09\n"
+            "updated: 2026-07-09\n"
+            "tags: [benchmark, schema]\n"
+            "---\n\n"
+            f"# Benchmark schema {index}\n\n"
+            "## Claim\n\n"
+            f"The benchmark schema corpus contains governed observation {index}.\n",
+            encoding="utf-8",
+        )
 
 
 def _status_from_checks(checks: list[Check]) -> str:

@@ -111,7 +111,7 @@ def upsert_after_write(
     path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
     events the same way; this belt covers direct writer calls.
     """
-    from . import epistemic_graph, find, lexstore, mode
+    from . import epistemic_graph, find, lexstore, memory_refs, mode
     from .vault import in_excluded_scan_dir
 
     vr = vault_root.resolve()
@@ -131,6 +131,7 @@ def upsert_after_write(
     if not eligible:
         return
     lexstore.upsert_after_write(vault_root, eligible)
+    memory_refs.upsert_after_write(vault_root, eligible)
     try:
         rels = _rel_md_paths(vault_root, eligible)
         if rels:
@@ -150,9 +151,10 @@ def upsert_after_write(
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
     """Fan a removal out to every index sidecar."""
-    from . import embeddings, epistemic_graph, find, lexstore
+    from . import embeddings, epistemic_graph, find, lexstore, memory_refs
 
     lexstore.delete_after_remove(vault_root, removed_rel_paths)
+    memory_refs.delete_after_remove(vault_root, removed_rel_paths)
     epistemic_graph.delete_after_remove(vault_root, removed_rel_paths)
     embeddings.delete_after_remove(vault_root, removed_rel_paths)
     try:

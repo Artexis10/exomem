@@ -62,7 +62,7 @@ log = logging.getLogger(__name__)
 ALL_CATEGORIES: tuple[str, ...] = (
     "broken_wikilink", "orphan_entity", "unprocessed_source",
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
-    "unregistered_project_key", "embedding_drift", "graph_drift",
+    "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
 )
 
@@ -174,6 +174,8 @@ def audit(
         findings.extend(_check_embedding_drift(vault_root))
     if "graph_drift" in selected:
         findings.extend(_check_graph_drift(vault_root))
+    if "reference_identity" in selected:
+        findings.extend(_check_reference_identity(vault_root))
     if "relevance_pairs_pending" in selected:
         findings.extend(_check_relevance_pairs_pending())
     if "stale_review" in selected:
@@ -765,6 +767,37 @@ def _check_unregistered_project_keys(
 
 
 # ---------------- check: graph_drift ----------------
+
+
+def _check_reference_identity(vault_root: Path) -> list[AuditFinding]:
+    """Flag duplicate/malformed IDs and reference-sidecar drift."""
+    from . import memory_refs
+
+    findings: list[AuditFinding] = []
+    for item in memory_refs.scan_issues(vault_root):
+        kind = item["kind"]
+        value = item["value"]
+        findings.append(AuditFinding(
+            category="reference_identity",
+            severity="error",
+            path=item["path"],
+            detail=f"{kind} exomem_id: {value}",
+            proposed_fix=(
+                "Assign a unique UUID in `exomem_id` and run `maintain_memory` "
+                "with mode `reconcile`."
+            ),
+            meta=item,
+        ))
+    for item in memory_refs.drift(vault_root):
+        findings.append(AuditFinding(
+            category="reference_identity",
+            severity="info",
+            path=item["path"],
+            detail=item["reason"],
+            proposed_fix="Run `maintain_memory` with mode `reconcile`.",
+            meta=item,
+        ))
+    return findings
 
 
 def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
