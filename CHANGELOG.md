@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.16.2](https://github.com/Artexis10/exomem/compare/v0.16.1...v0.16.2) (2026-07-10)
+
+
+### Bug Fixes
+
+* preserve protected trees during link migration ([#195](https://github.com/Artexis10/exomem/issues/195)) ([f17d139](https://github.com/Artexis10/exomem/commit/f17d139b16a1e1424f8e15723c6082b7f4e00e9e))
+
 ## [0.16.1](https://github.com/Artexis10/exomem/compare/v0.16.0...v0.16.1) (2026-07-10)
 
 
