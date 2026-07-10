@@ -503,6 +503,7 @@ def _edges_for_page(
 ) -> list[GraphEdge]:
     rel = page.rel_path
     file_key = _file_key(rel)
+    resolver = find_module.shared_resolver(vault_root)
     edges: list[GraphEdge] = []
     for block in blocks:
         block_key = _block_key(page, block)
@@ -527,7 +528,7 @@ def _edges_for_page(
             target = target.split("|", 1)[0].split("#", 1)[0].strip()
             try:
                 canonical, warning = vault_module.normalize_wikilink(
-                    target, vault_root, strict=False
+                    target, vault_root, resolver=resolver, strict=False
                 )
             except Exception:  # noqa: BLE001 - malformed links are ignored
                 continue
@@ -607,9 +608,11 @@ def _edges_for_page(
         )
     relation_doc = parse_markdown_relations(page.body, include_legacy=True)
     relation_edges, canonical_lines = _relation_line_edges(
-        vault_root, relation_doc.relations, rel, file_key
+        vault_root, relation_doc.relations, rel, file_key, resolver=resolver
     )
-    for target in _body_wikilink_paths(vault_root, page.body, skip_lines=canonical_lines):
+    for target in _body_wikilink_paths(
+        vault_root, page.body, skip_lines=canonical_lines, resolver=resolver
+    ):
         edges.append(
             _edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel)
         )
@@ -622,13 +625,15 @@ def _relation_line_edges(
     relations: list,
     rel_path: str,
     file_key: str,
+    *,
+    resolver: vault_module.WikilinkResolver,
 ) -> tuple[list[GraphEdge], set[int]]:
     edges: list[GraphEdge] = []
     canonical_lines: set[int] = set()
     for relation in relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                relation.target, vault_root, strict=False
+                relation.target, vault_root, resolver=resolver, strict=False
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
@@ -660,6 +665,7 @@ def _body_wikilink_paths(
     body: str,
     *,
     skip_lines: set[int],
+    resolver: vault_module.WikilinkResolver,
 ) -> list[str]:
     """Resolve body links while omitting canonical relation bullets themselves."""
     out: list[str] = []
@@ -673,7 +679,7 @@ def _body_wikilink_paths(
             continue
         try:
             canonical, warning = vault_module.normalize_wikilink(
-                target, vault_root, strict=False
+                target, vault_root, resolver=resolver, strict=False
             )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
