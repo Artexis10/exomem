@@ -243,10 +243,10 @@ class ReferenceIndex:
             return {}
 
         if not self.available():
-            rows = _scan_pages(self.vault_root)
+            scan_rows = _scan_pages(self.vault_root)
             by_id: dict[str, list[str]] = {}
             id_by_path: dict[str, str] = {}
-            for path, exomem_id, _raw, _hash, status in rows:
+            for path, exomem_id, _raw, _hash, status in scan_rows:
                 if status != "valid" or exomem_id is None:
                     continue
                 by_id.setdefault(exomem_id, []).append(path)
@@ -263,12 +263,12 @@ class ReferenceIndex:
         placeholders = ",".join("?" for _ in wanted)
         conn = self._connect()
         try:
-            rows = conn.execute(
+            db_rows = conn.execute(
                 f"SELECT path, exomem_id FROM identities "  # noqa: S608 - placeholders only
                 f"WHERE status = 'valid' AND path IN ({placeholders})",
                 wanted,
             ).fetchall()
-            ids = {str(row[1]) for row in rows}
+            ids = {str(row[1]) for row in db_rows}
             duplicate_ids: set[str] = set()
             if ids:
                 id_placeholders = ",".join("?" for _ in ids)
@@ -283,7 +283,7 @@ class ReferenceIndex:
                 }
         finally:
             conn.close()
-        id_by_path = {str(path): str(exomem_id) for path, exomem_id in rows}
+        id_by_path = {str(path): str(exomem_id) for path, exomem_id in db_rows}
         resolved = {
             path: (
                 memory_ref(id_by_path[path])
