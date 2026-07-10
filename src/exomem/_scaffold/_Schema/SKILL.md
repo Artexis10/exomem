@@ -56,7 +56,8 @@ diagnosed, a pattern is recognized — capture it:
   is how the corpus grows.
 - Raw material -> `capture_source`. A durable conclusion -> draft with
   `remember` or `connect_memory`, run
-  `connect_memory(operation="suggest-links")` and the near-duplicate check first,
+  `connect_memory(operation="suggest-links")`, use `suggest-relations` when
+  directional meaning matters, and run the near-duplicate check first,
   then write and report one line: `Saved -> <path>`.
 - The guardrails that remain are the ones that matter: dedupe (prefer
   **edit_memory**/**replace_memory** over a parallel page; surface a near-duplicate warning when
@@ -74,7 +75,10 @@ Use this loop whenever a durable conclusion should enter Exomem:
 1. `ask_memory` for relevant prior notes and sources.
 2. `read_memory` for chosen pages, or use `ask_memory(deep=true)` when synthesis needs bounded context.
 3. Draft the typed page at the right layer: `capture_source` for raw source, `remember` for a compiled conclusion, `connect_memory` for entity/link work, `edit_memory` for small correction, `replace_memory` for supersession.
-4. Run `connect_memory(operation="suggest-links")` on the draft before writing; accept only links that genuinely clarify provenance or context.
+4. Run `connect_memory(operation="suggest-links")` on the draft before writing;
+   use `suggest-relations` when directional meaning matters. Accept only links
+   that genuinely clarify provenance or context, and write accepted note-level
+   edges under `## Relations` as `- relation_type [[Target]]`.
 5. Write, then inspect the returned `warnings` and optional `suggestions`.
 6. If a near-duplicate warning fires, prefer `edit_memory` or `replace_memory` over a parallel page. If suggestions are useful, add them with a follow-up `edit_memory`.
 7. Report one line: `Saved -> <path>`.
@@ -156,11 +160,11 @@ shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 `read_memory` (open a page), `browse_memory` (vault shape), `remember`
 (compiled conclusions), `edit_memory`, `replace_memory`, `capture_source`,
 `compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
-`connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
+`triage_memory`, `connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
 `query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
 single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -207,7 +211,7 @@ experiments, proof-bearing records, review, and supersession.
 | `ask` | "what do I know," "find what I concluded," "show the context" | `ask_memory(detail="compact", rerank=false)` first; `read_memory` or `ask_memory(deep=true)` when synthesis needs context |
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
-| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory` |
+| `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
@@ -643,9 +647,10 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    insight, failure, pattern, experiment, production-log? And what scope?"** Skip
    if you already specified.
 4. **Skill drafts the compiled page** with frontmatter, a sources block linking
-   back to the source file, and a Connections section. **Run
-   `connect_memory(operation="suggest-links")` on the draft first** — it surfaces
-   related existing pages you'd otherwise miss.
+   back to the source file, and a typed Relations section. **Run
+   `connect_memory(operation="suggest-links")` on the draft first** — and
+   `suggest-relations` when direction matters — to surface related existing
+   pages you'd otherwise miss.
 5. **Skill shows the draft, waits for confirmation.** You can revise inline.
 6. **On confirm: calls `remember` to write the page**, updates the relevant
    `index.md`, appends to `log.md`, and reports paths. The write result carries a
@@ -666,6 +671,21 @@ under the vault root with no prefix guessing:
 `[[Knowledge Base/Entities/Concepts/Profile]]`. Link back to the originating
 `Sources/` file via the `sources:` frontmatter list (mirrors the source's
 `ingested_into:` list).
+
+**Canonical note relation form: one directional edge per bullet under
+`## Relations`.** Use a governed lower-snake-case relation and one wikilink:
+
+```markdown
+## Relations
+- refines [[Knowledge Base/Notes/Insights/Earlier Conclusion]]
+- depends_on [[Knowledge Base/Entities/Decisions/Architecture Decision]]
+```
+
+Use semantic-block metadata such as
+`- relations: evidenced_by: [[Source]], contradicts: [[Earlier Finding]]` when
+the edge belongs to a specific claim, finding, or piece of evidence. Ordinary
+inline wikilinks remain useful generic `links_to` connections. Never turn a
+semantic suggestion into a typed relation without reviewing its meaning.
 
 **The writer normalizes on your behalf.** Exomem's writers run every wikilink
 through `vault.normalize_wikilink()` before writing — bare names, KB-relative
@@ -738,6 +758,7 @@ is in **`references/audit-checks.md`**.
   unambiguous — write under the standing waiver and report the path.
 - `capture_source` and `preserve_evidence` operations — raw capture.
 - `ask_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
+- `triage_memory` — writes only portable Inbox review state; it never edits a note.
 - Updating `index.md`, `log.md`, and `ingested_into:` frontmatter after a
   confirmed write.
 - Resolving obvious wikilink targets when the entity exists exactly.

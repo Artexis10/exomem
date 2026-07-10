@@ -18,6 +18,7 @@ from exomem.audit import AuditFinding
 C = "corpus_contradictions"
 S = "stale_review"
 U = "unprocessed_source"
+R = "relation_debt"
 
 
 def _f(category: str, path: str, *, severity: str = "info",
@@ -187,6 +188,13 @@ def test_empty_findings():
     assert report.truncated == 0
     assert report.upstream_truncated == 0
     assert report.note is None
+
+
+def test_relation_debt_is_composed_after_other_rank_ties():
+    report = attention_module._rank([_f(R, "relationless"), _f(U, "source")])
+
+    assert _paths(report) == ["source", "relationless"]
+    assert report.summary == {U: 1, R: 1}
 
 
 def test_limit_zero_or_negative_surfaces_all():

@@ -163,7 +163,12 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 2. Generate filename:
    - Research / insight / failure / pattern: `<topic-slug>.md` (no date prefix).
    - Experiment / production-log: `YYYY-MM-<slug>.md` (start month prefix).
-3. **Draft the page in conversation** — show full content including frontmatter, all sections per the page-type template, wikilinks to existing entities/concepts where they obviously match. **Run `suggest_links` on the draft first.**
+3. **Draft the page in conversation** — show full content including frontmatter,
+   all sections per the page-type template, and wikilinks to existing pages where
+   they obviously match. **Run `suggest_links` on the draft first; use
+   `suggest_relations` when directional meaning matters.** Put accepted note-level
+   edges under `## Relations` as `- relation_type [[Target]]`; keep claim-specific
+   edges in semantic-block `relations:` metadata.
 4. **Wait for confirmation.** Default is propose-then-write.
 5. On confirm:
    - Write the file.

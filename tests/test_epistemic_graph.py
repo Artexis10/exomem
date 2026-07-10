@@ -163,6 +163,77 @@ def test_edge_provenance_and_unsupported_relation_labels(tmp_path: Path) -> None
     assert all(e["relation_type"] != "made_up_relation" for e in edges)
 
 
+def test_canonical_note_relation_suppresses_redundant_generic_edge(tmp_path: Path) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    canonical = "Knowledge Base/Notes/Insights/canonical.md"
+    _write(
+        vault,
+        canonical,
+        """\
+---
+type: insight
+status: active
+---
+# Canonical Relations
+
+## Relations
+- refines [[Knowledge Base/Notes/Insights/old-view]]
+
+## Finding
+This also references [[Knowledge Base/Notes/Insights/related-view]].
+""",
+    )
+
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+    edges = idx.edges(source_path=canonical)
+
+    old_edges = [edge for edge in edges if edge["dst_key"].endswith("old-view.md")]
+    assert [(edge["relation_type"], edge["origin"]) for edge in old_edges] == [
+        ("refines", "markdown_relation")
+    ]
+    assert any(
+        edge["relation_type"] == "links_to"
+        and edge["dst_key"].endswith("related-view.md")
+        for edge in edges
+    )
+
+
+def test_inline_link_to_typed_target_keeps_generic_edge(tmp_path: Path) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    canonical = "Knowledge Base/Notes/Insights/repeated-target.md"
+    _write(
+        vault,
+        canonical,
+        """\
+---
+type: insight
+status: active
+---
+# Repeated Target
+
+## Relations
+- refines [[Knowledge Base/Notes/Insights/old-view]]
+
+## Finding
+The discussion also cites [[Knowledge Base/Notes/Insights/old-view]] generically.
+""",
+    )
+
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+    old_edges = [
+        edge
+        for edge in idx.edges(source_path=canonical)
+        if edge["dst_key"].endswith("old-view.md")
+    ]
+
+    assert {(edge["relation_type"], edge["origin"]) for edge in old_edges} == {
+        ("refines", "markdown_relation"),
+        ("links_to", "wikilink"),
+    }
+
+
 def test_default_graph_indexing_imports_no_reasoning_model(
     tmp_path: Path, monkeypatch
 ) -> None:

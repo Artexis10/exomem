@@ -63,10 +63,31 @@ equivalent:
 
 Unknown headings remain normal Markdown and are not validation errors.
 
-## Relations
+## Note relations
 
-Relations live in a `relations` metadata bullet. Use comma-separated
-`relation: target` entries:
+Use a canonical `## Relations` section for directional note-to-note edges. Each
+bullet has one governed lower-snake-case relation type and one wikilink:
+
+```markdown
+## Relations
+- refines [[Knowledge Base/Notes/Insights/Earlier Conclusion]]
+- depends_on [[Knowledge Base/Entities/Decisions/Architecture Decision]]
+- relates_to [[Knowledge Base/Notes/Research/Project/Adjacent Finding]]
+```
+
+These links remain visible and editable in Obsidian. Exomem indexes the declared
+edge type instead of a redundant generic edge. Inline references elsewhere in
+the note remain generic `links_to` connections.
+
+Typed bullets written outside `## Relations` remain index-compatible for older
+notes, but new notes should use the canonical section so validation and review
+can distinguish governed relations from incidental list prose.
+
+## Block relations
+
+When a relation belongs to a specific claim, finding, decision, or piece of
+evidence rather than the whole note, put it in that semantic block's
+`relations` metadata bullet. Use comma-separated `relation: target` entries:
 
 ```markdown
 ## Risk
@@ -81,17 +102,26 @@ Supported relations:
 - `supports`
 - `contradicts`
 - `refines`
+- `duplicates`
 - `supersedes`
 - `derived_from`
-- `depends_on`
 - `evidenced_by`
-- `used_for`
+- `depends_on`
+- `implements`
 - `mitigates`
 - `causes`
+- `caused_by`
 - `blocks`
 - `resolves`
+- `answers`
+- `raises_question`
+- `used_for`
+- `observed_in`
+- `mentions`
+- `about_entity`
+- `relates_to`
+- `links_to`
 - `cites`
-- `implements`
 - `tests`
 - `owns`
 

@@ -25,7 +25,7 @@ def test_proposal_structure_and_no_write(vault: Path, monkeypatch) -> None:
     assert res["suggested_note_type"] in ("insight", "research-note")
     out = res["outline_markdown"]
     assert out.startswith("# ")
-    assert "## Connections" in out
+    assert "## Relations" in out
     # It must not have written anything — the source's ingested_into stays empty.
     src = (vault / f"{_ARTICLE}.md").read_text(encoding="utf-8")
     assert "ingested_into: []" in src
@@ -45,7 +45,7 @@ def test_proposal_filters_source_connections(vault: Path, monkeypatch) -> None:
     monkeypatch.setattr(corpus_aware, "suggest_related", lambda *a, **k: fake)
     res = cp.propose_compilation(vault, sources=[_ARTICLE])
     assert res["suggested_connections"] == ["Knowledge Base/Notes/Insights/keep.md"]
-    assert "[[Knowledge Base/Notes/Insights/keep.md]]" in res["outline_markdown"]
+    assert "- relates_to [[Knowledge Base/Notes/Insights/keep.md]]" in res["outline_markdown"]
 
 
 def test_session_source_suggests_research_note(vault: Path, monkeypatch) -> None:
