@@ -39,6 +39,28 @@ def test_audit_fix_canonicalizes_wikilinks_in_body(vault: Path) -> None:
     assert report.files_rewritten >= 1
 
 
+def test_audit_fix_uses_kb_relative_links_for_nested_obsidian_root(vault: Path) -> None:
+    (vault / "Knowledge Base" / ".obsidian").mkdir()
+    target = (
+        "Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation"
+    )
+    path = vault / "Knowledge Base" / "Notes" / "Insights" / "nested-root-linker.md"
+    _seed(
+        path,
+        "---\ntype: insight\nstatus: active\ncreated: 2026-05-28\n"
+        "updated: 2026-05-28\ntags: []\n"
+        f'sources:\n  - "[[{target}]]"\n---\n'
+        f"# Linker\n\nSee [[{target}]].\n",
+    )
+
+    audit_fix_module.audit_fix(vault, today=TODAY)
+
+    text = path.read_text(encoding="utf-8")
+    assert "[[Notes/Insights/progressive-disclosure-without-mode-fragmentation]]" in text
+    assert "[[Knowledge Base/" not in text
+
+
 def test_audit_fix_skips_sources_and_evidence(vault: Path) -> None:
     """Append-only trees are never touched even if they contain stale wikilinks."""
     # Plant a KB-relative wikilink in an existing source (which would normally

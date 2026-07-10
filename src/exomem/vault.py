@@ -1000,6 +1000,43 @@ def _strip_wikilink_brackets(s: str) -> str:
     return s
 
 
+def obsidian_uses_kb_root(vault_root: Path) -> bool:
+    """Whether Obsidian opens the managed KB directory as its vault root.
+
+    Exomem's API paths stay vault-rooted (``Knowledge Base/...``). Markdown
+    targets must instead be relative to the directory containing ``.obsidian``
+    or Obsidian interprets the KB prefix as a nested folder.
+    """
+    return (kb_root(vault_root) / ".obsidian").is_dir()
+
+
+def render_wikilink_target(target: str, vault_root: Path) -> str:
+    """Render a canonical target for the detected Obsidian vault root."""
+    if obsidian_uses_kb_root(vault_root) and target.startswith(kb_prefix()):
+        return target.removeprefix(kb_prefix())
+    return target
+
+
+def render_wikilinks_for_vault(text: str, vault_root: Path) -> str:
+    """Render canonical wikilinks in generated Markdown for this vault root.
+
+    Unlike :func:`normalize_body_wikilinks`, this does not resolve targets. It
+    only converts already-canonical ``Knowledge Base/...`` targets to their
+    KB-relative display form when Obsidian opens the managed directory itself.
+    """
+    new_text = text
+    for match in reversed(find_body_wikilinks(text)):
+        full = match.group(0)
+        inner = full[2:-2]
+        target, separator, alias = inner.partition("|")
+        rendered = render_wikilink_target(target.strip(), vault_root)
+        if rendered == target.strip():
+            continue
+        replacement = f"[[{rendered}|{alias}]]" if separator else f"[[{rendered}]]"
+        new_text = new_text[: match.start()] + replacement + new_text[match.end() :]
+    return new_text
+
+
 def normalize_wikilink(
     target: str,
     vault_root: Path,
@@ -1164,11 +1201,14 @@ def normalize_body_wikilinks(
     *,
     resolver: WikilinkResolver | None = None,
 ) -> tuple[str, list[str]]:
-    """Rewrite every `[[X]]` in `body` to canonical full vault-rooted form.
+    """Rewrite every `[[X]]` to the preferred Obsidian-visible form.
 
     Preserves `[[X|alias]]` aliases. Skips matches inside fenced code blocks
-    and inline code spans. Returns `(new_body, warnings)`. Unresolvable links
-    are left as-is with a warning — forward references are intentional.
+    and inline code spans. Internal resolution remains canonical vault-rooted;
+    emitted Markdown is KB-relative when ``Knowledge Base/.obsidian`` marks the
+    managed directory as the Obsidian vault root. Returns `(new_body, warnings)`.
+    Unresolvable links are left as-is with a warning — forward references are
+    intentional.
     """
     if resolver is None:
         resolver = WikilinkResolver(vault_root)
@@ -1195,10 +1235,11 @@ def normalize_body_wikilinks(
         if warning:
             warnings.append(warning)
             continue
-        if canonical == target_only:
+        rendered = render_wikilink_target(canonical, vault_root)
+        if rendered == target_only:
             continue  # already canonical
         replacement = (
-            f"[[{canonical}|{alias}]]" if alias is not None else f"[[{canonical}]]"
+            f"[[{rendered}|{alias}]]" if alias is not None else f"[[{rendered}]]"
         )
         new_body = new_body[: m.start()] + replacement + new_body[m.end():]
     return new_body, warnings

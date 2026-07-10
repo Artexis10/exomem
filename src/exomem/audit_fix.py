@@ -61,6 +61,7 @@ from .vault import (
     normalize_body_wikilinks,
     normalize_wikilink,
     parse_frontmatter,
+    render_wikilink_target,
 )
 
 
@@ -130,9 +131,10 @@ def _normalize_frontmatter_wikilinks(
         if warning:
             warnings.append(warning)
             continue
-        if canonical == target and not alias:
+        rendered = render_wikilink_target(canonical, vault_root)
+        if rendered == target and not alias:
             continue
-        replacement = f"[[{canonical}{alias}]]" if alias else f"[[{canonical}]]"
+        replacement = f"[[{rendered}{alias}]]" if alias else f"[[{rendered}]]"
         if replacement != m.group(0):
             new_text = new_text[: m.start()] + replacement + new_text[m.end():]
     return new_text, warnings
