@@ -218,13 +218,9 @@ def _merge_graph_contexts(
         truncation.extend(str(item) for item in context.get("truncation", []))
         warnings.extend(context.get("warnings", []))
     if dropped_nodes:
-        truncation.append(
-            f"merged nodes capped at {max_nodes} ({dropped_nodes} more not shown)"
-        )
+        truncation.append(f"merged nodes capped at {max_nodes} ({dropped_nodes} more not shown)")
     if dropped_edges:
-        truncation.append(
-            f"merged edges capped at {max_edges} ({dropped_edges} more not shown)"
-        )
+        truncation.append(f"merged edges capped at {max_edges} ({dropped_edges} more not shown)")
     return {
         "available": available,
         "reason": None if available else (warnings[0] if warnings else "no graph seeds"),

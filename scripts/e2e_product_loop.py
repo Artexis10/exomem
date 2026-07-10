@@ -206,6 +206,12 @@ async def _stdio_session(
                         },
                     },
                 }
+                registry_before = await _call(
+                    client,
+                    "schema_memory",
+                    {"operation": "infer", "subject": "relations"},
+                    timeout,
+                )
                 registry_result = await _call(
                     client,
                     "schema_memory",
@@ -213,12 +219,18 @@ async def _stdio_session(
                         "operation": "infer",
                         "subject": "relations",
                         "save": True,
+                        "expected_hash": registry_before["content_hash"],
                         "proposal": relation_proposal,
                     },
                     timeout,
                 )
-                if not registry_result.get("saved", {}).get("created"):
-                    raise RuntimeError("installed schema governance did not create relation registry")
+                if (
+                    registry_result.get("saved", {}).get("previous_hash")
+                    != registry_before["content_hash"]
+                ):
+                    raise RuntimeError(
+                        "installed schema governance did not hash-guard relation registry"
+                    )
                 source = await _call(
                     client,
                     "capture_source",

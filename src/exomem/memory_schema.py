@@ -131,8 +131,7 @@ def infer_contract(
         "frequencies": {
             "fields": field_profile,
             "blocks": {
-                key: _frequency(count, sample_size)
-                for key, count in sorted(block_counts.items())
+                key: _frequency(count, sample_size) for key, count in sorted(block_counts.items())
             },
             "relations": {
                 key: _frequency(count, sample_size)
@@ -157,20 +156,23 @@ def infer_relation_registry(
 ) -> dict[str, Any]:
     """Profile explicit relation observations without assigning new semantics."""
     registry = relation_registry.load_registry(vault_root)
-    observations = relation_observations(
+    pages, observations = _scan_relation_observations(
         vault_root, project=project, page_type=page_type, registry=registry
     )
     grouped: dict[str, dict[str, Any]] = {}
     for item in observations:
         key = str(item["raw_relation"])
-        entry = grouped.setdefault(key, {
-            "raw_relation": key,
-            "canonical": item["canonical"],
-            "parent": item["parent"],
-            "registry_status": item["registry_status"],
-            "count": 0,
-            "examples": [],
-        })
+        entry = grouped.setdefault(
+            key,
+            {
+                "raw_relation": key,
+                "canonical": item["canonical"],
+                "parent": item["parent"],
+                "registry_status": item["registry_status"],
+                "count": 0,
+                "examples": [],
+            },
+        )
         entry["count"] += 1
         example = {
             "path": item["source_path"],
@@ -187,23 +189,40 @@ def infer_relation_registry(
     warnings: list[dict[str, str]] = []
     suggestions: list[dict[str, Any]] = []
     if include_model_suggestions:
-        warnings.append({
-            "code": "model_suggestions_unavailable",
-            "detail": "No optional relation suggestion model is configured; deterministic inference is complete.",
-        })
+        warnings.append(
+            {
+                "code": "model_suggestions_unavailable",
+                "detail": (
+                    "No optional relation suggestion model is configured; "
+                    "deterministic inference is complete."
+                ),
+            }
+        )
     return {
         "subject": "relations",
-        "sample_size": len(_select_pages(vault_root, ContractScope(project, page_type))),
+        "sample_size": len(pages),
         "observation_count": len(observations),
-        "counts": {key: counts.get(key, 0) for key in (
-            "core", "extension", "alias", "deprecated", "scope_violation", "unregistered"
-        )},
-        "relations": sorted(grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])),
+        "counts": {
+            key: counts.get(key, 0)
+            for key in (
+                "core",
+                "extension",
+                "alias",
+                "deprecated",
+                "scope_violation",
+                "unregistered",
+            )
+        },
+        "relations": sorted(
+            grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])
+        ),
         "proposal": proposal,
         "content_hash": registry.extension_hash,
         "warnings": warnings,
         "model_suggestions": suggestions,
-        "model_suggestions_attribution": "optional model; response-only" if include_model_suggestions else None,
+        "model_suggestions_attribution": "optional model; response-only"
+        if include_model_suggestions
+        else None,
     }
 
 
@@ -214,6 +233,21 @@ def relation_observations(
     page_type: str | None = None,
     registry: relation_registry.RelationRegistry | None = None,
 ) -> list[dict[str, Any]]:
+    return _scan_relation_observations(
+        vault_root,
+        project=project,
+        page_type=page_type,
+        registry=registry,
+    )[1]
+
+
+def _scan_relation_observations(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
     registry = registry or relation_registry.load_registry(vault_root)
     pages = _select_pages(vault_root, ContractScope(project, page_type))
     out: list[dict[str, Any]] = []
@@ -232,7 +266,11 @@ def relation_observations(
                     source_kind=block.type,
                     origin="semantic_relation",
                 )
-                out.append(_observation(page.rel_path, block.id or f"line-{relation.line}", raw, resolution))
+                out.append(
+                    _observation(
+                        page.rel_path, block.id or f"line-{relation.line}", raw, resolution
+                    )
+                )
         in_fence = False
         for line_number, line in enumerate(page.body.splitlines(), start=1):
             if epistemic_graph._FENCE_RE.match(line):
@@ -254,7 +292,7 @@ def relation_observations(
     unique: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in out:
         unique[(item["source_path"], item["source_anchor"], item["raw_relation"])] = item
-    return list(unique.values())
+    return pages, list(unique.values())
 
 
 def validate_relation_registry(
@@ -265,20 +303,31 @@ def validate_relation_registry(
     page_type: str | None = None,
     strict: bool = False,
 ) -> dict[str, Any]:
-    registry = relation_registry.load_registry(vault_root, proposal=proposal) if proposal is not None else relation_registry.load_registry(vault_root)
+    registry = (
+        relation_registry.load_registry(vault_root, proposal=proposal)
+        if proposal is not None
+        else relation_registry.load_registry(vault_root)
+    )
     findings = list(registry.findings)
     observations = relation_observations(
         vault_root, project=project, page_type=page_type, registry=registry
     )
     for item in observations:
         if item["registry_status"] in {"unregistered", "deprecated", "scope_violation"}:
-            findings.append({
-                "code": item["registry_status"],
-                "path": item["source_path"],
-                "span": item["source_anchor"],
-                "severity": "warning" if item["registry_status"] != "scope_violation" else "error",
-                "detail": f"observed relation {item['raw_relation']!r} is {item['registry_status']}",
-            })
+            findings.append(
+                {
+                    "code": item["registry_status"],
+                    "path": item["source_path"],
+                    "span": item["source_anchor"],
+                    "severity": "warning"
+                    if item["registry_status"] != "scope_violation"
+                    else "error",
+                    "detail": (
+                        f"observed relation {item['raw_relation']!r} "
+                        f"is {item['registry_status']}"
+                    ),
+                }
+            )
     return {
         "subject": "relations",
         "valid": not any(item.get("severity") == "error" for item in findings),
@@ -289,7 +338,9 @@ def validate_relation_registry(
     }
 
 
-def diff_relation_registries(before: relation_registry.RelationRegistry, after: relation_registry.RelationRegistry) -> dict[str, Any]:
+def diff_relation_registries(
+    before: relation_registry.RelationRegistry, after: relation_registry.RelationRegistry
+) -> dict[str, Any]:
     before_defs = {key: value.as_dict() for key, value in before.extensions.items()}
     after_defs = {key: value.as_dict() for key, value in after.extensions.items()}
     common = set(before_defs) & set(after_defs)
@@ -319,11 +370,14 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
         if item.family and item.parent and item.family != registry.core[item.parent].family:
             value["family"] = item.family
         for field, candidate in (
-            ("direction", item.direction), ("inverse", item.inverse),
-            ("origins", sorted(item.origins)), ("aliases", list(item.aliases)),
+            ("direction", item.direction),
+            ("inverse", item.inverse),
+            ("origins", sorted(item.origins)),
+            ("aliases", list(item.aliases)),
             ("source_kinds", sorted(item.source_kinds)),
             ("target_kinds", sorted(item.target_kinds)),
-            ("status", item.status), ("replaced_by", item.replaced_by),
+            ("status", item.status),
+            ("replaced_by", item.replaced_by),
         ):
             if candidate not in (None, [], "active", "directed", ["semantic_relation"]):
                 value[field] = candidate
@@ -357,7 +411,9 @@ def infer_traversal_profiles(vault_root: Path) -> dict[str, Any]:
     }
 
 
-def _observation(path: str, anchor: str, raw: str, resolution: relation_registry.RelationResolution) -> dict[str, Any]:
+def _observation(
+    path: str, anchor: str, raw: str, resolution: relation_registry.RelationResolution
+) -> dict[str, Any]:
     return {
         "raw_relation": relation_registry.normalize_relation(raw),
         "canonical": resolution.canonical,
@@ -433,48 +489,59 @@ def validate_contract(vault_root: Path, contract: MemoryContract, *, strict: boo
         relations = _page_relations(vault_root, page, document)
         for field, rule in contract.fields.items():
             if rule.get("required") and field not in page.frontmatter:
-                findings.append(_finding(
-                    page.rel_path,
-                    f"frontmatter.{field}",
-                    f"missing required frontmatter field `{field}`",
-                    f"Add `{field}` to frontmatter or revise contract `{contract.name}`.",
-                ))
+                findings.append(
+                    _finding(
+                        page.rel_path,
+                        f"frontmatter.{field}",
+                        f"missing required frontmatter field `{field}`",
+                        f"Add `{field}` to frontmatter or revise contract `{contract.name}`.",
+                    )
+                )
                 continue
             if field not in page.frontmatter:
                 continue
             actual_type = _value_type(page.frontmatter[field])
             allowed_types = [str(item) for item in rule.get("types") or []]
             if allowed_types and actual_type not in allowed_types:
-                findings.append(_finding(
-                    page.rel_path,
-                    f"frontmatter.{field}",
-                    f"field `{field}` has type {actual_type}; expected {allowed_types}",
-                    f"Use one of the contract types or revise contract `{contract.name}`.",
-                ))
+                findings.append(
+                    _finding(
+                        page.rel_path,
+                        f"frontmatter.{field}",
+                        f"field `{field}` has type {actual_type}; expected {allowed_types}",
+                        f"Use one of the contract types or revise contract `{contract.name}`.",
+                    )
+                )
             enum = [str(item) for item in rule.get("enum") or []]
             if enum and str(page.frontmatter[field]) not in enum:
-                findings.append(_finding(
-                    page.rel_path,
-                    f"frontmatter.{field}",
-                    f"field `{field}` value is outside enum {enum}",
-                    f"Use an allowed value or revise contract `{contract.name}`.",
-                ))
+                findings.append(
+                    _finding(
+                        page.rel_path,
+                        f"frontmatter.{field}",
+                        f"field `{field}` value is outside enum {enum}",
+                        f"Use an allowed value or revise contract `{contract.name}`.",
+                    )
+                )
         for block, rule in contract.blocks.items():
             if rule.get("required") and block not in blocks:
-                findings.append(_finding(
-                    page.rel_path,
-                    f"body.block:{block}",
-                    f"missing required semantic block `{block}`",
-                    f"Add a `{block}` block or revise contract `{contract.name}`.",
-                ))
+                findings.append(
+                    _finding(
+                        page.rel_path,
+                        f"body.block:{block}",
+                        f"missing required semantic block `{block}`",
+                        f"Add a `{block}` block or revise contract `{contract.name}`.",
+                    )
+                )
         for relation, rule in contract.relations.items():
             if rule.get("required") and relation not in relations:
-                findings.append(_finding(
-                    page.rel_path,
-                    f"body.relation:{relation}",
-                    f"missing required relation `{relation}`",
-                    f"Add an observed `{relation}` relation or revise contract `{contract.name}`.",
-                ))
+                findings.append(
+                    _finding(
+                        page.rel_path,
+                        f"body.relation:{relation}",
+                        f"missing required relation `{relation}`",
+                        f"Add an observed `{relation}` relation or revise "
+                        f"contract `{contract.name}`.",
+                    )
+                )
     return {
         "contract": contract.name,
         "sample_size": len(pages),
@@ -502,9 +569,7 @@ def diff_contracts(before: MemoryContract, after: MemoryContract) -> dict[str, A
 
 def contract_from_dict(data: dict[str, Any]) -> MemoryContract:
     if int(data.get("schema_version", 0)) != SCHEMA_VERSION:
-        raise ValueError(
-            f"INVALID_CONTRACT: schema_version must be {SCHEMA_VERSION}"
-        )
+        raise ValueError(f"INVALID_CONTRACT: schema_version must be {SCHEMA_VERSION}")
     name = _validate_name(str(data.get("name") or ""))
     scope_data = data.get("scope") or {}
     if not isinstance(scope_data, dict):
@@ -562,10 +627,8 @@ def _page_projects(frontmatter: dict[str, Any]) -> set[str]:
 def _page_relations(vault_root: Path, page, document) -> set[str]:
     return {
         edge.relation_type
-        for edge in epistemic_graph._edges_for_page(
-            vault_root, page, tuple(document.blocks)
-        )
-        if edge.origin == "semantic_relation"
+        for edge in epistemic_graph._edges_for_page(vault_root, page, tuple(document.blocks))
+        if edge.origin == "semantic_relation" and edge.relation_type is not None
     }
 
 

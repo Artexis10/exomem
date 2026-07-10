@@ -40,28 +40,42 @@ def test_legacy_relation_contract_matches_static_golden() -> None:
 
 
 def test_extension_alias_parent_and_scope_resolution() -> None:
-    registry = relation_registry.load_registry(proposal=_proposal(
-        **{"science.replicates": {
-            "parent": "supports", "description": "Reports independent reproduction",
-            "aliases": ["replicates"], "scope": {"page_types": ["experiment"]},
-        }}
-    ))
+    registry = relation_registry.load_registry(
+        proposal=_proposal(
+            **{
+                "science.replicates": {
+                    "parent": "supports",
+                    "description": "Reports independent reproduction",
+                    "aliases": ["replicates"],
+                    "scope": {"page_types": ["experiment"]},
+                }
+            }
+        )
+    )
     resolved = registry.resolve("replicates", page_type="experiment", origin="semantic_relation")
     assert (resolved.canonical, resolved.parent, resolved.status) == (
-        "science.replicates", "supports", "alias"
+        "science.replicates",
+        "supports",
+        "alias",
     )
-    assert registry.resolve(
-        "replicates", page_type="insight", origin="semantic_relation"
-    ).status == "scope_violation"
+    assert (
+        registry.resolve("replicates", page_type="insight", origin="semantic_relation").status
+        == "scope_violation"
+    )
 
 
 def test_collisions_and_incomplete_semantics_are_stable_findings() -> None:
-    registry = relation_registry.load_registry(proposal=_proposal(
-        supports={"parent": "supports", "description": "bad"},
-        **{"science.empty": {"parent": "not_core", "description": ""}},
-    ))
+    registry = relation_registry.load_registry(
+        proposal=_proposal(
+            supports={"parent": "supports", "description": "bad"},
+            **{"science.empty": {"parent": "not_core", "description": ""}},
+        )
+    )
     assert sorted(finding["code"] for finding in registry.findings) == [
-        "collision", "invalid_key", "invalid_parent", "missing_description"
+        "collision",
+        "invalid_key",
+        "invalid_parent",
+        "missing_description",
     ]
 
 
@@ -75,9 +89,14 @@ def test_unknown_semantic_relation_is_retained_but_validation_reports_it() -> No
 
 def test_save_is_atomic_and_expected_hash_guarded(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
-    proposal = _proposal(**{"science.replicates": {
-        "parent": "supports", "description": "Reports independent reproduction"
-    }})
+    proposal = _proposal(
+        **{
+            "science.replicates": {
+                "parent": "supports",
+                "description": "Reports independent reproduction",
+            }
+        }
+    )
     created = relation_registry.save_registry(vault, proposal)
     path = vault / created["path"]
     before = path.read_bytes()
@@ -93,3 +112,53 @@ def test_observed_relation_cannot_be_deleted() -> None:
         relation_registry.save_registry(
             Path("/unused"), _proposal(), observed_keys={"science.replicates"}
         )
+
+
+def test_replacement_and_inverse_cycles_are_rejected() -> None:
+    replacement_cycle = relation_registry.load_registry(
+        proposal=_proposal(
+            **{
+                "science.old_a": {
+                    "parent": "supports",
+                    "description": "Old A",
+                    "status": "deprecated",
+                    "replaced_by": "science.old_b",
+                },
+                "science.old_b": {
+                    "parent": "supports",
+                    "description": "Old B",
+                    "status": "deprecated",
+                    "replaced_by": "science.old_a",
+                },
+            }
+        )
+    )
+    assert any(item["code"] == "relation_cycle" for item in replacement_cycle.findings)
+    inverse_cycle = relation_registry.load_registry(
+        proposal=_proposal(
+            **{
+                "science.a": {"parent": "supports", "description": "A", "inverse": "science.b"},
+                "science.b": {"parent": "supports", "description": "B", "inverse": "science.c"},
+                "science.c": {"parent": "supports", "description": "C", "inverse": "science.a"},
+            }
+        )
+    )
+    assert any(item["code"] == "relation_cycle" for item in inverse_cycle.findings)
+
+
+def test_invalid_node_kind_and_active_replacement_are_rejected() -> None:
+    registry = relation_registry.load_registry(
+        proposal=_proposal(
+            **{
+                "science.new": {"parent": "supports", "description": "New"},
+                "science.current": {
+                    "parent": "supports",
+                    "description": "Current",
+                    "replaced_by": "science.new",
+                    "source_kinds": ["not valid"],
+                },
+            }
+        )
+    )
+    codes = {item["code"] for item in registry.findings}
+    assert {"invalid_node_kind", "invalid_replacement"} <= codes

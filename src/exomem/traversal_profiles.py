@@ -18,8 +18,17 @@ MAX_NODES = 200
 MAX_EDGES = 400
 _DIRECTIONS = {"both", "outgoing", "incoming"}
 _FIELDS = {
-    "extends", "add_families", "remove_families", "add_relations", "remove_relations",
-    "direction", "priority", "include_extensions", "max_depth", "max_nodes", "max_edges",
+    "extends",
+    "add_families",
+    "remove_families",
+    "add_relations",
+    "remove_relations",
+    "direction",
+    "priority",
+    "include_extensions",
+    "max_depth",
+    "max_nodes",
+    "max_edges",
 }
 
 
@@ -28,6 +37,7 @@ class TraversalProfile:
     name: str
     families: frozenset[str]
     relations: frozenset[str] = frozenset()
+    excluded_relations: frozenset[str] = frozenset()
     direction: str = "both"
     priority: tuple[str, ...] = ()
     include_extensions: bool = True
@@ -43,6 +53,7 @@ class TraversalProfile:
             "extends": self.extends,
             "families": sorted(self.families),
             "relations": sorted(self.relations),
+            "excluded_relations": sorted(self.excluded_relations),
             "direction": self.direction,
             "priority": list(self.priority),
             "include_extensions": self.include_extensions,
@@ -67,14 +78,32 @@ class ProfileRegistry:
         return profile
 
 
-def builtin_profiles(registry: relation_registry.RelationRegistry | None = None) -> dict[str, TraversalProfile]:
+def builtin_profiles(
+    registry: relation_registry.RelationRegistry | None = None,
+) -> dict[str, TraversalProfile]:
     registry = registry or relation_registry.core_registry()
     all_families = frozenset(item.family for item in registry.core.values())
     values = {
-        "epistemic": {"support", "contradiction", "refinement", "duplication", "supersession", "question", "answer"},
+        "epistemic": {
+            "support",
+            "contradiction",
+            "refinement",
+            "duplication",
+            "supersession",
+            "question",
+            "answer",
+        },
         "provenance": {"derivation", "evidence", "citation", "observation"},
         "causal": {"causality", "dependency", "mitigation", "blocking", "resolution"},
-        "decision": {"evidence", "derivation", "dependency", "implementation", "use", "mitigation", "resolution"},
+        "decision": {
+            "evidence",
+            "derivation",
+            "dependency",
+            "implementation",
+            "use",
+            "mitigation",
+            "resolution",
+        },
         "all": set(all_families),
     }
     return {
@@ -119,7 +148,9 @@ def load_profiles(
     try:
         data = yaml.safe_load(raw)
     except yaml.YAMLError as exc:
-        result = ProfileRegistry(builtins, digest, (_finding("invalid_yaml", "profiles", str(exc)),))
+        result = ProfileRegistry(
+            builtins, digest, (_finding("invalid_yaml", "profiles", str(exc)),)
+        )
     else:
         result = _parse(data, digest, registry, builtins)
     _CACHE[path] = (digest, result)
@@ -144,15 +175,24 @@ def save_profiles(
         if expected_hash != previous:
             raise ValueError("STALE_TRAVERSAL_PROFILES: expected_hash does not match current hash")
     rendered = yaml.safe_dump(proposal, sort_keys=False, allow_unicode=True)
-    vault.batch_atomic_write([vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root)
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(path=path, content=rendered)], vault_root=vault_root
+    )
     _CACHE.pop(path, None)
-    return {"path": path.relative_to(vault_root).as_posix(), "content_hash": _hash(rendered), "previous_hash": previous, "created": previous is None}
+    return {
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": _hash(rendered),
+        "previous_hash": previous,
+        "created": previous is None,
+    }
 
 
 def relation_allowed(
     profile: TraversalProfile,
     definition: relation_registry.RelationDefinition,
 ) -> bool:
+    if definition.key in profile.excluded_relations:
+        return False
     if definition.key in profile.relations:
         return True
     if definition.parent and not profile.include_extensions:
@@ -190,7 +230,9 @@ def _parse(
 ) -> ProfileRegistry:
     findings: list[dict[str, str]] = []
     if not isinstance(data, dict):
-        return ProfileRegistry(builtins, digest, (_finding("invalid_profiles", "profiles", "must be an object"),))
+        return ProfileRegistry(
+            builtins, digest, (_finding("invalid_profiles", "profiles", "must be an object"),)
+        )
     for key in sorted(set(data) - {"schema_version", "profiles"}):
         findings.append(_finding("unknown_field", key, "unknown profile registry field"))
     if data.get("schema_version") != SCHEMA_VERSION:
@@ -204,7 +246,9 @@ def _parse(
         name = str(raw_name)
         span = f"profiles.{name}"
         if name in builtins:
-            findings.append(_finding("immutable_builtin", span, "built-in profiles cannot be redefined"))
+            findings.append(
+                _finding("immutable_builtin", span, "built-in profiles cannot be redefined")
+            )
             continue
         if not isinstance(value, dict):
             findings.append(_finding("invalid_profile", span, "must be an object"))
@@ -213,13 +257,17 @@ def _parse(
             findings.append(_finding("unknown_field", f"{span}.{unknown}", "unknown profile field"))
         base_name = value.get("extends")
         if base_name not in builtins:
-            findings.append(_finding("invalid_parent", f"{span}.extends", "must extend one built-in profile"))
+            findings.append(
+                _finding("invalid_parent", f"{span}.extends", "must extend one built-in profile")
+            )
             continue
         base = builtins[str(base_name)]
         add_families = _list(value.get("add_families"), f"{span}.add_families", findings)
         remove_families = _list(value.get("remove_families"), f"{span}.remove_families", findings)
         add_relations = _list(value.get("add_relations"), f"{span}.add_relations", findings)
-        remove_relations = _list(value.get("remove_relations"), f"{span}.remove_relations", findings)
+        remove_relations = _list(
+            value.get("remove_relations"), f"{span}.remove_relations", findings
+        )
         for family in (*add_families, *remove_families):
             if family not in registry.families:
                 findings.append(_finding("unknown_family", span, f"unregistered family {family!r}"))
@@ -227,11 +275,19 @@ def _parse(
         canonical_remove = _canonical(remove_relations, registry, span, findings)
         direction = str(value.get("direction", base.direction))
         if direction not in _DIRECTIONS:
-            findings.append(_finding("invalid_direction", f"{span}.direction", f"must be one of {sorted(_DIRECTIONS)}"))
+            findings.append(
+                _finding(
+                    "invalid_direction",
+                    f"{span}.direction",
+                    f"must be one of {sorted(_DIRECTIONS)}",
+                )
+            )
         priority = _list(value.get("priority"), f"{span}.priority", findings) or list(base.priority)
         for item in priority:
             if item not in registry.families and registry.resolve(item).canonical is None:
-                findings.append(_finding("unknown_priority", f"{span}.priority", f"unregistered item {item!r}"))
+                findings.append(
+                    _finding("unknown_priority", f"{span}.priority", f"unregistered item {item!r}")
+                )
         caps = {}
         for key, maximum, default in (
             ("max_depth", MAX_DEPTH, base.max_depth),
@@ -243,25 +299,49 @@ def _parse(
             except (TypeError, ValueError):
                 cap = maximum + 1
             if cap < 0 or cap > maximum or cap > default:
-                findings.append(_finding("invalid_cap", f"{span}.{key}", f"must be between 0 and built-in bound {default}"))
+                findings.append(
+                    _finding(
+                        "invalid_cap",
+                        f"{span}.{key}",
+                        f"must be between 0 and built-in bound {default}",
+                    )
+                )
                 cap = default
             caps[key] = cap
+        include_extensions = value.get("include_extensions", base.include_extensions)
+        if not isinstance(include_extensions, bool):
+            findings.append(
+                _finding(
+                    "invalid_boolean",
+                    f"{span}.include_extensions",
+                    "must be true or false",
+                )
+            )
+            include_extensions = base.include_extensions
         profiles[name] = replace(
             base,
             name=name,
             families=frozenset((set(base.families) | set(add_families)) - set(remove_families)),
             relations=frozenset((set(base.relations) | canonical_add) - canonical_remove),
+            excluded_relations=frozenset(canonical_remove),
             direction=direction,
             priority=tuple(priority),
-            include_extensions=bool(value.get("include_extensions", base.include_extensions)),
+            include_extensions=include_extensions,
             extends=str(base_name),
             builtin=False,
             **caps,
         )
-    return ProfileRegistry(profiles, digest, tuple(sorted(findings, key=lambda x: (x["path"], x["code"], x["detail"]))))
+    return ProfileRegistry(
+        profiles, digest, tuple(sorted(findings, key=lambda x: (x["path"], x["code"], x["detail"])))
+    )
 
 
-def _canonical(values: list[str], registry: relation_registry.RelationRegistry, span: str, findings: list[dict[str, str]]) -> set[str]:
+def _canonical(
+    values: list[str],
+    registry: relation_registry.RelationRegistry,
+    span: str,
+    findings: list[dict[str, str]],
+) -> set[str]:
     out: set[str] = set()
     for value in values:
         resolved = registry.resolve(value)

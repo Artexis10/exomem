@@ -146,3 +146,52 @@ def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) 
     index.delete_paths([moved_rel])
     assert index.nodes(path=moved_rel) == []
     assert index.edges(source_path=moved_rel) == []
+
+
+def test_target_refresh_preserves_inbound_relation_as_placeholder(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source, target = _seed(vault)
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
+        encoding="utf-8",
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    before = next(edge for edge in index.edges(source_path=A) if edge["relation_type"] == "supports")
+    target.write_text(target.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8")
+    index.refresh_paths([target])
+    assert before in index.edges(source_path=A)
+
+
+def test_incremental_write_after_registry_change_forces_full_reresolution(tmp_path: Path) -> None:
+    import yaml
+
+    vault = tmp_path / "vault"
+    source, target = _seed(vault)
+    registry_path = vault / "Knowledge Base" / "_Schema" / "relation-registry.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    proposal = {"schema_version": 1, "extensions": {"science.replicates": {
+        "parent": "supports", "description": "Reports independent reproduction",
+        "aliases": ["mirrors"],
+    }}}
+    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8")
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n- mirrors: [[Knowledge Base/Notes/Insights/b]]\n",
+        encoding="utf-8",
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    proposal["extensions"]["science.replicates"]["aliases"] = ["reproduces"]
+    registry_path.write_text(yaml.safe_dump(proposal), encoding="utf-8")
+    target.write_text(target.read_text(encoding="utf-8") + "\nChanged.\n", encoding="utf-8")
+
+    report = epistemic_graph.EpistemicGraphIndex(vault).refresh_paths([target])
+
+    assert report["indexed_files"] == 2
+    changed = next(
+        edge for edge in epistemic_graph.EpistemicGraphIndex(vault).edges(source_path=A)
+        if edge["raw_relation"] == "mirrors"
+    )
+    assert changed["registry_status"] == "unregistered"

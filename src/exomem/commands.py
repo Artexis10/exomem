@@ -3691,13 +3691,19 @@ def op_schema_memory(
             )
         if operation == "diff":
             before = relation_registry_module.load_registry(vault_root)
-            after = (
-                relation_registry_module.load_registry(vault_root, proposal=proposal)
-                if proposal is not None
-                else before
-            )
+            if proposal is not None:
+                after = relation_registry_module.load_registry(vault_root, proposal=proposal)
+                comparison = "proposal"
+            else:
+                inferred = memory_schema_module.infer_relation_registry(
+                    vault_root, project=project, page_type=page_type
+                )
+                after = relation_registry_module.load_registry(
+                    vault_root, proposal=inferred["proposal"]
+                )
+                comparison = "corpus"
             result = memory_schema_module.diff_relation_registries(before, after)
-            result.update({"content_hash": before.extension_hash, "comparison": "proposal" if proposal is not None else "current"})
+            result.update({"content_hash": before.extension_hash, "comparison": comparison})
             return result
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject == "traversal-profiles":

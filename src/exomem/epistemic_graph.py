@@ -123,10 +123,7 @@ class EpistemicGraphIndex:
             embeddings._apply_sidecar_pragmas(conn)
         except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
             pass
-        columns = {
-            row[1]
-            for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()
-        }
+        columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
         if columns and "raw_relation" not in columns:
             conn.execute("DROP TABLE graph_edges")
         conn.execute("""
@@ -164,10 +161,12 @@ class EpistemicGraphIndex:
         try:
             conn = sqlite3.connect(self.path)
             try:
-                values = dict(conn.execute(
-                    "SELECT key, value FROM graph_meta WHERE key IN "
-                    "('schema_version', 'core_registry_version', 'extension_registry_hash')"
-                ).fetchall())
+                values = dict(
+                    conn.execute(
+                        "SELECT key, value FROM graph_meta WHERE key IN "
+                        "('schema_version', 'core_registry_version', 'extension_registry_hash')"
+                    ).fetchall()
+                )
             finally:
                 conn.close()
         except sqlite3.Error:
@@ -200,9 +199,12 @@ class EpistemicGraphIndex:
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                    ("traversal_profile_hash", traversal_profiles.load_profiles(
-                        self.vault_root, registry=self.registry
-                    ).content_hash),
+                    (
+                        "traversal_profile_hash",
+                        traversal_profiles.load_profiles(
+                            self.vault_root, registry=self.registry
+                        ).content_hash,
+                    ),
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -224,6 +226,8 @@ class EpistemicGraphIndex:
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
+        if self.path.exists() and not self.available():
+            return self.rebuild_all()
         conn = self._connect()
         indexed = 0
         try:
@@ -255,7 +259,10 @@ class EpistemicGraphIndex:
             return []
         conn = self._connect()
         try:
-            select = "SELECT node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata FROM graph_nodes"
+            select = (
+                "SELECT node_key, kind, path, anchor, title, text, source_hash, "
+                "line_start, line_end, metadata FROM graph_nodes"
+            )
             if path is None:
                 rows = conn.execute(select + " ORDER BY node_key").fetchall()
             else:
@@ -271,7 +278,11 @@ class EpistemicGraphIndex:
             return []
         conn = self._connect()
         try:
-            select = "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata FROM graph_edges"
+            select = (
+                "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
+                "parent_relation, registry_status, registry_version, registry_hash, "
+                "origin, source_path, source_anchor, metadata FROM graph_edges"
+            )
             if source_path is None:
                 rows = conn.execute(select + " ORDER BY edge_key").fetchall()
             else:
@@ -327,9 +338,12 @@ class EpistemicGraphIndex:
             )
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                ("traversal_profile_hash", traversal_profiles.load_profiles(
-                    self.vault_root, registry=self.registry
-                ).content_hash),
+                (
+                    "traversal_profile_hash",
+                    traversal_profiles.load_profiles(
+                        self.vault_root, registry=self.registry
+                    ).content_hash,
+                ),
             )
             for node in [file_node, *block_nodes]:
                 _insert_node(conn, node)
@@ -338,14 +352,8 @@ class EpistemicGraphIndex:
         return True
 
     def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
-        node_rows = conn.execute(
-            "SELECT node_key FROM graph_nodes WHERE path = ?", (rel_path,)
-        ).fetchall()
-        node_keys = [r[0] for r in node_rows]
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel_path,))
-            for key in node_keys:
-                conn.execute("DELETE FROM graph_edges WHERE src_key = ? OR dst_key = ?", (key, key))
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
         return cur.rowcount if cur.rowcount is not None else 0
 
@@ -373,9 +381,7 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
-    profile_registry = traversal_profiles.load_profiles(
-        vault_root, registry=idx.registry
-    )
+    profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
     profile = profile_registry.resolve(traversal_profile)
     depth = min(max(0, int(depth)), profile.max_depth, traversal_profiles.MAX_DEPTH)
     max_nodes = min(max(1, int(max_nodes)), profile.max_nodes, traversal_profiles.MAX_NODES)
@@ -423,11 +429,14 @@ def graph_context(
                         str(edge.get("source_anchor")),
                         str(edge.get("raw_relation")),
                     )
-                    unknown.setdefault(key, {
-                        "raw_relation": edge.get("raw_relation"),
-                        "source_path": edge.get("source_path"),
-                        "source_anchor": edge.get("source_anchor"),
-                    })
+                    unknown.setdefault(
+                        key,
+                        {
+                            "raw_relation": edge.get("raw_relation"),
+                            "source_path": edge.get("source_path"),
+                            "source_anchor": edge.get("source_anchor"),
+                        },
+                    )
                     continue
                 if status == "scope_violation":
                     excluded_scope += 1
@@ -473,11 +482,13 @@ def graph_context(
             truncation.append(f"edges capped at {max_edges}")
         warnings: list[dict[str, Any]] = []
         if unknown:
-            warnings.append({
-                "code": "unregistered_relations",
-                "count": len(unknown),
-                "examples": list(unknown.values())[:5],
-            })
+            warnings.append(
+                {
+                    "code": "unregistered_relations",
+                    "count": len(unknown),
+                    "examples": list(unknown.values())[:5],
+                }
+            )
         if excluded_scope:
             warnings.append({"code": "scope_violations", "count": excluded_scope})
         return {
@@ -562,10 +573,15 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
         return []
     idx = EpistemicGraphIndex(vault_root)
     if not idx.path.exists() or not idx.available():
-        return [{
-            "path": kb_prefix(),
-            "reason": "graph sidecar missing, schema-mismatched, or relation-registry hash drift",
-        }]
+        return [
+            {
+                "path": kb_prefix(),
+                "reason": (
+                    "graph sidecar missing, schema-mismatched, or "
+                    "relation-registry hash drift"
+                ),
+            }
+        ]
     by_path = {n["path"]: n for n in idx.nodes() if n["kind"] == "file"}
     drift: list[dict[str, Any]] = []
     kb = vault_root / kb_dirname()
@@ -762,7 +778,9 @@ def _edges_for_page(
         )
     for target in find_module._outbound_wikilink_paths(page, vault_root):
         edges.append(
-            page_edge(file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel)
+            page_edge(
+                file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel
+            )
         )
     edges.extend(
         _relation_line_edges(
@@ -951,7 +969,9 @@ def _edge(
 
 def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO graph_nodes (node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO graph_nodes "
+        "(node_key, kind, path, anchor, title, text, source_hash, line_start, "
+        "line_end, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             node.node_key,
             node.kind,
@@ -969,7 +989,10 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
 
 def _insert_edge(conn: sqlite3.Connection, edge: GraphEdge) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO graph_edges (edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT OR REPLACE INTO graph_edges "
+        "(edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, "
+        "registry_status, registry_version, registry_hash, origin, source_path, "
+        "source_anchor, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             edge.edge_key,
             edge.src_key,
@@ -1032,9 +1055,14 @@ def _json(value: str | None) -> dict[str, Any]:
 
 
 def _seed_nodes(conn: sqlite3.Connection, *, path: str | None, query: str | None):
-    select = "SELECT node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata FROM graph_nodes"
+    select = (
+        "SELECT node_key, kind, path, anchor, title, text, source_hash, "
+        "line_start, line_end, metadata FROM graph_nodes"
+    )
     if path:
-        rows = conn.execute(select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)).fetchall()
+        rows = conn.execute(
+            select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)
+        ).fetchall()
         return [_node_row_to_dict(row) for row in rows]
     if query:
         like = f"%{query}%"
@@ -1049,7 +1077,11 @@ def _neighbor_edges(
     conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    select = "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, parent_relation, registry_status, registry_version, registry_hash, origin, source_path, source_anchor, metadata FROM graph_edges"
+    select = (
+        "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
+        "parent_relation, registry_status, registry_version, registry_hash, "
+        "origin, source_path, source_anchor, metadata FROM graph_edges"
+    )
     for key in sorted(frontier):
         rows = conn.execute(
             select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)
@@ -1079,7 +1111,8 @@ def _edge_priority(
 
 def _node_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata FROM graph_nodes WHERE node_key = ?",
+        "SELECT node_key, kind, path, anchor, title, text, source_hash, line_start, "
+        "line_end, metadata FROM graph_nodes WHERE node_key = ?",
         (key,),
     ).fetchone()
     return _node_row_to_dict(row) if row else None

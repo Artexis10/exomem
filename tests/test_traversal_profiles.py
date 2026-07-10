@@ -18,11 +18,18 @@ def test_builtins_are_bounded_and_domain_distinct() -> None:
 
 
 def test_custom_profile_can_only_narrow_a_builtin() -> None:
-    proposal = {"schema_version": 1, "profiles": {"lab-evidence": {
-        "extends": "provenance", "add_relations": ["supports"],
-        "remove_families": ["citation"], "direction": "outgoing",
-        "max_nodes": 20,
-    }}}
+    proposal = {
+        "schema_version": 1,
+        "profiles": {
+            "lab-evidence": {
+                "extends": "provenance",
+                "add_relations": ["supports"],
+                "remove_families": ["citation"],
+                "direction": "outgoing",
+                "max_nodes": 20,
+            }
+        },
+    }
     loaded = traversal_profiles.load_profiles(proposal=proposal)
     assert loaded.findings == ()
     profile = loaded.resolve("lab-evidence")
@@ -34,25 +41,47 @@ def test_custom_profile_can_only_narrow_a_builtin() -> None:
 
 
 def test_invalid_custom_profile_is_not_selectable() -> None:
-    loaded = traversal_profiles.load_profiles(proposal={
-        "schema_version": 1,
-        "profiles": {"bad": {"extends": "missing", "max_nodes": 999}},
-    })
+    loaded = traversal_profiles.load_profiles(
+        proposal={
+            "schema_version": 1,
+            "profiles": {"bad": {"extends": "missing", "max_nodes": 999}},
+        }
+    )
     assert any(item["code"] == "invalid_parent" for item in loaded.findings)
     with pytest.raises(ValueError, match="INVALID_TRAVERSAL_PROFILE"):
         loaded.resolve("bad")
 
 
 def test_parent_filter_expands_registered_extensions() -> None:
-    registry = relation_registry.load_registry(proposal={
-        "schema_version": 1,
-        "extensions": {"science.replicates": {
-            "parent": "supports", "description": "Reports independent reproduction"
-        }},
-    })
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "extensions": {
+                "science.replicates": {
+                    "parent": "supports",
+                    "description": "Reports independent reproduction",
+                }
+            },
+        }
+    )
     profile = traversal_profiles.builtin_profiles(registry)["epistemic"]
     narrowed = traversal_profiles.narrow_relations(profile, ["supports"], registry)
     assert narrowed == frozenset({"supports", "science.replicates"})
+
+
+def test_custom_exact_removal_overrides_inherited_family() -> None:
+    loaded = traversal_profiles.load_profiles(
+        proposal={
+            "schema_version": 1,
+            "profiles": {"no-citations": {"extends": "provenance", "remove_relations": ["cites"]}},
+        }
+    )
+    profile = loaded.resolve("no-citations")
+    cites = relation_registry.core_registry().definition("cites")
+    derived = relation_registry.core_registry().definition("derived_from")
+    assert cites is not None and derived is not None
+    assert traversal_profiles.relation_allowed(profile, cites) is False
+    assert traversal_profiles.relation_allowed(profile, derived) is True
 
 
 def test_profile_save_uses_expected_hash(tmp_path: Path) -> None:
@@ -79,14 +108,14 @@ def test_cross_file_extensions_are_precise_under_portable_profiles(tmp_path: Pat
         "schema_version": 1,
         "extensions": {
             "science.replicates": {
-                "parent": "supports", "description": "Reports independent reproduction"
+                "parent": "supports",
+                "description": "Reports independent reproduction",
             },
             "records.traces_to": {
-                "parent": "derived_from", "description": "Traces a record to its source"
+                "parent": "derived_from",
+                "description": "Traces a record to its source",
             },
-            "systems.triggers": {
-                "parent": "causes", "description": "Triggers a system transition"
-            },
+            "systems.triggers": {"parent": "causes", "description": "Triggers a system transition"},
         },
     }
     _write(
@@ -127,7 +156,9 @@ The result reproduced.
         vault, path=source_path, traversal_profile="causal", depth=1
     )
 
-    precise = next(edge for edge in epistemic["edges"] if edge["relation_type"] == "science.replicates")
+    precise = next(
+        edge for edge in epistemic["edges"] if edge["relation_type"] == "science.replicates"
+    )
     assert precise["parent_relation"] == "supports"
     assert precise["raw_relation"] == "science.replicates"
     assert precise["registry_status"] == "extension"
@@ -145,16 +176,29 @@ The result reproduced.
 
 def test_registry_hash_drift_requires_rebuild_and_re_resolves_alias(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
-    proposal = {"schema_version": 1, "extensions": {"science.replicates": {
-        "parent": "supports", "description": "Reports independent reproduction",
-        "aliases": ["mirrors"],
-    }}}
+    proposal = {
+        "schema_version": 1,
+        "extensions": {
+            "science.replicates": {
+                "parent": "supports",
+                "description": "Reports independent reproduction",
+                "aliases": ["mirrors"],
+            }
+        },
+    }
     _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", yaml.safe_dump(proposal))
     _write(vault, "Knowledge Base/Notes/Target.md", "# Target\n")
-    _write(vault, "Knowledge Base/Notes/Source.md", "# Source\n\n- mirrors: [[Knowledge Base/Notes/Target]]\n")
+    _write(
+        vault,
+        "Knowledge Base/Notes/Source.md",
+        "# Source\n\n- mirrors: [[Knowledge Base/Notes/Target]]\n",
+    )
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    assert next(edge for edge in index.edges() if edge["raw_relation"] == "mirrors")["relation_type"] == "science.replicates"
+    assert (
+        next(edge for edge in index.edges() if edge["raw_relation"] == "mirrors")["relation_type"]
+        == "science.replicates"
+    )
     proposal["extensions"]["science.replicates"]["aliases"] = ["reproduces"]
     _write(vault, "Knowledge Base/_Schema/relation-registry.yaml", yaml.safe_dump(proposal))
     assert epistemic_graph.EpistemicGraphIndex(vault).available() is False
