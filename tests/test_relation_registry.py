@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import relation_registry, semantic_blocks
 
@@ -18,6 +19,24 @@ def test_core_is_single_source_for_parser_and_graph() -> None:
     assert len(core.core) == 24
     assert semantic_blocks.RELATION_TYPES == core.keys
     assert epistemic_graph.RELATION_TYPES == core.keys
+
+
+def test_legacy_relation_contract_matches_static_golden() -> None:
+    golden = yaml.safe_load(
+        (Path(__file__).parent / "golden" / "relation_compatibility.yaml").read_text(
+            encoding="utf-8"
+        )
+    )
+    actual = {
+        key: {
+            "direction": definition.direction,
+            **({"inverse": definition.inverse} if definition.inverse else {}),
+            "origins": sorted(definition.origins),
+        }
+        for key, definition in relation_registry.core_registry().core.items()
+    }
+    assert actual == golden["relations"]
+    assert golden["graph_context_default_profile"] == "all"
 
 
 def test_extension_alias_parent_and_scope_resolution() -> None:

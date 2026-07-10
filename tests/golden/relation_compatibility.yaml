@@ -1,0 +1,32 @@
+schema_version: 1
+parser:
+  semantic_metadata: colon_required_between_relation_and_target
+  registered_bullet_colon: optional
+  unregistered_bullet_colon: required
+  unknown_semantic_metadata: retained_with_validation_finding
+graph_context_default_profile: all
+relations:
+  about_entity: {direction: directed, origins: [semantic_relation]}
+  answers: {direction: directed, origins: [semantic_relation]}
+  blocks: {direction: directed, origins: [semantic_relation]}
+  caused_by: {direction: directed, inverse: causes, origins: [semantic_relation]}
+  causes: {direction: directed, inverse: caused_by, origins: [semantic_relation]}
+  cites: {direction: directed, origins: [semantic_relation]}
+  contradicts: {direction: symmetric, origins: [semantic_relation]}
+  depends_on: {direction: directed, origins: [semantic_relation]}
+  derived_from: {direction: directed, origins: [frontmatter, semantic_block, semantic_relation]}
+  duplicates: {direction: symmetric, origins: [semantic_relation]}
+  evidenced_by: {direction: directed, origins: [frontmatter, semantic_relation]}
+  implements: {direction: directed, origins: [semantic_relation]}
+  links_to: {direction: directed, origins: [frontmatter, semantic_relation, wikilink]}
+  mentions: {direction: directed, origins: [semantic_relation]}
+  mitigates: {direction: directed, origins: [semantic_relation]}
+  observed_in: {direction: directed, origins: [semantic_relation]}
+  owns: {direction: directed, origins: [semantic_relation]}
+  raises_question: {direction: directed, origins: [semantic_relation]}
+  refines: {direction: directed, origins: [semantic_relation]}
+  resolves: {direction: directed, origins: [semantic_relation]}
+  supersedes: {direction: directed, origins: [frontmatter, semantic_relation]}
+  supports: {direction: directed, origins: [semantic_relation]}
+  tests: {direction: directed, origins: [semantic_relation]}
+  used_for: {direction: directed, origins: [semantic_relation]}

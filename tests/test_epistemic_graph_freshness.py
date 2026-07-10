@@ -112,3 +112,37 @@ def test_disabled_graph_indexing_makes_drift_check_noop(tmp_path: Path, monkeypa
     report = audit.audit(vault, categories=["graph_drift"])
 
     assert report.findings == []
+
+
+def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    source.write_text(
+        source.read_text(encoding="utf-8")
+        + "\n- supports: [[Knowledge Base/Notes/Insights/b]]\n",
+        encoding="utf-8",
+    )
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    assert any(edge["relation_type"] == "supports" for edge in index.edges(source_path=A))
+
+    source.write_text(
+        source.read_text(encoding="utf-8").replace("supports:", "contradicts:"),
+        encoding="utf-8",
+    )
+    index.refresh_paths([source])
+    assert any(edge["relation_type"] == "contradicts" for edge in index.edges(source_path=A))
+    assert not any(edge["relation_type"] == "supports" for edge in index.edges(source_path=A))
+
+    moved_rel = "Knowledge Base/Notes/Insights/moved-a.md"
+    moved = vault / moved_rel
+    source.rename(moved)
+    index.delete_paths([A])
+    index.refresh_paths([moved])
+    assert index.nodes(path=A) == []
+    assert any(edge["relation_type"] == "contradicts" for edge in index.edges(source_path=moved_rel))
+
+    moved.unlink()
+    index.delete_paths([moved_rel])
+    assert index.nodes(path=moved_rel) == []
+    assert index.edges(source_path=moved_rel) == []
