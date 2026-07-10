@@ -1019,6 +1019,7 @@ def op_graph_context(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
 ) -> dict:
     """Return a bounded typed-graph neighborhood for a page or query. Read-only.
 
@@ -1042,6 +1043,8 @@ def op_graph_context(
             `finding`, `risk`, `action`, `claim`, `evidence`.
         max_nodes: Cap returned nodes. Default 40.
         max_edges: Cap returned edges. Default 80.
+        traversal_profile: Deterministic traversal lens. One of `epistemic`,
+            `provenance`, `causal`, `decision`, `all`, or a governed custom profile.
 
     Returns:
         {available, reason, seeds, nodes, edges, truncation}. Nodes and edges
@@ -1058,6 +1061,7 @@ def op_graph_context(
         node_types=node_types,
         max_nodes=max_nodes,
         max_edges=max_edges,
+        traversal_profile=traversal_profile,
     )
 
 
@@ -3408,6 +3412,7 @@ def op_connect_memory(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
     max_body_chars: int = 3000,
     entity_type: str | None = None,
     name: str | None = None,
@@ -3447,6 +3452,7 @@ def op_connect_memory(
         node_types: Graph node-type allowlist.
         max_nodes: Graph node cap.
         max_edges: Graph edge cap.
+        traversal_profile: Deterministic graph lens; omission preserves `all`.
         max_body_chars: Per-document stored-body cap for context.
         entity_type: Entity type for create-entity.
         name: Entity name for create-entity.
@@ -3497,6 +3503,7 @@ def op_connect_memory(
             node_types=node_types,
             max_nodes=max_nodes,
             max_edges=max_edges,
+            traversal_profile=traversal_profile,
             limit=limit,
             max_body_chars=max_body_chars,
         )

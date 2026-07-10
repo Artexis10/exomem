@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import relation_registry, semantic_blocks
+from . import relation_registry, semantic_blocks, traversal_profiles
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 
@@ -200,6 +200,12 @@ class EpistemicGraphIndex:
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("traversal_profile_hash", traversal_profiles.load_profiles(
+                        self.vault_root, registry=self.registry
+                    ).content_hash),
+                )
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("indexed_scope", "kb"),
                 )
             indexed = 0
@@ -319,6 +325,12 @@ class EpistemicGraphIndex:
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("extension_registry_hash", self.registry.extension_hash),
             )
+            conn.execute(
+                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                ("traversal_profile_hash", traversal_profiles.load_profiles(
+                    self.vault_root, registry=self.registry
+                ).content_hash),
+            )
             for node in [file_node, *block_nodes]:
                 _insert_node(conn, node)
             for edge in edges:
@@ -348,6 +360,7 @@ def graph_context(
     node_types: list[str] | None = None,
     max_nodes: int = 40,
     max_edges: int = 80,
+    traversal_profile: str | None = None,
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query."""
     idx = EpistemicGraphIndex(vault_root)
@@ -360,6 +373,21 @@ def graph_context(
             "edges": [],
             "truncation": [],
         }
+    profile_registry = traversal_profiles.load_profiles(
+        vault_root, registry=idx.registry
+    )
+    profile = profile_registry.resolve(traversal_profile)
+    depth = min(max(0, int(depth)), profile.max_depth, traversal_profiles.MAX_DEPTH)
+    max_nodes = min(max(1, int(max_nodes)), profile.max_nodes, traversal_profiles.MAX_NODES)
+    max_edges = min(max(0, int(max_edges)), profile.max_edges, traversal_profiles.MAX_EDGES)
+    allowed = {
+        definition.key
+        for definition in (*idx.registry.core.values(), *idx.registry.extensions.values())
+        if traversal_profiles.relation_allowed(profile, definition)
+    }
+    narrowed = traversal_profiles.narrow_relations(profile, relation_types, idx.registry)
+    if narrowed is not None:
+        allowed &= set(narrowed)
     conn = idx._connect()
     try:
         seeds = _seed_nodes(conn, path=path, query=query)
@@ -372,19 +400,45 @@ def graph_context(
                 "edges": [],
                 "truncation": [],
             }
-        rel_filter = set(relation_types or [])
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
         placeholder_nodes: dict[str, dict[str, Any]] = {}
         node_cap_hit = False
+        excluded_profile = 0
+        excluded_scope = 0
+        unknown: dict[tuple[str, str, str], dict[str, Any]] = {}
         frontier = set(seen_nodes)
         for _ in range(max(0, depth)):
             if not frontier:
                 break
-            rows = _neighbor_edges(conn, frontier, rel_filter)
+            rows = _neighbor_edges(conn, frontier, set())
+            rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
             next_frontier: set[str] = set()
             for edge in rows:
+                status = edge.get("registry_status")
+                if status == "unregistered":
+                    key = (
+                        str(edge.get("source_path")),
+                        str(edge.get("source_anchor")),
+                        str(edge.get("raw_relation")),
+                    )
+                    unknown.setdefault(key, {
+                        "raw_relation": edge.get("raw_relation"),
+                        "source_path": edge.get("source_path"),
+                        "source_anchor": edge.get("source_anchor"),
+                    })
+                    continue
+                if status == "scope_violation":
+                    excluded_scope += 1
+                    continue
+                if edge.get("relation_type") not in allowed:
+                    excluded_profile += 1
+                    continue
+                if profile.direction == "outgoing" and edge["src_key"] not in frontier:
+                    continue
+                if profile.direction == "incoming" and edge["dst_key"] not in frontier:
+                    continue
                 if len(seen_edges) < max_edges:
                     seen_edges.setdefault(edge["edge_key"], edge)
                 for key in (edge["src_key"], edge["dst_key"]):
@@ -417,6 +471,15 @@ def graph_context(
             truncation.append(f"nodes capped at {max_nodes}")
         if len(seen_edges) >= max_edges:
             truncation.append(f"edges capped at {max_edges}")
+        warnings: list[dict[str, Any]] = []
+        if unknown:
+            warnings.append({
+                "code": "unregistered_relations",
+                "count": len(unknown),
+                "examples": list(unknown.values())[:5],
+            })
+        if excluded_scope:
+            warnings.append({"code": "scope_violations", "count": excluded_scope})
         return {
             "available": True,
             "reason": None,
@@ -424,6 +487,19 @@ def graph_context(
             "nodes": nodes,
             "edges": edges,
             "truncation": truncation,
+            "profile": profile.as_dict(),
+            "registry": {
+                "core_version": idx.registry.core_version,
+                "extension_hash": idx.registry.extension_hash,
+                "profile_hash": profile_registry.content_hash,
+            },
+            "included_relation_families": sorted(profile.families),
+            "excluded": {
+                "profile": excluded_profile,
+                "scope_violation": excluded_scope,
+                "unregistered": len(unknown),
+            },
+            "warnings": warnings,
         }
     finally:
         conn.close()
@@ -486,7 +562,10 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
         return []
     idx = EpistemicGraphIndex(vault_root)
     if not idx.path.exists() or not idx.available():
-        return [{"path": kb_prefix(), "reason": "graph sidecar missing or schema-mismatched"}]
+        return [{
+            "path": kb_prefix(),
+            "reason": "graph sidecar missing, schema-mismatched, or relation-registry hash drift",
+        }]
     by_path = {n["path"]: n for n in idx.nodes() if n["kind"] == "file"}
     drift: list[dict[str, Any]] = []
     kb = vault_root / kb_dirname()
@@ -955,8 +1034,8 @@ def _json(value: str | None) -> dict[str, Any]:
 def _seed_nodes(conn: sqlite3.Connection, *, path: str | None, query: str | None):
     select = "SELECT node_key, kind, path, anchor, title, text, source_hash, line_start, line_end, metadata FROM graph_nodes"
     if path:
-        row = conn.execute(select + " WHERE node_key = ?", (_file_key(path),)).fetchone()
-        return [_node_row_to_dict(row)] if row else []
+        rows = conn.execute(select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)).fetchall()
+        return [_node_row_to_dict(row) for row in rows]
     if query:
         like = f"%{query}%"
         rows = conn.execute(
@@ -981,6 +1060,21 @@ def _neighbor_edges(
                 continue
             out.append(edge)
     return out
+
+
+def _edge_priority(
+    edge: dict[str, Any],
+    profile: traversal_profiles.TraversalProfile,
+    registry: relation_registry.RelationRegistry,
+) -> tuple[int, str]:
+    definition = registry.definition(str(edge.get("relation_type") or ""))
+    candidates = [str(edge.get("relation_type") or "")]
+    if definition:
+        candidates.append(definition.family)
+        if definition.parent:
+            candidates.append(definition.parent)
+    positions = [profile.priority.index(item) for item in candidates if item in profile.priority]
+    return (min(positions) if positions else len(profile.priority), str(edge.get("edge_key")))
 
 
 def _node_by_key(conn: sqlite3.Connection, key: str) -> dict[str, Any] | None:
