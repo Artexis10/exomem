@@ -27,6 +27,7 @@ from pathlib import Path
 from . import find as find_module
 from . import indexes
 from . import note as note_module
+from . import memory_refs
 from .kbdir import kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
@@ -39,12 +40,16 @@ class ReplaceResult:
     old_path: str   # vault-relative, with .md
     new_path: str   # vault-relative, with .md
     warnings: list[str]
+    old_ref: str | None = None
+    new_ref: str | None = None
 
     def as_dict(self) -> dict:
         return {
             "old_path": self.old_path,
             "new_path": self.new_path,
             "warnings": self.warnings,
+            "old_ref": self.old_ref,
+            "new_ref": self.new_ref,
         }
 
 
@@ -187,6 +192,8 @@ def replace(
         old_path=rel_old_with_ext,
         new_path=new_path_str,
         warnings=warnings,
+        old_ref=memory_refs.ReferenceIndex(vault_root).ref_for_path(rel_old_with_ext),
+        new_ref=new_result.ref,
     )
 
 

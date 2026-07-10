@@ -293,7 +293,6 @@ def test_note_shares_one_embedding_pass(vault, monkeypatch) -> None:
 pytest.importorskip("sentence_transformers")
 pytest.importorskip("torch")
 
-from exomem import embeddings, note as note_module  # noqa: E402
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
 

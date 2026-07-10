@@ -23,7 +23,6 @@ from .vault import (
     VaultPathError,
     in_append_only_tree,
     in_curated_tree,
-    kb_root,
     resolve_under_vault,
     write_log_entry,
 )

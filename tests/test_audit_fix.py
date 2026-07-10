@@ -122,7 +122,7 @@ def test_audit_fix_computes_experiment_duration(vault: Path) -> None:
 
 def test_audit_fix_is_idempotent_on_clean_vault(vault: Path) -> None:
     """Running audit_fix twice produces no second-pass changes."""
-    first = audit_fix_module.audit_fix(vault, today=TODAY)
+    audit_fix_module.audit_fix(vault, today=TODAY)
     second = audit_fix_module.audit_fix(vault, today=TODAY)
     # Second run shouldn't fix anything that the first run fixed.
     assert second.files_rewritten == 0

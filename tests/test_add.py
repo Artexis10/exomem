@@ -71,7 +71,7 @@ def test_add_paper_auto_creates_folder(
 ) -> None:
     papers_dir = vault / "Knowledge Base" / "Sources" / "Papers"
     assert not papers_dir.exists()
-    result = add_module.add(
+    add_module.add(
         vault,
         source_schema,
         content="Abstract: novel retrieval method...",
@@ -244,7 +244,6 @@ def test_add_appends_to_log(
     vault: Path, source_schema: schema_module.SourceSchema
 ) -> None:
     log_file = vault / "Knowledge Base" / "log.md"
-    before = _read(log_file)
     add_module.add(
         vault,
         source_schema,

@@ -1,0 +1,15 @@
+current_view:
+  depth: 1
+  min_blocks: 1
+  expected_paths:
+    - Knowledge Base/Notes/Insights/current-view.md
+    - Knowledge Base/Notes/Insights/old-view.md
+    - Knowledge Base/Notes/Insights/related-view.md
+    - Knowledge Base/Notes/Insights/future-view.md
+    - Knowledge Base/Sources/Articles/2026-07-08-source.md
+    - Knowledge Base/Evidence/Cases/receipt.md
+  expected_relation_types:
+    - derived_from
+    - evidenced_by
+    - supersedes
+    - supports

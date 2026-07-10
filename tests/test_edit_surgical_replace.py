@@ -61,7 +61,7 @@ def test_surgical_append_to_section(vault: Path) -> None:
     """Append a row by replacing a section anchor with itself + the new line."""
     rel = _make_page(vault, "# Scratch\n\n## Opinions\n\n### Conversation-derived\n\n## Connections\n\n- x\n")
     anchor = "### Conversation-derived\n"
-    result = edit_module.edit(
+    edit_module.edit(
         vault,
         path=rel,
         why="append conv opinion",

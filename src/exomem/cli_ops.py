@@ -54,6 +54,8 @@ _CONFLICT_CODES = frozenset(
         "ALREADY_SUPERSEDED",
         "ALREADY_TRASHED",
         "STALE_EDIT",
+        "STALE_CONTRACT",
+        "CONTRACT_EXISTS",
     }
 )
 

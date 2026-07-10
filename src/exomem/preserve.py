@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import indexes
+from . import indexes, memory_refs
 from .kbdir import kb_prefix
 from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, kb_root
 
@@ -86,6 +86,7 @@ class PreserveResult:
     path: str                 # vault-relative path of the artifact
     sidecar_path: str | None  # vault-relative path of the .md sidecar (if any)
     warnings: list[str]
+    ref: str | None = None
     size: int | None = None
     hash: str | None = None
     hash_algorithm: str | None = None
@@ -97,6 +98,7 @@ class PreserveResult:
             "path": self.path,
             "stored_path": self.path,
             "sidecar_path": self.sidecar_path,
+            "ref": self.ref,
             "warnings": self.warnings,
             "size": self.size,
             "hash": self.hash,
@@ -214,6 +216,7 @@ def preserve(
     warnings: list[str] = []
     written_artifact = False
     sidecar_rel: str | None = None
+    sidecar_ref: str | None = None
     artifact_size: int | None = None
     artifact_hash: str | None = None
     content_type_effective = (
@@ -290,6 +293,7 @@ def preserve(
                     evidence_file=rel_artifact if media_type else None,
                     extracted_by=extracted_by,
                 )
+                sidecar_ref = memory_refs.ref_from_markdown(sidecar_md)
                 writes.append(PlannedWrite(path=sidecar_path, content=sidecar_md))
                 sidecar_rel = sidecar_path.relative_to(vault_root).as_posix()
 
@@ -357,6 +361,7 @@ def preserve(
         path=artifact_path.relative_to(vault_root).as_posix(),
         sidecar_path=sidecar_rel,
         warnings=warnings,
+        ref=sidecar_ref,
         size=artifact_size,
         hash=artifact_hash,
         hash_algorithm="sha256" if artifact_hash else None,
@@ -537,6 +542,7 @@ def _render_sidecar(
     """
     lines = ["---"]
     lines.append("type: source")
+    lines.append(f"exomem_id: {memory_refs.new_id()}")
     lines.append("source_type: other")
     lines.append(f"captured: {date_iso}")
     if media_type:

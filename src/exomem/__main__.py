@@ -1326,7 +1326,7 @@ def _core_op_main(argv: list[str]) -> int:
         print(json.dumps(cli_ops.envelope(True, data=result), ensure_ascii=False, default=str))
     else:
         _print_human(result, op=cmd.name)
-    return 0
+    return 1 if isinstance(result, dict) and result.get("strict_failed") else 0
 
 
 def _resolve_core_op_vault(op: str, kwargs: dict, resolve_vault_func) -> Path:

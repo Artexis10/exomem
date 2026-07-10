@@ -5,8 +5,6 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-import pytest
-import yaml
 
 from exomem import note as note_module
 

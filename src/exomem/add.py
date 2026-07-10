@@ -20,7 +20,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes, schema
+from . import corpus_aware, indexes, memory_refs, schema
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -57,10 +57,11 @@ FOLDER_DESCRIPTIONS: dict[str, str] = {
 @dataclass
 class AddResult:
     path: str  # vault-relative
+    ref: str
     warnings: list[str]
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "warnings": self.warnings}
+        return {"path": self.path, "ref": self.ref, "warnings": self.warnings}
 
 
 @dataclass
@@ -141,6 +142,7 @@ def add(
     source_path = unique_path(folder_path, stem)
 
     tags_clean = _clean_tags(tags)
+    exomem_id = memory_refs.new_id()
 
     source_md = _render_source(
         title=title,
@@ -150,6 +152,7 @@ def add(
         tags=tags_clean,
         why_captured=why_captured,
         content=content,
+        exomem_id=exomem_id,
     )
 
     # Plan the source file write so the counts in compute_updates() are
@@ -227,6 +230,7 @@ def add(
 
     return AddResult(
         path=source_path.relative_to(vault_root).as_posix(),
+        ref=memory_refs.memory_ref(exomem_id),
         warnings=warnings,
     )
 
@@ -286,10 +290,12 @@ def _render_source(
     tags: list[str],
     why_captured: str | None,
     content: str,
+    exomem_id: str,
 ) -> str:
     """Emit the source page markdown matching frontmatter.md's example shape."""
     lines = ["---"]
     lines.append("type: source")
+    lines.append(f"exomem_id: {exomem_id}")
     lines.append(f"source_type: {source_type}")
     lines.append(f"captured: {date_iso}")
     if url:

@@ -421,7 +421,7 @@
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.",
           "type": "string"
         },
         "path": {
@@ -542,6 +542,11 @@
         "max_edges": {
           "default": 80,
           "description": "Graph edge cap.",
+          "type": "integer"
+        },
+        "max_body_chars": {
+          "default": 3000,
+          "description": "Per-document stored-body cap for context.",
           "type": "integer"
         },
         "entity_type": {
@@ -952,13 +957,13 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"reconcile\"`\npreserve the canonical dry-run/write semantics and default to dry-run here.",
+    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"`, `mode=\"reconcile\"`, and\n`mode=\"backfill-ids\"`\npreserve the canonical dry-run/write semantics and default to dry-run here.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "mode": {
           "default": "audit",
-          "description": "audit, fix, or reconcile.",
+          "description": "audit, fix, reconcile, or backfill-ids.",
           "type": "string"
         },
         "categories": {
@@ -2069,6 +2074,85 @@
           "description": "Restrict provenance scan to one path."
         }
       },
+      "type": "object"
+    }
+  },
+  "schema_memory": {
+    "description": "Infer, validate, or diff an optional corpus-backed memory contract.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "infer, validate, or diff.",
+          "type": "string"
+        },
+        "name": {
+          "description": "Lowercase contract slug under `_Schema/contracts/`.",
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project scope for inference."
+        },
+        "page_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional page-type scope for inference."
+        },
+        "save": {
+          "default": false,
+          "description": "Persist an inferred proposal. Default false.",
+          "type": "boolean"
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required current hash when overwriting a saved contract."
+        },
+        "strict": {
+          "default": false,
+          "description": "In validate mode, signal a failing CLI/CI outcome on findings.",
+          "type": "boolean"
+        },
+        "compare_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "In diff mode, compare to this saved contract instead of corpus reality."
+        }
+      },
+      "required": [
+        "operation",
+        "name"
+      ],
       "type": "object"
     }
   },

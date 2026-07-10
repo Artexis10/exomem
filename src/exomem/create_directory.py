@@ -105,7 +105,7 @@ def create_directory(
     if not already_existed:
         today = today or dt.date.today()
         date_iso = today.isoformat()
-        log_body = f"Created directory via exomem Tier 2."
+        log_body = "Created directory via exomem Tier 2."
         if curated and allow_curated:
             log_body += f" allow_curated=true (target tree: {curated})."
         log_warning = write_log_entry(

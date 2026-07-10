@@ -10,7 +10,6 @@ syscall-free.
 
 from __future__ import annotations
 
-import shutil
 from pathlib import Path
 
 import pytest
