@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -18,13 +20,25 @@ EXCLUDED_DIR_NAMES = frozenset({"_Schema", "_attachments", "_archive", "_trash"}
 NAVIGATION_BASENAMES = frozenset({"index.md", "log.md"})
 FRONTMATTER_PATTERN = re.compile(r"^---\n(.*?)\n---\n(.*)", re.DOTALL)
 H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
+_DEFAULT_PAGE_CACHE_SIZE = 4096
+
+
+def _page_cache_size() -> int:
+    raw = os.environ.get("EXOMEM_PAGE_CACHE_SIZE")
+    if raw is None or not raw.strip():
+        return _DEFAULT_PAGE_CACHE_SIZE
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        log.warning("EXOMEM_PAGE_CACHE_SIZE=%r is not an int; using default", raw)
+        return _DEFAULT_PAGE_CACHE_SIZE
 
 
 @dataclass
 class FrontmatterCache:
     """Per-process cache of parsed pages, invalidated by mtime."""
 
-    entries: dict[Path, ParsedPage] = field(default_factory=dict)
+    entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         try:
@@ -34,10 +48,14 @@ class FrontmatterCache:
             return None
         cached = self.entries.get(path)
         if cached and cached.mtime == mtime:
+            self.entries.move_to_end(path)
             return cached
         parsed = parse_page(path, mtime, vault_root)
         if parsed is not None:
             self.entries[path] = parsed
+            self.entries.move_to_end(path)
+            while len(self.entries) > _page_cache_size():
+                self.entries.popitem(last=False)
         return parsed
 
 
