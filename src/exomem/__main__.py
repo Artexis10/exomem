@@ -31,7 +31,6 @@ import os
 import sys
 from pathlib import Path
 
-from . import server
 from .kbdir import kb_dirname, kb_prefix
 
 
@@ -76,13 +75,18 @@ def main(argv: list[str] | None = None) -> int:
     # Registry-driven product operations (reads + writes): `exomem ask_memory "..."`,
     # `exomem remember ...`, etc. Product commands take precedence over old
     # short aliases when a name overlaps.
-    if raw and raw[0] in _core_op_names():
+    if raw and not raw[0].startswith("-") and raw[0] in _core_op_names():
         return _core_op_main(raw)
     if raw and raw[0] in _simple_cli_action_names():
         return _simple_action_main(raw)
     # A real tier-2 op invoked while EXOMEM_DISABLE_TIER2 is set would otherwise fall
     # through to the serve parser and emit a confusing argparse error — name it instead.
-    if raw and not _expose_tier2() and raw[0] in _core_op_names(expose_tier2=True):
+    if (
+        raw
+        and not raw[0].startswith("-")
+        and not _expose_tier2()
+        and raw[0] in _core_op_names(expose_tier2=True)
+    ):
         print(
             f"Error [UNAVAILABLE]: operation {raw[0]!r} is unavailable (tier-2 disabled)",
             file=sys.stderr,
@@ -112,6 +116,8 @@ def _serve_main(argv: list[str]) -> int:
         help="Bind port for HTTP transports (default: 8765).",
     )
     args = parser.parse_args(argv)
+
+    from . import server
 
     try:
         server.run(transport=args.transport, host=args.host, port=args.port)
