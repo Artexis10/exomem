@@ -171,7 +171,7 @@ def main() -> int:
     if writes and not args.dry_run:
         BATCH = 100
         for i in range(0, len(writes), BATCH):
-            batch_atomic_write(writes[i : i + BATCH])
+            batch_atomic_write(writes[i : i + BATCH], vault_root=vault_root)
         print(f"Applied {len(writes)} file writes.")
 
     return 0
