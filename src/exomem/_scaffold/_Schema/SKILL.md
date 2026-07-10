@@ -211,7 +211,7 @@ experiments, proof-bearing records, review, and supersession.
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
-| `schema` | "what structure recurs," "validate this corpus contract" | `schema_memory`; infer before saving, and keep contracts optional |
+| `schema` | "what structure or relation vocabulary recurs," "validate this graph lens" | `schema_memory`; infer before saving, and keep governance optional |
 
 Examples:
 
@@ -387,6 +387,8 @@ reference for the canonical operation leaves that product commands route to.
 - "what should this link to," "densify this page's links" → **suggest_links**
 - "what does this connect to in the graph," "show typed relations" → **graph_context**
 - "suggest relations," "what should this support / contradict / supersede" → **suggest_relations**
+- "which relations recur," "review unknown relation labels" → **schema_memory** (`subject="relations"`; proposal-first)
+- "use an epistemic / provenance / causal lens" → **graph_context** (`traversal_profile=...`)
 - "what should I compile next," "drain the source backlog" → **propose_compilation**
 - "audit the KB," "lint the vault," "check for orphans" → **audit**
 - "what does this vault look like," "assess my vault," "how is this vault organized" → **overview**

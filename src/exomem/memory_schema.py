@@ -11,7 +11,7 @@ from typing import Any
 
 import yaml
 
-from . import epistemic_graph, semantic_blocks, vault
+from . import epistemic_graph, relation_registry, semantic_blocks, traversal_profiles, vault
 from . import find as find_module
 from .kbdir import kb_dirname
 
@@ -145,6 +145,226 @@ def infer_contract(
             "eligible": sample_size >= MIN_REQUIRED_SAMPLE,
         },
         "proposal": contract.as_dict(),
+    }
+
+
+def infer_relation_registry(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    include_model_suggestions: bool = False,
+) -> dict[str, Any]:
+    """Profile explicit relation observations without assigning new semantics."""
+    registry = relation_registry.load_registry(vault_root)
+    observations = relation_observations(
+        vault_root, project=project, page_type=page_type, registry=registry
+    )
+    grouped: dict[str, dict[str, Any]] = {}
+    for item in observations:
+        key = str(item["raw_relation"])
+        entry = grouped.setdefault(key, {
+            "raw_relation": key,
+            "canonical": item["canonical"],
+            "parent": item["parent"],
+            "registry_status": item["registry_status"],
+            "count": 0,
+            "examples": [],
+        })
+        entry["count"] += 1
+        example = {
+            "path": item["source_path"],
+            "anchor": item["source_anchor"],
+        }
+        if example not in entry["examples"] and len(entry["examples"]) < 5:
+            entry["examples"].append(example)
+    counts = Counter(item["registry_status"] for item in observations)
+    proposal = relation_registry_proposal(registry)
+    for item in grouped.values():
+        raw = item["raw_relation"]
+        if item["registry_status"] == "unregistered" and "." in raw:
+            proposal["extensions"].setdefault(raw, {"parent": None, "description": None})
+    warnings: list[dict[str, str]] = []
+    suggestions: list[dict[str, Any]] = []
+    if include_model_suggestions:
+        warnings.append({
+            "code": "model_suggestions_unavailable",
+            "detail": "No optional relation suggestion model is configured; deterministic inference is complete.",
+        })
+    return {
+        "subject": "relations",
+        "sample_size": len(_select_pages(vault_root, ContractScope(project, page_type))),
+        "observation_count": len(observations),
+        "counts": {key: counts.get(key, 0) for key in (
+            "core", "extension", "alias", "deprecated", "scope_violation", "unregistered"
+        )},
+        "relations": sorted(grouped.values(), key=lambda item: (-item["count"], item["raw_relation"])),
+        "proposal": proposal,
+        "content_hash": registry.extension_hash,
+        "warnings": warnings,
+        "model_suggestions": suggestions,
+        "model_suggestions_attribution": "optional model; response-only" if include_model_suggestions else None,
+    }
+
+
+def relation_observations(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    registry: relation_registry.RelationRegistry | None = None,
+) -> list[dict[str, Any]]:
+    registry = registry or relation_registry.load_registry(vault_root)
+    pages = _select_pages(vault_root, ContractScope(project, page_type))
+    out: list[dict[str, Any]] = []
+    for page in pages:
+        page_project = next(iter(sorted(_page_projects(page.frontmatter))), None)
+        document = semantic_blocks.parse_semantic_blocks(
+            page.body, validate=False, registry=registry
+        )
+        for block in document.blocks:
+            for relation in block.relations:
+                raw = relation.raw.split(":", 1)[0].strip()
+                resolution = registry.resolve(
+                    raw,
+                    project=page_project,
+                    page_type=page.page_type,
+                    source_kind=block.type,
+                    origin="semantic_relation",
+                )
+                out.append(_observation(page.rel_path, block.id or f"line-{relation.line}", raw, resolution))
+        in_fence = False
+        for line_number, line in enumerate(page.body.splitlines(), start=1):
+            if epistemic_graph._FENCE_RE.match(line):
+                in_fence = not in_fence
+                continue
+            if in_fence or not (match := epistemic_graph._RELATION_LINE_RE.match(line)):
+                continue
+            raw = match.group("rel").strip()
+            resolution = registry.resolve(
+                raw,
+                project=page_project,
+                page_type=page.page_type,
+                source_kind="file",
+                origin="semantic_relation",
+            )
+            if resolution.canonical is None and not match.group("colon"):
+                continue
+            out.append(_observation(page.rel_path, f"line-{line_number}", raw, resolution))
+    unique: dict[tuple[str, str, str], dict[str, Any]] = {}
+    for item in out:
+        unique[(item["source_path"], item["source_anchor"], item["raw_relation"])] = item
+    return list(unique.values())
+
+
+def validate_relation_registry(
+    vault_root: Path,
+    *,
+    proposal: dict[str, Any] | None = None,
+    project: str | None = None,
+    page_type: str | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    registry = relation_registry.load_registry(vault_root, proposal=proposal) if proposal is not None else relation_registry.load_registry(vault_root)
+    findings = list(registry.findings)
+    observations = relation_observations(
+        vault_root, project=project, page_type=page_type, registry=registry
+    )
+    for item in observations:
+        if item["registry_status"] in {"unregistered", "deprecated", "scope_violation"}:
+            findings.append({
+                "code": item["registry_status"],
+                "path": item["source_path"],
+                "span": item["source_anchor"],
+                "severity": "warning" if item["registry_status"] != "scope_violation" else "error",
+                "detail": f"observed relation {item['raw_relation']!r} is {item['registry_status']}",
+            })
+    return {
+        "subject": "relations",
+        "valid": not any(item.get("severity") == "error" for item in findings),
+        "strict": strict,
+        "strict_failed": bool(strict and findings),
+        "content_hash": registry.extension_hash,
+        "findings": findings,
+    }
+
+
+def diff_relation_registries(before: relation_registry.RelationRegistry, after: relation_registry.RelationRegistry) -> dict[str, Any]:
+    before_defs = {key: value.as_dict() for key, value in before.extensions.items()}
+    after_defs = {key: value.as_dict() for key, value in after.extensions.items()}
+    common = set(before_defs) & set(after_defs)
+    changed = {
+        key: {"before": before_defs[key], "after": after_defs[key]}
+        for key in sorted(common)
+        if before_defs[key] != after_defs[key]
+    }
+    return {
+        "subject": "relations",
+        "changed": bool(set(before_defs) ^ set(after_defs) or changed),
+        "changes": {
+            "added": sorted(set(after_defs) - set(before_defs)),
+            "removed": sorted(set(before_defs) - set(after_defs)),
+            "modified": changed,
+        },
+    }
+
+
+def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> dict[str, Any]:
+    extensions: dict[str, Any] = {}
+    for key, item in registry.extensions.items():
+        value: dict[str, Any] = {
+            "parent": item.parent,
+            "description": item.description,
+        }
+        if item.family and item.parent and item.family != registry.core[item.parent].family:
+            value["family"] = item.family
+        for field, candidate in (
+            ("direction", item.direction), ("inverse", item.inverse),
+            ("origins", sorted(item.origins)), ("aliases", list(item.aliases)),
+            ("source_kinds", sorted(item.source_kinds)),
+            ("target_kinds", sorted(item.target_kinds)),
+            ("status", item.status), ("replaced_by", item.replaced_by),
+        ):
+            if candidate not in (None, [], "active", "directed", ["semantic_relation"]):
+                value[field] = candidate
+        scope = {}
+        if item.projects:
+            scope["projects"] = sorted(item.projects)
+        if item.page_types:
+            scope["page_types"] = sorted(item.page_types)
+        if scope:
+            value["scope"] = scope
+        extensions[key] = value
+    return {"schema_version": 1, "extensions": extensions}
+
+
+def infer_traversal_profiles(vault_root: Path) -> dict[str, Any]:
+    loaded = traversal_profiles.load_profiles(vault_root)
+    path = traversal_profiles.profile_path(vault_root)
+    if path.exists():
+        try:
+            proposal = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError:
+            proposal = {"schema_version": 1, "profiles": {}}
+    else:
+        proposal = {"schema_version": 1, "profiles": {}}
+    return {
+        "subject": "traversal-profiles",
+        "profiles": {key: value.as_dict() for key, value in loaded.profiles.items()},
+        "proposal": proposal,
+        "content_hash": loaded.content_hash,
+        "findings": list(loaded.findings),
+    }
+
+
+def _observation(path: str, anchor: str, raw: str, resolution: relation_registry.RelationResolution) -> dict[str, Any]:
+    return {
+        "raw_relation": relation_registry.normalize_relation(raw),
+        "canonical": resolution.canonical,
+        "parent": resolution.parent,
+        "registry_status": resolution.status,
+        "source_path": path,
+        "source_anchor": anchor,
     }
 
 

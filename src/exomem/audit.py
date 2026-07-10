@@ -65,6 +65,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
 )
+OPTIONAL_CATEGORIES: tuple[str, ...] = ("relation_registry",)
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
 # query set, used by the relevance_pairs_pending check. Module-level so tests
@@ -145,11 +146,12 @@ def audit(
     `today` is dependency-injectable for tests (used by unprocessed-source aging).
     """
     selected = set(categories) if categories else set(ALL_CATEGORIES)
-    invalid = selected - set(ALL_CATEGORIES)
+    valid_categories = set(ALL_CATEGORIES) | set(OPTIONAL_CATEGORIES)
+    invalid = selected - valid_categories
     if invalid:
         raise ValueError(
             f"unknown audit categories: {sorted(invalid)}. "
-            f"Valid: {list(ALL_CATEGORIES)}"
+            f"Valid: {sorted(valid_categories)}"
         )
 
     kb = kb_root(vault_root)
@@ -182,6 +184,8 @@ def audit(
         findings.extend(_check_stale_review(vault_root, pages, today=today))
     if "corpus_contradictions" in selected:
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
+    if "relation_registry" in selected:
+        findings.extend(_check_relation_registry(vault_root))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -814,6 +818,27 @@ def _check_graph_drift(vault_root: Path) -> list[AuditFinding]:
             path=path,
             detail=reason,
             proposed_fix="Run `reconcile` to refresh the derived graph sidecar.",
+            meta=item,
+        ))
+    return findings
+
+
+def _check_relation_registry(vault_root: Path) -> list[AuditFinding]:
+    """Opt-in ontology-governance findings; never feeds default attention."""
+    from . import memory_schema
+
+    report = memory_schema.validate_relation_registry(vault_root)
+    findings: list[AuditFinding] = []
+    for item in report["findings"]:
+        findings.append(AuditFinding(
+            category="relation_registry",
+            severity=str(item.get("severity") or "warning"),
+            path=str(item.get("path") or kb_prefix()),
+            detail=str(item.get("detail") or item.get("code") or "relation registry finding"),
+            proposed_fix=(
+                "Review corpus evidence with schema_memory(subject='relations') and save "
+                "a complete, hash-guarded proposal."
+            ),
             meta=item,
         ))
     return findings

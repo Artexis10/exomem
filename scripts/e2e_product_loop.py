@@ -106,6 +106,46 @@ async def _call(client, name: str, arguments: dict[str, Any], timeout: float) ->
     return _result_data(result)
 
 
+async def _assert_relation_contexts(
+    client,
+    *,
+    relation_ref: str,
+    timeout: float,
+) -> None:
+    expected = {
+        "epistemic": ("science.replicates", "supports"),
+        "provenance": ("records.traces_to", "derived_from"),
+        "causal": ("systems.triggers", "causes"),
+    }
+    for profile, (canonical, parent) in expected.items():
+        context = await _call(
+            client,
+            "connect_memory",
+            {
+                "operation": "context",
+                "path": relation_ref,
+                "depth": 1,
+                "traversal_profile": profile,
+            },
+            timeout,
+        )
+        graph = context.get("graph", {})
+        if graph.get("profile", {}).get("name") != profile:
+            raise RuntimeError(f"installed context did not resolve {profile!r} profile")
+        edge = next(
+            (item for item in graph.get("edges", []) if item.get("relation_type") == canonical),
+            None,
+        )
+        if edge is None:
+            raise RuntimeError(f"installed {profile} context omitted {canonical}")
+        if edge.get("parent_relation") != parent:
+            raise RuntimeError(f"installed edge {canonical} lost parent {parent}")
+        if edge.get("registry_status") != "extension":
+            raise RuntimeError(f"installed edge {canonical} was not registry-resolved")
+        if edge.get("raw_relation") != canonical:
+            raise RuntimeError(f"installed edge {canonical} lost raw observation identity")
+
+
 async def _stdio_session(
     executable: Path,
     env: dict[str, str],
@@ -142,12 +182,43 @@ async def _stdio_session(
                 "connect_memory",
                 "review_memory",
                 "maintain_memory",
+                "schema_memory",
             }
             missing = required - tools
             if missing:
                 raise RuntimeError(f"installed stdio server missing tools: {sorted(missing)}")
 
             if first_run:
+                relation_proposal = {
+                    "schema_version": 1,
+                    "extensions": {
+                        "science.replicates": {
+                            "parent": "supports",
+                            "description": "Reports an independent reproduction",
+                        },
+                        "records.traces_to": {
+                            "parent": "derived_from",
+                            "description": "Traces a record to its source",
+                        },
+                        "systems.triggers": {
+                            "parent": "causes",
+                            "description": "Triggers a system transition",
+                        },
+                    },
+                }
+                registry_result = await _call(
+                    client,
+                    "schema_memory",
+                    {
+                        "operation": "infer",
+                        "subject": "relations",
+                        "save": True,
+                        "proposal": relation_proposal,
+                    },
+                    timeout,
+                )
+                if not registry_result.get("saved", {}).get("created"):
+                    raise RuntimeError("installed schema governance did not create relation registry")
                 source = await _call(
                     client,
                     "capture_source",
@@ -236,6 +307,39 @@ async def _stdio_session(
                     },
                     timeout,
                 )
+                targets: dict[str, dict[str, Any]] = {}
+                for key, title in (
+                    ("study", "Lantern replication study"),
+                    ("record", "Lantern source record"),
+                    ("event", "Lantern trigger event"),
+                ):
+                    targets[key] = await _call(
+                        client,
+                        "remember",
+                        {
+                            "content": f"# {title}\n\n## Record\n\nCross-file graph target.\n",
+                            "title": title,
+                            "note_type": "insight",
+                        },
+                        timeout,
+                    )
+                relation_memory = await _call(
+                    client,
+                    "remember",
+                    {
+                        "content": (
+                            "# Lantern governed relations\n\n"
+                            "## Finding\n"
+                            f"- relations: science.replicates: [[{targets['study']['path']}]]\n\n"
+                            "The study independently reproduced the result.\n\n"
+                            f"- records.traces_to: [[{targets['record']['path']}]]\n"
+                            f"- systems.triggers: [[{targets['event']['path']}]]\n"
+                        ),
+                        "title": "Lantern governed relations",
+                        "note_type": "insight",
+                    },
+                    timeout,
+                )
                 context = await _call(
                     client,
                     "connect_memory",
@@ -259,6 +363,11 @@ async def _stdio_session(
                     {"mode": "reconcile", "dry_run": False},
                     timeout,
                 )
+                await _assert_relation_contexts(
+                    client,
+                    relation_ref=relation_memory["ref"],
+                    timeout=timeout,
+                )
                 state.update(
                     {
                         "source_ref": source["ref"],
@@ -267,9 +376,18 @@ async def _stdio_session(
                         "evidence_ref": evidence["ref"],
                         "new_path": replacement["new_path"],
                         "references_status": reconcile.get("references_status"),
+                        "relation_ref": relation_memory["ref"],
+                        "relation_path": relation_memory["path"],
+                        "registry_hash": registry_result["saved"]["content_hash"],
                     }
                 )
             else:
+                reconcile = await _call(
+                    client,
+                    "maintain_memory",
+                    {"mode": "reconcile", "dry_run": False},
+                    timeout,
+                )
                 active = await _call(
                     client,
                     "read_memory",
@@ -296,6 +414,13 @@ async def _stdio_session(
                     raise RuntimeError("supersession link did not survive restart")
                 if not context["history"] or not context["provenance"][0]["evidence"]:
                     raise RuntimeError("context history/provenance did not survive restart")
+                await _assert_relation_contexts(
+                    client,
+                    relation_ref=state["relation_ref"],
+                    timeout=timeout,
+                )
+                if reconcile.get("graph_status") != "refreshed":
+                    raise RuntimeError("deleted graph sidecar was not rebuilt after restart")
     return state
 
 
@@ -319,6 +444,8 @@ def _installed_stdio(args: argparse.Namespace) -> int:
     )
     refs_sidecar = vault / "Knowledge Base" / ".refs.sqlite"
     refs_sidecar.unlink(missing_ok=True)
+    graph_sidecar = vault / "Knowledge Base" / ".graph.sqlite"
+    graph_sidecar.unlink(missing_ok=True)
     asyncio.run(
         _stdio_session(
             executable,
@@ -406,7 +533,7 @@ def _installed_http(args: argparse.Namespace) -> int:
                         + server_log.read_text(encoding="utf-8")[-4000:]
                     )
                 try:
-                    status, _ = _http_json(
+                    status, openapi = _http_json(
                         f"{base_url}/api/openapi.json",
                         timeout=1.0,
                     )
@@ -417,6 +544,11 @@ def _installed_http(args: argparse.Namespace) -> int:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("HTTP server did not become ready before timeout")
                 time.sleep(0.1)
+
+            serialized_openapi = json.dumps(openapi, sort_keys=True)
+            for parameter in ("traversal_profile", "subject", "proposal"):
+                if f'"{parameter}"' not in serialized_openapi:
+                    raise RuntimeError(f"installed OpenAPI omitted {parameter}")
 
             wrong_status, _ = _http_json(
                 f"{base_url}/api/bootstrap",
