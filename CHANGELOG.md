@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0](https://github.com/Artexis10/exomem/compare/v0.14.0...v0.15.0) (2026-07-10)
+
+
+### Features
+
+* close technical memory gaps ([#182](https://github.com/Artexis10/exomem/issues/182)) ([3a5cb55](https://github.com/Artexis10/exomem/commit/3a5cb55f8f5fa33852437827da794dd8416788c1))
+* make multimodal capability resource-bounded by default ([#180](https://github.com/Artexis10/exomem/issues/180)) ([cb388bb](https://github.com/Artexis10/exomem/commit/cb388bbcec36eac64e12a31339dbb8b67ab006c0))
+
 ## [0.14.0](https://github.com/Artexis10/exomem/compare/v0.13.0...v0.14.0) (2026-07-09)
 
 
