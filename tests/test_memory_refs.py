@@ -40,6 +40,32 @@ def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     assert index.resolve(identity) == "Knowledge Base/Notes/new.md"
 
 
+def test_bulk_reference_lookup_uses_index_and_scans_missing_paths(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    first_id = memory_refs.new_id()
+    second_id = memory_refs.new_id()
+    first_path = "Knowledge Base/Notes/first.md"
+    second_path = "Knowledge Base/Notes/second.md"
+    (vault / first_path).write_text(_page(first_id), encoding="utf-8")
+
+    index = memory_refs.ReferenceIndex(vault)
+    index.rebuild_all()
+    # Simulate a page created after the sidecar was last refreshed.
+    (vault / second_path).write_text(_page(second_id), encoding="utf-8")
+
+    resolved = index.refs_for_paths(
+        [first_path, "\\Knowledge Base\\Notes\\second.md", first_path, "missing.md"]
+    )
+
+    assert resolved == {
+        first_path: memory_refs.memory_ref(first_id),
+        second_path: memory_refs.memory_ref(second_id),
+        "missing.md": None,
+    }
+
+
 def test_duplicate_and_malformed_ids_are_diagnostic_and_self_healing(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     notes = vault / "Knowledge Base" / "Notes"

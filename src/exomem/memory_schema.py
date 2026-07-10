@@ -11,7 +11,14 @@ from typing import Any
 
 import yaml
 
-from . import epistemic_graph, relation_registry, semantic_blocks, traversal_profiles, vault
+from . import (
+    epistemic_graph,
+    markdown_relations,
+    relation_registry,
+    semantic_blocks,
+    traversal_profiles,
+    vault,
+)
 from . import find as find_module
 from .kbdir import kb_dirname
 
@@ -271,14 +278,14 @@ def _scan_relation_observations(
                         page.rel_path, block.id or f"line-{relation.line}", raw, resolution
                     )
                 )
-        in_fence = False
-        for line_number, line in enumerate(page.body.splitlines(), start=1):
-            if epistemic_graph._FENCE_RE.match(line):
-                in_fence = not in_fence
-                continue
-            if in_fence or not (match := epistemic_graph._RELATION_LINE_RE.match(line)):
-                continue
-            raw = match.group("rel").strip()
+        note_relations = markdown_relations.parse_markdown_relations(
+            page.body,
+            include_legacy=True,
+            relation_types=registry.keys | frozenset(registry.aliases),
+            retain_unknown=True,
+        )
+        for relation in note_relations.relations:
+            raw = relation.kind
             resolution = registry.resolve(
                 raw,
                 project=page_project,
@@ -286,9 +293,9 @@ def _scan_relation_observations(
                 source_kind="file",
                 origin="semantic_relation",
             )
-            if resolution.canonical is None and not match.group("colon"):
-                continue
-            out.append(_observation(page.rel_path, f"line-{line_number}", raw, resolution))
+            out.append(
+                _observation(page.rel_path, f"line-{relation.line}", raw, resolution)
+            )
     unique: dict[tuple[str, str, str], dict[str, Any]] = {}
     for item in out:
         unique[(item["source_path"], item["source_anchor"], item["raw_relation"])] = item

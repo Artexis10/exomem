@@ -20,18 +20,11 @@ from . import find as find_module
 from . import relation_registry, semantic_blocks, traversal_profiles
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
+from .markdown_relations import MarkdownRelation, parse_markdown_relations
 
 SCHEMA_VERSION = 2
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
-
-_RELATION_LINE_RE = re.compile(
-    r"^\s*[-*+]\s+(?P<rel>[a-z][a-z0-9_.-]{1,80})\s*(?P<colon>:?)[ \t]+"
-    r"(?P<link>\[\[[^\]\n]+\]\])",
-    re.IGNORECASE,
-)
-_FENCE_RE = re.compile(r"^\s*(?:```|~~~)")
-
 
 @dataclass(frozen=True)
 class GraphNode:
@@ -673,6 +666,7 @@ def _edges_for_page(
 
     rel = page.rel_path
     file_key = _file_key(rel)
+    resolver = find_module.shared_resolver(vault_root)
     edges: list[GraphEdge] = []
     for block in blocks:
         block_key = _block_key(page, block)
@@ -695,7 +689,7 @@ def _edges_for_page(
             target = target.split("|", 1)[0].split("#", 1)[0].strip()
             try:
                 canonical, warning = vault_module.normalize_wikilink(
-                    target, vault_root, strict=False
+                    target, vault_root, resolver=resolver, strict=False
                 )
             except Exception:  # noqa: BLE001 - malformed links are ignored
                 continue
@@ -776,71 +770,70 @@ def _edges_for_page(
                 source_anchor="related",
             )
         )
-    for target in find_module._outbound_wikilink_paths(page, vault_root):
+    relation_doc = parse_markdown_relations(
+        page.body,
+        include_legacy=True,
+        relation_types=registry.keys | frozenset(registry.aliases),
+        retain_unknown=True,
+    )
+    relation_edges, canonical_lines = _relation_line_edges(
+        vault_root,
+        relation_doc.relations,
+        rel,
+        file_key,
+        resolver=resolver,
+        registry=registry,
+        project=project,
+        page_type=page.page_type,
+        source_hash=source_hash,
+    )
+    for target in _body_wikilink_paths(
+        vault_root, page.body, skip_lines=canonical_lines, resolver=resolver
+    ):
         edges.append(
             page_edge(
                 file_key, _file_key(_with_md(target)), "links_to", "wikilink", source_path=rel
             )
         )
-    edges.extend(
-        _relation_line_edges(
-            vault_root,
-            page.body,
-            rel,
-            file_key,
-            registry=registry,
-            project=project,
-            page_type=page.page_type,
-            source_hash=source_hash,
-        )
-    )
+    edges.extend(relation_edges)
     return _dedupe_edges(edges)
 
 
 def _relation_line_edges(
     vault_root: Path,
-    body: str,
+    relations: list[MarkdownRelation],
     rel_path: str,
     file_key: str,
     *,
-    registry: relation_registry.RelationRegistry | None = None,
+    resolver: vault_module.WikilinkResolver,
+    registry: relation_registry.RelationRegistry,
     project: str | None = None,
     page_type: str | None = None,
     source_hash: str = "",
-) -> list[GraphEdge]:
-    registry = registry or relation_registry.load_registry(vault_root)
+) -> tuple[list[GraphEdge], set[int]]:
     edges: list[GraphEdge] = []
-    in_fence = False
-    for line_no, line in enumerate(body.splitlines(), start=1):
-        if _FENCE_RE.match(line):
-            in_fence = not in_fence
-            continue
-        if in_fence:
-            continue
-        m = _RELATION_LINE_RE.match(line)
-        if not m:
-            continue
-        raw_relation = m.group("rel").strip()
-        relation = relation_registry.normalize_relation(raw_relation)
-        resolution = registry.resolve(relation, origin="semantic_relation")
-        if resolution.canonical is None and not m.group("colon"):
-            continue
-        target = m.group("link")[2:-2].split("|", 1)[0].strip()
+    canonical_lines: set[int] = set()
+    for relation in relations:
         try:
-            canonical, warning = vault_module.normalize_wikilink(target, vault_root, strict=False)
+            canonical, warning = vault_module.normalize_wikilink(
+                relation.target, vault_root, resolver=resolver, strict=False
+            )
         except Exception:  # noqa: BLE001 - malformed links are ignored
             continue
         if not canonical:
             continue
+        target_path = _with_md(canonical)
+        if relation.canonical:
+            canonical_lines.add(relation.line)
         edges.append(
             _edge(
                 file_key,
-                _file_key(_with_md(canonical)),
-                relation,
-                "semantic_relation",
+                _file_key(target_path),
+                relation.kind,
+                "markdown_relation" if relation.canonical else "semantic_relation",
                 source_path=rel_path,
-                source_anchor=f"line-{line_no}",
-                raw_relation=raw_relation,
+                source_anchor=f"line-{relation.line}",
+                raw_relation=relation.kind,
                 registry=registry,
                 project=project,
                 page_type=page_type,
@@ -848,12 +841,44 @@ def _relation_line_edges(
                 target_kind=_target_kind(vault_root, canonical),
                 source_hash=source_hash,
                 metadata={
-                    "line": line.strip(),
+                    "line": relation.raw,
+                    "canonical": relation.canonical,
                     "target_resolution": "unresolved" if warning else "resolved",
                 },
             )
         )
-    return edges
+    return edges, canonical_lines
+
+
+def _body_wikilink_paths(
+    vault_root: Path,
+    body: str,
+    *,
+    skip_lines: set[int],
+    resolver: vault_module.WikilinkResolver,
+) -> list[str]:
+    """Resolve body links while omitting canonical relation bullets themselves."""
+    out: list[str] = []
+    seen: set[str] = set()
+    for match in vault_module.find_body_wikilinks(body):
+        line = body.count("\n", 0, match.start()) + 1
+        if line in skip_lines:
+            continue
+        target = match.group(0)[2:-2].split("|", 1)[0].strip()
+        if not target or target.endswith("/"):
+            continue
+        try:
+            canonical, warning = vault_module.normalize_wikilink(
+                target, vault_root, resolver=resolver, strict=False
+            )
+        except Exception:  # noqa: BLE001 - malformed links are ignored
+            continue
+        target_path = _with_md(canonical)
+        if warning or not target_path.startswith(kb_prefix()) or target_path in seen:
+            continue
+        seen.add(target_path)
+        out.append(target_path)
+    return out
 
 
 def _frontmatter_links(value: Any) -> list[str]:
@@ -938,7 +963,7 @@ def _edge(
         page_type=page_type,
         source_kind=source_kind,
         target_kind=target_kind,
-        origin=origin,
+        origin="semantic_relation" if origin == "markdown_relation" else origin,
     )
     canonical = resolution.canonical
     key_material = "\n".join(

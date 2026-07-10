@@ -23,12 +23,12 @@ import json
 import os
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any
-from typing_extensions import NotRequired, TypedDict
+from typing import Any, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
 from mcp.types import TextContent
+from typing_extensions import TypedDict
 
 from . import add as add_module
 from . import adopt as adopt_module
@@ -55,8 +55,8 @@ from . import link_summary as link_summary_module
 from . import list_directory as list_directory_module
 from . import list_inbound_links as list_inbound_links_module
 from . import list_trash as list_trash_module
-from . import memory_refs as memory_refs_module
 from . import memory_context as memory_context_module
+from . import memory_refs as memory_refs_module
 from . import memory_schema as memory_schema_module
 from . import move_file as move_file_module
 from . import multi_edit as multi_edit_module
@@ -70,6 +70,7 @@ from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
 from . import replace as replace_module
+from . import review_state as review_state_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -231,7 +232,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-08.1",
+        "contract_version": "2026-07-10.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -268,7 +269,7 @@ def op_bootstrap(
                 "ask_memory for cheap product recall",
                 "read_memory or ask_memory(deep=true) when more context is needed",
                 "reason in the agent",
-                "use connect_memory(operation='suggest-links') before important compiled writes",
+                "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
                 "remember, edit_memory, or replace_memory when there is a durable conclusion",
                 "read warnings/suggestions/write_feedback and follow up on unresolved links or duplicate warnings",
             ],
@@ -288,7 +289,8 @@ def op_bootstrap(
                 "ask_memory for relevant prior notes and sources",
                 "read_memory enough context; use ask_memory(deep=true) for synthesis",
                 "draft the smallest durable compiled conclusion",
-                "run connect_memory(operation='suggest-links') on the draft",
+                "run connect_memory(operation='suggest-links') and, when directional meaning matters, 'suggest-relations' on the draft",
+                "write accepted note-level edges under `## Relations` as `- relation_type [[Target]]`",
                 "write with remember, edit_memory, replace_memory, capture_source, preserve_evidence, or connect_memory as appropriate",
                 "inspect warnings, suggestions, and write_feedback from the write result",
                 "apply any accepted links through edit_memory",
@@ -303,21 +305,21 @@ def op_bootstrap(
                 "named_person_concept_library_or_decision": "connect_memory(operation='entity')",
             },
             "preflight": {
-                "connect_memory": "standard read-only suggest-links check before a compiled note write",
+                "connect_memory": "standard read-only suggest-links/suggest-relations check before a compiled note write",
                 "near_duplicate_warnings": "if they fire, consider edit or replace instead of a parallel page",
             },
             "post_write": {
                 "remember_suggestions": "non-binding related pages returned by remember(suggestions=true)",
-                "write_feedback": "structural feedback returned by note(): semantic block counts, source/link counts, unresolved wikilinks, and next actions",
+                "write_feedback": "structural feedback returned by note(): semantic blocks, typed note/block relations, generic/source links, relation debt, unresolved wikilinks, and next actions",
                 "accepted_links": "persist only through edit_memory/remember/replace_memory; never auto-write suggestions",
             },
             "note_type_recipes": {
-                "research-note": "Project-scoped finding with Question, Findings, and Connections.",
-                "insight": "Cross-cutting claim with Claim, Why it holds, and Connections.",
-                "failure": "Failure mode with mechanism, detection, mitigation, and Connections.",
-                "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and Connections.",
+                "research-note": "Project-scoped finding with Question, Findings, and typed Relations.",
+                "insight": "Cross-cutting claim with Claim, Why it holds, and typed Relations.",
+                "failure": "Failure mode with mechanism, detection, mitigation, and typed Relations.",
+                "pattern": "Reusable solution with Problem, Solution, When to use, When not to use, and typed Relations.",
                 "experiment": "Primary protocol with Hypothesis, Protocol, Results, and Conclusion.",
-                "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and Connections.",
+                "production-log": "Creative artifact record with Frame, Artifact, Outcomes, Reflection, and typed Relations.",
             },
         },
         "tool_defaults": {
@@ -1214,10 +1216,14 @@ def op_audit(
 
 
 def op_attention(
-    vault_root: Path,categories: list[str] | None = None, limit: int = 25) -> dict:
+    vault_root: Path,
+    categories: list[str] | None = None,
+    limit: int = 25,
+    state: str = "open",
+) -> dict:
     """Your review queue: the one ranked list of what in the Knowledge Base needs your attention today. Read-only.
 
-    Composes the three measurement-only epistemic queues into a single list,
+    Composes the four measurement-only epistemic queues into a single list,
     ranked by Reciprocal Rank Fusion over each queue's own ordering — a note
     flagged by more than one queue rises to the top:
     - `stale_review`: active conclusions that are old AND rarely surfaced in
@@ -1226,6 +1232,8 @@ def op_attention(
       close enough to restate, refine, or contradict (do they conflict?).
     - `unprocessed_source`: sources captured but never compiled (nothing
       distilled from them yet).
+    - `relation_debt`: active compiled pages with no outbound Markdown
+      connections (semantic neighbours are not yet durable graph edges).
 
     Each item carries its reason(s), the related note(s) for a contradiction
     pair, and severity. Surfaced for REVIEW only: the ranking is a deterministic
@@ -1239,17 +1247,23 @@ def op_attention(
 
     Args:
         categories: Optional subset of {corpus_contradictions, stale_review,
-            unprocessed_source}. Omit to include all three.
+            unprocessed_source, relation_debt}. Omit to include all four.
         limit: Max items to surface (default 25; 0 or negative = uncapped,
             surface all). Lower-priority items beyond the cap are summarized in
             a "N more not shown" note, never dropped silently.
+        state: open (default), all, snoozed, or dismissed.
 
     Returns:
         {items: [{path, score, severity, categories, reasons: [{category, rank,
          detail, related_paths?, meta}], proposed_fix}], summary: {category:
          count}, shown, total, truncated, upstream_truncated, note}.
     """
-    report = attention_module.attention(vault_root, categories=categories, limit=limit)
+    report = attention_module.attention(
+        vault_root,
+        categories=categories,
+        limit=limit,
+        state=state,
+    )
     return report.as_dict()
 
 
@@ -1446,7 +1460,7 @@ def op_propose_compilation(
 
     The backlog-drain companion to `audit`'s `unprocessed_source` findings:
     point it at one or more raw sources and it hands back a ready-to-fill
-    note skeleton — inferred note_type, a Question/Findings/Connections (or
+    note skeleton — inferred note_type, a Question/Findings/Relations (or
     Claim/…) outline, the `sources[]` to cite, and adjacent compiled pages to
     link (computed via the same hybrid retrieval as `suggest_links`). It
     does NOT write anything: you fill the prose and call `note()` with the
@@ -1916,7 +1930,8 @@ def op_link(
             this entity is relevant to in your work.
         tags: Lowercase dash-separated; normalized by the server.
         connections: List of vault-relative wikilink targets to put under
-            `## Connections`. Same path conventions as `note.sources`.
+            `## Relations` as conservative `relates_to` edges. Same path
+            conventions as `note.sources`.
         (per-type fields): see the bullet list above.
 
     Returns:
@@ -2075,12 +2090,12 @@ def op_note(
         content: Full markdown body, written verbatim after the
             frontmatter. Should start with `# <title>` (the H1 matching
             the title arg) followed by the section conventions per type:
-            research-note: `## Question`/`## Findings`/`## Connections`.
-            insight: `## Claim`/`## Why it holds`/`## Connections`.
-            failure: `## What happened`/`## Mechanism`/`## Detection`/`## Mitigation`/`## Connections`.
-            pattern: `## Problem`/`## Solution`/`## When to use`/`## When NOT to use`/`## Connections`.
-            experiment: `## Hypothesis`/`## Protocol`/`## Baseline`/`## Intervention`/`## Results`/`## Conclusion`/`## Connections`.
-            production-log: `## Frame`/`## Artifact`/`## Production session`/`## Outcomes`/`## Reflection`/`## Connections`.
+            research-note: `## Question`/`## Findings`/`## Relations`.
+            insight: `## Claim`/`## Why it holds`/`## Relations`.
+            failure: `## What happened`/`## Mechanism`/`## Detection`/`## Mitigation`/`## Relations`.
+            pattern: `## Problem`/`## Solution`/`## When to use`/`## When NOT to use`/`## Relations`.
+            experiment: `## Hypothesis`/`## Protocol`/`## Baseline`/`## Intervention`/`## Results`/`## Conclusion`/`## Relations`.
+            production-log: `## Frame`/`## Artifact`/`## Production session`/`## Outcomes`/`## Reflection`/`## Relations`.
             Conventions only — no shape is enforced.
         note_type: One of research-note, insight, failure, pattern,
             experiment, production-log.
@@ -2116,9 +2131,10 @@ def op_note(
             by the retrieval stack. Set false for a faster write when you
             already know the note's links; the near-duplicate/overlap
             warnings stay ON either way (dedupe is a guardrail, not a
-            suggestion). For important drafts, call `suggest_links` before
-            `note` and wire accepted links into the body or with a follow-up
-            `edit`.
+            suggestion). For important drafts, call
+            `connect_memory(operation="suggest-links")`, use
+            `operation="suggest-relations"` when direction matters, and write
+            accepted note-level edges under `## Relations`.
 
     Returns:
         {path, warnings, suggestions?, write_feedback}. `write_feedback` is
@@ -3354,6 +3370,8 @@ def op_review_memory(
     key: str | None = None,
     value: str | None = None,
     path: str | None = None,
+    state: str = "open",
+    ref: str | None = None,
 ) -> dict:
     """Review memory health, provenance, drift, or source backlog.
 
@@ -3361,7 +3379,8 @@ def op_review_memory(
     `maintain_memory`, not here.
 
     Args:
-        mode: attention, audit, provenance, evolution, compilation, stale, contradiction, or unprocessed-sources.
+        mode: attention, item, audit, provenance, evolution, compilation, stale,
+            contradiction, unprocessed-sources, or relation-debt.
         categories: Optional category filter for attention/audit.
         limit: Attention/evolution result cap.
         query: Topic for evolution review.
@@ -3371,19 +3390,41 @@ def op_review_memory(
         key: Provenance key filter.
         value: Provenance value filter.
         path: Restrict provenance scan to one path.
+        state: For attention, open (default), all, snoozed, or dismissed.
+        ref: Stable `exomem://review/<id>` reference for item mode.
     """
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if mode == "attention":
-        return op_attention(vault_root, categories=categories, limit=limit)
+        return op_attention(vault_root, categories=categories, limit=limit, state=state)
+    if mode == "item":
+        if not ref:
+            raise ValueError("INVALID_REVIEW: item mode requires `ref`")
+        return attention_module.item_by_ref(vault_root, ref).as_dict()
     if mode == "audit":
         return op_audit(vault_root, categories=categories)
     if mode == "stale":
-        return op_attention(vault_root, categories=["stale_review"], limit=limit)
+        return op_attention(
+            vault_root, categories=["stale_review"], limit=limit, state=state
+        )
     if mode == "contradiction":
-        return op_attention(vault_root, categories=["corpus_contradictions"], limit=limit)
+        return op_attention(
+            vault_root,
+            categories=["corpus_contradictions"],
+            limit=limit,
+            state=state,
+        )
     if mode == "unprocessed-sources":
-        return op_attention(vault_root, categories=["unprocessed_source"], limit=limit)
+        return op_attention(
+            vault_root,
+            categories=["unprocessed_source"],
+            limit=limit,
+            state=state,
+        )
+    if mode == "relation-debt":
+        return op_attention(
+            vault_root, categories=["relation_debt"], limit=limit, state=state
+        )
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
     if mode == "evolution":
@@ -3393,9 +3434,46 @@ def op_review_memory(
             raise ValueError("INVALID_REVIEW: compilation mode requires `sources`")
         return op_propose_compilation(vault_root, sources=sources, suggested_title=suggested_title)
     raise ValueError(
-        "INVALID_MODE: review_memory mode must be attention, audit, provenance, "
-        "evolution, compilation, stale, contradiction, or unprocessed-sources"
+        "INVALID_MODE: review_memory mode must be attention, item, audit, provenance, "
+        "evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt"
     )
+
+
+def op_triage_memory(
+    vault_root: Path,
+    ref: str,
+    action: str,
+    until: str | None = None,
+    why: str | None = None,
+) -> dict:
+    """Triage one Epistemic Inbox item explicitly.
+
+    This is the write-capable companion to read-only `review_memory`. Decisions
+    bind to the current signal fingerprint, so materially changed knowledge
+    resurfaces automatically.
+
+    Args:
+        ref: Stable `exomem://review/<id>` reference from review_memory.
+        action: dismiss, snooze, or reopen.
+        until: Snooze-through date as YYYY-MM-DD; required only for snooze.
+        why: Optional short rationale stored with the review decision.
+    """
+    item = attention_module.item_by_ref(vault_root, ref)
+    result = review_state_module.ReviewStateStore(vault_root).apply(
+        item.item_id or review_state_module.parse_review_ref(ref),
+        item.fingerprint or "",
+        action=action,
+        until=until,
+        why=why,
+    )
+    result.update(
+        {
+            "path": item.path,
+            "target_ref": item.target_ref,
+            "categories": item.categories,
+        }
+    )
+    return result
 
 
 def op_connect_memory(
@@ -4016,11 +4094,11 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "advanced": ["transfer_artifact", "compile_source"],
     },
     "review": {
-        "intent": "Review stale, contradictory, or unprocessed knowledge before acting.",
+        "intent": "Review stale, contradictory, disconnected, or unprocessed knowledge before acting.",
         "route": {"tool": "review_memory", "args": {"mode": "attention"}},
         "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
-        "safety": "read-only by default; surfaces candidates for human judgment",
-        "advanced": ["review_memory", "compile_source"],
+        "safety": "read-only by default; triage state changes are explicit through triage_memory",
+        "advanced": ["review_memory", "triage_memory", "compile_source"],
     },
     "connect": {
         "intent": "Find links or typed relations that make the knowledge graph denser.",
@@ -4276,6 +4354,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("attention", "audit", "evolution", "provenance_report", "propose_compilation"),
         {"surface": "primary", "actions": ("review", "ask", "prove"), "first_run_safe": True},
+    ),
+    (
+        "triage_memory",
+        op_triage_memory,
+        1,
+        True,
+        False,
+        "ref",
+        _MCRC,
+        ("attention",),
+        {"surface": "primary", "actions": ("review", "update"), "first_run_safe": False},
     ),
     (
         "connect_memory",

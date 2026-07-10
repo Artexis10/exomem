@@ -16,7 +16,7 @@ superseded."
 **Edit in place** (small changes; same `updated` field bump):
 - Typo, formatting, link fix
 - Adding a new source citation to an existing claim
-- Adding an `## Open thread` or extending `## Connections`
+- Adding an `## Open thread` or extending `## Relations`
 - Reorganizing sections without changing the substantive claim
 
 **Supersede** (substantive change):

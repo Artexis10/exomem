@@ -47,11 +47,13 @@ from pathlib import Path
 
 import yaml
 
-from . import access, indexes
+from . import access, indexes, markdown_relations, semantic_blocks
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     _mask_code_spans,
+    content_hash,
+    find_body_wikilinks,
     in_append_only_tree,
     kb_root,
     parse_frontmatter,
@@ -64,6 +66,7 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "index_drift", "tag_inconsistency", "frontmatter_compliance",
     "unregistered_project_key", "embedding_drift", "graph_drift", "reference_identity",
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
+    "relation_debt",
 )
 OPTIONAL_CATEGORIES: tuple[str, ...] = ("relation_registry",)
 
@@ -186,6 +189,8 @@ def audit(
         findings.extend(_check_corpus_contradictions(vault_root, pages, today=today))
     if "relation_registry" in selected:
         findings.extend(_check_relation_registry(vault_root))
+    if "relation_debt" in selected:
+        findings.extend(_check_relation_debt(vault_root, pages))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -213,6 +218,12 @@ def _parse_all(kb: Path, vault_root: Path) -> list[find_module.ParsedPage]:
         if page is not None:
             pages.append(page)
     return pages
+
+
+def _page_signal_version(page: find_module.ParsedPage) -> str:
+    """Stable content version for fingerprint-bound review decisions."""
+    frontmatter = yaml.safe_dump(page.frontmatter, sort_keys=True, allow_unicode=True)
+    return content_hash(frontmatter + "\n" + page.body)[:16]
 
 
 # ---------------- check: broken_wikilink ----------------
@@ -432,14 +443,20 @@ def _check_unprocessed_sources(
         captured = _parse_fm_date(
             page.frontmatter.get("captured") or page.frontmatter.get("created")
         )
-        meta: dict = {}
+        meta: dict = {"signal_version": _page_signal_version(page)}
         age_days: int | None = None
         if captured is not None:
             age_days = max(0, (today - captured).days)
             bucket = (
                 "fresh" if age_days < 30 else "aging" if age_days < 90 else "stale"
             )
-            meta = {"age_days": age_days, "age_bucket": bucket, "captured": captured.isoformat()}
+            meta.update(
+                {
+                    "age_days": age_days,
+                    "age_bucket": bucket,
+                    "captured": captured.isoformat(),
+                }
+            )
             severity = "warn" if bucket == "stale" else "info"
             age_phrase = f" ({age_days}d old, {bucket})"
         else:
@@ -462,7 +479,7 @@ def _check_unprocessed_sources(
                     "skeleton, then compile via `note` (the back-ref updates "
                     "automatically). Otherwise mark archived or delete."
                 ),
-                meta=meta or None,
+                meta=meta,
             ),
         ))
 
@@ -1061,6 +1078,78 @@ def _check_relevance_pairs_pending(
     )]
 
 
+# ---------------- check: relation_debt ----------------
+
+_RELATION_DEBT_TYPES = frozenset(
+    {
+        "research-note",
+        "insight",
+        "pattern",
+        "failure",
+        "experiment",
+        "production-log",
+        "entity",
+    }
+)
+
+
+def _check_relation_debt(
+    vault_root: Path,
+    pages: list[find_module.ParsedPage],
+) -> list[AuditFinding]:
+    """Surface active compiled pages with no explicit outbound Markdown edges."""
+    findings: list[AuditFinding] = []
+    for page in pages:
+        if page.page_type not in _RELATION_DEBT_TYPES:
+            continue
+        if page.path.name in ("index.md", "log.md"):
+            continue
+        if page.status in ("superseded", "archived", "draft", "dropped"):
+            continue
+        if access.access_tier(vault_root, page.rel_path) != access.TIER_READ_WRITE:
+            continue
+        stem = page.path.stem.lower()
+        if any(stem.endswith(suffix) for suffix in _STALE_SKIP_SLUG_SUFFIXES):
+            continue
+        if _STALE_SKIP_TAGS & set(page.tags):
+            continue
+
+        note_relations = markdown_relations.parse_markdown_relations(page.body)
+        block_relations = semantic_blocks.parse_semantic_blocks(
+            page.body, validate=False
+        )
+        typed_count = len(note_relations.relations) + sum(
+            len(block.relations) for block in block_relations.blocks
+        )
+        body_link_count = sum(1 for _ in find_body_wikilinks(page.body))
+        if typed_count or body_link_count:
+            continue
+
+        findings.append(
+            AuditFinding(
+                category="relation_debt",
+                severity="info",
+                path=page.rel_path,
+                detail=(
+                    "Active compiled page has no outbound Markdown connections; "
+                    "its semantic neighbours are not visible as durable graph edges."
+                ),
+                proposed_fix=(
+                    "Review `connect_memory(operation='suggest-relations')` or "
+                    "`suggest-links`; accept only meaningful edges, writing note-level "
+                    "relations under `## Relations`. Nothing is auto-written."
+                ),
+                meta={
+                    "signal_version": _page_signal_version(page),
+                    "typed_relations": typed_count,
+                    "body_wikilinks": body_link_count,
+                },
+            )
+        )
+
+    return sorted(findings, key=lambda finding: finding.path)
+
+
 # ---------------- check: stale_review ----------------
 
 # Staleness review targets living CONCLUSIONS only. Raw sources have their own
@@ -1312,6 +1401,7 @@ def _check_stale_review(
                 "archive into a `_archive/` subfolder."
             ),
             meta={
+                "signal_version": _page_signal_version(page),
                 "age_days": age_days,
                 "age_bucket": bucket,
                 "inbound_count": inbound,
@@ -1607,6 +1697,11 @@ def _check_corpus_contradictions(
             if polarity else ""
         )
         meta = {
+            "signal_version": content_hash(
+                _page_signal_version(eligible[a])
+                + "\n"
+                + _page_signal_version(eligible[b])
+            )[:16],
             "cosine": round(cos, 4),
             "priority": round(priority, 4),
             "dormancy": round(dormancy, 4),

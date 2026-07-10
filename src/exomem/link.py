@@ -410,11 +410,11 @@ def _render_entity(
         lines.append("")
         lines.append(why_in_kb.strip())
     lines.append("")
-    lines.append("## Connections")
+    lines.append("## Relations")
     lines.append("")
     if connections:
         for c in connections:
-            lines.append(f"- [[{c}]]")
+            lines.append(f"- relates_to [[{c}]]")
     else:
         lines.append("- (none yet)")
     lines.append("")

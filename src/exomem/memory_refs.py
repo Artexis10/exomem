@@ -235,6 +235,79 @@ class ReferenceIndex:
             conn.close()
         return memory_ref(str(row[0])) if count == 1 else None
 
+    def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
+        """Resolve many paths with one sidecar query or one Markdown scan."""
+        clean = [str(path or "").replace("\\", "/").lstrip("/") for path in paths]
+        wanted = list(dict.fromkeys(path for path in clean if path))
+        if not wanted:
+            return {}
+
+        if not self.available():
+            scan_rows = _scan_pages(self.vault_root)
+            by_id: dict[str, list[str]] = {}
+            id_by_path: dict[str, str] = {}
+            for path, exomem_id, _raw, _hash, status in scan_rows:
+                if status != "valid" or exomem_id is None:
+                    continue
+                by_id.setdefault(exomem_id, []).append(path)
+                id_by_path[path] = exomem_id
+            return {
+                path: (
+                    memory_ref(id_by_path[path])
+                    if path in id_by_path and len(by_id[id_by_path[path]]) == 1
+                    else None
+                )
+                for path in wanted
+            }
+
+        placeholders = ",".join("?" for _ in wanted)
+        conn = self._connect()
+        try:
+            db_rows = conn.execute(
+                f"SELECT path, exomem_id FROM identities "  # noqa: S608 - placeholders only
+                f"WHERE status = 'valid' AND path IN ({placeholders})",
+                wanted,
+            ).fetchall()
+            ids = {str(row[1]) for row in db_rows}
+            duplicate_ids: set[str] = set()
+            if ids:
+                id_placeholders = ",".join("?" for _ in ids)
+                duplicate_ids = {
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT exomem_id FROM identities "  # noqa: S608 - placeholders only
+                        f"WHERE status = 'valid' AND exomem_id IN ({id_placeholders}) "
+                        "GROUP BY exomem_id HAVING COUNT(*) > 1",
+                        sorted(ids),
+                    ).fetchall()
+                }
+        finally:
+            conn.close()
+        id_by_path = {str(path): str(exomem_id) for path, exomem_id in db_rows}
+        resolved = {
+            path: (
+                memory_ref(id_by_path[path])
+                if path in id_by_path and id_by_path[path] not in duplicate_ids
+                else None
+            )
+            for path in wanted
+        }
+        missing = [path for path, ref in resolved.items() if ref is None]
+        if missing:
+            scan_rows = _scan_pages(self.vault_root)
+            scan_by_id: dict[str, list[str]] = {}
+            scan_id_by_path: dict[str, str] = {}
+            for path, exomem_id, _raw, _hash, status in scan_rows:
+                if status != "valid" or exomem_id is None:
+                    continue
+                scan_by_id.setdefault(exomem_id, []).append(path)
+                scan_id_by_path[path] = exomem_id
+            for path in missing:
+                exomem_id = scan_id_by_path.get(path)
+                if exomem_id and len(scan_by_id[exomem_id]) == 1:
+                    resolved[path] = memory_ref(exomem_id)
+        return resolved
+
     def issues(self) -> list[dict[str, str]]:
         if not self.available():
             return scan_issues(self.vault_root)

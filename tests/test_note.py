@@ -5,9 +5,7 @@ from __future__ import annotations
 import datetime as dt
 from pathlib import Path
 
-
 from exomem import note as note_module
-
 
 TODAY = dt.date(2026, 5, 18)
 
@@ -63,8 +61,8 @@ def test_note_returns_structural_write_feedback(vault: Path) -> None:
             "# Feedback note\n\n"
             "## Claim\n\n"
             "The writer should report the note structure.\n\n"
-            "## Connections\n\n"
-            "This relates to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]].\n"
+            "## Relations\n"
+            "- relates_to [[Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation]]\n"
         ),
         note_type="insight",
         title="Feedback note",
@@ -76,8 +74,28 @@ def test_note_returns_structural_write_feedback(vault: Path) -> None:
     assert feedback["note_type"] == "insight"
     assert feedback["semantic_blocks"]["by_kind"]["claim"] >= 1
     assert feedback["links"]["body_wikilinks"] == 1
+    assert feedback["links"]["generic_wikilinks"] == 0
     assert feedback["links"]["unresolved_count"] == 0
+    assert feedback["relations"] == {
+        "typed_note": 1,
+        "typed_block": 0,
+        "errors": [],
+        "relation_debt": False,
+    }
     assert "write_feedback" in result.as_dict()
+
+
+def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path) -> None:
+    result = note_module.note(
+        vault,
+        content="## Finding\n\nA durable but currently isolated conclusion.\n",
+        note_type="insight",
+        title="Isolated conclusion",
+        today=TODAY,
+    )
+
+    assert result.write_feedback["relations"]["relation_debt"] is True
+    assert any("suggest-relations" in action for action in result.write_feedback["next_actions"])
 
 def test_note_slug_truncation_emits_warning(vault: Path) -> None:
     """A title that exceeds SLUG_MAX_LENGTH should produce a slug_warning."""

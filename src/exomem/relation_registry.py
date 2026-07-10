@@ -21,7 +21,13 @@ _KEY_RE = re.compile(r"^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$")
 _LABEL_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
 _STATUSES = {"active", "deprecated"}
 _DIRECTIONS = {"directed", "symmetric"}
-_ORIGINS = {"semantic_relation", "semantic_block", "frontmatter", "wikilink"}
+_ORIGINS = {
+    "semantic_relation",
+    "markdown_relation",
+    "semantic_block",
+    "frontmatter",
+    "wikilink",
+}
 _KIND_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 

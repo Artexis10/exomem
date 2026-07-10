@@ -20,6 +20,7 @@ relations:
   observed_in: {description: Was observed in, family: observation, direction: directed, origins: [semantic_relation]}
   mentions: {description: Mentions, family: mention, direction: directed, origins: [semantic_relation]}
   about_entity: {description: Is about an entity, family: entity, direction: directed, origins: [semantic_relation]}
+  relates_to: {description: Has a general meaningful relationship to, family: relation, direction: symmetric, origins: [semantic_relation]}
   links_to: {description: Links to, family: link, direction: directed, origins: [semantic_relation, frontmatter, wikilink]}
   cites: {description: Cites, family: citation, direction: directed, origins: [semantic_relation]}
   tests: {description: Tests, family: testing, direction: directed, origins: [semantic_relation]}

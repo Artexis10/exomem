@@ -291,3 +291,30 @@ def test_simple_review_connect_and_maintain_aliases(vault: Path, capsys) -> None
     connect_payload = json.loads(out3.strip().splitlines()[-1])
     assert connect_payload["success"] is True
     assert isinstance(connect_payload["data"], list)
+
+
+def test_simple_review_human_output_and_triage(vault: Path, capsys) -> None:
+    code, out, err = _run(["review", "--limit", "1"], capsys)
+    assert code == 0, err
+    assert "Epistemic Inbox" in out
+    assert "exomem://review/" in out
+    assert '"items"' not in out
+
+    code2, out2, err2 = _run(["review", "--limit", "1", "--json"], capsys)
+    assert code2 == 0, err2
+    item = json.loads(out2.strip().splitlines()[-1])["data"]["items"][0]
+
+    code3, out3, err3 = _run(
+        ["review", "dismiss", item["ref"], "--why", "reviewed", "--json"],
+        capsys,
+    )
+    assert code3 == 0, err3
+    triage = json.loads(out3.strip().splitlines()[-1])["data"]
+    assert triage["state"] == "dismissed"
+    assert (vault / "Knowledge Base/.review-state.json").exists()
+
+    code4, out4, err4 = _run(
+        ["review", "reopen", item["ref"], "--json"], capsys
+    )
+    assert code4 == 0, err4
+    assert json.loads(out4.strip().splitlines()[-1])["data"]["state"] == "open"

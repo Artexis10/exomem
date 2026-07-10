@@ -52,7 +52,7 @@ routes.
 | `ask` | "What do I know?", "find what I concluded", "show the context" | `ask_memory(detail="compact", rerank=false)`, then `read_memory`; use `ask_memory(deep=true)` for synthesis |
 | `remember` | "remember this conclusion", "save this decision", "write this up" | `remember`; use `replace_memory` when it supersedes an old conclusion |
 | `capture` | "save this source", "preserve this receipt", "keep this proof" | `capture_source` for raw sources; `preserve_evidence` or `transfer_artifact` for Evidence |
-| `review` | "what needs review?", "show stale knowledge", "what is unprocessed?" | `review_memory` |
+| `review` | "what needs review?", "show stale/disconnected knowledge", "what is unprocessed?" | `review_memory`; `triage_memory` for explicit dismiss/snooze/reopen |
 | `connect` | "what should this link to?", "suggest relations", "show related ideas" | `connect_memory`; entity writes stay explicit through its write-capable mode |
 | `adopt` | "import/adopt this existing vault safely" | `adopt_vault(mode="scan-only")`; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check/fix vault health" | `maintain_memory(mode="audit")`; `fix`/`reconcile` modes only when explicitly requested |
@@ -71,6 +71,8 @@ exomem remember "# Decision\n\n## Claim\n\nUse simple actions first." --title "U
 exomem capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
 exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
 exomem review --json
+exomem review --category relation_debt
+exomem review snooze exomem://review/0123456789abcdef01234567 --until 2026-08-01
 exomem connect --path "Notes/Insights/example" --json
 exomem maintain --json
 ```
@@ -164,8 +166,9 @@ Agent behavior:
 
 1. Run `review_memory` with the appropriate review mode.
 2. Present candidates as review items only.
-3. Ask whether to keep, edit, supersede, or archive. Do not auto-decay old
-   knowledge.
+3. Ask whether to keep, connect, edit, supersede, archive, dismiss, or snooze.
+   Use `triage_memory` only for an explicit review decision. Do not auto-decay
+   old knowledge or auto-accept suggested relations.
 
 ### Supersede old conclusion
 

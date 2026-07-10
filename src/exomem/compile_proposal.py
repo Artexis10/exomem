@@ -2,8 +2,9 @@
 
 Pure retrieval. Reads the cited source(s), infers a likely note_type, finds the
 adjacent compiled notes worth connecting to (reusing corpus_aware.suggest_related),
-and returns a sectioned outline with `sources[]` and wikilink connections
-pre-filled. It NEVER writes — the client (Claude) fills the prose and calls
+and returns a sectioned outline with `sources[]` and proposed `relates_to`
+relations pre-filled. It NEVER writes — the client fills the prose, reviews the
+proposed relations, and calls
 `note()`. Generation stays client-side per the pure-substrate principle; the
 server just hands over the scaffolding and the connections it can compute.
 
@@ -116,10 +117,10 @@ def _suggest_note_type(source_types: list[str]) -> str:
 
 
 _SECTIONS: dict[str, list[str]] = {
-    "research-note": ["Question", "Findings", "Connections"],
-    "insight": ["Claim", "Why it holds", "Connections"],
-    "failure": ["What happened", "Mechanism", "Detection", "Mitigation", "Connections"],
-    "pattern": ["Problem", "Solution", "When to use", "When NOT to use", "Connections"],
+    "research-note": ["Question", "Findings", "Relations"],
+    "insight": ["Claim", "Why it holds", "Relations"],
+    "failure": ["What happened", "Mechanism", "Detection", "Mitigation", "Relations"],
+    "pattern": ["Problem", "Solution", "When to use", "When NOT to use", "Relations"],
 }
 
 
@@ -142,9 +143,10 @@ def _render_outline(note_type: str, title: str, connections: list[str]) -> str:
     for sec in sections:
         lines.append(f"## {sec}")
         lines.append("")
-        if sec == "Connections" and connections:
+        if sec == "Relations" and connections:
+            lines.append("<!-- Proposed relations: review before writing. -->")
             for c in connections:
-                lines.append(f"- [[{c}]]")
+                lines.append(f"- relates_to [[{c}]]")
         else:
             lines.append(f"<!-- {sec.lower()}: distilled from the cited source(s) -->")
         lines.append("")

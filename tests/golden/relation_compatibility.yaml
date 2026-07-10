@@ -25,6 +25,7 @@ relations:
   owns: {direction: directed, origins: [semantic_relation]}
   raises_question: {direction: directed, origins: [semantic_relation]}
   refines: {direction: directed, origins: [semantic_relation]}
+  relates_to: {direction: symmetric, origins: [semantic_relation]}
   resolves: {direction: directed, origins: [semantic_relation]}
   supersedes: {direction: directed, origins: [frontmatter, semantic_relation]}
   supports: {direction: directed, origins: [semantic_relation]}

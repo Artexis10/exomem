@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from exomem import relation_registry, semantic_blocks
+from exomem import markdown_relations, relation_registry, semantic_blocks
 
 
 def _proposal(**extensions):
@@ -16,7 +16,8 @@ def test_core_is_single_source_for_parser_and_graph() -> None:
     from exomem import epistemic_graph
 
     core = relation_registry.core_registry()
-    assert len(core.core) == 24
+    assert len(core.core) == 25
+    assert markdown_relations.RELATION_TYPES == core.keys
     assert semantic_blocks.RELATION_TYPES == core.keys
     assert epistemic_graph.RELATION_TYPES == core.keys
 
@@ -85,6 +86,56 @@ def test_unknown_semantic_relation_is_retained_but_validation_reports_it() -> No
     assert document.blocks[0].relations[0].kind == "science.replicates"
     assert document.errors[0].code == "unsupported_relation"
     assert semantic_blocks.parse_semantic_blocks(body, validate=False).errors == []
+
+
+def test_canonical_markdown_relations_use_registry_extensions_and_retain_unknowns(
+    tmp_path: Path,
+) -> None:
+    from exomem import epistemic_graph
+
+    vault = tmp_path / "vault"
+    relation_registry.save_registry(
+        vault,
+        _proposal(
+            **{
+                "science.replicates": {
+                    "parent": "supports",
+                    "description": "Reports independent reproduction",
+                }
+            }
+        ),
+    )
+    source = vault / "Knowledge Base/Notes/source.md"
+    target = vault / "Knowledge Base/Notes/target.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# Target\n", encoding="utf-8")
+    source.write_text(
+        "# Source\n\n## Relations\n"
+        "- science.replicates [[Knowledge Base/Notes/target]]\n"
+        "- science.unreviewed [[Knowledge Base/Notes/target]]\n",
+        encoding="utf-8",
+    )
+
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    edges = index.edges(source_path="Knowledge Base/Notes/source.md")
+
+    extension = next(edge for edge in edges if edge["raw_relation"] == "science.replicates")
+    assert (extension["relation_type"], extension["parent_relation"]) == (
+        "science.replicates",
+        "supports",
+    )
+    assert (extension["origin"], extension["registry_status"]) == (
+        "markdown_relation",
+        "extension",
+    )
+    unknown = next(edge for edge in edges if edge["raw_relation"] == "science.unreviewed")
+    assert unknown["relation_type"] is None
+    assert (unknown["origin"], unknown["registry_status"]) == (
+        "markdown_relation",
+        "unregistered",
+    )
+    assert not any(edge["origin"] == "wikilink" for edge in edges)
 
 
 def test_save_is_atomic_and_expected_hash_guarded(tmp_path: Path) -> None:
