@@ -33,4 +33,4 @@ rules:
     - State default-off + soft-fail behavior explicitly for any optional/heavy capability.
     - Name the pure-substrate justification when a capability runs a model.
   tasks:
-    - TDD order: pure-logic unit tests before wiring; torch/model paths behind soft-fail seams.
+    - "TDD order: pure-logic unit tests before wiring; torch/model paths behind soft-fail seams."
