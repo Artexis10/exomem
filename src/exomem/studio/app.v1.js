@@ -263,8 +263,12 @@ function renderProvenance(section = {}) {
 
 function renderGraph(section = {}) {
   const rows = [];
+  for (const node of section.nodes || []) {
+    rows.push(element("li", `Node · ${node.title || node.path || node.node_key} · ${node.ref || "no canonical reference"}`));
+  }
   for (const edge of section.edges || []) {
-    rows.push(element("li", `${edge.src_key} — ${edge.relation_type || edge.raw_relation || "related"} → ${edge.dst_key}`));
+    const source = edge.source_ref ? ` · ${edge.source_ref}` : "";
+    rows.push(element("li", `${edge.src_key} — ${edge.relation_type || edge.raw_relation || "related"} → ${edge.dst_key}${source}`));
   }
   const note = stateNote({...section, items: rows, truncated: section.truncated_edges || section.truncated_nodes}, "No recorded graph neighborhood.");
   replaceChildren(byId("graph"), [note, rows.length ? list(rows) : null].filter(Boolean));
@@ -293,7 +297,7 @@ function renderEvolution(section = {}) {
       const li = element("li");
       li.tabIndex = 0;
       li.append(element("strong", version.title || version.path));
-      li.append(element("p", [version.date, version.status, version.path].filter(Boolean).join(" · "), "fine-print"));
+      li.append(element("p", [version.date, version.status, version.path, version.ref].filter(Boolean).join(" · "), "fine-print"));
       for (const claim of version.claims || []) li.append(element("p", String(claim)));
       if (version.transition) {
         li.append(element("p", `Recorded transition: ${version.transition.reason || "No reason stored"}${version.transition.date ? ` · ${version.transition.date}` : ""}`, "reason"));
@@ -355,10 +359,103 @@ function openTriage(action) {
   dialog.showModal();
 }
 
+function inputField(labelText, name, value = "", {required = false, multiline = false} = {}) {
+  const wrapper = element("label", labelText);
+  const control = document.createElement(multiline ? "textarea" : "input");
+  control.name = name;
+  control.value = value || "";
+  control.required = required;
+  if (multiline) control.rows = 10;
+  wrapper.append(control);
+  return wrapper;
+}
+
+async function openProposal(kind) {
+  if (!context) return;
+  restoreRef = context.item.ref;
+  workspaceError.hidden = true;
+  byId("dialog-error").hidden = true;
+  byId("dialog-kicker").textContent = "Read-only proposal first";
+  byId("dialog-confirm").disabled = true;
+  replaceChildren(byId("dialog-fields"), [element("p", "Preparing a bounded proposal…", "section-note")]);
+  dialog.showModal();
+  try {
+    let ready = true;
+    if (kind === "relation") ready = await prepareRelationProposal();
+    if (kind === "compile") ready = await prepareCompileProposal();
+    if (kind === "replace") ready = prepareReplacePreview();
+    byId("dialog-confirm").disabled = !ready;
+  } catch (error) {
+    dialogAction = null;
+    showError(byId("dialog-error"), error);
+  }
+}
+
+async function prepareRelationProposal() {
+  const proposal = await command("connect_memory", {
+    operation: "suggest-relations",
+    path: context.target.path,
+    include_model_suggestions: true,
+    limit: 10,
+  });
+  dialogAction = {kind: "relation", proposal};
+  byId("dialog-title").textContent = "Review a provisional relation";
+  byId("dialog-description").textContent = `${context.target.title || context.target.path} · Suggestions are read-only and may include model-backed candidates. Choose one, then confirm a separate audited edit.`;
+  const candidates = proposal.candidates || [];
+  if (!candidates.length) {
+    replaceChildren(byId("dialog-fields"), [element("p", "No relation candidates were measured. Nothing can be written from this proposal.", "section-note empty")]);
+    return false;
+  }
+  const wrapper = element("label", "Provisional candidate");
+  const select = document.createElement("select");
+  select.name = "candidate";
+  candidates.forEach((candidate, index) => {
+    const modelLabel = candidate.method === "model" ? " · model-backed proposal" : "";
+    select.append(new Option(`${candidate.relation_type || "relates_to"} → ${candidate.to}${modelLabel}`, String(index)));
+  });
+  wrapper.append(select);
+  const warnings = (proposal.warnings || []).map((warning) => element("p", String(warning), "section-note"));
+  replaceChildren(byId("dialog-fields"), [wrapper, inputField("Audit reason", "why", "Accepted reviewed relation", {required: true}), ...warnings]);
+  byId("dialog-confirm").textContent = "Confirm governed edit";
+  return true;
+}
+
+async function prepareCompileProposal() {
+  const proposal = await command("compile_source", {sources: [context.target.path]});
+  dialogAction = {kind: "compile", proposal};
+  byId("dialog-title").textContent = "Review compiled-knowledge draft";
+  byId("dialog-description").textContent = `${context.target.title || context.target.path} remains unchanged. Edit this read-only proposal; only confirmation creates a governed note.`;
+  replaceChildren(byId("dialog-fields"), [
+    inputField("Title", "title", proposal.suggested_title || context.target.title, {required: true}),
+    inputField("Note type", "note_type", proposal.suggested_note_type || "insight", {required: true}),
+    inputField("Project key (required for research-note)", "project", ""),
+    inputField("Editable compiled draft", "content", proposal.outline_markdown || "", {required: true, multiline: true}),
+  ]);
+  byId("dialog-confirm").textContent = "Confirm create knowledge";
+  return true;
+}
+
+function prepareReplacePreview() {
+  dialogAction = {kind: "replace"};
+  byId("dialog-title").textContent = "Preview a superseding conclusion";
+  byId("dialog-description").textContent = `Target: ${context.target.title || context.target.path}. Confirmation will create a successor and mark this exact page superseded; cancellation writes nothing.`;
+  replaceChildren(byId("dialog-fields"), [
+    inputField("Successor title", "title", context.target.title, {required: true}),
+    inputField("Note type", "note_type", context.target.type || "insight", {required: true}),
+    inputField("Recorded reason for supersession", "reason", "", {required: true}),
+    inputField("Successor draft", "content", context.target.body || "", {required: true, multiline: true}),
+  ]);
+  byId("dialog-confirm").textContent = "Confirm supersession";
+  return true;
+}
+
 async function submitDialog(event) {
   event.preventDefault();
   if (!dialogAction) return;
   if (dialogAction.kind === "triage") await submitTriage();
+  if (dialogAction.kind === "relation") await submitRelation();
+  if (dialogAction.kind === "compile") await submitCompilation();
+  if (dialogAction.kind === "replace") await submitReplacement();
 }
 
 async function submitTriage() {
@@ -388,6 +485,70 @@ async function submitTriage() {
   } finally {
     confirm.disabled = false;
   }
+}
+
+async function guardedWrite(write) {
+  const confirm = byId("dialog-confirm");
+  confirm.disabled = true;
+  try {
+    await command("review_item_context", {ref: context.item.ref, expected_fingerprint: context.item.fingerprint});
+    await write();
+    dialog.close();
+    context = null;
+    route = routePatch(route, {ref: ""});
+    writeRoute(route, {replace: true});
+    byId("workspace-content").hidden = true;
+    byId("workspace-empty").hidden = false;
+    await loadWorklist({focusRef: restoreRef});
+  } catch (error) {
+    if (error instanceof ApiError && error.code === "REVIEW_ITEM_CHANGED") {
+      showError(byId("dialog-error"), new ApiError("The reviewed signal changed. The draft is preserved and nothing was written; refresh before confirming."));
+      await loadWorklist();
+    } else showError(byId("dialog-error"), error);
+  } finally {
+    confirm.disabled = false;
+  }
+}
+
+async function submitRelation() {
+  const data = new FormData(byId("dialog-form"));
+  const candidate = dialogAction.proposal.candidates?.[Number(data.get("candidate"))];
+  if (!candidate) {
+    showError(byId("dialog-error"), new ApiError("Choose a valid proposal before confirming."));
+    return;
+  }
+  await guardedWrite(() => command("edit_memory", {
+    path: context.target.path,
+    why: data.get("why"),
+    heading: "Relations",
+    section_position: "append",
+    new_string: `- ${candidate.relation_type || "relates_to"} [[${String(candidate.to || "").replace(/\.md$/, "")}]]`,
+    expected_hash: context.target.content_hash,
+  }));
+}
+
+async function submitCompilation() {
+  const data = new FormData(byId("dialog-form"));
+  await guardedWrite(() => command("remember", {
+    title: data.get("title"),
+    note_type: data.get("note_type"),
+    project: data.get("project") || null,
+    content: data.get("content"),
+    sources: [context.target.path],
+    suggestions: true,
+  }));
+}
+
+async function submitReplacement() {
+  const data = new FormData(byId("dialog-form"));
+  await guardedWrite(() => command("replace_memory", {
+    old_path: context.target.path,
+    title: data.get("title"),
+    note_type: data.get("note_type"),
+    reason: data.get("reason"),
+    content: data.get("content"),
+    sources: context.target.frontmatter?.sources || null,
+  }));
 }
 
 function wireEvents() {
@@ -426,6 +587,16 @@ function wireEvents() {
     cards[next]?.focus();
     event.preventDefault();
   });
+  byId("evolution-list").addEventListener("keydown", (event) => {
+    if (!['ArrowDown', 'ArrowUp', 'Home', 'End'].includes(event.key)) return;
+    const versions = [...byId("evolution-list").querySelectorAll("li[tabindex]")];
+    const current = versions.indexOf(document.activeElement);
+    let next = event.key === "End" ? versions.length - 1 : 0;
+    if (event.key === "ArrowDown") next = Math.min(versions.length - 1, current + 1);
+    if (event.key === "ArrowUp") next = Math.max(0, current - 1);
+    versions[next]?.focus();
+    event.preventDefault();
+  });
   for (const button of document.querySelectorAll("[data-panel]")) {
     button.addEventListener("click", () => setPanel(button.dataset.panel, {push: true}));
   }
@@ -433,7 +604,7 @@ function wireEvents() {
     button.addEventListener("click", () => openTriage(button.dataset.triage));
   }
   for (const button of document.querySelectorAll("[data-proposal]")) {
-    button.addEventListener("click", () => showError(workspaceError, new ApiError(`${label(button.dataset.proposal)} proposal flow is not available in this build yet.`)));
+    button.addEventListener("click", () => openProposal(button.dataset.proposal));
   }
   byId("dialog-form").addEventListener("submit", submitDialog);
   byId("dialog-cancel").addEventListener("click", () => dialog.close());

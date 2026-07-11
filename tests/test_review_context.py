@@ -107,6 +107,10 @@ def test_review_context_contract_is_bounded_and_json_serializable(
     assert result["related"]["shown"] <= 1
     assert result["graph"]["shown_nodes"] <= 2
     assert result["graph"]["shown_edges"] <= 2
+    assert all(node.get("ref") for node in result["graph"]["nodes"] if node.get("path"))
+    assert all(
+        edge.get("source_ref") for edge in result["graph"]["edges"] if edge.get("source_path")
+    )
     assert result["history"]["shown"] <= 1
     assert SOURCE in {row["path"] for row in result["provenance"]["sources"]}
     assert EVIDENCE in {row["path"] for row in result["provenance"]["evidence"]}

@@ -107,6 +107,7 @@ def assemble(
     graph = _graph_section(
         vault_root,
         path=page_result.path,
+        ref_index=ref_index,
         max_nodes=limits["max_graph_nodes"],
         max_edges=limits["max_graph_edges"],
     )
@@ -142,6 +143,7 @@ def assemble(
     evolution_section = _evolution_section(
         vault_root,
         parsed,
+        ref_index=ref_index,
         max_versions=limits["max_evolution_versions"],
     )
     truncation.extend(str(value) for value in evolution_section.get("truncation", []))
@@ -203,6 +205,7 @@ def _graph_section(
     vault_root: Path,
     *,
     path: str,
+    ref_index: memory_refs.ReferenceIndex,
     max_nodes: int,
     max_edges: int,
 ) -> dict[str, Any]:
@@ -249,6 +252,8 @@ def _graph_section(
                 "line_end",
             )
         }
+        if node_path:
+            safe["ref"] = _reference_for_path(ref_index, node_path)
         nodes.append(safe)
         if safe.get("node_key"):
             allowed_keys.add(str(safe["node_key"]))
@@ -270,11 +275,17 @@ def _graph_section(
         if str(edge.get("src_key")) in allowed_keys
         and str(edge.get("dst_key")) in allowed_keys
     ]
+    safe_edges = []
+    for edge in edges[:max_edges]:
+        source_path = str(edge.get("source_path") or "")
+        if source_path:
+            edge["source_ref"] = _reference_for_path(ref_index, source_path)
+        safe_edges.append(edge)
     return {
         "available": True,
         "reason": None,
         "nodes": nodes[:max_nodes],
-        "edges": edges[:max_edges],
+        "edges": safe_edges,
         "shown_nodes": min(len(nodes), max_nodes),
         "shown_edges": min(len(edges), max_edges),
         "truncated_nodes": max(0, len(nodes) - max_nodes),
@@ -409,6 +420,7 @@ def _evolution_section(
     vault_root: Path,
     page,
     *,
+    ref_index: memory_refs.ReferenceIndex,
     max_versions: int,
 ) -> dict[str, Any]:
     try:
@@ -426,6 +438,11 @@ def _evolution_section(
             "timelines": [],
             "truncation": [],
         }
+    for timeline in result.get("timelines", []):
+        for version in timeline.get("versions", []):
+            version_path = str(version.get("path") or "")
+            if version_path:
+                version["ref"] = _reference_for_path(ref_index, version_path)
     return {"available": True, "reason": None, **result}
 
 

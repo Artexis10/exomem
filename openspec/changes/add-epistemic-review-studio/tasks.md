@@ -33,23 +33,23 @@
 
 ## 5. Review Workspace And Triage
 
-- [ ] 5.1 Render the selected target, exact review reasons, related summaries, canonical references, provenance/evidence, graph neighborhood, history, and independent unavailable/truncated section states from `review_item_context`.
-- [ ] 5.2 Implement dismiss, snooze, and reopen dialogs through `triage_memory`, updating the worklist only after server success and preserving state plus actionable errors on failure.
-- [ ] 5.3 Add stale-fingerprint handling that refreshes the worklist and makes the changed signal visible instead of applying an action to obsolete context.
-- [ ] 5.4 Add keyboard-complete workspace navigation, focus management for dialogs and errors, and restoration of list position after a successful or cancelled action.
+- [x] 5.1 Render the selected target, exact review reasons, related summaries, canonical references, provenance/evidence, graph neighborhood, history, and independent unavailable/truncated section states from `review_item_context`.
+- [x] 5.2 Implement dismiss, snooze, and reopen dialogs through `triage_memory`, updating the worklist only after server success and preserving state plus actionable errors on failure.
+- [x] 5.3 Add stale-fingerprint handling that refreshes the worklist and makes the changed signal visible instead of applying an action to obsolete context.
+- [x] 5.4 Add keyboard-complete workspace navigation, focus management for dialogs and errors, and restoration of list position after a successful or cancelled action.
 
 ## 6. Governed Proposal And Write Flows
 
-- [ ] 6.1 Add relation suggestion display through `connect_memory`, clearly label model-backed output as provisional, and require a separate validated `edit_memory` confirmation to persist an accepted governed relation.
-- [ ] 6.2 Add source-compilation planning through `compile_source`, retain the proposed note as an editable draft, and require explicit `remember` confirmation before creating compiled knowledge.
-- [ ] 6.3 Add supersession preview showing target, successor draft, reason, and consequence, then call `replace_memory` only after explicit confirmation; cancellation and errors must perform no write.
-- [ ] 6.4 Add integration tests proving proposals never mutate, confirmed writes use existing commands and audit logging, validation errors preserve drafts, and the reviewed signal refreshes or leaves the queue according to its new fingerprint.
+- [x] 6.1 Add relation suggestion display through `connect_memory`, clearly label model-backed output as provisional, and require a separate validated `edit_memory` confirmation to persist an accepted governed relation.
+- [x] 6.2 Add source-compilation planning through `compile_source`, retain the proposed note as an editable draft, and require explicit `remember` confirmation before creating compiled knowledge.
+- [x] 6.3 Add supersession preview showing target, successor draft, reason, and consequence, then call `replace_memory` only after explicit confirmation; cancellation and errors must perform no write.
+- [x] 6.4 Add integration tests proving proposals never mutate, confirmed writes use existing commands and audit logging, validation errors preserve drafts, and the reviewed signal refreshes or leaves the queue according to its new fingerprint.
 
 ## 7. Recorded Evolution View
 
-- [ ] 7.1 Render a pointer-ordered version timeline with recorded dates, structural claims, transition reasons, provenance, and canonical references from the context response.
-- [ ] 7.2 Add honest single-version, unavailable, and truncated states and verify the client never generates transition narrative, confidence, authority, or causal labels.
-- [ ] 7.3 Add accessible timeline semantics and keyboard navigation, including a non-visual tabular/list representation of every displayed relationship.
+- [x] 7.1 Render a pointer-ordered version timeline with recorded dates, structural claims, transition reasons, provenance, and canonical references from the context response.
+- [x] 7.2 Add honest single-version, unavailable, and truncated states and verify the client never generates transition narrative, confidence, authority, or causal labels.
+- [x] 7.3 Add accessible timeline semantics and keyboard navigation, including a non-visual tabular/list representation of every displayed relationship.
 
 ## 8. Verification, Packaging, And Documentation
 
