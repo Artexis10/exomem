@@ -7,6 +7,7 @@
 
 - [x] 2.1 Generalize attention composition for a fixed activation category order while preserving default attention output.
 - [x] 2.2 Add `review_memory(mode="activation")`, coverage output, activation item lookup, and triage lifecycle support.
+- [x] 2.3 Keep activation and daily-attention identities distinct for overlapping pages and verify independent triage.
 
 ## 3. Surface And Lifecycle Verification
 

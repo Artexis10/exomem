@@ -49,6 +49,8 @@ Coverage will report eligible pages, connected pages, typed-relation pages, gene
 
 `review_memory(mode="activation")` will compose activation findings with equal-weight RRF, deterministic category/path tie-breaking, path deduplication, stable references, fingerprint-bound state, and explicit truncation. The default `attention` category set and order remain unchanged. Item lookup and triage will resolve both default-attention and activation-only items.
 
+Activation review identities are deterministically namespaced from daily-attention identities. A page may legitimately appear in both queues with different reasons and fingerprints; distinct stable references keep triage of one queue from resolving to or changing the other. Existing daily-attention references remain unchanged.
+
 Alternative: add activation categories to the default attention inbox. Rejected for the first release because a mature existing corpus can produce a large backlog that would drown time-sensitive contradiction, staleness, and source work.
 
 ### Put action routes in measured finding metadata
