@@ -18,7 +18,7 @@ The system SHALL expose corpus activation through `review_memory(mode="activatio
 
 ### Requirement: Activation Items Use Stable Review Lifecycle
 
-Activation items SHALL receive the same stable review reference, content-bound signal fingerprint, open/all/snoozed/dismissed filtering, and triage behavior as daily attention items. Item lookup and triage SHALL resolve activation-only references. A materially changed signal SHALL resurface even if its previous fingerprint was dismissed.
+Activation items SHALL receive the same stable review reference, content-bound signal fingerprint, open/all/snoozed/dismissed filtering, and triage behavior as daily attention items. Activation references SHALL be deterministically distinct from daily-attention references for the same target so item lookup and triage resolve the intended queue. Item lookup and triage SHALL resolve activation-only references. A materially changed signal SHALL resurface even if its previous fingerprint was dismissed.
 
 #### Scenario: Activation-only item can be triaged
 
@@ -31,6 +31,12 @@ Activation items SHALL receive the same stable review reference, content-bound s
 - **WHEN** a dismissed page is edited so its measured activation signal version changes while a deficit remains
 - **THEN** the new activation fingerprint is open again
 
+#### Scenario: Overlapping queues retain independent triage
+
+- **WHEN** the same page appears in both daily attention and corpus activation
+- **THEN** the two items have distinct stable review references
+- **AND** dismissing the activation item does not dismiss or resolve to the daily-attention item
+
 ### Requirement: Activation Mode Is Shared Across Product Surfaces
 
 The activation mode SHALL be implemented in the shared `review_memory` leaf and SHALL therefore be reachable through the generated MCP tool, REST route, OpenAPI operation, and CLI command without surface-specific activation logic.
@@ -39,4 +45,3 @@ The activation mode SHALL be implemented in the shared `review_memory` leaf and 
 
 - **WHEN** activation is invoked through MCP, `/api/review_memory`, and `kb review_memory --mode activation --json` over the same vault state
 - **THEN** each surface returns the same coverage, ordered item paths, categories, and stable references
-

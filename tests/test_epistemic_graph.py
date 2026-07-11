@@ -6,7 +6,7 @@ import builtins
 from pathlib import Path
 from types import SimpleNamespace
 
-from exomem import epistemic_graph
+from exomem import corpus_aware, epistemic_graph
 
 SOURCE = "Knowledge Base/Sources/Articles/2026-07-08-source.md"
 EVIDENCE = "Knowledge Base/Evidence/Cases/receipt.md"
@@ -261,6 +261,54 @@ def test_optional_model_suggestion_failure_does_not_break_context(tmp_path: Path
     assert suggestions["model_suggestions_available"] is False
     assert any("unavailable" in warning for warning in suggestions["warnings"])
     assert any(c["method"] == "wikilink" for c in suggestions["candidates"])
+
+
+def test_similarity_suggestions_are_neutral_evidenced_and_read_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    before_markdown = {
+        path.relative_to(vault).as_posix(): path.read_text(encoding="utf-8")
+        for path in vault.rglob("*.md")
+    }
+    before_edges = index.edges()
+    monkeypatch.setattr(
+        corpus_aware,
+        "_best_cosine_per_file",
+        lambda *_args, **_kwargs: {RELATED: 0.91234},
+    )
+
+    suggestions = epistemic_graph.suggest_relations(vault, path=CURRENT, limit=30)
+    candidates = suggestions["candidates"]
+    shared = next(candidate for candidate in candidates if candidate["method"] == "shared_sources")
+    proximity = next(
+        candidate for candidate in candidates if candidate["method"] == "embedding_proximity"
+    )
+    wikilink = next(candidate for candidate in candidates if candidate["method"] == "wikilink")
+    frontmatter = next(
+        candidate for candidate in candidates if candidate["method"] == "frontmatter_sources"
+    )
+
+    assert shared["relation_type"] == "relates_to"
+    assert shared["evidence"]["shared_source"].endswith("2026-07-08-source.md")
+    assert proximity == {
+        "from": CURRENT,
+        "to": RELATED,
+        "relation_type": "relates_to",
+        "method": "embedding_proximity",
+        "evidence": {"cosine": 0.9123},
+    }
+    assert wikilink["relation_type"] == "links_to"
+    assert frontmatter["relation_type"] == "derived_from"
+    assert suggestions["mutated"] is False
+    assert index.edges() == before_edges
+    assert {
+        path.relative_to(vault).as_posix(): path.read_text(encoding="utf-8")
+        for path in vault.rglob("*.md")
+    } == before_markdown
+
 
 def test_command_leaves_return_graph_context_and_suggestions(tmp_path: Path) -> None:
     from exomem import commands

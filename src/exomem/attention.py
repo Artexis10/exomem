@@ -331,7 +331,14 @@ def activation(
         proposed_fix=_ACTIVATION_FIX,
     )
     ranked.coverage = scan.coverage
-    return _apply_review_state(vault_root, ranked, state=state, limit=limit, today=today)
+    return _apply_review_state(
+        vault_root,
+        ranked,
+        state=state,
+        limit=limit,
+        today=today,
+        identity_namespace="activation",
+    )
 
 
 def item_by_ref(
@@ -343,18 +350,11 @@ def item_by_ref(
 ) -> AttentionItem:
     """Resolve one current review item by its stable review reference."""
     wanted = review_state_module.parse_review_ref(reference)
-    matches: list[AttentionItem] = []
-    for report in (
-        attention(vault_root, limit=0, state="all", today=today),
-        activation(vault_root, limit=0, state="all", today=today),
-    ):
+    for resolver in (attention, activation):
+        report = resolver(vault_root, limit=0, state="all", today=today)
         for item in report.items:
             if item.item_id == wanted:
-                if expected_fingerprint and item.fingerprint == expected_fingerprint:
-                    return item
-                matches.append(item)
-    if matches:
-        return matches[0]
+                return item
     raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}")
 
 
@@ -365,6 +365,7 @@ def _apply_review_state(
     state: str,
     limit: int,
     today=None,
+    identity_namespace: str | None = None,
 ) -> AttentionReport:
     all_paths: list[str] = []
     for item in report.items:
@@ -378,7 +379,12 @@ def _apply_review_state(
 
     for item in report.items:
         target_ref = refs[item.path]
-        review_id = review_state_module.item_id(target_ref)
+        identity = (
+            f"{identity_namespace}:{target_ref}"
+            if identity_namespace
+            else target_ref
+        )
+        review_id = review_state_module.item_id(identity)
         related_paths = sorted(
             {
                 path

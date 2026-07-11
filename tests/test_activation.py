@@ -167,6 +167,42 @@ def test_activation_only_item_supports_item_lookup_and_triage(tmp_path: Path) ->
     assert review_state.state_path(tmp_path).exists()
 
 
+def test_activation_identity_does_not_collide_with_daily_attention(tmp_path: Path) -> None:
+    paths = _seed_activation_corpus(tmp_path)
+    rel_path = paths["disconnected"].relative_to(tmp_path).as_posix()
+    daily_item = next(
+        item
+        for item in attention.attention(
+            tmp_path, categories=["relation_debt"], limit=0
+        ).items
+        if item.path == rel_path
+    )
+    activation_item = next(
+        item
+        for item in attention.activation(tmp_path, limit=0).items
+        if item.path == rel_path
+    )
+
+    assert activation_item.ref != daily_item.ref
+    resolved = attention.item_by_ref(tmp_path, activation_item.ref)
+    assert resolved.ref == activation_item.ref
+    assert resolved.categories == activation_item.categories
+
+    commands.op_triage_memory(
+        tmp_path, ref=activation_item.ref, action="dismiss"
+    )
+
+    assert activation_item.ref not in {
+        item.ref for item in attention.activation(tmp_path, limit=0).items
+    }
+    assert daily_item.ref in {
+        item.ref
+        for item in attention.attention(
+            tmp_path, categories=["relation_debt"], limit=0
+        ).items
+    }
+
+
 def test_review_memory_activation_response_is_json_serializable(tmp_path: Path) -> None:
     _seed_activation_corpus(tmp_path)
 
@@ -176,70 +212,3 @@ def test_review_memory_activation_response_is_json_serializable(tmp_path: Path) 
     assert result["truncated"] > 0
     assert result["coverage"]["eligible_pages"] == 5
     assert json.loads(json.dumps(result))["coverage"] == result["coverage"]
-
-
-def test_expected_fingerprint_disambiguates_same_target_across_review_modes(
-    tmp_path: Path, monkeypatch
-) -> None:
-    target_ref = "exomem://vault/shared"
-    review_ref = review_state.review_ref(review_state.item_id(target_ref))
-    attention_item = attention.AttentionItem(
-        path="shared.md",
-        score=1.0,
-        severity="info",
-        categories=["stale_review"],
-        reasons=[],
-        proposed_fix="Review.",
-        item_id=review_state.item_id(target_ref),
-        ref=review_ref,
-        target_ref=target_ref,
-        fingerprint="attention-fingerprint",
-        state="open",
-    )
-    activation_item = attention.AttentionItem(
-        path="shared.md",
-        score=1.0,
-        severity="info",
-        categories=["relation_debt"],
-        reasons=[],
-        proposed_fix="Review.",
-        item_id=review_state.item_id(target_ref),
-        ref=review_ref,
-        target_ref=target_ref,
-        fingerprint="activation-fingerprint",
-        state="open",
-    )
-    monkeypatch.setattr(
-        attention,
-        "attention",
-        lambda *args, **kwargs: attention.AttentionReport(
-            items=[attention_item],
-            summary={},
-            shown=1,
-            total=1,
-            truncated=0,
-            upstream_truncated=0,
-            note=None,
-        ),
-    )
-    monkeypatch.setattr(
-        attention,
-        "activation",
-        lambda *args, **kwargs: attention.AttentionReport(
-            items=[activation_item],
-            summary={},
-            shown=1,
-            total=1,
-            truncated=0,
-            upstream_truncated=0,
-            note=None,
-        ),
-    )
-
-    resolved = attention.item_by_ref(
-        tmp_path,
-        review_ref,
-        expected_fingerprint="activation-fingerprint",
-    )
-
-    assert resolved.categories == ["relation_debt"]

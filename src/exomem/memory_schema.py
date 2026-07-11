@@ -24,6 +24,7 @@ from .kbdir import kb_dirname
 
 SCHEMA_VERSION = 1
 MIN_REQUIRED_SAMPLE = 5
+CONTRACT_RELATION_ORIGINS = frozenset({"semantic_relation", "markdown_relation"})
 _NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 
 
@@ -635,7 +636,7 @@ def _page_relations(vault_root: Path, page, document) -> set[str]:
     return {
         edge.relation_type
         for edge in epistemic_graph._edges_for_page(vault_root, page, tuple(document.blocks))
-        if edge.origin == "semantic_relation" and edge.relation_type is not None
+        if edge.origin in CONTRACT_RELATION_ORIGINS and edge.relation_type is not None
     }
 
 
