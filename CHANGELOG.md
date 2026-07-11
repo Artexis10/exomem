@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.17.0](https://github.com/Artexis10/exomem/compare/v0.16.2...v0.17.0) (2026-07-11)
+
+
+### Features
+
+* activate and prove the governed graph ([#198](https://github.com/Artexis10/exomem/issues/198)) ([79fb147](https://github.com/Artexis10/exomem/commit/79fb1476270743fbfe0c41647e7fb362c41f30d9))
+* add Epistemic Review Studio ([#200](https://github.com/Artexis10/exomem/issues/200)) ([9ec3805](https://github.com/Artexis10/exomem/commit/9ec3805d49e8fd478a95d6c5fe22561f407849b8))
+
 ## [0.16.2](https://github.com/Artexis10/exomem/compare/v0.16.1...v0.16.2) (2026-07-10)
 
 
