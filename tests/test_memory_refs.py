@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import yaml
@@ -40,7 +41,7 @@ def test_reference_round_trip_and_incremental_move(tmp_path: Path) -> None:
     assert index.resolve(identity) == "Knowledge Base/Notes/new.md"
 
 
-def test_bulk_reference_lookup_uses_index_and_scans_missing_paths(tmp_path: Path) -> None:
+def test_bulk_reference_lookup_uses_index_and_refreshes_only_missing_paths(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     notes = vault / "Knowledge Base" / "Notes"
     notes.mkdir(parents=True)
@@ -64,6 +65,130 @@ def test_bulk_reference_lookup_uses_index_and_scans_missing_paths(tmp_path: Path
         second_path: memory_refs.memory_ref(second_id),
         "missing.md": None,
     }
+
+
+def test_legacy_negative_reference_is_indexed_without_repeat_scan(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vault = tmp_path / "vault"
+    legacy_path = "Knowledge Base/Notes/legacy.md"
+    legacy = vault / legacy_path
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_page(None), encoding="utf-8")
+
+    calls = 0
+    original_scan = memory_refs._scan_pages
+
+    def counted_scan(root: Path):
+        nonlocal calls
+        calls += 1
+        return original_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted_scan)
+    index = memory_refs.ReferenceIndex(vault)
+
+    assert index.refs_for_paths([legacy_path]) == {legacy_path: None}
+    assert index.refs_for_paths([legacy_path]) == {legacy_path: None}
+    assert index.ref_for_path(legacy_path) is None
+    assert calls == 1
+
+
+def test_bulk_reference_lookup_does_not_scan_per_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vault = tmp_path / "vault"
+    notes = vault / "Knowledge Base" / "Notes"
+    notes.mkdir(parents=True)
+    paths = []
+    for number in range(30):
+        path = notes / f"legacy-{number}.md"
+        path.write_text(_page(None), encoding="utf-8")
+        paths.append(path.relative_to(vault).as_posix())
+
+    calls = 0
+    original_scan = memory_refs._scan_pages
+
+    def counted_scan(root: Path):
+        nonlocal calls
+        calls += 1
+        return original_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted_scan)
+    index = memory_refs.ReferenceIndex(vault)
+
+    assert all(ref is None for ref in index.refs_for_paths(paths).values())
+    assert all(ref is None for ref in index.refs_for_paths(paths).values())
+    assert calls == 1
+
+
+def test_concurrent_reference_lookup_shares_initial_rebuild(
+    tmp_path: Path, monkeypatch
+) -> None:
+    vault = tmp_path / "vault"
+    legacy_path = "Knowledge Base/Notes/legacy.md"
+    legacy = vault / legacy_path
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_page(None), encoding="utf-8")
+
+    calls = 0
+    original_scan = memory_refs._scan_pages
+
+    def counted_scan(root: Path):
+        nonlocal calls
+        calls += 1
+        return original_scan(root)
+
+    monkeypatch.setattr(memory_refs, "_scan_pages", counted_scan)
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda _: memory_refs.ReferenceIndex(vault).ref_for_path(legacy_path),
+                range(16),
+            )
+        )
+
+    assert results == [None] * 16
+    assert calls == 1
+
+
+def test_legacy_negative_reference_refreshes_when_identity_is_added(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    legacy_path = "Knowledge Base/Notes/legacy.md"
+    legacy = vault / legacy_path
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(_page(None), encoding="utf-8")
+    index = memory_refs.ReferenceIndex(vault)
+
+    assert index.ref_for_path(legacy_path) is None
+    identity = memory_refs.new_id()
+    legacy.write_text(_page(identity), encoding="utf-8")
+    index.refresh_paths([legacy])
+
+    assert index.ref_for_path(legacy_path) == memory_refs.memory_ref(identity)
+
+
+def test_ask_memory_enriches_references_once(vault: Path, monkeypatch) -> None:
+    calls = 0
+    original = memory_refs.ReferenceIndex.refs_for_paths
+
+    def counted(self, paths: list[str]):
+        nonlocal calls
+        calls += 1
+        return original(self, paths)
+
+    monkeypatch.setattr(memory_refs.ReferenceIndex, "refs_for_paths", counted)
+
+    commands.op_ask_memory(
+        vault,
+        query="metabolism",
+        mode="keyword",
+        limit=5,
+        detail="compact",
+    )
+
+    assert calls == 1
 
 
 def test_duplicate_and_malformed_ids_are_diagnostic_and_self_healing(tmp_path: Path) -> None:

@@ -688,8 +688,11 @@ def op_find(
         else:
             hit_dicts = [h.as_dict() for h in hits]
         ref_index = memory_refs_module.ReferenceIndex(vault_root)
+        refs = ref_index.refs_for_paths(
+            [str(hit.get("path") or "") for hit in hit_dicts]
+        )
         for hit in hit_dicts:
-            ref = ref_index.ref_for_path(str(hit.get("path") or ""))
+            ref = refs.get(str(hit.get("path") or ""))
             if ref:
                 hit["ref"] = ref
     timings_dict = timings.as_dict() if timings is not None else None
@@ -2885,13 +2888,6 @@ def op_ask_memory(
         detail=detail,
         include_timings=include_timings,
     )
-    hits = result.get("hits", []) if isinstance(result, dict) else result
-    ref_index = memory_refs_module.ReferenceIndex(vault_root)
-    for hit in hits:
-        if isinstance(hit, dict) and hit.get("path"):
-            ref = ref_index.ref_for_path(str(hit["path"]))
-            if ref:
-                hit["ref"] = ref
     return result
 
 

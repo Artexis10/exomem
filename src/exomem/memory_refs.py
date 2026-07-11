@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -11,9 +12,10 @@ from urllib.parse import unquote
 from . import vault as vault_module
 from .kbdir import kb_dirname
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 REF_PREFIX = "exomem://memory/"
 ID_FIELD = "exomem_id"
+_REFERENCE_REBUILD_LOCK = threading.Lock()
 
 
 @dataclass(frozen=True)
@@ -215,25 +217,7 @@ class ReferenceIndex:
 
     def ref_for_path(self, path: str) -> str | None:
         clean = str(path or "").replace("\\", "/").lstrip("/")
-        if not self.available():
-            return _ref_for_path_from_scan(self.vault_root, clean)
-        conn = self._connect()
-        try:
-            row = conn.execute(
-                "SELECT exomem_id FROM identities "
-                "WHERE path = ? AND status = 'valid'",
-                (clean,),
-            ).fetchone()
-            if row is None:
-                return _ref_for_path_from_scan(self.vault_root, clean)
-            count = conn.execute(
-                "SELECT COUNT(*) FROM identities "
-                "WHERE exomem_id = ? AND status = 'valid'",
-                (row[0],),
-            ).fetchone()[0]
-        finally:
-            conn.close()
-        return memory_ref(str(row[0])) if count == 1 else None
+        return self.refs_for_paths([clean]).get(clean)
 
     def refs_for_paths(self, paths: list[str]) -> dict[str, str | None]:
         """Resolve many paths with one sidecar query or one Markdown scan."""
@@ -243,32 +227,43 @@ class ReferenceIndex:
             return {}
 
         if not self.available():
-            scan_rows = _scan_pages(self.vault_root)
-            by_id: dict[str, list[str]] = {}
-            id_by_path: dict[str, str] = {}
-            for path, exomem_id, _raw, _hash, status in scan_rows:
-                if status != "valid" or exomem_id is None:
-                    continue
-                by_id.setdefault(exomem_id, []).append(path)
-                id_by_path[path] = exomem_id
-            return {
-                path: (
-                    memory_ref(id_by_path[path])
-                    if path in id_by_path and len(by_id[id_by_path[path]]) == 1
-                    else None
-                )
-                for path in wanted
-            }
+            # Schema upgrades and first use rebuild once. The lock prevents a
+            # burst of concurrent reads from all scanning the corpus together.
+            with _REFERENCE_REBUILD_LOCK:
+                if not self.available():
+                    try:
+                        self.rebuild_all()
+                    except (OSError, sqlite3.Error):
+                        # A read-only vault still works, with one scan per batch.
+                        return _refs_for_paths_from_scan(self.vault_root, wanted)
 
+        resolved, indexed_paths = self._refs_from_index(wanted)
+        # Rows absent from the index may be new external files whose watcher
+        # event has not landed yet. Refresh only those exact paths; never turn
+        # an ordinary negative lookup into a full-corpus scan.
+        missing = [path for path in wanted if path not in indexed_paths]
+        if missing:
+            self.refresh_paths([self.vault_root / path for path in missing])
+            refreshed, _ = self._refs_from_index(missing)
+            resolved.update(refreshed)
+        return resolved
+
+    def _refs_from_index(
+        self, wanted: list[str]
+    ) -> tuple[dict[str, str | None], set[str]]:
         placeholders = ",".join("?" for _ in wanted)
         conn = self._connect()
         try:
             db_rows = conn.execute(
-                f"SELECT path, exomem_id FROM identities "  # noqa: S608 - placeholders only
-                f"WHERE status = 'valid' AND path IN ({placeholders})",
+                f"SELECT path, exomem_id, status FROM identities "  # noqa: S608
+                f"WHERE path IN ({placeholders})",
                 wanted,
             ).fetchall()
-            ids = {str(row[1]) for row in db_rows}
+            ids = {
+                str(row[1])
+                for row in db_rows
+                if str(row[2]) == "valid" and row[1] is not None
+            }
             duplicate_ids: set[str] = set()
             if ids:
                 id_placeholders = ",".join("?" for _ in ids)
@@ -283,30 +278,24 @@ class ReferenceIndex:
                 }
         finally:
             conn.close()
-        id_by_path = {str(path): str(exomem_id) for path, exomem_id in db_rows}
-        resolved = {
-            path: (
-                memory_ref(id_by_path[path])
-                if path in id_by_path and id_by_path[path] not in duplicate_ids
-                else None
-            )
-            for path in wanted
+        indexed_paths = {str(row[0]) for row in db_rows}
+        id_by_path = {
+            str(path): str(exomem_id)
+            for path, exomem_id, status in db_rows
+            if str(status) == "valid" and exomem_id is not None
         }
-        missing = [path for path, ref in resolved.items() if ref is None]
-        if missing:
-            scan_rows = _scan_pages(self.vault_root)
-            scan_by_id: dict[str, list[str]] = {}
-            scan_id_by_path: dict[str, str] = {}
-            for path, exomem_id, _raw, _hash, status in scan_rows:
-                if status != "valid" or exomem_id is None:
-                    continue
-                scan_by_id.setdefault(exomem_id, []).append(path)
-                scan_id_by_path[path] = exomem_id
-            for path in missing:
-                exomem_id = scan_id_by_path.get(path)
-                if exomem_id and len(scan_by_id[exomem_id]) == 1:
-                    resolved[path] = memory_ref(exomem_id)
-        return resolved
+        return (
+            {
+                path: (
+                    memory_ref(id_by_path[path])
+                    if path in id_by_path
+                    and id_by_path[path] not in duplicate_ids
+                    else None
+                )
+                for path in wanted
+            },
+            indexed_paths,
+        )
 
     def issues(self) -> list[dict[str, str]]:
         if not self.available():
@@ -510,16 +499,28 @@ def _duplicate_ids(conn: sqlite3.Connection) -> list[str]:
 
 
 def _ref_for_path_from_scan(vault_root: Path, clean_path: str) -> str | None:
+    return _refs_for_paths_from_scan(vault_root, [clean_path]).get(clean_path)
+
+
+def _refs_for_paths_from_scan(
+    vault_root: Path, wanted: list[str]
+) -> dict[str, str | None]:
     entries = _scan_pages(vault_root)
-    row = next(
-        (entry for entry in entries if entry[0] == clean_path and entry[4] == "valid"),
-        None,
-    )
-    if row is None or row[1] is None:
-        return None
-    if sum(1 for entry in entries if entry[1] == row[1] and entry[4] == "valid") != 1:
-        return None
-    return memory_ref(row[1])
+    by_id: dict[str, list[str]] = {}
+    id_by_path: dict[str, str] = {}
+    for path, exomem_id, _raw, _hash, status in entries:
+        if status != "valid" or exomem_id is None:
+            continue
+        by_id.setdefault(exomem_id, []).append(path)
+        id_by_path[path] = exomem_id
+    return {
+        path: (
+            memory_ref(id_by_path[path])
+            if path in id_by_path and len(by_id[id_by_path[path]]) == 1
+            else None
+        )
+        for path in wanted
+    }
 
 
 def _relative_markdown(vault_root: Path, path: Path) -> str | None:
@@ -545,11 +546,9 @@ def _read_identity(vault_root: Path, path: Path) -> tuple[str, str | None, str, 
         return None
     fm, _, _ = vault_module.parse_frontmatter(raw)
     value = fm.get(ID_FIELD)
-    if value is None:
-        return None
-    raw_id = str(value)
+    raw_id = "" if value is None else str(value)
     normalized = normalize_id(value)
-    status = "valid" if normalized else "malformed"
+    status = "missing" if value is None else ("valid" if normalized else "malformed")
     return rel, normalized, raw_id, vault_module.content_hash(raw), status
 
 
