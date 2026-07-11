@@ -1,5 +1,5 @@
 import {ApiError, command, setStoredKey, storedKey} from "/studio/assets/api.v1.js";
-import {categoriesFor, reportStatus, sectionState, visibleItems} from "/studio/assets/model.v1.js";
+import {categoriesFor, reportStatus, sectionState, visibleItems, worklistFiltersVisible} from "/studio/assets/model.v1.js";
 import {readRoute, routePatch, writeRoute} from "/studio/assets/state.v1.js";
 
 const byId = (id) => document.getElementById(id);
@@ -108,6 +108,7 @@ function renderWorklist() {
   for (const tab of document.querySelectorAll("[data-mode]")) {
     tab.setAttribute("aria-selected", String(tab.dataset.mode === route.mode));
   }
+  byId("filters").hidden = !worklistFiltersVisible(route.mode);
   byId("state-filter").value = route.state;
   renderCategoryOptions();
   renderCoverage();
@@ -603,6 +604,7 @@ function renderRelationQueue() {
   for (const tab of document.querySelectorAll("[data-mode]")) {
     tab.setAttribute("aria-selected", String(tab.dataset.mode === route.mode));
   }
+  byId("filters").hidden = !worklistFiltersVisible(route.mode);
   renderQueueCoverage();
   const groups = queue?.groups || [];
   const shown = queue?.shown ?? 0;
@@ -789,11 +791,13 @@ function wireEvents() {
     });
   }
   byId("state-filter").addEventListener("change", async (event) => {
+    if (!worklistFiltersVisible(route.mode)) return;
     route = routePatch(route, {state: event.target.value, ref: ""});
     writeRoute(route);
     await loadWorklist();
   });
   byId("category-filter").addEventListener("change", (event) => {
+    if (!worklistFiltersVisible(route.mode)) return;
     route = routePatch(route, {category: event.target.value, ref: ""});
     writeRoute(route);
     renderWorklist();

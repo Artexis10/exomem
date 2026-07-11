@@ -68,6 +68,26 @@ def test_worklist_model_preserves_server_order_filters_and_honest_counts() -> No
     )
 
 
+def test_worklist_filters_hidden_only_for_relation_queue_mode() -> None:
+    # Bug: switching to the relation-queue tab left the Inbox/Activation
+    # state+category filters live; changing one re-rendered the STALE
+    # attention/activation report into the sidebar while the relation panel
+    # stayed visible. The fix routes both "should this UI be interactive" and
+    # "should the change handlers act" through this one predicate.
+    source = f"""
+      import {{worklistFiltersVisible}} from {MODEL.as_uri()!r};
+      console.log(JSON.stringify({{
+        attention: worklistFiltersVisible('attention'),
+        activation: worklistFiltersVisible('activation'),
+        relationQueue: worklistFiltersVisible('relation-queue'),
+      }}));
+    """
+
+    result = _node(source)
+
+    assert result == {"attention": True, "activation": True, "relationQueue": False}
+
+
 def test_section_states_distinguish_empty_unavailable_and_truncated() -> None:
     source = f"""
       import {{sectionState}} from {MODEL.as_uri()!r};

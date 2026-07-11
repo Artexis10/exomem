@@ -22,6 +22,10 @@ export function reportStatus(report, visibleCount) {
   return parts.join(" · ");
 }
 
+export function worklistFiltersVisible(mode) {
+  return mode !== "relation-queue";
+}
+
 export function sectionState(section) {
   if (!section || (section.available === false && section.reason)) return "unavailable";
   if (section.truncated || Number(section.omitted || 0) > 0) return "truncated";
