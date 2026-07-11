@@ -69,6 +69,60 @@ def test_inference_profiles_fields_blocks_relations_and_enums(tmp_path: Path) ->
     assert proposal["unknown_fields"] == "allow"
 
 
+def test_canonical_relations_drive_contract_inference_validation_and_diff(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    target = "Knowledge Base/Notes/future"
+    for page in pages:
+        body = page.read_text(encoding="utf-8").replace(
+            f"- supports [[{target}]]\n",
+            "A generic reference remains [[Knowledge Base/Notes/other]].\n\n"
+            "## Relations\n\n"
+            f"- supports [[{target}]]\n"
+            "- science.unreviewed [[Knowledge Base/Notes/unknown]]\n",
+        )
+        page.write_text(body, encoding="utf-8")
+
+    inferred = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        name="canonical-relations",
+        project="atlas",
+        page_type="insight",
+        save=True,
+    )
+    proposal = inferred["proposal"]
+
+    assert proposal["relations"] == {"supports": {"required": True}}
+    assert inferred["frequencies"]["relations"]["supports"] == {
+        "count": 5,
+        "frequency": 1.0,
+    }
+    assert commands.op_schema_memory(
+        vault, operation="validate", name="canonical-relations", strict=True
+    )["valid"] is True
+
+    pages[0].write_text(
+        pages[0].read_text(encoding="utf-8").replace(
+            f"- supports [[{target}]]\n", ""
+        ),
+        encoding="utf-8",
+    )
+    validation = commands.op_schema_memory(
+        vault, operation="validate", name="canonical-relations", strict=True
+    )
+    diff = commands.op_schema_memory(
+        vault, operation="diff", name="canonical-relations"
+    )
+
+    assert "body.relation:supports" in {
+        finding["span"] for finding in validation["findings"]
+    }
+    assert diff["changes"]["relations"]["required_removed"] == ["supports"]
+
+
 def test_contract_save_requires_hash_for_overwrite(tmp_path: Path) -> None:
     vault = tmp_path / "vault"
     _seed_pages(vault)
