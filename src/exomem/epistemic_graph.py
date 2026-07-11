@@ -88,6 +88,22 @@ class GraphEdge:
         }
 
 
+@dataclass(frozen=True)
+class GraphNeighbor:
+    """One typed edge touching a find-lane seed, resolved to file endpoints.
+
+    `direction` is relative to the seed: "outbound" when the seed is the edge
+    source, "inbound" when the seed is the edge destination. `family` is the
+    relation registry family ("" for unregistered relations).
+    """
+
+    seed_rel: str
+    other_rel: str
+    relation_type: str | None
+    direction: str
+    family: str
+
+
 def graph_enabled() -> bool:
     return os.environ.get("EXOMEM_DISABLE_GRAPH_INDEX", "").strip().lower() not in {
         "1",
@@ -140,6 +156,9 @@ class EpistemicGraphIndex:
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
         """)
+        conn.execute(
+            "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('generation', '0')"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
@@ -203,6 +222,7 @@ class EpistemicGraphIndex:
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("indexed_scope", "kb"),
                 )
+                _bump_generation(conn)
             indexed = 0
             kb = self.vault_root / kb_dirname()
             if kb.is_dir():
@@ -342,13 +362,78 @@ class EpistemicGraphIndex:
                 _insert_node(conn, node)
             for edge in edges:
                 _insert_edge(conn, edge)
+            _bump_generation(conn)
         return True
 
     def _delete_path(self, conn: sqlite3.Connection, rel_path: str) -> int:
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel_path,))
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
+            _bump_generation(conn)
         return cur.rowcount if cur.rowcount is not None else 0
+
+    def neighbors_for(self, seeds: list[str]) -> list[GraphNeighbor]:
+        """Typed edges touching `seeds` in both directions, batched over SQL.
+
+        Two indexed lookups (`src_key IN (...)`, `dst_key IN (...)`) joined to
+        `graph_nodes` on the OTHER endpoint so unresolved-placeholder targets
+        (no node row) are excluded. Each result names the seed it touched, the
+        neighbour file, the relation type/direction, and the registry family
+        (looked up from `self.registry`, never re-parsed from YAML). Results are
+        ordered by seed position then edge key, so callers can group by family
+        precedence deterministically. Self-edges (block→file plumbing) drop out.
+        """
+        if not seeds or not self.available():
+            return []
+        seed_order: dict[str, int] = {}
+        seed_rel_by_key: dict[str, str] = {}
+        for i, seed in enumerate(seeds):
+            key = _file_key(seed)
+            if key not in seed_order:
+                seed_order[key] = i
+                seed_rel_by_key[key] = _with_md(seed)
+        keys = list(seed_order)
+        placeholders = ",".join("?" for _ in keys)
+        conn = self._connect()
+        try:
+            outbound = conn.execute(
+                "SELECT e.edge_key, e.src_key, e.relation_type, n.path "
+                "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.dst_key "
+                f"WHERE e.src_key IN ({placeholders}) AND n.kind = 'file' "
+                "ORDER BY e.edge_key",
+                keys,
+            ).fetchall()
+            inbound = conn.execute(
+                "SELECT e.edge_key, e.dst_key, e.relation_type, n.path "
+                "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
+                f"WHERE e.dst_key IN ({placeholders}) AND n.kind = 'file' "
+                "ORDER BY e.edge_key",
+                keys,
+            ).fetchall()
+        finally:
+            conn.close()
+        rows: list[tuple[int, str, GraphNeighbor]] = []
+        for direction, batch in (("outbound", outbound), ("inbound", inbound)):
+            for edge_key, seed_key, relation_type, other_path in batch:
+                seed_rel = seed_rel_by_key.get(seed_key)
+                if seed_rel is None or other_path == seed_rel:
+                    continue
+                definition = self.registry.definition(str(relation_type or ""))
+                rows.append(
+                    (
+                        seed_order[seed_key],
+                        edge_key,
+                        GraphNeighbor(
+                            seed_rel=seed_rel,
+                            other_rel=other_path,
+                            relation_type=relation_type,
+                            direction=direction,
+                            family=definition.family if definition else "",
+                        ),
+                    )
+                )
+        rows.sort(key=lambda item: (item[0], item[1]))
+        return [neighbor for _order, _edge_key, neighbor in rows]
 
 
 def graph_context(
@@ -541,6 +626,48 @@ def suggest_relations(
         "model_suggestions_available": False,
         "mutated": False,
     }
+
+
+def _bump_generation(conn: sqlite3.Connection) -> None:
+    """Monotonically advance the in-band content generation counter.
+
+    Called inside each sidecar write transaction (index, delete, rebuild) so the
+    freshness token below changes iff graph content changed — never on a WAL
+    checkpoint, which moves the file mtime without touching content.
+    """
+    conn.execute(
+        "UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'"
+    )
+
+
+def cache_token(vault_root: Path) -> tuple | None:
+    """`(schema_version, extension_registry_hash, generation)` or None.
+
+    None whenever the sidecar is unavailable (disabled, missing, or
+    schema/registry drift), which the find freshness key maps to a stable
+    absent-sentinel so typed-mode and fallback-mode entries never collide.
+    """
+    idx = EpistemicGraphIndex(vault_root)
+    if not idx.available():
+        return None
+    try:
+        conn = sqlite3.connect(idx.path)
+        try:
+            values = dict(
+                conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'extension_registry_hash', 'generation')"
+                ).fetchall()
+            )
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return None
+    return (
+        values.get("schema_version"),
+        values.get("extension_registry_hash"),
+        values.get("generation"),
+    )
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:

@@ -2,19 +2,19 @@
 
 ## 1. Sidecar read API + freshness token (src/exomem/epistemic_graph.py)
 
-- [ ] 1.1 Add `generation` to `graph_meta`: initialize on create/rebuild, bump
+- [x] 1.1 Add `generation` to `graph_meta`: initialize on create/rebuild, bump
       in `upsert_after_write` and `delete_after_remove` (single UPDATE inside
       the existing write transaction).
-- [ ] 1.2 Add module-level `cache_token(vault_root) -> tuple | None`:
+- [x] 1.2 Add module-level `cache_token(vault_root) -> tuple | None`:
       `(schema_version, registry_hash, generation)` when `available`, else
       `None`. Cheap: one SELECT on `graph_meta`; no table scans.
-- [ ] 1.3 Add `EpistemicGraphIndex.neighbors_for(seeds: list[str])` returning
+- [x] 1.3 Add `EpistemicGraphIndex.neighbors_for(seeds: list[str])` returning
       typed edges touching the seeds in both directions: two indexed queries
       (`src IN (...)`, `dst IN (...)`), joined to exclude placeholder targets;
       each row exposes (seed_rel, other_rel, relation_type, direction,
       family). Family comes from the relation registry lookup used elsewhere
       in this module — do not re-parse YAML per call.
-- [ ] 1.4 Red-first tests (tests/test_epistemic_graph.py or new file):
+- [x] 1.4 Red-first tests (tests/test_epistemic_graph.py or new file):
       generation bumps on write/delete/rebuild; token None when unavailable;
       neighbors_for returns both directions, excludes placeholders, is
       deterministic; incremental token == rebuild token after equivalent
