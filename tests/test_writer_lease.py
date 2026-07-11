@@ -34,6 +34,34 @@ def test_config_loads_without_exposing_token_in_status(tmp_path: Path) -> None:
     assert "url" not in status
 
 
+def test_coordinator_requests_use_cloudflare_compatible_user_agent(monkeypatch) -> None:
+    from exomem.writer_lease import LeaseCoordinatorClient
+
+    seen = {}
+
+    class Response:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return None
+
+        def read(self):
+            return b'{"holder":null,"expires_at":null,"fencing_token":0}'
+
+    def fake_urlopen(request, timeout):  # noqa: ANN001, ARG001
+        seen["user_agent"] = request.get_header("User-agent")
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    client = LeaseCoordinatorClient(
+        LeaseConfig(url="https://lease.example", vault_id="main", replica_id="desktop")
+    )
+    client.status()
+    assert seen["user_agent"].startswith("Mozilla/5.0")
+    assert "Exomem-Coordinator" in seen["user_agent"]
+
+
 class FakeClient:
     def __init__(self, record: LeaseRecord | Exception):
         self.record = record
@@ -46,7 +74,9 @@ class FakeClient:
 
     def acquire(self) -> LeaseRecord:
         record = self._get()
-        return LeaseRecord(record.holder, record.expires_at, record.fencing_token, record.holder == "desktop")
+        return LeaseRecord(
+            record.holder, record.expires_at, record.fencing_token, record.holder == "desktop"
+        )
 
     def status(self) -> LeaseRecord:
         return self._get()
@@ -77,7 +107,9 @@ def _manager(tmp_path: Path, record: LeaseRecord | Exception) -> LeaseManager:
 
 def test_reads_bypass_unavailable_coordinator(tmp_path: Path) -> None:
     manager = _manager(tmp_path, OpError("WRITER_COORDINATOR_UNAVAILABLE", "down"))
-    assert manager.invoke(_command(writes=False, leaf=lambda value: value + 1), (), {"value": 2}) == 3
+    assert (
+        manager.invoke(_command(writes=False, leaf=lambda value: value + 1), (), {"value": 2}) == 3
+    )
 
 
 def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> None:
@@ -87,7 +119,9 @@ def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> 
     with pytest.raises(OpError, match="WRITER_LEASE_REQUIRED"):
         _manager(tmp_path / "b", LeaseRecord("laptop", 99, 5)).invoke(command, (), {})
     with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
-        _manager(tmp_path / "c", OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")).invoke(command, (), {})
+        _manager(tmp_path / "c", OpError("WRITER_COORDINATOR_UNAVAILABLE", "down")).invoke(
+            command, (), {}
+        )
     assert calls == ["write"]
     assert http_status_for("WRITER_LEASE_REQUIRED") == 409
     assert http_status_for("WRITER_COORDINATOR_UNAVAILABLE") == 503
