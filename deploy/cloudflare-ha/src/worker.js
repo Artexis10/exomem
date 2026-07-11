@@ -223,5 +223,5 @@ function stateValue(body) {
 
 function authorized(request, expected) {
   if (!expected) return false;
-  return request.headers.get("authorization") === `Bearer ${expected}`;
+  return request.headers.get("authorization") === `Bearer ${String(expected).trim()}`;
 }

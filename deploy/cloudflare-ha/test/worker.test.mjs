@@ -73,3 +73,21 @@ test("edge rejects unauthenticated coordinator access", async () => {
   const response = await worker.fetch(post("/v1/vaults/main/lease/acquire", { replica_id: "desktop", ttl_seconds: 30 }), env);
   assert.equal(response.status, 401);
 });
+
+test("edge accepts a piped Worker secret with trailing transport whitespace", async () => {
+  const request = post("/v1/vaults/main/lease/acquire", {
+    replica_id: "desktop",
+    ttl_seconds: 30,
+  });
+  request.headers.set("authorization", "Bearer secret");
+  const env = {
+    STATE_TOKEN: "secret\r\n",
+    EXOMEM_STATE: {
+      idFromName: (name) => name,
+      get: () => ({ fetch: async () => new Response('{"granted":true}') }),
+    },
+  };
+  const response = await worker.fetch(request, env);
+  assert.equal(response.status, 200);
+  assert.equal((await response.json()).granted, true);
+});
