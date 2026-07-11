@@ -1,18 +1,18 @@
 ## 1. Prerequisite And Contract Baseline
 
-- [ ] 1.1 Rebase the implementation branch after the existing-corpus activation change lands and verify `review_memory(mode="activation")` plus stable activation item lookup are available without copying that change's scanner or ranking logic.
-- [ ] 1.2 Add contract fixtures for `review_item_context` inputs, bounds, result sections, truncation, unavailable-section metadata, and stale-fingerprint errors before implementing the command.
-- [ ] 1.3 Add a path-specific evolution contract test covering pointer order, similar-title isolation, recorded transition reasons, single-version empty state, and version truncation.
+- [x] 1.1 Rebase the implementation branch after the existing-corpus activation change lands and verify `review_memory(mode="activation")` plus stable activation item lookup are available without copying that change's scanner or ranking logic.
+- [x] 1.2 Add contract fixtures for `review_item_context` inputs, bounds, result sections, truncation, unavailable-section metadata, and stale-fingerprint errors before implementing the command.
+- [x] 1.3 Add a path-specific evolution contract test covering pointer order, similar-title isolation, recorded transition reasons, single-version empty state, and version truncation.
 
 ## 2. Bounded Review Item Context
 
-- [ ] 2.1 Refactor the existing evolution helpers to expose a read-only path/reference-specific chain builder while preserving the current topic-query evolution response.
-- [ ] 2.2 Implement a `review_context` assembly module that resolves attention or activation items by stable review reference and optional expected fingerprint.
-- [ ] 2.3 Compose bounded target body, related-page summaries, canonical references, provenance/evidence, graph neighborhood, history, current review state, and path-specific evolution with independent availability and truncation metadata.
-- [ ] 2.4 Enforce existing read/access policy and content minimization for target and related material, including explicit target-denied and item-changed errors.
-- [ ] 2.5 Register `review_item_context` as one read-only Tier 1 product command and regenerate MCP schemas, REST/OpenAPI coverage, CLI help, and `docs/capabilities.md` from the registry.
-- [ ] 2.6 Add unit and product-surface tests proving deterministic output, bounds, no vault mutation, no model load, partial-section soft failure, and equivalent MCP/REST/CLI result shapes.
-- [ ] 2.7 Add a latency regression test for the default context bounds and verify the command reuses existing parsed/indexed data rather than reparsing the full vault per section.
+- [x] 2.1 Refactor the existing evolution helpers to expose a read-only path/reference-specific chain builder while preserving the current topic-query evolution response.
+- [x] 2.2 Implement a `review_context` assembly module that resolves attention or activation items by stable review reference and optional expected fingerprint.
+- [x] 2.3 Compose bounded target body, related-page summaries, canonical references, provenance/evidence, graph neighborhood, history, current review state, and path-specific evolution with independent availability and truncation metadata.
+- [x] 2.4 Enforce existing read/access policy and content minimization for target and related material, including explicit target-denied and item-changed errors.
+- [x] 2.5 Register `review_item_context` as one read-only Tier 1 product command and regenerate MCP schemas, REST/OpenAPI coverage, CLI help, and `docs/capabilities.md` from the registry.
+- [x] 2.6 Add unit and product-surface tests proving deterministic output, bounds, no vault mutation, no model load, partial-section soft failure, and equivalent MCP/REST/CLI result shapes.
+- [x] 2.7 Add a latency regression test for the default context bounds and verify the command reuses existing parsed/indexed data rather than reparsing the full vault per section.
 
 ## 3. Packaged Studio Shell And Security Boundary
 
