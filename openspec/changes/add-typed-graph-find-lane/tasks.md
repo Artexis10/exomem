@@ -63,12 +63,12 @@
 
 ## 5. Gates (do NOT edit thresholds or golden files in this lane)
 
-- [ ] 5.1 `uv run python -m pytest -q` green.
-- [ ] 5.2 `uv run python -m pytest tests/test_latency_gate.py -q` green,
+- [x] 5.1 `uv run python -m pytest -q` green.
+- [x] 5.2 `uv run python -m pytest tests/test_latency_gate.py -q` green,
       thresholds untouched.
-- [ ] 5.3 Extend tests/test_graph_lane_perf.py with a typed-mode timing case
+- [x] 5.3 Extend tests/test_graph_lane_perf.py with a typed-mode timing case
       (assert within existing budget; no new threshold).
-- [ ] 5.4 `uvx ruff check` clean on changed files.
+- [x] 5.4 `uvx ruff check` clean on changed files.
 
 ## 6. Orchestrator-owned (guarded files — NOT for the executor lane)
 

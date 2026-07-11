@@ -16,6 +16,13 @@ from exomem import epistemic_graph
 from exomem import find as find_module
 
 
+@pytest.fixture(autouse=True)
+def _clear_find_caches():
+    """Flush the process-global find caches these tests populate on teardown."""
+    yield
+    find_module.clear_cache()
+
+
 def _count_semantic(monkeypatch: pytest.MonkeyPatch) -> dict:
     calls = {"n": 0}
     orig = find_module._find_semantic

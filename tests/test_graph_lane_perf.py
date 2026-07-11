@@ -31,8 +31,8 @@ from pathlib import Path
 
 import pytest
 
+from exomem import epistemic_graph, freshness
 from exomem import find as find_module
-from exomem import freshness
 from exomem import vault as vault_module
 from exomem.vault import WikilinkResolver, normalize_wikilink, walk_vault_md
 
@@ -205,6 +205,48 @@ def test_graph_stage_exposes_sub_spans(dense_vault, monkeypatch) -> None:
     off = find_module.FindTimings()
     find_module.find(vault, query="topic", limit=10, graph=False, timings=off)
     assert "graph.seeds" not in off.as_dict()["stages"]
+
+
+@pytest.fixture
+def typed_dense_vault(tmp_path: Path) -> tuple[Path, list[str]]:
+    """A smaller dense vault WITH a built typed-graph sidecar, so the graph lane
+    runs in typed mode. Kept smaller than N_NOTES because the one-time sidecar
+    build indexes every note; the per-query stage cost the budget guards is
+    independent of vault size (two indexed reads over <=20 seeds)."""
+    find_module.clear_cache()
+    freshness.clear()
+    vault = tmp_path / "vault"
+    rels = _gen_dense_vault(vault, 200)
+    _seed_freshness_live(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    yield vault, rels
+    find_module.clear_cache()
+    freshness.clear()
+
+
+def test_typed_graph_stage_stays_under_budget(typed_dense_vault, monkeypatch) -> None:
+    """A `find` whose graph lane reads the typed sidecar keeps the graph stage
+    well under the 1s budget — the batch neighbour read replaces the per-seed
+    wikilink resolve/parse, so typed mode is no slower than the fallback."""
+    vault, _rels = typed_dense_vault
+    # Warm bm25 corpus + pages the way a first query / boot warm-up would.
+    find_module.find(vault, query="topic", limit=10, graph=True)
+
+    # Disable the hot cache so the timed call recomputes the graph lane.
+    monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
+    timings = find_module.FindTimings()
+    hits = find_module.find(vault, query="topic", limit=10, graph=True, timings=timings)
+
+    stages = timings.as_dict()["stages"]
+    assert "ms" in stages.get("graph", {}), f"graph lane did not run: {stages}"
+    # Typed mode exposes graph.sidecar (not graph.resolver) — proves the sidecar
+    # path served this query.
+    assert "ms" in stages.get("graph.sidecar", {}), f"typed lane did not run: {stages}"
+    assert stages["graph"]["ms"] < 1000.0, (
+        f"typed graph stage took {stages['graph']['ms']}ms (>=1s). "
+        f"full timings: {timings.as_dict()}"
+    )
+    assert hits, "expected the dense vault to produce hits"
 
 
 def test_kill_switch_falls_back_to_rebuild(dense_vault, monkeypatch) -> None:

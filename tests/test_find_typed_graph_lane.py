@@ -10,9 +10,20 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from exomem import embeddings as embeddings_module
 from exomem import epistemic_graph
 from exomem import find as find_module
+
+
+@pytest.fixture(autouse=True)
+def _clear_find_caches():
+    """Flush the process-global find caches this module's find() calls populate,
+    so a typed-mode ranking never bleeds into an unrelated later test."""
+    yield
+    find_module.clear_cache()
+    embeddings_module.clear_embedding_indexes()
 
 KB = "Knowledge Base/Notes/Insights"
 SEED = f"{KB}/chloroplast-note.md"
