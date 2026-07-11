@@ -172,6 +172,93 @@ def test_generation_bumps_on_rebuild(tmp_path: Path) -> None:
     assert after != before
 
 
+def test_neighbors_for_resolves_semantic_block_relations(tmp_path: Path) -> None:
+    """Semantic-block-authored relations (a `## Claim` block's `relations:`
+    metadata) store src/dst as the BLOCK node key, not the file key —
+    neighbors_for must resolve the block back to its owning file (the block
+    node's own `path` field) so the typed edge reaches the lane instead of
+    silently degrading to a plain links_to via the body wikilink."""
+    vault = tmp_path / "vault"
+    seed_rel = "Knowledge Base/Notes/Insights/block-seed.md"
+    target_rel = "Knowledge Base/Notes/Insights/block-target.md"
+    _write(
+        vault,
+        seed_rel,
+        "---\ntype: insight\n---\n# Block Seed\n\n## Claim\n\n"
+        "- relations: evidenced_by: [[Knowledge Base/Notes/Insights/block-target]]\n\n"
+        "A claim body.\n",
+    )
+    _write(vault, target_rel, "---\ntype: insight\n---\n# Block Target\n\nBody.\n")
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    neighbors = idx.neighbors_for([seed_rel])
+    # The block's typed relation (evidenced_by) must be present. The body
+    # scan ALSO produces an incidental plain `links_to` edge to the same
+    # target from the same bracketed text (pre-existing dual-edge behavior,
+    # not neighbors_for's concern) — dedup/precedence across the two is
+    # find_candidates.py's job (see the family-precedence-before-dedup fix),
+    # so neighbors_for's contract here is just "the typed edge is present".
+    typed = [n for n in neighbors if n.other_rel == target_rel and n.relation_type == "evidenced_by"]
+    assert len(typed) == 1, f"expected exactly one evidenced_by neighbor, got {neighbors}"
+    assert typed[0].direction == "outbound"
+    assert typed[0].family == "evidence"
+
+
+def test_neighbors_for_resolves_inbound_semantic_block_relations(tmp_path: Path) -> None:
+    """Symmetric inbound case: another page's semantic-block relation TARGETS
+    our seed — the source endpoint is that other page's block, which must
+    resolve to the other page's file path, not vanish because it isn't
+    kind='file'."""
+    vault = tmp_path / "vault"
+    seed_rel = "Knowledge Base/Notes/Insights/inbound-block-seed.md"
+    source_rel = "Knowledge Base/Notes/Insights/inbound-block-source.md"
+    _write(vault, seed_rel, "---\ntype: insight\n---\n# Inbound Block Seed\n\nBody.\n")
+    _write(
+        vault,
+        source_rel,
+        "---\ntype: insight\n---\n# Inbound Block Source\n\n## Claim\n\n"
+        "- relations: supports: [[Knowledge Base/Notes/Insights/inbound-block-seed]]\n\n"
+        "A claim body.\n",
+    )
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    neighbors = idx.neighbors_for([seed_rel])
+    typed = [n for n in neighbors if n.other_rel == source_rel and n.relation_type == "supports"]
+    assert len(typed) == 1, f"expected exactly one supports neighbor, got {neighbors}"
+    assert typed[0].direction == "inbound"
+
+
+def test_neighbors_for_same_family_order_is_insertion_not_hash(tmp_path: Path) -> None:
+    """Design D3: within a family, ordering is seed order then edge
+    insertion/source order — deterministic. The edge_key is a content hash and
+    must NOT be the ordering signal (it's arbitrary relative to authoring
+    order)."""
+    vault = tmp_path / "vault"
+    seed_rel = "Knowledge Base/Notes/Insights/order-seed.md"
+    targets = [f"Knowledge Base/Notes/Insights/order-target-{i}.md" for i in range(4)]
+    relations_block = "\n".join(
+        f"- supports [[Knowledge Base/Notes/Insights/order-target-{i}]]" for i in range(4)
+    )
+    _write(
+        vault,
+        seed_rel,
+        f"---\ntype: insight\n---\n# Order Seed\n\n## Relations\n\n{relations_block}\n",
+    )
+    for t in targets:
+        _write(vault, t, f"---\ntype: insight\n---\n# {t}\n\nBody.\n")
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    neighbors = idx.neighbors_for([seed_rel])
+    ordered_targets = [n.other_rel for n in neighbors]
+    assert ordered_targets == targets, (
+        f"expected authored (insertion) order {targets}, got {ordered_targets} "
+        "— ordering is following the edge_key hash instead of insertion order"
+    )
+
+
 def test_connect_does_not_hold_an_open_write_transaction(tmp_path: Path) -> None:
     """A pure-read connection (as neighbors_for/nodes/edges use) must not open
     an implicit write transaction — that would contend with a genuine

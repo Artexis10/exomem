@@ -372,54 +372,70 @@ class EpistemicGraphIndex:
     def neighbors_for(self, seeds: list[str]) -> list[GraphNeighbor]:
         """Typed edges touching `seeds` in both directions, batched over SQL.
 
-        Two indexed lookups (`src_key IN (...)`, `dst_key IN (...)`) joined to
-        `graph_nodes` on the OTHER endpoint so unresolved-placeholder targets
-        (no node row) are excluded. Each result names the seed it touched, the
-        neighbour file, the relation type/direction, and the registry family
-        (looked up from `self.registry`, never re-parsed from YAML). Results are
-        ordered by seed position then edge key, so callers can group by family
-        precedence deterministically. Self-edges (block→file plumbing) drop out.
+        Semantic-block-authored relations store src/dst as the BLOCK node key,
+        not the file key (`## Claim` etc. — see `_block_node`/`_edges_for_page`),
+        so the seed match set is every node (file AND its semantic blocks)
+        whose `path` equals the seed — one query resolves that set, since a
+        block node's own `path` column already names its owning file. The two
+        edge lookups (`src_key IN (...)`, `dst_key IN (...)`) then join
+        `graph_nodes` on the OTHER endpoint (by `path`, not restricted to
+        kind='file', so a relation touching another page's block still
+        resolves to that page) — an INNER JOIN, so unresolved-placeholder
+        targets (no node row at all) are excluded. Results are ordered by seed
+        position then `rowid` (stable insertion/source order — edge_key is a
+        content hash and is NOT a valid ordering signal), matching design D3's
+        "seed order then edge insertion order" contract; family-precedence
+        tiering and target dedup are the caller's job (find_candidates.py).
+        Self-edges (a block's own `derived_from` edge to its owning file) drop
+        out via the same-path check below.
         """
         if not seeds or not self.available():
             return []
         seed_order: dict[str, int] = {}
-        seed_rel_by_key: dict[str, str] = {}
         for i, seed in enumerate(seeds):
-            key = _file_key(seed)
-            if key not in seed_order:
-                seed_order[key] = i
-                seed_rel_by_key[key] = _with_md(seed)
-        keys = list(seed_order)
-        placeholders = ",".join("?" for _ in keys)
+            rel = _with_md(seed)
+            if rel not in seed_order:
+                seed_order[rel] = i
+        seed_paths = list(seed_order)
         conn = self._connect()
         try:
+            path_placeholders = ",".join("?" for _ in seed_paths)
+            node_rows = conn.execute(
+                f"SELECT node_key, path FROM graph_nodes WHERE path IN ({path_placeholders})",
+                seed_paths,
+            ).fetchall()
+            seed_rel_by_key: dict[str, str] = {node_key: path for node_key, path in node_rows}
+            if not seed_rel_by_key:
+                return []
+            keys = list(seed_rel_by_key)
+            key_placeholders = ",".join("?" for _ in keys)
             outbound = conn.execute(
-                "SELECT e.edge_key, e.src_key, e.relation_type, n.path "
+                "SELECT e.rowid, e.src_key, e.relation_type, n.path "
                 "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.dst_key "
-                f"WHERE e.src_key IN ({placeholders}) AND n.kind = 'file' "
-                "ORDER BY e.edge_key",
+                f"WHERE e.src_key IN ({key_placeholders}) "
+                "ORDER BY e.rowid",
                 keys,
             ).fetchall()
             inbound = conn.execute(
-                "SELECT e.edge_key, e.dst_key, e.relation_type, n.path "
+                "SELECT e.rowid, e.dst_key, e.relation_type, n.path "
                 "FROM graph_edges e JOIN graph_nodes n ON n.node_key = e.src_key "
-                f"WHERE e.dst_key IN ({placeholders}) AND n.kind = 'file' "
-                "ORDER BY e.edge_key",
+                f"WHERE e.dst_key IN ({key_placeholders}) "
+                "ORDER BY e.rowid",
                 keys,
             ).fetchall()
         finally:
             conn.close()
-        rows: list[tuple[int, str, GraphNeighbor]] = []
+        rows: list[tuple[int, int, GraphNeighbor]] = []
         for direction, batch in (("outbound", outbound), ("inbound", inbound)):
-            for edge_key, seed_key, relation_type, other_path in batch:
+            for rowid, seed_key, relation_type, other_path in batch:
                 seed_rel = seed_rel_by_key.get(seed_key)
                 if seed_rel is None or other_path == seed_rel:
                     continue
                 definition = self.registry.definition(str(relation_type or ""))
                 rows.append(
                     (
-                        seed_order[seed_key],
-                        edge_key,
+                        seed_order[seed_rel],
+                        rowid,
                         GraphNeighbor(
                             seed_rel=seed_rel,
                             other_rel=other_path,
@@ -430,7 +446,28 @@ class EpistemicGraphIndex:
                     )
                 )
         rows.sort(key=lambda item: (item[0], item[1]))
-        return [neighbor for _order, _edge_key, neighbor in rows]
+        return [neighbor for _order, _rowid, neighbor in rows]
+
+    def indexed_paths(self, paths: list[str]) -> set[str]:
+        """Subset of `paths` (vault-relative, .md-suffixed) with a FILE node in
+        the sidecar. `rebuild_all` indexes only the KB tree, so a seed outside
+        it (reachable under `scope="vault"`) is never in this set — the
+        find-lane hybrid branch uses that to run legacy wikilink expansion for
+        seeds the sidecar never covered, instead of silently dropping them."""
+        if not paths or not self.available():
+            return set()
+        rels = [_with_md(p) for p in paths]
+        conn = self._connect()
+        try:
+            placeholders = ",".join("?" for _ in rels)
+            rows = conn.execute(
+                f"SELECT DISTINCT path FROM graph_nodes WHERE path IN ({placeholders}) "
+                "AND kind = 'file'",
+                rels,
+            ).fetchall()
+        finally:
+            conn.close()
+        return {row[0] for row in rows}
 
 
 def graph_context(
