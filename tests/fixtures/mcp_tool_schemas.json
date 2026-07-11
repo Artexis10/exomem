@@ -792,7 +792,7 @@
             }
           ],
           "default": null,
-          "description": "Target page `content_hash` drift guard for accept-relation."
+          "description": "Target page `content_hash` drift guard for accept-relation. Required for accept-relation."
         },
         "why": {
           "anyOf": [
@@ -816,7 +816,7 @@
             }
           ],
           "default": null,
-          "description": "Optional reviewed candidate fingerprint; a mismatch refuses the accept-relation write."
+          "description": "Reviewed candidate fingerprint for accept-relation. Required for accept-relation (not optional — a mismatch, or an omitted value, refuses the write); accept re-validates live eligibility too, so a candidate that stopped being open between the queue read and this call also refuses."
         }
       },
       "type": "object"

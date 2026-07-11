@@ -218,6 +218,53 @@ def test_dismissed_candidate_resurfaces_when_evidence_changes_without_source_edi
     assert resurfaced_item["ref"] in {it["ref"] for it in _all_items(resurfaced)}
 
 
+def test_accept_refuses_when_target_deleted_between_read_and_accept(
+    tmp_path: Path,
+) -> None:
+    # A frontmatter-`sources` candidate does not existence-check its target at
+    # suggestion time (that's the queue's OWN placeholder filter, applied at
+    # read time). If the target is deleted AFTER the queue read but BEFORE
+    # accept, the candidate's identity/evidence/fingerprint are all unchanged
+    # (nothing about the SOURCE page or its evidence differs) — only accept's
+    # own live eligibility re-check catches the now-dangling target.
+    page = tmp_path / "Knowledge Base" / "Notes" / "Insights" / "epsilon.md"
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(
+        "---\ntype: insight\nstatus: active\n"
+        "sources:\n  - Knowledge Base/Sources/ephemeral-source.md\n---\n"
+        "# epsilon\n\nA claim backed by a source that will vanish.\n",
+        encoding="utf-8",
+    )
+    source = tmp_path / "Knowledge Base" / "Sources" / "ephemeral-source.md"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_text(
+        "---\ntype: source\nstatus: unprocessed\ningested_into: []\n---\n"
+        "# Ephemeral source\n\nWill be deleted before accept.\n",
+        encoding="utf-8",
+    )
+
+    result = relation_queue.build_queue(tmp_path)
+    group = next(g for g in result["groups"] if g["path"].endswith("epsilon.md"))
+    item = next(it for it in group["items"] if it["to"].endswith("ephemeral-source.md"))
+    before = page.read_bytes()
+
+    source.unlink()  # target deleted between read and accept
+
+    def _unexpected_edit(*_args, **_kwargs):
+        raise AssertionError("edit_memory must not be called when the candidate is stale")
+
+    with pytest.raises(ValueError, match="REVIEW_ITEM_CHANGED"):
+        relation_queue.accept(
+            tmp_path,
+            ref=item["ref"],
+            expected_hash=group["content_hash"],
+            why="Accepted reviewed relation",
+            expected_fingerprint=item["fingerprint"],
+            edit_memory=_unexpected_edit,
+        )
+    assert page.read_bytes() == before  # no bullet was appended
+
+
 def test_read_never_writes_to_the_vault(tmp_path: Path) -> None:
     _seed(tmp_path)
     before = _tree_hash(tmp_path)

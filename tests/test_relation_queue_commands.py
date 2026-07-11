@@ -84,6 +84,7 @@ def test_accept_writes_bullet_byte_identical_to_studio_path(tmp_path: Path) -> N
         ref=item["ref"],
         expected_hash=accept_hash,
         why="Accepted reviewed relation",
+        expected_fingerprint=item["fingerprint"],
     )
 
     # Studio path: the existing two-step client flow's governed edit.
@@ -137,6 +138,29 @@ def test_accept_hash_mismatch_refuses_and_writes_nothing(tmp_path: Path) -> None
             ref=item["ref"],
             expected_hash="0" * 64,
             why="Accepted reviewed relation",
+            expected_fingerprint=item["fingerprint"],
+        )
+    assert acorn.read_bytes() == before
+
+
+def test_accept_requires_expected_fingerprint(tmp_path: Path) -> None:
+    # The spec requires accept-relation to validate the candidate fingerprint
+    # against the live signal — an omitted expected_fingerprint must not be
+    # treated as "skip this check" (that made the guard skippable by a
+    # caller simply not sending it).
+    _seed(tmp_path)
+    acorn = tmp_path / "Knowledge Base/Notes/Insights/acorn.md"
+    item = _first_item(tmp_path)
+    accept_hash = _group_hash(tmp_path, "acorn.md")
+    before = acorn.read_bytes()
+    with pytest.raises(ValueError, match="INVALID_ACCEPT"):
+        commands.op_connect_memory(
+            tmp_path,
+            operation="accept-relation",
+            ref=item["ref"],
+            expected_hash=accept_hash,
+            why="Accepted reviewed relation",
+            # expected_fingerprint omitted entirely.
         )
     assert acorn.read_bytes() == before
 
@@ -151,6 +175,7 @@ def test_accepted_item_absent_on_reread(tmp_path: Path) -> None:
         ref=item["ref"],
         expected_hash=accept_hash,
         why="Accepted reviewed relation",
+        expected_fingerprint=item["fingerprint"],
     )
     find.clear_cache()
     after = commands.op_review_memory(tmp_path, mode="relation-queue")
@@ -262,6 +287,7 @@ def test_new_operations_exposed_on_all_registry_surfaces(
             "operation": "accept-relation",
             "ref": item["ref"],
             "expected_hash": group_hash,
+            "expected_fingerprint": item["fingerprint"],
             "why": "Accepted reviewed relation via REST",
         },
     )

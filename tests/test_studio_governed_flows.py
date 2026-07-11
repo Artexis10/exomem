@@ -214,6 +214,7 @@ def test_relation_queue_accept_round_trip_writes_canonical_bullet(
             "ref": item["ref"],
             "expected_hash": content_hash,
             "why": "Accepted reviewed relation from the Studio queue",
+            "expected_fingerprint": item["fingerprint"],
         },
     )
 
@@ -245,6 +246,7 @@ def test_relation_queue_accept_refuses_on_target_drift(
             "ref": item["ref"],
             "expected_hash": "0" * 64,
             "why": "Accepted reviewed relation from the Studio queue",
+            "expected_fingerprint": item["fingerprint"],
         },
         headers={"Authorization": "Bearer studio-key"},
     )

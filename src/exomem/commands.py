@@ -3633,9 +3633,13 @@ def op_connect_memory(
         decision_status: Decision status.
         ref: Relation-queue item ref for accept-relation.
         expected_hash: Target page `content_hash` drift guard for accept-relation.
+            Required for accept-relation.
         why: Audit reason recorded with the accept-relation edit.
-        expected_fingerprint: Optional reviewed candidate fingerprint; a mismatch
-            refuses the accept-relation write.
+        expected_fingerprint: Reviewed candidate fingerprint for accept-relation.
+            Required for accept-relation (not optional — a mismatch, or an
+            omitted value, refuses the write); accept re-validates live
+            eligibility too, so a candidate that stopped being open between
+            the queue read and this call also refuses.
     """
     if operation == "accept-relation":
         if not ref:

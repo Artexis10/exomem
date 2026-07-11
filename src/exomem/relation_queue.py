@@ -196,6 +196,21 @@ def _page_candidates(
     return list(proposal.get("candidates") or [])
 
 
+def _page_for(vault_root: Path, rel_path: str) -> Any | None:
+    """Re-read one page fresh from disk, for accept's live re-validation.
+
+    Deliberately bypasses any process-level cache: accept must judge the
+    candidate against the file's CURRENT state, not a read from earlier in
+    this call (or an earlier request). Returns `None` if the page is gone.
+    """
+    path = Path(vault_root) / str(rel_path or "")
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return None
+    return find_module._parse_page(path, mtime, Path(vault_root))
+
+
 def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str, Any]:
     from_path = str(candidate.get("from") or page.rel_path)
     to_path = str(candidate.get("to") or "")
@@ -419,6 +434,11 @@ def accept(
 
     ``edit_memory`` is injected (the registry's ``op_edit_memory``) so the write
     is byte-identical in effect to the Studio single-proposal path.
+
+    ``expected_fingerprint`` is REQUIRED, not merely checked when present: the
+    spec requires accept to validate the candidate's fingerprint against the
+    live signal, and an optional-by-omission check is skippable by any caller
+    that simply doesn't send it.
     """
     if not why or not str(why).strip():
         raise ValueError(
@@ -428,13 +448,33 @@ def accept(
         raise ValueError(
             "INVALID_ACCEPT: accept-relation requires `expected_hash` from the target page"
         )
+    if not expected_fingerprint:
+        raise ValueError(
+            "INVALID_ACCEPT: accept-relation requires `expected_fingerprint` from the queue read"
+        )
+    vault_root = Path(vault_root)
     resolved = resolve_candidate(vault_root, ref)
-    if expected_fingerprint and resolved.fingerprint != expected_fingerprint:
+    if resolved.fingerprint != expected_fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the relation candidate signal changed; refresh "
             f"the queue and inspect {ref} again"
         )
     candidate = resolved.candidate
+    page = _page_for(vault_root, str(candidate.get("from") or ""))
+    if page is None:
+        raise ValueError(
+            "REVIEW_ITEM_CHANGED: the relation candidate's source page no longer "
+            f"exists; refresh the queue and inspect {ref} again"
+        )
+    store = review_state_module.ReviewStateStore(vault_root)
+    reason, _enriched = _classify_candidate(
+        vault_root, page, candidate, store=store, state_payload=store.load()
+    )
+    if reason is not None:
+        raise ValueError(
+            "REVIEW_ITEM_CHANGED: the relation candidate is no longer eligible "
+            f"({reason}); refresh the queue and inspect {ref} again"
+        )
     bullet = _bullet(candidate)
     edit_result = edit_memory(
         vault_root,
