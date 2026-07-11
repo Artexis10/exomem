@@ -1,0 +1,25 @@
+name = "exomem-ha-edge"
+main = "src/worker.js"
+compatibility_date = "2026-07-11"
+
+[vars]
+VAULT_ID = "personal-main"
+DESKTOP_REPLICA_ID = "desktop"
+LAPTOP_REPLICA_ID = "laptop"
+DESKTOP_ORIGIN = "https://exomem-desktop.example.com"
+LAPTOP_ORIGIN = "https://exomem-laptop.example.com"
+ORIGIN_TIMEOUT_MS = "2500"
+
+[[routes]]
+pattern = "exomem.example.com/*"
+zone_name = "example.com"
+
+[durable_objects]
+bindings = [{ name = "EXOMEM_STATE", class_name = "ExomemState" }]
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["ExomemState"]
+
+# Add the coordinator bearer token separately; never commit it:
+#   npx wrangler secret put STATE_TOKEN

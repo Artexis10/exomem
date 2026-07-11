@@ -353,6 +353,14 @@ on a single coordinator node but not highly available; for HA, implement the sam
 HTTP contract on a linearizable store such as a Durable Object, transactional SQL,
 Consul, or etcd.
 
+For a single public connector with two private origins, the supported Cloudflare
+deployment is in `deploy/cloudflare-ha/`. Its SQLite Durable Object implements the
+lease contract, holds client-encrypted shared OAuth records, and routes the stable
+public hostname to the current writer with a bounded fallback to the other replica.
+It stores no vault content. This is optional: deployments that do not use
+Cloudflare can place the same coordinator/state contract behind their own reverse
+proxy or load balancer.
+
 Configure both Exomem hosts with the same vault ID and coordinator, but unique
 replica IDs. Desktop example:
 
@@ -363,6 +371,11 @@ EXOMEM_WRITER_LEASE_REPLICA_ID=desktop
 EXOMEM_WRITER_LEASE_TOKEN=<long-random-secret>
 EXOMEM_WRITER_LEASE_TTL=30
 EXOMEM_WRITER_LEASE_PREFERRED=1
+
+# Required when both replicas serve one stable OAuth/MCP hostname.
+EXOMEM_OAUTH_STORAGE_URL=https://exomem.example.com
+EXOMEM_OAUTH_STORAGE_NAMESPACE=personal-main
+EXOMEM_OAUTH_STORAGE_TOKEN=<same-edge-secret>
 ```
 
 Laptop uses the same values except
@@ -380,25 +393,38 @@ REST callers can attach `Idempotency-Key`; CLI callers can set
 `EXOMEM_IDEMPOTENCY_KEY` for retry-safe mutations. Idempotency records and lease
 credentials stay in per-machine runtime state, outside the synced vault.
 
+Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
+ID/secret, and `EXOMEM_JWT_SIGNING_KEY`. FastMCP access tokens are reference tokens,
+so the signing key alone is not enough: the shared OAuth store carries their JTI
+and upstream-token mappings. Values are Fernet-encrypted on the replica before
+leaving it. On first enablement, the preferred replica reads through its existing
+encrypted local FastMCP store and migrates live records on demand, while mirroring
+new writes locally for rollback. Existing connectors therefore migrate in place
+instead of requiring removal and re-registration.
+
 The coordinator contract is:
 
 - `POST /v1/vaults/{vault}/lease/acquire`
 - `POST /v1/vaults/{vault}/lease/renew`
 - `POST /v1/vaults/{vault}/lease/release`
 - `GET /v1/vaults/{vault}/lease`
+- `POST /v1/state/{namespace}/{get|ttl|put|delete|get-many|ttl-many|put-many|delete-many}`
 
 POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
 `fencing_token`. Responses carry only `holder`, `expires_at`, `fencing_token`, and
 `granted`; no vault content is sent. Use bearer authentication in any networked
 deployment.
 
-The deployments coexist — claude.ai can use either connector. After editing `.env`,
-restart each service so it reloads the coordination settings. Automatic two-way
-failover requires the vault folder to be Syncthing **Send & Receive on both hosts**;
-the writer lease is the write guard. Avoid direct Obsidian/filesystem edits on a
-follower because those bypass Exomem. Before deliberately stopping the active
-writer, let Syncthing reach **Up to Date**; on an unclean crash, the lease prevents
-split brain but cannot recover bytes the old writer had not replicated yet.
+With the edge deployment, clients register only the stable connector URL; the two
+origin hostnames are operational endpoints, not separate connectors. After editing
+`.env`, restart each service so it reloads the coordination settings. Automatic
+two-way failover requires the replication layer to accept changes from either
+host. For Syncthing that means **Send & Receive on both hosts**; users of other
+replication systems should apply their equivalent. The writer lease guards Exomem
+mutations, not direct Obsidian/filesystem edits, so do not edit a follower manually.
+Before deliberately stopping the active writer, let replication reach **Up to
+Date**; on an unclean crash, the lease prevents concurrent Exomem writers but cannot
+recover bytes the old writer had not replicated yet.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
