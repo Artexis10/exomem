@@ -249,6 +249,23 @@ def test_review_memory_attention_mode_composes_review_surface(vault: Path, monke
     assert surfaced <= {"unprocessed_source"}
 
 
+def test_review_memory_activation_mode_surfaces_corpus_coverage(vault: Path, monkeypatch) -> None:
+    rel = _make_page(
+        vault,
+        "# Activation-only\n\n## Overview\n\nSee [[Knowledge Base/Notes/Insights/other]].\n",
+        name="activation-only.md",
+    )
+    mcp = _build(monkeypatch)
+
+    out = _call(mcp, "review_memory", {"mode": "activation", "limit": 0})
+
+    assert out["coverage"]["eligible_pages"] > 0
+    item = next(item for item in out["items"] if item["path"] == rel)
+    assert item["categories"] == ["typed_relation_debt"]
+    assert item["ref"].startswith("exomem://review/")
+    assert item["reasons"][0]["meta"]["next_actions"]
+
+
 def test_triage_memory_mcp_write_is_explicit_and_reversible(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     review = _call(mcp, "review_memory", {"mode": "attention", "limit": 1})
