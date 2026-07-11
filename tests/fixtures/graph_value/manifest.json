@@ -1,0 +1,49 @@
+{
+  "manifest_version": 1,
+  "notes": [
+    {"id": "common-start", "title": "Common Start", "kind": "insight", "status": "active", "text": "The common graph path begins here."},
+    {"id": "common-target", "title": "Common Target", "kind": "insight", "status": "active", "text": "The common one-hop target is reachable."},
+    {"id": "chain-start", "title": "Chain Start", "kind": "insight", "status": "active", "text": "The multi-hop chain begins here."},
+    {"id": "chain-middle", "title": "Chain Middle", "kind": "insight", "status": "active", "text": "The chain continues through this note."},
+    {"id": "chain-end", "title": "Chain End", "kind": "insight", "status": "active", "text": "The multi-hop target ends here."},
+    {"id": "filter-start", "title": "Filter Start", "kind": "insight", "status": "active", "text": "One edge is a dependency and one is merely adjacent."},
+    {"id": "filter-target", "title": "Filter Target", "kind": "insight", "status": "active", "text": "This dependency is relevant to the filtered traversal."},
+    {"id": "filter-distractor", "title": "Filter Distractor", "kind": "insight", "status": "active", "text": "This adjacent note is a deliberate distractor."},
+    {"id": "direction-source", "title": "Direction Source", "kind": "insight", "status": "active", "text": "This note points into the direction center."},
+    {"id": "direction-center", "title": "Direction Center", "kind": "insight", "status": "active", "text": "Outgoing traversal should not follow the incoming edge."},
+    {"id": "direction-target", "title": "Direction Target", "kind": "insight", "status": "active", "text": "This note is the outgoing dependency."},
+    {"id": "governed-claim", "title": "Governed Claim", "kind": "insight", "status": "active", "text": "The governed conclusion is tied to source, evidence, and a precise claim."},
+    {"id": "architecture-source", "title": "Architecture Source", "kind": "source", "status": "active", "text": "The architecture record is the source for the governed claim."},
+    {"id": "test-evidence", "title": "Test Evidence", "kind": "evidence", "status": "active", "text": "The preserved receipt verifies the governed claim."},
+    {"id": "verified-result", "title": "Verified Result", "kind": "insight", "status": "active", "text": "The result is supported by a specific claim block."},
+    {"id": "old-policy", "title": "Old Policy", "kind": "insight", "status": "superseded", "text": "This policy is retained as history but is no longer current.", "superseded_by": "current-policy"},
+    {"id": "current-policy", "title": "Current Policy", "kind": "insight", "status": "active", "text": "This policy is the active replacement.", "supersedes": "old-policy"}
+  ],
+  "relations": [
+    {"from": "common-start", "to": "common-target", "type": "relates_to"},
+    {"from": "chain-start", "to": "chain-middle", "type": "depends_on"},
+    {"from": "chain-middle", "to": "chain-end", "type": "depends_on"},
+    {"from": "filter-start", "to": "filter-target", "type": "depends_on"},
+    {"from": "filter-start", "to": "filter-distractor", "type": "relates_to"},
+    {"from": "direction-source", "to": "direction-center", "type": "depends_on"},
+    {"from": "direction-center", "to": "direction-target", "type": "depends_on"}
+  ],
+  "provenance": [
+    {"from": "governed-claim", "to": "architecture-source", "type": "derived_from", "channel": "sources"},
+    {"from": "governed-claim", "to": "test-evidence", "type": "evidenced_by", "channel": "evidence"}
+  ],
+  "blocks": [
+    {"note": "governed-claim", "id": "claim-anchor", "kind": "claim", "text": "A precise claim supports the verified result.", "relations": [{"to": "verified-result", "type": "supports"}]}
+  ],
+  "tasks": [
+    {"id": "common-one-hop", "dimension": "one_hop_reachability", "seed": "common-start", "depth": 1, "expected_nodes": ["common-target"]},
+    {"id": "common-multi-hop", "dimension": "multi_hop_reachability", "seed": "chain-start", "depth": 2, "expected_nodes": ["chain-middle", "chain-end"]},
+    {"id": "typed-distractor-filter", "dimension": "distractor_precision", "seed": "filter-start", "depth": 1, "relation_types": ["depends_on"], "expected_nodes": ["filter-target"], "forbidden_nodes": ["filter-distractor"]},
+    {"id": "relation-type-fidelity", "dimension": "relation_type_fidelity", "seed": "filter-start", "depth": 1, "expected_edges": [{"from": "filter-start", "to": "filter-target", "type": "depends_on"}]},
+    {"id": "outgoing-direction", "dimension": "direction_fidelity", "seed": "direction-center", "depth": 1, "profile": "benchmark-outgoing", "expected_nodes": ["direction-target"], "forbidden_nodes": ["direction-source"], "expected_edges": [{"from": "direction-center", "to": "direction-target", "type": "depends_on"}]},
+    {"id": "dependency-lens", "dimension": "traversal_lens_filtering", "seed": "filter-start", "depth": 1, "profile": "benchmark-dependency", "expected_relation_types": ["depends_on"], "forbidden_relation_types": ["relates_to"]},
+    {"id": "provenance-trace", "dimension": "provenance_traceability", "seed": "governed-claim", "depth": 1, "profile": "provenance", "edge_requirements": [{"from": "governed-claim", "to": "architecture-source", "type": "derived_from", "origin": "frontmatter", "source_anchor": "sources"}, {"from": "governed-claim", "to": "test-evidence", "type": "evidenced_by", "origin": "frontmatter", "source_anchor": "evidence"}]},
+    {"id": "active-supersession", "dimension": "supersession_handling", "seed": "current-policy", "depth": 1, "profile": "epistemic", "expected_edges": [{"from": "current-policy", "to": "old-policy", "type": "supersedes"}], "expected_statuses": {"current-policy": "active", "old-policy": "superseded"}},
+    {"id": "block-relational-precision", "dimension": "semantic_block_precision", "seed": "governed-claim", "depth": 1, "profile": "epistemic", "expected_blocks": [{"note": "governed-claim", "id": "claim-anchor", "kind": "claim"}], "expected_edges": [{"from": "governed-claim#claim-anchor", "to": "verified-result", "type": "supports"}]}
+  ]
+}

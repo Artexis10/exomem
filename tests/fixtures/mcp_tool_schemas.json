@@ -1982,7 +1982,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt.",
+          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt.",
           "type": "string"
         },
         "categories": {
@@ -1998,11 +1998,11 @@
             }
           ],
           "default": null,
-          "description": "Optional category filter for attention/audit."
+          "description": "Optional category filter for attention/activation/audit."
         },
         "limit": {
           "default": 25,
-          "description": "Attention/evolution result cap.",
+          "description": "Attention/activation/evolution result cap.",
           "type": "integer"
         },
         "query": {
@@ -2087,7 +2087,7 @@
         },
         "state": {
           "default": "open",
-          "description": "For attention, open (default), all, snoozed, or dismissed.",
+          "description": "For attention/activation, open (default), all, snoozed, or dismissed.",
           "type": "string"
         },
         "ref": {

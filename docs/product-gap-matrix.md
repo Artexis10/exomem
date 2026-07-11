@@ -1,8 +1,12 @@
 # Product gap matrix: Exomem vs Basic Memory
 
-Generated from local product-flow benchmarking on 2026-07-09.
+Product-flow baseline measured 2026-07-09; direct graph comparison added
+2026-07-11.
 
-This is a product benchmark, not an internals comparison. Basic Memory was inspected only through public/product-facing surfaces in the sibling checkout: README/docs/tool names. No Basic Memory implementation or benchmark code was copied.
+This is a product benchmark, not an internals comparison. The product-flow
+baseline reads Basic Memory's public README/docs/tool names; the graph row adds a
+direct run through its public `build_context` MCP tool over native Markdown. No
+Basic Memory implementation or benchmark code is copied.
 
 Run locally:
 
@@ -22,8 +26,10 @@ hash-guarded schema contracts, and safe copied-source preservation. Basic Memory
 is stronger where the product needs low-friction adoption and breadth:
 cloud/no-install paths, sync, importers, multi-project UX, canvas workflows, and
 the packaged assistant ecosystem. The earlier technical schema and unified
-context gaps are now closed; the remaining lead is primarily product surface,
-not knowledge-substrate depth.
+context gaps are now closed. Exomem's graph is now directly benchmarked as ahead
+on graph-dependent tasks; Basic Memory's remaining lead is primarily product
+surface, not knowledge-substrate depth. See
+[the graph-value comparison](comparison-basic-memory-graph.md).
 
 The earlier largest product gap was first-run adoption: direct CLI scans of a messy uninitialized vault failed before they could report anything useful. That is now fixed for the product surface: `browse_memory(mode="overview")` and `adopt_vault(mode="scan-only")` can inspect a pre-init vault, while write-capable adoption modes still require an initialized governed KB.
 
@@ -38,18 +44,24 @@ The earlier largest product gap was first-run adoption: direct CLI scans of a me
 | Source preservation | Ahead | Pass | Basic Memory importers cover more formats. | Exomem `adopt_vault(mode="copy-as-sources")` preserves the original file, records `imported_from`, SHA-256, and byte count. |
 | Evidence / provenance | Ahead | Pass | Basic Memory is primarily note/knowledge-graph oriented. | Exomem has an explicit Evidence tree plus `review_memory(mode="provenance")` over durable `<!-- key:value -->` markers. The marker workflow is still hidden. |
 | Schema inference / validation | Comparable | Pass | Basic Memory publicly exposes `schema_infer`, `schema_validate`, and `schema_diff`. | Exomem's `schema_memory` now infers from corpus frequencies, saves optional contracts with hash-guarded overwrite, validates with strict CI status, and diffs corpus or contract drift. |
-| Graph / context building | Comparable | Pass | Basic Memory still exposes a broader canvas workflow. | Exomem now has one bounded `connect_memory(operation="context")` response over stored documents, semantic blocks, typed graph edges, provenance, evidence, supersession, history, unresolved targets, and explicit truncation. |
+| Graph / context building | Ahead | Pass | Basic Memory still exposes a broader canvas workflow. | The direct graph-value benchmark matches Basic Memory on one-hop, multi-hop, and relation typing, then wins direction, distractor precision, traversal lenses, provenance, lifecycle, and semantic-block precision. |
 | Review / stale / contradiction workflow | Ahead | Pass | Basic Memory has recent activity and graph navigation, but less explicit epistemic review. | Exomem `review_memory` surfaces unprocessed source work, audit findings, attention queues, provenance, and compilation scaffolds. |
 | Assistant onboarding | Comparable | Pass | Basic Memory has broader packaged plugins, skills, and public docs across clients. | Exomem `bootstrap` exposes front-door actions and product commands; `demo --json` proves doctor/retrieval/review against a sample vault. |
 
-Current harness summary: 10 flows; 4 ahead, 5 comparable, 1 behind, 0 missing.
+Current harness summary: 10 flows; 5 ahead, 4 comparable, 1 behind, 0 missing.
 Status: 10 pass.
 
 ## Prioritized backlog
 
-1. **Keep first-run adoption polished across surfaces.** The CLI now lets `browse_memory(mode="overview")` and `adopt_vault(mode="scan-only")` scan a raw messy vault before `Knowledge Base/_Schema/SKILL.md` exists. Keep MCP and REST aligned with that contract, and make the safe next action obvious.
+1. **Turn graph superiority into habitual product value.** Use
+   `review_memory(mode="activation")` to measure and rank relationship debt in
+   existing vaults, make propose/review/apply easy, and show graph paths,
+   provenance anchors, and active/superseded state when they improve an answer.
 
-2. **Collapse onboarding into one obvious first action.** Keep `setup`'s safety, but reduce the user's mental model to: demo, choose vault, scan, initialize. Basic Memory is ahead because its first-run story is easier to explain and it has a cloud escape hatch.
+2. **Keep first-run adoption polished across surfaces.** The CLI now lets
+   `browse_memory(mode="overview")` and `adopt_vault(mode="scan-only")` scan a
+   raw messy vault before initialization. Keep MCP and REST aligned and reduce
+   the first-run mental model to: demo, choose vault, scan, initialize.
 
 3. **Make evidence/provenance discoverable.** The Evidence tree and
    `review_memory(mode="provenance")` are a real differentiator, but the
@@ -61,10 +73,10 @@ Status: 10 pass.
    The product remember flow should guide the assistant through Source vs Note vs
    Evidence without requiring the user to name page types.
 
-5. **Keep the heavy proof lanes operational.** Lean stdio/HTTP product E2E now
-   runs on every pull request; real embeddings/reranking remain in the model job,
-   and OCR/PDF/ASR/CLIP/video run scheduled or on demand. Treat failures in those
-   configured lanes as product regressions, not optional noise.
+5. **Grow schema from observed graph pressure, not in advance.** Add relation
+   vocabulary or constraints only when activation and user-task evidence shows a
+   repeated semantic collision that changes traversal or review outcomes. Keep
+   the graph benchmark and heavy proof lanes operational as the promotion gate.
 
 ## Harness coverage notes
 

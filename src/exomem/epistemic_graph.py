@@ -1223,7 +1223,7 @@ def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str,
             {
                 "from": rel_path,
                 "to": other_key.removeprefix("file:"),
-                "relation_type": "refines",
+                "relation_type": "relates_to",
                 "method": "shared_sources",
                 "evidence": {"shared_source": shared_key.removeprefix("file:")},
             }
@@ -1251,7 +1251,7 @@ def _embedding_proximity_candidates(vault_root: Path, page) -> list[dict[str, An
             {
                 "from": self_path,
                 "to": target_path,
-                "relation_type": "refines",
+                "relation_type": "relates_to",
                 "method": "embedding_proximity",
                 "evidence": {"cosine": round(float(score), 4)},
             }
