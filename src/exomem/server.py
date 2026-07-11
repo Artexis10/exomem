@@ -16,6 +16,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastmcp import FastMCP
 from fastmcp.server.middleware.middleware import Middleware, MiddlewareContext
+from starlette.middleware import Middleware as ASGIMiddleware
 
 from . import commands as commands_module
 from . import guards
@@ -31,6 +32,7 @@ from .server_auth import (  # noqa: F401 - re-exported for compatibility
 from .server_rest import register_rest_facade
 from .server_runtime import initialize_runtime
 from .server_transfer import register_transfer_routes
+from .server_transport import PrimeMcpSSEMiddleware
 
 log = logging.getLogger(__name__)
 _call_log = logging.getLogger("exomem.calls")
@@ -255,4 +257,9 @@ def run(
     else:
         host = os.environ.get("EXOMEM_HOST") or host or "127.0.0.1"
         log.info("exomem starting on %s host=%s port=%s", transport, host, port)
-        mcp.run(transport=transport, host=host, port=port)
+        mcp.run(
+            transport=transport,
+            host=host,
+            port=port,
+            middleware=[ASGIMiddleware(PrimeMcpSSEMiddleware)],
+        )
