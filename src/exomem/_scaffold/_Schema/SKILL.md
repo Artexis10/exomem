@@ -445,7 +445,12 @@ Empty queries degrade to filtered-most-recent regardless of mode.
   what I searched,"* not *"it doesn't exist."* If you're sure something exists,
   try `scope="vault"`, vary the query terms, or `read_memory` a path you suspect.
 
-Additional knobs exposed through `ask_memory`/`find`: `graph=true` (1-hop neighbours of strong matches),
+Additional knobs exposed through `ask_memory`/`find`: `graph=true` (default; expands
+1-hop neighbours of strong matches through the typed graph sidecar when it is
+available — typed and provenance relations rank ahead of plain wikilinks, and a
+hit surfaced this way carries a `graph` annotation naming the relation type,
+direction, and the seed page it came from; without a sidecar the lane falls back
+to plain wikilink expansion, unannotated),
 `rerank=true` (CrossEncoder re-sort, explicit precision spend),
 `prefer_compiled=true` (default; favours compiled types over raw `source`),
 `prefer_active=true` (default; soft-demotes superseded pages), `file_types` /
@@ -733,7 +738,10 @@ is in **`references/audit-checks.md`**.
   mark it; if irrelevant, archive into an `_archive/` subfolder. (`review_memory`'s
   `stale_review` check **surfaces** old/cold/low-inbound conclusions as *review
   candidates* for you to judge — but never auto-decays, down-ranks, hides, or moves
-  anything; `ask_memory`/`find` ordering is unchanged. Surfacing a candidate ≠ a forgetting curve.)
+  anything; review surfacing has no effect on `ask_memory`/`find` ordering.
+  Surfacing a candidate ≠ a forgetting curve. Authored typed relations DO
+  legitimately inform retrieval ranking — that is connectivity you wrote, not
+  decay the system invented.)
 - Run on hooks, schedules, or background triggers. Operations happen because you
   asked, or because the conversation reached a point where consulting or capturing
   is clearly warranted.

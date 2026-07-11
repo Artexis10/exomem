@@ -1,7 +1,11 @@
 # Ranking auto-tune - the closed feedback loop
 
 Exomem's hybrid ranker (`RankingConfig` in `src/exomem/ranking_config.py`) self-tunes from
-your own usage. The loop is asynchronous and reviewed: cheap continuous
+your own usage. (The `graph` fusion lane reads the typed epistemic-graph sidecar
+when available — typed/provenance edges rank ahead of plain wikilinks and
+annotate the hits they surface — falling back to wikilink expansion otherwise;
+the lane keeps its existing `LANE_ORDER` slot and intent weights, so adopted
+`ranking_config.json` files and this tuning loop are unaffected.) The loop is asynchronous and reviewed: cheap continuous
 mining, a periodic desk-side tune that only proposes, and an explicit, reversible
 adopt. Nothing on the server holds a model or a key for this loop. It is
 deterministic measurement end to end (see `openspec/specs/ranking-autotune`).

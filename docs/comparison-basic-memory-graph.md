@@ -92,6 +92,11 @@ The next target is graph activation and product use, not a larger schema.
 2. Make the graph advantage visible in normal recall and review: show the path,
    relation family, provenance anchor, and active/superseded state when they
    materially change the answer.
+   *(Delivered for recall by `add-typed-graph-find-lane`: the `find` graph lane
+   now expands through the typed sidecar by default — typed/provenance families
+   ranked ahead of plain wikilinks — and graph-surfaced hits carry a `graph`
+   annotation with relation type, direction, and seed in both compact and full
+   envelopes. Review-side visibility shipped earlier via `review_item_context`.)*
 3. Add a medium public corpus and user-task tier after observing real activation
    output. Keep the same independent dimensions and dominance rule.
 4. Improve relation authoring and maintenance ergonomics: acceptance queues,

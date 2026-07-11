@@ -1,0 +1,130 @@
+{
+ "mode": "typed",
+ "queries": {
+  "what did I conclude about basic memory comparison": [],
+  "writer lease takeover multi host": [
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-multi-host-writer-lease-separates-coordination-replication-and-reachability.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/single-source-command-surface-one-registry-generates-mcp-rest-cli-byte-identically.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-multi-host-writer-lease-separates-coordination-replication-and-reachability.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Notes/Patterns/multi-machine-claude-config-sync-yadm-for-hooks-settings-syncthing-for-vault-skills.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-multi-host-writer-lease-separates-coordination-replication-and-reachability.md"
+    }
+   }
+  ],
+  "orchestration routing which agent toolchain": [
+   {
+    "path": "Knowledge Base/Notes/Patterns/orchestration-improvement-frontier-make-routing-explicit-not-add-more-agent-tools.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Patterns/canonical-agent-workflows-should-deploy-to-claude-and-codex-not-fork.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Patterns/orchestration-improvement-frontier-make-routing-explicit-not-add-more-agent-tools.md"
+    }
+   }
+  ],
+  "graph activation relation debt": [
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-now-leads-basic-memory-in-relationship-governance-not-yet-in-demonstrated-graph-usefulness.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Insights/exomem-s-wedge-is-power-user-epistemics-not-basic-memory-parity.md",
+    "graph": {
+     "relation_type": "derived_from",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-now-leads-basic-memory-in-relationship-governance-not-yet-in-demonstrated-graph-usefulness.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/basic-memory-infers-useful-schema-profiles-but-not-reliable-semantic-conclusions.md",
+    "graph": {
+     "relation_type": "derived_from",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-now-leads-basic-memory-in-relationship-governance-not-yet-in-demonstrated-graph-usefulness.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/a-rust-rewrite-wouldn-t-speed-up-exomem-latency-is-native-ml-i-o-not-python-measured.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-0-16-2-deployed-with-root-aware-obsidian-links-and-protected-corpus-migration.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-0-16-2-deployed-with-root-aware-obsidian-links-and-protected-corpus-migration.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Failures/wsl-mounted-windows-vault-stat-walk-is-far-slower-than-native-windows.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-0-16-2-deployed-with-root-aware-obsidian-links-and-protected-corpus-migration.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Notes/Failures/manual-windows-release-service-setup-exposed-installer-gaps.md",
+    "graph": {
+     "relation_type": "links_to",
+     "direction": "outbound",
+     "seed": "Knowledge Base/Notes/Research/Exomem/exomem-0-16-2-deployed-with-root-aware-obsidian-links-and-protected-corpus-migration.md"
+    }
+   },
+   {
+    "path": "Knowledge Base/Evidence/Yolo/03 - Performance Visibility/jira-exports/2026-05-19-jira-full-audit-trail.pdf.md",
+    "graph": null
+   }
+  ],
+  "exomem product moat governed knowledge": [
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/openspec-artifacts-ready-for-exomem-epistemic-graph.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-moat-proof-requires-an-end-to-end-product-path-after-epistemic-graph-merges.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-roadmap-sequences-the-epistemic-inbox-before-contexts-evolution-and-adoption-studio.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-schema-moat-work-should-run-as-parallel-disjoint-sessions.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-now-leads-basic-memory-in-relationship-governance-not-yet-in-demonstrated-graph-usefulness.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-has-substantially-closed-the-basic-memory-product-gap-after-schema-sprint-with-epistemic.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-market-exists-if-it-productizes-governed-agent-memory-not-generic-notes.md",
+    "graph": null
+   },
+   {
+    "path": "Knowledge Base/Notes/Research/Exomem/exomem-semantic-blocks-are-the-schema-moat-beyond-basic-memory.md",
+    "graph": null
+   }
+  ]
+ }
+}

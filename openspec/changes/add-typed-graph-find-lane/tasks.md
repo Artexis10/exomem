@@ -75,10 +75,10 @@
 - [ ] 6.1 New golden tier: typed-relation fixtures + expectations in
       tests/golden/ + tests/test_retrieval_golden.py wiring; legacy goldens
       unchanged and passing in fallback mode.
-- [ ] 6.2 Scaffold `_Schema/SKILL.md`: revise the "`ask_memory`/`find`
+- [x] 6.2 Scaffold `_Schema/SKILL.md`: revise the "`ask_memory`/`find`
       ordering is unchanged" line to describe typed-graph-aware ordering +
       annotation; scaffold-no-leak test stays green.
-- [ ] 6.3 Docs: `docs/ranking-tuning.md` (lane description),
+- [x] 6.3 Docs: `docs/ranking-tuning.md` (lane description),
       `docs/comparison-basic-memory-graph.md` "What to improve next" #2
       marked delivered; ARCHITECTURE.md graph-lane paragraph.
 - [ ] 6.4 `scripts/graph_value_benchmark.py`: add a recall-visibility
