@@ -303,3 +303,87 @@ def test_direct_mode_requires_an_explicit_basic_memory_target(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="--basic-memory-root"):
         bench._execute(args, bench.load_manifest(), tmp_path)
+
+
+def test_recall_visibility_registered_and_excluded_from_dominance_comparison() -> None:
+    """recall_visibility is a must-pass Exomem-only invariant: present in
+    ALL_DIMENSIONS (so load_manifest accepts its tasks and score_run/
+    dominance_report's fixture_failures check covers it) but absent from
+    COMMON_DIMENSIONS/GOVERNED_DIMENSIONS (so it never enters the
+    dominance_report Basic-Memory comparison `checks` loop — it does not
+    touch the Basic Memory comparison path)."""
+    assert "recall_visibility" in bench.ALL_DIMENSIONS
+    assert "recall_visibility" not in bench.COMMON_DIMENSIONS
+    assert "recall_visibility" not in bench.GOVERNED_DIMENSIONS
+
+
+def test_recall_visibility_clears_perfect_fixture(perfect_fixture) -> None:
+    """The two recall-visibility tasks (find(), lexical+graph lanes, no
+    embeddings) surface their typed neighbour WITH a graph-provenance
+    annotation matching the authored relation type."""
+    manifest, _, _, run = perfect_fixture
+    scores = bench.score_run(manifest, run)
+
+    assert "recall_visibility" in scores
+    metric = scores["recall_visibility"]
+    assert metric.supported
+    assert metric.ratio == 1.0, f"recall_visibility did not clear: {metric.as_dict()}"
+    assert not metric.missing
+    assert set(metric.case_ids) == {"recall-visibility-1", "recall-visibility-2"}
+
+
+def test_recall_visibility_failure_is_independent_and_skips_dominance_checks(
+    perfect_fixture,
+) -> None:
+    """A broken/missing graph annotation fails ONLY the fixture gate (must-pass
+    Exomem invariant) — it must never surface as a dominance_report `checks`
+    criterion, since that loop is scoped to COMMON_DIMENSIONS/
+    GOVERNED_DIMENSIONS only (the Basic Memory comparison path)."""
+    manifest, _, _, run = perfect_fixture
+    tasks = {str(task["id"]): task for task in manifest["tasks"]}
+
+    broken = bench.score_case(
+        tasks["recall-visibility-1"],
+        _case(tasks["recall-visibility-1"], edges=[]),
+    )
+    assert broken.ratio == 0.0
+
+    exomem_scores = dict(bench.score_run(manifest, run))
+    exomem_scores["recall_visibility"] = broken
+
+    # No Basic Memory comparison available (fixture-only mode): the failing
+    # dimension is a bare name in failed_criteria, not "fixture:"-prefixed —
+    # that prefix only applies once a real basic_scores comparison exists.
+    fixture_only_report = bench.dominance_report(exomem_scores, None)
+    assert fixture_only_report["fixture_passed"] is False
+    assert "recall_visibility" in fixture_only_report["failed_criteria"]
+
+    # With a (stand-in) Basic Memory comparison present, the SAME failure is
+    # reported as "fixture:recall_visibility" and never as a `checks` entry —
+    # that loop is scoped to COMMON_DIMENSIONS/GOVERNED_DIMENSIONS only.
+    basic_scores = dict(exomem_scores)
+    report = bench.dominance_report(exomem_scores, basic_scores)
+    assert report["fixture_passed"] is False
+    assert "fixture:recall_visibility" in report["failed_criteria"]
+    assert not any(
+        "recall_visibility" in item["criterion"] for item in report["checks"]
+    )
+
+
+def test_recall_visibility_unsupported_for_basic_memory(tmp_path: Path) -> None:
+    """find()/hit-envelope graph-provenance has no build_context equivalent —
+    Basic Memory's score for this dimension must always be unsupported, never
+    a real comparison (the dominance `checks` loop never looks it up anyway,
+    since it iterates COMMON_DIMENSIONS/GOVERNED_DIMENSIONS only)."""
+    manifest = bench.load_manifest()
+    corpus = bench.render_basic_memory(manifest, tmp_path / "basic")
+    tasks = {str(task["id"]): task for task in manifest["tasks"]}
+
+    normalized = bench.normalize_basic_memory_context(
+        tasks["recall-visibility-1"], {"results": []}, corpus, elapsed_ms=1.0
+    )
+    assert normalized.unsupported.get("recall_visibility")
+
+    scored = bench.score_case(tasks["recall-visibility-1"], normalized)
+    assert scored.supported is False
+    assert scored.ratio == 0.0

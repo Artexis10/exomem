@@ -31,7 +31,18 @@ GOVERNED_DIMENSIONS = (
     "supersession_handling",
     "semantic_block_precision",
 )
-ALL_DIMENSIONS = (*COMMON_DIMENSIONS, "traversal_lens_filtering", *GOVERNED_DIMENSIONS)
+# Exomem-only: a must-pass fixture invariant (score_run/dominance_report's
+# fixture_failures check covers every dimension in ALL_DIMENSIONS), but
+# DELIBERATELY excluded from COMMON_DIMENSIONS/GOVERNED_DIMENSIONS so it never
+# enters dominance_report's Basic-Memory comparison `checks` loop — find()'s
+# hit-envelope graph-provenance annotation has no build_context equivalent.
+EXOMEM_ONLY_DIMENSIONS = ("recall_visibility",)
+ALL_DIMENSIONS = (
+    *COMMON_DIMENSIONS,
+    "traversal_lens_filtering",
+    *GOVERNED_DIMENSIONS,
+    *EXOMEM_ONLY_DIMENSIONS,
+)
 
 
 @dataclass(frozen=True)
@@ -350,6 +361,9 @@ def run_exomem_fixture(
     epistemic_graph.EpistemicGraphIndex(corpus.root).rebuild_all()
     cases: dict[str, CaseResult] = {}
     for task in manifest["tasks"]:
+        if str(task["dimension"]) == "recall_visibility":
+            cases[str(task["id"])] = _recall_visibility_case(task, corpus)
+            continue
         started = time.perf_counter()
         payload = epistemic_graph.graph_context(
             corpus.root,
@@ -375,6 +389,69 @@ def run_exomem_fixture(
         cases=cases,
         notes=["model-free in-process shared graph leaf"],
         renderer_parity=corpus.parity,
+    )
+
+
+def _recall_visibility_case(task: dict[str, Any], corpus: RenderedCorpus) -> CaseResult:
+    """EXOMEM-ONLY dimension: does plain `find()` (lexical + graph lanes) surface
+    the typed neighbour in top-K WITH a graph-provenance annotation naming the
+    authored relation? No Basic Memory equivalent — `build_context` has no
+    hit-envelope/graph-annotation concept, so this never touches that path
+    (see EXOMEM_ONLY_DIMENSIONS).
+
+    "Embeddings off" is the ambient state this benchmark already runs under:
+    `test_graph_value_benchmark.py` has no heavy-model dependency today, and
+    `find()`'s vector lane self-degrades via ImportError when
+    sentence-transformers/torch aren't installed — the same soft-fail path
+    every other keyword-mode deployment relies on. No env-var toggle is needed
+    (or reliable: EXOMEM_DISABLE_EMBEDDINGS only gates the writer path, not a
+    query-time model that's already importable).
+    """
+    from exomem import find as find_module
+
+    started = time.perf_counter()
+    hits = find_module.find(
+        corpus.root,
+        query=str(task["query"]),
+        limit=10,
+        mode="hybrid",
+        graph=True,
+        prefer_compiled=False,
+        prefer_active=False,
+        temporal=False,
+    )
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    seed_id = str(task["seed"])
+    edges: set[EdgeFact] = set()
+    reached: set[str] = set()
+    path_to_id = {path: note_id for note_id, path in corpus.id_to_path.items()}
+    for hit in hits:
+        note_id = path_to_id.get(hit.path)
+        if note_id is None or note_id == seed_id:
+            continue
+        annotation = hit.as_dict().get("graph")
+        if annotation is None:
+            continue
+        reached.add(note_id)
+        edges.add(
+            EdgeFact(seed_id, note_id, str(annotation.get("relation_type") or ""))
+        )
+
+    encoded = json.dumps(
+        {"query": task["query"], "hits": [h.path for h in hits]},
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return CaseResult(
+        case_id=str(task["id"]),
+        dimension="recall_visibility",
+        reached_nodes=sorted(reached),
+        edges=sorted(edges, key=_edge_sort_key),
+        blocks=[],
+        statuses={},
+        response_bytes=len(encoded),
+        latency_ms=elapsed_ms,
     )
 
 
@@ -467,6 +544,10 @@ def normalize_basic_memory_context(
         unsupported[dimension] = "observations cannot own graph relations or stable block anchors"
     elif dimension == "traversal_lens_filtering":
         unsupported[dimension] = "build_context exposes no relation-family traversal lens"
+    elif dimension == "recall_visibility":
+        unsupported[dimension] = (
+            "find()/hit-envelope graph-provenance annotation has no build_context equivalent"
+        )
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return CaseResult(
         case_id=str(task["id"]),
@@ -639,6 +720,10 @@ def score_case(task: dict[str, Any], result: CaseResult) -> MetricResult:
         checks = [block in result.blocks for block in expected_blocks]
         checks.extend(_matching_expected_edge(edge, result.edges) for edge in expected_edges)
         return _metric_from_bools(dimension, checks, [*expected_blocks, *expected_edges])
+    if dimension == "recall_visibility":
+        expected_edges = [_expected_edge(edge) for edge in task.get("expected_edges") or []]
+        checks = [_matching_expected_edge(edge, result.edges) for edge in expected_edges]
+        return _metric_from_bools(dimension, checks, expected_edges)
     raise ValueError(f"unsupported graph benchmark dimension: {dimension}")
 
 

@@ -17,7 +17,11 @@
     {"id": "test-evidence", "title": "Test Evidence", "kind": "evidence", "status": "active", "text": "The preserved receipt verifies the governed claim."},
     {"id": "verified-result", "title": "Verified Result", "kind": "insight", "status": "active", "text": "The result is supported by a specific claim block."},
     {"id": "old-policy", "title": "Old Policy", "kind": "insight", "status": "superseded", "text": "This policy is retained as history but is no longer current.", "superseded_by": "current-policy"},
-    {"id": "current-policy", "title": "Current Policy", "kind": "insight", "status": "active", "text": "This policy is the active replacement.", "supersedes": "old-policy"}
+    {"id": "current-policy", "title": "Current Policy", "kind": "insight", "status": "active", "text": "This policy is the active replacement.", "supersedes": "old-policy"},
+    {"id": "recall-vis-seed-1", "title": "Retry Budget Design", "kind": "insight", "status": "active", "text": "Retries should use exponential backoff with jitter to avoid synchronized retry storms."},
+    {"id": "recall-vis-target-1", "title": "Coffee Roasting Notes", "kind": "insight", "status": "active", "text": "Light roasts preserve more origin flavor than dark roasts which taste more uniformly bitter."},
+    {"id": "recall-vis-seed-2", "title": "Segment Compaction", "kind": "insight", "status": "active", "text": "Periodic compaction merges small segment files into larger ones to reduce read amplification."},
+    {"id": "recall-vis-target-2", "title": "Migratory Bird Patterns", "kind": "insight", "status": "active", "text": "Many songbird species migrate thousands of miles between breeding and wintering grounds each year."}
   ],
   "relations": [
     {"from": "common-start", "to": "common-target", "type": "relates_to"},
@@ -26,7 +30,9 @@
     {"from": "filter-start", "to": "filter-target", "type": "depends_on"},
     {"from": "filter-start", "to": "filter-distractor", "type": "relates_to"},
     {"from": "direction-source", "to": "direction-center", "type": "depends_on"},
-    {"from": "direction-center", "to": "direction-target", "type": "depends_on"}
+    {"from": "direction-center", "to": "direction-target", "type": "depends_on"},
+    {"from": "recall-vis-seed-1", "to": "recall-vis-target-1", "type": "mentions"},
+    {"from": "recall-vis-seed-2", "to": "recall-vis-target-2", "type": "relates_to"}
   ],
   "provenance": [
     {"from": "governed-claim", "to": "architecture-source", "type": "derived_from", "channel": "sources"},
@@ -44,6 +50,8 @@
     {"id": "dependency-lens", "dimension": "traversal_lens_filtering", "seed": "filter-start", "depth": 1, "profile": "benchmark-dependency", "expected_relation_types": ["depends_on"], "forbidden_relation_types": ["relates_to"]},
     {"id": "provenance-trace", "dimension": "provenance_traceability", "seed": "governed-claim", "depth": 1, "profile": "provenance", "edge_requirements": [{"from": "governed-claim", "to": "architecture-source", "type": "derived_from", "origin": "frontmatter", "source_anchor": "sources"}, {"from": "governed-claim", "to": "test-evidence", "type": "evidenced_by", "origin": "frontmatter", "source_anchor": "evidence"}]},
     {"id": "active-supersession", "dimension": "supersession_handling", "seed": "current-policy", "depth": 1, "profile": "epistemic", "expected_edges": [{"from": "current-policy", "to": "old-policy", "type": "supersedes"}], "expected_statuses": {"current-policy": "active", "old-policy": "superseded"}},
-    {"id": "block-relational-precision", "dimension": "semantic_block_precision", "seed": "governed-claim", "depth": 1, "profile": "epistemic", "expected_blocks": [{"note": "governed-claim", "id": "claim-anchor", "kind": "claim"}], "expected_edges": [{"from": "governed-claim#claim-anchor", "to": "verified-result", "type": "supports"}]}
+    {"id": "block-relational-precision", "dimension": "semantic_block_precision", "seed": "governed-claim", "depth": 1, "profile": "epistemic", "expected_blocks": [{"note": "governed-claim", "id": "claim-anchor", "kind": "claim"}], "expected_edges": [{"from": "governed-claim#claim-anchor", "to": "verified-result", "type": "supports"}]},
+    {"id": "recall-visibility-1", "dimension": "recall_visibility", "seed": "recall-vis-seed-1", "query": "retries should use exponential backoff with jitter to avoid synchronized retry storms", "expected_edges": [{"from": "recall-vis-seed-1", "to": "recall-vis-target-1", "type": "mentions"}]},
+    {"id": "recall-visibility-2", "dimension": "recall_visibility", "seed": "recall-vis-seed-2", "query": "periodic compaction merges small segment files into larger ones to reduce read amplification", "expected_edges": [{"from": "recall-vis-seed-2", "to": "recall-vis-target-2", "type": "relates_to"}]}
   ]
 }
