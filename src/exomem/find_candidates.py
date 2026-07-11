@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import find_policy, find_results, find_types
-from .find_types import FindTimings, ParsedPage
+from .find_types import FindTimings, GraphProvenance, ParsedPage
 from .ranking_config import RankingConfig
 
 log = logging.getLogger(__name__)
@@ -36,6 +36,7 @@ class CandidateBundle:
     clip_frame_ts_by_path: dict[str, float | None]
     frame_attribution: dict[str, tuple[str, float | None]]
     graph_in_degree_by_path: dict[str, int]
+    graph_provenance_by_path: dict[str, GraphProvenance]
     usage_map: dict[str, float]
 
 
@@ -54,6 +55,7 @@ def empty_bundle(*, usage_map: dict[str, float] | None = None) -> CandidateBundl
         clip_frame_ts_by_path={},
         frame_attribution={},
         graph_in_degree_by_path={},
+        graph_provenance_by_path={},
         usage_map=usage_map or {},
     )
 
@@ -115,7 +117,7 @@ def collect_candidates(
     failed_out: list[str] | None,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
-    from . import bm25, embeddings, fusion, readiness
+    from . import bm25, embeddings, epistemic_graph, fusion, readiness
 
     usage_map: dict[str, float] = {}
     if prefer_used:
@@ -258,6 +260,7 @@ def collect_candidates(
 
     graph_ranking: list[str] = []
     graph_in_degree_by_path: dict[str, int] = {}
+    graph_provenance_by_path: dict[str, GraphProvenance] = {}
     if not graph and timings is not None:
         timings.skipped("graph")
     graph_t0 = time.perf_counter()
@@ -283,39 +286,82 @@ def collect_candidates(
                 ):
                     graph_seeds.append(p)
         graph_t_seeds = time.perf_counter()
-        resolver = (
-            get_query_resolver(vault_root, freshness=snapshot.vault())
-            if graph_seeds else None
-        )
-        graph_t_resolver = time.perf_counter()
-        seen_target: set[str] = set()
-        for seed_rel in graph_seeds:
-            page = page_of(seed_rel)
-            if page is None:
-                continue
-            for target_rel in outbound_wikilink_paths(
-                page, vault_root, resolver=resolver
-            ):
+        graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
+        if graph_index.available():
+            # Typed mode: read the governed sidecar once for all seeds, then
+            # order targets by relation-family precedence (epistemic/provenance
+            # families ahead of plain links_to/unregistered; within a tier, seed
+            # order then edge order). Placeholder targets are excluded upstream.
+            neighbors = graph_index.neighbors_for(graph_seeds)
+            graph_t_sidecar = time.perf_counter()
+            seen_target = set()
+            tier_targets: dict[int, list[str]] = {0: [], 1: []}
+            for neighbor in neighbors:
+                target_rel = neighbor.other_rel
                 graph_in_degree_by_path[target_rel] = (
                     graph_in_degree_by_path.get(target_rel, 0) + 1
                 )
                 if target_rel in primary_set or target_rel in seen_target:
                     continue
                 seen_target.add(target_rel)
-                graph_ranking.append(target_rel)
-        if graph_ranking:
-            rankings.append(graph_ranking)
-        if timings is not None:
-            graph_t_end = time.perf_counter()
-            timings.stages.setdefault("graph", {})["ms"] = round(
-                (graph_t_end - graph_t0) * 1000.0, 3
+                family = neighbor.family
+                tier = 0 if (neighbor.relation_type and family and family != "link") else 1
+                tier_targets[tier].append(target_rel)
+                graph_provenance_by_path[target_rel] = GraphProvenance(
+                    relation_type=neighbor.relation_type,
+                    direction=neighbor.direction,
+                    seed=neighbor.seed_rel,
+                )
+            graph_ranking = tier_targets[0] + tier_targets[1]
+            if graph_ranking:
+                rankings.append(graph_ranking)
+            if timings is not None:
+                graph_t_end = time.perf_counter()
+                timings.stages.setdefault("graph", {})["ms"] = round(
+                    (graph_t_end - graph_t0) * 1000.0, 3
+                )
+                for name, t0, t1 in (
+                    ("graph.seeds", graph_t0, graph_t_seeds),
+                    ("graph.sidecar", graph_t_seeds, graph_t_sidecar),
+                    ("graph.expand", graph_t_sidecar, graph_t_end),
+                ):
+                    timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
+        else:
+            # Fallback: the pre-existing 1-hop outbound-wikilink expansion,
+            # byte-identical to the pre-change ordering. Do not refactor.
+            resolver = (
+                get_query_resolver(vault_root, freshness=snapshot.vault())
+                if graph_seeds else None
             )
-            for name, t0, t1 in (
-                ("graph.seeds", graph_t0, graph_t_seeds),
-                ("graph.resolver", graph_t_seeds, graph_t_resolver),
-                ("graph.expand", graph_t_resolver, graph_t_end),
-            ):
-                timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
+            graph_t_resolver = time.perf_counter()
+            seen_target = set()
+            for seed_rel in graph_seeds:
+                page = page_of(seed_rel)
+                if page is None:
+                    continue
+                for target_rel in outbound_wikilink_paths(
+                    page, vault_root, resolver=resolver
+                ):
+                    graph_in_degree_by_path[target_rel] = (
+                        graph_in_degree_by_path.get(target_rel, 0) + 1
+                    )
+                    if target_rel in primary_set or target_rel in seen_target:
+                        continue
+                    seen_target.add(target_rel)
+                    graph_ranking.append(target_rel)
+            if graph_ranking:
+                rankings.append(graph_ranking)
+            if timings is not None:
+                graph_t_end = time.perf_counter()
+                timings.stages.setdefault("graph", {})["ms"] = round(
+                    (graph_t_end - graph_t0) * 1000.0, 3
+                )
+                for name, t0, t1 in (
+                    ("graph.seeds", graph_t0, graph_t_seeds),
+                    ("graph.resolver", graph_t_seeds, graph_t_resolver),
+                    ("graph.expand", graph_t_resolver, graph_t_end),
+                ):
+                    timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
 
     if not rankings:
         return empty_bundle(usage_map=usage_map)
@@ -375,5 +421,6 @@ def collect_candidates(
         clip_frame_ts_by_path=clip_frame_ts_by_path,
         frame_attribution=frame_attribution,
         graph_in_degree_by_path=graph_in_degree_by_path,
+        graph_provenance_by_path=graph_provenance_by_path,
         usage_map=usage_map,
     )

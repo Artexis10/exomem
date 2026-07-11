@@ -10,6 +10,21 @@ from pathlib import Path
 from typing import Any
 
 
+@dataclass(frozen=True)
+class GraphProvenance:
+    """Why a hit entered results through the typed graph lane.
+
+    Records the FIRST typed edge that surfaced a graph-expanded target: the
+    relation type, the edge direction relative to the seed
+    ("outbound"/"inbound"), and the seed page it hopped from. Populated only in
+    typed mode for targets not already in the vector/BM25 primary set.
+    """
+
+    relation_type: str | None
+    direction: str
+    seed: str
+
+
 @dataclass
 class ParsedPage:
     path: Path

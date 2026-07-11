@@ -22,21 +22,21 @@
 
 ## 2. Typed lane in find (src/exomem/find_candidates.py)
 
-- [ ] 2.1 In the `if graph:` block, branch on sidecar availability: typed
+- [x] 2.1 In the `if graph:` block, branch on sidecar availability: typed
       mode calls `neighbors_for(graph_seeds)` once; fallback mode keeps the
       existing `outbound_wikilink_paths` loop UNTOUCHED (byte-identical
       contract — do not refactor it).
-- [ ] 2.2 Typed mode: build `graph_ranking` grouped by family precedence
+- [x] 2.2 Typed mode: build `graph_ranking` grouped by family precedence
       (provenance/epistemic families first, `links_to`/unregistered last;
       within family: seed order, then edge order). Keep the existing rules:
       skip targets already in `primary_set`, dedup via `seen_target`, tally
       `graph_in_degree_by_path` for ALL targets.
-- [ ] 2.3 Populate `graph_provenance_by_path` (new `CandidateBundle` field,
+- [x] 2.3 Populate `graph_provenance_by_path` (new `CandidateBundle` field,
       default empty) for typed-surfaced targets only: relation_type,
       direction, seed_rel of the FIRST edge that surfaced the target.
-- [ ] 2.4 Keep the timings spans (`graph.seeds/resolver/expand`) meaningful in
+- [x] 2.4 Keep the timings spans (`graph.seeds/resolver/expand`) meaningful in
       both modes (typed mode may rename `graph.resolver` → `graph.sidecar`).
-- [ ] 2.5 Red-first tests (new tests/test_find_typed_graph_lane.py):
+- [x] 2.5 Red-first tests (new tests/test_find_typed_graph_lane.py):
       typed neighbour surfaces for conceptual query (spec scenario);
       inbound edge counts; placeholder excluded; family precedence ordering;
       fallback equivalence — same fixture vault, sidecar disabled via
