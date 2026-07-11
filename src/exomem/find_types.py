@@ -267,6 +267,12 @@ class Hit:
             "title": self.title,
             "updated": self.updated,
         }
+        if self.graph_provenance is not None:
+            out["graph"] = {
+                "relation_type": self.graph_provenance.relation_type,
+                "direction": self.graph_provenance.direction,
+                "seed": self.graph_provenance.seed,
+            }
         if self.media_type:
             out["media_type"] = self.media_type
         if self.media_file:

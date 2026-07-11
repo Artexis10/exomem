@@ -189,6 +189,22 @@ def test_fallback_mode_never_annotates(tmp_path, monkeypatch) -> None:
     assert all("graph" not in h.as_dict() for h in hits)
 
 
+def test_compact_dict_also_carries_graph_annotation(tmp_path, monkeypatch) -> None:
+    """ask_memory's DEFAULT compact serialization must also expose graph
+    provenance — as_dict alone leaves most MCP callers (compact is the
+    default) never seeing relation type/direction/seed."""
+    vault = _build_vault(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    hits = _hits(vault)
+    experiment = next(h for h in hits if h.path == EXPERIMENT)
+    compact = experiment.as_compact_dict()
+    assert compact.get("graph") == {
+        "relation_type": "evidenced_by",
+        "direction": "outbound",
+        "seed": SEED,
+    }
+
+
 def test_family_precedence_applied_before_target_dedup(tmp_path, monkeypatch) -> None:
     """A target reached by BOTH a typed relation and a plain wikilink from the
     same seed must be classified/annotated by the TYPED (higher-precedence)
