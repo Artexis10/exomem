@@ -46,11 +46,11 @@
 
 ## 4. Gates
 
-- [ ] 4.1 `uv run python -m pytest -q` green.
-- [ ] 4.2 `uv run python -m pytest tests/test_latency_gate.py -q` green
+- [x] 4.1 `uv run python -m pytest -q` green.
+- [x] 4.2 `uv run python -m pytest tests/test_latency_gate.py -q` green
       (thresholds untouched; queue is not on the find path but the gate is
       the merge bar).
-- [ ] 4.3 `uvx ruff check` clean on changed files.
+- [x] 4.3 `uvx ruff check` clean on changed files.
 
 ## 5. Orchestrator-owned (NOT for the executor lane)
 

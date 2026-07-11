@@ -423,13 +423,13 @@
     }
   },
   "connect_memory": {
-    "description": "Connect memory through links, typed graph context, or entities.\n\nProposal modes are read-only. `operation=\"create-entity\"` is an explicit\nadditive write that creates a typed graph node through the canonical entity\nwriter.",
+    "description": "Connect memory through links, typed graph context, or entities.\n\nProposal modes are read-only. `operation=\"create-entity\"` is an explicit\nadditive write that creates a typed graph node through the canonical entity\nwriter. `operation=\"accept-relation\"` is a governed additive write that\nauthors one reviewed relation-queue candidate.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "operation": {
           "default": "suggest-links",
-          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.",
+          "description": "context, suggest-links, suggest-relations, graph-context, inbound-links, create-entity, or accept-relation.",
           "type": "string"
         },
         "path": {
@@ -769,6 +769,54 @@
           ],
           "default": null,
           "description": "Decision status."
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Relation-queue item ref for accept-relation."
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Target page `content_hash` drift guard for accept-relation."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason recorded with the accept-relation edit."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional reviewed candidate fingerprint; a mismatch refuses the accept-relation write."
         }
       },
       "type": "object"
@@ -2048,7 +2096,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, or relation-debt.",
+          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, or relation-queue. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`.",
           "type": "string"
         },
         "categories": {
