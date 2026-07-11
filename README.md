@@ -251,8 +251,10 @@ store. exomem works the other way around: agents come to your vault.
 | Memory hidden inside one assistant | exomem is client-agnostic: use the same vault from Claude Code, Codex, Cursor, scripts, or a custom chatbot. |
 
 For a deeper point-in-time comparison, see
-[docs/comparison-engraph.md](docs/comparison-engraph.md). For the practical
-boundary with chat products' own memory features, see
+[docs/comparison-engraph.md](docs/comparison-engraph.md). The reproducible
+graph-only comparison with Basic Memory is in
+[docs/comparison-basic-memory-graph.md](docs/comparison-basic-memory-graph.md).
+For the practical boundary with chat products' own memory features, see
 [docs/vs-built-in-memory.md](docs/vs-built-in-memory.md).
 
 **Measured retrieval quality — and speed.** Retrieval is graded by a
