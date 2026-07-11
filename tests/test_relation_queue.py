@@ -54,10 +54,24 @@ def _seed(vault: Path) -> None:
     )
 
 
+# Derived, rebuildable index sidecars that read paths may lazily (re)build.
+# The purity contract is about knowledge state — Markdown, graph EDGES, and
+# review-state — not derived index maintenance (e.g. .refs.sqlite from the
+# reference-enrichment index, which any read op may create on first touch).
+_DERIVED_INDEX_NAMES = {".refs.sqlite", ".embeddings.sqlite", ".clip.sqlite"}
+
+
+def _is_derived_index(p: Path) -> bool:
+    name = p.name
+    return any(
+        name == base or name.startswith(base + "-") for base in _DERIVED_INDEX_NAMES
+    )
+
+
 def _tree_hash(root: Path) -> str:
     h = hashlib.sha256()
     for p in sorted(root.rglob("*")):
-        if p.is_file():
+        if p.is_file() and not _is_derived_index(p):
             h.update(p.relative_to(root).as_posix().encode("utf-8"))
             h.update(b"\0")
             h.update(p.read_bytes())
