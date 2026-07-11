@@ -1446,7 +1446,14 @@ def _core_op_main(argv: list[str]) -> int:
             injected = (vault_root, schema_module.load_source_schema(vault_root))
         else:
             injected = (vault_root,)
-        result = cmd.leaf(*injected, **kwargs)
+        from .writer_lease import invoke_command
+
+        result = invoke_command(
+            cmd,
+            *injected,
+            idempotency_key=os.environ.get("EXOMEM_IDEMPOTENCY_KEY") or None,
+            **kwargs,
+        )
     except (cli_ops.OpError, ValueError, TypeError, RuntimeError) as e:
         err = cli_ops.error_dict(e)
         if as_json:

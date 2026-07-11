@@ -39,6 +39,8 @@ _REMEDIATION: dict[str, str] = {
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
+    "WRITER_LEASE_REQUIRED": "Send the mutation to the current writer or retry after its lease expires.",
+    "WRITER_COORDINATOR_UNAVAILABLE": "Check the coordinator URL, credentials, and service health; reads remain available.",
 }
 
 # Error codes whose HTTP status is NOT the default 400.
@@ -56,6 +58,9 @@ _CONFLICT_CODES = frozenset(
         "STALE_EDIT",
         "STALE_CONTRACT",
         "CONTRACT_EXISTS",
+        "WRITER_LEASE_REQUIRED",
+        "IDEMPOTENCY_KEY_REUSED",
+        "IDEMPOTENCY_IN_PROGRESS",
     }
 )
 
@@ -105,6 +110,8 @@ def http_status_for(code: str) -> int:
         return 404
     if code in _CONFLICT_CODES or code.endswith("_EXISTS"):
         return 409
+    if code == "WRITER_COORDINATOR_UNAVAILABLE":
+        return 503
     return 400
 
 

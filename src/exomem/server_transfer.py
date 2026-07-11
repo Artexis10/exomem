@@ -114,6 +114,17 @@ def register_transfer_routes(
                 {"code": "UNAUTHORIZED", "reason": "missing or invalid upload credential"},
                 status_code=401,
             )
+        from .cli_ops import OpError, error_dict, http_status_for
+        from .writer_lease import get_manager
+
+        try:
+            get_manager().ensure_writer()
+        except (OpError, ValueError) as exc:
+            error = error_dict(exc)
+            return JSONResponse(
+                {"code": error["code"], "reason": error["message"]},
+                status_code=http_status_for(error["code"]),
+            )
         try:
             form = await request.form(max_part_size=config.upload_max_bytes)
         except MultiPartException as exc:

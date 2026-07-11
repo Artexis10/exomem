@@ -289,9 +289,10 @@ service name, so it keeps working across the rename. Verify with
 
 ## Deploying on a second machine (multi-host)
 
-Each machine is an independent deployment — there is no shared state. To run exomem
-on a second box (e.g. a laptop alongside a desktop), repeat the install with that
-host's *own* values. The non-obvious parts:
+Each machine runs its own Exomem process and local vault replica. If both replicas
+can mutate a Syncthing-replicated vault, enable the writer lease below: Syncthing
+replicates files, while the coordinator guarantees that only one Exomem host writes.
+Without a lease, keep exactly one host writable. The non-obvious per-host parts:
 
 - **Its own public hostname.** `EXOMEM_BASE_URL` and the connector URL are
   per-host. Tailscale gives each node a distinct `<node>.<tailnet>.ts.net`
@@ -322,9 +323,82 @@ host's *own* values. The non-obvious parts:
   `embedding model ready ... on cuda`. (Default PyPI Windows torch is CPU-only,
   which is why the explicit CUDA index in `pyproject.toml` exists.)
 
-The deployments coexist — claude.ai talks to whichever host's connector you invoke,
-and only that host needs to be awake. After editing `.env`, restart the service so
-it reloads.
+### Single-writer lease and automatic laptop takeover
+
+The lease is replication-agnostic. It decides which replica may mutate; it does
+not copy vault files. This desktop/laptop example uses Syncthing, but self-hosters
+can use shared storage, Unison, rsync automation, Git-based replication, or another
+external mechanism. Followers can only serve content that mechanism has delivered,
+and its convergence/recovery behavior remains an operator concern.
+
+Network reachability is a third, separate layer. In a LAN-only Syncthing setup,
+an isolated laptop can take the lease and write its last local vault copy, but its
+changes do not reach the desktop until the machines share a network again. If
+takeover must work while the laptop is away from home, the coordinator must also
+be reachable from both networks (for example through public TLS, a small VPS, a
+managed linearizable service, or a private overlay network). Never put the only
+coordinator on the desktop whose shutdown is meant to trigger failover.
+
+Run one strongly consistent coordinator. The included reference service uses a
+transactional SQLite database on one always-on node:
+
+```powershell
+$env:EXOMEM_LEASE_COORDINATOR_TOKEN = '<long-random-secret>'
+uv run python -m exomem.lease_coordinator --host 0.0.0.0 --port 8770 `
+  --database C:\exomem-state\writer-leases.sqlite
+```
+
+Expose that service over private TLS or a protected tunnel. SQLite is consistent
+on a single coordinator node but not highly available; for HA, implement the same
+HTTP contract on a linearizable store such as a Durable Object, transactional SQL,
+Consul, or etcd.
+
+Configure both Exomem hosts with the same vault ID and coordinator, but unique
+replica IDs. Desktop example:
+
+```dotenv
+EXOMEM_WRITER_LEASE_URL=https://lease.example.com
+EXOMEM_WRITER_LEASE_VAULT_ID=personal-main
+EXOMEM_WRITER_LEASE_REPLICA_ID=desktop
+EXOMEM_WRITER_LEASE_TOKEN=<long-random-secret>
+EXOMEM_WRITER_LEASE_TTL=30
+EXOMEM_WRITER_LEASE_PREFERRED=1
+```
+
+Laptop uses the same values except
+`EXOMEM_WRITER_LEASE_REPLICA_ID=laptop` and omits the preferred flag. Both remain
+readable. The first write acquires the lease; the server renews it while alive.
+After a crash or sleep, another host can take over after the TTL. Writes fail closed
+with `WRITER_COORDINATOR_UNAVAILABLE` if authority cannot be confirmed, but reads
+continue locally. Check any replica with:
+
+```powershell
+uv run python -m exomem coordination_status --json
+```
+
+REST callers can attach `Idempotency-Key`; CLI callers can set
+`EXOMEM_IDEMPOTENCY_KEY` for retry-safe mutations. Idempotency records and lease
+credentials stay in per-machine runtime state, outside the synced vault.
+
+The coordinator contract is:
+
+- `POST /v1/vaults/{vault}/lease/acquire`
+- `POST /v1/vaults/{vault}/lease/renew`
+- `POST /v1/vaults/{vault}/lease/release`
+- `GET /v1/vaults/{vault}/lease`
+
+POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
+`fencing_token`. Responses carry only `holder`, `expires_at`, `fencing_token`, and
+`granted`; no vault content is sent. Use bearer authentication in any networked
+deployment.
+
+The deployments coexist — claude.ai can use either connector. After editing `.env`,
+restart each service so it reloads the coordination settings. Automatic two-way
+failover requires the vault folder to be Syncthing **Send & Receive on both hosts**;
+the writer lease is the write guard. Avoid direct Obsidian/filesystem edits on a
+follower because those bypass Exomem. Before deliberately stopping the active
+writer, let Syncthing reach **Up to Date**; on an unclean crash, the lease prevents
+split brain but cannot recover bytes the old writer had not replicated yet.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
@@ -518,7 +592,7 @@ The remote tier is intentionally minimal. Not included:
   RBAC).
 - Monitoring/metrics/observability beyond rotating file logs.
 - Web UI.
-- Multi-host failover / always-on home server (each host is independent; you pick
-  which connector to invoke).
+- Highly available coordinator hosting (the bundled SQLite coordinator is a
+  strongly consistent single-node reference).
 - Compiled-note creation from mobile (`add` only captures raw sources;
   compilation stays a desk-side / Claude Code flow).

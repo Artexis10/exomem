@@ -1,4 +1,12 @@
 {
+  "coordination_status": {
+    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {

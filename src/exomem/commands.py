@@ -4097,6 +4097,17 @@ def remember_description(project_keys_hint: str) -> str:
     """The `remember` MCP description with the live project-key hint substituted."""
     return (op_remember.__doc__ or "").replace("__PROJECT_KEYS_HINT__", project_keys_hint)
 
+
+def op_coordination_status(vault_root: Path) -> dict:  # noqa: ARG001
+    """Report this replica's writer-lease role and coordinator health.
+
+    Read-only and safe during coordinator outages. Credentials and vault content
+    are never included.
+    """
+    from .writer_lease import coordination_status
+
+    return coordination_status()
+
 def note_description(project_keys_hint: str) -> str:
     """The `note` MCP description with the live project-key hint substituted in.
 
@@ -4189,6 +4200,7 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
     },
 }
 _PRODUCT_METADATA: dict[str, dict] = {
+    "coordination_status": {"surface": "advanced", "actions": ("review",), "first_run_safe": True},
     "bootstrap": {"surface": "primary", "actions": (), "first_run_safe": True},
     "adopt": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
     "overview": {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
@@ -4224,6 +4236,7 @@ _RC = frozenset({"rest", "cli"})
 # meaningless through the REST/CLI JSON envelopes, so it is mcp-only.
 _M = frozenset({"mcp"})
 _SPEC: tuple[tuple, ...] = (
+    ("coordination_status", op_coordination_status, 1, False, False, None, _MCRC),
     ("bootstrap", op_bootstrap, 1, False, False, None, _MCRC),
     ("search", op_search, 1, False, False, "query", _MCRC),
     ("fetch", op_fetch, 1, False, False, "id", _MCRC),
@@ -4295,6 +4308,17 @@ def _build_commands() -> tuple[Command, ...]:
 COMMANDS: tuple[Command, ...] = _build_commands()
 
 _PRODUCT_SPEC: tuple[tuple, ...] = (
+    (
+        "coordination_status",
+        op_coordination_status,
+        1,
+        False,
+        False,
+        None,
+        _MCRC,
+        ("coordination_status",),
+        {"surface": "advanced", "actions": ("review",), "first_run_safe": True},
+    ),
     (
         "bootstrap",
         op_bootstrap,

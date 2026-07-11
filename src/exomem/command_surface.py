@@ -114,6 +114,7 @@ def bind_vault(
     *injected: object,
     name: str | None = None,
     description: str | None = None,
+    command: Command | None = None,
 ) -> Callable:
     """Return a callable FastMCP introspects exactly like a hand-written wrapper."""
     sig = inspect.signature(leaf)
@@ -137,7 +138,11 @@ def bind_vault(
     new_sig = sig.replace(parameters=visible)
 
     def wrapper(**kwargs):
-        return leaf(*injected, **kwargs)
+        if command is None:
+            return leaf(*injected, **kwargs)
+        from .writer_lease import invoke_command
+
+        return invoke_command(command, *injected, **kwargs)
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__
