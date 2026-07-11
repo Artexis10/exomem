@@ -125,6 +125,9 @@ def _find_call_summary(message) -> str:
 def build_server(*, require_auth: bool) -> FastMCP:
     """Construct and return the FastMCP app, ready to run."""
     runtime = initialize_runtime(load_dotenv_func=load_dotenv)
+    from .writer_lease import start_server_lifecycle
+
+    start_server_lifecycle()
     auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
 
     mcp = FastMCP("exomem", auth=auth, icons=server_icons())
@@ -157,7 +160,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
             description = commands_module.remember_description(runtime.project_keys_hint)
         mcp.tool(
             commands_module.bind_vault(
-                cmd.leaf, *injected, name=cmd.name, description=description
+                cmd.leaf, *injected, name=cmd.name, description=description, command=cmd
             ),
             annotations=cmd.mcp_annotations,
         )
@@ -225,6 +228,7 @@ def _register_legacy_mcp_tools(
                 name=cmd.name,
                 description="[Deprecated compatibility alias; prefer product commands.] "
                 + description,
+                command=cmd,
             ),
             annotations=cmd.mcp_annotations,
         )

@@ -119,7 +119,15 @@ def register_rest_facade(
                     _cmd.params, body, guarded_fields=_cmd.guarded_fields, tool=_cmd.name
                 )
                 injected = (vault_root, source_schema) if _cmd.needs_schema else (vault_root,)
-                result = await run_in_threadpool(_cmd.leaf, *injected, **kwargs)
+                from .writer_lease import invoke_command
+
+                result = await run_in_threadpool(
+                    invoke_command,
+                    _cmd,
+                    *injected,
+                    idempotency_key=request.headers.get("idempotency-key"),
+                    **kwargs,
+                )
             except (cli_ops.OpError, ValueError, TypeError) as exc:
                 err = cli_ops.error_dict(exc)
                 return RestJSONResponse(

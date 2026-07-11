@@ -6,18 +6,19 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 21
-- Tier 1 commands: 18
+- Product commands: 22
+- Tier 1 commands: 19
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 21
-- REST commands: 20
-- CLI commands: 20
+- Registry-generated MCP commands: 22
+- REST commands: 21
+- CLI commands: 21
 - Hand-registered MCP tools: none
 
 ## Product Command Registry
 
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |
 | --- | ---: | --- | --- | --- | --- | --- | --- | --- |
+| coordination_status | 1 | MCP, REST, CLI | read | no | - | coordination_status | - | Report this replica's writer-lease role and coordinator health. |
 | bootstrap | 1 | MCP, REST, CLI | read | no | - | bootstrap | profile, workflow | Return Exomem's versioned operating contract for generic MCP clients. |
 | ask_memory | 1 | MCP, REST, CLI | read | no | query | search, find | query, types, projects, tags, speakers, file_types, exclude_file_types, limit, scope, mode, detail, deep, graph, rerank, prefer_compiled, prefer_active, prefer_used, graph_enrich, include_timings | Recall durable knowledge from Exomem with product defaults. |
 | read_memory | 1 | MCP, REST, CLI | read | no | path | fetch, get | path*, frontmatter_only, include_history, links, include_raw | Read one memory page or curated vault file by path. |
