@@ -171,6 +171,53 @@ def test_cap_stops_candidate_generation_early_and_reports_honestly(
     assert capped["coverage"]["relation_scan_complete"] is False
 
 
+def test_dismissed_candidate_resurfaces_when_evidence_changes_without_source_edit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Some candidate methods (shared_sources, embedding_proximity) derive
+    # evidence from ANOTHER page or the corpus index, not from the "from"
+    # page's own content. If the fingerprint only folds in the source page's
+    # signal_version (as review_state.fingerprint does whenever meta.signal_
+    # version is supplied — it then ignores `detail` entirely), an evidence
+    # change driven by something other than an edit to the source page keeps
+    # the same fingerprint, and a stale dismissal never expires.
+    _write_page(tmp_path, "alpha", "See [[Knowledge Base/Notes/Insights/beta]].")
+    _write_page(tmp_path, "beta", "A measured fact.")
+    evidence_holder = {"cosine": 0.42}
+    real_page_candidates = relation_queue._page_candidates
+
+    def fake_page_candidates(vault_root, page, *, limit_per_page):
+        if not page.rel_path.endswith("alpha.md"):
+            return real_page_candidates(vault_root, page, limit_per_page=limit_per_page)
+        return [
+            {
+                "from": page.rel_path,
+                "to": "Knowledge Base/Notes/Insights/beta.md",
+                "relation_type": "relates_to",
+                "method": "embedding_proximity",
+                "evidence": dict(evidence_holder),
+            }
+        ]
+
+    monkeypatch.setattr(relation_queue, "_page_candidates", fake_page_candidates)
+
+    first = relation_queue.build_queue(tmp_path)
+    item = next(it for it in _all_items(first) if it["from"].endswith("alpha.md"))
+    relation_queue.triage(tmp_path, ref=item["ref"], action="dismiss")
+    still_dismissed = relation_queue.build_queue(tmp_path)
+    assert item["ref"] not in {it["ref"] for it in _all_items(still_dismissed)}
+
+    # The evidence changes (e.g. corpus-wide embedding drift from an edit to
+    # SOME OTHER page) — alpha.md itself is untouched on disk.
+    evidence_holder["cosine"] = 0.91
+    resurfaced = relation_queue.build_queue(tmp_path)
+    resurfaced_item = next(
+        it for it in _all_items(resurfaced) if it["from"].endswith("alpha.md")
+    )
+    assert resurfaced_item["fingerprint"] != item["fingerprint"]
+    assert resurfaced_item["ref"] in {it["ref"] for it in _all_items(resurfaced)}
+
+
 def test_read_never_writes_to_the_vault(tmp_path: Path) -> None:
     _seed(tmp_path)
     before = _tree_hash(tmp_path)

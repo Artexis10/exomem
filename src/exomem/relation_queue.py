@@ -83,6 +83,33 @@ def _bullet(candidate: dict[str, Any]) -> str:
     return f"- {relation} [[{destination}]]"
 
 
+def _evidence_signal_version(page: Any, candidate: dict[str, Any]) -> str:
+    """A version string that changes whenever the candidate's evidence does.
+
+    `review_state.fingerprint()` uses `meta.signal_version` verbatim as the
+    reason's version WHENEVER it is supplied, ignoring `detail` entirely (see
+    `review_state.fingerprint`). Folding in only the source page's own
+    `activation._signal_version` (as the activation/attention queues do,
+    since their findings are entirely about the source page) would miss
+    candidate methods whose evidence is driven by a DIFFERENT page or the
+    corpus index — `shared_sources` (a neighbour page's edge), and
+    `embedding_proximity` (a corpus-wide cosine score) — so an edit to that
+    OTHER page would never resurface a dismissed candidate. Hashing the
+    source page's signal version together with the serialized evidence (and
+    the candidate's own to/method/relation_type) means any of those changes
+    is reflected, regardless of which page produced them.
+    """
+    payload = {
+        "page_signal_version": activation_module._signal_version(page),
+        "method": str(candidate.get("method") or ""),
+        "relation_type": str(candidate.get("relation_type") or ""),
+        "to": str(candidate.get("to") or ""),
+        "evidence": candidate.get("evidence") or {},
+    }
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return vault_module.content_hash(encoded)[:16]
+
+
 def _candidate_fingerprint(
     candidate: dict[str, Any],
     *,
@@ -178,7 +205,7 @@ def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str,
         candidate,
         from_ref=refs.get(from_path, from_path),
         to_ref=refs.get(to_path, to_path),
-        signal_version=activation_module._signal_version(page),
+        signal_version=_evidence_signal_version(page, candidate),
     )
     return {
         "review_id": review_id,
