@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.18.0](https://github.com/Artexis10/exomem/compare/v0.17.0...v0.18.0) (2026-07-11)
+
+
+### Features
+
+* add multi-host writer lease ([#201](https://github.com/Artexis10/exomem/issues/201)) ([5b96122](https://github.com/Artexis10/exomem/commit/5b9612282f24922bd1d7a627492b27081847f5d4))
+
+
+### Bug Fixes
+
+* flush MCP SSE sessions immediately ([#205](https://github.com/Artexis10/exomem/issues/205)) ([4c3a843](https://github.com/Artexis10/exomem/commit/4c3a843afc04301285e7cdf07917cc96db222ad2))
+* restore fast reference enrichment ([#204](https://github.com/Artexis10/exomem/issues/204)) ([3c65563](https://github.com/Artexis10/exomem/commit/3c655636558c4ba33a806be3e22352713e50d2f6))
+
 ## [0.17.0](https://github.com/Artexis10/exomem/compare/v0.16.2...v0.17.0) (2026-07-11)
 
 
