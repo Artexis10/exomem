@@ -222,6 +222,7 @@ def _freshness_key(
     scope: str,
     query_norm: str,
     mode: str,
+    graph: bool,
     snapshot: FreshnessSnapshot,
 ) -> tuple:
     """Freshness inputs that can change this request's answer.
@@ -248,6 +249,15 @@ def _freshness_key(
 
         parts.append((".embeddings.sqlite", embeddings.EmbeddingIndex.cache_token(vault_root)))
         parts.append((".clip.sqlite", embeddings.ClipIndex.cache_token(vault_root)))
+        if graph:
+            # The typed graph lane can re-rank on sidecar content, so its in-band
+            # generation token joins the key (same guard as embeddings). Absent
+            # sentinel when the sidecar is unavailable keeps typed-mode and
+            # fallback-mode entries from colliding; never the sidecar mtime, which
+            # a WAL checkpoint moves without a content change.
+            from . import epistemic_graph
+
+            parts.append((".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent"))
     if mode in ("hybrid", "keyword"):
         # Which lexical backend serves (fts5 vs python) changes bm25-lane
         # scores, so a mid-process flip must not hit entries cached under the
@@ -429,7 +439,7 @@ def find(
         with _span(timings, "freshness"):
             fresh = _freshness_key(
                 vault_root, scope=scope, query_norm=query_norm, mode=mode,
-                snapshot=snapshot,
+                graph=graph, snapshot=snapshot,
             )
         cache_key = (request_key, fresh)
         with _span(timings, "cache_lookup"):

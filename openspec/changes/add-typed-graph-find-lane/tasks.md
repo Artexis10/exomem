@@ -45,10 +45,10 @@
 
 ## 3. Freshness key (src/exomem/find.py)
 
-- [ ] 3.1 In `_freshness_key()`, when `mode in ("hybrid","vector")` — same
+- [x] 3.1 In `_freshness_key()`, when `mode in ("hybrid","vector")` — same
       guard as embeddings — and graph lane enabled, append
       `(".graph.sqlite", epistemic_graph.cache_token(vault_root) or "absent")`.
-- [ ] 3.2 Tests: cached result invalidated by a relation-adding write; WAL
+- [x] 3.2 Tests: cached result invalidated by a relation-adding write; WAL
       mtime-only change does NOT evict (reuse the token, not mtime — assert
       token unchanged); typed→fallback flip changes the key.
 
