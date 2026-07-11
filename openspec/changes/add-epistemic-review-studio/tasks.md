@@ -53,8 +53,8 @@
 
 ## 8. Verification, Packaging, And Documentation
 
-- [ ] 8.1 Add an opt-in Playwright browser acceptance lane covering authentication, Inbox inspection, triage, activation separation, governed proposal confirmation, evolution, back/forward navigation, narrow viewport, and keyboard-only operation without making browser tooling a runtime dependency.
-- [ ] 8.2 Run focused Studio/context tests, `uv run ruff check`, the lean full suite with embeddings disabled, generated-capability checks, REST/MCP schema fixtures, scaffold leak guard, startup benchmark, and latency gate.
-- [ ] 8.3 Build wheel and sdist artifacts, install the wheel into a clean environment, verify offline Studio assets/routes and the full read/triage lifecycle, and confirm package-size growth remains within the documented budget.
-- [ ] 8.4 Document the Review Studio quickstart, auth behavior, local and remote deployment, measurement-only semantics, explicit write confirmations, activation prerequisite, and deliberate non-goals versus a generic notes app.
-- [ ] 8.5 Record the shipped end-to-end product proof in the product gap matrix and Exomem Knowledge Base after acceptance, including known limitations and the next measured product decision.
+- [x] 8.1 Add an opt-in Playwright browser acceptance lane covering authentication, Inbox inspection, triage, activation separation, governed proposal confirmation, evolution, back/forward navigation, narrow viewport, and keyboard-only operation without making browser tooling a runtime dependency.
+- [x] 8.2 Run focused Studio/context tests, `uv run ruff check`, the lean full suite with embeddings disabled, generated-capability checks, REST/MCP schema fixtures, scaffold leak guard, startup benchmark, and latency gate.
+- [x] 8.3 Build wheel and sdist artifacts, install the wheel into a clean environment, verify offline Studio assets/routes and the full read/triage lifecycle, and confirm package-size growth remains within the documented budget.
+- [x] 8.4 Document the Review Studio quickstart, auth behavior, local and remote deployment, measurement-only semantics, explicit write confirmations, activation prerequisite, and deliberate non-goals versus a generic notes app.
+- [x] 8.5 Record the shipped end-to-end product proof in the product gap matrix and Exomem Knowledge Base after acceptance, including known limitations and the next measured product decision.

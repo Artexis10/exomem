@@ -61,7 +61,9 @@ def assemble(
         max_history=max_history,
         max_evolution_versions=max_evolution_versions,
     )
-    item = attention.item_by_ref(vault_root, ref)
+    item = attention.item_by_ref(
+        vault_root, ref, expected_fingerprint=expected_fingerprint
+    )
     if expected_fingerprint and expected_fingerprint != item.fingerprint:
         raise ValueError(
             "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "

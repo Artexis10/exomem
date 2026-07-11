@@ -469,6 +469,7 @@ async function submitTriage() {
       action: dialogAction.action,
       until: data.get("until") || null,
       why: data.get("why") || null,
+      expected_fingerprint: context.item.fingerprint,
     });
     dialog.close();
     context = null;

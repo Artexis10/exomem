@@ -3496,6 +3496,7 @@ def op_triage_memory(
     action: str,
     until: str | None = None,
     why: str | None = None,
+    expected_fingerprint: str | None = None,
 ) -> dict:
     """Triage one Epistemic Inbox item explicitly.
 
@@ -3508,8 +3509,17 @@ def op_triage_memory(
         action: dismiss, snooze, or reopen.
         until: Snooze-through date as YYYY-MM-DD; required only for snooze.
         why: Optional short rationale stored with the review decision.
+        expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
+            the write and asks the caller to refresh.
     """
-    item = attention_module.item_by_ref(vault_root, ref)
+    item = attention_module.item_by_ref(
+        vault_root, ref, expected_fingerprint=expected_fingerprint
+    )
+    if expected_fingerprint and item.fingerprint != expected_fingerprint:
+        raise ValueError(
+            "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
+            f"and inspect {item.ref} again"
+        )
     result = review_state_module.ReviewStateStore(vault_root).apply(
         item.item_id or review_state_module.parse_review_ref(ref),
         item.fingerprint or "",

@@ -176,3 +176,70 @@ def test_review_memory_activation_response_is_json_serializable(tmp_path: Path) 
     assert result["truncated"] > 0
     assert result["coverage"]["eligible_pages"] == 5
     assert json.loads(json.dumps(result))["coverage"] == result["coverage"]
+
+
+def test_expected_fingerprint_disambiguates_same_target_across_review_modes(
+    tmp_path: Path, monkeypatch
+) -> None:
+    target_ref = "exomem://vault/shared"
+    review_ref = review_state.review_ref(review_state.item_id(target_ref))
+    attention_item = attention.AttentionItem(
+        path="shared.md",
+        score=1.0,
+        severity="info",
+        categories=["stale_review"],
+        reasons=[],
+        proposed_fix="Review.",
+        item_id=review_state.item_id(target_ref),
+        ref=review_ref,
+        target_ref=target_ref,
+        fingerprint="attention-fingerprint",
+        state="open",
+    )
+    activation_item = attention.AttentionItem(
+        path="shared.md",
+        score=1.0,
+        severity="info",
+        categories=["relation_debt"],
+        reasons=[],
+        proposed_fix="Review.",
+        item_id=review_state.item_id(target_ref),
+        ref=review_ref,
+        target_ref=target_ref,
+        fingerprint="activation-fingerprint",
+        state="open",
+    )
+    monkeypatch.setattr(
+        attention,
+        "attention",
+        lambda *args, **kwargs: attention.AttentionReport(
+            items=[attention_item],
+            summary={},
+            shown=1,
+            total=1,
+            truncated=0,
+            upstream_truncated=0,
+            note=None,
+        ),
+    )
+    monkeypatch.setattr(
+        attention,
+        "activation",
+        lambda *args, **kwargs: attention.AttentionReport(
+            items=[activation_item],
+            summary={},
+            shown=1,
+            total=1,
+            truncated=0,
+            upstream_truncated=0,
+            note=None,
+        ),
+    )
+
+    resolved = attention.item_by_ref(
+        tmp_path,
+        review_ref,
+        expected_fingerprint="activation-fingerprint",
+    )
+
+    assert resolved.categories == ["relation_debt"]

@@ -338,17 +338,23 @@ def item_by_ref(
     vault_root: Path,
     reference: str,
     *,
+    expected_fingerprint: str | None = None,
     today=None,
 ) -> AttentionItem:
     """Resolve one current review item by its stable review reference."""
     wanted = review_state_module.parse_review_ref(reference)
+    matches: list[AttentionItem] = []
     for report in (
         attention(vault_root, limit=0, state="all", today=today),
         activation(vault_root, limit=0, state="all", today=today),
     ):
         for item in report.items:
             if item.item_id == wanted:
-                return item
+                if expected_fingerprint and item.fingerprint == expected_fingerprint:
+                    return item
+                matches.append(item)
+    if matches:
+        return matches[0]
     raise ValueError(f"REVIEW_ITEM_NOT_FOUND: no current review item for {reference}")
 
 

@@ -2323,6 +2323,18 @@
           ],
           "default": null,
           "description": "Optional short rationale stored with the review decision."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
         }
       },
       "required": [
