@@ -36,12 +36,12 @@
 
 ## 3. Studio panel (src/exomem/studio/)
 
-- [ ] 3.1 Batched queue panel in app.v1.js: grouped by page, per-item
+- [x] 3.1 Batched queue panel in app.v1.js: grouped by page, per-item
       Accept (audit reason required) / Dismiss / Snooze, via existing
       api.v1.js REST calls + guardedWrite fingerprint handling; panel
       refresh after actions; no client-side ranking.
-- [ ] 3.2 Bump studio asset version per the existing versioning convention.
-- [ ] 3.3 Extend tests/test_studio_governed_flows.py: queue render, accept
+- [x] 3.2 Bump studio asset version per the existing versioning convention.
+- [x] 3.3 Extend tests/test_studio_governed_flows.py: queue render, accept
       round-trip, drift-refusal handling, triage round-trip.
 
 ## 4. Gates

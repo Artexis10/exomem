@@ -157,3 +157,118 @@ def test_supersession_confirmation_records_successor_reason_and_pointer(
     assert (vault / result["new_path"]).is_file()
     log = (vault / "Knowledge Base/log.md").read_text(encoding="utf-8")
     assert "New recorded evidence changed the conclusion" in log
+
+
+def _seed_relation_queue(vault: Path) -> str:
+    acorn_rel = "Knowledge Base/Notes/Insights/studio-queue-acorn.md"
+    _write(
+        vault,
+        acorn_rel,
+        "---\ntype: insight\nstatus: active\n---\n# Studio queue acorn\n\n"
+        "## Relations\n\n"
+        "See [[Knowledge Base/Notes/Insights/studio-queue-birch]].\n",
+    )
+    _write(
+        vault,
+        "Knowledge Base/Notes/Insights/studio-queue-birch.md",
+        "---\ntype: insight\nstatus: active\n---\n# Studio queue birch\n\nA fact.\n",
+    )
+    find.clear_cache()
+    return acorn_rel
+
+
+def _acorn_item(client: TestClient, acorn_rel: str) -> tuple[dict, str]:
+    queue = _post(client, "review_memory", {"mode": "relation-queue"})
+    group = next(g for g in queue["groups"] if g["path"] == acorn_rel)
+    return group["items"][0], group["content_hash"]
+
+
+def test_relation_queue_panel_render_is_read_only(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acorn_rel = _seed_relation_queue(vault)
+    before = (vault / acorn_rel).read_bytes()
+    client = _client(vault, monkeypatch)
+
+    queue = _post(client, "review_memory", {"mode": "relation-queue"})
+
+    assert queue["mode"] == "relation-queue"
+    assert queue["mutated"] is False
+    item, _hash = _acorn_item(client, acorn_rel)
+    assert item["to"].endswith("studio-queue-birch.md")
+    assert (vault / acorn_rel).read_bytes() == before
+
+
+def test_relation_queue_accept_round_trip_writes_canonical_bullet(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acorn_rel = _seed_relation_queue(vault)
+    client = _client(vault, monkeypatch)
+    item, content_hash = _acorn_item(client, acorn_rel)
+
+    accepted = _post(
+        client,
+        "connect_memory",
+        {
+            "operation": "accept-relation",
+            "ref": item["ref"],
+            "expected_hash": content_hash,
+            "why": "Accepted reviewed relation from the Studio queue",
+        },
+    )
+
+    assert accepted["accepted"] is True
+    page = (vault / acorn_rel).read_text(encoding="utf-8")
+    assert "- links_to [[Knowledge Base/Notes/Insights/studio-queue-birch]]" in page
+    assert "Accepted reviewed relation from the Studio queue" in (
+        vault / "Knowledge Base/log.md"
+    ).read_text(encoding="utf-8")
+    # Accepted candidate leaves the queue on re-read.
+    find.clear_cache()
+    requeued = _post(client, "review_memory", {"mode": "relation-queue"})
+    refs = {it["ref"] for g in requeued["groups"] for it in g["items"]}
+    assert item["ref"] not in refs
+
+
+def test_relation_queue_accept_refuses_on_target_drift(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acorn_rel = _seed_relation_queue(vault)
+    client = _client(vault, monkeypatch)
+    item, _hash = _acorn_item(client, acorn_rel)
+    before = (vault / acorn_rel).read_bytes()
+
+    response = client.post(
+        "/api/connect_memory",
+        json={
+            "operation": "accept-relation",
+            "ref": item["ref"],
+            "expected_hash": "0" * 64,
+            "why": "Accepted reviewed relation from the Studio queue",
+        },
+        headers={"Authorization": "Bearer studio-key"},
+    )
+
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["code"] == "STALE_EDIT"
+    assert (vault / acorn_rel).read_bytes() == before
+
+
+def test_relation_queue_triage_round_trip_dismisses_candidate(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    acorn_rel = _seed_relation_queue(vault)
+    client = _client(vault, monkeypatch)
+    item, _hash = _acorn_item(client, acorn_rel)
+
+    dismissed = _post(
+        client,
+        "triage_memory",
+        {"ref": item["ref"], "action": "dismiss", "expected_fingerprint": item["fingerprint"]},
+    )
+
+    assert dismissed["state"] == "dismissed"
+    find.clear_cache()
+    requeued = _post(client, "review_memory", {"mode": "relation-queue"})
+    refs = {it["ref"] for g in requeued["groups"] for it in g["items"]}
+    assert item["ref"] not in refs

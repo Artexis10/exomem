@@ -42,6 +42,7 @@
         <div class="mode-tabs" role="tablist" aria-label="Review worklist">
           <button id="mode-inbox" role="tab" aria-selected="true" data-mode="attention">Inbox</button>
           <button id="mode-activation" role="tab" aria-selected="false" data-mode="activation">Activation</button>
+          <button id="mode-relations" role="tab" aria-selected="false" data-mode="relation-queue">Relations</button>
         </div>
         <div class="worklist-heading">
           <div>
@@ -104,6 +105,7 @@
             <ol id="evolution-list" class="timeline"></ol>
           </section>
         </div>
+        <section id="relation-queue-panel" class="relation-queue" hidden aria-label="Relation acceptance queue"></section>
         <p id="workspace-error" class="error" role="alert" tabindex="-1" hidden></p>
       </article>
     </section>
@@ -123,6 +125,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="/studio/assets/app.v1.js"></script>
+  <script type="module" src="/studio/assets/app.v2.js"></script>
 </body>
 </html>

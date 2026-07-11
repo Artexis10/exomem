@@ -12,6 +12,7 @@ const dialog = byId("action-dialog");
 let route = readRoute();
 let report = null;
 let context = null;
+let queue = null;
 let dialogAction = null;
 let restoreRef = "";
 
@@ -65,10 +66,15 @@ async function authenticate(key = "") {
   try {
     const data = await command("review_memory", {mode: route.mode, state: route.state, limit: 50}, {key});
     if (key) setStoredKey(key);
-    report = data;
     showStudio();
-    renderWorklist();
-    await restoreSelection();
+    if (route.mode === "relation-queue") {
+      queue = data;
+      renderRelationQueue();
+    } else {
+      report = data;
+      renderWorklist();
+      await restoreSelection();
+    }
   } catch (error) {
     if (key) setStoredKey("");
     showAuth(error);
@@ -76,6 +82,8 @@ async function authenticate(key = "") {
 }
 
 async function loadWorklist({focusRef = ""} = {}) {
+  if (route.mode === "relation-queue") return loadRelationQueue();
+  byId("relation-queue-panel").hidden = true;
   status.textContent = route.mode === "activation" ? "Measuring corpus activation…" : "Loading Inbox…";
   try {
     report = await command("review_memory", {mode: route.mode, state: route.state, limit: 50});
@@ -454,6 +462,8 @@ async function submitDialog(event) {
   if (!dialogAction) return;
   if (dialogAction.kind === "triage") await submitTriage();
   if (dialogAction.kind === "relation") await submitRelation();
+  if (dialogAction.kind === "relation-accept") await submitRelationAccept();
+  if (dialogAction.kind === "relation-triage") await submitRelationTriage();
   if (dialogAction.kind === "compile") await submitCompilation();
   if (dialogAction.kind === "replace") await submitReplacement();
 }
@@ -488,23 +498,32 @@ async function submitTriage() {
   }
 }
 
-async function guardedWrite(write) {
+async function guardedWrite(write, options = {}) {
+  const {
+    precheck = true,
+    onDone = () => loadWorklist({focusRef: restoreRef}),
+    onDrift = () => loadWorklist(),
+    driftCodes = ["REVIEW_ITEM_CHANGED"],
+    driftMessage = "The reviewed signal changed. The draft is preserved and nothing was written; refresh before confirming.",
+  } = options;
   const confirm = byId("dialog-confirm");
   confirm.disabled = true;
   try {
-    await command("review_item_context", {ref: context.item.ref, expected_fingerprint: context.item.fingerprint});
+    if (precheck) await command("review_item_context", {ref: context.item.ref, expected_fingerprint: context.item.fingerprint});
     await write();
     dialog.close();
-    context = null;
-    route = routePatch(route, {ref: ""});
-    writeRoute(route, {replace: true});
-    byId("workspace-content").hidden = true;
-    byId("workspace-empty").hidden = false;
-    await loadWorklist({focusRef: restoreRef});
+    if (precheck) {
+      context = null;
+      route = routePatch(route, {ref: ""});
+      writeRoute(route, {replace: true});
+      byId("workspace-content").hidden = true;
+      byId("workspace-empty").hidden = false;
+    }
+    await onDone();
   } catch (error) {
-    if (error instanceof ApiError && error.code === "REVIEW_ITEM_CHANGED") {
-      showError(byId("dialog-error"), new ApiError("The reviewed signal changed. The draft is preserved and nothing was written; refresh before confirming."));
-      await loadWorklist();
+    if (error instanceof ApiError && driftCodes.includes(error.code)) {
+      showError(byId("dialog-error"), new ApiError(driftMessage));
+      await onDrift();
     } else showError(byId("dialog-error"), error);
   } finally {
     confirm.disabled = false;
@@ -550,6 +569,207 @@ async function submitReplacement() {
     content: data.get("content"),
     sources: context.target.frontmatter?.sources || null,
   }));
+}
+
+// --- Relation-acceptance queue panel ------------------------------------- //
+// A batched, read-only view over review_memory(mode="relation-queue"), grouped
+// by page in the server's order (no client-side ranking — Studio spec rule).
+// Accept authors the canonical bullet through the governed accept operation;
+// Dismiss/Snooze persist fingerprint-bound review-state decisions.
+
+async function loadRelationQueue() {
+  byId("workspace-content").hidden = true;
+  byId("workspace-empty").hidden = true;
+  status.textContent = "Assembling the relation-acceptance queue…";
+  try {
+    queue = await command("review_memory", {mode: "relation-queue", limit: 50});
+    renderRelationQueue();
+  } catch (error) {
+    if (error instanceof ApiError && (error.status === 401 || error.code === "REST_DISABLED")) {
+      showAuth(error);
+      return;
+    }
+    queue = null;
+    replaceChildren(reviewList);
+    byId("relation-queue-panel").hidden = true;
+    byId("workspace-empty").hidden = false;
+    status.textContent = `Relation queue unavailable: ${errorMessage(error)}`;
+  }
+}
+
+function renderRelationQueue() {
+  byId("worklist-kicker").textContent = "Relation debt";
+  byId("worklist-title").textContent = "Relation Queue";
+  for (const tab of document.querySelectorAll("[data-mode]")) {
+    tab.setAttribute("aria-selected", String(tab.dataset.mode === route.mode));
+  }
+  renderQueueCoverage();
+  const groups = queue?.groups || [];
+  const shown = queue?.shown ?? 0;
+  status.textContent = groups.length
+    ? `${shown} candidate${shown === 1 ? "" : "s"} across ${groups.length} page${groups.length === 1 ? "" : "s"}.`
+    : "No relation candidates await review.";
+  if (queue?.pages_truncated) status.textContent += ` · ${queue.pages_truncated} more page(s) not shown.`;
+  replaceChildren(reviewList, groups.map((group, index) => {
+    const li = document.createElement("li");
+    const button = element("button", "", "review-card");
+    button.type = "button";
+    button.append(element("strong", group.title || group.path));
+    button.append(element("span", `${group.items.length} candidate${group.items.length === 1 ? "" : "s"}`, "fine-print"));
+    button.addEventListener("click", () => byId(`relation-group-${index}`)?.scrollIntoView({block: "start"}));
+    li.append(button);
+    return li;
+  }));
+  byId("workspace-empty").hidden = true;
+  byId("workspace-content").hidden = true;
+  const panel = byId("relation-queue-panel");
+  panel.hidden = false;
+  replaceChildren(
+    panel,
+    groups.length
+      ? groups.map(renderRelationGroup)
+      : [element("p", "No relation candidates await review. Accepted edges leave the queue automatically.", "section-note empty")],
+  );
+}
+
+function renderQueueCoverage() {
+  const node = byId("coverage");
+  const coverage = queue?.coverage;
+  if (!coverage) {
+    node.hidden = true;
+    replaceChildren(node);
+    return;
+  }
+  const rows = [];
+  for (const [name, value] of Object.entries(coverage)) {
+    const row = document.createElement("div");
+    row.append(element("dt", label(name)), element("dd", value));
+    rows.push(row);
+  }
+  replaceChildren(node, rows);
+  node.hidden = false;
+}
+
+function renderRelationGroup(group, index) {
+  const section = element("section", "", "relation-group");
+  section.id = `relation-group-${index}`;
+  section.append(element("h3", group.title || group.path));
+  section.append(element("p", group.path, "path"));
+  const rows = (group.items || []).map((item) => renderRelationCandidate(item, group));
+  section.append(list(rows));
+  return section;
+}
+
+function renderRelationCandidate(item, group) {
+  const li = element("li", "", "relation-candidate");
+  const summary = element("div", "", "relation-summary");
+  const destination = String(item.to || "").replace(/\.md$/, "");
+  summary.append(element("strong", `${item.relation_type || "relates_to"} → ${destination}`));
+  summary.append(element("span", `method: ${label(item.method)}`, "tag"));
+  li.append(summary);
+  const actions = element("div", "", "actions");
+  const accept = element("button", "Accept");
+  accept.type = "button";
+  accept.addEventListener("click", () => openRelationAccept(item, group));
+  const dismiss = element("button", "Dismiss");
+  dismiss.type = "button";
+  dismiss.addEventListener("click", () => openRelationTriage(item, "dismiss"));
+  const snooze = element("button", "Snooze");
+  snooze.type = "button";
+  snooze.addEventListener("click", () => openRelationTriage(item, "snooze"));
+  actions.append(accept, dismiss, snooze);
+  li.append(actions);
+  return li;
+}
+
+function openRelationAccept(item, group) {
+  dialogAction = {kind: "relation-accept", item, group};
+  restoreRef = "";
+  const destination = String(item.to || "").replace(/\.md$/, "");
+  byId("dialog-kicker").textContent = "Governed accept";
+  byId("dialog-title").textContent = "Accept this relation?";
+  byId("dialog-description").textContent = `${group.title || group.path} · ${item.relation_type || "relates_to"} → ${destination}`;
+  replaceChildren(byId("dialog-fields"), [inputField("Audit reason", "why", "Accepted reviewed relation", {required: true})]);
+  byId("dialog-error").hidden = true;
+  byId("dialog-confirm").disabled = false;
+  byId("dialog-confirm").textContent = "Confirm governed accept";
+  dialog.showModal();
+}
+
+function openRelationTriage(item, action) {
+  dialogAction = {kind: "relation-triage", item, action};
+  restoreRef = "";
+  const destination = String(item.to || "").replace(/\.md$/, "");
+  byId("dialog-kicker").textContent = "Governed triage";
+  byId("dialog-title").textContent = `${label(action)} this relation candidate?`;
+  byId("dialog-description").textContent = `${item.relation_type || "relates_to"} → ${destination}`;
+  const fields = [];
+  if (action === "snooze") {
+    const labelNode = element("label", "Snooze through");
+    const input = document.createElement("input");
+    input.name = "until";
+    input.type = "date";
+    input.required = true;
+    labelNode.append(input);
+    fields.push(labelNode);
+  }
+  const whyLabel = element("label", "Optional rationale");
+  const why = document.createElement("textarea");
+  why.name = "why";
+  why.rows = 3;
+  whyLabel.append(why);
+  fields.push(whyLabel);
+  replaceChildren(byId("dialog-fields"), fields);
+  byId("dialog-error").hidden = true;
+  byId("dialog-confirm").disabled = false;
+  byId("dialog-confirm").textContent = `Confirm ${label(action)}`;
+  dialog.showModal();
+}
+
+async function submitRelationAccept() {
+  const data = new FormData(byId("dialog-form"));
+  const why = String(data.get("why") || "").trim();
+  if (!why) {
+    showError(byId("dialog-error"), new ApiError("An audit reason is required to accept a relation."));
+    return;
+  }
+  const {item, group} = dialogAction;
+  await guardedWrite(
+    () => command("connect_memory", {
+      operation: "accept-relation",
+      ref: item.ref,
+      expected_hash: group.content_hash,
+      why,
+      expected_fingerprint: item.fingerprint,
+    }),
+    {
+      precheck: false,
+      onDone: () => loadRelationQueue(),
+      onDrift: () => loadRelationQueue(),
+      driftCodes: ["REVIEW_ITEM_CHANGED", "STALE_EDIT"],
+      driftMessage: "The relation candidate or target page changed. Nothing was written; the queue has been refreshed.",
+    },
+  );
+}
+
+async function submitRelationTriage() {
+  const data = new FormData(byId("dialog-form"));
+  const {item, action} = dialogAction;
+  await guardedWrite(
+    () => command("triage_memory", {
+      ref: item.ref,
+      action,
+      until: data.get("until") || null,
+      why: data.get("why") || null,
+      expected_fingerprint: item.fingerprint,
+    }),
+    {
+      precheck: false,
+      onDone: () => loadRelationQueue(),
+      onDrift: () => loadRelationQueue(),
+      driftMessage: "The relation candidate changed. Nothing was written; the queue has been refreshed.",
+    },
+  );
 }
 
 function wireEvents() {
