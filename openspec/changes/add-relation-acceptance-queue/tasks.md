@@ -18,17 +18,17 @@
 
 ## 2. Command surface (src/exomem/commands.py)
 
-- [ ] 2.1 `review_memory(mode="relation-queue")` → relation_queue.build_queue
+- [x] 2.1 `review_memory(mode="relation-queue")` → relation_queue.build_queue
       (read-only registry op).
-- [ ] 2.2 `connect_memory(operation="accept-relation")` → op_accept_relation:
+- [x] 2.2 `connect_memory(operation="accept-relation")` → op_accept_relation:
       re-derive candidate, fingerprint equality check, expected_hash check,
       then the same internal heading-append edit path op_edit_memory uses;
       drift error contract on any mismatch; response includes the written
       bullet and new content hash.
-- [ ] 2.3 `triage_memory`: relation-queue refs accepted by existing actions;
+- [x] 2.3 `triage_memory`: relation-queue refs accepted by existing actions;
       namespace isolation (triaging a relation item never resolves
       activation/attention items — mirror the #198 isolation test).
-- [ ] 2.4 Red-first tests: accept writes exactly one canonical bullet
+- [x] 2.4 Red-first tests: accept writes exactly one canonical bullet
       (byte-compare with a Studio-path write of the same candidate);
       fingerprint mismatch refuses; hash mismatch refuses; accepted item
       absent on re-read; dismissed item absent until fingerprint changes;

@@ -68,6 +68,7 @@ from . import query_log, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
+from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
 from . import review_context as review_context_module
@@ -3377,7 +3378,13 @@ def op_review_memory(
 
     Args:
         mode: attention, activation, item, audit, provenance, evolution,
-            compilation, stale, contradiction, unprocessed-sources, or relation-debt.
+            compilation, stale, contradiction, unprocessed-sources, relation-debt,
+            or relation-queue. `relation-queue` returns the read-only, batched
+            relation-acceptance queue (deterministic suggestion candidates
+            grouped by source page, with signal fingerprints and coverage
+            counters); accept a candidate via
+            `connect_memory(operation="accept-relation")` or reject via
+            `triage_memory`.
         categories: Optional category filter for attention/activation/audit.
         limit: Attention/activation/evolution result cap.
         query: Topic for evolution review.
@@ -3429,6 +3436,8 @@ def op_review_memory(
         return op_attention(
             vault_root, categories=["relation_debt"], limit=limit, state=state
         )
+    if mode == "relation-queue":
+        return relation_queue_module.build_queue(vault_root, limit_pages=limit)
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
     if mode == "evolution":
@@ -3440,7 +3449,7 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, or relation-debt"
+        "unprocessed-sources, relation-debt, or relation-queue"
     )
 
 
@@ -3508,6 +3517,15 @@ def op_triage_memory(
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
     """
+    if relation_queue_module.is_relation_ref(ref):
+        return relation_queue_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     item = attention_module.item_by_ref(
         vault_root, ref, expected_fingerprint=expected_fingerprint
     )
@@ -3567,15 +3585,21 @@ def op_connect_memory(
     decided: str | None = None,
     project: str | None = None,
     decision_status: str | None = None,
+    ref: str | None = None,
+    expected_hash: str | None = None,
+    why: str | None = None,
+    expected_fingerprint: str | None = None,
 ) -> dict | list[dict]:
     """Connect memory through links, typed graph context, or entities.
 
     Proposal modes are read-only. `operation="create-entity"` is an explicit
     additive write that creates a typed graph node through the canonical entity
-    writer.
+    writer. `operation="accept-relation"` is a governed additive write that
+    authors one reviewed relation-queue candidate.
 
     Args:
-        operation: context, suggest-links, suggest-relations, graph-context, inbound-links, or create-entity.
+        operation: context, suggest-links, suggest-relations, graph-context,
+            inbound-links, create-entity, or accept-relation.
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
@@ -3607,7 +3631,23 @@ def op_connect_memory(
         decided: Decision date.
         project: Decision project key.
         decision_status: Decision status.
+        ref: Relation-queue item ref for accept-relation.
+        expected_hash: Target page `content_hash` drift guard for accept-relation.
+        why: Audit reason recorded with the accept-relation edit.
+        expected_fingerprint: Optional reviewed candidate fingerprint; a mismatch
+            refuses the accept-relation write.
     """
+    if operation == "accept-relation":
+        if not ref:
+            raise ValueError("INVALID_MODE: accept-relation requires `ref`")
+        return relation_queue_module.accept(
+            vault_root,
+            ref=ref,
+            expected_hash=expected_hash,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+            edit_memory=op_edit_memory,
+        )
     if path:
         path = _resolve_memory_identifier(vault_root, path)
     if target:
@@ -3678,7 +3718,8 @@ def op_connect_memory(
         )
     raise ValueError(
         "INVALID_MODE: connect_memory operation must be context, suggest-links, "
-        "suggest-relations, graph-context, inbound-links, or create-entity"
+        "suggest-relations, graph-context, inbound-links, create-entity, or "
+        "accept-relation"
     )
 
 
