@@ -70,6 +70,7 @@ from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
+from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
@@ -3447,12 +3448,55 @@ def op_review_memory(
     )
 
 
+def op_review_item_context(
+    vault_root: Path,
+    ref: str,
+    expected_fingerprint: str | None = None,
+    max_body_chars: int = 4000,
+    max_related_pages: int = 8,
+    max_graph_nodes: int = 30,
+    max_graph_edges: int = 60,
+    max_history: int = 10,
+    max_evolution_versions: int = 10,
+) -> dict:
+    """Inspect one stable review item with bounded recorded context.
+
+    Resolves an Inbox or corpus-activation item by `exomem://review/<id>` and
+    composes its target, related summaries, provenance/evidence, graph, history,
+    and path-specific supersession evolution. This is deterministic read-only
+    assembly: it runs no model, makes no epistemic judgment, and never writes.
+
+    Args:
+        ref: Stable `exomem://review/<id>` reference.
+        expected_fingerprint: Optional reviewed fingerprint; a mismatch asks the
+            caller to refresh instead of presenting stale context.
+        max_body_chars: Maximum target body characters.
+        max_related_pages: Maximum related-page summaries.
+        max_graph_nodes: Maximum graph nodes.
+        max_graph_edges: Maximum graph edges.
+        max_history: Maximum recorded history entries.
+        max_evolution_versions: Maximum recorded supersession versions.
+    """
+    return review_context_module.assemble(
+        vault_root,
+        ref=ref,
+        expected_fingerprint=expected_fingerprint,
+        max_body_chars=max_body_chars,
+        max_related_pages=max_related_pages,
+        max_graph_nodes=max_graph_nodes,
+        max_graph_edges=max_graph_edges,
+        max_history=max_history,
+        max_evolution_versions=max_evolution_versions,
+    )
+
+
 def op_triage_memory(
     vault_root: Path,
     ref: str,
     action: str,
     until: str | None = None,
     why: str | None = None,
+    expected_fingerprint: str | None = None,
 ) -> dict:
     """Triage one Epistemic Inbox item explicitly.
 
@@ -3465,8 +3509,17 @@ def op_triage_memory(
         action: dismiss, snooze, or reopen.
         until: Snooze-through date as YYYY-MM-DD; required only for snooze.
         why: Optional short rationale stored with the review decision.
+        expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
+            the write and asks the caller to refresh.
     """
-    item = attention_module.item_by_ref(vault_root, ref)
+    item = attention_module.item_by_ref(
+        vault_root, ref, expected_fingerprint=expected_fingerprint
+    )
+    if expected_fingerprint and item.fingerprint != expected_fingerprint:
+        raise ValueError(
+            "REVIEW_ITEM_CHANGED: the review signal changed; refresh the worklist "
+            f"and inspect {item.ref} again"
+        )
     result = review_state_module.ReviewStateStore(vault_root).apply(
         item.item_id or review_state_module.parse_review_ref(ref),
         item.fingerprint or "",
@@ -4106,7 +4159,12 @@ _SIMPLE_ACTION_DEFS: dict[str, dict] = {
         "route": {"tool": "review_memory", "args": {"mode": "attention"}},
         "audit_route": {"tool": "review_memory", "args": {"mode": "audit"}},
         "safety": "read-only by default; triage state changes are explicit through triage_memory",
-        "advanced": ["review_memory", "triage_memory", "compile_source"],
+        "advanced": [
+            "review_memory",
+            "review_item_context",
+            "triage_memory",
+            "compile_source",
+        ],
     },
     "connect": {
         "intent": "Find links or typed relations that make the knowledge graph denser.",
@@ -4142,6 +4200,11 @@ _PRODUCT_METADATA: dict[str, dict] = {
     "note": {"surface": "primary", "actions": ("save", "update"), "first_run_safe": False},
     "preserve": {"surface": "primary", "actions": ("prove", "save"), "first_run_safe": False},
     "attention": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
+    "review_item_context": {
+        "surface": "primary",
+        "actions": ("review", "ask"),
+        "first_run_safe": True,
+    },
     "audit": {"surface": "primary", "actions": ("review",), "first_run_safe": True},
     "edit": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
     "replace": {"surface": "primary", "actions": ("update",), "first_run_safe": False},
@@ -4171,6 +4234,7 @@ _SPEC: tuple[tuple, ...] = (
     ("add", op_add, 1, True, True, None, _MCRC),
     ("audit", op_audit, 1, False, False, None, _MCRC),
     ("attention", op_attention, 1, False, False, None, _MCRC),
+    ("review_item_context", op_review_item_context, 1, False, False, "ref", _MCRC),
     ("overview", op_overview, 1, False, False, "path", _MCRC),
     ("adopt", op_adopt, 1, True, False, "path", _MCRC),
     ("evolution", op_evolution, 1, False, False, "query", _MCRC),
@@ -4362,6 +4426,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("attention", "audit", "evolution", "provenance_report", "propose_compilation"),
         {"surface": "primary", "actions": ("review", "ask", "prove"), "first_run_safe": True},
+    ),
+    (
+        "review_item_context",
+        op_review_item_context,
+        1,
+        False,
+        False,
+        "ref",
+        _MCRC,
+        ("review_item_context",),
+        {"surface": "primary", "actions": ("review", "ask"), "first_run_safe": True},
     ),
     (
         "triage_memory",

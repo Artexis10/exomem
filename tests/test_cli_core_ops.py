@@ -83,6 +83,33 @@ def test_review_memory_activation_runs(vault: Path, capsys) -> None:
     assert all(item["ref"].startswith("exomem://review/") for item in data["items"])
 
 
+def test_review_item_context_runs_from_cli(vault: Path, capsys) -> None:
+    code, out, _ = _run(
+        ["review_memory", "--mode", "activation", "--limit", "1", "--json"],
+        capsys,
+    )
+    assert code == 0
+    item = json.loads(out.strip().splitlines()[-1])["data"]["items"][0]
+
+    code, out, _ = _run(
+        [
+            "review_item_context",
+            item["ref"],
+            "--expected-fingerprint",
+            item["fingerprint"],
+            "--max-body-chars",
+            "200",
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert code == 0
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["item"]["ref"] == item["ref"]
+    assert data["target"]["path"] == item["path"]
+
+
 def test_review_memory_audit_runs(vault: Path, capsys) -> None:
     code, out, _ = _run(["review_memory", "--mode", "audit", "--json"], capsys)
     assert code == 0

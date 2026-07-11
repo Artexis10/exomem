@@ -266,6 +266,36 @@ def test_review_memory_activation_mode_surfaces_corpus_coverage(vault: Path, mon
     assert item["reasons"][0]["meta"]["next_actions"]
 
 
+def test_review_item_context_mcp_composes_stable_bounded_context(
+    vault: Path, monkeypatch
+) -> None:
+    mcp = _build(monkeypatch)
+    review = _call(mcp, "review_memory", {"mode": "activation", "limit": 1})
+    item = review["items"][0]
+
+    out = _call(
+        mcp,
+        "review_item_context",
+        {
+            "ref": item["ref"],
+            "expected_fingerprint": item["fingerprint"],
+            "max_body_chars": 200,
+        },
+    )
+
+    assert out["item"]["ref"] == item["ref"]
+    assert out["target"]["path"] == item["path"]
+    assert {
+        "related",
+        "provenance",
+        "graph",
+        "history",
+        "evolution",
+        "availability",
+        "truncation",
+    } <= set(out)
+
+
 def test_triage_memory_mcp_write_is_explicit_and_reversible(vault: Path, monkeypatch) -> None:
     mcp = _build(monkeypatch)
     review = _call(mcp, "review_memory", {"mode": "attention", "limit": 1})

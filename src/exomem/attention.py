@@ -345,6 +345,7 @@ def item_by_ref(
     vault_root: Path,
     reference: str,
     *,
+    expected_fingerprint: str | None = None,
     today=None,
 ) -> AttentionItem:
     """Resolve one current review item by its stable review reference."""

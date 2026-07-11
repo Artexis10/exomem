@@ -25,7 +25,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-from . import context_pack
+from . import context_pack, get_page
 from . import find as find_module
 from . import vault as vault_module
 from .find import Hit, ParsedPage
@@ -248,3 +248,73 @@ def evolution(
     )
     built = build_timelines(vault_root, hits, max_chains=limit)
     return {"query": query, **built}
+
+
+def evolution_for_path(
+    vault_root: Path,
+    *,
+    path: str,
+    max_versions: int | None = None,
+) -> dict:
+    """Return the recorded supersession chain for one known page.
+
+    This is the path-specific counterpart to :func:`evolution`: it avoids topic-search
+    ambiguity when a caller already has a canonical review target. Assembly remains
+    pointer-ordered and measurement-only; a page with no supersession history returns an
+    honest empty timeline.
+    """
+    try:
+        canonical_path = get_page.get_page(vault_root, path=path).path
+    except get_page.GetError as exc:
+        raise ValueError(f"{exc.code}: {exc.reason}") from exc
+    page = find_module._CACHE.get(vault_root / canonical_path, vault_root)
+    if page is None:
+        raise ValueError(f"NOT_FOUND: no readable page at {canonical_path}")
+    return evolution_for_page(
+        vault_root,
+        page=page,
+        target_path=canonical_path,
+        max_versions=max_versions,
+    )
+
+
+def evolution_for_page(
+    vault_root: Path,
+    *,
+    page: ParsedPage,
+    target_path: str | None = None,
+    max_versions: int | None = None,
+) -> dict:
+    """Assemble one already-parsed page's recorded supersession chain.
+
+    Review-context assembly uses this seam to avoid reparsing the selected target for
+    each response section. Callers that only have a path use :func:`evolution_for_path`.
+    """
+    canonical_path = target_path or page.rel_path
+    members = _resolve_chain(vault_root, page)
+    if len(members) < 2:
+        return {"target_path": canonical_path, "timelines": [], "truncation": []}
+
+    resolved_max = _int_env(
+        max_versions,
+        "EXOMEM_EVOLUTION_MAX_VERSIONS",
+        _DEFAULT_MAX_VERSIONS,
+    )
+    ordered = _order_chain(vault_root, members)
+    timeline, dropped = _build_timeline(
+        vault_root,
+        ordered,
+        anchor=canonical_path,
+        max_versions=resolved_max,
+    )
+    truncation = []
+    if dropped:
+        truncation.append(
+            f"timeline {timeline['chain_id']} capped at {resolved_max} versions "
+            f"({dropped} older not shown; raise max_versions)"
+        )
+    return {
+        "target_path": canonical_path,
+        "timelines": [timeline],
+        "truncation": truncation,
+    }

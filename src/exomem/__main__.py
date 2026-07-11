@@ -11,6 +11,7 @@ Subcommands:
 - `install-hook` — wire the KB capture + retrieval hooks into Claude Code or Codex
 - `demo` — the packaged 30-second proof: doctor → find → get → audit against a
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
+- `studio` — print the local Review Studio URL; `--open` launches it explicitly
 - `doctor` — read-only local install/setup preflight
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
@@ -54,6 +55,8 @@ def main(argv: list[str] | None = None) -> int:
         from .demo import main as demo_main
 
         return demo_main(raw[1:])
+    if raw and raw[0] == "studio":
+        return _studio_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
     if raw and raw[0] == "status":
@@ -125,6 +128,45 @@ def _serve_main(argv: list[str]) -> int:
         return 130
     except Exception as e:  # noqa: BLE001 — top-level CLI guard: report and exit non-zero
         print(f"exomem failed: {e}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def _studio_main(argv: list[str]) -> int:
+    """Print the Review Studio URL and open it only when explicitly requested."""
+    import webbrowser
+    from urllib.parse import urlsplit, urlunsplit
+
+    parser = argparse.ArgumentParser(
+        prog="exomem studio",
+        description="Show the packaged Epistemic Review Studio entry URL.",
+    )
+    parser.add_argument(
+        "--url",
+        default=os.environ.get("EXOMEM_BASE_URL", "http://127.0.0.1:8765"),
+        help="Exomem service base URL (default: $EXOMEM_BASE_URL or http://127.0.0.1:8765)",
+    )
+    parser.add_argument(
+        "--open",
+        action="store_true",
+        help="open the Studio in the system browser (never done by default)",
+    )
+    args = parser.parse_args(argv)
+    parsed = urlsplit(args.url.strip())
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.query
+        or parsed.fragment
+        or parsed.path.rstrip("/") not in {"", "/studio"}
+    ):
+        parser.error("--url must be an http(s) origin or existing /studio/ URL without credentials")
+    studio_url = urlunsplit((parsed.scheme, parsed.netloc, "/studio/", "", ""))
+    print(studio_url)
+    if args.open and not webbrowser.open(studio_url):
+        print("Could not open the system browser; use the URL above.", file=sys.stderr)
         return 1
     return 0
 

@@ -23,6 +23,7 @@ PRODUCT_ROUTES = [
     "preserve_evidence",
     "transfer_artifact",
     "review_memory",
+    "review_item_context",
     "triage_memory",
     "connect_memory",
     "adopt_vault",
@@ -234,6 +235,44 @@ def test_review_memory_activation_route(vault, monkeypatch: pytest.MonkeyPatch) 
     assert data["coverage"]["eligible_pages"] > 0
     assert data["shown"] == len(data["items"]) <= 3
     assert all(item["ref"].startswith("exomem://review/") for item in data["items"])
+
+
+def test_review_item_context_route_and_openapi(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    review = client.post(
+        "/api/review_memory",
+        json={"mode": "activation", "limit": 1},
+        headers=_auth(),
+    ).json()["data"]
+    item = review["items"][0]
+
+    response = client.post(
+        "/api/review_item_context",
+        json={
+            "ref": item["ref"],
+            "expected_fingerprint": item["fingerprint"],
+            "max_body_chars": 200,
+        },
+        headers=_auth(),
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["item"]["ref"] == item["ref"]
+    doc = client.get("/api/openapi.json").json()
+    schema = doc["paths"]["/api/review_item_context"]["post"]["requestBody"][
+        "content"
+    ]["application/json"]["schema"]
+    assert "ref" in schema.get("required", [])
+    assert {
+        "expected_fingerprint",
+        "max_body_chars",
+        "max_related_pages",
+        "max_graph_nodes",
+        "max_graph_edges",
+        "max_history",
+        "max_evolution_versions",
+    } <= set(schema["properties"])
 
 
 def test_openapi_has_no_hand_list(vault, monkeypatch: pytest.MonkeyPatch) -> None:

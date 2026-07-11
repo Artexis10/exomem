@@ -209,3 +209,31 @@ def test_deterministic_on_rerun(chains: Path) -> None:
     assert evolution.evolution(chains, query="widget") == evolution.evolution(
         chains, query="widget"
     )
+
+
+def test_path_specific_evolution_uses_only_selected_pointer_chain(chains: Path) -> None:
+    result = evolution.evolution_for_path(chains, path=C_P)
+
+    assert result["target_path"] == C_P
+    assert len(result["timelines"]) == 1
+    timeline = result["timelines"][0]
+    assert timeline["chain_id"] == C_P
+    assert [version["path"] for version in timeline["versions"]] == [A_P, B_P, C_P]
+    assert F_P not in {version["path"] for version in timeline["versions"]}
+
+
+def test_path_specific_evolution_single_version_is_honestly_empty(chains: Path) -> None:
+    result = evolution.evolution_for_path(chains, path=D_P)
+
+    assert result == {"target_path": D_P, "timelines": [], "truncation": []}
+
+
+def test_path_specific_evolution_reports_version_cap(chains: Path) -> None:
+    result = evolution.evolution_for_path(chains, path=C_P, max_versions=2)
+
+    timeline = result["timelines"][0]
+    assert [version["path"] for version in timeline["versions"]] == [B_P, C_P]
+    assert timeline["span"]["n_versions"] == 3
+    assert result["truncation"] == [
+        f"timeline {C_P} capped at 2 versions (1 older not shown; raise max_versions)"
+    ]
