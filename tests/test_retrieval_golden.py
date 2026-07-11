@@ -44,6 +44,7 @@ pytest.importorskip("sentence_transformers")
 pytest.importorskip("torch")
 
 from exomem import embeddings as embeddings_module  # noqa: E402
+from exomem import epistemic_graph  # noqa: E402
 from exomem import find as find_module  # noqa: E402
 
 # Reuse the offline eval harness verbatim — the gate must score identically to
@@ -55,6 +56,24 @@ if str(_SCRIPTS) not in sys.path:
 import eval_retrieval  # noqa: E402
 
 _GOLDEN = _REPO_ROOT / "tests" / "golden" / "queries.yaml"
+
+# The two "TYPED-GRAPH LANE" golden entries (see queries.yaml): each grade-1
+# target is reachable through an authored `## Relations` bullet between two
+# existing fixture pages, not shared query vocabulary. Keyed here (rather than
+# re-parsed out of the YAML) so the typed-mode/fallback-mode tests below can
+# assert the SPECIFIC relation type each edge carries.
+_TYPED_LANE_CASES: dict[str, dict[str, str]] = {
+    "why circuit breakers fail calls immediately instead of waiting on a timeout": {
+        "ideal": "Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures",
+        "typed_neighbor": "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start",
+        "relation_type": "mitigates",
+    },
+    "advanced mode reveals information but does not change the safety model": {
+        "ideal": "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation",
+        "typed_neighbor": "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization",
+        "relation_type": "relates_to",
+    },
+}
 
 # --- Floors, WITH MARGIN. See the module docstring for how these were measured.
 _MEASURED = {"ndcg10": 0.9270, "mrr": 0.9154, "recall10": 0.9615}  # 2026-07-03, 26 queries
@@ -153,3 +172,153 @@ def test_golden_hybrid_ranking_clears_floors(
         f"{len(dropped)} golden query(ies) dropped to recall@10 == 0 "
         f"(target absent from top-10): {dropped}"
     )
+
+
+def _enable_live_embeddings(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Shared embeddings-on setup for the typed-graph-lane tests below — the
+    same numpy/fts5 default case `test_golden_hybrid_ranking_clears_floors`
+    exercises above, factored out since two new tests need it identically."""
+    from exomem import lexstore
+
+    monkeypatch.delenv("EXOMEM_VEC_BACKEND", raising=False)
+    monkeypatch.delenv("EXOMEM_VEC_QUANT", raising=False)
+    monkeypatch.setenv(
+        "EXOMEM_LEXICAL_BACKEND", "fts5" if lexstore.fts5_available() else "python"
+    )
+    lexstore.reset_memo()
+    lexstore.clear_stores()
+    for var in ("EXOMEM_DISABLE_EMBEDDINGS", "KB_MCP_DISABLE_EMBEDDINGS"):
+        monkeypatch.delenv(var, raising=False)
+    embeddings_module._IMPORT_FAILED = False
+    embeddings_module.clear_embedding_indexes()
+    find_module.clear_cache()
+    rows = embeddings_module.get_embedding_index(vault).rebuild_all()
+    assert rows > 0, "fixture KB produced no embedding chunks — nothing to rank"
+
+
+@pytest.mark.embeddings
+def test_typed_graph_lane_clears_golden_expectations(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The TYPED-GRAPH LANE golden entries (queries.yaml), evaluated WITH the
+    typed sidecar built.
+
+    Two things are asserted, deliberately at different levels:
+
+    1. The authored `## Relations` bullet is actually indexed as a TYPED edge
+       (via `neighbors_for`, the same batch read the find-lane uses) with the
+       expected relation type and a registered (non-"link") family — this is
+       the genuine regression gate: it fails if the fixture edit is lost, the
+       relation type typo'd, or `neighbors_for`/family resolution regresses.
+    2. `find()` still surfaces both the grade-3 ideal and the grade-1 typed
+       neighbour in the top-10 fused ranking — the "golden expectations" the
+       queries.yaml entries encode.
+
+    (2) alone would NOT be a meaningful regression gate here: this bundled
+    fixture's ~31 pages are small and topically dense enough that both targets
+    independently reach top-10 via vector/BM25 alone (verified empirically —
+    `graph=False` reproduces the same top-10 membership), so (2) would pass
+    even if the typed relation were deleted entirely. (1) is what actually
+    pins the typed-graph-lane behavior; (2) documents that recall still holds
+    end-to-end. The stronger claim — a target reachable ONLY via the graph
+    lane, carrying a graph-provenance annotation — is unit-tested against a
+    small, controlled fixture in tests/test_find_typed_graph_lane.py, where
+    the target can be kept outside the vector/BM25 primary set; this bundled
+    fixture's page count trivially clears the default `candidate_floor` (50),
+    so nothing here is ever "outside" it and the annotation cannot fire.
+
+    See `test_typed_graph_lane_entries_still_resolve_in_fallback_mode` below
+    for the distinct fallback-mode (sidecar ABSENT) pass over the same
+    entries.
+    """
+    _enable_live_embeddings(vault, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    golden = eval_retrieval._load_golden(_GOLDEN)
+    covered = {g["query"] for g in golden if g["query"] in _TYPED_LANE_CASES}
+    assert covered == set(_TYPED_LANE_CASES), (
+        f"typed-graph-lane golden entries missing from {_GOLDEN}: "
+        f"{set(_TYPED_LANE_CASES) - covered}"
+    )
+
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    for query, spec in _TYPED_LANE_CASES.items():
+        # (1) The typed edge is genuinely indexed with the authored relation.
+        neighbors = idx.neighbors_for([spec["ideal"]])
+        neighbor_canon = eval_retrieval._canon(spec["typed_neighbor"])
+        typed = [
+            n
+            for n in neighbors
+            if eval_retrieval._canon(n.other_rel) == neighbor_canon
+            and n.relation_type == spec["relation_type"]
+        ]
+        assert typed, (
+            f"authored relation {spec['relation_type']!r} from {spec['ideal']} to "
+            f"{spec['typed_neighbor']} not found via neighbors_for: {neighbors}"
+        )
+        assert typed[0].family not in ("", "link"), (
+            f"typed relation resolved to an unregistered/link family: {typed[0]}"
+        )
+
+        # (2) End-to-end recall still clears the golden expectation.
+        hits = find_module.find(vault, query=query, limit=10, graph=True)
+        paths = {eval_retrieval._canon(h.path) for h in hits}
+        assert eval_retrieval._canon(spec["ideal"]) in paths, (
+            f"ideal target missing for {query!r}: {[h.path for h in hits]}"
+        )
+        assert neighbor_canon in paths, (
+            f"typed neighbour {spec['typed_neighbor']} not surfaced for {query!r}: "
+            f"{[h.path for h in hits]}"
+        )
+
+
+@pytest.mark.embeddings
+def test_typed_graph_lane_entries_still_resolve_in_fallback_mode(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Distinct second pass over the SAME typed-lane golden entries: with the
+    graph sidecar ABSENT (this vault copy never runs rebuild_all, and
+    EXOMEM_DISABLE_GRAPH_INDEX is set as an explicit, defensive kill switch).
+
+    Two things are asserted, for the same reason as the typed-mode test above:
+
+    1. The pre-existing fallback wikilink scanner
+       (`find._outbound_wikilink_paths`) still resolves the typed neighbour as
+       a plain 1-hop target from the ideal page — it does not distinguish a
+       canonical `## Relations` line from an ordinary body link, so the
+       bracket the typed bullet also contains still parses. This is the
+       genuine fallback-mode regression gate.
+    2. `find()` still surfaces the typed neighbour in the top-10 fused
+       ranking WITHOUT a graph-provenance annotation (fallback must never
+       annotate) — documenting the end-to-end golden expectation, though (as
+       in typed mode) this bundled fixture's small size means the target
+       would likely surface via vector/BM25 alone regardless of (1).
+    """
+    _enable_live_embeddings(vault, monkeypatch)
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    find_module.clear_cache()
+    assert epistemic_graph.EpistemicGraphIndex(vault).available() is False
+
+    for query, spec in _TYPED_LANE_CASES.items():
+        # (1) The fallback wikilink scanner still resolves the typed neighbour.
+        page = find_module._CACHE.get(vault / f"{spec['ideal']}.md", vault)
+        assert page is not None, f"ideal page failed to parse: {spec['ideal']}"
+        wikilinks = find_module._outbound_wikilink_paths(page, vault)
+        neighbor_canon = eval_retrieval._canon(spec["typed_neighbor"])
+        assert any(eval_retrieval._canon(w) == neighbor_canon for w in wikilinks), (
+            f"fallback wikilink scanner lost {spec['typed_neighbor']} from "
+            f"{spec['ideal']}: {wikilinks}"
+        )
+
+        # (2) End-to-end recall still clears the golden expectation, unannotated.
+        hits = find_module.find(vault, query=query, limit=10, graph=True)
+        neighbor_hit = next(
+            (h for h in hits if eval_retrieval._canon(h.path) == neighbor_canon), None
+        )
+        assert neighbor_hit is not None, (
+            f"fallback mode lost the typed-lane target for {query!r}: "
+            f"{[h.path for h in hits]}"
+        )
+        assert "graph" not in neighbor_hit.as_dict(), (
+            "fallback mode must never annotate a hit with graph provenance"
+        )

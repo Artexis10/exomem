@@ -184,3 +184,36 @@
   graded:
     "Knowledge Base/Notes/Productions/Reels/2026-05-metabolism-basics": 3
     "Knowledge Base/Notes/Research/Health/metabolic-literacy-curriculum": 1
+
+# --------------------------------------------------------------------------- #
+# TYPED-GRAPH LANE: the grade-1 target is reachable through an authored typed
+# relation (a `## Relations` bullet, epistemic/provenance relation type) added
+# between two EXISTING pages, not the query's lexical/vector best match.
+# Unlike the earlier "PIN: graph-hop target" section (a plain wikilink), these
+# bullets are canonical typed edges: `circuit-breaker...` `mitigates`
+# `cache-stampede-on-cold-start`, and `progressive-disclosure...` `relates_to`
+# `rrf-fusion-beats-score-normalization`. Exercised WITH the typed sidecar
+# built by test_typed_graph_lane_clears_golden_expectations in
+# test_retrieval_golden.py. The same canonical bullet also parses as a plain
+# body wikilink under the pre-existing fallback wikilink scanner
+# (find._outbound_wikilink_paths does not distinguish a canonical
+# `## Relations` line from an ordinary link), so both entries still clear
+# their golden expectations with the sidecar ABSENT — verified by
+# test_typed_graph_lane_entries_still_resolve_in_fallback_mode, which also
+# confirms fallback mode never attaches a graph-provenance annotation. (The
+# typed-mode annotation contract itself — that a genuinely graph-surfaced
+# target carries relation_type/direction/seed — is unit-tested against a
+# small, controlled fixture in tests/test_find_typed_graph_lane.py; this
+# bundled fixture's ~31 pages all clear the default candidate floor, so every
+# page already ranks in the vector/BM25 primary set and the annotation, which
+# is additive only for targets outside it, does not fire here.)
+# --------------------------------------------------------------------------- #
+- query: "why circuit breakers fail calls immediately instead of waiting on a timeout"
+  graded:
+    "Knowledge Base/Notes/Patterns/circuit-breaker-for-downstream-failures": 3
+    "Knowledge Base/Notes/Failures/cache-stampede-on-cold-start": 1
+
+- query: "advanced mode reveals information but does not change the safety model"
+  graded:
+    "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation": 3
+    "Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization": 1

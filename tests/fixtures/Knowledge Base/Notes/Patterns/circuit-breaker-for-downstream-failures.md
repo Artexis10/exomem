@@ -26,6 +26,10 @@ Any synchronous call to a remote dependency that can degrade, especially on a ho
 
 Cheap in-process calls, or when every request truly must reach the dependency.
 
+## Relations
+
+- mitigates [[Knowledge Base/Notes/Failures/cache-stampede-on-cold-start]]
+
 ## Connections
 
 - [[Knowledge Base/Notes/Patterns/retry-with-full-jitter-backoff]]

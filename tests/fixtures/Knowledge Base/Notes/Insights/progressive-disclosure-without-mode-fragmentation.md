@@ -18,6 +18,10 @@ A single behavioural mode with progressive disclosure beats dual basic/advanced 
 
 Modes fragment defaults, double the QA surface, and turn the toggle into a foot-gun. Defaults can only be defended in one place — two modes mean two failure surfaces.
 
+## Relations
+
+- relates_to [[Knowledge Base/Notes/Insights/rrf-fusion-beats-score-normalization]]
+
 ## Connections
 
 - [[Knowledge Base/Notes/Research/Project Alpha/engine-architecture]]
