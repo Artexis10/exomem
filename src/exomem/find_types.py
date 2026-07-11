@@ -195,6 +195,7 @@ class Hit:
     superseded_by: list[str] = field(default_factory=list)
     activation: float | None = None
     usage_boost_applied: float | None = None
+    graph_provenance: GraphProvenance | None = None
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -205,6 +206,12 @@ class Hit:
             "updated": self.updated,
             "excerpt": self.excerpt,
         }
+        if self.graph_provenance is not None:
+            out["graph"] = {
+                "relation_type": self.graph_provenance.relation_type,
+                "direction": self.graph_provenance.direction,
+                "seed": self.graph_provenance.seed,
+            }
         if self.media_type:
             out["media_type"] = self.media_type
         if self.media_file:

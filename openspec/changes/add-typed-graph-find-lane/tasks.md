@@ -54,10 +54,10 @@
 
 ## 4. Hit annotation (src/exomem/find_results.py + envelope)
 
-- [ ] 4.1 Thread `graph_provenance_by_path` from the bundle to hit assembly;
+- [x] 4.1 Thread `graph_provenance_by_path` from the bundle to hit assembly;
       attach optional `graph` field {relation_type, direction, seed} on
       matching hits. No change to hits without provenance.
-- [ ] 4.2 Tests: annotated typed hit carries the triple; non-graph hits
+- [x] 4.2 Tests: annotated typed hit carries the triple; non-graph hits
       byte-identical to pre-change shape (snapshot assert); fallback mode
       never annotates.
 

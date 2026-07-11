@@ -766,6 +766,7 @@ def _find_semantic(
     clip_frame_ts_by_path = bundle.clip_frame_ts_by_path
     frame_attribution = bundle.frame_attribution
     graph_in_degree_by_path = bundle.graph_in_degree_by_path
+    graph_provenance_by_path = bundle.graph_provenance_by_path
     usage_map = bundle.usage_map
 
     # Pre-compute per-mode rank lookups so we can tag each Hit's signals.
@@ -874,6 +875,7 @@ def _find_semantic(
             clip_frame_ts=clip_frame_ts_by_path.get(rel_path),
             graph_hop=is_graph_only,
             graph_in_degree=graph_in_degree_by_path.get(rel_path, 0),
+            graph_provenance=graph_provenance_by_path.get(rel_path),
             keyword_rank=keyword_rank_by_path.get(rel_path),
             activation=hit_activation,
             usage_boost_applied=hit_usage_mult,

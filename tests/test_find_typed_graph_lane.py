@@ -142,3 +142,37 @@ def test_fallback_equivalence_when_sidecar_disabled(tmp_path, monkeypatch) -> No
     monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
     find_module.clear_cache()
     assert _paths(vault) == FALLBACK_FUSED
+
+
+def _hits(vault, **kw):
+    return find_module.find(vault, query="photosynthesis", limit=15, graph=True, **kw)
+
+
+def test_annotated_typed_hit_carries_the_triple(tmp_path, monkeypatch) -> None:
+    vault = _build_vault(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    hits = _hits(vault)
+    experiment = next(h for h in hits if h.path == EXPERIMENT)
+    graph = experiment.as_dict()["graph"]
+    assert graph == {
+        "relation_type": "evidenced_by",
+        "direction": "outbound",
+        "seed": SEED,
+    }
+
+
+def test_non_graph_hit_has_no_annotation(tmp_path, monkeypatch) -> None:
+    vault = _build_vault(tmp_path, monkeypatch)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    hits = _hits(vault)
+    # The seed itself entered via BM25/keyword, not graph expansion.
+    seed_hit = next(h for h in hits if h.path == SEED)
+    assert "graph" not in seed_hit.as_dict()
+
+
+def test_fallback_mode_never_annotates(tmp_path, monkeypatch) -> None:
+    vault = _build_vault(tmp_path, monkeypatch)
+    monkeypatch.setenv("EXOMEM_DISABLE_GRAPH_INDEX", "1")
+    find_module.clear_cache()
+    hits = _hits(vault)
+    assert all("graph" not in h.as_dict() for h in hits)
