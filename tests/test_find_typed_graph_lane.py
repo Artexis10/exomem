@@ -187,3 +187,62 @@ def test_fallback_mode_never_annotates(tmp_path, monkeypatch) -> None:
     find_module.clear_cache()
     hits = _hits(vault)
     assert all("graph" not in h.as_dict() for h in hits)
+
+
+def test_family_precedence_applied_before_target_dedup(tmp_path, monkeypatch) -> None:
+    """A target reached by BOTH a typed relation and a plain wikilink from the
+    same seed must be classified/annotated by the TYPED (higher-precedence)
+    edge — never by whichever edge the arbitrary edge-key hash/insertion order
+    happens to visit first during dedup."""
+    vault = tmp_path / "vault"
+    seed_rel = f"{KB}/dual-edge-seed.md"
+    target_rel = f"{KB}/dual-edge-target.md"
+    _w(
+        vault,
+        seed_rel,
+        "---\ntype: insight\nstatus: active\n---\n# Dual Edge Seed\n\n"
+        "findmedualedge findmedualedge.\n\n"
+        "See also [[Knowledge Base/Notes/Insights/dual-edge-target]].\n\n"
+        "## Relations\n\n- contradicts [[Knowledge Base/Notes/Insights/dual-edge-target]]\n",
+    )
+    _w(vault, target_rel, "---\ntype: insight\n---\n# Dual Edge Target\n\nUnrelated body text.\n")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    find_module.clear_cache()
+    embeddings_module.clear_embedding_indexes()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+
+    hits = find_module.find(vault, query="findmedualedge", limit=15, graph=True)
+    target_hit = next(h for h in hits if h.path == target_rel)
+    graph = target_hit.as_dict()["graph"]
+    assert graph["relation_type"] == "contradicts", (
+        f"target was classified by the lower-precedence edge: {graph}"
+    )
+
+
+def test_vault_scope_out_of_kb_seed_still_gets_legacy_expansion(tmp_path, monkeypatch) -> None:
+    """scope='vault' walks outside the KB too. An out-of-KB seed has no
+    sidecar file node (rebuild_all only indexes the KB tree), so typed mode
+    alone silently drops expansion for it. The lane must hybridize: typed
+    expansion for indexed seeds, legacy wikilink expansion for seeds the
+    sidecar never covered — matching pre-change (fallback-only) recall."""
+    vault = tmp_path / "vault"
+    out_of_kb_seed = "Reference/vault-scope-seed.md"
+    kb_target = f"{KB}/vault-scope-target.md"
+    _w(
+        vault,
+        out_of_kb_seed,
+        "---\ntype: reference\n---\n# Vault Scope Seed\n\n"
+        "vaultscopemarker vaultscopemarker.\n\n"
+        "See [[Knowledge Base/Notes/Insights/vault-scope-target]].\n",
+    )
+    _w(vault, kb_target, "---\ntype: insight\n---\n# Vault Scope Target\n\nBody about an unrelated matter.\n")
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault))
+    find_module.clear_cache()
+    embeddings_module.clear_embedding_indexes()
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()  # indexes KB only
+
+    hits = find_module.find(vault, query="vaultscopemarker", scope="vault", limit=15, graph=True)
+    paths = [h.path for h in hits]
+    assert kb_target in paths, (
+        "out-of-KB seed lost its legacy wikilink expansion under typed mode"
+    )

@@ -288,31 +288,74 @@ def collect_candidates(
         graph_t_seeds = time.perf_counter()
         graph_index = epistemic_graph.EpistemicGraphIndex(vault_root)
         if graph_index.available():
-            # Typed mode: read the governed sidecar once for all seeds, then
-            # order targets by relation-family precedence (epistemic/provenance
-            # families ahead of plain links_to/unregistered; within a tier, seed
-            # order then edge order). Placeholder targets are excluded upstream.
-            neighbors = graph_index.neighbors_for(graph_seeds)
+            # Hybrid: seeds with a sidecar file node get typed expansion; seeds
+            # outside the indexed scope (e.g. an out-of-KB page under
+            # scope="vault" — rebuild_all only walks the KB tree) have no node
+            # at all, so typed expansion alone would silently drop them. Those
+            # seeds fall back to the legacy 1-hop wikilink expansion instead,
+            # preserving pre-change recall for out-of-KB seeds.
+            indexed = graph_index.indexed_paths(graph_seeds)
+            typed_seeds = [s for s in graph_seeds if s in indexed]
+            legacy_seeds = [s for s in graph_seeds if s not in indexed]
+            neighbors = graph_index.neighbors_for(typed_seeds) if typed_seeds else []
             graph_t_sidecar = time.perf_counter()
-            seen_target = set()
-            tier_targets: dict[int, list[str]] = {0: [], 1: []}
-            for neighbor in neighbors:
+
+            # Family precedence MUST be decided BEFORE target dedup: when a
+            # target is reached by both a typed relation and a plain
+            # links_to/unregistered edge, first-seen-wins would let arbitrary
+            # edge order misclassify the target's tier and provenance. Group
+            # every edge touching a target, then keep the highest-precedence
+            # (lowest tier) edge as the surfacing/provenance edge. in-degree is
+            # still tallied for EVERY edge, matching the existing invariant.
+            best_tier_for_target: dict[str, int] = {}
+            best_neighbor_for_target: dict[str, epistemic_graph.GraphNeighbor] = {}
+            first_pos_for_target: dict[str, int] = {}
+            for pos, neighbor in enumerate(neighbors):
                 target_rel = neighbor.other_rel
                 graph_in_degree_by_path[target_rel] = (
                     graph_in_degree_by_path.get(target_rel, 0) + 1
                 )
-                if target_rel in primary_set or target_rel in seen_target:
+                if target_rel in primary_set:
                     continue
-                seen_target.add(target_rel)
                 family = neighbor.family
                 tier = 0 if (neighbor.relation_type and family and family != "link") else 1
-                tier_targets[tier].append(target_rel)
+                current_best = best_tier_for_target.get(target_rel)
+                if current_best is None or tier < current_best:
+                    best_tier_for_target[target_rel] = tier
+                    best_neighbor_for_target[target_rel] = neighbor
+                    first_pos_for_target[target_rel] = pos
+            typed_targets = sorted(
+                best_tier_for_target,
+                key=lambda t: (best_tier_for_target[t], first_pos_for_target[t]),
+            )
+            for target_rel in typed_targets:
+                neighbor = best_neighbor_for_target[target_rel]
                 graph_provenance_by_path[target_rel] = GraphProvenance(
                     relation_type=neighbor.relation_type,
                     direction=neighbor.direction,
                     seed=neighbor.seed_rel,
                 )
-            graph_ranking = tier_targets[0] + tier_targets[1]
+            seen_target = set(typed_targets)
+
+            legacy_targets: list[str] = []
+            if legacy_seeds:
+                resolver = get_query_resolver(vault_root, freshness=snapshot.vault())
+                for seed_rel in legacy_seeds:
+                    page = page_of(seed_rel)
+                    if page is None:
+                        continue
+                    for target_rel in outbound_wikilink_paths(
+                        page, vault_root, resolver=resolver
+                    ):
+                        graph_in_degree_by_path[target_rel] = (
+                            graph_in_degree_by_path.get(target_rel, 0) + 1
+                        )
+                        if target_rel in primary_set or target_rel in seen_target:
+                            continue
+                        seen_target.add(target_rel)
+                        legacy_targets.append(target_rel)
+
+            graph_ranking = typed_targets + legacy_targets
             if graph_ranking:
                 rankings.append(graph_ranking)
             if timings is not None:
