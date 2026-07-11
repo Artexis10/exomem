@@ -42,6 +42,16 @@ coverage. It does not mix activation debt into the Inbox. Activation depends on
 the existing-corpus activation scanner; if that command is unavailable, the
 Inbox remains usable.
 
+Relations is the batched acceptance queue. It displays
+`review_memory(mode="relation-queue")` — deterministic relation candidates
+grouped by page, already filtered against authored edges, placeholder targets,
+and unexpired dismissals — with the same capped-surfacing honesty as the other
+worklists. Its identities are namespaced (`exomem://review/relation/<id>`) so
+triaging a relation candidate never resolves an Inbox or Activation item.
+Per-candidate Accept requires an audit reason and the reviewed fingerprint;
+Dismiss and Snooze record fingerprint-bound decisions that expire when the
+underlying signal materially changes.
+
 Selecting an item calls `review_item_context` with its stable
 `exomem://review/<id>` reference and current fingerprint. The bounded response
 contains the target body, exact reasons, related summaries, provenance/evidence,
@@ -57,8 +67,11 @@ performs no action.
 
 Conclusion-changing work has a proposal step and a separate confirmation:
 
-- Relation suggestions come from read-only `connect_memory`; acceptance is an
-  audited `edit_memory` call.
+- Relation suggestions come from read-only `connect_memory`; single-candidate
+  acceptance is an audited `edit_memory` call, and queue acceptance is the
+  governed `connect_memory(operation="accept-relation")`, which revalidates the
+  candidate's fingerprint, the target page hash, and live eligibility before
+  authoring exactly one canonical `## Relations` bullet.
 - Source compilation starts with read-only `compile_source`; the editable draft
   becomes knowledge only through confirmed `remember`.
 - Supersession previews the exact target, successor draft, reason, and

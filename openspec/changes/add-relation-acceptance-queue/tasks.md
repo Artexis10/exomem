@@ -54,10 +54,10 @@
 
 ## 5. Orchestrator-owned (NOT for the executor lane)
 
-- [ ] 5.1 Docs: docs/review-studio.md queue section;
+- [x] 5.1 Docs: docs/review-studio.md queue section;
       docs/epistemic-inbox.md cross-reference; comparison doc improvement #1/#4
       status.
-- [ ] 5.2 Scaffold SKILL.md: document relation-queue + accept-relation in the
+- [x] 5.2 Scaffold SKILL.md: document relation-queue + accept-relation in the
       tool surface section (scaffold-no-leak test green).
 - [ ] 5.3 Merge sequencing after the typed-find-lane change (commands.py
       adjacency).

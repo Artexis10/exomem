@@ -212,6 +212,7 @@ experiments, proof-bearing records, review, and supersession.
 | `remember` | "remember this," "save this conclusion," "write this decision" | `remember`; use `replace_memory` when it supersedes old knowledge |
 | `capture` | "save this article/source/transcript," "keep this receipt/record/proof" | `capture_source` for Sources; `preserve_evidence` or `transfer_artifact` for Evidence |
 | `review` | "review stale knowledge," "what needs attention," "what sources are unprocessed" | `review_memory`; explicit dismiss/snooze/reopen via `triage_memory` |
+| `relations` | "review suggested relations," "pay down relation debt," "accept/reject suggested links" | `review_memory(mode="relation-queue")` for the batched read; accept one reviewed candidate via `connect_memory(operation="accept-relation")` (requires the queue fingerprint, target `expected_hash`, and an audit reason); reject via `triage_memory` |
 | `connect` | "connect these ideas," "suggest relations," "show the surrounding context" | `connect_memory`; use `operation="context"` for bounded graph, provenance, evidence, and history |
 | `adopt` | "what does this existing vault contain," "import/adopt this vault safely" | `adopt_vault(mode="scan-only")` first; explicit modes for manifest/copy/compile planning |
 | `maintain` | "check vault health," "fix safe drift" | `maintain_memory(mode="audit")`; explicit `fix` or `reconcile` modes only with fix intent |
@@ -768,7 +769,8 @@ is in **`references/audit-checks.md`**.
   unambiguous — write under the standing waiver and report the path.
 - `capture_source` and `preserve_evidence` operations — raw capture.
 - `ask_memory`, `read_memory`, `browse_memory`, and `review_memory` — read-only.
-- `triage_memory` — writes only portable Inbox review state; it never edits a note.
+- `triage_memory` — writes only portable review state (Inbox, activation, and
+  relation-queue identities are namespaced apart); it never edits a note.
 - Updating `index.md`, `log.md`, and `ingested_into:` frontmatter after a
   confirmed write.
 - Resolving obvious wikilink targets when the entity exists exactly.

@@ -64,6 +64,13 @@ relations. It does not mean Exomem should invent edges.
    claim/finding/evidence-level edges.
 5. Re-run review. The repaired note leaves the relation-debt queue.
 
+For batch repair, `review_memory(mode="relation-queue")` presents the same
+deterministic suggestions as a fingerprint-guarded accept/reject queue
+(see the Review Studio's Relations worklist): accept via
+`connect_memory(operation="accept-relation")`, reject via `triage_memory`.
+Rejections are fingerprint-bound and resurface when the signal materially
+changes.
+
 Existing vaults are repaired incrementally through this loop. There is no
 automatic bulk rewrite, and semantic similarity alone never becomes a durable
 typed relation.
