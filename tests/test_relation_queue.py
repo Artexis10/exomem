@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 from pathlib import Path
 
+import pytest
+
 from exomem import relation_queue
 
 
@@ -127,17 +129,46 @@ def test_coverage_counters_align_with_activation(tmp_path: Path) -> None:
     result = relation_queue.build_queue(tmp_path)
     coverage = result["coverage"]
     assert coverage["eligible_pages"] >= 4
-    assert "relation_candidate_pages" in coverage
+    assert "relation_candidate_pages_found" in coverage
     assert result["shown"] == len(_all_items(result))
+    # The full (uncapped) corpus was scanned this call — nothing is partial.
+    assert coverage["relation_scan_complete"] is True
+    assert result["pages_truncated"] is False
 
 
-def test_cap_limits_pages_with_explicit_dropped_count(tmp_path: Path) -> None:
-    _seed(tmp_path)
-    # Two candidate-bearing pages (alpha, and a second) but cap at one page.
-    _write_page(tmp_path, "epsilon", "See [[Knowledge Base/Notes/Insights/beta]].")
+def test_cap_stops_candidate_generation_early_and_reports_honestly(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Several candidate-bearing eligible pages, but cap at one group. Bug:
+    # candidate generation (suggest_relations, which can invoke embedding
+    # scoring) ran for EVERY eligible page before slicing the result down to
+    # the cap — unacceptable on a large vault. The fix must stop generating
+    # once `limit_pages` groups with open items are collected.
+    _write_page(tmp_path, "page-a", "See [[Knowledge Base/Notes/Insights/page-z]].")
+    _write_page(tmp_path, "page-b", "See [[Knowledge Base/Notes/Insights/page-z]].")
+    _write_page(tmp_path, "page-c", "See [[Knowledge Base/Notes/Insights/page-z]].")
+    _write_page(tmp_path, "page-z", "See [[Knowledge Base/Notes/Insights/page-a]].")
+
+    calls: list[str] = []
+    real_page_candidates = relation_queue._page_candidates
+
+    def counting_page_candidates(vault_root, page, *, limit_per_page):
+        calls.append(page.rel_path)
+        return real_page_candidates(vault_root, page, limit_per_page=limit_per_page)
+
+    monkeypatch.setattr(relation_queue, "_page_candidates", counting_page_candidates)
+
     capped = relation_queue.build_queue(tmp_path, limit_pages=1)
+
     assert capped["pages_shown"] == 1
-    assert capped["pages_truncated"] >= 1
+    # The defect: this call would equal 4 (every eligible page) before the fix.
+    assert len(calls) < 4, f"candidate generation ran for {calls}, not just the capped prefix"
+    assert capped["pages_scanned"] == len(calls)
+    # Honest capped-surfacing signal: we stopped before the corpus was fully
+    # scanned, so totals beyond the shown prefix are explicitly NOT claimed.
+    assert capped["pages_truncated"] is True
+    assert capped["pages_unscanned"] >= 1
+    assert capped["coverage"]["relation_scan_complete"] is False
 
 
 def test_read_never_writes_to_the_vault(tmp_path: Path) -> None:

@@ -195,6 +195,48 @@ def _enrich(vault_root: Path, page: Any, candidate: dict[str, Any]) -> dict[str,
     }
 
 
+def _classify_candidate(
+    vault_root: Path,
+    page: Any,
+    candidate: dict[str, Any],
+    *,
+    store: review_state_module.ReviewStateStore,
+    state_payload: dict[str, Any],
+    authored: set[tuple[str, str]] | None = None,
+    today=None,
+) -> tuple[str | None, dict[str, Any] | None]:
+    """Apply the three read-time eligibility filters to one candidate.
+
+    Shared by `build_queue` (batch read) and `accept` (single-candidate
+    re-validation immediately before writing) so the two paths can never
+    disagree about what counts as an open, acceptable candidate.
+
+    Returns `(reason, enriched)`: `reason` is `None` when the candidate is
+    open, else one of "authored_edge", "placeholder_target", "decided".
+    `enriched` (the review-identity-bearing item) is computed only once the
+    cheap authored/placeholder checks pass; it is `None` when filtered by
+    either of those, since nothing downstream needs it.
+    """
+    if authored is None:
+        authored = _authored_targets(page, vault_root)
+    relation_type = str(candidate.get("relation_type") or "")
+    to_path = str(candidate.get("to") or "")
+    if (relation_type, epistemic_graph_module._with_md(to_path)) in authored:
+        return "authored_edge", None
+    if _is_placeholder_target(vault_root, to_path):
+        return "placeholder_target", None
+    enriched = _enrich(vault_root, page, candidate)
+    effective, _decision = store.effective_state(
+        enriched["review_id"],
+        enriched["fingerprint"],
+        today=today,
+        payload=state_payload,
+    )
+    if effective != "open":
+        return "decided", enriched
+    return None, enriched
+
+
 def build_queue(
     vault_root: Path,
     *,
@@ -202,42 +244,56 @@ def build_queue(
     limit_per_page: int = _DEFAULT_LIMIT_PER_PAGE,
     today=None,
 ) -> dict[str, Any]:
-    """Assemble the deterministic, read-only relation-acceptance queue."""
+    """Assemble the deterministic, read-only relation-acceptance queue.
+
+    Generation is lazy: candidate generation (`suggest_relations` per page,
+    which can invoke embedding-proximity scoring) STOPS as soon as
+    `limit_pages` groups with open items have been collected, so a small
+    `limit_pages` never pays full-corpus generation cost. Because of that,
+    per-call totals (`pages_scanned`, `filtered`, the `relation_*` coverage
+    counters) describe only the scanned prefix, not the whole corpus — the
+    activation denominators in `coverage` (from the cheap, model-free
+    `activation.scan`) stay full-corpus as before, but `pages_truncated` /
+    `pages_unscanned` / `coverage["relation_scan_complete"]` say explicitly
+    when the relation-specific counts are partial rather than implying a
+    full-corpus total that was never computed.
+    """
     vault_root = Path(vault_root)
     scan = activation_module.scan(vault_root)
     store = review_state_module.ReviewStateStore(vault_root)
     state_payload = store.load()
+    cap = max(0, int(limit_pages))
 
     filtered = {"authored_edge": 0, "placeholder_target": 0, "decided": 0}
-    candidate_pages: list[dict[str, Any]] = []
+    groups: list[dict[str, Any]] = []
+    pages_scanned = 0
+    scan_complete = True
 
     for page in _ordered_pages(vault_root, scan):
+        if len(groups) >= cap:
+            scan_complete = False
+            break
+        pages_scanned += 1
         authored = _authored_targets(page, vault_root)
         items: list[dict[str, Any]] = []
         for candidate in _page_candidates(
             vault_root, page, limit_per_page=limit_per_page
         ):
-            relation_type = str(candidate.get("relation_type") or "")
-            to_path = str(candidate.get("to") or "")
-            if (relation_type, epistemic_graph_module._with_md(to_path)) in authored:
-                filtered["authored_edge"] += 1
-                continue
-            if _is_placeholder_target(vault_root, to_path):
-                filtered["placeholder_target"] += 1
-                continue
-            enriched = _enrich(vault_root, page, candidate)
-            effective, _decision = store.effective_state(
-                enriched["review_id"],
-                enriched["fingerprint"],
+            reason, enriched = _classify_candidate(
+                vault_root,
+                page,
+                candidate,
+                store=store,
+                state_payload=state_payload,
+                authored=authored,
                 today=today,
-                payload=state_payload,
             )
-            if effective != "open":
-                filtered["decided"] += 1
+            if reason is not None:
+                filtered[reason] += 1
                 continue
             items.append(enriched)
         if items:
-            candidate_pages.append(
+            groups.append(
                 {
                     "path": page.rel_path,
                     "title": page.title,
@@ -246,25 +302,24 @@ def build_queue(
                 }
             )
 
-    pages_total = len(candidate_pages)
-    cap = max(0, int(limit_pages))
-    shown_groups = candidate_pages[:cap]
-    shown_items = sum(len(group["items"]) for group in shown_groups)
+    eligible_pages_total = int(scan.coverage.get("eligible_pages", 0))
+    shown_items = sum(len(group["items"]) for group in groups)
 
     coverage = dict(scan.coverage)
-    coverage["relation_candidate_pages"] = pages_total
-    coverage["relation_candidates"] = sum(
-        len(group["items"]) for group in candidate_pages
-    )
+    coverage["relation_pages_scanned"] = pages_scanned
+    coverage["relation_candidate_pages_found"] = len(groups)
+    coverage["relation_candidates_found"] = shown_items
+    coverage["relation_scan_complete"] = scan_complete
 
     return {
         "mode": "relation-queue",
         "mutated": False,
-        "groups": shown_groups,
+        "groups": groups,
         "shown": shown_items,
-        "pages_shown": len(shown_groups),
-        "pages_total": pages_total,
-        "pages_truncated": pages_total - len(shown_groups),
+        "pages_shown": len(groups),
+        "pages_scanned": pages_scanned,
+        "pages_truncated": not scan_complete,
+        "pages_unscanned": max(0, eligible_pages_total - pages_scanned),
         "filtered": filtered,
         "coverage": coverage,
     }
