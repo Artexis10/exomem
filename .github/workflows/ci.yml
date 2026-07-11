@@ -12,7 +12,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12", "3.13"]
+        # Compatibility boundaries are sufficient here: 3.11 is the minimum
+        # supported runtime and 3.13 is the newest. Testing the middle release
+        # duplicated the full lean suite without expanding the support range.
+        python-version: ["3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
       - name: Install uv
