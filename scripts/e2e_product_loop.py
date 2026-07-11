@@ -7,6 +7,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import socket
 import subprocess
 import sys
@@ -559,15 +560,17 @@ def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> N
     )
     if shell_status != 200 or not shell_headers.get("content-type", "").startswith("text/html"):
         raise RuntimeError(f"/studio/ shell not served as HTML: {shell_status}")
-    if b"Exomem Review Studio" not in shell_body or b"/studio/assets/app.v1.js" not in shell_body:
+    app_asset = re.search(rb"/studio/assets/app\.v\d+\.js", shell_body)
+    if b"Exomem Review Studio" not in shell_body or app_asset is None:
         raise RuntimeError("Studio shell body missing packaged markers")
+    app_asset_path = app_asset.group(0).decode("ascii")
     asset_status, asset_headers, asset_body = _http_get_raw(
-        f"{base_url}/studio/assets/app.v1.js", timeout=timeout
+        f"{base_url}{app_asset_path}", timeout=timeout
     )
     if asset_status != 200 or "javascript" not in asset_headers.get("content-type", ""):
-        raise RuntimeError(f"Studio app.v1.js not served: {asset_status}")
+        raise RuntimeError(f"Studio {app_asset_path} not served: {asset_status}")
     if b"/studio/assets/api.v1.js" not in asset_body:
-        raise RuntimeError("Studio app.v1.js missing packaged module import")
+        raise RuntimeError(f"Studio {app_asset_path} missing packaged module import")
 
     # Authenticated data boundary: /api reads are rejected without a bearer key.
     unauth_status, unauth_payload = _http_json(
