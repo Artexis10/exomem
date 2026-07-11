@@ -156,9 +156,6 @@ class EpistemicGraphIndex:
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
         """)
-        conn.execute(
-            "INSERT OR IGNORE INTO graph_meta(key, value) VALUES ('generation', '0')"
-        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
@@ -634,9 +631,18 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     Called inside each sidecar write transaction (index, delete, rebuild) so the
     freshness token below changes iff graph content changed — never on a WAL
     checkpoint, which moves the file mtime without touching content.
+
+    Self-initializing upsert (no separate "seed the row" step): a fresh sidecar
+    has no `generation` row yet, so the first bump inserts '1'; every
+    subsequent bump increments in place. This keeps row initialization scoped
+    to genuine write paths — `_connect()` (shared by read-only callers like
+    `neighbors_for`/`nodes`/`edges`) must never open a write transaction just
+    to guarantee this row exists (a read connection holding the writer lock
+    would contend with a real concurrent writer).
     """
     conn.execute(
-        "UPDATE graph_meta SET value = CAST(value AS INTEGER) + 1 WHERE key = 'generation'"
+        "INSERT INTO graph_meta(key, value) VALUES ('generation', '1') "
+        "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
     )
 
 

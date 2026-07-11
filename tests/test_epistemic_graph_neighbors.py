@@ -172,6 +172,26 @@ def test_generation_bumps_on_rebuild(tmp_path: Path) -> None:
     assert after != before
 
 
+def test_connect_does_not_hold_an_open_write_transaction(tmp_path: Path) -> None:
+    """A pure-read connection (as neighbors_for/nodes/edges use) must not open
+    an implicit write transaction — that would contend with a genuine
+    concurrent writer (multi-host vault, #201) for a connection that never
+    intends to write anything."""
+    vault = tmp_path / "vault"
+    _seed(vault)
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    idx.rebuild_all()
+
+    conn = idx._connect()
+    try:
+        assert conn.in_transaction is False, (
+            "_connect() left an open write transaction — a read-only caller "
+            "(neighbors_for/nodes/edges) now contends for the writer lock"
+        )
+    finally:
+        conn.close()
+
+
 def test_content_edit_moves_token_like_a_rebuild(tmp_path: Path) -> None:
     """The freshness discipline: an incremental relation-adding write moves the
     token exactly as a rebuild would, so a cached ranking cannot outlive the
