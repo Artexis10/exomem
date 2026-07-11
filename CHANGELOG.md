@@ -5,6 +5,35 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.19.0](https://github.com/Artexis10/exomem/compare/v0.18.0...v0.19.0) (2026-07-11)
+
+
+### Features
+
+* **benchmark:** add recall-visibility Exomem-only dimension ([9edff7b](https://github.com/Artexis10/exomem/commit/9edff7b26d534febcdf05be85a13d0650a6b51e4))
+* **find:** graph-provenance annotation on typed-lane hits ([36ac75c](https://github.com/Artexis10/exomem/commit/36ac75c80e805f631cc1bee2b4717ddd58211f2b))
+* **find:** join typed-graph sidecar token to hot-cache freshness key ([9bddfd5](https://github.com/Artexis10/exomem/commit/9bddfd5ce6fd0a7712a3b48cbcbf3dcd1847675d))
+* **find:** typed-graph lane expansion with byte-identical fallback ([3817f00](https://github.com/Artexis10/exomem/commit/3817f002aea65d23996040cf9bfda7c2cc7aac5c))
+* **graph:** batch neighbour read API + freshness generation token ([0f7df31](https://github.com/Artexis10/exomem/commit/0f7df31d39aee9e7ec0292decd7b44b775842f36))
+* make replicated Exomem one failover-safe connector ([#207](https://github.com/Artexis10/exomem/issues/207)) ([67d7337](https://github.com/Artexis10/exomem/commit/67d7337df8cd63788066131dc44f55fcbaf5dab8))
+* **review:** relation-acceptance queue assembly and filtering ([cb4dd07](https://github.com/Artexis10/exomem/commit/cb4dd071e110f82906b930fb0a4ba850e793e4ff))
+* **review:** relation-queue command surface (review/accept/triage) ([b8c07d0](https://github.com/Artexis10/exomem/commit/b8c07d029f4ea150e46e8653973cc77ab489036c))
+* **studio:** batched relation-acceptance queue panel ([31b058a](https://github.com/Artexis10/exomem/commit/31b058af798421b4ddf6eeb9e5a89d02a39cf7db))
+
+
+### Bug Fixes
+
+* **find:** expose graph provenance in compact hit serialization ([1111a8e](https://github.com/Artexis10/exomem/commit/1111a8e681a8be0b569bbb2f252080762cb84d52))
+* **find:** family precedence before target dedup + vault-scope hybrid expansion ([a61ac8b](https://github.com/Artexis10/exomem/commit/a61ac8b61b765d2ac0cf6d238bc5084e04a09a14))
+* **graph:** resolve semantic-block edges + deterministic same-family order ([c8d903a](https://github.com/Artexis10/exomem/commit/c8d903a22bb4a6ca803d1dae7be817ede5e8c7d7))
+* **graph:** stop opening a write transaction on read connections ([190c8f7](https://github.com/Artexis10/exomem/commit/190c8f7abcaa1588c288ed0d4da688d4ac3d322f))
+* identify coordinator requests through Cloudflare ([#208](https://github.com/Artexis10/exomem/issues/208)) ([7c93fb8](https://github.com/Artexis10/exomem/commit/7c93fb835b316adba630bb31a2472a8b364d4dac))
+* normalize piped Worker secrets ([#209](https://github.com/Artexis10/exomem/issues/209)) ([143595f](https://github.com/Artexis10/exomem/commit/143595f7cef2cf21123dda6b10607663eff5e74b))
+* **review:** fold candidate evidence into the relation fingerprint ([f814fe4](https://github.com/Artexis10/exomem/commit/f814fe4178083de2bf267e545cf59eaca5a3f036))
+* **review:** require fingerprint on accept, re-validate live eligibility ([37f8d04](https://github.com/Artexis10/exomem/commit/37f8d0444143e4a01cfd35e021bb795ca33382de))
+* **review:** stop relation-queue generation once limit_pages is reached ([b373fff](https://github.com/Artexis10/exomem/commit/b373ffff86f97592cae4b265bf424aaf4b22cfa7))
+* **studio:** hide/disable Inbox+Activation filters in relation-queue mode ([4a193bf](https://github.com/Artexis10/exomem/commit/4a193bf62bba81ba0f15013ccbd3d9e4c257095c))
+
 ## [0.18.0](https://github.com/Artexis10/exomem/compare/v0.17.0...v0.18.0) (2026-07-11)
 
 
