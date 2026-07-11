@@ -1,6 +1,7 @@
 ---
 name: "OPSX: Bulk Archive"
 description: Archive multiple completed changes at once
+allowed-tools: Bash(openspec:*)
 category: Workflow
 tags: [workflow, archive, experimental, bulk]
 ---
@@ -8,6 +9,8 @@ tags: [workflow, archive, experimental, bulk]
 Archive multiple completed changes in a single operation.
 
 This skill allows you to batch-archive changes, handling spec conflicts intelligently by checking the codebase to determine what's actually implemented.
+
+**Store selection:** If the user names a store (a store is a standalone OpenSpec repo registered on this machine) or the work lives in one, run `openspec store list --json` to discover registered store ids, then pass `--store <id>` on the commands that read or write specs and changes (`new change`, `status`, `instructions`, `list`, `show`, `validate`, `archive`, `doctor`, `context`). Other commands do not take the flag. Hints printed by commands already carry the flag; keep it on follow-ups. Without a store, commands act on the nearest local `openspec/` root.
 
 **Input**: None required (prompts for selection)
 
@@ -35,8 +38,6 @@ This skill allows you to batch-archive changes, handling spec conflicts intellig
    a. **Artifact status** - Run `openspec status --change "<name>" --json`
       - Parse `schemaName`, `artifacts`, `planningHome`, `changeRoot`, `artifactPaths`, and `actionContext`
       - Note which artifacts are `done` vs other states
-
-      If any selected change reports `actionContext.mode: "workspace-planning"`, explain that workspace bulk archive is not supported in this slice and STOP before syncing specs or moving changes. Do not fall back to repo-local paths or edit linked repos.
 
    b. **Task completion** - Read `artifactPaths.tasks.existingOutputPaths` from status JSON
       - Count `- [ ]` (incomplete) vs `- [x]` (complete)
