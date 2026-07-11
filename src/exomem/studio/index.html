@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <title>Exomem Review Studio</title>
+  <link rel="icon" href="/studio/assets/studio-icon.v1.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/studio/assets/styles.v1.css">
+</head>
+<body>
+  <a class="skip-link" href="#workspace">Skip to review workspace</a>
+  <header class="masthead">
+    <a class="brand" href="/studio/" aria-label="Exomem Review Studio home">
+      <img src="/studio/assets/studio-icon.v1.svg" alt="" width="36" height="36">
+      <span><strong>Exomem</strong><small>Epistemic Review Studio</small></span>
+    </a>
+    <p id="connection-status" class="connection" role="status">Not connected</p>
+  </header>
+
+  <noscript><p class="fatal">The Review Studio needs JavaScript. Core Exomem commands remain available through MCP, REST, and CLI.</p></noscript>
+
+  <main>
+    <section id="auth-panel" class="auth-card" aria-labelledby="auth-title">
+      <p class="eyebrow">Private, same-origin session</p>
+      <h1 id="auth-title">Connect to your Exomem</h1>
+      <p>Use your personal REST key, or continue through a deployment already protected by Cloudflare Access. The key stays in this browser tab session.</p>
+      <form id="auth-form">
+        <label for="api-key">REST bearer key</label>
+        <div class="field-row">
+          <input id="api-key" name="api-key" type="password" autocomplete="off" spellcheck="false">
+          <button type="submit">Connect</button>
+        </div>
+      </form>
+      <button id="access-connect" class="secondary" type="button">Continue with Cloudflare Access</button>
+      <p id="auth-error" class="error" role="alert" hidden></p>
+      <p class="fine-print">No vault titles, paths, counts, or note text are embedded in this page.</p>
+    </section>
+
+    <section id="studio" class="studio" hidden aria-label="Review Studio">
+      <aside class="worklist" aria-labelledby="worklist-title">
+        <div class="mode-tabs" role="tablist" aria-label="Review worklist">
+          <button id="mode-inbox" role="tab" aria-selected="true" data-mode="attention">Inbox</button>
+          <button id="mode-activation" role="tab" aria-selected="false" data-mode="activation">Activation</button>
+        </div>
+        <div class="worklist-heading">
+          <div>
+            <p class="eyebrow" id="worklist-kicker">Daily review</p>
+            <h1 id="worklist-title">Epistemic Inbox</h1>
+          </div>
+          <button id="refresh" class="icon-button" type="button" aria-label="Refresh worklist">Refresh</button>
+        </div>
+        <form id="filters" class="filters" aria-label="Worklist filters">
+          <label for="state-filter">State</label>
+          <select id="state-filter" name="state">
+            <option value="open">Open</option>
+            <option value="snoozed">Snoozed</option>
+            <option value="dismissed">Dismissed</option>
+            <option value="all">All</option>
+          </select>
+          <label for="category-filter">Category</label>
+          <select id="category-filter" name="category"><option value="">All categories</option></select>
+        </form>
+        <p id="worklist-status" class="status" role="status">Waiting to connect.</p>
+        <dl id="coverage" class="coverage" hidden></dl>
+        <ol id="review-list" class="review-list" aria-label="Review items"></ol>
+      </aside>
+
+      <article id="workspace" class="workspace" tabindex="-1" aria-labelledby="workspace-title">
+        <div id="workspace-empty" class="empty-state">
+          <p class="eyebrow">Recorded context, no generated story</p>
+          <h2 id="workspace-title">Choose a review item</h2>
+          <p>Inspect why it surfaced, its evidence and relationships, then make an explicit decision.</p>
+        </div>
+        <div id="workspace-content" hidden>
+          <header class="workspace-header">
+            <p id="item-state" class="state-badge"></p>
+            <h2 id="item-title"></h2>
+            <p id="item-path" class="path"></p>
+            <div id="item-reasons" class="reasons" aria-label="Exact review reasons"></div>
+            <div class="actions" aria-label="Review actions">
+              <button type="button" data-triage="dismiss">Dismiss</button>
+              <button type="button" data-triage="snooze">Snooze</button>
+              <button type="button" data-triage="reopen">Reopen</button>
+              <button type="button" data-proposal="relation">Suggest relation</button>
+              <button type="button" data-proposal="compile">Compile source</button>
+              <button type="button" data-proposal="replace">Replace conclusion</button>
+            </div>
+          </header>
+          <nav class="workspace-tabs" aria-label="Review context">
+            <button type="button" data-panel="context" aria-pressed="true">Context</button>
+            <button type="button" data-panel="evolution" aria-pressed="false">Evolution</button>
+          </nav>
+          <div id="context-panel">
+            <section aria-labelledby="target-heading"><h3 id="target-heading">Target</h3><pre id="target-body" class="note-body"></pre></section>
+            <section aria-labelledby="related-heading"><h3 id="related-heading">Related pages</h3><div id="related-pages"></div></section>
+            <section aria-labelledby="evidence-heading"><h3 id="evidence-heading">Provenance and evidence</h3><div id="evidence"></div></section>
+            <section aria-labelledby="graph-heading"><h3 id="graph-heading">Graph neighborhood</h3><div id="graph"></div></section>
+            <section aria-labelledby="history-heading"><h3 id="history-heading">Recorded history</h3><div id="history"></div></section>
+          </div>
+          <section id="evolution-panel" hidden aria-labelledby="evolution-heading">
+            <h3 id="evolution-heading">Recorded belief evolution</h3>
+            <p class="fine-print">Pointer-ordered stored facts only. No inferred confidence, authority, cause, or transition narrative.</p>
+            <ol id="evolution-list" class="timeline"></ol>
+          </section>
+        </div>
+        <p id="workspace-error" class="error" role="alert" tabindex="-1" hidden></p>
+      </article>
+    </section>
+  </main>
+
+  <dialog id="action-dialog" aria-labelledby="dialog-title">
+    <form method="dialog" id="dialog-form">
+      <p class="eyebrow" id="dialog-kicker">Explicit action</p>
+      <h2 id="dialog-title">Confirm action</h2>
+      <p id="dialog-description"></p>
+      <div id="dialog-fields"></div>
+      <p id="dialog-error" class="error" role="alert" hidden></p>
+      <div class="dialog-actions">
+        <button type="button" id="dialog-cancel" class="secondary">Cancel</button>
+        <button type="submit" id="dialog-confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <script type="module" src="/studio/assets/app.v1.js"></script>
+</body>
+</html>

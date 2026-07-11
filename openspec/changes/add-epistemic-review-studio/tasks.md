@@ -16,20 +16,20 @@
 
 ## 3. Packaged Studio Shell And Security Boundary
 
-- [ ] 3.1 Create the source-controlled Studio asset layout with semantic HTML, CSS, ES modules, icons, and a manifest; add package-data configuration and installed-wheel inclusion tests.
-- [ ] 3.2 Add `/studio/` and manifest-allowlisted asset routes with correct content types, immutable asset caching, uncached shell HTML, path-traversal rejection, and soft-fail diagnostics when assets are missing.
-- [ ] 3.3 Add restrictive Content Security Policy and related browser security headers while keeping all runtime requests same-origin and free of CDN/external asset dependencies.
-- [ ] 3.4 Implement the small REST client and session-scoped authentication screen for bearer-key and Cloudflare Access deployments without putting secrets in URLs, HTML, logs, persistent cookies, or `localStorage`.
-- [ ] 3.5 Add server-route and auth-boundary tests proving unauthenticated clients receive no vault-derived data and Studio failures do not affect MCP, REST, CLI, health, or retrieval readiness.
-- [ ] 3.6 Add an `exomem studio` convenience command that prints the resolved Studio URL by default and opens a browser only behind an explicit option suitable for interactive hosts.
+- [x] 3.1 Create the source-controlled Studio asset layout with semantic HTML, CSS, ES modules, icons, and a manifest; add package-data configuration and installed-wheel inclusion tests.
+- [x] 3.2 Add `/studio/` and manifest-allowlisted asset routes with correct content types, immutable asset caching, uncached shell HTML, path-traversal rejection, and soft-fail diagnostics when assets are missing.
+- [x] 3.3 Add restrictive Content Security Policy and related browser security headers while keeping all runtime requests same-origin and free of CDN/external asset dependencies.
+- [x] 3.4 Implement the small REST client and session-scoped authentication screen for bearer-key and Cloudflare Access deployments without putting secrets in URLs, HTML, logs, persistent cookies, or `localStorage`.
+- [x] 3.5 Add server-route and auth-boundary tests proving unauthenticated clients receive no vault-derived data and Studio failures do not affect MCP, REST, CLI, health, or retrieval readiness.
+- [x] 3.6 Add an `exomem studio` convenience command that prints the resolved Studio URL by default and opens a browser only behind an explicit option suitable for interactive hosts.
 
 ## 4. Inbox And Activation Worklists
 
-- [ ] 4.1 Implement a minimal client state/router keyed by worklist mode, filters, state tab, and stable review reference, including browser back/forward restoration and stale-selection recovery.
-- [ ] 4.2 Render the daily Inbox in server order with category/reason labels, state and summary counts, truncation notes, loading/empty/error states, and no client-side epistemic reranking.
-- [ ] 4.3 Render corpus activation as a separately selected opt-in worklist with structural categories and denominator-backed coverage, and handle activation-unavailable deployments without breaking the Inbox.
-- [ ] 4.4 Add keyboard list navigation, visible focus, labelled filters and status, responsive narrow/desktop layouts, and non-color-only severity/state indicators.
-- [ ] 4.5 Add deterministic UI fixture tests for attention ordering, filters, counts, truncation, stable selection, activation separation, and honest empty/error states.
+- [x] 4.1 Implement a minimal client state/router keyed by worklist mode, filters, state tab, and stable review reference, including browser back/forward restoration and stale-selection recovery.
+- [x] 4.2 Render the daily Inbox in server order with category/reason labels, state and summary counts, truncation notes, loading/empty/error states, and no client-side epistemic reranking.
+- [x] 4.3 Render corpus activation as a separately selected opt-in worklist with structural categories and denominator-backed coverage, and handle activation-unavailable deployments without breaking the Inbox.
+- [x] 4.4 Add keyboard list navigation, visible focus, labelled filters and status, responsive narrow/desktop layouts, and non-color-only severity/state indicators.
+- [x] 4.5 Add deterministic UI fixture tests for attention ordering, filters, counts, truncation, stable selection, activation separation, and honest empty/error states.
 
 ## 5. Review Workspace And Triage
 

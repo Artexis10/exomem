@@ -3,12 +3,65 @@
 from __future__ import annotations
 
 import base64
+import json
 from pathlib import Path
 
 import mcp.types
 from fastmcp import FastMCP
 from starlette.requests import Request
-from starlette.responses import FileResponse, JSONResponse
+from starlette.responses import FileResponse, JSONResponse, RedirectResponse
+
+_STUDIO_SECURITY_HEADERS = {
+    "Content-Security-Policy": (
+        "default-src 'none'; base-uri 'none'; connect-src 'self'; "
+        "font-src 'self'; form-action 'self'; frame-ancestors 'none'; "
+        "img-src 'self'; manifest-src 'self'; object-src 'none'; "
+        "script-src 'self'; style-src 'self'"
+    ),
+    "Cross-Origin-Opener-Policy": "same-origin",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+}
+
+
+def _studio_dir() -> Path:
+    return Path(__file__).parent / "studio"
+
+
+def _studio_manifest() -> dict[str, str]:
+    """Load the packaged allowlist as ``asset name -> media type``."""
+    manifest_path = _studio_dir() / "manifest.json"
+    data = json.loads(manifest_path.read_text(encoding="utf-8"))
+    assets = data.get("assets")
+    if not isinstance(assets, dict) or "index.html" not in assets:
+        raise ValueError("Studio asset manifest is invalid")
+    clean: dict[str, str] = {}
+    for name, media_type in assets.items():
+        if (
+            not isinstance(name, str)
+            or not isinstance(media_type, str)
+            or not name
+            or Path(name).name != name
+            or name.startswith(".")
+        ):
+            raise ValueError("Studio asset manifest contains an unsafe entry")
+        clean[name] = media_type
+    return clean
+
+
+def _studio_error(message: str, *, status_code: int = 503) -> JSONResponse:
+    return JSONResponse(
+        {
+            "error": "STUDIO_ASSETS_UNAVAILABLE",
+            "message": message[:240],
+            "remediation": "Reinstall Exomem and restart the service.",
+        },
+        status_code=status_code,
+        headers={"Cache-Control": "no-store", **_STUDIO_SECURITY_HEADERS},
+    )
 
 
 def server_icons() -> list[mcp.types.Icon]:
@@ -28,7 +81,7 @@ def server_icons() -> list[mcp.types.Icon]:
 
 
 def register_asset_routes(mcp_app: FastMCP) -> None:
-    """Serve public favicon assets outside MCP auth."""
+    """Serve inert public assets outside MCP auth; vault data stays behind REST."""
     asset_dir = Path(__file__).parent
 
     @mcp_app.custom_route("/favicon.ico", methods=["GET"])
@@ -45,6 +98,46 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
             asset_dir / "icon.svg",
             media_type="image/svg+xml",
             headers={"Cache-Control": "public, max-age=86400"},
+        )
+
+    @mcp_app.custom_route("/studio", methods=["GET"])
+    async def _studio_redirect(request: Request):  # noqa: ARG001
+        return RedirectResponse("/studio/", status_code=307)
+
+    @mcp_app.custom_route("/studio/", methods=["GET"])
+    async def _studio_shell(request: Request):  # noqa: ARG001
+        try:
+            manifest = _studio_manifest()
+            shell = _studio_dir() / "index.html"
+            if not shell.is_file():
+                raise FileNotFoundError("Studio shell is missing")
+            return FileResponse(
+                shell,
+                media_type=manifest["index.html"],
+                headers={"Cache-Control": "no-store", **_STUDIO_SECURITY_HEADERS},
+            )
+        except (OSError, ValueError, json.JSONDecodeError, KeyError) as exc:
+            return _studio_error(str(exc))
+
+    @mcp_app.custom_route("/studio/assets/{asset_path:path}", methods=["GET"])
+    async def _studio_asset(request: Request):
+        asset_name = request.path_params.get("asset_path", "")
+        try:
+            manifest = _studio_manifest()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            return _studio_error(str(exc))
+        if asset_name == "index.html" or asset_name not in manifest:
+            return _studio_error("Studio asset is not in the packaged manifest", status_code=404)
+        asset = _studio_dir() / asset_name
+        if not asset.is_file():
+            return _studio_error(f"Studio asset {asset_name!r} is missing")
+        return FileResponse(
+            asset,
+            media_type=manifest[asset_name],
+            headers={
+                "Cache-Control": "public, max-age=31536000, immutable",
+                **_STUDIO_SECURITY_HEADERS,
+            },
         )
 
 
