@@ -2,17 +2,17 @@
 
 ## 1. Queue module (new src/exomem/relation_queue.py)
 
-- [ ] 1.1 `build_queue(vault_root, *, limit_pages, ...) -> QueueResult`:
+- [x] 1.1 `build_queue(vault_root, *, limit_pages, ...) -> QueueResult`:
       walk activation-eligible pages (reuse activation's eligibility walk),
       call `suggest_relations` per page, assemble items with review refs
       (`exomem://review/relation/<sha1-16>`) and signal fingerprints (reuse
       the existing fingerprint helper from review_state usage).
-- [ ] 1.2 Read-time filtering: authored-edge dedup (parse source page's
+- [x] 1.2 Read-time filtering: authored-edge dedup (parse source page's
       `## Relations` via markdown_relations), placeholder-target drop,
       unexpired-decision drop (ReviewStateStore lookup).
-- [ ] 1.3 Coverage counters aligned with activation denominators; capped
+- [x] 1.3 Coverage counters aligned with activation denominators; capped
       surfacing with explicit dropped counts.
-- [ ] 1.4 Red-first tests (tests/test_relation_queue.py): determinism on
+- [x] 1.4 Red-first tests (tests/test_relation_queue.py): determinism on
       unchanged corpus; all three filters; counters; cap; `mutated: false`;
       no filesystem writes on read (assert vault tree hash unchanged).
 
