@@ -493,6 +493,169 @@ def _http_json(
         return exc.code, json.loads(exc.read().decode("utf-8"))
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface 3xx responses instead of following them (Studio redirect proof)."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001, D102
+        return None
+
+
+def _http_get_raw(
+    url: str,
+    *,
+    token: str | None = None,
+    timeout: float,
+    follow_redirects: bool = True,
+) -> tuple[int, dict[str, str], bytes]:
+    """GET a non-JSON asset (Studio HTML/JS), returning status, headers, body."""
+    headers = {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    request = urllib.request.Request(url, headers=headers, method="GET")
+    opener = (
+        urllib.request.build_opener()
+        if follow_redirects
+        else urllib.request.build_opener(_NoRedirect)
+    )
+    try:
+        with opener.open(request, timeout=timeout) as response:
+            headers = {key.lower(): value for key, value in response.headers.items()}
+            return response.status, headers, response.read()
+    except urllib.error.HTTPError as exc:
+        headers = {key.lower(): value for key, value in exc.headers.items()}
+        return exc.code, headers, exc.read()
+
+
+def _first_review_item(base_url: str, token: str, timeout: float) -> dict[str, Any]:
+    """Resolve one current review item (activation queue, then attention)."""
+    for mode in ("activation", "attention"):
+        status, payload = _http_json(
+            f"{base_url}/api/review_memory",
+            method="POST",
+            body={"mode": mode, "state": "all", "limit": 50},
+            token=token,
+            timeout=timeout,
+        )
+        if status != 200 or not payload.get("success"):
+            raise RuntimeError(f"review_memory {mode} failed over REST: {status} {payload}")
+        for item in payload["data"].get("items", []):
+            if item.get("ref") and item.get("fingerprint"):
+                return item
+    raise RuntimeError("no review item surfaced from the seeded corpus over REST")
+
+
+def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> None:
+    """Prove #200 Studio: offline shell, REST data boundary, bounded context, triage."""
+    # Packaged Studio shell + versioned asset are served from the installed wheel.
+    redirect_status, redirect_headers, _ = _http_get_raw(
+        f"{base_url}/studio", timeout=timeout, follow_redirects=False
+    )
+    if redirect_status != 307 or not redirect_headers.get("location", "").endswith("/studio/"):
+        raise RuntimeError(
+            f"/studio did not redirect to /studio/ ({redirect_status} {redirect_headers.get('location')})"
+        )
+    shell_status, shell_headers, shell_body = _http_get_raw(
+        f"{base_url}/studio/", timeout=timeout
+    )
+    if shell_status != 200 or not shell_headers.get("content-type", "").startswith("text/html"):
+        raise RuntimeError(f"/studio/ shell not served as HTML: {shell_status}")
+    if b"Exomem Review Studio" not in shell_body or b"/studio/assets/app.v1.js" not in shell_body:
+        raise RuntimeError("Studio shell body missing packaged markers")
+    asset_status, asset_headers, asset_body = _http_get_raw(
+        f"{base_url}/studio/assets/app.v1.js", timeout=timeout
+    )
+    if asset_status != 200 or "javascript" not in asset_headers.get("content-type", ""):
+        raise RuntimeError(f"Studio app.v1.js not served: {asset_status}")
+    if b"/studio/assets/api.v1.js" not in asset_body:
+        raise RuntimeError("Studio app.v1.js missing packaged module import")
+
+    # Authenticated data boundary: /api reads are rejected without a bearer key.
+    unauth_status, unauth_payload = _http_json(
+        f"{base_url}/api/review_item_context",
+        method="POST",
+        body={"ref": "exomem://review/" + "0" * 24},
+        timeout=timeout,
+    )
+    if unauth_status != 401 or unauth_payload.get("success"):
+        raise RuntimeError(
+            f"review_item_context served without a bearer key: {unauth_status} {unauth_payload}"
+        )
+
+    item = _first_review_item(base_url, token, timeout)
+    ref = item["ref"]
+    fingerprint = item["fingerprint"]
+
+    # Bounded, deterministic composed context for the seeded review item.
+    ctx_status, ctx_payload = _http_json(
+        f"{base_url}/api/review_item_context",
+        method="POST",
+        body={
+            "ref": ref,
+            "expected_fingerprint": fingerprint,
+            "max_body_chars": 200,
+            "max_related_pages": 2,
+        },
+        token=token,
+        timeout=timeout,
+    )
+    if ctx_status != 200 or not ctx_payload.get("success"):
+        raise RuntimeError(f"review_item_context failed: {ctx_status} {ctx_payload}")
+    context = ctx_payload["data"]
+    required_sections = {
+        "item",
+        "target",
+        "related",
+        "provenance",
+        "graph",
+        "history",
+        "evolution",
+        "availability",
+        "truncation",
+    }
+    missing = required_sections - set(context)
+    if missing:
+        raise RuntimeError(f"review_item_context omitted sections: {sorted(missing)}")
+    if not str(context["target"].get("ref", "")).startswith(("exomem://", "vault://")):
+        raise RuntimeError("review_item_context target lost its canonical reference")
+    if not isinstance(context["truncation"], list):
+        raise RuntimeError("review_item_context truncation is not an explicit list")
+    if context["target"].get("body_chars", 0) > 200 and not context["target"].get("body_truncated"):
+        raise RuntimeError("review_item_context did not honor the target body bound")
+    # Path-specific recorded evolution: present and honest (recorded chain or empty state).
+    evolution = context["evolution"]
+    availability = context["availability"]
+    if "available" not in evolution or not isinstance(evolution.get("timelines"), list):
+        raise RuntimeError("review_item_context evolution section is not an honest supersession state")
+    if not isinstance(availability.get("evolution"), bool):
+        raise RuntimeError("review_item_context availability omitted the evolution flag")
+
+    # Fingerprint-guarded triage round-trip through the REST surface.
+    stale_fp = ("1" if fingerprint[0] != "1" else "0") + fingerprint[1:]
+    stale_status, stale_payload = _http_json(
+        f"{base_url}/api/triage_memory",
+        method="POST",
+        body={"ref": ref, "action": "dismiss", "expected_fingerprint": stale_fp},
+        token=token,
+        timeout=timeout,
+    )
+    if stale_payload.get("success"):
+        raise RuntimeError("stale-fingerprint triage was accepted instead of refused")
+    stale_message = json.dumps(stale_payload.get("error") or {})
+    if "REVIEW_ITEM_CHANGED" not in stale_message:
+        raise RuntimeError(f"stale-fingerprint triage lacked the changed-item contract: {stale_payload}")
+    fresh_status, fresh_payload = _http_json(
+        f"{base_url}/api/triage_memory",
+        method="POST",
+        body={"ref": ref, "action": "dismiss", "expected_fingerprint": fingerprint},
+        token=token,
+        timeout=timeout,
+    )
+    if fresh_status != 200 or not fresh_payload.get("success"):
+        raise RuntimeError(f"fresh-fingerprint triage failed: {fresh_status} {fresh_payload}")
+    if fresh_payload["data"].get("state") != "dismissed":
+        raise RuntimeError(f"triage dismiss did not record a dismissed state: {fresh_payload}")
+
+
 async def _initialize_http_mcp(base_url: str, timeout: float) -> None:
     from fastmcp import Client
 
@@ -593,6 +756,9 @@ def _installed_http(args: argparse.Namespace) -> int:
             )
             if status != 200 or not payload.get("success"):
                 raise RuntimeError(f"authenticated REST write failed: {status} {payload}")
+            _studio_and_review_checks(
+                base_url, token="e2e-rest-key", timeout=args.request_timeout
+            )
             asyncio.run(_initialize_http_mcp(base_url, args.request_timeout))
         finally:
             if proc.poll() is None:
@@ -611,6 +777,216 @@ def _installed_http(args: argparse.Namespace) -> int:
                 + server_log.read_text(encoding="utf-8")[-4000:]
             )
     print(json.dumps({"success": True, "transport": "http", "clean_shutdown": True}))
+    return 0
+
+
+_LEASE_VAULT_ID = "e2e-lease-vault"
+_LEASE_TOKEN = "e2e-coord-token"
+_LEASE_TTL = 4.0
+
+
+def _lease_replica_env(
+    home: Path, vault: Path, *, replica_id: str, coord_url: str, state_dir: Path
+) -> dict[str, str]:
+    env = _clean_env(home, vault)
+    env["EXOMEM_REST_API_KEY"] = "e2e-rest-key"
+    env["EXOMEM_WRITER_LEASE_URL"] = coord_url
+    env["EXOMEM_WRITER_LEASE_VAULT_ID"] = _LEASE_VAULT_ID
+    env["EXOMEM_WRITER_LEASE_REPLICA_ID"] = replica_id
+    env["EXOMEM_WRITER_LEASE_TOKEN"] = _LEASE_TOKEN
+    env["EXOMEM_WRITER_LEASE_TTL"] = str(_LEASE_TTL)
+    env["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(state_dir)
+    return env
+
+
+def _wait_http_ready(
+    check, *, proc: subprocess.Popen, deadline: float, log: Path, label: str
+) -> None:
+    while True:
+        if proc.poll() is not None:
+            raise RuntimeError(
+                f"{label} exited during startup ({proc.returncode}):\n"
+                + log.read_text(encoding="utf-8")[-3000:]
+            )
+        try:
+            if check():
+                return
+        except (OSError, ValueError, json.JSONDecodeError):
+            pass
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"{label} did not become ready before timeout")
+        time.sleep(0.1)
+
+
+def _terminate(proc: subprocess.Popen, timeout: float) -> None:
+    if proc.poll() is not None:
+        return
+    proc.terminate()
+    try:
+        proc.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        proc.wait(timeout=5)
+
+
+def _installed_lease(args: argparse.Namespace) -> int:
+    """Prove #201: two replicas serialize writes through the lease-wrapped surface."""
+    vault = Path(args.vault)
+    work = Path(args.work)
+    home = Path(args.home)
+    timeout = args.request_timeout
+    coord_port = _reserve_port()
+    port_a = _reserve_port()
+    port_b = _reserve_port()
+    coord_url = f"http://127.0.0.1:{coord_port}"
+    url_a = f"http://127.0.0.1:{port_a}"
+    url_b = f"http://127.0.0.1:{port_b}"
+
+    coord_env = _clean_env(home, vault)
+    coord_env["EXOMEM_LEASE_COORDINATOR_DB"] = str(work / "writer-leases.sqlite")
+    coord_env["EXOMEM_LEASE_COORDINATOR_TOKEN"] = _LEASE_TOKEN
+    env_a = _lease_replica_env(
+        home, vault, replica_id="replica-a", coord_url=coord_url, state_dir=work / "lease-a"
+    )
+    env_b = _lease_replica_env(
+        home, vault, replica_id="replica-b", coord_url=coord_url, state_dir=work / "lease-b"
+    )
+
+    coord_log = work / "coordinator.log"
+    log_a = work / "replica-a.log"
+    log_b = work / "replica-b.log"
+    procs: list[subprocess.Popen] = []
+    handles = []
+    try:
+        coord_handle = coord_log.open("w", encoding="utf-8")
+        handles.append(coord_handle)
+        coordinator = subprocess.Popen(
+            [
+                args.python,
+                "-m",
+                "exomem.lease_coordinator",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                str(coord_port),
+                "--database",
+                str(work / "writer-leases.sqlite"),
+            ],
+            cwd=work,
+            env=coord_env,
+            stdout=coord_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+        )
+        procs.append(coordinator)
+        lease_status_url = f"{coord_url}/v1/vaults/{_LEASE_VAULT_ID}/lease"
+        _wait_http_ready(
+            lambda: _http_json(lease_status_url, token=_LEASE_TOKEN, timeout=1.0)[0] == 200,
+            proc=coordinator,
+            deadline=time.monotonic() + timeout,
+            log=coord_log,
+            label="lease coordinator",
+        )
+
+        for url, env, log, handle_label in (
+            (url_a, env_a, log_a, port_a),
+            (url_b, env_b, log_b, port_b),
+        ):
+            handle = log.open("w", encoding="utf-8")
+            handles.append(handle)
+            replica = subprocess.Popen(
+                [args.python, args.http_server, "--host", "127.0.0.1", "--port", str(handle_label)],
+                cwd=work,
+                env=env,
+                stdout=handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+            procs.append(replica)
+            _wait_http_ready(
+                lambda u=url: _http_json(f"{u}/api/openapi.json", timeout=1.0)[0] == 200,
+                proc=replica,
+                deadline=time.monotonic() + timeout,
+                log=log,
+                label=f"lease replica on {handle_label}",
+            )
+        replica_a, replica_b = procs[1], procs[2]
+
+        def _remember(url: str, title: str) -> tuple[int, dict[str, Any]]:
+            return _http_json(
+                f"{url}/api/remember",
+                method="POST",
+                body={
+                    "content": f"# {title}\n\n## Claim\n\nWriter-lease serialization.\n",
+                    "title": title,
+                    "note_type": "insight",
+                },
+                token="e2e-rest-key",
+                timeout=timeout,
+            )
+
+        # Replica A acquires the lease lazily on its first mutation and becomes writer.
+        a_status, a_payload = _remember(url_a, "Lease writer A")
+        if a_status != 200 or not a_payload.get("success"):
+            raise RuntimeError(f"first writer was refused the lease: {a_status} {a_payload}")
+
+        # Replica B is a readable follower: its write is refused before the leaf runs.
+        b_status, b_payload = _remember(url_b, "Lease follower B")
+        b_code = (b_payload.get("error") or {}).get("code")
+        if b_payload.get("success") or b_code != "WRITER_LEASE_REQUIRED":
+            raise RuntimeError(f"follower write was not lease-gated: {b_status} {b_payload}")
+
+        # Coordination status reports the single holder and each replica's role.
+        _, status_a = _http_json(
+            f"{url_a}/api/coordination_status", method="POST", body={}, token="e2e-rest-key", timeout=timeout
+        )
+        _, status_b = _http_json(
+            f"{url_b}/api/coordination_status", method="POST", body={}, token="e2e-rest-key", timeout=timeout
+        )
+        if status_a["data"].get("role") != "writer" or status_a["data"].get("holder") != "replica-a":
+            raise RuntimeError(f"writer replica misreported coordination status: {status_a}")
+        if status_b["data"].get("role") != "follower" or status_b["data"].get("holder") != "replica-a":
+            raise RuntimeError(f"follower replica misreported coordination status: {status_b}")
+
+        # Followers still serve reads while another replica holds the lease.
+        read_status, read_payload = _http_json(
+            f"{url_b}/api/bootstrap", method="POST", body={}, token="e2e-rest-key", timeout=timeout
+        )
+        if read_status != 200 or not read_payload.get("success"):
+            raise RuntimeError(f"follower could not serve a read: {read_status} {read_payload}")
+
+        # Release/expiry: once A stops, B acquires the lease and takes over writing.
+        _terminate(replica_a, timeout)
+        deadline = time.monotonic() + _LEASE_TTL * 3 + 5
+        takeover: tuple[int, dict[str, Any]] | None = None
+        while time.monotonic() < deadline:
+            status, payload = _remember(url_b, "Lease takeover B")
+            if status == 200 and payload.get("success"):
+                takeover = (status, payload)
+                break
+            time.sleep(0.25)
+        if takeover is None:
+            raise RuntimeError("second replica never acquired the lease after the writer stopped")
+
+        # The serialized writes left the vault consistent (both reads succeed via B).
+        verify_status, verify_payload = _http_json(
+            f"{url_b}/api/ask_memory",
+            method="POST",
+            body={"query": "Lease writer takeover", "mode": "keyword"},
+            token="e2e-rest-key",
+            timeout=timeout,
+        )
+        if verify_status != 200 or not verify_payload.get("success"):
+            raise RuntimeError(f"post-takeover read failed: {verify_status} {verify_payload}")
+
+        _terminate(replica_b, timeout)
+        _terminate(coordinator, timeout)
+    finally:
+        for proc in procs:
+            _terminate(proc, 5)
+        for handle in handles:
+            handle.close()
+    print(json.dumps({"success": True, "transport": "lease", "takeover": True}))
     return 0
 
 
@@ -677,7 +1053,7 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=work,
             timeout=child_timeout,
         )
-        print("product-e2e: HTTP auth + MCP lifecycle + shutdown")
+        print("product-e2e: HTTP auth + Studio + review context + triage + shutdown")
         _run(
             [
                 str(python),
@@ -693,6 +1069,22 @@ def _orchestrate(args: argparse.Namespace) -> int:
             cwd=work,
             timeout=max(30.0, args.request_timeout * 6),
         )
+        print("product-e2e: writer-lease coordination (two replicas)")
+        _run(
+            [
+                str(python),
+                str(Path(__file__).resolve()),
+                "--installed-lease",
+                "--python",
+                str(python),
+                "--http-server",
+                str(REPO_ROOT / "scripts" / "e2e_http_server.py"),
+                *common,
+            ],
+            env=env,
+            cwd=work,
+            timeout=max(60.0, args.request_timeout * 8),
+        )
     elapsed = time.monotonic() - started
     if elapsed > args.budget_seconds:
         raise TimeoutError(
@@ -707,7 +1099,8 @@ def main() -> int:
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--installed-stdio", action="store_true", help=argparse.SUPPRESS)
     mode.add_argument("--installed-http", action="store_true", help=argparse.SUPPRESS)
-    parser.add_argument("--budget-seconds", type=float, default=240.0)
+    mode.add_argument("--installed-lease", action="store_true", help=argparse.SUPPRESS)
+    parser.add_argument("--budget-seconds", type=float, default=300.0)
     parser.add_argument("--request-timeout", type=float, default=20.0)
     parser.add_argument("--executable", default="")
     parser.add_argument("--python", default=sys.executable)
@@ -720,6 +1113,8 @@ def main() -> int:
         return _installed_stdio(args)
     if args.installed_http:
         return _installed_http(args)
+    if args.installed_lease:
+        return _installed_lease(args)
     return _orchestrate(args)
 
 
