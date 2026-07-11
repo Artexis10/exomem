@@ -553,7 +553,8 @@ def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> N
     )
     if redirect_status != 307 or not redirect_headers.get("location", "").endswith("/studio/"):
         raise RuntimeError(
-            f"/studio did not redirect to /studio/ ({redirect_status} {redirect_headers.get('location')})"
+            "/studio did not redirect to /studio/ "
+            f"({redirect_status} {redirect_headers.get('location')})"
         )
     shell_status, shell_headers, shell_body = _http_get_raw(
         f"{base_url}/studio/", timeout=timeout
@@ -628,7 +629,9 @@ def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> N
     evolution = context["evolution"]
     availability = context["availability"]
     if "available" not in evolution or not isinstance(evolution.get("timelines"), list):
-        raise RuntimeError("review_item_context evolution section is not an honest supersession state")
+        raise RuntimeError(
+            "review_item_context evolution section is not an honest supersession state"
+        )
     if not isinstance(availability.get("evolution"), bool):
         raise RuntimeError("review_item_context availability omitted the evolution flag")
 
@@ -645,7 +648,9 @@ def _studio_and_review_checks(base_url: str, *, token: str, timeout: float) -> N
         raise RuntimeError("stale-fingerprint triage was accepted instead of refused")
     stale_message = json.dumps(stale_payload.get("error") or {})
     if "REVIEW_ITEM_CHANGED" not in stale_message:
-        raise RuntimeError(f"stale-fingerprint triage lacked the changed-item contract: {stale_payload}")
+        raise RuntimeError(
+            f"stale-fingerprint triage lacked the changed-item contract: {stale_payload}"
+        )
     fresh_status, fresh_payload = _http_json(
         f"{base_url}/api/triage_memory",
         method="POST",
@@ -941,14 +946,28 @@ def _installed_lease(args: argparse.Namespace) -> int:
 
         # Coordination status reports the single holder and each replica's role.
         _, status_a = _http_json(
-            f"{url_a}/api/coordination_status", method="POST", body={}, token="e2e-rest-key", timeout=timeout
+            f"{url_a}/api/coordination_status",
+            method="POST",
+            body={},
+            token="e2e-rest-key",
+            timeout=timeout,
         )
         _, status_b = _http_json(
-            f"{url_b}/api/coordination_status", method="POST", body={}, token="e2e-rest-key", timeout=timeout
+            f"{url_b}/api/coordination_status",
+            method="POST",
+            body={},
+            token="e2e-rest-key",
+            timeout=timeout,
         )
-        if status_a["data"].get("role") != "writer" or status_a["data"].get("holder") != "replica-a":
+        if (
+            status_a["data"].get("role") != "writer"
+            or status_a["data"].get("holder") != "replica-a"
+        ):
             raise RuntimeError(f"writer replica misreported coordination status: {status_a}")
-        if status_b["data"].get("role") != "follower" or status_b["data"].get("holder") != "replica-a":
+        if (
+            status_b["data"].get("role") != "follower"
+            or status_b["data"].get("holder") != "replica-a"
+        ):
             raise RuntimeError(f"follower replica misreported coordination status: {status_b}")
 
         # Followers still serve reads while another replica holds the lease.
