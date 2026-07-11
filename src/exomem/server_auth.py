@@ -7,9 +7,19 @@ import logging
 import os
 import time
 
+from cryptography.fernet import Fernet
 from fastmcp.server.auth.auth import AccessToken
+from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
 from fastmcp.server.auth.providers.github import GitHubTokenVerifier
+from key_value.aio.stores.filetree import (
+    FileTreeStore,
+    FileTreeV1CollectionSanitizationStrategy,
+    FileTreeV1KeySanitizationStrategy,
+)
+from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
+
+from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 
 log = logging.getLogger(__name__)
 
@@ -67,9 +77,7 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
         if ttl > 0 and key:
             now = time.monotonic()
             if len(self._login_cache) >= self._MAX_ENTRIES:
-                self._login_cache = {
-                    k: v for k, v in self._login_cache.items() if now - v[0] < ttl
-                }
+                self._login_cache = {k: v for k, v in self._login_cache.items() if now - v[0] < ttl}
             self._login_cache[key] = (now, access)
         return access
 
@@ -106,6 +114,53 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
             "rotation or FastMCP upgrades. Set it in .env for a stable connector."
         )
 
+    client_storage = None
+    storage_url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip()
+    if storage_url:
+        if jwt_signing_key is None:
+            raise RuntimeError(
+                "EXOMEM_JWT_SIGNING_KEY is required when EXOMEM_OAUTH_STORAGE_URL is set"
+            )
+        namespace = (
+            os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+            or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+        )
+        if not namespace:
+            raise RuntimeError(
+                "EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID "
+                "is required for shared OAuth storage"
+            )
+        signing_key = derive_jwt_key(
+            low_entropy_material=jwt_signing_key,
+            salt="fastmcp-jwt-signing-key",
+        )
+        storage_key = derive_jwt_key(
+            high_entropy_material=signing_key.decode(),
+            salt="fastmcp-storage-encryption-key",
+        )
+        remote = RemoteOAuthStorage(
+            url=storage_url,
+            namespace=namespace,
+            token=os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip() or None,
+            timeout=float(os.environ.get("EXOMEM_OAUTH_STORAGE_TIMEOUT", "5")),
+            cache_ttl=float(os.environ.get("EXOMEM_OAUTH_STORAGE_CACHE_TTL", "300")),
+        )
+        from fastmcp import settings
+
+        key_fingerprint = hashlib.sha256(storage_key).hexdigest()[:12]
+        storage_dir = settings.home / "oauth-proxy" / key_fingerprint
+        storage_dir.mkdir(parents=True, exist_ok=True)
+        local = FileTreeStore(
+            data_directory=storage_dir,
+            key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(storage_dir),
+            collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(storage_dir),
+        )
+        client_storage = FernetEncryptionWrapper(
+            key_value=ReadThroughMirrorStorage(primary=remote, fallback=local),
+            fernet=Fernet(key=storage_key),
+            raise_on_decryption_error=False,
+        )
+
     return OAuthProxy(
         upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
         upstream_token_endpoint="https://github.com/login/oauth/access_token",
@@ -114,5 +169,6 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         token_verifier=SingleUserGitHubVerifier(allowed_login=gh_username),
         base_url=base_url,
         jwt_signing_key=jwt_signing_key,
+        client_storage=client_storage,
         fallback_access_token_expiry_seconds=30 * 24 * 60 * 60,
     )

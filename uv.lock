@@ -632,10 +632,11 @@ wheels = [
 
 [[package]]
 name = "exomem"
-version = "0.14.0"
+version = "0.18.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
+    { name = "httpx" },
     { name = "numpy" },
     { name = "pyjwt", extra = ["crypto"] },
     { name = "python-dotenv" },
@@ -677,7 +678,6 @@ vision = [
 
 [package.dev-dependencies]
 dev = [
-    { name = "httpx" },
     { name = "pytest" },
     { name = "pytest-timeout" },
 ]
@@ -686,6 +686,7 @@ dev = [
 requires-dist = [
     { name = "faster-whisper", marker = "extra == 'media'", specifier = ">=1.0" },
     { name = "fastmcp", specifier = ">=2.10" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "markitdown", extras = ["docx", "xlsx", "pptx"], marker = "extra == 'media'", specifier = ">=0.1.1" },
     { name = "mlx-whisper", marker = "platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'media-mlx'", specifier = ">=0.4" },
     { name = "numpy", specifier = ">=1.26" },
@@ -715,7 +716,6 @@ provides-extras = ["embeddings", "media", "media-mlx", "diarization", "vision"]
 
 [package.metadata.requires-dev]
 dev = [
-    { name = "httpx", specifier = ">=0.27" },
     { name = "pytest", specifier = ">=8.0" },
     { name = "pytest-timeout", specifier = ">=2.3" },
 ]
