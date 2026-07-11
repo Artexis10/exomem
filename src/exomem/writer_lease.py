@@ -25,6 +25,10 @@ from typing import Any
 
 from .cli_ops import OpError
 
+_COORDINATOR_USER_AGENT = (
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
+)
+
 
 @dataclass(frozen=True)
 class LeaseConfig:
@@ -97,7 +101,12 @@ class LeaseRecord:
             raise ValueError("expires_at must be a number or null")
         if isinstance(token, bool) or not isinstance(token, int):
             raise ValueError("fencing_token must be an integer")
-        return cls(holder, float(expires) if expires is not None else None, token, bool(data.get("granted")))
+        return cls(
+            holder,
+            float(expires) if expires is not None else None,
+            token,
+            bool(data.get("granted")),
+        )
 
 
 class LeaseCoordinatorClient:
@@ -109,13 +118,29 @@ class LeaseCoordinatorClient:
         self.config = config
 
     def acquire(self) -> LeaseRecord:
-        return self._request("POST", "acquire", {"replica_id": self.config.replica_id, "ttl_seconds": self.config.ttl_seconds})
+        return self._request(
+            "POST",
+            "acquire",
+            {"replica_id": self.config.replica_id, "ttl_seconds": self.config.ttl_seconds},
+        )
 
     def renew(self, fencing_token: int) -> LeaseRecord:
-        return self._request("POST", "renew", {"replica_id": self.config.replica_id, "fencing_token": fencing_token, "ttl_seconds": self.config.ttl_seconds})
+        return self._request(
+            "POST",
+            "renew",
+            {
+                "replica_id": self.config.replica_id,
+                "fencing_token": fencing_token,
+                "ttl_seconds": self.config.ttl_seconds,
+            },
+        )
 
     def release(self, fencing_token: int) -> LeaseRecord:
-        return self._request("POST", "release", {"replica_id": self.config.replica_id, "fencing_token": fencing_token})
+        return self._request(
+            "POST",
+            "release",
+            {"replica_id": self.config.replica_id, "fencing_token": fencing_token},
+        )
 
     def status(self) -> LeaseRecord:
         return self._request("GET", "", None)
@@ -124,7 +149,7 @@ class LeaseCoordinatorClient:
         vault = urllib.parse.quote(str(self.config.vault_id), safe="")
         suffix = f"/{operation}" if operation else ""
         url = f"{self.config.url}/v1/vaults/{vault}/lease{suffix}"
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
         data = None
         if body is not None:
             data = json.dumps(body, separators=(",", ":")).encode("utf-8")
@@ -138,7 +163,14 @@ class LeaseCoordinatorClient:
             if not isinstance(payload, dict):
                 raise ValueError("response is not an object")
             return LeaseRecord.from_json(payload)
-        except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError, json.JSONDecodeError, ValueError) as exc:
+        except (
+            urllib.error.URLError,
+            urllib.error.HTTPError,
+            TimeoutError,
+            OSError,
+            json.JSONDecodeError,
+            ValueError,
+        ) as exc:
             raise OpError(
                 "WRITER_COORDINATOR_UNAVAILABLE",
                 f"writer coordinator could not confirm authority: {exc}",
@@ -169,13 +201,21 @@ class IdempotencyStore:
             return operation()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
-            row = conn.execute("SELECT digest, state, result FROM mutations WHERE key = ?", (key,)).fetchone()
+            row = conn.execute(
+                "SELECT digest, state, result FROM mutations WHERE key = ?", (key,)
+            ).fetchone()
             if row:
                 if row[0] != digest:
-                    raise OpError("IDEMPOTENCY_KEY_REUSED", "idempotency key was already used for different input")
+                    raise OpError(
+                        "IDEMPOTENCY_KEY_REUSED",
+                        "idempotency key was already used for different input",
+                    )
                 if row[1] == "completed":
                     return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
-                raise OpError("IDEMPOTENCY_IN_PROGRESS", "an identical mutation with this key is already in progress")
+                raise OpError(
+                    "IDEMPOTENCY_IN_PROGRESS",
+                    "an identical mutation with this key is already in progress",
+                )
             conn.execute(
                 "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
                 (key, digest, time.time()),
@@ -184,7 +224,10 @@ class IdempotencyStore:
             result = operation()
         except Exception:
             with self._connect() as conn:
-                conn.execute("DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'", (key, digest))
+                conn.execute(
+                    "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
+                    (key, digest),
+                )
             raise
         payload = pickle.dumps(result)
         with self._connect() as conn:
@@ -198,11 +241,19 @@ class IdempotencyStore:
 class LeaseManager:
     def __init__(self, config: LeaseConfig, *, client: LeaseCoordinatorClient | None = None):
         self.config = config
-        self.client = client if client is not None else (LeaseCoordinatorClient(config) if config.enabled else None)
+        self.client = (
+            client
+            if client is not None
+            else (LeaseCoordinatorClient(config) if config.enabled else None)
+        )
         replica = config.replica_id or "standalone"
         vault = config.vault_id or "standalone"
         safe_name = hashlib.sha256(f"{vault}\0{replica}".encode()).hexdigest()[:20]
-        self.idempotency = IdempotencyStore(config.state_dir / f"idempotency-{safe_name}.sqlite") if config.enabled else None
+        self.idempotency = (
+            IdempotencyStore(config.state_dir / f"idempotency-{safe_name}.sqlite")
+            if config.enabled
+            else None
+        )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
         self._lock = threading.RLock()
@@ -225,15 +276,29 @@ class LeaseManager:
             self._expires_at = record.expires_at
             return record
 
-    def invoke(self, command: Any, injected: tuple[Any, ...], kwargs: dict[str, Any], *, idempotency_key: str | None = None) -> Any:
+    def invoke(
+        self,
+        command: Any,
+        injected: tuple[Any, ...],
+        kwargs: dict[str, Any],
+        *,
+        idempotency_key: str | None = None,
+    ) -> Any:
         if command.read_only or not self.config.enabled:
             return command.leaf(*injected, **kwargs)
         self.ensure_writer()
         digest = hashlib.sha256(
-            json.dumps({"command": command.name, "kwargs": kwargs}, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+            json.dumps(
+                {"command": command.name, "kwargs": kwargs},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode("utf-8")
         ).hexdigest()
         assert self.idempotency is not None
-        return self.idempotency.run(idempotency_key, digest, lambda: command.leaf(*injected, **kwargs))
+        return self.idempotency.run(
+            idempotency_key, digest, lambda: command.leaf(*injected, **kwargs)
+        )
 
     def status(self) -> dict[str, Any]:
         base = {
@@ -265,7 +330,9 @@ class LeaseManager:
     def start_renewer(self) -> None:
         if not self.config.enabled or self._renewer is not None:
             return
-        self._renewer = threading.Thread(target=self._renew_loop, name="exomem-writer-lease", daemon=True)
+        self._renewer = threading.Thread(
+            target=self._renew_loop, name="exomem-writer-lease", daemon=True
+        )
         self._renewer.start()
 
     def _renew_loop(self) -> None:
@@ -313,7 +380,9 @@ def get_manager() -> LeaseManager:
         return manager
 
 
-def invoke_command(command: Any, *injected: Any, idempotency_key: str | None = None, **kwargs: Any) -> Any:
+def invoke_command(
+    command: Any, *injected: Any, idempotency_key: str | None = None, **kwargs: Any
+) -> Any:
     return get_manager().invoke(command, injected, kwargs, idempotency_key=idempotency_key)
 
 

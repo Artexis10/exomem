@@ -58,6 +58,8 @@ async def test_remote_storage_caches_hot_token_records() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         nonlocal calls
         calls += 1
+        assert request.headers["user-agent"].startswith("Mozilla/5.0")
+        assert "Exomem-Coordinator" in request.headers["user-agent"]
         return httpx.Response(200, json={"result": {"ciphertext": "hot"}})
 
     store = RemoteOAuthStorage(

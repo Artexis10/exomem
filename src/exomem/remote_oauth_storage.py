@@ -14,6 +14,10 @@ from typing import Any, SupportsFloat
 
 import httpx
 
+_COORDINATOR_USER_AGENT = (
+    "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
+)
+
 
 class RemoteOAuthStorage:
     """Implement ``key_value.aio.AsyncKeyValue`` over Exomem's state API."""
@@ -69,7 +73,7 @@ class RemoteOAuthStorage:
         self._cache[(collection, key)] = (time.monotonic() + max(0.0, lifetime), dict(value))
 
     async def _request(self, operation: str, payload: dict[str, Any]) -> Any:
-        headers = {"Accept": "application/json"}
+        headers = {"Accept": "application/json", "User-Agent": _COORDINATOR_USER_AGENT}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         async with httpx.AsyncClient(timeout=self.timeout, transport=self.transport) as client:
