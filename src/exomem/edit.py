@@ -108,6 +108,7 @@ def edit(
     section_position: str = "append",
     expected_hash: str | None = None,
     validate_only: bool = False,
+    create_missing_section: bool = False,
     today: dt.date | None = None,
 ) -> EditResult | EditValidation:
     """Edit a compiled page in place. Bumps `updated:`.
@@ -249,6 +250,7 @@ def edit(
             new_string,  # type: ignore[arg-type]
             vault_root,
             rel_path=rel_path,
+            create_missing=create_missing_section,
         )
         body_changed = True
     elif new_body is not None:
@@ -503,6 +505,7 @@ def apply_section_edit(
     *,
     rel_path: str = "",
     resolver: WikilinkResolver | None = None,
+    create_missing: bool = False,
 ) -> tuple[str, list[str]]:
     """Replace/prepend/append `content` within the section under `heading`.
 
@@ -510,9 +513,15 @@ def apply_section_edit(
     EQUAL-OR-HIGHER level (or EOF). The heading line itself is preserved; only
     its body is rewritten. Returns `(new_body, warnings)`.
 
-    Raises EditError(code="HEADING_NOT_FOUND") if the heading is absent. Only
-    the inserted `content` is wikilink-normalized — the rest of the body is left
-    byte-for-byte untouched (matching `apply_surgical_replace`).
+    Raises EditError(code="HEADING_NOT_FOUND") if the heading is absent — UNLESS
+    `create_missing` is set, in which case a new `## <heading>` section is
+    appended at the end of the body with `content`. `create_missing` is off by
+    default so an interactive caller's heading typo still errors rather than
+    silently spawning a section; server-side authors that must be able to write
+    the first entry into an absent section (e.g. the relation-acceptance queue
+    writing `## Relations` into a note that has none) opt in. Only the inserted
+    `content` is wikilink-normalized — the rest of the body is left byte-for-byte
+    untouched (matching `apply_surgical_replace`).
     """
     where = f" in {rel_path}" if rel_path else ""
     want = _normalize_heading(heading)
@@ -527,14 +536,25 @@ def apply_section_edit(
             h_level = len(m.group(1))
             break
     if h_idx == -1:
-        raise EditError(
-            code="HEADING_NOT_FOUND",
-            missing=["heading"],
-            reason=(
-                f"heading {heading!r} not found{where}. Match an existing `## Heading` "
-                "(the `#` markers are optional in the arg); read the page first."
-            ),
+        if not create_missing:
+            raise EditError(
+                code="HEADING_NOT_FOUND",
+                missing=["heading"],
+                reason=(
+                    f"heading {heading!r} not found{where}. Match an existing `## Heading` "
+                    "(the `#` markers are optional in the arg); read the page first."
+                ),
+            )
+        # Append a new level-2 section (the scaffold's convention) with `content`.
+        if resolver is None:
+            resolver = find_module.shared_resolver(vault_root)
+        content_norm, warnings = normalize_body_wikilinks(
+            content, vault_root, resolver=resolver
         )
+        prefix = body.rstrip("\n")
+        joiner = "\n\n" if prefix else ""
+        new_body = f"{prefix}{joiner}## {want}\n\n{content_norm}\n"
+        return new_body, warnings
 
     end = len(lines)
     for j in range(h_idx + 1, len(lines)):

@@ -3663,13 +3663,33 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
+
+        def _accept_relations_edit(vault_root: Path, **kw: Any) -> dict:
+            """`edit_memory` for the relation queue: identical to op_edit_memory,
+            but creates the canonical `## Relations` section when a note has none
+            (remember() doesn't emit one), so accepting the first relation into a
+            note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
+            only — it is not exposed on the edit_memory MCP tool."""
+            try:
+                result = edit_module.edit(
+                    vault_root, create_missing_section=True, **kw
+                )
+            except edit_module.EditError as e:
+                msg = f"{e.code}: {e.reason}"
+                if getattr(e, "missing", None):
+                    msg += f" (missing: {e.missing})"
+                if getattr(e, "candidates", None):
+                    msg += f" (candidates: {e.candidates})"
+                raise ValueError(msg) from e
+            return result.as_dict()
+
         return relation_queue_module.accept(
             vault_root,
             ref=ref,
             expected_hash=expected_hash,
             why=why,
             expected_fingerprint=expected_fingerprint,
-            edit_memory=op_edit_memory,
+            edit_memory=_accept_relations_edit,
         )
     if path:
         path = _resolve_memory_identifier(vault_root, path)
