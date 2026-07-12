@@ -2,6 +2,14 @@
 
 Verified on 2026-07-12 in the isolated Exomem worktree.
 
+## Scorecard
+
+| Dimension    | Result                                                                 |
+| ------------ | ---------------------------------------------------------------------- |
+| Completeness | 32/32 tasks complete; 37/37 requirements implemented                   |
+| Correctness  | 86/86 scenarios covered by focused, full-suite, and lifecycle evidence |
+| Coherence    | Isolated single-vault cells and the shared-control-plane contract match the approved design |
+
 ## Evidence
 
 - Full lean suite: `uv run --frozen pytest -q` — **2172 passed, 19 skipped**. Skips are optional model/media dependencies and platform-only tests.
@@ -24,3 +32,19 @@ Verified on 2026-07-12 in the isolated Exomem worktree.
 ## External boundary
 
 The Exomem cell implementation is complete and provider-neutral. Production compute/storage provisioning, live retention policy, and paid catalog pricing remain companion control-plane launch gates rather than cell responsibilities.
+
+## OpenSpec verification assessment
+
+### CRITICAL
+
+- None.
+
+### WARNING
+
+- None.
+
+### SUGGESTION
+
+- None.
+
+**Final assessment:** all checks passed. The Exomem cell change is ready to archive once the companion branch is integrated through the chosen merge workflow.
