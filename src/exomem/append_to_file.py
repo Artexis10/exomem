@@ -11,7 +11,6 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from .kbdir import kb_dirname
 from .vault import (
     PlannedWrite,
     VaultPathError,
@@ -21,7 +20,6 @@ from .vault import (
     resolve_under_vault,
     write_log_entry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -70,9 +68,9 @@ def append_to_file(
     # Sources/ is fully immutable. Evidence/ allows appends to sidecars and
     # description files (description.md style); the raw artifacts there are
     # binary and wouldn't be markdown-appended anyway.
-    parts = rel_path.split("/")
-    head = parts[1] if parts[0] == kb_dirname() and len(parts) > 1 else parts[0]
-    if head == "Sources":
+    # Canonical, case-insensitive match (an uppercase `SOURCES/` aliases the real
+    # `Sources/` on a case-insensitive filesystem). Evidence/ appends stay allowed.
+    if in_append_only_tree(rel_path) == "Sources":
         raise AppendError(
             code="APPEND_ONLY",
             reason=(
@@ -131,8 +129,3 @@ def append_to_file(
     return AppendResult(
         path=rel_path, bytes_appended=bytes_appended, warnings=warnings
     )
-
-# `in_append_only_tree` import kept available for callers/tests that want
-# the consistent guard; the local `head` check above is narrower because
-# Evidence/ sidecars are intentionally allowed here.
-_ = in_append_only_tree

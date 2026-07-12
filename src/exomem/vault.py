@@ -490,20 +490,25 @@ def _is_curated_top_level(vault_root: Path, head: str) -> bool:
 
 
 def in_append_only_tree(rel_path: str) -> str | None:
-    """Return the subpath name ("Sources" or "Evidence") if matched.
+    """Return the canonical subpath name ("Sources" or "Evidence") if matched.
 
     Matches both `Knowledge Base/Sources/...` and bare `Sources/...` —
-    callers may pass either form.
+    callers may pass either form. Matching is case-insensitive (see below).
     """
-    parts = rel_path.split("/")
+    parts = rel_path.replace("\\", "/").split("/")
     if not parts:
         return None
-    if parts[0] == kb_dirname() and len(parts) > 1:
+    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
         head = parts[1]
     else:
         head = parts[0]
-    if head in APPEND_ONLY_KB_SUBPATHS:
-        return head
+    # Case-insensitive match returning the CANONICAL name: on a case-insensitive
+    # filesystem (Windows/macOS) an uppercase `SOURCES/` aliases the real
+    # `Sources/` on disk, so a case-sensitive check would let raw Sources/Evidence
+    # be edited/appended/deleted through the alias.
+    for canonical in APPEND_ONLY_KB_SUBPATHS:
+        if head.casefold() == canonical.casefold():
+            return canonical
     return None
 
 

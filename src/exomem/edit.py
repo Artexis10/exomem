@@ -38,9 +38,8 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware
+from . import corpus_aware, indexes
 from . import find as find_module
-from . import indexes
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -48,10 +47,10 @@ from .vault import (
     batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
+    in_append_only_tree,
     kb_root,
     normalize_body_wikilinks,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -364,12 +363,13 @@ def load_editable(
     """
     abs_path, rel_path = _resolve(vault_root, path)
 
-    if "/Sources/" in "/" + rel_path or "/Evidence/" in "/" + rel_path:
+    append_only = in_append_only_tree(rel_path)
+    if append_only is not None:
         raise EditError(
             code="INVALID_EDIT",
             missing=["path"],
             reason=(
-                f"{rel_path} is in Sources/ or Evidence/, which are append-only "
+                f"{rel_path} is in {append_only}/, which is append-only "
                 "(SKILL.md rule 2). Add a corrective source instead, or compile "
                 "a downstream note that supersedes the framing."
             ),

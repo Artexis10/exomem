@@ -90,7 +90,7 @@ def _kb_relative(rel_path: str) -> str:
     """
     rel = rel_path.replace("\\", "/").strip("/")
     parts = rel.split("/")
-    if parts and parts[0] == kb_dirname():
+    if parts and parts[0].casefold() == kb_dirname().casefold():
         return "/".join(parts[1:])
     return rel
 
@@ -118,7 +118,9 @@ def access_tier(vault_root: Path, rel_path: str) -> str:
     if _matches(cfg["readonly"], kb_rel):
         return TIER_READONLY
     head = kb_rel.split("/", 1)[0]
-    if head in _APPEND_ONLY:
+    # Case-insensitive: an uppercase `SOURCES/` aliases the real `Sources/` on a
+    # case-insensitive filesystem, and the tier must not depend on path casing.
+    if any(head.casefold() == a.casefold() for a in _APPEND_ONLY):
         return TIER_APPEND_ONLY
     return TIER_READ_WRITE
 
