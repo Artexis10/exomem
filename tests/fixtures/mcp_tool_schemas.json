@@ -1049,7 +1049,7 @@
     }
   },
   "maintain_memory": {
-    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"`, `mode=\"reconcile\"`, and\n`mode=\"backfill-ids\"`\npreserve the canonical dry-run/write semantics and default to dry-run here.",
+    "description": "Maintain vault health with explicit write-capable modes.\n\nDefault mode is read-only audit. `mode=\"fix\"` and `mode=\"backfill-ids\"`\nrewrite content (wikilinks, frontmatter, stable IDs) and default to\ndry-run here as a safety net. `mode=\"reconcile\"` only heals index-count\nand sidecar drift from out-of-band edits — the same canonical default as\n`op_reconcile` itself (idempotent, non-destructive) — so it defaults to\nwriting; pass `dry_run=true` to preview instead.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1074,9 +1074,16 @@
           "description": "Optional audit category filter."
         },
         "dry_run": {
-          "default": true,
-          "description": "For fix/reconcile, report without writing when true.",
-          "type": "boolean"
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Report without writing when true. Defaults to true for fix/backfill-ids (safety net) and false for reconcile (matches `op_reconcile`'s own default). Pass explicitly to override either way."
         },
         "rebuild_embeddings": {
           "default": false,
