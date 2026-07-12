@@ -3663,13 +3663,33 @@ def op_connect_memory(
     if operation == "accept-relation":
         if not ref:
             raise ValueError("INVALID_MODE: accept-relation requires `ref`")
+
+        def _accept_relations_edit(vault_root: Path, **kw: Any) -> dict:
+            """`edit_memory` for the relation queue: identical to op_edit_memory,
+            but creates the canonical `## Relations` section when a note has none
+            (remember() doesn't emit one), so accepting the first relation into a
+            note doesn't fail HEADING_NOT_FOUND. create_missing stays server-side
+            only — it is not exposed on the edit_memory MCP tool."""
+            try:
+                result = edit_module.edit(
+                    vault_root, create_missing_section=True, **kw
+                )
+            except edit_module.EditError as e:
+                msg = f"{e.code}: {e.reason}"
+                if getattr(e, "missing", None):
+                    msg += f" (missing: {e.missing})"
+                if getattr(e, "candidates", None):
+                    msg += f" (candidates: {e.candidates})"
+                raise ValueError(msg) from e
+            return result.as_dict()
+
         return relation_queue_module.accept(
             vault_root,
             ref=ref,
             expected_hash=expected_hash,
             why=why,
             expected_fingerprint=expected_fingerprint,
-            edit_memory=op_edit_memory,
+            edit_memory=_accept_relations_edit,
         )
     if path:
         path = _resolve_memory_identifier(vault_root, path)
@@ -3790,29 +3810,40 @@ def op_maintain_memory(
     vault_root: Path,
     mode: str = "audit",
     categories: list[str] | None = None,
-    dry_run: bool = True,
+    dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
-    Default mode is read-only audit. `mode="fix"`, `mode="reconcile"`, and
-    `mode="backfill-ids"`
-    preserve the canonical dry-run/write semantics and default to dry-run here.
+    Default mode is read-only audit. `mode="fix"` and `mode="backfill-ids"`
+    rewrite content (wikilinks, frontmatter, stable IDs) and default to
+    dry-run here as a safety net. `mode="reconcile"` only heals index-count
+    and sidecar drift from out-of-band edits — the same canonical default as
+    `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
+    writing; pass `dry_run=true` to preview instead.
 
     Args:
         mode: audit, fix, reconcile, or backfill-ids.
         categories: Optional audit category filter.
-        dry_run: For fix/reconcile, report without writing when true.
+        dry_run: Report without writing when true. Defaults to true for
+            fix/backfill-ids (safety net) and false for reconcile (matches
+            `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
     """
     if mode == "audit":
         return op_audit(vault_root, categories=categories)
     if mode == "fix":
-        return op_audit_fix(vault_root, dry_run=dry_run, rebuild_embeddings=rebuild_embeddings)
+        return op_audit_fix(
+            vault_root,
+            dry_run=True if dry_run is None else dry_run,
+            rebuild_embeddings=rebuild_embeddings,
+        )
     if mode == "reconcile":
-        return op_reconcile(vault_root, dry_run=dry_run)
+        return op_reconcile(vault_root, dry_run=False if dry_run is None else dry_run)
     if mode == "backfill-ids":
-        return memory_refs_module.backfill_ids(vault_root, dry_run=dry_run)
+        return memory_refs_module.backfill_ids(
+            vault_root, dry_run=True if dry_run is None else dry_run
+        )
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, or backfill-ids"
     )

@@ -1,7 +1,14 @@
 # thinking-evolution Specification
 
 ## Purpose
-TBD - created by archiving change add-thinking-evolution. Update Purpose after archive.
+Let a reader see how a conclusion changed over time instead of only its
+current state: an `evolution` operation resolves a topic query's matching
+notes into their supersession chains — walking `supersedes`/`superseded_by`
+frontmatter pointers — and returns one ordered timeline per chain (oldest to
+newest), with each version's structurally-extracted claims and, for
+non-terminal versions, the recorded transition reason. The operation is
+measurement-only (no vault mutation, no change to `find` ranking), invents
+nothing beyond the notes' own text, and reports any truncation explicitly.
 ## Requirements
 ### Requirement: Topic-Driven Thinking-Evolution Timelines
 

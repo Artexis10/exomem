@@ -11,7 +11,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from exomem import audit as audit_module
-from exomem import index_sync
+from exomem import commands, index_sync
 from exomem import reconcile as reconcile_module
 
 
@@ -43,6 +43,37 @@ def test_reconcile_heals_index_count_drift(vault: Path) -> None:
     assert not any(
         f["category"] == "index_drift" for f in rep.remaining_drift
     ), rep.as_dict()
+
+
+def test_reconcile_via_maintain_memory_heals_out_of_band_count_drift(vault: Path) -> None:
+    """`maintain_memory(mode="reconcile")` — the only MCP-exposed entry point for
+    reconcile — must actually heal per-type count drift by default, not just
+    report it in `remaining_drift` forever. Regression for audit finding 1B-14:
+    `op_maintain_memory`'s blanket `dry_run=True` default (shared with the
+    riskier `fix`/`backfill-ids` modes) was silently swallowing every write for
+    `mode="reconcile"` even though `op_reconcile` itself defaults to writing.
+    """
+    top = vault / "Knowledge Base" / "index.md"
+    notes_dir = vault / "Knowledge Base" / "Notes" / "Insights"
+    out_of_band = notes_dir / "manual-oob-note.md"
+    out_of_band.write_text(
+        "---\ntype: note\npage_type: insight\n---\n\n# Manual OOB\n", encoding="utf-8"
+    )
+
+    # Call exactly as an MCP client would: no explicit dry_run.
+    res = commands.op_maintain_memory(vault, mode="reconcile")
+
+    assert res["dry_run"] is False, res
+    assert "- Notes (insight): 5" in top.read_text(encoding="utf-8")
+    assert not any(
+        f["category"] == "index_drift" for f in res["remaining_drift"]
+    ), res
+
+    # Idempotent: a second call finds nothing left to heal for this drift.
+    res2 = commands.op_maintain_memory(vault, mode="reconcile")
+    assert not any(
+        f["category"] == "index_drift" for f in res2["remaining_drift"]
+    ), res2
 
 
 def test_reconcile_refreshes_source_indexes_and_total_rows(vault: Path) -> None:

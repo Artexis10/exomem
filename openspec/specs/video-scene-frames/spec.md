@@ -1,7 +1,15 @@
 # video-scene-frames Specification
 
 ## Purpose
-TBD - created by archiving change add-video-scene-frames. Update Purpose after archive.
+Make a video's CLIP keyframes track what actually changes on screen instead of
+sampling at uniform intervals: when enabled
+(`EXOMEM_VIDEO_SCENE_FRAMES`), a cheap visual-change metrics pass detects
+scene boundaries, persists one representative, OCR'd JPEG per scene as an
+ordinary vault file, and `find` collapses a video's multiple scene-frame
+matches into a single hit enriched with the matched scene's frame and
+timestamp. The feature is default-off (byte-identical output when unset),
+falls back to the existing uniform sampler on detection failure, and a frame
+write failure never blocks the video's CLIP vectors from being indexed.
 ## Requirements
 ### Requirement: Visual-Change Scene Detection
 

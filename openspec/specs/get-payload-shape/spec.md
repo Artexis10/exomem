@@ -1,7 +1,11 @@
 # get-payload-shape Specification
 
 ## Purpose
-TBD - created by archiving change dedupe-get-payload. Update Purpose after archive.
+Cut the token cost of `get` by dropping the redundant raw `content` field from
+its default response, since `frontmatter` plus `body` already reconstruct the
+file. Raw content stays available opt-in via `include_raw`, and `content_hash`
+continues to be computed over the full raw file text regardless of
+`include_raw`, so `edit`'s stale-write guard is unaffected.
 ## Requirements
 ### Requirement: Default Get Response Excludes Raw Content
 

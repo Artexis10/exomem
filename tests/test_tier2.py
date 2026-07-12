@@ -159,6 +159,28 @@ def test_create_file_path_escape_guarded(vault: Path) -> None:
     assert exc.value.code == "INVALID_PATH"
 
 
+def test_create_file_refuses_escape_out_of_knowledge_base(vault: Path) -> None:
+    """Governed writes stay under Knowledge Base/: a `..` that escapes KB to a
+    vault-root sibling is refused, and a bare path is rooted under KB rather than
+    written to the vault root. Regression for the audit's KB-boundary finding."""
+    for escape in (
+        "Knowledge Base/../outside.md",
+        "Knowledge Base/Notes/Insights/../../../escape-deep.md",
+        "Knowledge Base\\..\\out.md",
+    ):
+        with pytest.raises(create_file_module.CreateFileError) as exc:
+            create_file_module.create_file(vault, path=escape, content="x", today=TODAY)
+        assert exc.value.code == "INVALID_PATH", escape
+    # No stray file landed at the vault root (outside Knowledge Base/).
+    assert not (vault / "outside.md").exists()
+    assert not (vault / "escape-deep.md").exists()
+    assert not (vault / "out.md").exists()
+    # A bare KB-relative path is rooted UNDER Knowledge Base/, not the vault root.
+    create_file_module.create_file(vault, path="Notes/Insights/bare.md", content="x", today=TODAY)
+    assert (vault / "Knowledge Base" / "Notes" / "Insights" / "bare.md").exists()
+    assert not (vault / "Notes" / "Insights" / "bare.md").exists()
+
+
 def test_create_file_logs_to_log_md(vault: Path) -> None:
     create_file_module.create_file(
         vault,
@@ -881,3 +903,36 @@ def test_tier2_dropped_when_disabled(
     # Tier 1 stays fully registered — only the escape hatches drop.
     assert {"ask_memory", "read_memory", "remember", "capture_source", "edit_memory", "review_memory", "connect_memory"} <= names
     assert names.isdisjoint(TIER2_TOOLS)
+
+
+def test_excluded_frontmatter_fields_are_refused(vault: Path) -> None:
+    """The schema excludes `confidence`/`decay_at`/`expires_at`; the writers must
+    enforce that, not just document it. Regression for the audit's confidence-float
+    finding (edit_memory(field='confidence') previously persisted 0.99)."""
+    import asyncio
+
+    from exomem import server as server_module
+
+    mcp = server_module.build_server(require_auth=False)
+    note = vault / "Knowledge Base" / "Notes" / "Insights" / "conf.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text("---\ntype: insight\n---\n# C\n\nBody.\n", encoding="utf-8")
+    rel = "Knowledge Base/Notes/Insights/conf.md"
+
+    with pytest.raises(Exception) as ei:  # ToolError wrapping EXCLUDED_FIELD
+        asyncio.run(mcp.call_tool(
+            "edit_memory",
+            {"path": rel, "why": "x", "field": "confidence", "value": 0.99},
+            run_middleware=True,
+        ))
+    assert "EXCLUDED_FIELD" in str(ei.value) or "confidence" in str(ei.value)
+    assert "confidence" not in note.read_text(encoding="utf-8")
+
+    # create_file with an excluded key in its frontmatter dict is refused too.
+    with pytest.raises(create_file_module.CreateFileError) as ce:
+        create_file_module.create_file(
+            vault, path="Notes/Insights/decay.md",
+            content="x", frontmatter={"type": "insight", "decay_at": "2030-01-01"},
+            today=TODAY,
+        )
+    assert ce.value.code == "EXCLUDED_FIELD"

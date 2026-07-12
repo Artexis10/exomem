@@ -54,6 +54,27 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
     "Evidence",
 )
 
+# Frontmatter keys the schema deliberately excludes (see _scaffold's
+# references/frontmatter.md): numeric confidence scores misrepresent the signal
+# (trust is citations + link count), and knowledge does not expire on a schedule.
+# Governed write paths refuse them so the documented "no confidence floats / no
+# retention decay" stance is actually enforced, not just described.
+EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
+    {"confidence", "decay_at", "expires_at"}
+)
+
+
+def excluded_frontmatter_reason(field: str) -> str | None:
+    """A refusal reason if `field` is a schema-excluded frontmatter key, else None."""
+    if field.strip().casefold() in EXCLUDED_FRONTMATTER_FIELDS:
+        return (
+            f"`{field}` is a schema-excluded frontmatter field. Exomem does not "
+            "record numeric confidence scores or time-based decay/expiry — trust "
+            "is conveyed by citations and link count, and old material is never "
+            "auto-decayed (see SKILL.md). Omit this field."
+        )
+    return None
+
 # When scanning the full vault for inbound wikilinks, skip these.
 VAULT_SCAN_SKIP_DIRS = frozenset({
     ".obsidian", ".git", ".trash", "_attachments", "_archive", "_trash",
@@ -262,8 +283,13 @@ def batch_atomic_write(
         for w in writes:
             try:
                 rel = w.path.resolve().relative_to(vault_resolved).as_posix()
-            except (ValueError, OSError):
-                continue  # not under the vault (shouldn't happen) — don't block
+            except (ValueError, OSError) as e:
+                # Fail CLOSED: a staged write that resolves outside the vault must
+                # never proceed (callers resolve paths first, so this is a
+                # defense-in-depth backstop, not a normal path).
+                raise ValueError(
+                    f"WRITE_REFUSED: {w.path} resolves outside the vault root"
+                ) from e
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
@@ -396,6 +422,7 @@ def resolve_under_vault(
     must_exist: bool = False,
     must_be_file: bool = False,
     must_be_dir: bool = False,
+    must_be_under_kb: bool = False,
 ) -> tuple[Path, str]:
     """Resolve a vault-relative path; guard against escape; normalize.
 
@@ -403,6 +430,11 @@ def resolve_under_vault(
     always forward-slashed, never starts with `/`. The leading
     `Knowledge Base/` is preserved as-is (we don't auto-strip it like
     `get_page` does — Tier 2 ops take explicit paths).
+
+    `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
+    `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
+    can't sneak a write to a vault-root sibling of KB). Governed content writers
+    (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -421,6 +453,17 @@ def resolve_under_vault(
             reason=f"absolute paths are not allowed: {raw!r}",
         )
 
+    if must_be_under_kb:
+        # Governed writes are KB-relative: a bare `Reference/x.md` means
+        # `Knowledge Base/Reference/x.md` (matching how access tiers are keyed),
+        # so root it under KB unless it already is (any case) or leads with `..`
+        # (left for the escape guards below to reject). This makes bare and
+        # prefixed paths resolve to the SAME governed location instead of a bare
+        # path silently writing to a vault-root sibling of Knowledge Base/.
+        first = rel.split("/", 1)[0]
+        if first.casefold() != kb_dirname().casefold() and first != "..":
+            rel = f"{kb_dirname()}/{rel}"
+
     candidate = vault_root / rel
     try:
         resolved = candidate.resolve()
@@ -431,6 +474,19 @@ def resolve_under_vault(
             code="INVALID_PATH",
             reason=f"path escapes vault root: {raw!r} ({e})",
         ) from None
+
+    if must_be_under_kb:
+        kb_resolved = (vault_root / kb_dirname()).resolve()
+        try:
+            resolved.relative_to(kb_resolved)
+        except ValueError:
+            raise VaultPathError(
+                code="INVALID_PATH",
+                reason=(
+                    f"path is outside Knowledge Base/: {raw!r} — exomem only "
+                    "writes governed content under Knowledge Base/"
+                ),
+            ) from None
 
     if must_exist and not candidate.exists():
         raise VaultPathError(
@@ -490,20 +546,25 @@ def _is_curated_top_level(vault_root: Path, head: str) -> bool:
 
 
 def in_append_only_tree(rel_path: str) -> str | None:
-    """Return the subpath name ("Sources" or "Evidence") if matched.
+    """Return the canonical subpath name ("Sources" or "Evidence") if matched.
 
     Matches both `Knowledge Base/Sources/...` and bare `Sources/...` —
-    callers may pass either form.
+    callers may pass either form. Matching is case-insensitive (see below).
     """
-    parts = rel_path.split("/")
+    parts = rel_path.replace("\\", "/").split("/")
     if not parts:
         return None
-    if parts[0] == kb_dirname() and len(parts) > 1:
+    if len(parts) > 1 and parts[0].casefold() == kb_dirname().casefold():
         head = parts[1]
     else:
         head = parts[0]
-    if head in APPEND_ONLY_KB_SUBPATHS:
-        return head
+    # Case-insensitive match returning the CANONICAL name: on a case-insensitive
+    # filesystem (Windows/macOS) an uppercase `SOURCES/` aliases the real
+    # `Sources/` on disk, so a case-sensitive check would let raw Sources/Evidence
+    # be edited/appended/deleted through the alias.
+    for canonical in APPEND_ONLY_KB_SUBPATHS:
+        if head.casefold() == canonical.casefold():
+            return canonical
     return None
 
 

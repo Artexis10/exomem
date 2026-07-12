@@ -1,7 +1,14 @@
 # contradiction-queue Specification
 
 ## Purpose
-TBD - created by archiving change order-contradiction-queue. Update Purpose after archive.
+Surface the contradiction pairs most worth reviewing first instead of in
+arbitrary order: the `corpus_contradictions` queue is sorted by a review
+priority derived from embedding cosine and note dormancy, with same-family
+pairs (noise from adjacent notes in the same research subfolder) demoted below
+cross-family pairs rather than dropped. Ordering is sort-only and
+measurement-only — it never changes which pairs are eligible, never mutates
+notes, and never affects `find` ranking — and the cap on surfaced pairs always
+reports an explicit omitted count.
 ## Requirements
 ### Requirement: Review-Priority Ordering by Cosine and Dormancy
 

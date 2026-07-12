@@ -1,7 +1,13 @@
 # context-packs Specification
 
 ## Purpose
-TBD - created by archiving change add-context-packs. Update Purpose after archive.
+Let a caller get more context from one `find` call instead of chaining several
+`get` calls: an optional `pack` parameter that assembles a bounded context
+pack — structurally extracted claims, a co-citation-ranked wikilink
+neighborhood, and recorded contradictions/supersessions — over the top hits.
+Assembly is purely structural and deterministic (no generative or reasoning
+model), never mutates the vault, and never changes `find`'s hits or ordering
+when `pack` is off.
 ## Requirements
 ### Requirement: Optional Context Pack Assembly From `find`
 
