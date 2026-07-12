@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.1](https://github.com/Artexis10/exomem/compare/v0.20.0...v0.20.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* make remote MCP sessions restart-safe ([#217](https://github.com/Artexis10/exomem/issues/217)) ([daf8ea3](https://github.com/Artexis10/exomem/commit/daf8ea3700d947476fb13f7aeb11c6361ad7f811))
+
 ## [0.20.0](https://github.com/Artexis10/exomem/compare/v0.19.1...v0.20.0) (2026-07-12)
 
 
