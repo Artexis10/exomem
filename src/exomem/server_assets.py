@@ -84,6 +84,21 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
     """Serve inert public assets outside MCP auth; vault data stays behind REST."""
     asset_dir = Path(__file__).parent
 
+    @mcp_app.custom_route("/health", methods=["GET"])
+    async def _health(request: Request) -> JSONResponse:  # noqa: ARG001
+        """Unauthenticated liveness probe for tunnels/orchestrators. Reports only
+        that the process is up + its version — no vault data, no auth required."""
+        try:
+            from importlib.metadata import version
+
+            ver = version("exomem")
+        except Exception:  # noqa: BLE001 — version lookup must never fail the probe
+            ver = "unknown"
+        return JSONResponse(
+            {"status": "ok", "service": "exomem", "version": ver},
+            headers={"Cache-Control": "no-store"},
+        )
+
     @mcp_app.custom_route("/favicon.ico", methods=["GET"])
     async def _favicon_ico(request: Request):  # noqa: ARG001
         return FileResponse(

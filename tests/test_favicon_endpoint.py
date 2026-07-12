@@ -40,3 +40,18 @@ def test_favicon_public_even_with_auth_enabled(vault, monkeypatch: pytest.Monkey
     # The whole point: no bearer token, auth turned ON, favicon still 200.
     r = _client(vault, monkeypatch, require_auth=True).get("/favicon.ico")
     assert r.status_code == 200, r.text
+
+
+def test_health_endpoint_public_and_reports_version(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`/health` is an unauthenticated liveness probe (tunnels/orchestrators need
+    an HTTP readiness check; previously only CLI `doctor` existed). Public even
+    with auth on, returns status + version, and leaks no vault data."""
+    r = _client(vault, monkeypatch).get("/health")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "ok"
+    assert body["service"] == "exomem"
+    assert "version" in body
+    # Public even with OAuth enabled.
+    r2 = _client(vault, monkeypatch, require_auth=True).get("/health")
+    assert r2.status_code == 200, r2.text
