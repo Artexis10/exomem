@@ -129,8 +129,8 @@ def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
         frontmatter = {}
         body = text
 
-    h1_match = H1_PATTERN.search(body)
-    title = h1_match.group(1).strip() if h1_match else path.stem
+    from .vault import resolve_display_title
+    title = resolve_display_title(frontmatter, body, path)
 
     try:
         rel_path = path.resolve().relative_to(vault_root.resolve()).as_posix()

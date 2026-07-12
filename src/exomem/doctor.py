@@ -102,7 +102,7 @@ def _module_available(module: str) -> bool:
 
 
 def infer_profile() -> Profile:
-    """Infer the doctor capability profile when --profile is omitted."""
+    """Infer the highest locally installed profile without importing models."""
     raw = (os.environ.get(PROFILE_ENV) or "").strip().lower()
     if raw:
         if raw not in VALID_PROFILES:
@@ -110,7 +110,18 @@ def infer_profile() -> Profile:
         return raw  # type: ignore[return-value]
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return "lean"
-    return "lean"
+    embeddings_ready = all(
+        _module_available(name) for name in ("sentence_transformers", "torch", "PIL")
+    )
+    if not embeddings_ready:
+        return "lean"
+    media_ready = all(
+        _module_available(name)
+        for name in ("faster_whisper", "pytesseract", "fitz", "markitdown")
+    )
+    if media_ready:
+        return "media" if shutil.which("tesseract") else "standard"
+    return "hybrid"
 
 
 def _resolve_vault(vault: str | None) -> tuple[Path | None, DoctorCheck]:

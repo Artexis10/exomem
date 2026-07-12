@@ -64,6 +64,37 @@ def test_standard_profile_is_valid_for_env_inference(monkeypatch: pytest.MonkeyP
     assert doctor_module.infer_profile() == "standard"
 
 
+def test_doctor_infers_hybrid_from_installed_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(
+        doctor_module,
+        "_module_available",
+        lambda name: name in {"sentence_transformers", "torch", "PIL"},
+    )
+    assert doctor_module.infer_profile() == "hybrid"
+
+
+def test_doctor_infers_media_when_full_stack_is_available(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _name: True)
+    monkeypatch.setattr(doctor_module.shutil, "which", lambda name: "/usr/bin/tesseract")
+    assert doctor_module.infer_profile() == "media"
+
+
+def test_doctor_infers_lean_without_embeddings(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _name: False)
+    assert doctor_module.infer_profile() == "lean"
+
+
+def test_doctor_disable_embeddings_forces_lean(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(doctor_module, "_module_available", lambda _name: True)
+    assert doctor_module.infer_profile() == "lean"
+
+
 def test_standard_profile_accepts_missing_tesseract_as_degraded_warning(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

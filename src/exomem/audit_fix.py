@@ -38,8 +38,8 @@ Risky categories (proposed only):
 - `source` missing `source_type` — folder→type inference is brittle.
 
 The op is idempotent: running it twice on a clean vault produces no changes.
-Atomic writes via the existing batch infrastructure; partial writes on
-mid-flip failure raise with a warning.
+Atomic writes use the rollback-safe batch infrastructure; caught mid-flip
+failures restore pre-write content before raising.
 """
 
 from __future__ import annotations

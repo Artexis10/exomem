@@ -322,6 +322,18 @@
           "description": "Source title.",
           "type": "string"
         },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case filename component."
+        },
         "source_type": {
           "default": "other",
           "description": "article, session, book, paper, video, or other.",
@@ -592,6 +604,18 @@
           ],
           "default": null,
           "description": "Entity name for create-entity."
+        },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case entity filename component."
         },
         "summary": {
           "anyOf": [
@@ -1493,8 +1517,20 @@
           "type": "string"
         },
         "title": {
-          "description": "Human title used for the note slug.",
+          "description": "Unicode display title stored in frontmatter and the H1.",
           "type": "string"
+        },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case filename component."
         },
         "note_type": {
           "default": "insight",
@@ -1767,6 +1803,18 @@
         "title": {
           "description": "New page title.",
           "type": "string"
+        },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case filename component."
         },
         "note_type": {
           "default": "insight",

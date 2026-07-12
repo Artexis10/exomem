@@ -5,6 +5,7 @@ registry-derived OpenAPI, and the preserved binary-blob guard.
 from __future__ import annotations
 
 import pytest
+import yaml
 from starlette.testclient import TestClient
 
 from exomem import find as find_module
@@ -120,6 +121,23 @@ def test_validation_error_uses_envelope_with_code(vault, monkeypatch: pytest.Mon
     assert err["message"]
 
 
+def test_remember_route_preserves_unicode_title_and_explicit_slug(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+    response = client.post(
+        "/api/remember",
+        json={"title": "睡眠", "slug": "sleep", "content": "## 要約\n\n本文。"},
+        headers=_auth(),
+    )
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data["path"].endswith("/sleep.md")
+    text = (vault / data["path"]).read_text(encoding="utf-8")
+    frontmatter = text.removeprefix("---\n").split("\n---\n", 1)[0]
+    assert yaml.safe_load(frontmatter)["title"] == "睡眠"
+
+
 def test_unknown_param_rejected(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
@@ -171,6 +189,10 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
     assert props["tags"]["type"] == "array"
+    remember_schema = doc["paths"]["/api/remember"]["post"]["requestBody"]["content"][
+        "application/json"
+    ]["schema"]
+    assert "slug" in remember_schema["properties"]
     read_schema = doc["paths"]["/api/read_memory"]["post"]["requestBody"]["content"][
         "application/json"
     ]["schema"]

@@ -817,11 +817,8 @@ def _frontmatter_metadata(path: str, frontmatter: dict[str, Any]) -> dict[str, s
     return _string_metadata(**items)
 
 
-def _title_from_page(path: str, frontmatter: dict[str, Any]) -> str:
-    title = frontmatter.get("title")
-    if title:
-        return str(title)
-    return Path(path).stem.replace("-", " ").replace("_", " ").strip() or path
+def _title_from_page(path: str, frontmatter: dict[str, Any], body: str = "") -> str:
+    return vault.resolve_display_title(frontmatter, body, path)
 
 
 def _bounded_text(text: str, max_chars: int) -> tuple[str, bool]:
@@ -923,7 +920,7 @@ def op_fetch(
     )
     out = {
         "id": page.path,
-        "title": _title_from_page(page.path, page.frontmatter),
+        "title": _title_from_page(page.path, page.frontmatter, page.body),
         "text": text_out,
         "url": _citation_url(page.path),
         "metadata": metadata,
@@ -1120,6 +1117,7 @@ def op_add(
     content: str,
     source_type: str,
     title: str,
+    slug: str | None = None,
     url: str | None = None,
     tags: list[str] | None = None,
     why_captured: str | None = None,
@@ -1134,7 +1132,8 @@ def op_add(
         content: Full text body to capture (markdown / plain text). For
             files or binaries, use the /upload endpoint instead.
         source_type: One of article, session, book, paper, video, other.
-        title: Human title; used to derive the filename slug.
+        title: Unicode display title stored in frontmatter and the H1.
+        slug: Optional lowercase ASCII kebab-case filename component.
         url: Required when source_type is article, paper, or video.
         tags: Lowercase dash-separated; the server normalizes case/spacing.
         why_captured: One short paragraph on why this is worth keeping.
@@ -1152,6 +1151,7 @@ def op_add(
             content=content,
             source_type=source_type,
             title=title,
+            slug=slug,
             url=url,
             tags=tags,
             why_captured=why_captured,
@@ -1790,6 +1790,7 @@ def op_replace(
     content: str,
     note_type: str,
     title: str,
+    slug: str | None = None,
     reason: str | None = None,
     project: str | None = None,
     projects: list[str] | None = None,
@@ -1851,6 +1852,7 @@ def op_replace(
             content=content,
             note_type=note_type,
             title=title,
+            slug=slug,
             project=project,
             projects=projects,
             sources=sources,
@@ -1891,6 +1893,7 @@ def op_link(
     entity_type: str,
     name: str,
     summary: str,
+    slug: str | None = None,
     why_in_kb: str | None = None,
     tags: list[str] | None = None,
     connections: list[str] | None = None,
@@ -1929,7 +1932,8 @@ def op_link(
 
     Args:
         entity_type: One of person, concept, library, decision.
-        name: Title Case, the entity's actual name. Will be the filename.
+        name: Unicode display name stored in frontmatter and the H1.
+        slug: Optional lowercase ASCII kebab-case filename component.
         summary: One-paragraph description for the `## Summary` section.
         why_in_kb: Optional `## Why in the KB` paragraph — explains what
             this entity is relevant to in your work.
@@ -1951,6 +1955,7 @@ def op_link(
             vault_root,
             entity_type=entity_type,
             name=name,
+            slug=slug,
             summary=summary,
             why_in_kb=why_in_kb,
             tags=tags,
@@ -2034,6 +2039,7 @@ def op_note(
     content: str,
     note_type: str,
     title: str,
+    slug: str | None = None,
     project: str | None = None,
     projects: list[str] | None = None,
     sources: list[str] | None = None,
@@ -2092,9 +2098,9 @@ def op_note(
     suggested next actions. Treat it as write-shape feedback, not semantic truth.
 
     Args:
-        content: Full markdown body, written verbatim after the
-            frontmatter. Should start with `# <title>` (the H1 matching
-            the title arg) followed by the section conventions per type:
+        content: Markdown body written after frontmatter. The writer adds or
+            normalizes the leading `# <title>` H1, followed by the section
+            conventions per type:
             research-note: `## Question`/`## Findings`/`## Relations`.
             insight: `## Claim`/`## Why it holds`/`## Relations`.
             failure: `## What happened`/`## Mechanism`/`## Detection`/`## Mitigation`/`## Relations`.
@@ -2104,7 +2110,8 @@ def op_note(
             Conventions only — no shape is enforced.
         note_type: One of research-note, insight, failure, pattern,
             experiment, production-log.
-        title: Human title; used to derive a kebab-case filename slug.
+        title: Unicode display title stored in frontmatter and the H1.
+        slug: Optional lowercase ASCII kebab-case filename component.
             Experiments and production-logs auto-prefix with YYYY-MM.
         project: REQUIRED for research-note. __PROJECT_KEYS_HINT__
         projects: List of project keys (plural). Optional for insight,
@@ -2154,6 +2161,7 @@ def op_note(
             content=content,
             note_type=note_type,
             title=title,
+            slug=slug,
             project=project,
             projects=projects,
             sources=sources,
@@ -2967,6 +2975,7 @@ def op_remember(
     vault_root: Path,
     content: str,
     title: str,
+    slug: str | None = None,
     note_type: str = "insight",
     project: str | None = None,
     projects: list[str] | None = None,
@@ -2997,7 +3006,8 @@ def op_remember(
 
     Args:
         content: Full markdown body to write after frontmatter.
-        title: Human title used for the note slug.
+        title: Unicode display title stored in frontmatter and the H1.
+        slug: Optional lowercase ASCII kebab-case filename component.
         note_type: research-note, insight, failure, pattern, experiment, or production-log.
         project: Required for research-note. __PROJECT_KEYS_HINT__
         projects: Optional project keys for cross-project notes. __PROJECT_KEYS_HINT__
@@ -3025,6 +3035,7 @@ def op_remember(
         content=content,
         note_type=note_type,
         title=title,
+        slug=slug,
         project=project,
         projects=projects,
         sources=sources,
@@ -3123,6 +3134,7 @@ def op_replace_memory(
     old_path: str,
     content: str,
     title: str,
+    slug: str | None = None,
     note_type: str = "insight",
     reason: str | None = None,
     project: str | None = None,
@@ -3154,6 +3166,7 @@ def op_replace_memory(
         old_path: Existing page to supersede.
         content: Full markdown body for the new page.
         title: New page title.
+        slug: Optional lowercase ASCII kebab-case filename component.
         note_type: New page type.
         reason: Why the old page is being superseded.
         project: Required for research-note.
@@ -3182,6 +3195,7 @@ def op_replace_memory(
         content=content,
         note_type=note_type,
         title=title,
+        slug=slug,
         reason=reason,
         project=project,
         projects=projects,
@@ -3210,6 +3224,7 @@ def op_capture_source(
     source_schema: object,
     content: str,
     title: str,
+    slug: str | None = None,
     source_type: str = "other",
     url: str | None = None,
     tags: list[str] | None = None,
@@ -3226,6 +3241,7 @@ def op_capture_source(
     Args:
         content: Raw source text.
         title: Source title.
+        slug: Optional lowercase ASCII kebab-case filename component.
         source_type: article, session, book, paper, video, or other.
         url: Required for article, paper, or video sources.
         tags: Lowercase tags.
@@ -3239,6 +3255,7 @@ def op_capture_source(
         content=content,
         source_type=source_type,
         title=title,
+        slug=slug,
         url=url,
         tags=tags,
         why_captured=why_captured,
@@ -3571,6 +3588,7 @@ def op_connect_memory(
     max_body_chars: int = 3000,
     entity_type: str | None = None,
     name: str | None = None,
+    slug: str | None = None,
     summary: str | None = None,
     why_in_kb: str | None = None,
     tags: list[str] | None = None,
@@ -3617,6 +3635,7 @@ def op_connect_memory(
         max_body_chars: Per-document stored-body cap for context.
         entity_type: Entity type for create-entity.
         name: Entity name for create-entity.
+        slug: Optional lowercase ASCII kebab-case entity filename component.
         summary: Entity summary for create-entity.
         why_in_kb: Optional entity relevance paragraph.
         tags: Entity tags.
@@ -3705,6 +3724,7 @@ def op_connect_memory(
             vault_root,
             entity_type=entity_type or "",
             name=name or "",
+            slug=slug,
             summary=summary or "",
             why_in_kb=why_in_kb,
             tags=tags,

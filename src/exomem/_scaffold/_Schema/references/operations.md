@@ -108,13 +108,17 @@ None.
 ### Inputs to gather
 - The raw content (pasted text, URL, file reference, conversation excerpt)
 - Source type — usually inferable: pasted transcript → `Sessions/`; URL or article body → `Articles/`; book excerpt → `Books/`; academic paper → `Papers/`; a video transcript → `Videos/` with `url` set. Ask only if ambiguous.
+- Display title, plus an optional explicit lowercase ASCII `slug` when the
+  caller wants to control the portable filename
 - Optional: tags, why-captured one-liner
 
 ### Procedure
 1. Determine source type and target subfolder.
-2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated lowercase, ≤ 60 chars.
+2. Generate filename: `YYYY-MM-DD-<slug>.md` where slug is dash-separated
+   lowercase ASCII, ≤ 100 chars. An explicit `slug` controls only the filename;
+   the Unicode display title is stored unchanged.
 3. Write file with full frontmatter per `frontmatter.md` § source. `ingested_into: []`.
-4. Body: `# Source: <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
+4. Body: `# <Title>` → `> brief description` → `## Capture` (raw content) → `## Why captured` (one or two sentences).
 5. Update `Sources/index.md` with a new line.
 6. Report path written and offer: "Compile a note from this?"
 
@@ -150,7 +154,9 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 - For research notes: scope (a registered project key — see SKILL.md § Research scope keys). Ask if not stated.
 - For experiments: domain. Plus hypothesis, protocol summary, duration, started date.
 - For production-logs: medium. Plus projects, host, editor (if known), recording / publish status.
-- Topic / title (slug) — propose one based on content; confirm.
+- Human-facing title (Unicode is fine), plus an optional explicit lowercase
+  ASCII filename `slug`; propose the slug separately when portability or
+  readability matters.
 
 ### Procedure
 1. Determine note type and target folder:
@@ -163,6 +169,10 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
 2. Generate filename:
    - Research / insight / failure / pattern: `<topic-slug>.md` (no date prefix).
    - Experiment / production-log: `YYYY-MM-<slug>.md` (start month prefix).
+   Slugs are capped at 100 characters. Automatic slugging remains compatible
+   with older releases and may use language-blind transliteration; for any
+   non-Latin title, prefer an explicit meaningful ASCII slug. The real title is
+   always stored in frontmatter and the H1.
 3. **Draft the page in conversation** — show full content including frontmatter,
    all sections per the page-type template, and wikilinks to existing pages where
    they obviously match. **Run `suggest_links` on the draft first; use
@@ -175,6 +185,9 @@ to one of six compiled-page types: `research-note`, `insight`, `failure`,
    - For each source cited, update that source's `ingested_into` field to include a wikilink to this new note.
    - Update the relevant subfolder `index.md`.
 6. Report paths written and any wikilinks that target nonexistent pages (offer to create stubs via `link`).
+
+Upgrades and reconciliation never rename existing pages. Filename migration is
+an explicit reviewed operation because paths are graph addresses.
 
 ### Edge cases
 - **No clean source.** If you want to capture in-conversation thinking that wasn't first `add`-ed, it's fine to compile directly, but create a `Sources/Sessions/` capture of the conversation excerpt as a side-effect. Citation integrity matters.

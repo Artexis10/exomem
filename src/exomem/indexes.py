@@ -24,7 +24,6 @@ from .vault import (
     render_wikilinks_for_vault,
 )
 
-
 RECENT_ACTIVITY_CAP = 50
 
 SOURCES_BY_TYPE_HEADER = "## By type"
@@ -107,7 +106,7 @@ def compute_updates(
 
 
 def _count_sources(sources_dir: Path) -> dict[str, int]:
-    """Per-folder source count, excluding index.md and _attachments/."""
+    """Per top-level source-type count, including themed nested folders."""
     out: dict[str, int] = {}
     if not sources_dir.is_dir():
         return out
@@ -115,7 +114,10 @@ def _count_sources(sources_dir: Path) -> dict[str, int]:
         if not sub.is_dir() or sub.name.startswith("_"):
             continue
         out[sub.name] = sum(
-            1 for f in sub.iterdir() if f.is_file() and f.suffix == ".md" and f.name != "index.md"
+            1
+            for f in sub.rglob("*.md")
+            if f.name != "index.md"
+            and not any(part.startswith("_") for part in f.relative_to(sub).parts[:-1])
         )
     return out
 
@@ -293,6 +295,8 @@ _NOTES_COUNT_LINE = re.compile(
 _ENTITIES_COUNT_LINE = re.compile(
     r"^(- Entities \()([a-z-]+)(\): )(\d+)\s*$", re.MULTILINE
 )
+_NOTES_TOTAL_LINE = re.compile(r"^- Notes:\s*\d+\s*$", re.MULTILINE)
+_ENTITIES_TOTAL_LINE = re.compile(r"^- Entities:\s*\d+\s*$", re.MULTILINE)
 
 
 # Map Entities/<folder> → entity_type key used in the Counts section.
@@ -320,8 +324,10 @@ def _count_entities(entities_dir: Path) -> dict[str, int]:
         if key is None:
             continue
         out[key] = sum(
-            1 for f in sub.iterdir()
-            if f.is_file() and f.suffix == ".md" and f.name != "index.md"
+            1
+            for f in sub.rglob("*.md")
+            if f.name != "index.md"
+            and not any(part.startswith("_") for part in f.relative_to(sub).parts[:-1])
         )
     return out
 
@@ -332,12 +338,7 @@ def _rewrite_top_index_notes_and_entities_counts(
     notes_counts: dict[str, int],
     entities_counts: dict[str, int],
 ) -> str:
-    """Rewrite `- Notes (<type>): N` and `- Entities (<type>): N` lines in place.
-
-    Only updates lines already present — doesn't auto-add new rows. New
-    note-types or entity-types appearing on disk surface via audit's
-    index_drift check, where you can decide whether to add the row.
-    """
+    """Rewrite per-type rows and ensure true Notes/Entities total rows."""
     def _replace_notes(m: re.Match[str]) -> str:
         type_key = m.group(2)
         actual = notes_counts.get(type_key)
@@ -354,7 +355,33 @@ def _rewrite_top_index_notes_and_entities_counts(
 
     text = _NOTES_COUNT_LINE.sub(_replace_notes, text)
     text = _ENTITIES_COUNT_LINE.sub(_replace_entities, text)
+    text = _rewrite_or_insert_total_count(
+        text, label="Notes", total=sum(notes_counts.values()), pattern=_NOTES_TOTAL_LINE
+    )
+    text = _rewrite_or_insert_total_count(
+        text,
+        label="Entities",
+        total=sum(entities_counts.values()),
+        pattern=_ENTITIES_TOTAL_LINE,
+    )
     return text
+
+
+def _rewrite_or_insert_total_count(
+    text: str, *, label: str, total: int, pattern: re.Pattern[str]
+) -> str:
+    line = f"- {label}: {total}"
+    if pattern.search(text):
+        return pattern.sub(line, text, count=1)
+    counts_idx = text.find(INDEX_COUNTS_HEADER)
+    if counts_idx == -1:
+        return text
+    section_end = text.find("\n## ", counts_idx + len(INDEX_COUNTS_HEADER))
+    if section_end == -1:
+        section_end = len(text)
+    prefix = text[:section_end].rstrip("\n")
+    suffix = text[section_end:]
+    return f"{prefix}\n{line}\n{suffix}"
 
 
 def _rewrite_sources_count(text: str, *, counts: dict[str, int]) -> str:
@@ -567,9 +594,11 @@ def compute_subindex_writes(
     kb = kb_root(vault_root)
     writes: list[PlannedWrite] = []
 
+    sources_dir = kb / "Sources"
     notes_dir = kb / "Notes"
     entities_dir = kb / "Entities"
 
+    sources_counts = _count_sources(sources_dir)
     notes_counts = _count_notes(notes_dir)
     entities_counts = _count_entities(entities_dir)
     notes_by_subfolder = _count_notes_by_subfolder(notes_dir)
@@ -582,7 +611,11 @@ def compute_subindex_writes(
         if len(parts) < 2:
             continue
         head = parts[0]
-        if head == "Notes" and len(parts) >= 3:
+        if head == "Sources" and len(parts) >= 3:
+            source_folder = parts[1]
+            if not source_folder.startswith("_"):
+                sources_counts[source_folder] = sources_counts.get(source_folder, 0) + 1
+        elif head == "Notes" and len(parts) >= 3:
             type_folder = parts[1]
             type_key = {
                 "Research": "research",
@@ -608,15 +641,34 @@ def compute_subindex_writes(
             if ent_key:
                 entities_counts[ent_key] = entities_counts.get(ent_key, 0) + 1
 
-    # Top index counts refresh (Notes + Entities rows).
+    # Top index counts refresh (Sources + Notes + Entities rows).
     new_top_text: str | None = None
     if top_index_text is not None:
+        top_index_text = _rewrite_sources_count(top_index_text, counts=sources_counts)
         new_top_text = _rewrite_top_index_notes_and_entities_counts(
             top_index_text,
             notes_counts=notes_counts,
             entities_counts=entities_counts,
         )
         new_top_text = render_wikilinks_for_vault(new_top_text, vault_root)
+
+    # Sources/index.md refresh.
+    sources_index = sources_dir / "index.md"
+    if sources_index.exists():
+        try:
+            current = sources_index.read_text(encoding="utf-8")
+        except OSError:
+            current = None
+        if current is not None:
+            new = _replace_by_type_section(
+                current,
+                folder_title="Articles",
+                folder_description="captured web/PDF content",
+                counts=sources_counts,
+            )
+            new = render_wikilinks_for_vault(new, vault_root)
+            if new != current:
+                writes.append(PlannedWrite(path=sources_index, content=new))
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"

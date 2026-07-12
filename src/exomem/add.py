@@ -23,13 +23,14 @@ from pathlib import Path
 from . import corpus_aware, indexes, memory_refs, schema
 from .kbdir import kb_prefix
 from .vault import (
+    InvalidSlugError,
     PlannedWrite,
     batch_atomic_write,
     kb_root,
-    slugify_with_truncation_check,
+    resolve_filename_slug,
     unique_path,
+    yaml_scalar,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -81,6 +82,7 @@ def add(
     content: str,
     source_type: str,
     title: str,
+    slug: str | None = None,
     url: str | None = None,
     tags: list[str] | None = None,
     why_captured: str | None = None,
@@ -99,6 +101,10 @@ def add(
     )
     if err is not None:
         raise AddError(code=err.code, missing=list(err.missing), reason=err.reason)
+    try:
+        filename_slug, slug_warnings = resolve_filename_slug(title, slug)
+    except InvalidSlugError as e:
+        raise AddError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
 
     # Corpus-aware near-duplicate check (best-effort; warns, never blocks — the
     # 57% unprocessed-source backlog implies real dupes). Skipped when embeddings
@@ -137,8 +143,7 @@ def add(
     folder_name = SOURCE_TYPE_TO_FOLDER[source_type]
     folder_path = kb_root(vault_root) / "Sources" / folder_name
 
-    slug, slug_warning = slugify_with_truncation_check(title)
-    stem = f"{date_iso}-{slug}"
+    stem = f"{date_iso}-{filename_slug}"
     source_path = unique_path(folder_path, stem)
 
     tags_clean = _clean_tags(tags)
@@ -201,8 +206,14 @@ def add(
     # Sources counts that compute_updates() already handled. `add` doesn't
     # change Notes/Entities counts, so no override needed.
     sub_writes, top_with_counts = indexes.compute_subindex_writes(
-        vault_root, top_index_text=update.top_index_content
+        vault_root,
+        top_index_text=update.top_index_content,
+        pending_paths=[rel_source_no_ext],
     )
+    sub_writes = [
+        write for write in sub_writes
+        if write.path != kb / "Sources" / "index.md"
+    ]
     top_index_final = (
         top_with_counts if top_with_counts is not None
         else update.top_index_content
@@ -215,9 +226,9 @@ def add(
     ]
     writes.extend(sub_writes)
 
-    warnings: list[str] = list(dup_warnings) + list(contradiction_warnings)
-    if slug_warning:
-        warnings.append(slug_warning)
+    warnings: list[str] = (
+        list(slug_warnings) + list(dup_warnings) + list(contradiction_warnings)
+    )
     # Cap-50 trim is recorded in log.md per SKILL.md trim discipline; no need
     # to also surface it as a per-write warning.
 
@@ -296,10 +307,11 @@ def _render_source(
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {exomem_id}")
+    lines.append(f"title: {yaml_scalar(title.strip())}")
     lines.append(f"source_type: {source_type}")
     lines.append(f"captured: {date_iso}")
     if url:
-        lines.append(f"url: {url}")
+        lines.append(f"url: {yaml_scalar(url)}")
     if tags:
         lines.append("tags: [" + ", ".join(tags) + "]")
     else:
@@ -307,7 +319,7 @@ def _render_source(
     lines.append("ingested_into: []")
     lines.append("---")
     lines.append("")
-    lines.append(f"# Source: {title.strip()}")
+    lines.append(f"# {title.strip()}")
     lines.append("")
     if why_captured and why_captured.strip():
         # Single-line blockquote at top, per page-types.md shape.

@@ -33,7 +33,6 @@ from .vault import (
     write_log_entry,
 )
 
-
 log = logging.getLogger(__name__)
 
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
@@ -148,7 +147,8 @@ def move_file(
     files_touched: list[str] = []
     wikilinks_updated = 0
 
-    # Stage all writes: the move itself + every link-updated file.
+    # Stage inbound-link rewrites. The file itself moves with one filesystem
+    # rename so bytes of any type are preserved without a copy/unlink window.
     writes: list[PlannedWrite] = []
     if update_wikilinks and inbound:
         files_to_rewrite = sorted({hit.path for hit in inbound})
@@ -168,48 +168,43 @@ def move_file(
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
 
-    # Read old contents, then write to new location; then unlink old.
-    # We can't easily roll the move itself into batch_atomic_write since it's a
-    # rename. Strategy: write new file (as if creating it), then unlink old.
-    # If the unlink fails partway, the worst case is two copies — caller can
-    # reconcile.
-    old_contents = old_abs.read_text(encoding="utf-8")
-    writes.append(PlannedWrite(path=new_abs, content=old_contents))
+    try:
+        old_abs.rename(new_abs)
+    except OSError as e:
+        raise MoveFileError(
+            code="MOVE_FAILED",
+            reason=f"could not rename {old_rel!r} to {new_rel!r}: {e}",
+        ) from e
 
     try:
-        batch_atomic_write(writes, vault_root=vault_root)
+        if writes:
+            batch_atomic_write(writes, vault_root=vault_root)
     except Exception as e:
         log.exception("move_file: link-update batch failed for %s -> %s", old_rel, new_rel)
-        warnings.append(f"partial write — reconcile on desktop: {e}")
+        try:
+            new_abs.rename(old_abs)
+        except OSError as rollback_error:
+            raise RuntimeError(
+                f"move link rewrite failed ({e}); rename rollback also failed: "
+                f"{rollback_error}"
+            ) from e
         raise
 
-    # Register the self-authored removal BEFORE the unlink so the watcher's
-    # delete event for the old path is dropped (we purge its sidecar rows
-    # below; the new path was registered by batch_atomic_write above).
+    # The filesystem transaction succeeded. Only now notify watcher/sidecars;
+    # no derived index observes a move that was subsequently rolled back.
     try:
         from . import file_watcher
         file_watcher.register_self_delete(vault_root, [old_rel])
+        file_watcher.register_self_write(vault_root, [new_abs])
     except Exception:  # noqa: BLE001 — suppression is best-effort
-        log.debug("self-delete suppression registration failed", exc_info=True)
+        log.debug("move watcher suppression registration failed", exc_info=True)
 
     try:
-        old_abs.unlink()
-    except OSError as e:
-        log.exception("move_file: copy succeeded but old unlink failed: %s", old_rel)
-        warnings.append(
-            f"new file written but could not remove old {old_rel!r}: {e}. "
-            f"Delete it manually on the desk."
-        )
-    else:
-        # Old path is gone; purge its index sidecar rows. The new path
-        # was already re-indexed by batch_atomic_write above.
-        try:
-            from . import index_sync
-            index_sync.delete_after_remove(vault_root, [old_rel])
-        except Exception:  # noqa: BLE001 — sidecars are best-effort
-            log.exception(
-                "index delete failed for moved %s; sidecar may be stale", old_rel
-            )
+        from . import index_sync
+        index_sync.upsert_after_write(vault_root, [new_abs])
+        index_sync.delete_after_remove(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — sidecars are best-effort
+        log.exception("index refresh failed for moved %s -> %s", old_rel, new_rel)
 
     # If we just moved a file out of `_trash/`, its `.meta.json` sidecar (if
     # any) is now an orphan. Drop the sidecar — recovery is "removed from

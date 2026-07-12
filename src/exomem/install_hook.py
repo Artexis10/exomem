@@ -240,20 +240,45 @@ def check_hooks(
         raise ValueError("hook_dir/settings_path overrides require exactly one client")
 
     reports = []
+    strict_single_client = len(normalized) == 1
     for client in normalized:
         hd = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
         sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
+        has_client_footprint = sp.exists() or hd.exists() or sp.parent.exists()
+        if not has_client_footprint and not strict_single_client:
+            reports.append({
+                "client": client,
+                "status": "skipped",
+                "success": True,
+                "hook_dir": str(hd),
+                "settings_path": str(sp),
+                "scripts": {},
+                "logs": {},
+                "cache": {},
+                "checks": [{
+                    "id": "client.installation",
+                    "status": "skip",
+                    "message": f"{client} is not installed; hook checks skipped",
+                }],
+            })
+            continue
         data, parse_error = (None, "file does not exist")
         if sp.exists():
             data, parse_error = _read_json(sp)
 
         checks: list[dict] = []
 
-        def add(id_: str, status: str, message: str, details: dict | None = None) -> None:
+        def add(
+            id_: str,
+            status: str,
+            message: str,
+            details: dict | None = None,
+            _checks: list[dict] = checks,
+        ) -> None:
             row = {"id": id_, "status": status, "message": message}
             if details is not None:
                 row["details"] = details
-            checks.append(row)
+            _checks.append(row)
 
         add(
             "config.file",
@@ -340,6 +365,9 @@ def check_hooks(
 
         reports.append({
             "client": client,
+            "status": (
+                "failed" if any(c["status"] == "fail" for c in checks) else "healthy"
+            ),
             "success": not any(c["status"] == "fail" for c in checks),
             "hook_dir": str(hd),
             "settings_path": str(sp),
@@ -363,6 +391,9 @@ def render_check_human(report: dict) -> str:
     for client in report.get("clients", []):
         lines.append("")
         lines.append(client["client"].upper())
+        if client.get("status") == "skipped":
+            lines.append("- SKIP client.installation: client is not installed")
+            continue
         lines.append(f"- config: {client['settings_path']}")
         lines.append(f"- hooks:  {client['hook_dir']}")
         for check in client.get("checks", []):
@@ -435,7 +466,7 @@ def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> None:
             loaded = json.loads(path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 data = loaded
-        except Exception:
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             data = {}
 
     hooks = data.get("hooks")

@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from . import compile_proposal as compile_proposal_module
-from . import context_refs, indexes, knowledge_packs, overview as overview_module
+from . import context_refs, indexes, knowledge_packs
+from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     PlannedWrite,
@@ -27,6 +28,7 @@ from .vault import (
     resolve_under_vault,
     slugify_with_truncation_check,
     unique_path,
+    yaml_scalar,
 )
 
 DEFAULT_MODE = "scan-only"
@@ -249,7 +251,10 @@ def _add_manifest_index_writes(
             date_iso=today.isoformat(),
             summary=f"`{rel_no_ext.removeprefix(kb_prefix())}` (adoption manifest) — saved scan-first existing-vault report",
         )
-        sub_writes, top_text = indexes.compute_subindex_writes(root, top_index_text=top_text)
+        sub_writes, top_text = indexes.compute_subindex_writes(
+            root,
+            top_index_text=top_text,
+        )
         writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
         writes.extend(sub_writes)
     else:
@@ -318,16 +323,17 @@ def _render_imported_source(
         [
             "---",
             "type: source",
+            f"title: {yaml_scalar(title)}",
             "source_type: other",
             f"captured: {date_iso}",
-            f"imported_from: {rel_original}",
+            f"imported_from: {yaml_scalar(rel_original)}",
             f"original_sha256: {sha256}",
             f"original_bytes: {size}",
             "tags: [imported]",
             "ingested_into: []",
             "---",
             "",
-            f"# Source: Imported legacy note - {title}",
+            f"# {title}",
             "",
             f"> Copied from `{rel_original}` by `adopt(mode=\"copy-as-sources\")`. The original remains unchanged.",
             "",
@@ -482,7 +488,15 @@ def _copy_as_sources(
             date_iso=date_iso,
             activity_summary=summary,
         )
-        sub_writes, top_text = indexes.compute_subindex_writes(root, top_index_text=top_text)
+        sub_writes, top_text = indexes.compute_subindex_writes(
+            root,
+            top_index_text=top_text,
+            pending_paths=[item["source_path"] for item in copied],
+        )
+        sub_writes = [
+            write for write in sub_writes
+            if write.path != sources_index
+        ]
         writes.append(PlannedWrite(path=top_index, content=top_text or top_index.read_text(encoding="utf-8")))
         writes.extend(sub_writes)
         if trim_note:

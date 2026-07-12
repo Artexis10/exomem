@@ -36,8 +36,13 @@ from typing import BinaryIO
 
 from . import indexes, memory_refs
 from .kbdir import kb_prefix
-from .vault import PlannedWrite, batch_atomic_write, escape_wikilinks_for_log, kb_root
-
+from .vault import (
+    PlannedWrite,
+    batch_atomic_write,
+    escape_wikilinks_for_log,
+    kb_root,
+    yaml_scalar,
+)
 
 log = logging.getLogger(__name__)
 
@@ -543,6 +548,8 @@ def _render_sidecar(
     lines = ["---"]
     lines.append("type: source")
     lines.append(f"exomem_id: {memory_refs.new_id()}")
+    display_title = f"Evidence: {artifact_name}"
+    lines.append(f"title: {yaml_scalar(display_title)}")
     lines.append("source_type: other")
     lines.append(f"captured: {date_iso}")
     if media_type:
@@ -563,7 +570,7 @@ def _render_sidecar(
     lines.append("ingested_into: []")
     lines.append("---")
     lines.append("")
-    lines.append(f"# Evidence: {artifact_name}")
+    lines.append(f"# {display_title}")
     lines.append("")
     lines.append(f"Preserved under `Evidence/{scope}/{category}/`.")
     lines.append("")

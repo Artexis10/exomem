@@ -45,6 +45,27 @@ def test_reconcile_heals_index_count_drift(vault: Path) -> None:
     ), rep.as_dict()
 
 
+def test_reconcile_refreshes_source_indexes_and_total_rows(vault: Path) -> None:
+    kb = vault / "Knowledge Base"
+    extra = kb / "Sources" / "Articles" / "manual-source.md"
+    extra.write_text("---\ntype: source\nsource_type: article\n---\n\n# Manual\n", encoding="utf-8")
+    top = kb / "index.md"
+    top.write_text(
+        top.read_text(encoding="utf-8").replace("- Sources: 4", "- Sources: 0"),
+        encoding="utf-8",
+    )
+
+    rep = reconcile_module.reconcile(vault)
+
+    top_text = top.read_text(encoding="utf-8")
+    assert "- Sources: 5" in top_text
+    assert "- Notes:" in top_text
+    assert "- Entities:" in top_text
+    source_index = (kb / "Sources" / "index.md").read_text(encoding="utf-8")
+    assert "Articles]]" in source_index and "(3)" in source_index
+    assert "Knowledge Base/Sources/index.md" in rep.indexes_updated
+
+
 def test_reconcile_dry_run_reports_without_writing(vault: Path) -> None:
     """dry_run surfaces the would-be index fix but writes nothing to disk."""
     top = vault / "Knowledge Base" / "index.md"
