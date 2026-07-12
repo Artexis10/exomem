@@ -409,7 +409,12 @@ for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
 seconds for actual tools. While a lease holder exists, a tool call is sent only
 to that replica and is never replayed to the passive origin after a timeout or
 5xx response. Once the lease expires, the edge probes both origins, chooses one
-healthy replica, and forwards the next tool call exactly once. The active origin
+runtime-compatible replica, and forwards the next tool call exactly once. Runtime
+admission uses the content-free `/health/ready` contract: supported behavioral
+contract, stateless HTTP transport, expected replica identity, healthy writer
+coordination, and takeover eligibility. Admission is cached in the Durable Object
+against the active lease holder and fencing token, so steady-state tool calls do
+not pay another origin probe. The active origin
 renews its lease independently while a long tool runs; correctness does not rely
 on ordering `MCP_TOOL_TIMEOUT_MS` against `EXOMEM_WRITER_LEASE_TTL`.
 
@@ -446,19 +451,41 @@ Before deliberately stopping the active writer, let replication reach **Up to
 Date**; on an unclean crash, the lease prevents concurrent Exomem writers but cannot
 recover bytes the old writer had not replicated yet.
 
-Replica version parity is part of deployment, not optional housekeeping. Before
-enabling the stable route—or after every release—check the repo and the installed
-service environment on **both** machines:
+Replica release drift remains deployment housekeeping, but runtime compatibility
+is now enforced independently. Before enabling the stable route—or after every
+release—check the repo, installed service environment, and readiness contract on
+**both** machines:
 
 ```powershell
 git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
 & "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
   "import exomem; print(exomem.__version__)"
+curl.exe -fsS https://exomem-desktop.example.com/health/ready
+curl.exe -fsS https://exomem-laptop.example.com/health/ready
 ```
 
-If those versions differ, install the same release into that machine's service
-venv and restart `exomem` before testing failover. A new desktop paired with an
-old stateful laptop is not a healthy HA deployment even if both ports answer.
+Then run the combined read-only diagnostic:
+
+```powershell
+uv run python -m exomem doctor --profile ha --probe `
+  --replica-url https://exomem-desktop.example.com `
+  --replica-url https://exomem-laptop.example.com
+```
+
+Different package releases are allowed when they advertise a supported common
+runtime contract. A missing readiness route, unsupported contract, stateful
+transport, duplicate replica identity, unhealthy coordinator, or takeover
+ineligibility fails the HA gate. An old stateful laptop is therefore excluded
+even if its port answers.
+
+The Worker example sets `SUPPORTED_RUNTIME_CONTRACTS="1"`,
+`REQUIRED_RUNTIME_TRANSPORT="streamable-http-stateless"`, and
+`REQUIRE_COORDINATION="true"`. For an incompatible contract bump, first expand
+the accepted set (for example `"1,2"`), roll every replica, confirm doctor passes,
+then contract the set to the new version. The deployment platform owns immutable
+release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
+auto-updater, and the readiness contract is independent of Syncthing or any other
+replication product.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 

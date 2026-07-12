@@ -420,7 +420,7 @@ def _doctor_main(argv: list[str]) -> int:
     )
     parser.add_argument(
         "--profile",
-        choices=("lean", "hybrid", "standard", "media", "remote"),
+        choices=("lean", "hybrid", "standard", "media", "remote", "ha"),
         default=None,
         help="capability profile to validate (default: infer from EXOMEM_PROFILE, else lean)",
     )
@@ -428,16 +428,25 @@ def _doctor_main(argv: list[str]) -> int:
     parser.add_argument(
         "--probe",
         action="store_true",
-        help="with --profile remote: also verify the live endpoints (three "
-        "read-only GETs — local /mcp expects 401, OAuth discovery expects 200, "
-        "the bare oauth-protected-resource path expects 200; the last one is "
-        "the claude.ai registration gate). Default is fully offline.",
+        help="with --profile remote or ha: also verify live endpoints using read-only GETs. "
+        "Default is fully offline.",
+    )
+    parser.add_argument(
+        "--replica-url",
+        action="append",
+        default=None,
+        help="with --profile ha --probe: replica origin to inspect; repeat once per replica",
     )
     args = parser.parse_args(argv)
 
     from . import doctor as doctor_module
 
-    report = doctor_module.doctor(vault=args.vault, profile=args.profile, probe=args.probe)
+    report = doctor_module.doctor(
+        vault=args.vault,
+        profile=args.profile,
+        probe=args.probe,
+        replica_urls=args.replica_url,
+    )
     if args.json:
         print(json.dumps(report.as_dict(), ensure_ascii=False, default=str))
     else:

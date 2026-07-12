@@ -55,3 +55,67 @@ def test_health_endpoint_public_and_reports_version(vault, monkeypatch: pytest.M
     # Public even with OAuth enabled.
     r2 = _client(vault, monkeypatch, require_auth=True).get("/health")
     assert r2.status_code == 200, r2.text
+
+
+def test_readiness_endpoint_is_public_and_content_free(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_readiness
+
+    monkeypatch.setattr(
+        runtime_readiness,
+        "runtime_readiness",
+        lambda: {
+            "status": "ready",
+            "service": "exomem",
+            "release": "1.2.3",
+            "runtime_contract": 1,
+            "transport": "streamable-http-stateless",
+            "replica_id": "desktop",
+            "coordination": {
+                "enabled": True,
+                "role": "writer",
+                "coordinator_healthy": True,
+            },
+            "takeover_eligible": True,
+            "reasons": [],
+        },
+    )
+
+    response = _client(vault, monkeypatch, require_auth=True).get("/health/ready")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json()["runtime_contract"] == 1
+    rendered = response.text.lower()
+    assert "vault" not in rendered
+    assert "token" not in rendered
+
+
+def test_readiness_endpoint_returns_503_without_changing_liveness(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import runtime_readiness
+
+    monkeypatch.setattr(
+        runtime_readiness,
+        "runtime_readiness",
+        lambda: {
+            "status": "not_ready",
+            "service": "exomem",
+            "release": "1.2.3",
+            "runtime_contract": 1,
+            "transport": "streamable-http-stateless",
+            "replica_id": "desktop",
+            "coordination": {
+                "enabled": True,
+                "role": "unknown",
+                "coordinator_healthy": False,
+            },
+            "takeover_eligible": False,
+            "reasons": ["coordinator_unavailable"],
+        },
+    )
+    client = _client(vault, monkeypatch)
+
+    assert client.get("/health").status_code == 200
+    assert client.get("/health/ready").status_code == 503

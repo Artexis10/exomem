@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { ExomemState, isMcpToolCall } from "../src/worker.js";
+import worker, {
+  ExomemState,
+  evaluateReadiness,
+  isMcpToolCall,
+} from "../src/worker.js";
 
 class MemoryStorage {
   constructor() {
@@ -99,7 +103,37 @@ const mcp = (payload) =>
     body: typeof payload === "string" ? payload : JSON.stringify(payload),
   });
 
-const edgeEnv = (holder = "desktop") => ({
+const readiness = (replicaId, overrides = {}) => ({
+  status: "ready",
+  service: "exomem",
+  release: "0.20.2",
+  runtime_contract: 1,
+  transport: "streamable-http-stateless",
+  replica_id: replicaId,
+  coordination: { enabled: true, role: "follower", coordinator_healthy: true },
+  takeover_eligible: true,
+  reasons: [],
+  ...overrides,
+});
+
+const admission = (replicaId, fencingToken = 7) => ({
+  holder: replicaId,
+  fencing_token: fencingToken,
+  readiness: readiness(replicaId),
+});
+
+const leaseRecord = (value) => {
+  if (value && typeof value === "object") return value;
+  if (value == null) return { holder: null, expires_at: null, fencing_token: 7 };
+  return {
+    holder: value,
+    expires_at: Date.now() / 1000 + 30,
+    fencing_token: 7,
+    admission: admission(value),
+  };
+};
+
+const edgeEnv = (lease = "desktop", stateFetch = null) => ({
   VAULT_ID: "personal-main",
   DESKTOP_REPLICA_ID: "desktop",
   LAPTOP_REPLICA_ID: "laptop",
@@ -107,12 +141,14 @@ const edgeEnv = (holder = "desktop") => ({
   LAPTOP_ORIGIN: "https://laptop.example.com",
   ORIGIN_TIMEOUT_MS: "2500",
   MCP_TOOL_TIMEOUT_MS: "15000",
+  SUPPORTED_RUNTIME_CONTRACTS: "1",
+  REQUIRE_COORDINATION: "true",
   EXOMEM_STATE: {
     idFromName: (name) => name,
     get: () => ({
-      fetch: async () => new Response(JSON.stringify({ holder }), {
+      fetch: stateFetch || (async () => new Response(JSON.stringify(leaseRecord(lease)), {
         headers: { "content-type": "application/json" },
-      }),
+      })),
     }),
   },
 });
@@ -133,6 +169,68 @@ test("classifies single and batched tool calls conservatively", async () => {
   assert.equal(await isMcpToolCall(mcp({ jsonrpc: "2.0", id: 1, method: "initialize" })), false);
   assert.equal(await isMcpToolCall(mcp("{not-json")), true);
   assert.equal(await isMcpToolCall(new Request("https://exomem.example.com/mcp")), false);
+});
+
+test("readiness admission uses compatibility rather than exact release equality", () => {
+  const env = edgeEnv();
+  assert.deepEqual(evaluateReadiness(readiness("desktop", { release: "0.20.99" }), env, "desktop"), {
+    eligible: true,
+    reason: null,
+  });
+  assert.equal(
+    evaluateReadiness(readiness("desktop", { runtime_contract: 2 }), env, "desktop").reason,
+    "unsupported_runtime_contract",
+  );
+  assert.equal(
+    evaluateReadiness(readiness("desktop", { transport: "streamable-http-stateful" }), env, "desktop").reason,
+    "unsupported_transport",
+  );
+  assert.equal(
+    evaluateReadiness(readiness("laptop"), env, "desktop").reason,
+    "replica_identity_mismatch",
+  );
+  assert.equal(
+    evaluateReadiness(readiness("desktop", {
+      coordination: { enabled: false, role: "standalone", coordinator_healthy: true },
+    }), env, "desktop").reason,
+    "coordination_required",
+  );
+});
+
+test("lease admission is bound to holder and fencing token and cleared on takeover", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+  const desktop = await body(await object.fetch(post("/lease?operation=acquire", {
+    replica_id: "desktop",
+    ttl_seconds: 30,
+  })));
+  const admitted = await object.fetch(post("/admission", {
+    holder: "desktop",
+    fencing_token: desktop.fencing_token,
+    readiness: readiness("desktop"),
+  }));
+  assert.equal(admitted.status, 200);
+  let status = await body(await object.fetch(new Request("https://state/lease")));
+  assert.equal(status.admission.fencing_token, desktop.fencing_token);
+
+  await object.fetch(post("/lease?operation=release", {
+    replica_id: "desktop",
+    fencing_token: desktop.fencing_token,
+  }));
+  const laptop = await body(await object.fetch(post("/lease?operation=acquire", {
+    replica_id: "laptop",
+    ttl_seconds: 30,
+  })));
+  status = await body(await object.fetch(new Request("https://state/lease")));
+  assert.equal(status.holder, "laptop");
+  assert.equal(status.admission, undefined);
+
+  const stale = await object.fetch(post("/admission", {
+    holder: "desktop",
+    fencing_token: desktop.fencing_token,
+    readiness: readiness("desktop"),
+  }));
+  assert.equal(stale.status, 409);
+  assert.equal(laptop.fencing_token, 2);
 });
 
 test("active-holder tool call uses the long timeout and is never replayed", async () => {
@@ -175,14 +273,77 @@ test("active-holder tool timeout fails closed without passive replay", async () 
   }
 });
 
+test("active holder without cached admission is probed once and recorded", async () => {
+  const calls = [];
+  const stateCalls = [];
+  const lease = {
+    holder: "desktop",
+    expires_at: Date.now() / 1000 + 30,
+    fencing_token: 12,
+  };
+  const stateFetch = async (request) => {
+    const url = new URL(request.url);
+    stateCalls.push({ path: url.pathname, method: request.method });
+    if (url.pathname === "/admission") return new Response('{"stored":true}', { status: 200 });
+    return new Response(JSON.stringify(lease), {
+      headers: { "content-type": "application/json" },
+    });
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    const url = new URL(request.url);
+    calls.push(url.pathname);
+    if (url.pathname === "/health/ready") {
+      return Response.json(readiness("desktop"));
+    }
+    return new Response("ok", { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(lease, stateFetch));
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, ["/health/ready", "/mcp"]);
+    assert.deepEqual(stateCalls, [
+      { path: "/lease", method: "GET" },
+      { path: "/admission", method: "POST" },
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("ineligible active holder fails closed without invoking either MCP origin", async () => {
+  const calls = [];
+  const lease = {
+    holder: "desktop",
+    expires_at: Date.now() / 1000 + 30,
+    fencing_token: 12,
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).pathname);
+    return Response.json(readiness("desktop", { runtime_contract: 99 }));
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(lease));
+    assert.equal(response.status, 503);
+    assert.deepEqual(calls, ["/health/ready"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("no-holder tool call probes and selects exactly one healthy origin", async () => {
   const calls = [];
   const originalFetch = globalThis.fetch;
   globalThis.fetch = async (request) => {
     const url = new URL(request.url);
     calls.push(url.href);
-    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
-      return new Response("", { status: url.origin.includes("laptop") ? 200 : 503 });
+    if (url.pathname === "/health/ready") {
+      return Response.json(
+        url.origin.includes("laptop")
+          ? readiness("laptop")
+          : readiness("desktop", { runtime_contract: 99 }),
+      );
     }
     return new Response("laptop tool result", { status: 200 });
   };
@@ -208,9 +369,26 @@ test("no-holder tool call is not forwarded when neither origin is healthy", asyn
     const response = await worker.fetch(toolCall(), edgeEnv(null));
     assert.equal(response.status, 503);
     assert.deepEqual(calls, [
-      "/.well-known/oauth-protected-resource/mcp",
-      "/.well-known/oauth-protected-resource/mcp",
+      "/health/ready",
+      "/health/ready",
     ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("cached active-holder admission preserves the steady-state single-fetch path", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).pathname);
+    return new Response("cached writer", { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv("desktop"));
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "cached writer");
+    assert.deepEqual(calls, ["/mcp"]);
   } finally {
     globalThis.fetch = originalFetch;
   }

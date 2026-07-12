@@ -11,6 +11,8 @@ from fastmcp import FastMCP
 from starlette.requests import Request
 from starlette.responses import FileResponse, JSONResponse, RedirectResponse
 
+from . import runtime_readiness as runtime_readiness_module
+
 _STUDIO_SECURITY_HEADERS = {
     "Content-Security-Policy": (
         "default-src 'none'; base-uri 'none'; connect-src 'self'; "
@@ -96,6 +98,17 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
             ver = "unknown"
         return JSONResponse(
             {"status": "ok", "service": "exomem", "version": ver},
+            headers={"Cache-Control": "no-store"},
+        )
+
+    @mcp_app.custom_route("/health/ready", methods=["GET"])
+    async def _runtime_ready(request: Request) -> JSONResponse:  # noqa: ARG001
+        """Content-free admission probe; liveness remains the separate /health route."""
+        snapshot = runtime_readiness_module.runtime_readiness()
+        status_code = 200 if snapshot["status"] == "ready" else 503
+        return JSONResponse(
+            snapshot,
+            status_code=status_code,
             headers={"Cache-Control": "no-store"},
         )
 

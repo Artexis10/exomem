@@ -13,11 +13,9 @@ the other guarantees — it loads only an ALREADY-CACHED model (skips the probe
 rather than trigger a download) and the search is read-only (never mutates the
 sidecar).
 
-The one network exception is explicit opt-in: `--probe` (remote profile only)
-performs three read-only GETs to verify the live connector endpoints — local
-/mcp expects 401, OAuth discovery expects 200, and the bare
-oauth-protected-resource path expects 200 (the claude.ai registration gate).
-Without the flag, doctor performs zero network calls.
+The one network exception is explicit opt-in: `--probe`. The remote profile
+verifies the live connector endpoints; the HA profile verifies explicit replica
+readiness origins. Without the flag, doctor performs zero network calls.
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -36,8 +35,15 @@ from typing import Literal
 from .kbdir import kb_dirname, kb_prefix
 
 Status = Literal["pass", "warn", "fail"]
-Profile = Literal["lean", "hybrid", "standard", "media", "remote"]
-VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "standard", "media", "remote")
+Profile = Literal["lean", "hybrid", "standard", "media", "remote", "ha"]
+VALID_PROFILES: tuple[Profile, ...] = (
+    "lean",
+    "hybrid",
+    "standard",
+    "media",
+    "remote",
+    "ha",
+)
 PROFILE_ENV = "EXOMEM_PROFILE"
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -817,6 +823,222 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
+def _check_ha_env() -> list[DoctorCheck]:
+    required = {
+        "EXOMEM_WRITER_LEASE_URL": "Set the provider-neutral writer coordinator URL.",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "Set the stable vault coordination identifier.",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "Set a unique identifier for this replica.",
+    }
+    checks: list[DoctorCheck] = []
+    for key, remediation in required.items():
+        if os.environ.get(key, "").strip():
+            checks.append(_check(f"ha.env.{key}", "pass", f"{key} is set."))
+        else:
+            checks.append(_check(f"ha.env.{key}", "fail", f"{key} is not set.", remediation))
+    if os.environ.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip():
+        checks.append(_check("ha.env.EXOMEM_WRITER_LEASE_TOKEN", "pass", "Writer lease token is set."))
+    else:
+        checks.append(_check(
+            "ha.env.EXOMEM_WRITER_LEASE_TOKEN",
+            "warn",
+            "Writer lease token is not set.",
+            "Set EXOMEM_WRITER_LEASE_TOKEN unless the coordinator is private and explicitly unauthenticated.",
+        ))
+    raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
+    try:
+        contracts = _parse_runtime_contracts(raw_contracts)
+    except ValueError as exc:
+        checks.append(_check(
+            "ha.supported_contracts",
+            "fail",
+            str(exc),
+            "Set EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS to comma-separated positive integers.",
+        ))
+    else:
+        checks.append(_check(
+            "ha.supported_contracts",
+            "pass",
+            f"Accepted runtime contracts: {', '.join(map(str, sorted(contracts)))}.",
+        ))
+    return checks
+
+
+def _parse_runtime_contracts(raw: str = "") -> set[int]:
+    from .runtime_readiness import RUNTIME_CONTRACT
+
+    if not raw:
+        return {RUNTIME_CONTRACT}
+    values: set[int] = set()
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError(f"Invalid HA runtime contract {text!r}.") from None
+        if value <= 0:
+            raise ValueError(f"Invalid HA runtime contract {text!r}.")
+        values.add(value)
+    if not values:
+        raise ValueError("No valid HA runtime contracts were configured.")
+    return values
+
+
+def _ha_replica_urls(explicit: list[str] | tuple[str, ...] | None) -> list[str]:
+    raw_values = list(explicit or ())
+    if not raw_values:
+        raw_values = os.environ.get("EXOMEM_HA_REPLICA_URLS", "").split(",")
+    urls: list[str] = []
+    for raw in raw_values:
+        value = raw.strip().rstrip("/")
+        if not value:
+            continue
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"Invalid HA replica URL {value!r}.")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError(f"HA replica URL must be a credential-free origin: {value!r}.")
+        if parsed.path not in {"", "/"}:
+            raise ValueError(f"HA replica URL must not include a path: {value!r}.")
+        origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+        if origin not in urls:
+            urls.append(origin)
+    return urls
+
+
+def _evaluate_ha_readiness(
+    body: object, *, supported_contracts: set[int]
+) -> tuple[list[str], dict[str, object]]:
+    from .runtime_readiness import HTTP_TRANSPORT
+
+    if not isinstance(body, dict):
+        return ["invalid readiness payload"], {}
+    reasons: list[str] = []
+    if body.get("status") != "ready" or body.get("service") != "exomem":
+        reasons.append("runtime is not ready")
+    contract = body.get("runtime_contract")
+    if isinstance(contract, bool) or not isinstance(contract, int) or contract not in supported_contracts:
+        reasons.append("runtime contract is unsupported")
+    if body.get("transport") != HTTP_TRANSPORT:
+        reasons.append("HTTP transport is not stateless")
+    replica_id = body.get("replica_id")
+    if not isinstance(replica_id, str) or not replica_id:
+        reasons.append("replica identity is missing")
+    coordination = body.get("coordination")
+    if not isinstance(coordination, dict) or coordination.get("enabled") is not True:
+        reasons.append("writer coordination is disabled")
+    elif coordination.get("coordinator_healthy") is not True:
+        reasons.append("writer coordinator is unavailable")
+    if body.get("takeover_eligible") is not True:
+        reasons.append("replica is not takeover eligible")
+    release = body.get("release")
+    if not isinstance(release, str) or not release:
+        reasons.append("release identity is missing")
+    return reasons, {
+        "replica_id": replica_id,
+        "release": release,
+        "runtime_contract": contract,
+        "transport": body.get("transport"),
+    }
+
+
+def _check_ha_probes(replica_urls: list[str]) -> list[DoctorCheck]:
+    if len(replica_urls) < 2:
+        return [_check(
+            "ha.replica_urls",
+            "fail",
+            "HA probing requires at least two explicit replica origins.",
+            "Pass --replica-url once per replica or set EXOMEM_HA_REPLICA_URLS.",
+        )]
+    try:
+        supported = _parse_runtime_contracts(
+            os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
+        )
+    except ValueError as exc:
+        return [_check("ha.compatibility", "fail", str(exc))]
+
+    checks: list[DoctorCheck] = []
+    identities: list[str] = []
+    releases: list[str] = []
+    failed = False
+    for index, origin in enumerate(replica_urls, start=1):
+        url = f"{origin}/health/ready"
+        try:
+            status, body = _probe_get(url)
+        except Exception as exc:  # noqa: BLE001 - network failure is a diagnostic result
+            checks.append(_check(
+                f"ha.replica.{index}",
+                "fail",
+                f"Could not reach runtime readiness at {origin}: {exc}",
+                "Start or upgrade the replica and verify its private/public origin routing.",
+            ))
+            failed = True
+            continue
+        reasons, details = _evaluate_ha_readiness(body, supported_contracts=supported)
+        if status != 200:
+            reasons.insert(0, f"readiness returned HTTP {status}")
+        if reasons:
+            checks.append(_check(
+                f"ha.replica.{index}",
+                "fail",
+                f"Replica {origin} is ineligible: {', '.join(reasons)}.",
+                "Upgrade or repair this replica before enabling HA failover.",
+                details=details,
+            ))
+            failed = True
+            continue
+        replica_id = str(details["replica_id"])
+        release = str(details["release"])
+        identities.append(replica_id)
+        releases.append(release)
+        checks.append(_check(
+            f"ha.replica.{index}",
+            "pass",
+            f"Replica {replica_id} at {origin} is runtime-compatible (release {release}).",
+            details=details,
+        ))
+
+    duplicates = len(identities) != len(set(identities))
+    if duplicates:
+        failed = True
+    checks.append(_check(
+        "ha.compatibility",
+        "fail" if failed else "pass",
+        (
+            "HA replicas are not safely compatible."
+            if failed
+            else "All HA replicas are compatible and have unique identities."
+        ),
+        (
+            "Fix failing replica checks and ensure every replica ID is unique."
+            if failed
+            else None
+        ),
+    ))
+    if duplicates:
+        checks.append(_check(
+            "ha.replica_identity",
+            "fail",
+            "Two or more ready replicas report the same replica identity.",
+            "Set a unique EXOMEM_WRITER_LEASE_REPLICA_ID on every replica.",
+        ))
+    if len(set(releases)) > 1:
+        checks.append(_check(
+            "ha.release_drift",
+            "warn",
+            f"Compatible replicas run different releases: {', '.join(sorted(set(releases)))}.",
+            "Finish the rolling deployment when convenient; exact release equality is not required.",
+        ))
+    elif releases:
+        checks.append(_check(
+            "ha.release_drift",
+            "pass",
+            f"All ready replicas run release {releases[0]}.",
+        ))
+    return checks
+
+
 def _probe_get(url: str) -> tuple[int, object]:
     """GET `url` with a short timeout; returns (status, parsed-JSON-or-text).
 
@@ -945,7 +1167,13 @@ def _check_remote_probes() -> list[DoctorCheck]:
     return checks
 
 
-def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: bool = False) -> DoctorReport:
+def doctor(
+    *,
+    vault: str | None = None,
+    profile: Profile | None = None,
+    probe: bool = False,
+    replica_urls: list[str] | tuple[str, ...] | None = None,
+) -> DoctorReport:
     profile = profile or infer_profile()
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
@@ -1006,6 +1234,21 @@ def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: b
         # unless --probe is passed explicitly.
         if probe:
             checks.extend(_check_remote_probes())
+
+    if profile == "ha":
+        checks.extend(_check_ha_env())
+        if probe:
+            try:
+                urls = _ha_replica_urls(replica_urls)
+            except ValueError as exc:
+                checks.append(_check(
+                    "ha.replica_urls",
+                    "fail",
+                    str(exc),
+                    "Pass credential-free replica origins such as https://replica.example.com.",
+                ))
+            else:
+                checks.extend(_check_ha_probes(urls))
 
     return DoctorReport(profile=profile, checks=checks)
 
