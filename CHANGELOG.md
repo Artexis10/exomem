@@ -5,6 +5,26 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.20.0](https://github.com/Artexis10/exomem/compare/v0.19.1...v0.20.0) (2026-07-12)
+
+
+### Features
+
+* add an unauthenticated /health liveness endpoint ([a2573d3](https://github.com/Artexis10/exomem/commit/a2573d370ef95ed814c32faf5646d3cb77da4159))
+
+
+### Bug Fixes
+
+* accept-relation creates the ## Relations section when a note lacks one ([3fd89f7](https://github.com/Artexis10/exomem/commit/3fd89f765f233ec2a2610e4ae44b4847e1bcdb68))
+* enforce append-only immutability regardless of path casing ([3e20a1c](https://github.com/Artexis10/exomem/commit/3e20a1cd2d1ac94ca7a7ab528759bf4a7c28a212))
+* enforce the no-confidence-floats / no-decay stance in the writers ([7492c01](https://github.com/Artexis10/exomem/commit/7492c015b46806b2f34a9fc9e73fc70d2fb13a76))
+* exclude out-of-KB, readonly, and excluded targets from relation suggestions ([2fa0279](https://github.com/Artexis10/exomem/commit/2fa02793973e50d8f82d5e16fe7633660cc543e8))
+* heal reconcile count drift by default via maintain_memory ([009170f](https://github.com/Artexis10/exomem/commit/009170ffb7307513d416c5bb88fa34db36113e6e))
+* keep governed writes inside Knowledge Base/ and fail the backstop closed ([6f7245e](https://github.com/Artexis10/exomem/commit/6f7245e62e6bafb29d37b26b638412a629b8558b))
+* make MCP mutations retry-safe ([22ab936](https://github.com/Artexis10/exomem/commit/22ab936666d82e395b507444cfcf66abc3ac9f53))
+* make MCP mutations retry-safe ([cb0c47a](https://github.com/Artexis10/exomem/commit/cb0c47af757308d429e5167dfac48b60f6e32de1))
+* write-governance & lifecycle hardening from the promise audit ([9e057b4](https://github.com/Artexis10/exomem/commit/9e057b45d5cb386c4a6a0f9f6f315ff976708fb9))
+
 ## [0.19.1](https://github.com/Artexis10/exomem/compare/v0.19.0...v0.19.1) (2026-07-12)
 
 
