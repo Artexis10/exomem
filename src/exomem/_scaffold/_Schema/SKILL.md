@@ -651,6 +651,10 @@ out to *learn whether X is true* (experiment) or to *make a thing the world sees
    `Sources/Articles/`, `Sources/Sessions/`, `Sources/Books/`, `Sources/Papers/`,
    `Sources/Videos/`, or `Sources/Other/`. Filename: ISO-date + slug. Updates
    `Sources/index.md`.
+   The display title is stored losslessly as Unicode in frontmatter and the H1.
+   When a non-Latin title needs a readable portable filename, pass a separate
+   explicit lowercase ASCII `slug`; never treat a transliterated filename as
+   the page's title. Existing files are not renamed automatically.
 3. **Skill asks: "Compile a note from this? If yes, what type — research,
    insight, failure, pattern, experiment, production-log? And what scope?"** Skip
    if you already specified.

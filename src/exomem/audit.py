@@ -522,16 +522,19 @@ def _check_index_drift(vault_root: Path) -> list[AuditFinding]:
     # Actual counts.
     sources = indexes._count_sources(kb / "Sources")
     notes = indexes._count_notes(kb / "Notes")
-    actual: dict[str, int] = {"sources": sum(sources.values())}
+    entities = indexes._count_entities(kb / "Entities")
+    actual: dict[str, int] = {
+        "sources": sum(sources.values()),
+        "notes": sum(notes.values()),
+        "entities": sum(entities.values()),
+    }
     for type_key, n in notes.items():
         actual[f"notes:{type_key}"] = n
+    for type_key, n in entities.items():
+        actual[f"entities:{type_key}"] = n
 
     # Compare. Only flag drift for keys present in declared (the index defines what's tracked).
     for key, declared_count in declared.items():
-        # The Entities count is harder to verify without per-type folder structure
-        # introspection; skip entity drift in v1.
-        if key.startswith("entities"):
-            continue
         actual_count = actual.get(key)
         if actual_count is None:
             findings.append(AuditFinding(

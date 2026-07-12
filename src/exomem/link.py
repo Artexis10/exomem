@@ -27,6 +27,7 @@ from pathlib import Path
 from . import indexes, memory_refs
 from .kbdir import kb_prefix
 from .vault import (
+    InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
@@ -35,7 +36,9 @@ from .vault import (
     normalize_body_wikilinks,
     normalize_wikilink,
     render_wikilink_target,
+    resolve_filename_slug,
     rotate_log_if_needed,
+    yaml_scalar,
 )
 
 log = logging.getLogger(__name__)
@@ -78,6 +81,7 @@ def link(
     *,
     entity_type: str,
     name: str,
+    slug: str | None = None,
     summary: str,
     why_in_kb: str | None = None,
     tags: list[str] | None = None,
@@ -99,6 +103,13 @@ def link(
     today: dt.date | None = None,
 ) -> LinkResult:
     """Create a typed entity page + update top index + log."""
+    slug_warnings: list[str] = []
+    filename_slug: str | None = None
+    if slug is not None:
+        try:
+            filename_slug, slug_warnings = resolve_filename_slug(name, slug)
+        except InvalidSlugError as e:
+            raise LinkError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
     err = _validate(
         entity_type=entity_type,
         name=name,
@@ -134,9 +145,10 @@ def link(
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
+    display_name = name.strip()
     name_safe = _sanitize_name(name)
     folder = kb_root(vault_root) / "Entities" / ENTITY_TYPE_TO_FOLDER[entity_type]
-    entity_path = folder / f"{name_safe}.md"
+    entity_path = folder / f"{filename_slug or name_safe}.md"
 
     if entity_path.exists():
         raise LinkError(
@@ -156,7 +168,7 @@ def link(
     # post-write; purged in the except-path below on failure.
     from . import find as find_module
     resolver = find_module.shared_resolver(vault_root)
-    resolver.add_pending(rel_entity_no_ext, title=name_safe)
+    resolver.add_pending(rel_entity_no_ext, title=display_name)
 
     connections_norm, conn_warnings = _normalize_connections(
         connections, vault_root=vault_root, resolver=resolver
@@ -177,7 +189,7 @@ def link(
 
     entity_md = _render_entity(
         entity_type=entity_type,
-        name=name_safe,
+        name=display_name,
         summary=summary_clean,
         why_in_kb=why_clean,
         date_iso=date_iso,
@@ -202,20 +214,25 @@ def link(
     rel_entity = entity_path.relative_to(vault_root).as_posix()
 
     writes: list[PlannedWrite] = [PlannedWrite(path=entity_path, content=entity_md)]
-    warnings: list[str] = list(conn_warnings) + list(summary_warnings) + list(why_warnings)
+    warnings: list[str] = (
+        list(slug_warnings)
+        + list(conn_warnings)
+        + list(summary_warnings)
+        + list(why_warnings)
+    )
 
     # Index + log updates.
     kb = kb_root(vault_root)
     activity_summary = _activity_summary(
         rel_entity_no_ext=rel_entity_no_ext,
-        name=name_safe,
+        name=display_name,
         entity_type=entity_type,
         domain=domain,
         project=project,
     )
     log_body = _log_entry_body(
         entity_type=entity_type,
-        name=name_safe,
+        name=display_name,
         domain=domain,
         project=project,
         decision_status=decision_status,
@@ -367,6 +384,7 @@ def _render_entity(
     lines = ["---"]
     lines.append("type: entity")
     lines.append(f"exomem_id: {exomem_id}")
+    lines.append(f"title: {yaml_scalar(name)}")
     lines.append(f"entity_type: {entity_type}")
     lines.append("status: active")
     lines.append(f"created: {date_iso}")

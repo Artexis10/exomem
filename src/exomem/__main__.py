@@ -1212,7 +1212,7 @@ def _flag(name: str) -> str:
 def _add_command_args(sp: argparse.ArgumentParser, cmd) -> None:
     field_escape = cmd.name in _FIELD_ESCAPE
     for p in cmd.params:
-        if field_escape and not p.required:
+        if field_escape and not p.required and p.name != "slug":
             continue  # reachable via --field
         if p.cli_positional:
             sp.add_argument(
@@ -1262,7 +1262,7 @@ def _collect_raw_args(
     field_escape = cmd.name in _FIELD_ESCAPE
     raw: dict = {}
     for p in cmd.params:
-        if field_escape and not p.required:
+        if field_escape and not p.required and p.name != "slug":
             continue
         val = getattr(args, p.name, None)
         if val is not None:

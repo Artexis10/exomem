@@ -9,6 +9,7 @@ from importlib import resources
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import adopt as adopt_module
 from exomem import knowledge_packs
@@ -134,6 +135,26 @@ def test_adopt_copy_as_sources_preserves_original_and_records_provenance(tmp_pat
     assert "imported_from: Warranty Case/laptop-receipt.md" in source_text
     assert f"original_sha256: {expected_hash}" in source_text
     assert "# Laptop receipt" in source_text
+
+
+def test_adopt_quotes_yaml_significant_imported_path(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    legacy = vault / "Legacy" / "Step2: Paste your conversation.md"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("# 会話\n\nOriginal.\n", encoding="utf-8")
+
+    report = adopt_module.adopt(
+        vault,
+        mode="copy-as-sources",
+        selected_paths=["Legacy/Step2: Paste your conversation.md"],
+        today=dt.date(2026, 7, 12),
+    )
+
+    copied = report["copy"]["copied_sources"]
+    imported = vault / copied[0]["source_path"]
+    raw = imported.read_text(encoding="utf-8")
+    frontmatter = raw.removeprefix("---\n").split("\n---\n", 1)[0]
+    assert yaml.safe_load(frontmatter)["imported_from"] == "Legacy/Step2: Paste your conversation.md"
 
 
 def test_adopt_copy_as_sources_disambiguates_same_basename_batch(tmp_path: Path) -> None:

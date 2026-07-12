@@ -22,7 +22,7 @@ tags: [retrieval, knowledge-base]
 ingested_into: []
 ---
 
-# Source: <Title>
+# <Title>
 
 > Brief one-line description of what this source is.
 
@@ -463,12 +463,20 @@ What this commits us to and what it forecloses.
 
 ## Naming conventions summary
 
+The filename is a stable machine address; `title:` and the canonical H1 are the
+human display identity. Titles support arbitrary Unicode. Callers may pass an
+explicit lowercase ASCII kebab-case `slug` (maximum 100 characters) for a new
+source, note, or entity without changing the stored title. When omitted, the
+legacy automatic filename policy remains for compatibility. Exomem does not
+attempt language-aware transliteration, and it never renames existing pages on
+upgrade or reconcile.
+
 - Sources: date-prefixed, dash-slug, lowercase: `2026-05-09-retrieval-patterns.md`
 - Notes (research, insight, failure, pattern): no date prefix, dash-slug, lowercase: `agentic-rag-retrieval-budget.md`
 - Experiments: date-prefixed (start month), dash-slug, lowercase: `2026-05-30-day-low-carb.md`
 - Production-logs: date-prefixed (start month), dash-slug, lowercase: `2026-05-launch-recap.md`
-- Entities — People: working short used in daily reference; H1 carries the long form when it differs.
-- Entities — Concepts / Libraries / Decisions: Title Case, canonical name.
+- Entities: the Unicode canonical name is stored in `title:` and the H1; an
+  explicit ASCII slug may be used for the filename.
 
 Sources, experiments, and production-logs are dated because their value is partly
 temporal. Notes are not dated because they evolve. Entities are named after the

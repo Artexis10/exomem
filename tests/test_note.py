@@ -1,4 +1,4 @@
-"""note tool tests — covers auto-H1 removal, slug truncation, dry_run."""
+"""note tool tests — covers canonical H1, slug truncation, and feedback."""
 
 from __future__ import annotations
 
@@ -64,8 +64,7 @@ def test_note_renders_links_for_kb_rooted_obsidian_vault(vault: Path) -> None:
     assert "[[Notes/Insights/kb-rooted-obsidian-links]]" in source_text
 
 
-def test_note_body_with_no_h1_is_written_verbatim(vault: Path) -> None:
-    """If the caller declines to supply an H1, the tool doesn't invent one."""
+def test_note_body_with_no_h1_gets_canonical_title(vault: Path) -> None:
     result = note_module.note(
         vault,
         content="## Claim\n\nNo H1 today.\n",
@@ -75,8 +74,7 @@ def test_note_body_with_no_h1_is_written_verbatim(vault: Path) -> None:
     )
     text = (vault / result.path).read_text(encoding="utf-8")
     body = _body_after_frontmatter(text)
-    assert "# No H1 today" not in body
-    assert body.lstrip().startswith("## Claim")
+    assert body.lstrip().startswith("# No H1 today\n\n## Claim")
 
 
 def test_note_returns_structural_write_feedback(vault: Path) -> None:

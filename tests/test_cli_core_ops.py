@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem.__main__ import main
 
@@ -134,6 +135,25 @@ def test_remember_write(vault: Path, capsys) -> None:
     written = vault / payload["data"]["path"]
     assert written.exists()
     assert "CLI can write" in written.read_text(encoding="utf-8")
+
+
+def test_remember_unicode_title_with_explicit_slug(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "remember",
+            "--title", "睡眠",
+            "--slug", "sleep",
+            "--content", "## 要約\n\n本文。\n",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["path"].endswith("/sleep.md")
+    text = (vault / data["path"]).read_text(encoding="utf-8")
+    frontmatter = text.removeprefix("---\n").split("\n---\n", 1)[0]
+    assert yaml.safe_load(frontmatter)["title"] == "睡眠"
 
 
 def test_remember_field_escape(vault: Path, capsys) -> None:

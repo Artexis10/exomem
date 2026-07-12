@@ -13,10 +13,16 @@ These appear on every page type:
 |---|---|---|---|
 | `exomem_id` | new pages | UUID | immutable identity assigned by Exomem; legacy pages gain one only through explicit ID backfill |
 | `type` | yes | enum | `source`, `research-note`, `insight`, `failure`, `pattern`, `experiment`, `production-log`, `entity` |
+| `title` | new pages | Unicode string | exact human-facing display title; independent of the filename slug |
 | `status` | yes | enum | `draft`, `active`, `superseded`, `archived` (production-logs use a richer status set — see below) |
 | `created` | yes | ISO date | `YYYY-MM-DD`, set on creation, never edited |
 | `updated` | yes | ISO date | `YYYY-MM-DD`, refreshed on every edit |
 | `tags` | yes | list | freeform, lowercase, dash-separated |
+
+New writers also render `title` as the page's canonical H1. Readers remain
+backward-compatible with legacy pages and resolve display titles in this order:
+frontmatter `title`, first H1, then a humanized filename stem. Unicode is stored
+losslessly; the server never guesses a language, pronunciation, or translation.
 
 ## Per-type fields
 

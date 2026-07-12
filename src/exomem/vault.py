@@ -10,9 +10,11 @@ from __future__ import annotations
 
 import datetime as _dt
 import hashlib
+import json
 import logging
 import os
 import re
+import shutil
 import tempfile
 from collections.abc import Iterable
 from contextlib import contextmanager
@@ -30,6 +32,12 @@ log = logging.getLogger(__name__)
 
 
 SLUG_MAX_LENGTH = 100
+_EXPLICIT_SLUG_PATTERN = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+_H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
+
+
+class InvalidSlugError(ValueError):
+    """An explicit filename slug violated the portable ASCII contract."""
 
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
 # read-only protection is governed per-subtree by `Knowledge Base/_access.yaml`
@@ -143,6 +151,61 @@ def slugify_with_truncation_check(
     return slug, None
 
 
+def resolve_filename_slug(title: str, slug: str | None = None) -> tuple[str, list[str]]:
+    """Resolve a new filename component without conflating it with display title.
+
+    Explicit slugs are deliberately strict and portable. Automatic slugging is
+    kept for compatibility, including its language-blind transliteration, but
+    callers get a warning whenever non-ASCII title text enters that lossy path.
+    """
+    if slug is not None:
+        if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
+            raise InvalidSlugError(
+                "slug must be lowercase ASCII kebab-case (letters, digits, and "
+                "single hyphens only)"
+            )
+        if len(slug) > SLUG_MAX_LENGTH:
+            raise InvalidSlugError(
+                f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit"
+            )
+        return slug, []
+
+    resolved, truncation_warning = slugify_with_truncation_check(title)
+    warnings = [truncation_warning] if truncation_warning else []
+    if any(ord(char) > 127 for char in title):
+        warnings.append(
+            "automatic filename slug used lossy, language-blind ASCII "
+            "transliteration; the Unicode display title was preserved. Pass an "
+            "explicit ASCII `slug` to control the filename."
+        )
+    return resolved, warnings
+
+
+def ensure_canonical_h1(content: str, title: str) -> str:
+    """Return body markdown with exactly one writer-owned title H1 at the top."""
+    body = content.strip()
+    canonical = f"# {title.strip()}"
+    if not body:
+        return canonical
+    lines = body.splitlines()
+    if lines and lines[0].startswith("# "):
+        lines[0] = canonical
+        return "\n".join(lines)
+    return f"{canonical}\n\n{body}"
+
+
+def resolve_display_title(frontmatter: dict[str, Any], body: str, path: Path | str) -> str:
+    """Canonical display-title precedence shared by every read surface."""
+    title = frontmatter.get("title") if isinstance(frontmatter, dict) else None
+    if title is not None and str(title).strip():
+        return str(title).strip()
+    h1 = _H1_PATTERN.search(body or "")
+    if h1 and h1.group(1).strip():
+        return h1.group(1).strip()
+    stem = Path(path).stem.replace("-", " ").replace("_", " ").strip()
+    return stem or str(path)
+
+
 def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
     """Return a path that doesn't exist yet, appending -2, -3, ... on collision."""
     candidate = directory / f"{stem}{suffix}"
@@ -170,9 +233,9 @@ def batch_atomic_write(
     """Stage each write as a sibling .tmp file, then os.replace() them into place.
 
     On any exception during staging, no replacements happen — temps are cleaned.
-    Once replacement starts, files are flipped one at a time. A mid-flip failure
-    leaves a partially-updated tree: already-replaced files stand, remaining
-    temps are cleaned, the exception re-raises so the caller can warn.
+    Before replacement starts, existing destinations are snapshotted to sibling
+    backup files. A mid-flip failure restores every replaced destination and
+    removes destinations newly created by the batch before re-raising.
 
     When `vault_root` is supplied, the embedding sidecar at
     `<vault>/Knowledge Base/.embeddings.sqlite` is refreshed for every
@@ -180,7 +243,13 @@ def batch_atomic_write(
     in the embedding pass are logged and swallowed — keyword-mode find()
     still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.
     """
-    writes = list(writes)
+    # Several high-level writers independently refresh the same navigation
+    # file in one logical batch. Preserve the original destination order but
+    # commit only the last planned content for each path.
+    deduped: dict[Path, PlannedWrite] = {}
+    for write in writes:
+        deduped[write.path] = write
+    writes = list(deduped.values())
     # Access-tier backstop: when the caller knows the vault root, refuse any
     # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
     # here so every content writer inherits it without per-tool wiring. No
@@ -216,18 +285,63 @@ def batch_atomic_write(
             tmp.unlink(missing_ok=True)
         raise
 
+    backups: dict[Path, Path | None] = {}
+    try:
+        for final, _tmp in staged:
+            if not final.exists():
+                backups[final] = None
+                continue
+            fd, backup_str = tempfile.mkstemp(
+                prefix=f".{final.name}.", suffix=".bak", dir=str(final.parent)
+            )
+            os.close(fd)
+            backup = Path(backup_str)
+            shutil.copy2(final, backup)
+            backups[final] = backup
+    except Exception:
+        for _, tmp in staged:
+            tmp.unlink(missing_ok=True)
+        for backup in backups.values():
+            if backup is not None:
+                backup.unlink(missing_ok=True)
+        raise
+
     replaced: list[Path] = []
     try:
         for final, tmp in staged:
             os.replace(tmp, final)
             replaced.append(final)
-    except Exception:
-        # Replace failed mid-batch. Clean up remaining temps; replaced files stay.
-        replaced_paths = {s[0] for s, _ in zip(staged, staged) if s[0] in replaced}
+    except Exception as commit_error:
+        rollback_errors: list[str] = []
+        for final in reversed(replaced):
+            backup = backups.get(final)
+            try:
+                if backup is None:
+                    final.unlink(missing_ok=True)
+                else:
+                    os.replace(backup, final)
+                    backups[final] = None
+            except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
+                rollback_errors.append(f"{final}: {rollback_error}")
+        replaced_paths = set(replaced)
         for final, tmp in staged:
             if final not in replaced_paths and tmp.exists():
                 tmp.unlink(missing_ok=True)
+        if rollback_errors:
+            retained = [str(path) for path in backups.values() if path is not None]
+            raise RuntimeError(
+                f"batch commit failed ({commit_error}); rollback also failed: "
+                + "; ".join(rollback_errors)
+                + (f"; retained backups: {retained}" if retained else "")
+            ) from commit_error
+        for backup in backups.values():
+            if backup is not None:
+                backup.unlink(missing_ok=True)
         raise
+    else:
+        for backup in backups.values():
+            if backup is not None:
+                backup.unlink(missing_ok=True)
 
     if vault_root is not None and replaced:
         # Register the self-authored replacements so the live watcher drops
@@ -468,13 +582,26 @@ def _format_yaml_line(key: str, value: Any) -> str:
     return f"{key}: {_yaml_scalar(value)}"
 
 
-def _yaml_scalar(value: Any) -> str:
+def yaml_scalar(value: Any) -> str:
     """Render a scalar, quoting if it contains YAML-special chars."""
     s = str(value)
-    needs_quote = any(c in s for c in [":", "#", "[", "]", "{", "}", ","]) or s.strip() != s
+    try:
+        parsed = yaml.safe_load(s)
+    except yaml.YAMLError:
+        parsed = None
+    needs_quote = (
+        not isinstance(parsed, str)
+        or parsed != s
+        or any(c in s for c in [":", "#", "[", "]", "{", "}", ",", "\n", "\r"])
+        or s.strip() != s
+    )
     if needs_quote:
-        return yaml.safe_dump(s, default_flow_style=True).strip().rstrip("\n...").strip()
+        return json.dumps(s, ensure_ascii=False)
     return s
+
+
+# Backward-compatible private name for existing call sites.
+_yaml_scalar = yaml_scalar
 
 
 def walk_vault_md(vault_root: Path):
@@ -925,11 +1052,9 @@ class WikilinkResolver:
             text = abs_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return None
-        fm, _, _ = parse_frontmatter(text)
-        title = fm.get("title") if isinstance(fm, dict) else None
-        if isinstance(title, str) and title.strip():
-            return title.strip().lower()
-        return None
+        fm, body, _ = parse_frontmatter(text)
+        title = resolve_display_title(fm, body, abs_path)
+        return title.lower() if title else None
 
     def on_files_changed(
         self,

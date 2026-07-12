@@ -18,6 +18,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 import exomem
 from exomem import install_hook as hook_module
 
@@ -263,6 +265,45 @@ def test_install_hook_check_via_cli_json(tmp_path: Path, capsys) -> None:
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"] is True
     assert payload["clients"][0]["client"] == "codex"
+
+
+def test_hook_check_skips_absent_client_in_multi_client_check(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    claude_hooks = tmp_path / ".claude" / "hooks"
+    claude_settings = tmp_path / ".claude" / "settings.json"
+    hook_module.install_hook(
+        hook_dir=claude_hooks,
+        settings_path=claude_settings,
+        client="claude",
+    )
+
+    monkeypatch.setattr(
+        hook_module,
+        "_default_hook_dir",
+        lambda client: claude_hooks if client == "claude" else tmp_path / ".codex" / "hooks",
+    )
+    monkeypatch.setattr(
+        hook_module,
+        "_default_settings",
+        lambda client: claude_settings if client == "claude" else tmp_path / ".codex" / "hooks.json",
+    )
+
+    report = hook_module.check_hooks(clients=("claude", "codex"))
+    assert report["success"] is True
+    codex = next(item for item in report["clients"] if item["client"] == "codex")
+    assert codex["status"] == "skipped"
+    assert codex["success"] is True
+
+
+def test_hook_check_explicit_absent_client_remains_strict(tmp_path: Path) -> None:
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=tmp_path / "hooks",
+        settings_path=tmp_path / "hooks.json",
+    )
+    assert report["success"] is False
+    assert report["clients"][0]["status"] == "failed"
 
 
 # --- shared subprocess helper ---------------------------------------------------

@@ -17,5 +17,5 @@ Compiled, structured layer of your markdown vault (Obsidian optional). Governed 
 <!-- Reconciled against disk by the writers; run `reconcile` to resync after manual edits. -->
 
 - Sources: 0
-- Notes (insight): 0
-- Entities (concept): 0
+- Notes: 0
+- Entities: 0

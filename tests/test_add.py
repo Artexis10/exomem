@@ -41,12 +41,13 @@ def test_add_article_writes_source_file(
     fm, _, body = text.partition("\n---\n")
     parsed = yaml.safe_load(fm.removeprefix("---\n"))
     assert parsed["type"] == "source"
+    assert parsed["title"] == "Agentic RAG explained"
     assert parsed["source_type"] == "article"
     assert parsed["captured"] == TODAY  # date type round-trips
     assert parsed["url"] == "https://example.com/agentic-rag"
     assert parsed["tags"] == ["rag", "agentic"]
     assert parsed["ingested_into"] == []
-    assert "# Source: Agentic RAG explained" in body
+    assert "# Agentic RAG explained" in body
     assert "Useful for the Q retrieval roadmap" in body
     assert "## Capture" in body
 

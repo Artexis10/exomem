@@ -21,9 +21,9 @@ Workflow per call:
    and log.md (prepend `## [<date>] note | <path>` entry).
 6. Batch-atomic-write everything.
 
-Counts in top-level index.md are NOT auto-bumped for notes in v1 — the audit
-tool surfaces drift; reconcile via desk-side or a future `audit --fix`. A
-warning is returned to flag this every write.
+Sources/Notes/Entities navigation counts are recomputed with each governed
+write. The caller's Unicode title is stored in frontmatter and normalized into
+the canonical H1; the optional ASCII slug controls only the new filename.
 """
 
 from __future__ import annotations
@@ -39,18 +39,21 @@ from . import corpus_aware, indexes, markdown_relations, memory_refs, semantic_b
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
+    InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    ensure_canonical_h1,
     escape_wikilinks_for_log,
     find_body_wikilinks,
     kb_root,
     normalize_body_wikilinks,
     normalize_wikilink,
     render_wikilink_target,
+    resolve_filename_slug,
     rotate_log_if_needed,
-    slugify_with_truncation_check,
     unique_path,
+    yaml_scalar,
 )
 
 log = logging.getLogger(__name__)
@@ -217,6 +220,7 @@ def note(
     content: str,
     note_type: str,
     title: str,
+    slug: str | None = None,
     project: str | None = None,
     projects: list[str] | None = None,
     sources: list[str] | None = None,
@@ -247,6 +251,11 @@ def note(
 
     `today` is dependency-injectable for tests; defaults to dt.date.today().
     """
+    try:
+        filename_slug, slug_warnings = resolve_filename_slug(title, slug)
+    except InvalidSlugError as e:
+        raise NoteError(code="INVALID_SLUG", missing=["slug"], reason=str(e)) from e
+
     # Apply per-type default status if caller didn't specify.
     if status is None:
         if note_type == "production-log":
@@ -321,11 +330,11 @@ def note(
     tags_clean = _clean_tags(tags)
     exomem_id = memory_refs.new_id()
 
-    note_path, slug_warning = _resolve_path(
+    note_path = _resolve_path(
         vault_root=vault_root,
         note_type=note_type,
         project=project,
-        title=title,
+        slug=filename_slug,
         domain=domain,
         medium=medium,
         started=started,
@@ -455,14 +464,12 @@ def note(
     writes: list[PlannedWrite] = [PlannedWrite(path=note_path, content=note_md)]
     warnings: list[str] = (
         list(autoregister_warnings)
+        + list(slug_warnings)
         + list(source_warnings)
         + list(body_warnings)
         + list(dup_warnings)
         + list(contradiction_warnings)
     )
-    if slug_warning:
-        warnings.append(slug_warning)
-
     # Back-refs: append the new note's wikilink to each cited source's ingested_into.
     backrefs_planned = 0
     for src in sources_norm:
@@ -753,14 +760,13 @@ def _resolve_path(
     vault_root: Path,
     note_type: str,
     project: str | None,
-    title: str,
+    slug: str,
     domain: str | None,
     medium: str | None,
     started: str | None,
     date_iso: str,
-) -> tuple[Path, str | None]:
+) -> Path:
     kb = kb_root(vault_root)
-    slug, slug_warning = slugify_with_truncation_check(title)
     if note_type == "research-note":
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
@@ -788,7 +794,7 @@ def _resolve_path(
     else:  # pragma: no cover — validation guards this
         raise ValueError(f"unhandled note_type: {note_type}")
     folder.mkdir(parents=True, exist_ok=True)
-    return unique_path(folder, stem), slug_warning
+    return unique_path(folder, stem)
 
 
 def _domain_folder(domain: str) -> str:
@@ -835,6 +841,7 @@ def _render_note(
     lines = ["---"]
     lines.append(f"type: {note_type}")
     lines.append(f"exomem_id: {exomem_id}")
+    lines.append(f"title: {yaml_scalar(title.strip())}")
 
     # Type-specific required fields, ordered per fixture convention.
     if note_type == "research-note":
@@ -891,7 +898,7 @@ def _render_note(
         lines.append("tags: []")
     lines.append("---")
     lines.append("")
-    lines.append(content.strip())
+    lines.append(ensure_canonical_h1(content, title))
     lines.append("")
     return "\n".join(lines)
 

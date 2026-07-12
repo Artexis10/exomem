@@ -59,8 +59,8 @@ def test_create_file_writes_file_with_frontmatter(vault: Path) -> None:
     assert text.startswith("---\n")
     assert "type: identity" in text
     assert "scope: career" in text
-    assert "created: 2026-05-24" in text
-    assert "updated: 2026-05-24" in text
+    assert "created: \"2026-05-24\"" in text
+    assert "updated: \"2026-05-24\"" in text
     assert "# Career" in text
 
 
