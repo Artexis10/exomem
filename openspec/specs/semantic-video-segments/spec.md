@@ -1,7 +1,15 @@
 # semantic-video-segments Specification
 
 ## Purpose
-TBD - created by archiving change add-semantic-video-segments. Update Purpose after archive.
+Make long audio/video transcripts retrievable at the moment a topic was
+discussed rather than as one undifferentiated blob: when enabled
+(`EXOMEM_SEMANTIC_SEGMENTS`), transcripts render one timestamped line per ASR
+segment, and the embedding chunker segments them at boundaries fused from
+topic shifts, visual-change events, speaker turns, and OCR changes, so `find`
+can surface a matched hit's timestamp and nearest scene frame. The feature is
+default-off (byte-identical output when unset), degrades through a soft-fail
+ladder to the existing paragraph chunker on missing signals or errors, and
+relies only on deterministic measurements — no reasoning model is invoked.
 ## Requirements
 ### Requirement: Timed Transcript Rendering
 

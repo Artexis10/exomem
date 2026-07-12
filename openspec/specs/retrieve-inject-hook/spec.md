@@ -1,7 +1,15 @@
 # retrieve-inject-hook Specification
 
 ## Purpose
-TBD - created by archiving change retrieve-inject-hook. Update Purpose after archive.
+Let the `UserPromptSubmit` retrieve hook proactively surface relevant Exomem
+hits into the conversation instead of only reminding the agent to search,
+without changing its default reminder-only behavior. When explicitly opted in
+(`EXOMEM_RETRIEVE_INJECT`), the hook attempts a REST call and falls back to an
+opt-in CLI invocation to fetch a few compact hits, injecting only a small,
+bounded routing-stub block (paths and metadata, never excerpts or note
+content) into `additionalContext`. The hook reuses the existing prompt-length
+gate and cooldown, stays silent on obvious control prompts and zero-hit
+results, and never blocks indefinitely or raises.
 ## Requirements
 ### Requirement: Recall Injection Defaults Off
 

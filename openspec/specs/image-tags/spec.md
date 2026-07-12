@@ -1,7 +1,13 @@
 # image-tags Specification
 
 ## Purpose
-TBD - created by archiving change image-zero-shot-tags. Update Purpose after archive.
+Make depicted concepts in images findable by keyword/BM25 search even when an
+image has no legible text: when enabled (`EXOMEM_IMAGE_TAGS`), the system
+scores an image's CLIP embedding against a fixed generic tag vocabulary and
+appends the top-scoring tags above a threshold as a `Tags:` line to the
+image's extracted text, reusing the already-loaded CLIP model. The feature is
+default-off (byte-identical output when unset), configurable in top-K and
+threshold, and soft-fails to no tags on any dependency or inference error.
 ## Requirements
 ### Requirement: Zero-Shot CLIP Image Tags
 
