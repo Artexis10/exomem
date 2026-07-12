@@ -20,6 +20,6 @@
 ## 4. Verification and rollout
 
 - [x] 4.1 Run focused Python, Worker, Ruff, and strict OpenSpec validation.
-- [ ] 4.2 Run the broader CI-relevant test set and package checks.
+- [x] 4.2 Run the broader CI-relevant test set and package checks.
 - [ ] 4.3 Upgrade both live replicas to the compatible release/build before enabling Worker enforcement.
 - [ ] 4.4 Deploy the Worker, prove steady-state admission reuse and incompatible-replica fail-closed behavior, then verify a live MCP read and governed write.
