@@ -6,6 +6,13 @@ the web or mobile as a custom connector. The local-only path (Claude Code over
 stdio, no cloud) is in [../QUICKSTART.md](../QUICKSTART.md); start there if you
 don't need mobile access.
 
+This personal remote profile is still one user and one vault. The managed hosted
+service uses the same single-vault runtime as a private tenant cell behind a
+separate shared control plane; it is not made multi-tenant by pointing several
+accounts at the server configured below. Hosted operators should also read
+[hosted-operations.md](hosted-operations.md) and the
+[Substrate control-plane contract](substrate-control-plane-contract.md).
+
 Throughout, replace `<your-host>` / `example.com` with your own hostname.
 For the guided ≤15-minute bring-up, start with
 [remote-quickstart.md](remote-quickstart.md); this document is the reference.
@@ -46,6 +53,46 @@ Registration at `/register`, and walks the standard authorize → token → use 
 when the host is asleep, mobile writes fail with a connection error — fall back to
 editing the vault directly (the local capture path). Run on a box that stays up
 (or a cheap VPS) if you want reliable mobile access.
+
+### Managed hosted topology
+
+The managed service has a different ingress and ownership boundary:
+
+```text
+client
+  -> Substrate public auth / gateway / Home
+  -> authoritative account mapping + internal entitlement
+  -> one private Exomem cell
+  -> one tenant vault + isolated state/log/secret roots
+```
+
+The public gateway derives the destination from the authenticated account. No
+public body, URL, query, cookie, or header may select a tenant, cell, private
+endpoint, credential, or vault path. Each cell accepts only its unique private
+gateway/operator identity and exposes content-free readiness. Optional embedding
+and media workers start only from provider-neutral cell policy and soft-fail to
+durable capture and lexical recall.
+
+Deployment supplies private networking, process/container isolation, encrypted
+tenant volumes, secret injection, backup object storage, and KMS integration.
+That is encryption at rest and owner-scoped access—not zero-knowledge or
+end-to-end encryption. Search and indexing require plaintext in cell memory, so
+operators must minimize and audit volume access and keep content, queries, paths,
+and credentials out of operational logs.
+
+The gateway and cell negotiate a versioned protocol and are tested as a pair.
+Optional response fields may be added compatibly; command, parameter, or stable
+error removal requires a coordinated rollout. Pin the cell release per tenant,
+take a verified canonical snapshot before a file-format migration, and canary new
+gateway/cell pairs. Rollback stops routing, drains the affected cell, and starts
+the previous protocol-compatible image against the same vault. It never rolls
+canonical Markdown/media backward; disposable sidecars can be rebuilt.
+
+Paddle is not installed in, called by, or trusted by an Exomem cell. Substrate
+owns Paddle checkout, webhooks, portal, reconciliation, and the provider-neutral
+entitlement projection consumed before routing and at cell startup. Paddle MCP
+is an operator/development aid for that control-plane lane, not production
+runtime infrastructure.
 
 ## 1. Install dependencies
 
