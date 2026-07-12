@@ -161,6 +161,10 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
             raise_on_decryption_error=False,
         )
 
+    # Do not impose a fallback access-token lifetime here. GitHub OAuth Apps
+    # normally issue long-lived access tokens without refresh tokens; forcing a
+    # shorter downstream expiry creates an unrecoverable refresh gap. FastMCP
+    # already selects provider-aware defaults from the upstream token response.
     return OAuthProxy(
         upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
         upstream_token_endpoint="https://github.com/login/oauth/access_token",
@@ -170,5 +174,4 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
         base_url=base_url,
         jwt_signing_key=jwt_signing_key,
         client_storage=client_storage,
-        fallback_access_token_expiry_seconds=30 * 24 * 60 * 60,
     )
