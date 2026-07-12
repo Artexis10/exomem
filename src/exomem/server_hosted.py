@@ -700,14 +700,14 @@ def register_hosted_routes(
 
             def invoke_admitted() -> Any:
                 if command.read_only:
-                    lifecycle.require_read_admission()
-                    return invoke(
-                        command,
-                        *injected,
-                        idempotency_key=gateway.scoped_idempotency_key(context),
-                        implicit_idempotency_scope=gateway.implicit_retry_scope(context),
-                        **kwargs,
-                    )
+                    with lifecycle.admit_read():
+                        return invoke(
+                            command,
+                            *injected,
+                            idempotency_key=gateway.scoped_idempotency_key(context),
+                            implicit_idempotency_scope=gateway.implicit_retry_scope(context),
+                            **kwargs,
+                        )
                 with lifecycle.admit_mutation():
                     return invoke(
                         command,

@@ -349,6 +349,7 @@ class HostedReadiness:
 @dataclass(frozen=True)
 class HostedLifecycleSnapshot:
     phase: str
+    active_reads: int
     active_mutations: int
     active_transfers: int
     reason_code: str
@@ -356,6 +357,7 @@ class HostedLifecycleSnapshot:
     def as_dict(self) -> dict[str, Any]:
         return {
             "phase": self.phase,
+            "active_reads": self.active_reads,
             "active_mutations": self.active_mutations,
             "active_transfers": self.active_transfers,
             "reason_code": self.reason_code,
@@ -373,6 +375,7 @@ class HostedCellLifecycle:
         self._mutation_authority_ready = False
         self._mutation_reason = "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
         self._service_auth_ready = False
+        self._active_reads = 0
         self._active_mutations = 0
         self._active_transfers = 0
         self._worker_status: dict[str, tuple[bool, str]] = {}
@@ -601,28 +604,28 @@ class HostedCellLifecycle:
 
     def require_read_admission(self) -> None:
         with self._condition:
-            if (
-                self._phase not in {"active", "quiescing", "quiesced"}
-                or not self._read_ready_locked()
-            ):
-                raise HostedLifecycleError(
-                    "HOSTED_READ_NOT_ADMITTED",
-                    "cell lifecycle does not currently admit reads",
-                )
+            self._require_read_admission_locked()
+
+    @contextmanager
+    def admit_read(self) -> Iterator[None]:
+        """Hold read admission across snapshot coordination and leaf execution."""
+
+        with self._condition:
+            self._require_read_admission_locked()
+            self._active_reads += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active_reads -= 1
+                self._condition.notify_all()
 
     @contextmanager
     def admit_transfer(self) -> Iterator[None]:
         """Keep deletion sealing closed until an admitted download finishes."""
 
         with self._condition:
-            if (
-                self._phase not in {"active", "quiescing", "quiesced"}
-                or not self._read_ready_locked()
-            ):
-                raise HostedLifecycleError(
-                    "HOSTED_READ_NOT_ADMITTED",
-                    "cell lifecycle does not currently admit transfers",
-                )
+            self._require_read_admission_locked(message="cell lifecycle does not admit transfers")
             self._active_transfers += 1
         try:
             yield
@@ -681,17 +684,32 @@ class HostedCellLifecycle:
                     "HOSTED_LIFECYCLE_BUSY",
                     "cell cannot resume while admitted mutations are draining",
                 )
-            for _stopper, starter in self._background_workers:
-                if starter is None:
-                    continue
-                try:
+            started_stoppers: list[Callable[[], Any]] = []
+
+            def rollback_started_workers() -> None:
+                for stopper in reversed(started_stoppers):
+                    try:
+                        stopper()
+                    except Exception:  # noqa: BLE001 - admission remains closed after rollback
+                        pass
+
+            try:
+                for stopper, starter in self._background_workers:
+                    if starter is None:
+                        continue
+                    started_stoppers.append(stopper)
                     starter()
-                except Exception as exc:  # noqa: BLE001 - resume must remain closed
-                    raise HostedLifecycleError(
-                        "HOSTED_BACKGROUND_START_FAILED",
-                        "a hosted background writer could not restart safely",
-                    ) from exc
-            self._persist_phase("active")
+            except Exception as exc:  # noqa: BLE001 - resume must remain closed
+                rollback_started_workers()
+                raise HostedLifecycleError(
+                    "HOSTED_BACKGROUND_START_FAILED",
+                    "a hosted background writer could not restart safely",
+                ) from exc
+            try:
+                self._persist_phase("active")
+            except HostedLifecycleError:
+                rollback_started_workers()
+                raise
             self._phase = "active"
             self._condition.notify_all()
             return self._snapshot_locked()
@@ -704,6 +722,11 @@ class HostedCellLifecycle:
                 raise HostedLifecycleError(
                     "HOSTED_NOT_QUIESCED",
                     "cell must be quiesced before deletion sealing",
+                )
+            if self._active_reads:
+                raise HostedLifecycleError(
+                    "HOSTED_READ_IN_FLIGHT",
+                    "cell has an active read",
                 )
             if self._active_transfers:
                 raise HostedLifecycleError(
@@ -721,10 +744,22 @@ class HostedCellLifecycle:
     def _read_ready_locked(self) -> bool:
         return self._vault_ready and self._service_auth_ready
 
+    def _require_read_admission_locked(
+        self,
+        *,
+        message: str = "cell lifecycle does not currently admit reads",
+    ) -> None:
+        if (
+            self._phase not in {"active", "quiescing", "quiesced"}
+            or not self._read_ready_locked()
+        ):
+            raise HostedLifecycleError("HOSTED_READ_NOT_ADMITTED", message)
+
     def _snapshot_locked(self) -> HostedLifecycleSnapshot:
         reason = self.readiness().reason_code
         return HostedLifecycleSnapshot(
             phase=self._phase,
+            active_reads=self._active_reads,
             active_mutations=self._active_mutations,
             active_transfers=self._active_transfers,
             reason_code=reason,

@@ -111,6 +111,28 @@ def _initialize_hosted_runtime() -> ServerRuntime:
                     ready=False,
                     reason_code="HOSTED_WORKER_LIMIT_ZERO",
                 )
+    elif startup.phase == "quiesced":
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_CELL_NOT_ACTIVE",
+                )
+        if config.has_feature("media"):
+            media_worker = _create_media_worker(vault_root)
+            if media_worker is not None:
+                lifecycle.register_background_worker(
+                    stopper=media_worker.stop,
+                    starter=_worker_starter(lifecycle, "media", media_worker),
+                )
+        if config.has_feature("file-watcher"):
+            file_watcher = _create_file_watcher(vault_root)
+            if file_watcher is not None:
+                lifecycle.register_background_worker(
+                    stopper=file_watcher.stop,
+                    starter=_worker_starter(lifecycle, "file-watcher", file_watcher),
+                )
     elif startup.phase != "active":
         for feature in ("embeddings", "file-watcher", "media"):
             if config.has_feature(feature):
@@ -197,21 +219,16 @@ def _start_compute_runtime(vault_root: Path) -> None:
 
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
-    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+    worker = _create_media_worker(vault_root)
+    if worker is None:
         return None
-
-    from . import media_worker as media_worker_module
-
-    worker = None
     try:
-        worker = media_worker_module.MediaWorker(vault_root)
         worker.start()
     except Exception as exc:  # noqa: BLE001 - media must never deny the core service
-        if worker is not None:
-            try:
-                worker.stop()
-            except Exception:  # noqa: BLE001 - startup degradation must remain soft
-                pass
+        try:
+            worker.stop()
+        except Exception:  # noqa: BLE001 - startup degradation must remain soft
+            pass
         log.warning("media runtime unavailable; core service continuing: %s", exc)
         return None
     try:
@@ -221,16 +238,55 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     return worker
 
 
-def _start_file_watcher(vault_root: Path) -> Any | None:
-    """Start the optional live file watcher."""
-    if os.environ.get("EXOMEM_DISABLE_FILE_WATCHER"):
+def _create_media_worker(vault_root: Path) -> Any | None:
+    """Construct a media worker without starting background execution."""
+    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
         return None
 
-    from . import file_watcher as file_watcher_module
+    from . import media_worker as media_worker_module
 
-    watcher = file_watcher_module.FileWatcher(vault_root)
+    try:
+        return media_worker_module.MediaWorker(vault_root)
+    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media runtime unavailable; core service continuing: %s", exc)
+        return None
+
+
+def _start_file_watcher(vault_root: Path) -> Any | None:
+    """Start the optional live file watcher."""
+    watcher = _create_file_watcher(vault_root)
+    if watcher is None:
+        return None
     try:
         watcher.start()
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher start failed: %s", exc)
     return watcher
+
+
+def _create_file_watcher(vault_root: Path) -> Any | None:
+    """Construct a file watcher without starting background execution."""
+    if os.environ.get("EXOMEM_DISABLE_FILE_WATCHER"):
+        return None
+
+    from . import file_watcher as file_watcher_module
+
+    try:
+        return file_watcher_module.FileWatcher(vault_root)
+    except Exception as exc:  # noqa: BLE001 - watcher must not break startup
+        log.warning("file watcher unavailable; core service continuing: %s", exc)
+        return None
+
+
+def _worker_starter(
+    lifecycle: HostedCellLifecycle,
+    feature: str,
+    worker: Any,
+) -> Callable[[], None]:
+    """Start a dormant worker and make its resumed health explicit."""
+
+    def start() -> None:
+        worker.start()
+        lifecycle.set_worker_status(feature, ready=True)
+
+    return start
