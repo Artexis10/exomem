@@ -144,12 +144,39 @@ def register_asset_routes(mcp_app: FastMCP) -> None:
 def register_oauth_metadata_route(
     mcp_app: FastMCP, *, base_url: str, auth_enabled: bool
 ) -> None:
-    """Mirror OAuth protected-resource metadata at the bare well-known path."""
+    """Expose compatibility aliases for OAuth/OIDC discovery."""
     if not auth_enabled:
         return
 
+    base_url = base_url.rstrip("/")
     resource_url = f"{base_url}/mcp"
     issuer_url = f"{base_url}/"
+
+    @mcp_app.custom_route("/.well-known/openid-configuration", methods=["GET"])
+    async def _openid_configuration(request: Request) -> JSONResponse:  # noqa: ARG001
+        # Some MCP clients probe the OIDC alias after a successful OAuth token
+        # exchange. Exomem uses OAuth (not ID tokens), so return the same RFC
+        # 8414 authorization-server metadata shape as the canonical endpoint.
+        return JSONResponse(
+            {
+                "issuer": issuer_url,
+                "authorization_endpoint": f"{base_url}/authorize",
+                "token_endpoint": f"{base_url}/token",
+                "registration_endpoint": f"{base_url}/register",
+                "scopes_supported": [],
+                "response_types_supported": ["code"],
+                "grant_types_supported": ["authorization_code", "refresh_token"],
+                "token_endpoint_auth_methods_supported": [
+                    "client_secret_post",
+                    "client_secret_basic",
+                    "private_key_jwt",
+                    "none",
+                ],
+                "code_challenge_methods_supported": ["S256"],
+                "client_id_metadata_document_supported": True,
+            },
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
 
     @mcp_app.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
     async def _oauth_protected_resource_bare(request: Request) -> JSONResponse:  # noqa: ARG001

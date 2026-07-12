@@ -565,6 +565,12 @@ Pick the strongest option that fits the situation:
 
 ## Restarting the service
 
+Remote Streamable HTTP runs statelessly: authenticated tool calls do not rely
+on a process-local `Mcp-Session-Id`. A service restart or active/passive route
+change therefore cannot strand a transport session on the old process. OAuth
+is still enforced on every request; a genuinely expired, revoked, or invalid
+credential still requires authorization, but a normal restart does not.
+
 **macOS / Linux:** `bash scripts/restart.sh` — launchd `kickstart -k` on macOS,
 `systemctl --user restart` on Linux. It truncates `logs/exomem.log` and tails it.
 

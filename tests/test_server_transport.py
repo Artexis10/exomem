@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any
 
+import pytest
+
+from exomem import logging_config, server
+from exomem.server_assets import register_oauth_metadata_route
 from exomem.server_transport import PrimeMcpSSEMiddleware
 
 
@@ -90,3 +96,81 @@ def test_non_sse_or_failed_response_is_not_primed() -> None:
             )
         )
     ) == 2
+
+
+class _FakeMcp:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def run(self, **kwargs: Any) -> None:
+        self.calls.append(kwargs)
+
+
+@pytest.fixture
+def fake_mcp(monkeypatch: pytest.MonkeyPatch) -> _FakeMcp:
+    fake = _FakeMcp()
+    monkeypatch.setattr(server, "build_server", lambda **_kwargs: fake)
+    monkeypatch.setattr(logging_config, "configure_logging", lambda *_args, **_kwargs: None)
+    return fake
+
+
+@pytest.mark.parametrize("transport", ["http", "streamable-http"])
+def test_remote_http_runs_stateless(
+    fake_mcp: _FakeMcp,
+    monkeypatch: pytest.MonkeyPatch,
+    transport: str,
+) -> None:
+    monkeypatch.delenv("EXOMEM_HOST", raising=False)
+
+    server.run(transport=transport, host="127.0.0.1", port=9876)
+
+    assert len(fake_mcp.calls) == 1
+    call = fake_mcp.calls[0]
+    middleware = call.pop("middleware")
+    assert call == {
+        "transport": transport,
+        "host": "127.0.0.1",
+        "port": 9876,
+        "stateless_http": True,
+    }
+    assert len(middleware) == 1
+    assert middleware[0].cls is server.PrimeMcpSSEMiddleware
+
+
+def test_stdio_does_not_apply_http_stateless_configuration(fake_mcp: _FakeMcp) -> None:
+    server.run(transport="stdio")
+
+    assert fake_mcp.calls == [{"transport": "stdio"}]
+
+
+def test_stateless_http_keeps_get_sse_compatibility() -> None:
+    mcp = server.ExomemFastMCP("transport-test")
+
+    app = mcp.http_app(transport="streamable-http", stateless_http=True)
+
+    endpoint = next(route for route in app.routes if getattr(route, "path", None) == "/mcp")
+    assert endpoint.methods == {"GET", "POST", "DELETE"}
+
+
+def test_openid_discovery_alias_returns_oauth_metadata() -> None:
+    mcp = server.ExomemFastMCP("discovery-test")
+    register_oauth_metadata_route(
+        mcp,
+        base_url="https://memory.example",
+        auth_enabled=True,
+    )
+    app = mcp.http_app(transport="streamable-http", stateless_http=True)
+    route = next(
+        route
+        for route in app.routes
+        if getattr(route, "path", None) == "/.well-known/openid-configuration"
+    )
+
+    response = asyncio.run(route.endpoint(None))
+    metadata = json.loads(response.body)
+
+    assert metadata["issuer"] == "https://memory.example/"
+    assert metadata["authorization_endpoint"] == "https://memory.example/authorize"
+    assert metadata["token_endpoint"] == "https://memory.example/token"
+    assert metadata["registration_endpoint"] == "https://memory.example/register"
+    assert metadata["code_challenge_methods_supported"] == ["S256"]
