@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import types
 import typing
@@ -142,7 +143,12 @@ def bind_vault(
             return leaf(*injected, **kwargs)
         from .writer_lease import invoke_command
 
-        return invoke_command(command, *injected, **kwargs)
+        return invoke_command(
+            command,
+            *injected,
+            implicit_idempotency_scope=(None if command.read_only else mcp_retry_scope()),
+            **kwargs,
+        )
 
     wrapper.__signature__ = new_sig  # type: ignore[attr-defined]
     wrapper.__name__ = name or leaf.__name__
@@ -157,6 +163,22 @@ def bind_vault(
         ann["return"] = resolved["return"]
     wrapper.__annotations__ = ann
     return wrapper
+
+
+def mcp_retry_scope() -> str | None:
+    """Return a credential-safe caller scope for bounded MCP retry replay."""
+    try:
+        from fastmcp.server.dependencies import get_context, get_http_headers
+
+        headers = get_http_headers(include={"authorization"})
+        authorization = headers.get("authorization", "").strip()
+        scheme, separator, credential = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer" and credential.strip():
+            digest = hashlib.sha256(credential.strip().encode("utf-8")).hexdigest()
+            return f"bearer:{digest}"
+        return f"session:{get_context().session_id}"
+    except (LookupError, RuntimeError):
+        return None
 
 
 def _annotate_description(annotation: object, description: str) -> object:

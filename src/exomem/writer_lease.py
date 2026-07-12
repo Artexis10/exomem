@@ -10,6 +10,7 @@ from __future__ import annotations
 import atexit
 import hashlib
 import json
+import logging
 import os
 import pickle
 import sqlite3
@@ -28,6 +29,8 @@ from .cli_ops import OpError
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
 )
+_IMPLICIT_RETRY_TTL_SECONDS = 60.0
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -181,8 +184,9 @@ class LeaseCoordinatorClient:
 class IdempotencyStore:
     """Durable per-replica retry cache, deliberately outside the synced vault."""
 
-    def __init__(self, path: Path):
+    def __init__(self, path: Path, *, clock=time.time):  # noqa: ANN001
         self.path = path
+        self.clock = clock
         path.parent.mkdir(parents=True, exist_ok=True)
         with self._connect() as conn:
             conn.execute(
@@ -196,14 +200,32 @@ class IdempotencyStore:
         conn.execute("PRAGMA journal_mode=WAL")
         return conn
 
-    def run(self, key: str | None, digest: str, operation) -> Any:  # noqa: ANN001
+    def run(
+        self,
+        key: str | None,
+        digest: str,
+        operation,  # noqa: ANN001
+        *,
+        expires_after: float | None = None,
+        on_replay=None,  # noqa: ANN001
+    ) -> Any:
         if not key:
             return operation()
+        now = self.clock()
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
+            if expires_after is not None:
+                conn.execute(
+                    "DELETE FROM mutations WHERE key LIKE 'implicit:%' "
+                    "AND state = 'completed' AND updated_at <= ?",
+                    (now - expires_after,),
+                )
             row = conn.execute(
-                "SELECT digest, state, result FROM mutations WHERE key = ?", (key,)
+                "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?", (key,)
             ).fetchone()
+            if row and expires_after is not None and row[3] <= now - expires_after:
+                conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
+                row = None
             if row:
                 if row[0] != digest:
                     raise OpError(
@@ -211,6 +233,8 @@ class IdempotencyStore:
                         "idempotency key was already used for different input",
                     )
                 if row[1] == "completed":
+                    if on_replay is not None:
+                        on_replay()
                     return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
                 raise OpError(
                     "IDEMPOTENCY_IN_PROGRESS",
@@ -218,7 +242,7 @@ class IdempotencyStore:
                 )
             conn.execute(
                 "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
-                (key, digest, time.time()),
+                (key, digest, now),
             )
         try:
             result = operation()
@@ -233,13 +257,19 @@ class IdempotencyStore:
         with self._connect() as conn:
             conn.execute(
                 "UPDATE mutations SET state = 'completed', result = ?, updated_at = ? WHERE key = ? AND digest = ?",
-                (payload, time.time(), key, digest),
+                (payload, self.clock(), key, digest),
             )
         return result
 
 
 class LeaseManager:
-    def __init__(self, config: LeaseConfig, *, client: LeaseCoordinatorClient | None = None):
+    def __init__(
+        self,
+        config: LeaseConfig,
+        *,
+        client: LeaseCoordinatorClient | None = None,
+        clock=time.time,  # noqa: ANN001
+    ):
         self.config = config
         self.client = (
             client
@@ -249,10 +279,8 @@ class LeaseManager:
         replica = config.replica_id or "standalone"
         vault = config.vault_id or "standalone"
         safe_name = hashlib.sha256(f"{vault}\0{replica}".encode()).hexdigest()[:20]
-        self.idempotency = (
-            IdempotencyStore(config.state_dir / f"idempotency-{safe_name}.sqlite")
-            if config.enabled
-            else None
+        self.idempotency = IdempotencyStore(
+            config.state_dir / f"idempotency-{safe_name}.sqlite", clock=clock
         )
         self._fencing_token: int | None = None
         self._expires_at: float | None = None
@@ -283,10 +311,12 @@ class LeaseManager:
         kwargs: dict[str, Any],
         *,
         idempotency_key: str | None = None,
+        implicit_idempotency_scope: str | None = None,
     ) -> Any:
-        if command.read_only or not self.config.enabled:
+        if command.read_only:
             return command.leaf(*injected, **kwargs)
-        self.ensure_writer()
+        if self.config.enabled:
+            self.ensure_writer()
         digest = hashlib.sha256(
             json.dumps(
                 {"command": command.name, "kwargs": kwargs},
@@ -295,9 +325,26 @@ class LeaseManager:
                 default=str,
             ).encode("utf-8")
         ).hexdigest()
-        assert self.idempotency is not None
+        key = idempotency_key
+        expires_after = None
+        on_replay = None
+        if key is None and implicit_idempotency_scope:
+            scoped = hashlib.sha256(
+                f"{implicit_idempotency_scope}\0{digest}".encode()
+            ).hexdigest()
+            key = f"implicit:{scoped}"
+            expires_after = _IMPLICIT_RETRY_TTL_SECONDS
+
+            def log_replay() -> None:
+                logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
+
+            on_replay = log_replay
         return self.idempotency.run(
-            idempotency_key, digest, lambda: command.leaf(*injected, **kwargs)
+            key,
+            digest,
+            lambda: command.leaf(*injected, **kwargs),
+            expires_after=expires_after,
+            on_replay=on_replay,
         )
 
     def status(self) -> dict[str, Any]:
@@ -381,9 +428,19 @@ def get_manager() -> LeaseManager:
 
 
 def invoke_command(
-    command: Any, *injected: Any, idempotency_key: str | None = None, **kwargs: Any
+    command: Any,
+    *injected: Any,
+    idempotency_key: str | None = None,
+    implicit_idempotency_scope: str | None = None,
+    **kwargs: Any,
 ) -> Any:
-    return get_manager().invoke(command, injected, kwargs, idempotency_key=idempotency_key)
+    return get_manager().invoke(
+        command,
+        injected,
+        kwargs,
+        idempotency_key=idempotency_key,
+        implicit_idempotency_scope=implicit_idempotency_scope,
+    )
 
 
 def coordination_status() -> dict[str, Any]:
