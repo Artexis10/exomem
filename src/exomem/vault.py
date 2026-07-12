@@ -54,6 +54,27 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
     "Evidence",
 )
 
+# Frontmatter keys the schema deliberately excludes (see _scaffold's
+# references/frontmatter.md): numeric confidence scores misrepresent the signal
+# (trust is citations + link count), and knowledge does not expire on a schedule.
+# Governed write paths refuse them so the documented "no confidence floats / no
+# retention decay" stance is actually enforced, not just described.
+EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
+    {"confidence", "decay_at", "expires_at"}
+)
+
+
+def excluded_frontmatter_reason(field: str) -> str | None:
+    """A refusal reason if `field` is a schema-excluded frontmatter key, else None."""
+    if field.strip().casefold() in EXCLUDED_FRONTMATTER_FIELDS:
+        return (
+            f"`{field}` is a schema-excluded frontmatter field. Exomem does not "
+            "record numeric confidence scores or time-based decay/expiry — trust "
+            "is conveyed by citations and link count, and old material is never "
+            "auto-decayed (see SKILL.md). Omit this field."
+        )
+    return None
+
 # When scanning the full vault for inbound wikilinks, skip these.
 VAULT_SCAN_SKIP_DIRS = frozenset({
     ".obsidian", ".git", ".trash", "_attachments", "_archive", "_trash",

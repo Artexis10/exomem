@@ -21,12 +21,12 @@ from .vault import (
     VaultPathError,
     _format_yaml_line,
     batch_atomic_write,
+    excluded_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
     resolve_under_vault,
     write_log_entry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -84,6 +84,9 @@ def set_frontmatter_field(
             code="INVALID_SET",
             reason="cannot set `updated:` directly — it's always bumped to today by this op",
         )
+    excluded_reason = excluded_frontmatter_reason(field)
+    if excluded_reason is not None:
+        raise SetFrontmatterError(code="EXCLUDED_FIELD", reason=excluded_reason)
 
     # Project-key guard: route project/projects values through the same
     # auto-register + typo-distance check that note() uses. Without this,
