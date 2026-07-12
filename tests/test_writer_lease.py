@@ -138,6 +138,68 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     assert calls == [1]
 
 
+def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) -> None:
+    clock = Clock()
+    calls: list[int] = []
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=FakeClient(LeaseRecord("desktop", 99, 4)),
+        clock=clock,
+    )
+    command = _command(writes=True, leaf=lambda value: calls.append(value) or {"value": value})
+
+    assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
+        "value": 1
+    }
+    assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
+        "value": 1
+    }
+    assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="bob") == {
+        "value": 1
+    }
+    assert calls == [1, 1]
+
+    clock.value += 61
+    assert manager.invoke(command, (), {"value": 1}, implicit_idempotency_scope="alice") == {
+        "value": 1
+    }
+    assert calls == [1, 1, 1]
+
+
+def test_failed_implicit_mutation_remains_retryable(tmp_path: Path) -> None:
+    attempts = 0
+
+    def flaky() -> str:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ValueError("transient")
+        return "ok"
+
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+    command = _command(writes=True, leaf=flaky)
+    with pytest.raises(ValueError, match="transient"):
+        manager.invoke(command, (), {}, implicit_idempotency_scope="alice")
+    assert manager.invoke(command, (), {}, implicit_idempotency_scope="alice") == "ok"
+    assert attempts == 2
+
+
+def test_explicit_idempotency_also_works_without_writer_lease(tmp_path: Path) -> None:
+    calls: list[int] = []
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path))
+    command = _command(writes=True, leaf=lambda value: calls.append(value) or value)
+    assert manager.invoke(command, (), {"value": 1}, idempotency_key="standalone-1") == 1
+    assert manager.invoke(command, (), {"value": 1}, idempotency_key="standalone-1") == 1
+    with pytest.raises(OpError, match="IDEMPOTENCY_KEY_REUSED"):
+        manager.invoke(command, (), {"value": 2}, idempotency_key="standalone-1")
+    assert calls == [1]
+
+
 @dataclass
 class Clock:
     value: float = 100.0

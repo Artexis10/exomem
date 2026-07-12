@@ -393,6 +393,16 @@ REST callers can attach `Idempotency-Key`; CLI callers can set
 `EXOMEM_IDEMPOTENCY_KEY` for retry-safe mutations. Idempotency records and lease
 credentials stay in per-machine runtime state, outside the synced vault.
 
+MCP clients do not currently provide a caller-controlled idempotency header. Exomem
+therefore replays a successful mutation when the same authenticated bearer repeats
+the exact command and arguments within 60 seconds. This bounded guard covers the
+common "commit succeeded but the acknowledgement was lost" retry without changing
+tool result shapes or suppressing later intentional calls. The credential is hashed
+before it contributes to the local cache key and is never stored or logged. Replay
+state is per replica: the lease prevents concurrent writers, but a retry routed to a
+different replica after the first replica disappears cannot be guaranteed exactly-once
+across the local-filesystem/remote-coordinator boundary.
+
 Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
 ID/secret, and `EXOMEM_JWT_SIGNING_KEY`. FastMCP access tokens are reference tokens,
 so the signing key alone is not enough: the shared OAuth store carries their JTI
