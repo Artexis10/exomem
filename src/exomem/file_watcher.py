@@ -606,6 +606,12 @@ class FileWatcher:
             log.info("file watcher: %s not found; not watching", self._vault_root)
             return False
 
+        # Hosted quiesce/resume deliberately reuses the watcher instance. A
+        # stopped threading.Event is sticky, so reset both loop controls before
+        # recreating the dispatch/observer threads.
+        self._stop.clear()
+        self._wake.clear()
+
         watcher = self
 
         class _Handler(FileSystemEventHandler):

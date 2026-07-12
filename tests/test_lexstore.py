@@ -162,6 +162,50 @@ def test_out_of_band_content_replacement_with_preserved_mtime_self_heals(tmp_pat
     assert lexstore.search_bm25(tmp_path, "originaluniquetoken", k=3, scope="kb") == []
 
 
+def test_live_witness_does_not_bless_later_preserved_mtime_replacement(tmp_path):
+    """A past dual-write is proof for exactly its own corpus triple, not future drift."""
+    from exomem import freshness
+    from exomem import vault as vault_module
+
+    freshness.clear()
+    try:
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "initialuniquetoken")
+        assert lexstore.search_bm25(tmp_path, "initialuniquetoken", k=3, scope="kb")
+
+        kb_dir = tmp_path / "Knowledge Base"
+        freshness.seed(
+            tmp_path,
+            "kb",
+            ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
+        )
+        freshness.seed(
+            tmp_path,
+            "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
+        )
+
+        page = _write_page(tmp_path, "Knowledge Base/a.md", "witnesseduniquetoken")
+        freshness.on_files_changed(tmp_path, changed=[page])
+        lexstore.upsert_after_write(tmp_path, [page])
+        assert lexstore.search_bm25(tmp_path, "witnesseduniquetoken", k=3, scope="kb")
+
+        before = page.stat()
+        replacement = page.with_suffix(".replacement")
+        replacement.write_text(
+            "---\ntype: insight\n---\n# A\n\nlaterexternaluniquetoken with different bytes\n",
+            encoding="utf-8",
+        )
+        os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+        os.replace(replacement, page)
+        freshness.on_files_changed(tmp_path, changed=[page])
+
+        hits = lexstore.search_bm25(tmp_path, "laterexternaluniquetoken", k=3, scope="kb")
+        assert hits and hits[0][0] == "Knowledge Base/a.md"
+        assert lexstore.search_bm25(tmp_path, "witnesseduniquetoken", k=3, scope="kb") == []
+    finally:
+        freshness.clear()
+
+
 def test_restart_with_no_changes_skips_the_walk_verify(tmp_path):
     """Steady state across restarts: the meta-blessed triple lets a fresh
     store trust the sidecar without an exact verify (no rebuild)."""

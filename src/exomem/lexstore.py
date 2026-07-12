@@ -272,9 +272,9 @@ class LexicalStore:
         self.path = lexical_path(vault_root)
         # scope -> the walk-freshness triple this store last reconciled against.
         self._synced: dict[str, tuple] = {}
-        # An in-process hook applied a write since the last reconcile — counts
-        # matching then means the hooks did their job, not a coincidence.
-        self._witnessed = False
+        # scope -> exact live-registry triple applied by an in-process hook.
+        # A witness is single-use and cannot bless a later, different corpus.
+        self._witnessed: dict[str, tuple] = {}
         self._failed = False  # runtime-retired for this process
         self._lock = threading.Lock()
 
@@ -364,9 +364,9 @@ class LexicalStore:
             if self._stored_count_max(conn, scope) != (freshness[0], freshness[1]):
                 self._heal_delta(conn)  # incremental: patch only the drifted rows
                 return
-            if self._witnessed:
-                # In-process hooks applied every change they saw; matching
-                # counts here means their bookkeeping holds.
+            witnessed = self._witnessed.pop(scope, None)
+            if witnessed == freshness:
+                # The hook updated the sidecar for exactly this registry state.
                 self._bless(conn, scope, freshness)
                 return
             if self._meta_triple(conn, scope) == freshness:
@@ -444,7 +444,7 @@ class LexicalStore:
             conn.execute("DELETE FROM tri")
             for path, (in_kb, in_vault) in members.items():
                 self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
-        self._witnessed = False
+        self._witnessed.clear()
         for scope, idx in (("kb", 0), ("vault", 1)):
             entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
             self._bless(conn, scope, freshness_module.triple_from_entries(entries))
@@ -509,7 +509,7 @@ class LexicalStore:
                 s = stored.get(rel)
                 if s is None or (s[1], s[2], s[3]) != (signature[0], in_kb, in_vault):
                     self._insert_page(conn, path, signature[0], in_kb, in_vault)
-        self._witnessed = False
+        self._witnessed.clear()
         for scope, idx in (("kb", 0), ("vault", 1)):
             entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
             self._bless(conn, scope, freshness_module.triple_from_entries(entries))
@@ -608,7 +608,7 @@ class LexicalStore:
                     if not (in_kb or in_vault):
                         continue
                     self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
-            self._witnessed = True
+            self._remember_live_witnesses()
         finally:
             conn.close()
 
@@ -623,9 +623,24 @@ class LexicalStore:
                     row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
                         self._delete_rowid(conn, row[0])
-            self._witnessed = True
+            self._remember_live_witnesses()
         finally:
             conn.close()
+
+    def _remember_live_witnesses(self) -> None:
+        """Remember only the exact watcher-maintained corpus just applied.
+
+        Without a live registry there is no race-free corpus attestation, so
+        the next read takes the conservative verify/rebuild path.
+        """
+        from . import freshness as freshness_module
+
+        for scope in ("kb", "vault"):
+            triple = freshness_module.triple(self.vault_root, scope)
+            if triple is None:
+                self._witnessed.pop(scope, None)
+            else:
+                self._witnessed[scope] = triple
 
     def ensure_fresh(self) -> None:
         """Reconcile both scopes against their walks, PARANOIDLY: verified
@@ -638,7 +653,7 @@ class LexicalStore:
             conn = self._connect()
             try:
                 self._ensure_schema(conn)
-                self._witnessed = False
+                self._witnessed.clear()
                 self._synced.clear()
                 conn.execute("DELETE FROM meta WHERE key LIKE 'triple:%'")
                 conn.commit()

@@ -211,6 +211,42 @@ def test_start_no_op_when_kb_missing(tmp_path: Path, monkeypatch: pytest.MonkeyP
     assert w.start() is False
 
 
+def test_file_watcher_dispatch_thread_restarts_after_stop(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hosted quiesce/resume reuses one watcher object; restart must be real."""
+
+    class Handler:
+        pass
+
+    class Observer:
+        def schedule(self, *_args, **_kwargs) -> None:
+            pass
+
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+        def join(self, timeout: float | None = None) -> None:
+            pass
+
+    monkeypatch.setattr(file_watcher, "_import_watchdog", lambda: (Observer, Handler))
+    monkeypatch.setattr(file_watcher.freshness, "event_indexes_enabled", lambda: False)
+    watcher = file_watcher.FileWatcher(vault, debounce_seconds=0.01)
+
+    assert watcher.start() is True
+    watcher.stop()
+    assert watcher.start() is True
+    try:
+        assert watcher._thread is not None
+        time.sleep(0.02)
+        assert watcher._thread.is_alive(), "resumed dispatch thread exited on the stale stop event"
+    finally:
+        watcher.stop()
+
+
 # ---- Self-write suppression (OpenSpec: improve-find-latency-token-cost) ----
 
 
