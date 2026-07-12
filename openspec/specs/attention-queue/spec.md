@@ -1,7 +1,13 @@
 # attention-queue Specification
 
 ## Purpose
-TBD - created by archiving change add-attention-queue. Update Purpose after archive.
+Give reviewers a single daily front door instead of three separate audit
+queues: a unified `attention` operation that composes `stale_review`,
+`corpus_contradictions`, and `unprocessed_source` findings into one
+deterministically ranked, deduplicated list via Reciprocal Rank Fusion.
+Composition is measurement-only — it never mutates the vault, auto-supersedes,
+or changes `find` ranking — and any capped output reports an explicit count
+rather than silently truncating.
 ## Requirements
 ### Requirement: Unified Review Surface Composed From The Epistemic Queues
 

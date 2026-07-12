@@ -1,7 +1,12 @@
 # command-surface Specification
 
 ## Purpose
-TBD - created by archiving change unify-command-surface. Update Purpose after archive.
+Keep every operation defined once instead of once per surface: a single
+declarative command registry generates the MCP tools, the REST facade, the
+OpenAPI document, and the CLI, so adding or removing an operation requires no
+per-surface code and MCP tool schemas stay byte-identical to their committed
+baseline. The CLI and REST facade share one result/error envelope so a given
+failure carries the same machine-readable code on both surfaces.
 ## Requirements
 ### Requirement: Single Command Registry Generates Every Surface
 
