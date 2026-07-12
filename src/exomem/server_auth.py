@@ -6,8 +6,10 @@ import hashlib
 import logging
 import os
 import time
+from typing import TYPE_CHECKING
 
 from cryptography.fernet import Fernet
+from fastmcp.server.auth import TokenVerifier
 from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
 from fastmcp.server.auth.oauth_proxy import OAuthProxy
@@ -21,7 +23,31 @@ from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
 
+if TYPE_CHECKING:
+    from .hosted_runtime import HostedCellConfig
+
 log = logging.getLogger(__name__)
+
+
+class HostedCellTokenVerifier(TokenVerifier):
+    """FastMCP bearer verifier for one immutable private hosted cell."""
+
+    def __init__(self, config: HostedCellConfig) -> None:
+        super().__init__(required_scopes=["hosted:cell"])
+        self._config = config
+
+    async def verify_token(self, token: str) -> AccessToken | None:
+        if not self._config.matches_service_credential(token):
+            return None
+        return AccessToken(
+            token="hosted-cell-service",
+            client_id=self._config.cell_id,
+            scopes=["hosted:cell"],
+            claims={
+                "cell_id": self._config.cell_id,
+                "kind": "hosted-cell-service",
+            },
+        )
 
 
 class SingleUserGitHubVerifier(GitHubTokenVerifier):

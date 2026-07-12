@@ -15,7 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, project_keys, schema
+from . import env_compat, hosted_runtime, project_keys, schema
+from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, hosted_mode_enabled
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
@@ -29,6 +30,8 @@ class ServerRuntime:
     base_url: str
     media_worker: Any | None = None
     file_watcher: Any | None = None
+    hosted_config: HostedCellConfig | None = None
+    hosted_lifecycle: HostedCellLifecycle | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -38,6 +41,9 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     ``exomem.server.load_dotenv`` still neutralize dotenv loading exactly as they
     did before this extraction.
     """
+    if hosted_mode_enabled():
+        return _initialize_hosted_runtime()
+
     load_dotenv_func(override=True)
     env_compat.promote_legacy()
 
@@ -59,6 +65,102 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
         media_worker=media_worker,
         file_watcher=file_watcher,
     )
+
+
+def _initialize_hosted_runtime() -> ServerRuntime:
+    """Initialize one explicit hosted cell without reading any dotenv file."""
+    config = HostedCellConfig.from_env(require_provisioned=True)
+    config.apply_process_environment()
+    lifecycle = HostedCellLifecycle(config)
+    vault_root = config.vault_root
+
+    source_schema = schema.load_source_schema(vault_root)
+    project_keys_hint = project_keys.keys_hint(vault_root)
+    log.info(
+        "hosted_cell=%s source_types=%s",
+        config.cell_id,
+        source_schema.source_types,
+    )
+
+    mutation_ready, mutation_reason = probe_hosted_mutation_authority(vault_root)
+
+    lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=mutation_ready,
+        service_auth_ready=True,
+    )
+    if not mutation_ready:
+        lifecycle.set_mutation_authority(False, reason_code=mutation_reason)
+
+    media_worker = None
+    file_watcher = None
+    if not mutation_ready:
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE",
+                )
+    elif config.resource_limits.worker_count == 0:
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_WORKER_LIMIT_ZERO",
+                )
+    else:
+        if config.has_feature("embeddings"):
+            _start_compute_runtime(vault_root)
+        if config.has_feature("media"):
+            media_worker = _start_media_worker(vault_root)
+            lifecycle.set_worker_status(
+                "media",
+                ready=media_worker is not None,
+                reason_code="HOSTED_WORKER_UNAVAILABLE",
+            )
+            if media_worker is not None:
+                lifecycle.register_background_worker(
+                    stopper=media_worker.stop, starter=media_worker.start
+                )
+        if config.has_feature("file-watcher"):
+            file_watcher = _start_file_watcher(vault_root)
+            lifecycle.set_worker_status(
+                "file-watcher",
+                ready=file_watcher is not None,
+                reason_code="HOSTED_WORKER_UNAVAILABLE",
+            )
+            if file_watcher is not None:
+                lifecycle.register_background_worker(
+                    stopper=file_watcher.stop, starter=file_watcher.start
+                )
+
+    return ServerRuntime(
+        vault_root=vault_root,
+        source_schema=source_schema,
+        project_keys_hint=project_keys_hint,
+        base_url="",
+        media_worker=media_worker,
+        file_watcher=file_watcher,
+        hosted_config=config,
+        hosted_lifecycle=lifecycle,
+    )
+
+
+def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
+    """Prove the shared mutation guard can be acquired and safely released."""
+
+    try:
+        with hosted_runtime.hosted_mutation_guard(vault_root):
+            pass
+    except Exception as exc:  # noqa: BLE001 - any uncertainty keeps hosted writes closed
+        log.warning(
+            "hosted mutation authority unavailable error=%s",
+            type(exc).__name__,
+        )
+        return False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
+    return True, "HOSTED_READY"
 
 
 def _start_compute_runtime(vault_root: Path) -> None:

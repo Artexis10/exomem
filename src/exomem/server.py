@@ -26,9 +26,11 @@ from .server_assets import (
     server_icons,
 )
 from .server_auth import (  # noqa: F401 - re-exported for compatibility
+    HostedCellTokenVerifier,
     SingleUserGitHubVerifier,
     build_oauth,
 )
+from .server_hosted import register_hosted_routes
 from .server_rest import register_rest_facade
 from .server_runtime import initialize_runtime
 from .server_transfer import register_transfer_routes
@@ -43,6 +45,9 @@ _link_summary = commands_module._link_summary
 
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
+
+    def __init__(self, *, hosted: bool = False) -> None:
+        self.hosted = hosted
 
     async def on_call_tool(self, context: MiddlewareContext, call_next):
         tool_name = _extract_tool_name(context.message)
@@ -60,7 +65,11 @@ class CallTraceMiddleware(Middleware):
                             field="edits[].new_string",
                         )
 
-        extras = _find_call_summary(context.message) if tool_name == "ask_memory" else ""
+        extras = (
+            _find_call_summary(context.message)
+            if tool_name == "ask_memory" and not self.hosted
+            else ""
+        )
         _call_log.info(f"event=tool_start tool={tool_name}{extras}")
         t0 = time.perf_counter()
         try:
@@ -130,51 +139,67 @@ def build_server(*, require_auth: bool) -> FastMCP:
     from .writer_lease import start_server_lifecycle
 
     start_server_lifecycle()
-    auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
-
-    mcp = FastMCP("exomem", auth=auth, icons=server_icons())
-    mcp.add_middleware(CallTraceMiddleware())
-
-    register_asset_routes(mcp)
-    register_oauth_metadata_route(
-        mcp, base_url=runtime.base_url, auth_enabled=auth is not None
-    )
-    transfer_config = register_transfer_routes(
-        mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
-    )
-    expose_tier2 = register_rest_facade(
-        mcp,
-        vault_root=runtime.vault_root,
-        source_schema=runtime.source_schema,
-        transfer_config=transfer_config,
-    )
-
-    for cmd in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2):
-        if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
-            continue
-        injected = (
-            (runtime.vault_root, runtime.source_schema)
-            if cmd.needs_schema
-            else (runtime.vault_root,)
+    hosted = runtime.hosted_config is not None
+    if hosted:
+        assert runtime.hosted_config is not None
+        assert runtime.hosted_lifecycle is not None
+        auth = HostedCellTokenVerifier(runtime.hosted_config)
+        mcp = FastMCP("exomem", auth=auth)
+        mcp.add_middleware(CallTraceMiddleware(hosted=True))
+        expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
+        register_hosted_routes(
+            mcp,
+            config=runtime.hosted_config,
+            lifecycle=runtime.hosted_lifecycle,
+            source_schema=runtime.source_schema,
+            expose_tier2=expose_tier2,
         )
-        description = cmd.doc
-        if cmd.name == "remember":
-            description = commands_module.remember_description(runtime.project_keys_hint)
-        mcp.tool(
-            commands_module.bind_vault(
-                cmd.leaf, *injected, name=cmd.name, description=description, command=cmd
-            ),
-            annotations=cmd.mcp_annotations,
-        )
+    else:
+        auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
+        mcp = FastMCP("exomem", auth=auth, icons=server_icons())
+        mcp.add_middleware(CallTraceMiddleware())
 
-    if _legacy_mcp_compat_enabled():
-        _register_legacy_mcp_tools(
+        register_asset_routes(mcp)
+        register_oauth_metadata_route(mcp, base_url=runtime.base_url, auth_enabled=auth is not None)
+        transfer_config = register_transfer_routes(
+            mcp, vault_root=runtime.vault_root, media_worker=runtime.media_worker
+        )
+        expose_tier2 = register_rest_facade(
             mcp,
             vault_root=runtime.vault_root,
             source_schema=runtime.source_schema,
-            expose_tier2=expose_tier2,
-            project_keys_hint=runtime.project_keys_hint,
+            transfer_config=transfer_config,
         )
+        for cmd in commands_module.product_commands_for("mcp", expose_tier2=expose_tier2):
+            if cmd.name in commands_module.HAND_REGISTERED_EXCEPTIONS:
+                continue
+            injected = (
+                (runtime.vault_root, runtime.source_schema)
+                if cmd.needs_schema
+                else (runtime.vault_root,)
+            )
+            description = cmd.doc
+            if cmd.name == "remember":
+                description = commands_module.remember_description(runtime.project_keys_hint)
+            mcp.tool(
+                commands_module.bind_vault(
+                    cmd.leaf,
+                    *injected,
+                    name=cmd.name,
+                    description=description,
+                    command=cmd,
+                ),
+                annotations=cmd.mcp_annotations,
+            )
+
+        if _legacy_mcp_compat_enabled():
+            _register_legacy_mcp_tools(
+                mcp,
+                vault_root=runtime.vault_root,
+                source_schema=runtime.source_schema,
+                expose_tier2=expose_tier2,
+                project_keys_hint=runtime.project_keys_hint,
+            )
 
     return mcp
 
@@ -215,11 +240,7 @@ def _register_legacy_mcp_tools(
             continue
         if "mcp" not in cmd.surfaces and cmd.name != "note":
             continue
-        injected = (
-            (vault_root, source_schema)
-            if cmd.needs_schema
-            else (vault_root,)
-        )
+        injected = (vault_root, source_schema) if cmd.needs_schema else (vault_root,)
         description = cmd.doc
         if cmd.name == "note":
             description = commands_module.remember_description(project_keys_hint)
