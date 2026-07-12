@@ -24,3 +24,30 @@ Configure both replicas with the same stable `EXOMEM_BASE_URL`, GitHub OAuth app
 different replica ID; set `EXOMEM_WRITER_LEASE_PREFERRED=1` only on the preferred
 desktop. See `docs/deployment.md` for the complete environment block and takeover
 test.
+
+## Tool-call routing safety
+
+Use two edge timeouts:
+
+- `ORIGIN_TIMEOUT_MS` (default `2500`) is the short connectivity/fallback window
+  for OAuth, discovery, initialization, tool listing, and GET/SSE traffic.
+- `MCP_TOOL_TIMEOUT_MS` (default `15000`) is the execution window for
+  `tools/call`; correctness comes from single-origin routing, not from ordering
+  this timeout against the writer-lease TTL.
+
+While a writer lease is active, a tool call goes only to that replica. The edge
+never replays an ambiguous timeout or 5xx response to the passive replica: the
+first origin may already have completed a mutation. With no active holder, the
+edge probes both origins, chooses one healthy replica, and forwards the tool call
+once. That preserves laptop takeover after lease expiry without turning a slow
+desktop write into two writes.
+
+Both services must run the same restart-safe Exomem release before the stable
+connector route is considered healthy. Compare the checked-out and installed
+versions on each machine, then restart any stale service:
+
+```powershell
+git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
+& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
+  "import exomem; print(exomem.__version__)"
+```

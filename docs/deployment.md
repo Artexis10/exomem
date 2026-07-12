@@ -403,6 +403,16 @@ state is per replica: the lease prevents concurrent writers, but a retry routed 
 different replica after the first replica disappears cannot be guaranteed exactly-once
 across the local-filesystem/remote-coordinator boundary.
 
+The reference Cloudflare edge therefore treats `tools/call` as an ambiguous
+side-effect boundary. `ORIGIN_TIMEOUT_MS` remains the short connectivity window
+for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
+seconds for actual tools. While a lease holder exists, a tool call is sent only
+to that replica and is never replayed to the passive origin after a timeout or
+5xx response. Once the lease expires, the edge probes both origins, chooses one
+healthy replica, and forwards the next tool call exactly once. The active origin
+renews its lease independently while a long tool runs; correctness does not rely
+on ordering `MCP_TOOL_TIMEOUT_MS` against `EXOMEM_WRITER_LEASE_TTL`.
+
 Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
 ID/secret, and `EXOMEM_JWT_SIGNING_KEY`. FastMCP access tokens are reference tokens,
 so the signing key alone is not enough: the shared OAuth store carries their JTI
@@ -435,6 +445,20 @@ mutations, not direct Obsidian/filesystem edits, so do not edit a follower manua
 Before deliberately stopping the active writer, let replication reach **Up to
 Date**; on an unclean crash, the lease prevents concurrent Exomem writers but cannot
 recover bytes the old writer had not replicated yet.
+
+Replica version parity is part of deployment, not optional housekeeping. Before
+enabling the stable route—or after every release—check the repo and the installed
+service environment on **both** machines:
+
+```powershell
+git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
+& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
+  "import exomem; print(exomem.__version__)"
+```
+
+If those versions differ, install the same release into that machine's service
+venv and restart `exomem` before testing failover. A new desktop paired with an
+old stateful laptop is not a healthy HA deployment even if both ports answer.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 

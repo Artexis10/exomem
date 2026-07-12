@@ -9,6 +9,10 @@ LAPTOP_REPLICA_ID = "laptop"
 DESKTOP_ORIGIN = "https://exomem-desktop.example.com"
 LAPTOP_ORIGIN = "https://exomem-laptop.example.com"
 ORIGIN_TIMEOUT_MS = "2500"
+# MCP tools can legitimately take longer than a connectivity probe. Keep this
+# independent from the short connectivity probe; ambiguous tool calls are
+# never cross-replica replayed regardless of timeout.
+MCP_TOOL_TIMEOUT_MS = "15000"
 
 [[routes]]
 pattern = "exomem.example.com/*"

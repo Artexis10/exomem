@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import worker, { ExomemState } from "../src/worker.js";
+import worker, { ExomemState, isMcpToolCall } from "../src/worker.js";
 
 class MemoryStorage {
   constructor() {
@@ -90,4 +90,156 @@ test("edge accepts a piped Worker secret with trailing transport whitespace", as
   const response = await worker.fetch(request, env);
   assert.equal(response.status, 200);
   assert.equal((await response.json()).granted, true);
+});
+
+const mcp = (payload) =>
+  new Request("https://exomem.example.com/mcp", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: typeof payload === "string" ? payload : JSON.stringify(payload),
+  });
+
+const edgeEnv = (holder = "desktop") => ({
+  VAULT_ID: "personal-main",
+  DESKTOP_REPLICA_ID: "desktop",
+  LAPTOP_REPLICA_ID: "laptop",
+  DESKTOP_ORIGIN: "https://desktop.example.com",
+  LAPTOP_ORIGIN: "https://laptop.example.com",
+  ORIGIN_TIMEOUT_MS: "2500",
+  MCP_TOOL_TIMEOUT_MS: "15000",
+  EXOMEM_STATE: {
+    idFromName: (name) => name,
+    get: () => ({
+      fetch: async () => new Response(JSON.stringify({ holder }), {
+        headers: { "content-type": "application/json" },
+      }),
+    }),
+  },
+});
+
+const toolCall = (name = "remember") => mcp({
+  jsonrpc: "2.0",
+  id: 1,
+  method: "tools/call",
+  params: { name, arguments: {} },
+});
+
+test("classifies single and batched tool calls conservatively", async () => {
+  assert.equal(await isMcpToolCall(toolCall()), true);
+  assert.equal(await isMcpToolCall(mcp([
+    { jsonrpc: "2.0", method: "notifications/initialized" },
+    { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "ask_memory", arguments: {} } },
+  ])), true);
+  assert.equal(await isMcpToolCall(mcp({ jsonrpc: "2.0", id: 1, method: "initialize" })), false);
+  assert.equal(await isMcpToolCall(mcp("{not-json")), true);
+  assert.equal(await isMcpToolCall(new Request("https://exomem.example.com/mcp")), false);
+});
+
+test("active-holder tool call uses the long timeout and is never replayed", async () => {
+  const calls = [];
+  const timeouts = [];
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).origin);
+    return new Response("tool failed after execution", { status: 500 });
+  };
+  AbortSignal.timeout = (ms) => {
+    timeouts.push(ms);
+    return originalTimeout(60_000);
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv("desktop"));
+    assert.equal(response.status, 500);
+    assert.deepEqual(calls, ["https://desktop.example.com"]);
+    assert.deepEqual(timeouts, [15_000]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
+  }
+});
+
+test("active-holder tool timeout fails closed without passive replay", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).origin);
+    throw new DOMException("timed out", "TimeoutError");
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv("desktop"));
+    assert.equal(response.status, 504);
+    assert.deepEqual(calls, ["https://desktop.example.com"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("no-holder tool call probes and selects exactly one healthy origin", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    const url = new URL(request.url);
+    calls.push(url.href);
+    if (url.pathname === "/.well-known/oauth-protected-resource/mcp") {
+      return new Response("", { status: url.origin.includes("laptop") ? 200 : 503 });
+    }
+    return new Response("laptop tool result", { status: 200 });
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(null));
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "laptop tool result");
+    const forwarded = calls.filter((url) => new URL(url).pathname === "/mcp");
+    assert.deepEqual(forwarded, ["https://laptop.example.com/mcp"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("no-holder tool call is not forwarded when neither origin is healthy", async () => {
+  const calls = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (request) => {
+    calls.push(new URL(request.url).pathname);
+    return new Response("down", { status: 503 });
+  };
+  try {
+    const response = await worker.fetch(toolCall(), edgeEnv(null));
+    assert.equal(response.status, 503);
+    assert.deepEqual(calls, [
+      "/.well-known/oauth-protected-resource/mcp",
+      "/.well-known/oauth-protected-resource/mcp",
+    ]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("safe MCP initialization retains short-timeout fallback", async () => {
+  const calls = [];
+  const timeouts = [];
+  const originalFetch = globalThis.fetch;
+  const originalTimeout = AbortSignal.timeout;
+  globalThis.fetch = async (request) => {
+    const origin = new URL(request.url).origin;
+    calls.push(origin);
+    return new Response(origin.includes("desktop") ? "down" : "initialized", {
+      status: origin.includes("desktop") ? 503 : 200,
+    });
+  };
+  AbortSignal.timeout = (ms) => {
+    timeouts.push(ms);
+    return originalTimeout(60_000);
+  };
+  try {
+    const request = mcp({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
+    const response = await worker.fetch(request, edgeEnv("desktop"));
+    assert.equal(response.status, 200);
+    assert.deepEqual(calls, ["https://desktop.example.com", "https://laptop.example.com"]);
+    assert.deepEqual(timeouts, [2_500, 2_500]);
+  } finally {
+    globalThis.fetch = originalFetch;
+    AbortSignal.timeout = originalTimeout;
+  }
 });
