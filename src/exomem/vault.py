@@ -262,8 +262,13 @@ def batch_atomic_write(
         for w in writes:
             try:
                 rel = w.path.resolve().relative_to(vault_resolved).as_posix()
-            except (ValueError, OSError):
-                continue  # not under the vault (shouldn't happen) — don't block
+            except (ValueError, OSError) as e:
+                # Fail CLOSED: a staged write that resolves outside the vault must
+                # never proceed (callers resolve paths first, so this is a
+                # defense-in-depth backstop, not a normal path).
+                raise ValueError(
+                    f"WRITE_REFUSED: {w.path} resolves outside the vault root"
+                ) from e
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
@@ -396,6 +401,7 @@ def resolve_under_vault(
     must_exist: bool = False,
     must_be_file: bool = False,
     must_be_dir: bool = False,
+    must_be_under_kb: bool = False,
 ) -> tuple[Path, str]:
     """Resolve a vault-relative path; guard against escape; normalize.
 
@@ -403,6 +409,11 @@ def resolve_under_vault(
     always forward-slashed, never starts with `/`. The leading
     `Knowledge Base/` is preserved as-is (we don't auto-strip it like
     `get_page` does — Tier 2 ops take explicit paths).
+
+    `must_be_under_kb` additionally refuses any target that resolves OUTSIDE
+    `Knowledge Base/` (checked on the resolved path, so `Knowledge Base/../x`
+    can't sneak a write to a vault-root sibling of KB). Governed content writers
+    (`create`/`append`) set it — exomem only ever authors under `Knowledge Base/`.
 
     Raises VaultPathError with code in {INVALID_PATH, NOT_FOUND,
     NOT_A_FILE, NOT_A_DIR}.
@@ -421,6 +432,17 @@ def resolve_under_vault(
             reason=f"absolute paths are not allowed: {raw!r}",
         )
 
+    if must_be_under_kb:
+        # Governed writes are KB-relative: a bare `Reference/x.md` means
+        # `Knowledge Base/Reference/x.md` (matching how access tiers are keyed),
+        # so root it under KB unless it already is (any case) or leads with `..`
+        # (left for the escape guards below to reject). This makes bare and
+        # prefixed paths resolve to the SAME governed location instead of a bare
+        # path silently writing to a vault-root sibling of Knowledge Base/.
+        first = rel.split("/", 1)[0]
+        if first.casefold() != kb_dirname().casefold() and first != "..":
+            rel = f"{kb_dirname()}/{rel}"
+
     candidate = vault_root / rel
     try:
         resolved = candidate.resolve()
@@ -431,6 +453,19 @@ def resolve_under_vault(
             code="INVALID_PATH",
             reason=f"path escapes vault root: {raw!r} ({e})",
         ) from None
+
+    if must_be_under_kb:
+        kb_resolved = (vault_root / kb_dirname()).resolve()
+        try:
+            resolved.relative_to(kb_resolved)
+        except ValueError:
+            raise VaultPathError(
+                code="INVALID_PATH",
+                reason=(
+                    f"path is outside Knowledge Base/: {raw!r} — exomem only "
+                    "writes governed content under Knowledge Base/"
+                ),
+            ) from None
 
     if must_exist and not candidate.exists():
         raise VaultPathError(

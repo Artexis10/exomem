@@ -36,7 +36,6 @@ from .vault import (
     write_log_entry,
 )
 
-
 log = logging.getLogger(__name__)
 
 
@@ -69,7 +68,9 @@ def create_file(
     today: dt.date | None = None,
 ) -> CreateFileResult:
     try:
-        abs_path, rel_path = resolve_under_vault(vault_root, path)
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_be_under_kb=True
+        )
     except VaultPathError as e:
         raise CreateFileError(code=e.code, reason=e.reason) from e
 

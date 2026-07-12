@@ -159,6 +159,28 @@ def test_create_file_path_escape_guarded(vault: Path) -> None:
     assert exc.value.code == "INVALID_PATH"
 
 
+def test_create_file_refuses_escape_out_of_knowledge_base(vault: Path) -> None:
+    """Governed writes stay under Knowledge Base/: a `..` that escapes KB to a
+    vault-root sibling is refused, and a bare path is rooted under KB rather than
+    written to the vault root. Regression for the audit's KB-boundary finding."""
+    for escape in (
+        "Knowledge Base/../outside.md",
+        "Knowledge Base/Notes/Insights/../../../escape-deep.md",
+        "Knowledge Base\\..\\out.md",
+    ):
+        with pytest.raises(create_file_module.CreateFileError) as exc:
+            create_file_module.create_file(vault, path=escape, content="x", today=TODAY)
+        assert exc.value.code == "INVALID_PATH", escape
+    # No stray file landed at the vault root (outside Knowledge Base/).
+    assert not (vault / "outside.md").exists()
+    assert not (vault / "escape-deep.md").exists()
+    assert not (vault / "out.md").exists()
+    # A bare KB-relative path is rooted UNDER Knowledge Base/, not the vault root.
+    create_file_module.create_file(vault, path="Notes/Insights/bare.md", content="x", today=TODAY)
+    assert (vault / "Knowledge Base" / "Notes" / "Insights" / "bare.md").exists()
+    assert not (vault / "Notes" / "Insights" / "bare.md").exists()
+
+
 def test_create_file_logs_to_log_md(vault: Path) -> None:
     create_file_module.create_file(
         vault,
