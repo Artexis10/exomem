@@ -34,6 +34,17 @@ def _preserve_module():
     return preserve_module
 
 
+def _preserve_under_guard(
+    manager: Any,
+    vault_root: Path,
+    preserve_stream: Any,
+    **kwargs: Any,
+) -> Any:
+    """Run the complete upload read-plan-write path under vault authority."""
+    with manager.mutation_guard(vault_root):
+        return preserve_stream(vault_root, **kwargs)
+
+
 @dataclass(frozen=True)
 class TransferConfig:
     upload_token: str | None
@@ -118,14 +129,6 @@ def register_transfer_routes(
         from .writer_lease import get_manager
 
         try:
-            get_manager().ensure_writer()
-        except (OpError, ValueError) as exc:
-            error = error_dict(exc)
-            return JSONResponse(
-                {"code": error["code"], "reason": error["message"]},
-                status_code=http_status_for(error["code"]),
-            )
-        try:
             form = await request.form(max_part_size=config.upload_max_bytes)
         except MultiPartException as exc:
             return JSONResponse(
@@ -151,9 +154,12 @@ def register_transfer_routes(
         )
         preserve_module = _preserve_module()
         try:
+            manager = get_manager()
             result = await run_in_threadpool(
-                preserve_module.preserve_stream,
+                _preserve_under_guard,
+                manager,
                 vault_root,
+                preserve_module.preserve_stream,
                 scope=scope,
                 category=category,
                 filename=filename,
@@ -172,6 +178,12 @@ def register_transfer_routes(
             return JSONResponse(
                 {"code": exc.code, "reason": exc.reason, "missing": exc.missing},
                 status_code=status,
+            )
+        except (OpError, ValueError) as exc:
+            error = error_dict(exc)
+            return JSONResponse(
+                {"code": error["code"], "reason": error["message"]},
+                status_code=http_status_for(error["code"]),
             )
 
         if media_worker is not None and result.sidecar_path:

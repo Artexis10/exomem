@@ -19,7 +19,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -314,6 +315,22 @@ class LeaseManager:
             self._expires_at = record.expires_at
             return record
 
+    @contextmanager
+    def mutation_guard(
+        self, vault_root: os.PathLike[str] | str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        mutation = VaultMutationCoordinator(
+            self.config.state_dir,
+            vault_root,
+            timeout_seconds=self._mutation_timeout_seconds,
+            poll_interval_seconds=self._mutation_poll_interval_seconds,
+        )
+        with mutation.hold():
+            if self.config.enabled:
+                self.ensure_writer()
+            yield mutation
+
     def invoke(
         self,
         command: Any,
@@ -326,15 +343,7 @@ class LeaseManager:
         if command.read_only:
             return command.leaf(*injected, **kwargs)
         mutation_subject = self._mutation_subject(injected)
-        mutation = VaultMutationCoordinator(
-            self.config.state_dir,
-            mutation_subject,
-            timeout_seconds=self._mutation_timeout_seconds,
-            poll_interval_seconds=self._mutation_poll_interval_seconds,
-        )
-        with mutation.hold():
-            if self.config.enabled:
-                self.ensure_writer()
+        with self.mutation_guard(mutation_subject) as mutation:
             digest = hashlib.sha256(
                 json.dumps(
                     {"command": command.name, "kwargs": kwargs},

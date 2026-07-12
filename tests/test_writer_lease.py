@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -68,6 +69,7 @@ class FakeClient:
     def __init__(self, record: LeaseRecord | Exception):
         self.record = record
         self.releases: list[int] = []
+        self.acquisitions = 0
 
     def _get(self) -> LeaseRecord:
         if isinstance(self.record, Exception):
@@ -75,6 +77,7 @@ class FakeClient:
         return self.record
 
     def acquire(self) -> LeaseRecord:
+        self.acquisitions += 1
         record = self._get()
         return LeaseRecord(
             record.holder, record.expires_at, record.fencing_token, record.holder == "desktop"
@@ -183,6 +186,50 @@ def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
     second_thread.join(timeout=2.0)
     assert not first_thread.is_alive()
     assert not second_thread.is_alive()
+
+
+def test_mutation_guard_is_reentrant_and_revalidates_writer_authority(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    client = FakeClient(LeaseRecord("desktop", 99, 4))
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path / "state",
+        ),
+        client=client,
+    )
+
+    with manager.mutation_guard(vault) as outer:
+        with manager.mutation_guard(vault / ".") as inner:
+            assert outer.lock_path == inner.lock_path
+            assert outer.identity == inner.identity
+
+    assert client.acquisitions == 2
+
+
+def test_invoke_routes_writes_through_reusable_mutation_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+
+    @contextmanager
+    def guard(subject: Path):
+        assert subject == vault
+        events.append("guard-enter")
+        yield SimpleNamespace(identity="vault:test")
+        events.append("guard-exit")
+
+    monkeypatch.setattr(manager, "mutation_guard", guard, raising=False)
+    command = _command(writes=True, leaf=lambda _vault: events.append("leaf") or "ok")
+
+    assert manager.invoke(command, (vault,), {}) == "ok"
+    assert events == ["guard-enter", "leaf", "guard-exit"]
 
 
 def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> None:
