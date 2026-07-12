@@ -3810,29 +3810,40 @@ def op_maintain_memory(
     vault_root: Path,
     mode: str = "audit",
     categories: list[str] | None = None,
-    dry_run: bool = True,
+    dry_run: bool | None = None,
     rebuild_embeddings: bool = False,
 ) -> dict:
     """Maintain vault health with explicit write-capable modes.
 
-    Default mode is read-only audit. `mode="fix"`, `mode="reconcile"`, and
-    `mode="backfill-ids"`
-    preserve the canonical dry-run/write semantics and default to dry-run here.
+    Default mode is read-only audit. `mode="fix"` and `mode="backfill-ids"`
+    rewrite content (wikilinks, frontmatter, stable IDs) and default to
+    dry-run here as a safety net. `mode="reconcile"` only heals index-count
+    and sidecar drift from out-of-band edits — the same canonical default as
+    `op_reconcile` itself (idempotent, non-destructive) — so it defaults to
+    writing; pass `dry_run=true` to preview instead.
 
     Args:
         mode: audit, fix, reconcile, or backfill-ids.
         categories: Optional audit category filter.
-        dry_run: For fix/reconcile, report without writing when true.
+        dry_run: Report without writing when true. Defaults to true for
+            fix/backfill-ids (safety net) and false for reconcile (matches
+            `op_reconcile`'s own default). Pass explicitly to override either way.
         rebuild_embeddings: For fix mode, rebuild embeddings when explicitly requested.
     """
     if mode == "audit":
         return op_audit(vault_root, categories=categories)
     if mode == "fix":
-        return op_audit_fix(vault_root, dry_run=dry_run, rebuild_embeddings=rebuild_embeddings)
+        return op_audit_fix(
+            vault_root,
+            dry_run=True if dry_run is None else dry_run,
+            rebuild_embeddings=rebuild_embeddings,
+        )
     if mode == "reconcile":
-        return op_reconcile(vault_root, dry_run=dry_run)
+        return op_reconcile(vault_root, dry_run=False if dry_run is None else dry_run)
     if mode == "backfill-ids":
-        return memory_refs_module.backfill_ids(vault_root, dry_run=dry_run)
+        return memory_refs_module.backfill_ids(
+            vault_root, dry_run=True if dry_run is None else dry_run
+        )
     raise ValueError(
         "INVALID_MODE: maintain_memory mode must be audit, fix, reconcile, or backfill-ids"
     )
