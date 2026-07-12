@@ -176,6 +176,10 @@ export default {
     }
 
     const holder = await currentHolder(env);
+    if (await isMcpToolCall(request)) {
+      return proxyToolCall(request, env, holder);
+    }
+
     const replicas = holder === env.LAPTOP_REPLICA_ID
       ? [env.LAPTOP_ORIGIN, env.DESKTOP_ORIGIN]
       : [env.DESKTOP_ORIGIN, env.LAPTOP_ORIGIN];
@@ -197,6 +201,81 @@ export default {
     return lastResponse || json({ error: "both Exomem replicas are unavailable" }, 503);
   },
 };
+
+export async function isMcpToolCall(request) {
+  const url = new URL(request.url);
+  if (url.pathname !== "/mcp" || request.method !== "POST") return false;
+  let payload;
+  try {
+    payload = await request.clone().json();
+  } catch {
+    // A malformed MCP POST is ambiguous. Treat it as a tool call so the edge
+    // never fans an unreadable body out to two origins.
+    return true;
+  }
+  const messages = Array.isArray(payload) ? payload : [payload];
+  return messages.some((message) => message && message.method === "tools/call");
+}
+
+async function proxyToolCall(request, env, holder) {
+  const shortTimeout = Number(env.ORIGIN_TIMEOUT_MS || 2500);
+  const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 15000);
+  let origin = originForHolder(env, holder);
+
+  if (holder && !origin) {
+    return json({ error: "active Exomem replica is not configured" }, 503);
+  }
+  if (!holder) {
+    origin = await selectHealthyOrigin(env, shortTimeout);
+    if (!origin) return json({ error: "both Exomem replicas are unavailable" }, 503);
+  }
+
+  try {
+    return await proxyOnce(request, origin, toolTimeout);
+  } catch {
+    // Never replay an ambiguous tools/call request. The origin may have
+    // committed after the edge stopped waiting; cross-replica replay turns a
+    // transport timeout into duplicate governed state.
+    return json({ error: "active Exomem tool call did not complete at the edge" }, 504);
+  }
+}
+
+function originForHolder(env, holder) {
+  if (holder === env.DESKTOP_REPLICA_ID) return env.DESKTOP_ORIGIN || null;
+  if (holder === env.LAPTOP_REPLICA_ID) return env.LAPTOP_ORIGIN || null;
+  return null;
+}
+
+async function selectHealthyOrigin(env, timeoutMs) {
+  const origins = [env.DESKTOP_ORIGIN, env.LAPTOP_ORIGIN].filter(Boolean);
+  const health = await Promise.all(origins.map(async (origin) => ({
+    origin,
+    healthy: await originHealthy(origin, timeoutMs),
+  })));
+  return health.find((candidate) => candidate.healthy)?.origin || null;
+}
+
+async function originHealthy(origin, timeoutMs) {
+  try {
+    const target = new URL("/.well-known/oauth-protected-resource/mcp", origin);
+    const response = await fetch(new Request(target), {
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
+    });
+    return response.status < 500;
+  } catch {
+    return false;
+  }
+}
+
+function proxyOnce(request, origin, timeoutMs) {
+  const source = new URL(request.url);
+  const target = new URL(source.pathname + source.search, origin);
+  return fetch(new Request(target, request.clone()), {
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: "manual",
+  });
+}
 
 async function currentHolder(env) {
   const id = env.EXOMEM_STATE.idFromName(`lease:${env.VAULT_ID}`);
