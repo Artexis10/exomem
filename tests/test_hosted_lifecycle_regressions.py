@@ -84,6 +84,14 @@ def test_admit_read_tracks_the_entire_read_lifetime(tmp_path: Path) -> None:
     assert lifecycle.snapshot().active_reads == 0
 
 
+@pytest.mark.parametrize(
+    "code",
+    ["HOSTED_READ_IN_FLIGHT", "HOSTED_LIFECYCLE_STATE_WRITE_FAILED"],
+)
+def test_lifecycle_race_failures_are_retryable_service_errors(code: str) -> None:
+    assert server_hosted._status_for(code) == 503
+
+
 def test_queued_read_prevents_deletion_seal_until_its_snapshot_finishes(
     tmp_path: Path,
 ) -> None:
