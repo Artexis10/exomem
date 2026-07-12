@@ -37,9 +37,9 @@ query, via a ladder ordered by cost:
 3. counts match and `meta` already holds this exact triple (digest included)
    → verified, done — the steady state across restarts;
 4. counts match but the triple is UNKNOWN — something changed while nothing
-   was watching, yet count/mtime agree (the rename shape) → exact verify:
-   compare the walk's (path, mtime_ns) set against the stored rows, rebuild
-   on any difference. O(N) but rare by construction.
+   was watching, yet count/mtime agree → compare legacy path/mtime rows. A
+   rename heals incrementally; a full-signature-only change rebuilds so a
+   preserved-mtime content replacement cannot bless stale FTS rows.
 
 Availability is a ladder, decided per process (the `vecstore` idiom):
 - `EXOMEM_LEXICAL_BACKEND` = `auto` (default) | `fts5` | `python` (kill
@@ -108,8 +108,7 @@ def fts5_available() -> bool:
                 except sqlite3.Error as e:
                     _PROBE_RESULT = False
                     log.info(
-                        "FTS5/trigram unavailable (%s); lexical lanes stay on "
-                        "the in-process paths",
+                        "FTS5/trigram unavailable (%s); lexical lanes stay on the in-process paths",
                         e,
                     )
                 finally:
@@ -239,11 +238,7 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> None:
     """
     if not _usable():
         return
-    md = [
-        p
-        for p in written_paths
-        if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name
-    ]
+    md = [p for p in written_paths if p.suffix.lower() == ".md" and ".sync-conflict-" not in p.name]
     if not md or not lexical_path(vault_root).exists():
         return
     try:
@@ -332,9 +327,7 @@ class LexicalStore:
         return int(row[0]), int(row[1])
 
     def _meta_triple(self, conn: sqlite3.Connection, scope: str) -> tuple | None:
-        row = conn.execute(
-            "SELECT value FROM meta WHERE key = ?", (f"triple:{scope}",)
-        ).fetchone()
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (f"triple:{scope}",)).fetchone()
         if row is None:
             return None
         try:
@@ -379,16 +372,20 @@ class LexicalStore:
             if self._meta_triple(conn, scope) == freshness:
                 self._synced[scope] = freshness  # verified before; unchanged
                 return
-            # Unwitnessed change with matching count/mtime — the
-            # mtime-preserving rename shape. Verify exactly, rebuild on drift.
+            # Unwitnessed change with matching count/mtime. A path/mtime drift
+            # can be healed incrementally. If those legacy row fields still
+            # match while the full corpus signature changed, bytes were
+            # replaced with a preserved mtime; rebuild so FTS content cannot be
+            # blessed stale.
             if self._walk_matches_rows(conn, scope):
-                self._bless(conn, scope, freshness)
+                self._rebuild(conn)
             else:
                 self._heal_delta(conn)
 
-    def _walk_entries(self) -> tuple[dict[Path, list[bool]], dict[Path, int]]:
-        """One pass over both walks: membership flags + stat'ed mtimes."""
+    def _walk_entries(self):
+        """One pass over both walks: membership flags + file signatures."""
         from . import find as find_module
+        from . import freshness as freshness_module
         from .vault import walk_vault_md
 
         kb = self.vault_root / kb_dirname()
@@ -398,13 +395,13 @@ class LexicalStore:
                 members.setdefault(p, [False, False])[0] = True
         for p in walk_vault_md(self.vault_root):
             members.setdefault(p, [False, False])[1] = True
-        mtimes: dict[Path, int] = {}
+        signatures: dict[Path, freshness_module.FileSignature] = {}
         for p in list(members):
             try:
-                mtimes[p] = p.stat().st_mtime_ns
+                signatures[p] = freshness_module.stat_signature(p)
             except OSError:
                 del members[p]  # the walk triple skips stat failures too
-        return members, mtimes
+        return members, signatures
 
     def _rel(self, path: Path) -> str | None:
         try:
@@ -417,17 +414,15 @@ class LexicalStore:
         rows — reads the live freshness registry when available (no filesystem
         walk), else walks. Obsidian-Sync edits preserve mtimes, so this verify
         path is the one a real out-of-band edit hits; it must be walk-free too."""
-        members, mtimes = self._delta_source()
+        members, signatures = self._delta_source()
         idx = 1 if scope == "vault" else 0
         walked = {
-            (rel, mtimes[p])
+            (rel, signatures[p][0])
             for p, flags in members.items()
             if flags[idx] and (rel := self._rel(p)) is not None
         }
         col = "in_vault" if scope == "vault" else "in_kb"
-        stored = set(
-            conn.execute(f"SELECT path, mtime_ns FROM pages WHERE {col} = 1").fetchall()
-        )
+        stored = set(conn.execute(f"SELECT path, mtime_ns FROM pages WHERE {col} = 1").fetchall())
         return walked == stored
 
     def _rebuild(self, conn: sqlite3.Connection) -> None:
@@ -437,7 +432,7 @@ class LexicalStore:
         leaves BOTH scopes blessed and memoized."""
         from . import freshness as freshness_module
 
-        members, mtimes = self._walk_entries()
+        members, signatures = self._walk_entries()
         log.info(
             "lexical sync: rebuilding %s from %d markdown file(s)",
             self.path.name,
@@ -448,16 +443,14 @@ class LexicalStore:
             conn.execute("DELETE FROM fts")
             conn.execute("DELETE FROM tri")
             for path, (in_kb, in_vault) in members.items():
-                self._insert_page(conn, path, mtimes[path], in_kb, in_vault)
+                self._insert_page(conn, path, signatures[path][0], in_kb, in_vault)
         self._witnessed = False
         for scope, idx in (("kb", 0), ("vault", 1)):
-            entries = [
-                (str(p), mtimes[p]) for p, flags in members.items() if flags[idx]
-            ]
+            entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
             self._bless(conn, scope, freshness_module.triple_from_entries(entries))
 
-    def _delta_source(self) -> tuple[dict[Path, list[bool]], dict[Path, int]]:
-        """`(members, mtimes)` for the heal's diff — from the live freshness
+    def _delta_source(self):
+        """`(members, signatures)` for the heal's diff — from the live freshness
         registry (no filesystem walk) when BOTH scopes are live, else a fresh walk.
 
         Whenever a heal fires, the registry map is already current (it's why the
@@ -473,14 +466,14 @@ class LexicalStore:
         if kb is None or vault is None:
             return self._walk_entries()
         members: dict[Path, list[bool]] = {}
-        mtimes: dict[Path, int] = {}
-        for sp, ns in kb.items():
+        signatures = {}
+        for sp, signature in kb.items():
             members.setdefault(Path(sp), [False, False])[0] = True
-            mtimes[Path(sp)] = ns
-        for sp, ns in vault.items():
+            signatures[Path(sp)] = signature
+        for sp, signature in vault.items():
             members.setdefault(Path(sp), [False, False])[1] = True
-            mtimes[Path(sp)] = ns
-        return members, mtimes
+            signatures[Path(sp)] = signature
+        return members, signatures
 
     def _heal_delta(self, conn: sqlite3.Connection) -> None:
         """Reconcile the sidecar to the markdown walks by touching ONLY the rows
@@ -496,33 +489,29 @@ class LexicalStore:
         diverge (the class of `UNIQUE constraint failed: pages.path`)."""
         from . import freshness as freshness_module
 
-        members, mtimes = self._delta_source()
-        walk: dict[str, tuple[Path, int, bool, bool]] = {}
+        members, signatures = self._delta_source()
+        walk: dict[str, tuple[Path, tuple[int, int, int], bool, bool]] = {}
         for path, (in_kb, in_vault) in members.items():
             rel = self._rel(path)
             if rel is not None:
-                walk[rel] = (path, mtimes[path], in_kb, in_vault)
+                walk[rel] = (path, signatures[path], in_kb, in_vault)
         # path(rel) -> (rowid, mtime_ns, in_kb, in_vault), snapshotted before writes.
         stored = {
             row[0]: (int(row[1]), int(row[2]), bool(row[3]), bool(row[4]))
-            for row in conn.execute(
-                "SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages"
-            )
+            for row in conn.execute("SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages")
         }
         with conn:
             for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
                 w = walk.get(rel)
-                if w is None or (w[1], w[2], w[3]) != (mtime_ns, in_kb, in_vault):
+                if w is None or (w[1][0], w[2], w[3]) != (mtime_ns, in_kb, in_vault):
                     self._delete_rowid(conn, rowid)  # removed, or replaced below
-            for rel, (path, mtime_ns, in_kb, in_vault) in walk.items():
+            for rel, (path, signature, in_kb, in_vault) in walk.items():
                 s = stored.get(rel)
-                if s is None or (s[1], s[2], s[3]) != (mtime_ns, in_kb, in_vault):
-                    self._insert_page(conn, path, mtime_ns, in_kb, in_vault)
+                if s is None or (s[1], s[2], s[3]) != (signature[0], in_kb, in_vault):
+                    self._insert_page(conn, path, signature[0], in_kb, in_vault)
         self._witnessed = False
         for scope, idx in (("kb", 0), ("vault", 1)):
-            entries = [
-                (str(p), mtimes[p]) for p, flags in members.items() if flags[idx]
-            ]
+            entries = [(str(p), signatures[p]) for p, flags in members.items() if flags[idx]]
             self._bless(conn, scope, freshness_module.triple_from_entries(entries))
 
     def _insert_page(
@@ -605,16 +594,10 @@ class LexicalStore:
             with conn:
                 for path in paths:
                     try:
-                        rel = (
-                            path.resolve()
-                            .relative_to(self.vault_root.resolve())
-                            .as_posix()
-                        )
+                        rel = path.resolve().relative_to(self.vault_root.resolve()).as_posix()
                     except ValueError:
                         continue
-                    row = conn.execute(
-                        "SELECT rowid FROM pages WHERE path = ?", (rel,)
-                    ).fetchone()
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
                         self._delete_rowid(conn, row[0])
                     try:
@@ -637,9 +620,7 @@ class LexicalStore:
             self._ensure_schema(conn)
             with conn:
                 for rel in rel_paths:
-                    row = conn.execute(
-                        "SELECT rowid FROM pages WHERE path = ?", (rel,)
-                    ).fetchone()
+                    row = conn.execute("SELECT rowid FROM pages WHERE path = ?", (rel,)).fetchone()
                     if row is not None:
                         self._delete_rowid(conn, row[0])
             self._witnessed = True
@@ -668,8 +649,7 @@ class LexicalStore:
         except sqlite3.Error as e:
             self._failed = True
             log.warning(
-                "lexical sidecar failed (%s); this process serves the "
-                "in-process lexical paths",
+                "lexical sidecar failed (%s); this process serves the in-process lexical paths",
                 e,
             )
 
@@ -690,8 +670,7 @@ class LexicalStore:
         except sqlite3.Error as e:
             self._failed = True
             log.warning(
-                "lexical sidecar failed (%s); this process serves the "
-                "in-process lexical paths",
+                "lexical sidecar failed (%s); this process serves the in-process lexical paths",
                 e,
             )
             return None
@@ -727,8 +706,7 @@ class LexicalStore:
         except sqlite3.Error as e:
             self._failed = True
             log.warning(
-                "lexical sidecar failed (%s); this process serves the "
-                "in-process lexical paths",
+                "lexical sidecar failed (%s); this process serves the in-process lexical paths",
                 e,
             )
             return None

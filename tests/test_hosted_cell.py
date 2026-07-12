@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import hosted_runtime, server_runtime, vault
+from exomem import get_page, hosted_runtime, list_directory, server_runtime, vault
 from exomem.hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -836,3 +836,20 @@ def test_hosted_runtime_marker_is_not_a_user_addressable_vault_file(
     resolved, relative = vault.resolve_under_vault(tmp_path, marker.name, must_be_file=True)
     assert resolved == marker
     assert relative == marker.name
+
+
+def test_hosted_runtime_marker_is_hidden_from_all_user_read_surfaces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / ".exomem-hosted-cell.json"
+    marker.write_text('{"private":"binding"}', encoding="utf-8")
+    note = tmp_path / "visible.md"
+    note.write_text("# Visible\n", encoding="utf-8")
+    monkeypatch.setenv(hosted_runtime.HOSTED_MODE_ENV, "true")
+
+    with pytest.raises(get_page.GetError) as error:
+        get_page.get_page(tmp_path, path=marker.name)
+    assert "reserved" in error.value.reason
+
+    listing = list_directory.list_directory(tmp_path, path="", include_hidden=True)
+    assert [entry.path for entry in listing.entries] == [note.name]

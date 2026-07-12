@@ -276,6 +276,7 @@ class FileWatcher:
         if path.suffix.lower() != ".md":
             return  # only markdown is embedded; ignore attachments / sidecars-of-binaries churn
         from .vault import in_excluded_scan_dir
+
         rel = self._rel(path)
         if rel is not None and in_excluded_scan_dir(rel):
             # _trash/_archive/_Schema/…: every full walk skips these, so the
@@ -366,7 +367,7 @@ class FileWatcher:
             paths = find_module._walk_md(self._kb_root) if self._kb_root.is_dir() else ()
         for p in paths:
             try:
-                yield (str(p), p.stat().st_mtime_ns)
+                yield (str(p), freshness.stat_signature(p))
             except OSError:
                 continue
 
@@ -391,9 +392,7 @@ class FileWatcher:
                 if seed:
                     freshness.seed(self._vault_root, scope, self._walk_entries(scope))
                 else:
-                    delta = freshness.reconcile(
-                        self._vault_root, scope, self._walk_entries(scope)
-                    )
+                    delta = freshness.reconcile(self._vault_root, scope, self._walk_entries(scope))
                     if delta.drifted:
                         drifted = True
                         # vault ⊇ kb, so a KB file lands in both deltas — dedupe
@@ -417,6 +416,7 @@ class FileWatcher:
             log.info("file watcher: quiet reconcile deferred expensive warm-up")
             return
         from . import bm25
+
         for scope in freshness.SCOPES:
             try:
                 bm25.warm(self._vault_root, scope)
@@ -485,9 +485,7 @@ class FileWatcher:
                 del_rels = [r for r in del_rels if r not in exists_now]
             if gone_now:
                 up_rels = [r for r in up_rels if r not in gone_now]
-                changed_rel_pairs = [
-                    (p, r) for p, r in changed_rel_pairs if r not in gone_now
-                ]
+                changed_rel_pairs = [(p, r) for p, r in changed_rel_pairs if r not in gone_now]
                 changed_paths = [p for p, _ in changed_rel_pairs]
 
         self._dispatch_batch(changed_paths, up_rels, del_rels, cap=True)
@@ -543,7 +541,8 @@ class FileWatcher:
                     "file watcher: reconcile drift re-embed capped at %d of %d KB file(s); "
                     "the freshness registry is fully healed — run `reconcile` to re-embed "
                     "the remainder",
-                    max_files, len(kb_ups),
+                    max_files,
+                    len(kb_ups),
                 )
                 kb_ups = kb_ups[:max_files]
         elif not cap and not policy.defer_expensive_indexes:
@@ -554,7 +553,8 @@ class FileWatcher:
                     "EXOMEM_WATCHER_MAX_EMBED_FILES=%d; lexical indexes updated but "
                     "semantic indexing deferred. Run `exomem index --scope vault` "
                     "after the import.",
-                    len(kb_ups), max_files,
+                    len(kb_ups),
+                    max_files,
                 )
                 defer_semantic = True
         elif policy.defer_expensive_indexes and kb_ups:

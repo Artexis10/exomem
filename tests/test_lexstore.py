@@ -143,6 +143,25 @@ def test_out_of_band_rename_self_heals(tmp_path):
     ]
 
 
+def test_out_of_band_content_replacement_with_preserved_mtime_self_heals(tmp_path):
+    page = _write_page(tmp_path, "Knowledge Base/a.md", "originaluniquetoken")
+    before = page.stat()
+    assert lexstore.search_bm25(tmp_path, "originaluniquetoken", k=3, scope="kb")
+    lexstore.clear_stores()
+
+    replacement = page.with_suffix(".replacement")
+    replacement.write_text(
+        "---\ntype: insight\n---\n# A\n\nreplacementuniquetoken with different bytes\n",
+        encoding="utf-8",
+    )
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, page)
+
+    hits = lexstore.search_bm25(tmp_path, "replacementuniquetoken", k=3, scope="kb")
+    assert hits and hits[0][0] == "Knowledge Base/a.md"
+    assert lexstore.search_bm25(tmp_path, "originaluniquetoken", k=3, scope="kb") == []
+
+
 def test_restart_with_no_changes_skips_the_walk_verify(tmp_path):
     """Steady state across restarts: the meta-blessed triple lets a fresh
     store trust the sidecar without an exact verify (no rebuild)."""
@@ -212,9 +231,9 @@ def test_out_of_band_single_edit_heals_incrementally_not_full_rebuild(tmp_path):
     finally:
         lexstore.LexicalStore._rebuild = real
 
-    assert hits and hits[0][0] == "Knowledge Base/n3.md"       # new content indexed
+    assert hits and hits[0][0] == "Knowledge Base/n3.md"  # new content indexed
     assert lexstore.search_bm25(tmp_path, "token3", k=5, scope="kb") == []  # old tokens gone
-    assert lexstore.search_bm25(tmp_path, "token5", k=5, scope="kb")        # untouched intact
+    assert lexstore.search_bm25(tmp_path, "token5", k=5, scope="kb")  # untouched intact
     assert _count(lexstore.lexical_path(tmp_path), "pages") == 6
     assert calls["n"] == 0  # healed incrementally, NOT via full rebuild
 
@@ -227,7 +246,7 @@ def test_out_of_band_add_and_delete_heal_incrementally(tmp_path):
     assert lexstore.search_bm25(tmp_path, "corpus", k=10, scope="kb")
     lexstore.clear_stores()
 
-    (tmp_path / "Knowledge Base/n0.md").unlink()                                   # removed
+    (tmp_path / "Knowledge Base/n0.md").unlink()  # removed
     _write_page(tmp_path, "Knowledge Base/added.md", "corpus freshadd", mtime=8_000)  # added
 
     calls = {"n": 0}
@@ -245,8 +264,8 @@ def test_out_of_band_add_and_delete_heal_incrementally(tmp_path):
 
     assert hits and hits[0][0] == "Knowledge Base/added.md"
     assert lexstore.search_bm25(tmp_path, "token0", k=5, scope="kb") == []  # removed file gone
-    assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")        # survivor intact
-    assert _count(lexstore.lexical_path(tmp_path), "pages") == 5            # 5 - 1 + 1
+    assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")  # survivor intact
+    assert _count(lexstore.lexical_path(tmp_path), "pages") == 5  # 5 - 1 + 1
     assert calls["n"] == 0  # incremental delete+insert, not a full rebuild
 
 
@@ -270,12 +289,14 @@ def test_heal_reads_registry_map_not_filesystem_walk_when_live(tmp_path):
         # The watcher seeds the registry live for both scopes at the current state.
         kb_dir = tmp_path / "Knowledge Base"
         freshness.seed(
-            tmp_path, "kb",
-            ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+            tmp_path,
+            "kb",
+            ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
         )
         freshness.seed(
-            tmp_path, "vault",
-            ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(tmp_path)),
+            tmp_path,
+            "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
         )
 
         # One file edited out-of-band; the watcher catches it and patches the
@@ -296,9 +317,9 @@ def test_heal_reads_registry_map_not_filesystem_walk_when_live(tmp_path):
         finally:
             lexstore.LexicalStore._walk_entries = real
 
-        assert hits and hits[0][0] == "Knowledge Base/n2.md"                   # healed
+        assert hits and hits[0][0] == "Knowledge Base/n2.md"  # healed
         assert lexstore.search_bm25(tmp_path, "token2", k=5, scope="kb") == []  # old gone
-        assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")        # survivor
+        assert lexstore.search_bm25(tmp_path, "token4", k=5, scope="kb")  # survivor
         assert walks["n"] == 0  # read the registry map, did NOT walk the filesystem
     finally:
         freshness.clear()
@@ -316,7 +337,9 @@ def test_mtime_preserving_drift_heals_from_registry_no_walk(tmp_path):
 
     freshness.clear()
     try:
-        _write_page(tmp_path, "Knowledge Base/rename-old.md", "zanzibar quixotic marker", mtime=5_000)
+        _write_page(
+            tmp_path, "Knowledge Base/rename-old.md", "zanzibar quixotic marker", mtime=5_000
+        )
         _write_page(tmp_path, "Knowledge Base/other.md", "unrelated filler", mtime=4_000)
         assert lexstore.search_bm25(tmp_path, "zanzibar", k=5, scope="kb")
         lexstore.clear_stores()  # fresh process; no in-process hook witnessed anything
@@ -324,12 +347,14 @@ def test_mtime_preserving_drift_heals_from_registry_no_walk(tmp_path):
         # Watcher seeds the registry live for both scopes at the current state.
         kb_dir = tmp_path / "Knowledge Base"
         freshness.seed(
-            tmp_path, "kb",
-            ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+            tmp_path,
+            "kb",
+            ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
         )
         freshness.seed(
-            tmp_path, "vault",
-            ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(tmp_path)),
+            tmp_path,
+            "vault",
+            ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(tmp_path)),
         )
 
         # Pure rename: os.replace preserves mtime, so count AND max_mtime are
@@ -419,10 +444,10 @@ def test_bm25_or_semantics_and_ordering(tmp_path):
     hits = lexstore.search_bm25(tmp_path, "alpha beta", k=10, scope="kb")
     assert hits is not None
     paths = [p for p, _ in hits]
-    assert "Knowledge Base/none.md" not in paths          # no-term docs excluded
+    assert "Knowledge Base/none.md" not in paths  # no-term docs excluded
     assert set(paths) == {"Knowledge Base/both.md", "Knowledge Base/one.md"}  # OR
-    assert paths[0] == "Knowledge Base/both.md"           # more terms rank higher
-    assert all(s > 0 for _, s in hits)                    # positive scores
+    assert paths[0] == "Knowledge Base/both.md"  # more terms rank higher
+    assert all(s > 0 for _, s in hits)  # positive scores
     assert lexstore.search_bm25(tmp_path, "alpha beta", k=1, scope="kb") == hits[:1]
 
 
@@ -499,7 +524,9 @@ def test_substring_non_ascii(tmp_path):
     _write_page(tmp_path, "Knowledge Base/uni.md", "tere tulemast Tallinnasse sõbrad")
     assert lexstore.search_substring(tmp_path, "sõbra", scope="kb") == ["Knowledge Base/uni.md"]
     # Case-insensitivity via Python-side lowering of both sides:
-    assert lexstore.search_substring(tmp_path, "tallinnasse", scope="kb") == ["Knowledge Base/uni.md"]
+    assert lexstore.search_substring(tmp_path, "tallinnasse", scope="kb") == [
+        "Knowledge Base/uni.md"
+    ]
 
 
 def test_substring_skips_navigation_files(tmp_path):
