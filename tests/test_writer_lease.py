@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 
 from exomem.cli_ops import OpError, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
+from exomem.mutation_lock import VaultMutationCoordinator
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
 
 
@@ -112,6 +114,77 @@ def test_reads_bypass_unavailable_coordinator(tmp_path: Path) -> None:
     )
 
 
+def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(state_root, vault)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    thread = threading.Thread(target=hold_mutation)
+    thread.start()
+    assert entered.wait(1.0)
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    try:
+        assert manager.invoke(
+            _command(writes=False, leaf=lambda _vault: "read"),
+            (vault,),
+            {},
+        ) == "read"
+    finally:
+        release.set()
+        thread.join(timeout=2.0)
+    assert not thread.is_alive()
+
+
+def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    first_manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    second_manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    first_entered = threading.Event()
+    second_attempting = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def first_leaf(_vault: Path) -> str:
+        first_entered.set()
+        assert release_first.wait(2.0)
+        return "first"
+
+    def second_leaf(_vault: Path) -> str:
+        second_entered.set()
+        return "second"
+
+    def run_first() -> None:
+        first_manager.invoke(_command(writes=True, leaf=first_leaf), (vault,), {})
+
+    def run_second() -> None:
+        second_attempting.set()
+        second_manager.invoke(_command(writes=True, leaf=second_leaf), (vault,), {})
+
+    first_thread = threading.Thread(target=run_first)
+    second_thread = threading.Thread(target=run_second)
+    first_thread.start()
+    assert first_entered.wait(1.0)
+    second_thread.start()
+    assert second_attempting.wait(1.0)
+    assert not second_entered.wait(0.1)
+    release_first.set()
+    assert second_entered.wait(1.0)
+    first_thread.join(timeout=2.0)
+    second_thread.join(timeout=2.0)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+
+
 def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> None:
     calls: list[str] = []
     command = _command(writes=True, leaf=lambda: calls.append("write") or "ok")
@@ -198,6 +271,24 @@ def test_explicit_idempotency_also_works_without_writer_lease(tmp_path: Path) ->
     with pytest.raises(OpError, match="IDEMPOTENCY_KEY_REUSED"):
         manager.invoke(command, (), {"value": 2}, idempotency_key="standalone-1")
     assert calls == [1]
+
+
+def test_explicit_idempotency_key_is_independent_across_vaults(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault_a = tmp_path / "vault-a"
+    vault_b = tmp_path / "vault-b"
+    vault_a.mkdir()
+    vault_b.mkdir()
+    calls: list[str] = []
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    command = _command(
+        writes=True,
+        leaf=lambda vault: calls.append(vault.name) or vault.name,
+    )
+
+    assert manager.invoke(command, (vault_a,), {}, idempotency_key="request-1") == "vault-a"
+    assert manager.invoke(command, (vault_b,), {}, idempotency_key="request-1") == "vault-b"
+    assert calls == ["vault-a", "vault-b"]
 
 
 @dataclass

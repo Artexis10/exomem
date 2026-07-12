@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from .cli_ops import OpError
+from .mutation_lock import VaultMutationCoordinator
 
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
@@ -262,6 +263,11 @@ class IdempotencyStore:
         return result
 
 
+def _namespaced_idempotency_key(kind: str, identity: str, public_key: str) -> str:
+    digest = hashlib.sha256(f"{identity}\0{public_key}".encode()).hexdigest()
+    return f"{kind}:{digest}"
+
+
 class LeaseManager:
     def __init__(
         self,
@@ -269,6 +275,8 @@ class LeaseManager:
         *,
         client: LeaseCoordinatorClient | None = None,
         clock=time.time,  # noqa: ANN001
+        mutation_timeout_seconds: float = 5.0,
+        mutation_poll_interval_seconds: float = 0.025,
     ):
         self.config = config
         self.client = (
@@ -287,6 +295,8 @@ class LeaseManager:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
+        self._mutation_timeout_seconds = mutation_timeout_seconds
+        self._mutation_poll_interval_seconds = mutation_poll_interval_seconds
 
     def ensure_writer(self) -> LeaseRecord:
         if not self.config.enabled:
@@ -315,37 +325,60 @@ class LeaseManager:
     ) -> Any:
         if command.read_only:
             return command.leaf(*injected, **kwargs)
-        if self.config.enabled:
-            self.ensure_writer()
-        digest = hashlib.sha256(
-            json.dumps(
-                {"command": command.name, "kwargs": kwargs},
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-        key = idempotency_key
-        expires_after = None
-        on_replay = None
-        if key is None and implicit_idempotency_scope:
-            scoped = hashlib.sha256(
-                f"{implicit_idempotency_scope}\0{digest}".encode()
-            ).hexdigest()
-            key = f"implicit:{scoped}"
-            expires_after = _IMPLICIT_RETRY_TTL_SECONDS
-
-            def log_replay() -> None:
-                logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
-
-            on_replay = log_replay
-        return self.idempotency.run(
-            key,
-            digest,
-            lambda: command.leaf(*injected, **kwargs),
-            expires_after=expires_after,
-            on_replay=on_replay,
+        mutation_subject = self._mutation_subject(injected)
+        mutation = VaultMutationCoordinator(
+            self.config.state_dir,
+            mutation_subject,
+            timeout_seconds=self._mutation_timeout_seconds,
+            poll_interval_seconds=self._mutation_poll_interval_seconds,
         )
+        with mutation.hold():
+            if self.config.enabled:
+                self.ensure_writer()
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"command": command.name, "kwargs": kwargs},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()
+            key = None
+            expires_after = None
+            on_replay = None
+            idempotency_namespace = (
+                f"cell:{self.config.vault_id}" if self.config.vault_id else mutation.identity
+            )
+            if idempotency_key:
+                key = _namespaced_idempotency_key(
+                    "explicit", idempotency_namespace, idempotency_key
+                )
+            elif implicit_idempotency_scope:
+                key = _namespaced_idempotency_key(
+                    "implicit",
+                    idempotency_namespace,
+                    f"{implicit_idempotency_scope}\0{digest}",
+                )
+                expires_after = _IMPLICIT_RETRY_TTL_SECONDS
+
+                def log_replay() -> None:
+                    logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
+
+                on_replay = log_replay
+            return self.idempotency.run(
+                key,
+                digest,
+                lambda: command.leaf(*injected, **kwargs),
+                expires_after=expires_after,
+                on_replay=on_replay,
+            )
+
+    def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
+        if injected and isinstance(injected[0], os.PathLike):
+            return injected[0]
+        if self.config.vault_id:
+            return self.config.vault_id
+        return "standalone"
 
     def status(self) -> dict[str, Any]:
         base = {
