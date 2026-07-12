@@ -11,7 +11,7 @@ from pathlib import Path
 
 import yaml
 
-from . import freshness
+from . import freshness, privacy_log
 from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
@@ -36,26 +36,32 @@ def _page_cache_size() -> int:
 
 @dataclass
 class FrontmatterCache:
-    """Per-process cache of parsed pages, invalidated by mtime."""
+    """Per-process cache of parsed pages, invalidated by file identity."""
 
     entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
+    signatures: dict[Path, tuple[int, int, int]] = field(default_factory=dict)
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         try:
-            mtime = path.stat().st_mtime
+            file_stat = path.stat()
         except FileNotFoundError:
             self.entries.pop(path, None)
+            self.signatures.pop(path, None)
             return None
+        mtime = file_stat.st_mtime
+        signature = (file_stat.st_mtime_ns, file_stat.st_ctime_ns, file_stat.st_size)
         cached = self.entries.get(path)
-        if cached and cached.mtime == mtime:
+        if cached and self.signatures.get(path) == signature:
             self.entries.move_to_end(path)
             return cached
         parsed = parse_page(path, mtime, vault_root)
         if parsed is not None:
             self.entries[path] = parsed
+            self.signatures[path] = signature
             self.entries.move_to_end(path)
             while len(self.entries) > _page_cache_size():
-                self.entries.popitem(last=False)
+                evicted, _page = self.entries.popitem(last=False)
+                self.signatures.pop(evicted, None)
         return parsed
 
 
@@ -103,7 +109,10 @@ def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
     try:
         text = path.read_text(encoding="utf-8")
     except (OSError, UnicodeDecodeError) as e:
-        log.warning("could not read %s: %s", path, e)
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
         return None
 
     fm_match = FRONTMATTER_PATTERN.match(text)
@@ -116,7 +125,10 @@ def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
             if not isinstance(frontmatter, dict):
                 frontmatter = {}
         except yaml.YAMLError as e:
-            log.warning("YAML parse error in %s: %s", path, e)
+            if privacy_log.content_private_logging_enabled():
+                log.warning("hosted content parse failed code=HOSTED_CONTENT_PARSE_FAILED")
+            else:
+                log.warning("YAML parse error in %s: %s", path, e)
             frontmatter = {}
         body = fm_match.group(2)
         # The FRONTMATTER_PATTERN consumes the closing `\n---\n` but not the

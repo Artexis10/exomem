@@ -146,6 +146,49 @@ def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) ->
     assert not thread.is_alive()
 
 
+def test_hosted_read_waits_for_complete_multi_file_mutation_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(state_root, vault)
+    entered = threading.Event()
+    release = threading.Event()
+    read_finished = threading.Event()
+    result: list[str] = []
+
+    def hold_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+
+    def read() -> None:
+        result.append(
+            manager.invoke(
+                _command(writes=False, leaf=lambda _vault: "consistent"),
+                (vault,),
+                {},
+            )
+        )
+        read_finished.set()
+
+    writer = threading.Thread(target=hold_mutation)
+    reader = threading.Thread(target=read)
+    writer.start()
+    assert entered.wait(1.0)
+    reader.start()
+    assert not read_finished.wait(0.1)
+    release.set()
+    assert read_finished.wait(1.0)
+    writer.join(timeout=2.0)
+    reader.join(timeout=2.0)
+    assert result == ["consistent"]
+
+
 def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
     state_root = tmp_path / "state"
     vault = tmp_path / "vault"
@@ -256,6 +299,39 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     with pytest.raises(OpError, match="IDEMPOTENCY_KEY_REUSED"):
         manager.invoke(command, (), {"value": 2}, idempotency_key="request-1")
     assert calls == [1]
+
+
+def test_explicit_idempotency_reclaims_orphaned_pending_after_process_abort(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+    calls: list[str] = []
+
+    def aborted() -> str:
+        calls.append("aborted")
+        raise SystemExit(70)
+
+    with pytest.raises(SystemExit):
+        manager.invoke(
+            _command(writes=True, leaf=aborted),
+            (),
+            {},
+            idempotency_key="request-after-crash",
+        )
+
+    recovered = _command(
+        writes=True,
+        leaf=lambda: calls.append("recovered") or "ok",
+    )
+    assert (
+        manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
+        == "ok"
+    )
+    assert (
+        manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
+        == "ok"
+    )
+    assert calls == ["aborted", "recovered"]
 
 
 def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) -> None:

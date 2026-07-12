@@ -27,6 +27,7 @@ from typing import Any
 
 from .cli_ops import OpError
 from .mutation_lock import VaultMutationCoordinator
+from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
@@ -210,6 +211,7 @@ class IdempotencyStore:
         *,
         expires_after: float | None = None,
         on_replay=None,  # noqa: ANN001
+        reclaim_pending: bool = False,
     ) -> Any:
         if not key:
             return operation()
@@ -238,14 +240,22 @@ class IdempotencyStore:
                     if on_replay is not None:
                         on_replay()
                     return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
-                raise OpError(
-                    "IDEMPOTENCY_IN_PROGRESS",
-                    "an identical mutation with this key is already in progress",
+                if not reclaim_pending:
+                    raise OpError(
+                        "IDEMPOTENCY_IN_PROGRESS",
+                        "an identical mutation with this key is already in progress",
+                    )
+                conn.execute(
+                    "UPDATE mutations SET updated_at = ? "
+                    "WHERE key = ? AND digest = ? AND state = 'pending'",
+                    (now, key, digest),
                 )
-            conn.execute(
-                "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
-                (key, digest, now),
-            )
+            else:
+                conn.execute(
+                    "INSERT INTO mutations(key, digest, state, updated_at) "
+                    "VALUES (?, ?, 'pending', ?)",
+                    (key, digest, now),
+                )
         try:
             result = operation()
         except Exception:
@@ -341,6 +351,9 @@ class LeaseManager:
         implicit_idempotency_scope: str | None = None,
     ) -> Any:
         if command.read_only:
+            if content_private_logging_enabled():
+                with self.mutation_guard(self._mutation_subject(injected)):
+                    return command.leaf(*injected, **kwargs)
             return command.leaf(*injected, **kwargs)
         mutation_subject = self._mutation_subject(injected)
         with self.mutation_guard(mutation_subject) as mutation:
@@ -380,6 +393,12 @@ class LeaseManager:
                 lambda: command.leaf(*injected, **kwargs),
                 expires_after=expires_after,
                 on_replay=on_replay,
+                # The vault mutation guard encloses this call. Once acquired,
+                # no earlier process/thread can still own a pending mutation;
+                # an identical row is therefore an orphan from an aborted
+                # process and is safe to retry under the documented
+                # at-least-once crash boundary.
+                reclaim_pending=True,
             )
 
     def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:

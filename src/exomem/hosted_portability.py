@@ -81,7 +81,6 @@ def _is_provider_log(_path: str, parts: tuple[str, ...]) -> bool:
 
 
 def _is_secret_or_credential(path: str, parts: tuple[str, ...]) -> bool:
-    lowered = path.casefold()
     names = {part.casefold() for part in parts}
     basename = parts[-1].casefold() if parts else ""
     if basename == ".env" or basename.startswith(".env."):
@@ -90,15 +89,21 @@ def _is_secret_or_credential(path: str, parts: tuple[str, ...]) -> bool:
         return True
     if names & {"credentials", ".credentials", "secrets", ".secrets"}:
         return True
+    # Treat exact conventional secret filenames as runtime state, but never use
+    # a loose substring across the whole path. Authored notes routinely discuss
+    # keys and credentials; e.g. ``master-key-rotation.md`` is canonical memory,
+    # not a secret merely because its title contains those words.
+    secret_stems = {
+        "service-credential",
+        "oauth-token",
+        "session-token",
+        "encryption-key",
+        "master-key",
+    }
     return any(
-        token in lowered
-        for token in (
-            "service-credential",
-            "oauth-token",
-            "session-token",
-            "encryption-key",
-            "master-key",
-        )
+        basename == stem
+        or basename in {f"{stem}.json", f"{stem}.yaml", f"{stem}.yml", f"{stem}.txt"}
+        for stem in secret_stems
     )
 
 
@@ -377,6 +382,7 @@ class LifecycleCheckpoint:
             "state": self.state,
             "timestamp": self.created_at,
             "checkpoint_digest": self.checkpoint_digest,
+            "replayed": self.replayed,
             "outcome": "replayed" if self.replayed else "committed",
         }
 
@@ -1494,31 +1500,67 @@ class LifecycleCheckpointStore:
         context: PortabilityContext,
         artifact_reference: str,
         reason_code: str,
+        export_root: Path | str,
     ) -> LifecycleCheckpoint:
-        """Record the explicit, idempotent release of an export checkpoint."""
+        """Checkpoint release, then remove the corresponding cell-local artifact."""
 
-        _validate_context(
-            context,
-            allowed_states={"quiesced", "export-prepared", "export-failed"},
-        )
         if not isinstance(artifact_reference, str) or not _EXPORT_REF_RE.fullmatch(
             artifact_reference
         ):
             _fail("INVALID_ARTIFACT_REFERENCE", "artifact reference must be opaque and internal")
         if not isinstance(reason_code, str) or not _IDENTIFIER_RE.fullmatch(reason_code):
             _fail("INVALID_REASON_CODE", "lifecycle reason code is invalid")
-        return self._commit(
-            {
-                "operation": "release-export",
-                "operation_id": context.operation_id,
-                "cell_id": context.cell_id,
-                "vault_id": context.vault_id,
-                "created_at": context.created_at,
-                "state": "export-released",
-                "reason_code": reason_code,
-                "artifact_reference": artifact_reference,
-            }
-        )
+        if not context.operator_authorized:
+            _fail("UNAUTHORIZED_PORTABILITY", "private operator authorization is required")
+        _validate_identifier(context.cell_id, "cell_id")
+        _validate_identifier(context.vault_id, "vault_id")
+        _validate_identifier(context.operation_id, "operation_id")
+        _validate_timestamp(context.created_at)
+        payload = {
+            "operation": "release-export",
+            "operation_id": context.operation_id,
+            "cell_id": context.cell_id,
+            "vault_id": context.vault_id,
+            "created_at": context.created_at,
+            "state": "export-released",
+            "reason_code": reason_code,
+            "artifact_reference": artifact_reference,
+        }
+        # The checkpoint is persisted before the route resumes the cell. A lost
+        # HTTP acknowledgement therefore replays after background writers have
+        # restarted. Adopt the exact existing checkpoint before enforcing the
+        # first-write quiescence proof; conflicts still fail closed in _commit.
+        final = self._final_path("release-export", context.cell_id, context.operation_id)
+        if os.path.lexists(final):
+            checkpoint = self._commit(payload)
+        else:
+            _validate_context(
+                context,
+                allowed_states={"quiesced", "export-prepared", "export-failed"},
+            )
+            checkpoint = self._commit(payload)
+
+        digest = artifact_reference.rsplit("/", 1)[-1]
+        root = Path(export_root).absolute()
+        artifact = root / f"exomem-export-{digest}.zip"
+        try:
+            if os.path.lexists(artifact):
+                artifact_stat = artifact.lstat()
+                if stat.S_ISLNK(artifact_stat.st_mode) or not stat.S_ISREG(artifact_stat.st_mode):
+                    _fail(
+                        "EXPORT_RELEASE_CLEANUP_FAILED",
+                        "released export artifact is not a regular file",
+                    )
+            artifact.unlink(missing_ok=True)
+            _fsync_directory(root)
+        except PortabilityError:
+            raise
+        except OSError:
+            _fail(
+                "EXPORT_RELEASE_CLEANUP_FAILED",
+                "released export artifact could not be removed",
+            )
+        return checkpoint
 
     def seal_for_deletion(
         self,

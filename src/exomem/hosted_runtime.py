@@ -31,6 +31,8 @@ SUPPORTED_HOSTED_PROTOCOL_VERSIONS = frozenset({HOSTED_PROTOCOL_VERSION})
 HOSTED_MODE_ENV = "EXOMEM_HOSTED_CELL"
 _BINDING_VERSION = 1
 _BINDING_FILENAME = ".exomem-hosted-cell.json"
+_LIFECYCLE_STATE_VERSION = 1
+_LIFECYCLE_STATE_FILENAME = "hosted-lifecycle-state.json"
 _CELL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _PROTOCOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
 _TRUE = frozenset({"1", "true", "yes", "on"})
@@ -366,7 +368,7 @@ class HostedCellLifecycle:
     def __init__(self, config: HostedCellConfig) -> None:
         self.config = config
         self._condition = threading.Condition(threading.RLock())
-        self._phase = "starting"
+        self._phase = self._load_durable_phase()
         self._vault_ready = False
         self._mutation_authority_ready = False
         self._mutation_reason = "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
@@ -376,12 +378,76 @@ class HostedCellLifecycle:
         self._worker_status: dict[str, tuple[bool, str]] = {}
         self._background_workers: list[tuple[Callable[[], Any], Callable[[], Any] | None]] = []
 
+    def _load_durable_phase(self) -> str:
+        path = self.config.state_root / _LIFECYCLE_STATE_FILENAME
+        if not os.path.lexists(path):
+            return "starting"
+        try:
+            stored = path.lstat()
+            if path.is_symlink() or not path.is_file() or not stored.st_size:
+                raise ValueError("invalid lifecycle state file")
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise HostedLifecycleError(
+                "HOSTED_LIFECYCLE_STATE_INVALID",
+                "durable hosted lifecycle state is invalid",
+            ) from exc
+        if (
+            not isinstance(payload, dict)
+            or payload.get("version") != _LIFECYCLE_STATE_VERSION
+            or payload.get("cell_id") != self.config.cell_id
+            or payload.get("phase") not in {"active", "quiesced", "sealed"}
+        ):
+            raise HostedLifecycleError(
+                "HOSTED_LIFECYCLE_STATE_INVALID",
+                "durable hosted lifecycle state does not match this cell",
+            )
+        return str(payload["phase"])
+
+    def _persist_phase(self, phase: str) -> None:
+        if phase not in {"active", "quiesced", "sealed"}:
+            raise HostedLifecycleError(
+                "HOSTED_LIFECYCLE_STATE_INVALID", "hosted lifecycle phase is not durable"
+            )
+        root = self.config.state_root
+        path = root / _LIFECYCLE_STATE_FILENAME
+        temp = root / f".{_LIFECYCLE_STATE_FILENAME}.tmp"
+        payload = json.dumps(
+            {
+                "version": _LIFECYCLE_STATE_VERSION,
+                "cell_id": self.config.cell_id,
+                "phase": phase,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        try:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            if path.is_symlink() or temp.is_symlink():
+                raise OSError("lifecycle state path is a symbolic link")
+            with temp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(payload + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            _sync_directory(root)
+        except OSError as exc:
+            temp.unlink(missing_ok=True)
+            raise HostedLifecycleError(
+                "HOSTED_LIFECYCLE_STATE_WRITE_FAILED",
+                "durable hosted lifecycle state could not be recorded",
+            ) from exc
+
     def liveness(self) -> HostedLiveness:
         return HostedLiveness(
             live=True,
             cell_id=self.config.cell_id,
             protocol_version=self.config.protocol_version,
         )
+
+    def snapshot(self) -> HostedLifecycleSnapshot:
+        with self._condition:
+            return self._snapshot_locked()
 
     def readiness(self) -> HostedReadiness:
         with self._condition:
@@ -424,6 +490,36 @@ class HostedCellLifecycle:
                 degraded=degraded,
             )
 
+    def control_plane_readiness(self) -> dict[str, Any]:
+        """Return the provider-neutral readiness proof used before cell binding.
+
+        The existing snake-case readiness fields remain the cell-local diagnostic
+        contract.  This proof is deliberately explicit so a provisioner cannot
+        infer mutation authority, service authentication, or worker policy from a
+        single coarse ``ready`` boolean.
+        """
+
+        with self._condition:
+            readiness = self.readiness()
+            workers_enabled = self.config.resource_limits.worker_count > 0
+            return {
+                "live": True,
+                "ready": readiness.ready,
+                "cellId": self.config.cell_id,
+                "protocolVersion": self.config.protocol_version,
+                "releaseVersion": __version__,
+                "serviceAuthenticated": self._service_auth_ready,
+                "mutationAuthority": self._mutation_authority_ready,
+                "readAdmission": readiness.read_admitted,
+                "writeAdmission": readiness.write_admitted,
+                "workerPolicy": {
+                    "workerCount": self.config.resource_limits.worker_count,
+                    "semantic": workers_enabled and "embeddings" in self.config.feature_grants,
+                    "media": workers_enabled and "media" in self.config.feature_grants,
+                },
+                "code": "CELL_READY" if readiness.ready else readiness.reason_code,
+            }
+
     def complete_startup(
         self,
         *,
@@ -432,10 +528,6 @@ class HostedCellLifecycle:
         service_auth_ready: bool,
     ) -> HostedLifecycleSnapshot:
         with self._condition:
-            if self._phase == "sealed":
-                raise HostedLifecycleError(
-                    "HOSTED_DELETION_SEALED", "sealed cell cannot complete startup"
-                )
             self._vault_ready = bool(vault_ready)
             self._mutation_authority_ready = bool(mutation_authority_ready)
             self._mutation_reason = (
@@ -444,7 +536,9 @@ class HostedCellLifecycle:
                 else "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
             )
             self._service_auth_ready = bool(service_auth_ready)
-            self._phase = "active"
+            if self._phase == "starting":
+                self._persist_phase("active")
+                self._phase = "active"
             self._condition.notify_all()
             return self._snapshot_locked()
 
@@ -566,6 +660,7 @@ class HostedCellLifecycle:
                         "hosted cell did not drain mutations before its deadline",
                     )
                 self._condition.wait(remaining)
+            self._persist_phase("quiesced")
             self._phase = "quiesced"
             self._condition.notify_all()
             return self._snapshot_locked()
@@ -596,6 +691,7 @@ class HostedCellLifecycle:
                         "HOSTED_BACKGROUND_START_FAILED",
                         "a hosted background writer could not restart safely",
                     ) from exc
+            self._persist_phase("active")
             self._phase = "active"
             self._condition.notify_all()
             return self._snapshot_locked()
@@ -614,6 +710,7 @@ class HostedCellLifecycle:
                     "HOSTED_TRANSFER_IN_FLIGHT",
                     "cell has an active transfer",
                 )
+            self._persist_phase("sealed")
             self._phase = "sealed"
             self._condition.notify_all()
             return self._snapshot_locked()

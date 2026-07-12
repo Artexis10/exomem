@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, hosted_runtime, project_keys, schema
+from . import env_compat, hosted_runtime, privacy_log, project_keys, schema
 from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, hosted_mode_enabled
 from .vault import resolve_vault
 
@@ -69,6 +69,7 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
 
 def _initialize_hosted_runtime() -> ServerRuntime:
     """Initialize one explicit hosted cell without reading any dotenv file."""
+    privacy_log.install_hosted_log_redaction()
     config = HostedCellConfig.from_env(require_provisioned=True)
     config.apply_process_environment()
     lifecycle = HostedCellLifecycle(config)
@@ -84,7 +85,7 @@ def _initialize_hosted_runtime() -> ServerRuntime:
 
     mutation_ready, mutation_reason = probe_hosted_mutation_authority(vault_root)
 
-    lifecycle.complete_startup(
+    startup = lifecycle.complete_startup(
         vault_ready=True,
         mutation_authority_ready=mutation_ready,
         service_auth_ready=True,
@@ -109,6 +110,14 @@ def _initialize_hosted_runtime() -> ServerRuntime:
                     feature,
                     ready=False,
                     reason_code="HOSTED_WORKER_LIMIT_ZERO",
+                )
+    elif startup.phase != "active":
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_CELL_NOT_ACTIVE",
                 )
     else:
         if config.has_feature("embeddings"):

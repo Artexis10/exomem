@@ -117,6 +117,9 @@ def _raw_zip(
         ("logs/provider.log", "disposable-runtime"),
         (".env", "disposable-runtime"),
         ("private.pem", "disposable-runtime"),
+        ("service-credential.json", "disposable-runtime"),
+        ("Knowledge Base/Notes/Research/master-key-rotation.md", "canonical"),
+        ("Knowledge Base/Notes/Patterns/service-credential-design.md", "canonical"),
         ("mutation.lock", "disposable-runtime"),
         ("Knowledge Base/Notes/a.md.tmp", "disposable-runtime"),
     ],
@@ -282,6 +285,7 @@ def test_artifact_and_checkpoint_publication_fsync_their_directories(
         context=_context(operation_id="durable-release"),
         artifact_reference=exported.artifact_reference,
         reason_code="EXPORT_DELIVERED",
+        export_root=artifact_root,
     )
 
     assert artifact_root in synced
@@ -664,16 +668,23 @@ def test_export_release_checkpoint_is_private_content_minimal_and_idempotent(
 ) -> None:
     store = portability.LifecycleCheckpointStore(tmp_path / "state")
     context = _context(operation_id="release-op-1")
+    export_root = tmp_path / "exports"
+    export_root.mkdir()
+    artifact = export_root / f"exomem-export-{'a' * 64}.zip"
+    artifact.write_bytes(b"verified export")
 
     first = store.release_export(
         context=context,
         artifact_reference=f"exomem-export://sha256/{'a' * 64}",
         reason_code="EXPORT_DELIVERED",
+        export_root=export_root,
     )
+    assert not artifact.exists()
     replay = store.release_export(
         context=context,
         artifact_reference=f"exomem-export://sha256/{'a' * 64}",
         reason_code="EXPORT_DELIVERED",
+        export_root=export_root,
     )
 
     assert first.state == "export-released"
@@ -690,6 +701,7 @@ def test_export_release_checkpoint_is_private_content_minimal_and_idempotent(
             context=context,
             artifact_reference=f"exomem-export://sha256/{'b' * 64}",
             reason_code="EXPORT_DELIVERED",
+            export_root=export_root,
         )
     assert _error_code(exc) == "CHECKPOINT_CONFLICT"
 
@@ -721,6 +733,46 @@ def test_deletion_seal_requires_stopped_routing_and_disclaims_external_deletion(
     assert replay.replayed is True
 
 
+def test_export_release_replay_finishes_cleanup_after_unlink_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = portability.LifecycleCheckpointStore(tmp_path / "state")
+    context = _context(operation_id="release-cleanup-retry")
+    export_root = tmp_path / "exports"
+    export_root.mkdir()
+    artifact = export_root / f"exomem-export-{'e' * 64}.zip"
+    artifact.write_bytes(b"verified export")
+    original_unlink = Path.unlink
+    failed = False
+
+    def fail_artifact_once(path: Path, *args, **kwargs):
+        nonlocal failed
+        if path == artifact and not failed:
+            failed = True
+            raise OSError("simulated cleanup failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_artifact_once)
+    with pytest.raises(portability.PortabilityError) as exc:
+        store.release_export(
+            context=context,
+            artifact_reference=f"exomem-export://sha256/{'e' * 64}",
+            reason_code="EXPORT_DELIVERED",
+            export_root=export_root,
+        )
+    assert _error_code(exc) == "EXPORT_RELEASE_CLEANUP_FAILED"
+    assert artifact.exists()
+
+    replay = store.release_export(
+        context=context,
+        artifact_reference=f"exomem-export://sha256/{'e' * 64}",
+        reason_code="EXPORT_DELIVERED",
+        export_root=export_root,
+    )
+    assert replay.replayed is True
+    assert not artifact.exists()
+
+
 def test_portability_hooks_reject_unauthorized_operator_context(tmp_path: Path) -> None:
     store = portability.LifecycleCheckpointStore(tmp_path / "state")
     unauthorized = _context(operator_authorized=False)
@@ -729,6 +781,7 @@ def test_portability_hooks_reject_unauthorized_operator_context(tmp_path: Path) 
             context=unauthorized,
             artifact_reference=f"exomem-export://sha256/{'a' * 64}",
             reason_code="EXPORT_DELIVERED",
+            export_root=tmp_path,
         )
     with pytest.raises(portability.PortabilityError) as delete_exc:
         store.seal_for_deletion(
@@ -779,6 +832,7 @@ def test_interrupted_export_and_checkpoint_files_are_retryable(tmp_path: Path) -
         context=_context(operation_id="retry-op"),
         artifact_reference=first.artifact_reference,
         reason_code="EXPORT_DELIVERED",
+        export_root=artifact_root,
     )
     assert checkpoint.state == "export-released"
     assert stale_checkpoint.read_text(encoding="utf-8") == "interrupted checkpoint"
@@ -788,12 +842,19 @@ def test_concurrent_checkpoint_commit_adopts_one_atomic_result(tmp_path: Path) -
     store = portability.LifecycleCheckpointStore(tmp_path / "state")
     context = _context(operation_id="concurrent-release-op")
     artifact_reference = f"exomem-export://sha256/{'c' * 64}"
+    export_root = tmp_path / "exports"
+    export_root.mkdir()
+    artifact = export_root / f"exomem-export-{'c' * 64}.zip"
+    artifact.write_bytes(b"verified export")
+    unrelated = export_root / f"exomem-export-{'d' * 64}.zip"
+    unrelated.write_bytes(b"another export")
 
     def release(_index: int) -> portability.LifecycleCheckpoint:
         return store.release_export(
             context=context,
             artifact_reference=artifact_reference,
             reason_code="EXPORT_DELIVERED",
+            export_root=export_root,
         )
 
     with ThreadPoolExecutor(max_workers=8) as pool:
@@ -801,4 +862,6 @@ def test_concurrent_checkpoint_commit_adopts_one_atomic_result(tmp_path: Path) -
 
     assert len({checkpoint.checkpoint_digest for checkpoint in checkpoints}) == 1
     assert sum(not checkpoint.replayed for checkpoint in checkpoints) == 1
+    assert not artifact.exists()
+    assert unrelated.read_bytes() == b"another export"
     assert not list((tmp_path / "state").rglob(".*.json.partial"))

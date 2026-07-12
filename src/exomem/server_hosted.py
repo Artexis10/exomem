@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import errno
+import hashlib
 import hmac
 import json
 import logging
 import os
+import re
 import stat
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
@@ -22,7 +24,7 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from . import cli_ops, hosted_runtime
+from . import cli_ops, hosted_portability, hosted_runtime
 from . import commands as commands_module
 from . import hosted_gateway as gateway
 from .hosted_runtime import (
@@ -31,6 +33,7 @@ from .hosted_runtime import (
     HostedLifecycleError,
 )
 from .vault import VaultPathError, resolve_under_vault
+from .writer_lease import IdempotencyStore
 
 _call_log = logging.getLogger("exomem.calls")
 _MAX_COMMAND_BODY_BYTES = 1024 * 1024
@@ -162,6 +165,23 @@ def _status_for(code: str) -> int:
         return 503
     if code in {"TOO_LARGE", "HOSTED_TRANSFER_LIMIT_INVALID"}:
         return 413
+    if code in {"RESOURCE_LIMIT_EXCEEDED", "ARCHIVE_SIZE_MISMATCH"}:
+        return 413
+    if code.startswith("INVALID_") or code in {
+        "UNAUTHORIZED_PORTABILITY",
+        "UNSAFE_ARCHIVE_ENTRY",
+        "MANIFEST_MISSING",
+    }:
+        return 400
+    if code in {
+        "CELL_NOT_QUIESCED",
+        "ROUTING_NOT_STOPPED",
+        "QUIESCENCE_INCOMPLETE",
+        "CHECKPOINT_CONFLICT",
+        "HOSTED_NOT_QUIESCED",
+        "HOSTED_ROUTING_NOT_STOPPED",
+    }:
+        return 409
     if code == "INTERNAL":
         return 500
     return cli_ops.http_status_for(code)
@@ -449,12 +469,19 @@ def _validate_upload_metadata(form: Any, upload: UploadFile) -> dict[str, str | 
     }
 
 
-def _measure_and_rewind_upload(upload: UploadFile) -> int:
+def _measure_and_rewind_upload(upload: UploadFile) -> tuple[int, str]:
     stream = upload.file
-    stream.seek(0, os.SEEK_END)
-    size = stream.tell()
     stream.seek(0)
-    return size
+    digest = hashlib.sha256()
+    size = 0
+    while True:
+        chunk = stream.read(64 * 1024)
+        if not chunk:
+            break
+        size += len(chunk)
+        digest.update(chunk)
+    stream.seek(0)
+    return size, digest.hexdigest()
 
 
 def _open_bounded_vault_file(
@@ -585,6 +612,7 @@ def register_hosted_routes(
         invoke = invoke_command
     guard_factory = mutation_guard_factory or _default_mutation_guard
     preserve_stream = preserve_stream_func or _default_preserve_stream
+    upload_idempotency = IdempotencyStore(config.state_root / "idempotency-hosted.sqlite")
 
     @mcp_app.custom_route("/private/exomem/v1/contract", methods=["GET"])
     async def _contract(request: Request) -> Response:
@@ -628,8 +656,9 @@ def register_hosted_routes(
             context = _trusted_context(request, config)
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="ready", started=started)
+        readiness = lifecycle.readiness()
         return _success_response(
-            lifecycle.readiness().as_dict(),
+            {**readiness.as_dict(), **lifecycle.control_plane_readiness()},
             config=config,
             operation="ready",
             request_id=context.request_id,
@@ -770,6 +799,206 @@ def register_hosted_routes(
             started=started,
         )
 
+    def portability_context(
+        *,
+        operation_id: str,
+        created_at: str,
+        lifecycle_state: str,
+        routing_stopped: bool,
+    ) -> hosted_portability.PortabilityContext:
+        readiness = lifecycle.readiness()
+        return hosted_portability.PortabilityContext(
+            cell_id=config.cell_id,
+            vault_id=config.cell_id,
+            operation_id=operation_id,
+            created_at=created_at,
+            operator_authorized=True,
+            lifecycle_state=lifecycle_state,
+            routing_stopped=routing_stopped,
+            active_mutations=0,
+            background_writers_stopped=readiness.phase in {"quiesced", "sealed"},
+            reads_allowed=readiness.read_admitted,
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/lifecycle/export", methods=["POST"])
+    async def _export(request: Request) -> HostedJSONResponse:
+        context, error, started = await lifecycle_context(request, "export")
+        if error is not None:
+            return error
+        assert context is not None
+        try:
+            body = await _json_body(request)
+            if set(body) != {"operation_id", "created_at"}:
+                raise gateway.HostedGatewayError(
+                    "INVALID_BODY", "export requires operation identity and timestamp"
+                )
+            routing_stopped = (
+                request.headers.get(gateway.ROUTING_STOPPED_HEADER, "").strip().lower() == "true"
+            )
+            export_context = portability_context(
+                operation_id=str(body["operation_id"]),
+                created_at=str(body["created_at"]),
+                lifecycle_state=lifecycle.readiness().phase,
+                routing_stopped=routing_stopped,
+            )
+            result = await run_in_threadpool(
+                hosted_portability.export_quiesced_vault,
+                config.vault_root,
+                config.state_root / "exports",
+                context=export_context,
+                mutation_guard=guard_factory(config.vault_root),
+            )
+        except (
+            gateway.HostedGatewayError,
+            HostedLifecycleError,
+            hosted_portability.PortabilityError,
+        ) as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="export",
+                request_id=context.request_id,
+                started=started,
+            )
+        return _success_response(
+            {
+                "artifactReference": result.artifact_reference,
+                "archiveSha256": result.archive_sha256,
+                "manifestSha256": result.manifest_sha256,
+                "archiveSize": result.archive_size,
+                "archiveFormat": result.archive_format,
+                "manifestSchemaVersion": result.manifest["schema_version"],
+                "classificationVersion": result.manifest["classification_version"],
+                "releaseVersion": result.manifest["exomem_release"],
+            },
+            config=config,
+            operation="export",
+            request_id=context.request_id,
+            started=started,
+            status=201,
+        )
+
+    @mcp_app.custom_route(
+        "/private/exomem/v1/lifecycle/export/artifact/{archive_sha256}", methods=["GET"]
+    )
+    async def _export_download(request: Request) -> Response:
+        context, error, started = await lifecycle_context(request, "export-download")
+        if error is not None:
+            return error
+        assert context is not None
+        admission: AbstractContextManager[None] | None = None
+        try:
+            archive_sha256 = str(request.path_params.get("archive_sha256", ""))
+            if not re.fullmatch(r"[0-9a-f]{64}", archive_sha256):
+                raise gateway.HostedGatewayError("INVALID_BODY", "archive identity is invalid")
+            if request.query_params:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SELECTOR_REJECTED", "export download does not accept selectors"
+                )
+            archive_root = config.state_root / "exports"
+            archive_path = archive_root / f"exomem-export-{archive_sha256}.zip"
+            admission = lifecycle.admit_transfer()
+            admission.__enter__()
+            verified = await run_in_threadpool(
+                hosted_portability.verify_export_archive,
+                archive_path,
+                expected_cell_id=config.cell_id,
+                expected_vault_id=config.cell_id,
+            )
+            if verified.archive_sha256 != archive_sha256:
+                raise hosted_portability.PortabilityError(
+                    "ARCHIVE_DIGEST_MISMATCH", "archive identity does not match its bytes"
+                )
+            stream, size, _filename = await run_in_threadpool(
+                _open_bounded_vault_file,
+                archive_root,
+                archive_path.name,
+                max_bytes=config.resource_limits.storage_bytes + 32 * 1024 * 1024,
+            )
+        except (
+            gateway.HostedGatewayError,
+            HostedLifecycleError,
+            hosted_portability.PortabilityError,
+            VaultPathError,
+        ) as exc:
+            if admission is not None:
+                admission.__exit__(None, None, None)
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="export-download",
+                request_id=context.request_id,
+                started=started,
+            )
+        _trace(
+            config=config,
+            operation="export-download",
+            request_id=context.request_id,
+            outcome="success",
+            code="OK",
+            started=started,
+        )
+        assert admission is not None
+        return StreamingResponse(
+            _stream_bounded_file(stream, size, admission),
+            status_code=200,
+            media_type="application/zip",
+            headers={
+                "Content-Length": str(size),
+                "Content-Disposition": 'attachment; filename="exomem-export.zip"',
+                "Cache-Control": "private, no-store",
+                "X-Exomem-Archive-Sha256": archive_sha256,
+                "X-Exomem-Manifest-Sha256": str(verified.manifest["overall_digest"]["value"]),
+            },
+        )
+
+    @mcp_app.custom_route("/private/exomem/v1/lifecycle/export/release", methods=["POST"])
+    async def _release_export(request: Request) -> HostedJSONResponse:
+        context, error, started = await lifecycle_context(request, "release-export")
+        if error is not None:
+            return error
+        assert context is not None
+        try:
+            body = await _json_body(request)
+            allowed = {"operation_id", "created_at", "artifact_reference", "reason_code", "resume"}
+            if set(body) != allowed or not isinstance(body.get("resume"), bool):
+                raise gateway.HostedGatewayError("INVALID_BODY", "export release body is invalid")
+            release_context = portability_context(
+                operation_id=str(body["operation_id"]),
+                created_at=str(body["created_at"]),
+                lifecycle_state="export-prepared",
+                routing_stopped=True,
+            )
+            checkpoint = await run_in_threadpool(
+                hosted_portability.LifecycleCheckpointStore(
+                    config.state_root / "portability-checkpoints"
+                ).release_export,
+                context=release_context,
+                artifact_reference=str(body["artifact_reference"]),
+                reason_code=str(body["reason_code"]),
+                export_root=config.state_root / "exports",
+            )
+            snapshot = lifecycle.resume() if body["resume"] else lifecycle.snapshot()
+        except (
+            gateway.HostedGatewayError,
+            HostedLifecycleError,
+            hosted_portability.PortabilityError,
+        ) as exc:
+            return _error_response(
+                exc.code,
+                config=config,
+                operation="release-export",
+                request_id=context.request_id,
+                started=started,
+            )
+        return _success_response(
+            {**snapshot.as_dict(), **checkpoint.audit_record()},
+            config=config,
+            operation="release-export",
+            request_id=context.request_id,
+            started=started,
+        )
+
     @mcp_app.custom_route("/private/exomem/v1/lifecycle/resume", methods=["POST"])
     async def _resume(request: Request) -> HostedJSONResponse:
         context, error, started = await lifecycle_context(request, "resume")
@@ -805,14 +1034,31 @@ def register_hosted_routes(
         assert context is not None
         try:
             body = await _json_body(request)
-            if body:
-                raise gateway.HostedGatewayError("INVALID_BODY", "seal body must be empty")
+            allowed = {"operation_id", "created_at", "reason_code"}
             if request.headers.get(gateway.ROUTING_STOPPED_HEADER, "").strip().lower() != "true":
                 raise gateway.HostedGatewayError(
                     "HOSTED_ROUTING_NOT_STOPPED", "public routing must be stopped"
                 )
+            if set(body) != allowed:
+                raise gateway.HostedGatewayError("INVALID_BODY", "seal body is invalid")
             result = await run_in_threadpool(lifecycle.seal_for_deletion)
-        except (gateway.HostedGatewayError, HostedLifecycleError) as exc:
+            checkpoint = await run_in_threadpool(
+                hosted_portability.LifecycleCheckpointStore(
+                    config.state_root / "portability-checkpoints"
+                ).seal_for_deletion,
+                context=portability_context(
+                    operation_id=str(body["operation_id"]),
+                    created_at=str(body["created_at"]),
+                    lifecycle_state="deletion-quiesced",
+                    routing_stopped=True,
+                ),
+                reason_code=str(body["reason_code"]),
+            )
+        except (
+            gateway.HostedGatewayError,
+            HostedLifecycleError,
+            hosted_portability.PortabilityError,
+        ) as exc:
             return _error_response(
                 exc.code,
                 config=config,
@@ -821,7 +1067,7 @@ def register_hosted_routes(
                 started=started,
             )
         return _success_response(
-            result.as_dict(),
+            {**result.as_dict(), **checkpoint.audit_record()},
             config=config,
             operation="seal",
             request_id=context.request_id,
@@ -841,6 +1087,12 @@ def register_hosted_routes(
                 expected_tenant_scope=None,
                 expected_principal_scope=context.principal_scope,
             )
+            idempotency_key = gateway.scoped_idempotency_key(context)
+            if idempotency_key is None:
+                raise cli_ops.OpError(
+                    "IDEMPOTENCY_KEY_REQUIRED",
+                    "hosted uploads require a stable retry identity",
+                )
             max_body_bytes = grant.max_bytes + _MAX_MULTIPART_OVERHEAD_BYTES
             _upload_content_length(request, max_body_bytes=max_body_bytes)
             bounded_request = _bounded_upload_request(request, max_body_bytes=max_body_bytes)
@@ -852,23 +1104,44 @@ def register_hosted_routes(
                 ) as form:
                     upload = _validate_upload_form(form, max_bytes=grant.max_bytes)
                     metadata = _validate_upload_metadata(form, upload)
-                    measured_size = await run_in_threadpool(_measure_and_rewind_upload, upload)
+                    measured_size, upload_sha256 = await run_in_threadpool(
+                        _measure_and_rewind_upload, upload
+                    )
                     if measured_size > grant.max_bytes:
                         raise gateway.HostedGatewayError("TOO_LARGE", "upload is too large")
+                    request_digest = hashlib.sha256(
+                        json.dumps(
+                            {
+                                "operation": "upload",
+                                "metadata": metadata,
+                                "content_type": upload.content_type or "",
+                                "size": measured_size,
+                                "sha256": upload_sha256,
+                            },
+                            sort_keys=True,
+                            separators=(",", ":"),
+                            ensure_ascii=False,
+                        ).encode("utf-8")
+                    ).hexdigest()
 
                     def commit_upload() -> Any:
                         with lifecycle.admit_mutation():
                             with guard_factory(config.vault_root):
-                                return preserve_stream(
-                                    config.vault_root,
-                                    scope=metadata["scope"],
-                                    category=metadata["category"],
-                                    filename=metadata["filename"],
-                                    stream=upload.file,
-                                    content_type=upload.content_type,
-                                    description=metadata["description"],
-                                    text=metadata["text"],
-                                    max_bytes=grant.max_bytes,
+                                return upload_idempotency.run(
+                                    idempotency_key,
+                                    request_digest,
+                                    lambda: preserve_stream(
+                                        config.vault_root,
+                                        scope=metadata["scope"],
+                                        category=metadata["category"],
+                                        filename=metadata["filename"],
+                                        stream=upload.file,
+                                        content_type=upload.content_type,
+                                        description=metadata["description"],
+                                        text=metadata["text"],
+                                        max_bytes=grant.max_bytes,
+                                    ),
+                                    reclaim_pending=True,
                                 )
 
                     result = await run_in_threadpool(commit_upload)
@@ -909,7 +1182,7 @@ def register_hosted_routes(
             status=201,
         )
 
-    @mcp_app.custom_route("/private/exomem/v1/download", methods=["GET"])
+    @mcp_app.custom_route("/private/exomem/v1/download", methods=["POST"])
     async def _download(request: Request) -> Response:
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
@@ -926,13 +1199,20 @@ def register_hosted_routes(
             admitted_transfer = lifecycle.admit_transfer()
             admitted_transfer.__enter__()
             transfer_admission = admitted_transfer
-            requested_paths = request.query_params.getlist("path")
-            if len(requested_paths) != 1 or not requested_paths[0].strip():
+            if request.query_params:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_SELECTOR_REJECTED", "download does not accept URL selectors"
+                )
+            body = await _json_body(request)
+            if set(body) != {"path"} or not isinstance(body.get("path"), str):
+                raise gateway.HostedGatewayError("INVALID_PATH", "download path is required")
+            requested_path = str(body["path"])
+            if not requested_path.strip():
                 raise gateway.HostedGatewayError("INVALID_PATH", "download path is required")
             stream, size, filename = await run_in_threadpool(
                 _open_bounded_vault_file,
                 config.vault_root,
-                requested_paths[0],
+                requested_path,
                 max_bytes=grant.max_bytes,
             )
         except VaultPathError as exc:

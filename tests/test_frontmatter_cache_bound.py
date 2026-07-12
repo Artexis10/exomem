@@ -79,3 +79,19 @@ def test_mtime_change_invalidates_entry_within_bound(tmp_path: Path, monkeypatch
     assert updated is not None
     assert updated.title == "Updated title"
     assert parse_calls == 2
+
+
+def test_same_mtime_size_change_invalidates_entry_within_bound(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    _page(page, "First title")
+    cache = find_corpus.FrontmatterCache()
+
+    first = cache.get(page, tmp_path)
+    old_stat = page.stat()
+    _page(page, "A much longer replacement title")
+    os.utime(page, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    updated = cache.get(page, tmp_path)
+
+    assert first is not updated
+    assert updated is not None
+    assert updated.title == "A much longer replacement title"

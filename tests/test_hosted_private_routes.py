@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import io
 import logging
+import os
+import zipfile
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -14,7 +17,17 @@ import httpx
 import pytest
 from fastmcp import FastMCP
 
-from exomem import cli_ops, hosted_runtime, schema, server, server_runtime
+from exomem import (
+    cli_ops,
+    find_corpus,
+    hosted_portability,
+    hosted_runtime,
+    preserve,
+    privacy_log,
+    schema,
+    server,
+    server_runtime,
+)
 from exomem import hosted_gateway as gateway
 from exomem.hosted_runtime import (
     HostedCellConfig,
@@ -79,6 +92,16 @@ def _python_314_inline_route_threadpool(monkeypatch: pytest.MonkeyPatch) -> None
         return function(*args, **kwargs)
 
     monkeypatch.setattr("exomem.server_hosted.run_in_threadpool", inline)
+
+
+@pytest.fixture(autouse=True)
+def _restore_hosted_process_environment(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Hosted startup intentionally mutates process env; keep each test isolated."""
+
+    original = dict(os.environ)
+    yield
+    os.environ.clear()
+    os.environ.update(original)
 
 
 class IsolatedInvoker:
@@ -215,11 +238,13 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         ("GET", "/private/exomem/v1/live"),
         ("GET", "/private/exomem/v1/ready"),
         ("POST", "/private/exomem/v1/lifecycle/quiesce"),
+        ("POST", "/private/exomem/v1/lifecycle/export"),
+        ("POST", "/private/exomem/v1/lifecycle/export/release"),
         ("POST", "/private/exomem/v1/lifecycle/resume"),
         ("POST", "/private/exomem/v1/lifecycle/seal"),
         ("POST", "/private/exomem/v1/command/ask_memory"),
         ("POST", "/private/exomem/v1/upload"),
-        ("GET", "/private/exomem/v1/download"),
+        ("POST", "/private/exomem/v1/download"),
     ]
 
     for method, path in routes:
@@ -230,6 +255,39 @@ def test_every_private_custom_route_manually_requires_service_auth(tmp_path: Pat
         assert config.service_credential not in response.text
 
     assert client.get("/private/exomem/v1/live", headers=valid).status_code == 200
+
+
+def test_private_readiness_is_a_complete_control_plane_binding_proof(tmp_path: Path) -> None:
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-alpha",
+        credential="alpha-private-service-credential-0001",
+    )
+
+    response = client.get("/private/exomem/v1/ready", headers=_headers(config))
+
+    assert response.status_code == 200
+    proof = response.json()["data"]
+    assert proof == {
+        **{
+            "ready": True,
+            "phase": "active",
+            "reason_code": "HOSTED_READY",
+            "read_admitted": True,
+            "write_admitted": True,
+            "degraded": [],
+        },
+        "live": True,
+        "cellId": "cell-alpha",
+        "protocolVersion": config.protocol_version,
+        "releaseVersion": hosted_runtime.__version__,
+        "serviceAuthenticated": True,
+        "mutationAuthority": True,
+        "readAdmission": True,
+        "writeAdmission": True,
+        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "code": "CELL_READY",
+    }
 
 
 def test_private_context_rejects_wrong_cell_protocol_and_selector_attacks(
@@ -424,18 +482,275 @@ def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:
     )
     assert read_while_quiesced.status_code == 200
 
-    assert (
-        client.post("/private/exomem/v1/lifecycle/seal", headers=headers).json()["error"]["code"]
-        == "HOSTED_ROUTING_NOT_STOPPED"
-    )
+    routing_open = client.post("/private/exomem/v1/lifecycle/seal", headers=headers)
+    assert routing_open.status_code == 409
+    assert routing_open.json()["error"]["code"] == "HOSTED_ROUTING_NOT_STOPPED"
     sealed = client.post(
         "/private/exomem/v1/lifecycle/seal",
         headers={**headers, gateway.ROUTING_STOPPED_HEADER: "true"},
+        json={
+            "operation_id": "44444444-4444-4444-8444-444444444444",
+            "created_at": "2026-07-12T14:45:00+00:00",
+            "reason_code": "DELETION_CONFIRMED",
+        },
     )
     assert sealed.status_code == 200
     assert sealed.json()["data"]["phase"] == "sealed"
     assert lifecycle.readiness().read_admitted is False
     assert client.post("/private/exomem/v1/lifecycle/resume", headers=headers).status_code == 503
+
+
+def test_private_export_is_verified_downloadable_and_explicitly_released(
+    tmp_path: Path,
+) -> None:
+    client, config, lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-alpha",
+        credential="alpha-private-service-credential-0001",
+    )
+    headers = _headers(config)
+    operation_id = "33333333-3333-4333-8333-333333333333"
+    created_at = "2026-07-12T14:30:00+00:00"
+    sentinel = "PRIVATE-EXPORT-CANONICAL-SENTINEL"
+    note = config.vault_root / "Knowledge Base" / "Notes" / "Insights" / "exported.md"
+    note.parent.mkdir(parents=True, exist_ok=True)
+    note.write_text(f"# Exported\n\n{sentinel}\n", encoding="utf-8")
+
+    assert (
+        client.post(
+            "/private/exomem/v1/lifecycle/quiesce",
+            headers=headers,
+            json={"timeout_seconds": 1},
+        ).status_code
+        == 200
+    )
+    exported = client.post(
+        "/private/exomem/v1/lifecycle/export",
+        headers={**headers, gateway.ROUTING_STOPPED_HEADER: "true"},
+        json={"operation_id": operation_id, "created_at": created_at},
+    )
+
+    assert exported.status_code == 201, exported.text
+    descriptor = exported.json()["data"]
+    assert descriptor["artifactReference"].startswith("exomem-export://sha256/")
+    assert descriptor["archiveSha256"] in descriptor["artifactReference"]
+    assert descriptor["manifestSha256"]
+    assert str(config.vault_root) not in exported.text
+    assert sentinel not in exported.text
+
+    downloaded = client.get(
+        "/private/exomem/v1/lifecycle/export/artifact/" + descriptor["archiveSha256"],
+        headers=headers,
+    )
+    assert downloaded.status_code == 200, downloaded.text
+    assert downloaded.headers["x-exomem-archive-sha256"] == descriptor["archiveSha256"]
+    with zipfile.ZipFile(io.BytesIO(downloaded.content)) as archive:
+        assert sentinel in archive.read("Knowledge Base/Notes/Insights/exported.md").decode("utf-8")
+
+    released = client.post(
+        "/private/exomem/v1/lifecycle/export/release",
+        headers=headers,
+        json={
+            "operation_id": operation_id,
+            "created_at": created_at,
+            "artifact_reference": descriptor["artifactReference"],
+            "reason_code": "EXPORT_STORED",
+            "resume": True,
+        },
+    )
+    assert released.status_code == 200, released.text
+    assert released.json()["data"]["phase"] == "active"
+    assert released.json()["data"]["state"] == "export-released"
+    assert lifecycle.readiness().write_admitted is True
+
+    removed = client.get(
+        "/private/exomem/v1/lifecycle/export/artifact/" + descriptor["archiveSha256"],
+        headers=headers,
+    )
+    assert removed.status_code != 200
+
+    replayed = client.post(
+        "/private/exomem/v1/lifecycle/export/release",
+        headers=headers,
+        json={
+            "operation_id": operation_id,
+            "created_at": created_at,
+            "artifact_reference": descriptor["artifactReference"],
+            "reason_code": "EXPORT_STORED",
+            "resume": True,
+        },
+    )
+    assert replayed.status_code == 200, replayed.text
+    assert replayed.json()["data"]["replayed"] is True
+    assert replayed.json()["data"]["phase"] == "active"
+
+
+def test_local_two_cell_alpha_lifecycle_drill_preserves_isolation(tmp_path: Path) -> None:
+    """Exercise the complete cell-owned half of the hosted alpha handoff."""
+
+    alpha, alpha_config, alpha_lifecycle, _alpha_invoker = _cell(
+        tmp_path,
+        cell_id="cell-alpha",
+        credential="alpha-private-service-credential-0001",
+    )
+    bravo, bravo_config, _bravo_lifecycle, _bravo_invoker = _cell(
+        tmp_path,
+        cell_id="cell-bravo",
+        credential="bravo-private-service-credential-0002",
+    )
+    alpha_headers = _headers(
+        alpha_config,
+        principal=SHARED_PRINCIPAL,
+        idempotency_key="same-visible-retry-key",
+    )
+    bravo_headers = _headers(
+        bravo_config,
+        principal=SHARED_PRINCIPAL,
+        idempotency_key="same-visible-retry-key",
+    )
+
+    alpha_capture = alpha.post(
+        "/private/exomem/v1/command/remember",
+        headers=alpha_headers,
+        json=_remember_body("ALPHA-DRILL-SENTINEL"),
+    )
+    bravo_capture = bravo.post(
+        "/private/exomem/v1/command/remember",
+        headers=bravo_headers,
+        json=_remember_body("BRAVO-DRILL-SENTINEL"),
+    )
+    assert alpha_capture.status_code == bravo_capture.status_code == 200
+    assert alpha_capture.json()["data"]["path"] == bravo_capture.json()["data"]["path"]
+
+    for client, config, own, foreign in (
+        (alpha, alpha_config, "ALPHA-DRILL-SENTINEL", "BRAVO-DRILL-SENTINEL"),
+        (bravo, bravo_config, "BRAVO-DRILL-SENTINEL", "ALPHA-DRILL-SENTINEL"),
+    ):
+        recall = client.post(
+            "/private/exomem/v1/command/ask_memory",
+            headers=_headers(config, principal=SHARED_PRINCIPAL),
+            json={"query": own, "mode": "keyword", "detail": "full"},
+        )
+        assert recall.status_code == 200, recall.text
+        assert own in recall.text
+        assert foreign not in recall.text
+
+    # Derived state is deliberately absent from the portable restore.
+    derived = alpha_config.vault_root / "Knowledge Base" / ".embeddings.sqlite"
+    derived.write_bytes(b"ALPHA-DERIVED-MUST-NOT-PORT")
+    operation_id = "55555555-5555-4555-8555-555555555555"
+    created_at = "2026-07-12T15:00:00+00:00"
+    assert (
+        alpha.post(
+            "/private/exomem/v1/lifecycle/quiesce",
+            headers=_headers(alpha_config),
+            json={"timeout_seconds": 1},
+        ).status_code
+        == 200
+    )
+    exported = alpha.post(
+        "/private/exomem/v1/lifecycle/export",
+        headers={
+            **_headers(alpha_config),
+            gateway.ROUTING_STOPPED_HEADER: "true",
+        },
+        json={"operation_id": operation_id, "created_at": created_at},
+    )
+    assert exported.status_code == 201, exported.text
+    descriptor = exported.json()["data"]
+    archive = alpha.get(
+        f"/private/exomem/v1/lifecycle/export/artifact/{descriptor['archiveSha256']}",
+        headers=_headers(alpha_config),
+    )
+    assert archive.status_code == 200
+    downloaded = tmp_path / "alpha-export.zip"
+    downloaded.write_bytes(archive.content)
+
+    prepared = hosted_portability.prepare_restore(
+        downloaded,
+        tmp_path / "alpha-restore-staging",
+        context=hosted_portability.PortabilityContext(
+            cell_id="cell-alpha-replacement",
+            vault_id="cell-alpha",
+            operation_id="66666666-6666-4666-8666-666666666666",
+            created_at=created_at,
+            operator_authorized=True,
+            lifecycle_state="restore-staging",
+            routing_stopped=True,
+            active_mutations=0,
+            background_writers_stopped=True,
+            reads_allowed=True,
+        ),
+        expected_source_cell_id="cell-alpha",
+    )
+    restored = hosted_portability.publish_prepared_restore(
+        prepared,
+        tmp_path / "alpha-restored-live",
+    )
+    restored_text = "".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in restored.live_root.rglob("*.md")
+    )
+    assert "ALPHA-DRILL-SENTINEL" in restored_text
+    assert "BRAVO-DRILL-SENTINEL" not in restored_text
+    assert not (restored.live_root / "Knowledge Base" / ".embeddings.sqlite").exists()
+    assert restored.lexical_ready is True
+
+    released = alpha.post(
+        "/private/exomem/v1/lifecycle/export/release",
+        headers=_headers(alpha_config),
+        json={
+            "operation_id": operation_id,
+            "created_at": created_at,
+            "artifact_reference": descriptor["artifactReference"],
+            "reason_code": "EXPORT_STORED",
+            "resume": True,
+        },
+    )
+    assert released.status_code == 200
+    assert alpha_lifecycle.readiness().write_admitted is True
+
+    assert (
+        alpha.post(
+            "/private/exomem/v1/lifecycle/quiesce",
+            headers=_headers(alpha_config),
+            json={"timeout_seconds": 1},
+        ).status_code
+        == 200
+    )
+    sealed = alpha.post(
+        "/private/exomem/v1/lifecycle/seal",
+        headers={
+            **_headers(alpha_config),
+            gateway.ROUTING_STOPPED_HEADER: "true",
+        },
+        json={
+            "operation_id": "77777777-7777-4777-8777-777777777777",
+            "created_at": created_at,
+            "reason_code": "DELETION_CONFIRMED",
+        },
+    )
+    assert sealed.status_code == 200
+    assert alpha_lifecycle.readiness().read_admitted is False
+
+    bravo_still_available = bravo.post(
+        "/private/exomem/v1/command/remember",
+        headers=_headers(
+            bravo_config,
+            principal=SHARED_PRINCIPAL,
+            idempotency_key="bravo-after-alpha-seal",
+        ),
+        json={
+            "note_type": "insight",
+            "title": "Bravo remains available",
+            "content": "# Bravo remains available\n\nBRAVO-STILL-AVAILABLE\n",
+        },
+    )
+    assert bravo_still_available.status_code == 200, bravo_still_available.text
+    assert "BRAVO-STILL-AVAILABLE" in "".join(
+        path.read_text(encoding="utf-8", errors="replace")
+        for path in bravo_config.vault_root.rglob("*.md")
+    )
 
 
 def test_hosted_call_traces_and_errors_omit_query_path_and_arguments(
@@ -477,6 +792,55 @@ def test_hosted_call_traces_and_errors_omit_query_path_and_arguments(
     assert SENSITIVE_PATH not in failure.text
     assert SENSITIVE_QUERY not in caplog.text
     assert SENSITIVE_PATH not in caplog.text
+
+
+def test_hosted_core_logs_omit_paths_and_malformed_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv(hosted_runtime.HOSTED_MODE_ENV, "true")
+    privacy_log.install_hosted_log_redaction()
+    vault_root = tmp_path / "vault-private-sentinel"
+    kb = vault_root / "Knowledge Base"
+    kb.mkdir(parents=True)
+    malformed = kb / "private-yaml-sentinel.md"
+    malformed.write_text(
+        "---\nsecret-private-sentinel: [\n---\n# Private\n",
+        encoding="utf-8",
+    )
+
+    caplog.set_level(logging.WARNING)
+    assert find_corpus.parse_page(malformed, malformed.stat().st_mtime, vault_root) is not None
+
+    (kb / "index.md").write_text("# Index\n", encoding="utf-8")
+    (kb / "log.md").write_text("# Log\n", encoding="utf-8")
+    monkeypatch.setattr(
+        preserve,
+        "batch_atomic_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("private-preserve-exception-sentinel")
+        ),
+    )
+    with pytest.raises(RuntimeError, match="private-preserve-exception-sentinel"):
+        preserve.preserve(
+            vault_root,
+            scope="source",
+            category="test",
+            filename="private-artifact-sentinel.txt",
+            content="private-body-sentinel",
+        )
+
+    assert "private-yaml-sentinel" not in caplog.text
+    assert "secret-private-sentinel" not in caplog.text
+    assert "private-preserve-exception-sentinel" not in caplog.text
+    assert "private-artifact-sentinel" not in caplog.text
+    assert "HOSTED_CONTENT_REDACTED" in caplog.text
+
+    logging.getLogger("exomem.note").exception(
+        "title-derived-path=%s", "private-note-path-sentinel"
+    )
+    assert "private-note-path-sentinel" not in caplog.text
     assert DEFAULT_PRINCIPAL not in caplog.text
 
     middleware = server.CallTraceMiddleware(hosted=True)
@@ -516,7 +880,7 @@ def test_hosted_upload_holds_injected_mutation_guard_only_around_commit(
     oversized = client.post(
         "/private/exomem/v1/upload",
         headers={
-            **_headers(config),
+            **_headers(config, idempotency_key="upload-proof-001"),
             gateway.TRANSFER_GRANT_HEADER: small_grant,
         },
         files={"file": ("too-large.bin", b"123456789", "application/octet-stream")},
@@ -535,7 +899,7 @@ def test_hosted_upload_holds_injected_mutation_guard_only_around_commit(
         max_bytes=128,
     )
     headers = {
-        **_headers(config),
+        **_headers(config, idempotency_key="upload-proof-001"),
         gateway.TRANSFER_GRANT_HEADER: grant,
     }
     uploaded = client.post(
@@ -550,13 +914,40 @@ def test_hosted_upload_holds_injected_mutation_guard_only_around_commit(
     path = uploaded.json()["data"]["path"]
     assert (config.vault_root / path).read_bytes() == b"private evidence"
 
+    replay_grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-001",
+        principal_scope=DEFAULT_PRINCIPAL,
+        operation="upload",
+        jti="upload-grant-replay",
+        max_bytes=128,
+    )
     replay = client.post(
         "/private/exomem/v1/upload",
-        headers=headers,
+        headers={**headers, gateway.TRANSFER_GRANT_HEADER: replay_grant},
+        files={"file": ("proof.bin", b"private evidence", "application/octet-stream")},
+        data={"scope": "Case", "category": "Evidence"},
+    )
+    assert replay.status_code == 201, replay.text
+    assert replay.json()["data"] == uploaded.json()["data"]
+    assert events == ["guard-enter", "guard-exit", "guard-enter", "guard-exit"]
+
+    conflict_grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-001",
+        principal_scope=DEFAULT_PRINCIPAL,
+        operation="upload",
+        jti="upload-grant-conflict",
+        max_bytes=128,
+    )
+    conflict = client.post(
+        "/private/exomem/v1/upload",
+        headers={**headers, gateway.TRANSFER_GRANT_HEADER: conflict_grant},
         files={"file": ("proof.bin", b"changed", "application/octet-stream")},
         data={"scope": "Case", "category": "Evidence"},
     )
-    assert replay.status_code == 409
+    assert conflict.status_code == 409
+    assert conflict.json()["error"]["code"] == "IDEMPOTENCY_KEY_REUSED"
     assert (config.vault_root / path).read_bytes() == b"private evidence"
 
 
@@ -611,24 +1002,24 @@ def test_hosted_transfer_scope_expiry_cross_cell_and_download_isolation(tmp_path
         gateway.TRANSFER_GRANT_HEADER: bravo_grant,
     }
     assert (
-        alpha.get(
-            "/private/exomem/v1/download", headers=alpha_headers, params={"path": relative}
+        alpha.post(
+            "/private/exomem/v1/download", headers=alpha_headers, json={"path": relative}
         ).content
         == b"ALPHA-DOWNLOAD"
     )
     assert (
-        bravo.get(
-            "/private/exomem/v1/download", headers=bravo_headers, params={"path": relative}
+        bravo.post(
+            "/private/exomem/v1/download", headers=bravo_headers, json={"path": relative}
         ).content
         == b"BRAVO-DOWNLOAD"
     )
 
     symlink = alpha_config.vault_root / "Knowledge Base" / "Notes" / "link.md"
     symlink.symlink_to("shared.md")
-    symlink_response = alpha.get(
+    symlink_response = alpha.post(
         "/private/exomem/v1/download",
         headers=alpha_headers,
-        params={"path": "Knowledge Base/Notes/link.md"},
+        json={"path": "Knowledge Base/Notes/link.md"},
     )
     assert symlink_response.status_code == 400
     assert symlink_response.json()["error"]["code"] == "INVALID_PATH"
@@ -636,18 +1027,18 @@ def test_hosted_transfer_scope_expiry_cross_cell_and_download_isolation(tmp_path
 
     oversized_target = alpha_config.vault_root / "Knowledge Base" / "Notes" / "large.bin"
     oversized_target.write_bytes(b"x" * 65)
-    oversized_download = alpha.get(
+    oversized_download = alpha.post(
         "/private/exomem/v1/download",
         headers=alpha_headers,
-        params={"path": "Knowledge Base/Notes/large.bin"},
+        json={"path": "Knowledge Base/Notes/large.bin"},
     )
     assert oversized_download.status_code == 413
     assert oversized_download.json()["error"]["code"] == "HOSTED_TRANSFER_LIMIT_INVALID"
 
-    cross_cell = bravo.get(
+    cross_cell = bravo.post(
         "/private/exomem/v1/download",
         headers={**bravo_headers, gateway.TRANSFER_GRANT_HEADER: alpha_grant},
-        params={"path": relative},
+        json={"path": relative},
     )
     wrong_operation = alpha.post(
         "/private/exomem/v1/upload",
@@ -665,10 +1056,10 @@ def test_hosted_transfer_scope_expiry_cross_cell_and_download_isolation(tmp_path
         now=1,
         ttl_seconds=1,
     )
-    expired_response = alpha.get(
+    expired_response = alpha.post(
         "/private/exomem/v1/download",
         headers={**alpha_headers, gateway.TRANSFER_GRANT_HEADER: expired},
-        params={"path": relative},
+        json={"path": relative},
     )
     for response in (cross_cell, wrong_operation, expired_response):
         assert response.status_code in {401, 403}, response.text

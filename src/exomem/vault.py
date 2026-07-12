@@ -25,7 +25,7 @@ from typing import Any
 import yaml
 from slugify import slugify as _slugify
 
-from . import freshness
+from . import freshness, privacy_log
 from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
@@ -414,6 +414,8 @@ def resolve_under_vault(
         raise VaultPathError(code="INVALID_PATH", reason="path is empty")
 
     rel = raw.replace("\\", "/").lstrip("/")
+    if privacy_log.is_reserved_hosted_vault_path(rel):
+        raise VaultPathError(code="INVALID_PATH", reason="path is reserved by hosted runtime")
     # Reject absolute paths (drive letters or leading drive)
     if re.match(r"^[a-zA-Z]:", rel):
         raise VaultPathError(

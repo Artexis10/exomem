@@ -117,6 +117,12 @@ resource bounds, sizes, and digests before extracting to a new staging root.
 Publish atomically; then rebuild optional indexes from canonical bytes. Lexical
 recall may become ready while those indexes warm.
 
+After Substrate durably copies and verifies an archive, it explicitly releases
+the export checkpoint. The cell persists that acknowledgement first, removes
+the digest-addressed local ZIP, fsyncs the export directory, and only then
+resumes. Replaying a lost acknowledgement repeats the cleanup safely; a cleanup
+failure leaves the checkpoint replayable and the cell quiesced.
+
 ## Encryption and observability ceiling
 
 The hosted service can provide encrypted tenant volumes, encrypted backups,

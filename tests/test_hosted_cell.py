@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import hosted_runtime, server_runtime
+from exomem import hosted_runtime, server_runtime, vault
 from exomem.hosted_runtime import (
     HostedCellConfig,
     HostedCellLifecycle,
@@ -364,8 +364,9 @@ def test_hosted_initialize_skips_dotenv_and_starts_no_ungranted_workers(
     assert runtime.hosted_config.cell_id == "cell-alpha"
     assert runtime.hosted_lifecycle is not None
     readiness = runtime.hosted_lifecycle.readiness().as_dict()
-    assert readiness["ready"] is False
-    assert readiness["reason_code"] == "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
+    assert readiness["ready"] is True
+    assert readiness["write_admitted"] is True
+    assert readiness["reason_code"] == "HOSTED_READY"
     assert runtime.media_worker is None
     assert runtime.file_watcher is None
     assert SECRET not in repr(runtime)
@@ -702,6 +703,44 @@ def test_deletion_seal_is_idempotent_and_rejects_reads_and_writes(
     assert resume_error.value.code == "HOSTED_DELETION_SEALED"
 
 
+def test_quiesced_and_sealed_admission_survive_process_restart(tmp_path: Path) -> None:
+    _values, config = _provisioned(tmp_path)
+    first = HostedCellLifecycle(config)
+    first.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    first.quiesce(timeout=1)
+
+    restarted_quiesced = HostedCellLifecycle(config)
+    snapshot = restarted_quiesced.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    assert snapshot.phase == "quiesced"
+    assert restarted_quiesced.readiness().read_admitted is True
+    assert restarted_quiesced.readiness().write_admitted is False
+
+    restarted_quiesced.resume()
+    restarted_quiesced.quiesce(timeout=1)
+    restarted_quiesced.seal_for_deletion()
+
+    restarted_sealed = HostedCellLifecycle(config)
+    sealed = restarted_sealed.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=True,
+        service_auth_ready=True,
+    )
+    assert sealed.phase == "sealed"
+    assert restarted_sealed.readiness().read_admitted is False
+    assert restarted_sealed.readiness().write_admitted is False
+    with pytest.raises(HostedLifecycleError) as error:
+        restarted_sealed.resume()
+    assert error.value.code == "HOSTED_DELETION_SEALED"
+
+
 def test_provisioning_is_idempotent_machine_readable_and_non_destructive(
     tmp_path: Path,
 ) -> None:
@@ -782,3 +821,18 @@ def test_provisioning_recreates_missing_runtime_root_without_touching_vault(
     assert result.status == "existing"
     assert canonical.read_bytes() == before
     HostedCellConfig.from_env(values, require_provisioned=True)
+
+
+def test_hosted_runtime_marker_is_not_a_user_addressable_vault_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    marker = tmp_path / ".exomem-hosted-cell.json"
+    marker.write_text('{"private":"binding"}', encoding="utf-8")
+    monkeypatch.setenv(hosted_runtime.HOSTED_MODE_ENV, "true")
+    with pytest.raises(vault.VaultPathError, match="reserved"):
+        vault.resolve_under_vault(tmp_path, marker.name, must_be_file=True)
+
+    monkeypatch.setenv(hosted_runtime.HOSTED_MODE_ENV, "false")
+    resolved, relative = vault.resolve_under_vault(tmp_path, marker.name, must_be_file=True)
+    assert resolved == marker
+    assert relative == marker.name
