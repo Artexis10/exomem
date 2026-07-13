@@ -84,7 +84,7 @@
 
 - [ ] 9.1 Add read-only existing-vault census tests for compact observation coverage, category frequencies, false positives, malformed candidates, schema debt, and relation dispositions.
 - [ ] 9.2 Extend adoption scan-only output with semantic-language census and safe next actions; never rewrite originals or require categories.
-- [ ] 9.3 Implement the portable governed activation manifest that snapshots existing-page ID/hash baselines without page rewrites and survives rebuild/transfer.
+- [x] 9.3 Implement the portable governed activation manifest that snapshots existing-page ID/hash baselines without page rewrites and survives rebuild/transfer.
 - [ ] 9.4 Extend audit/attention/review with malformed-unit, category-governance, strict-schema-drift, and stale relation-disposition findings using stable fingerprints.
 - [ ] 9.5 Add empty-vault, first-note, portable existing-vault activation-manifest, legacy-no-ID/move fallback, direct-editor/new-file, sync-conflict, rebuild/transfer, and registry-upgrade acceptance fixtures.
 - [ ] 9.6 Verify default installs and upgrades do not fabricate observations, categories, relations, IDs, or review decisions.
