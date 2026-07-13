@@ -19,6 +19,8 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, *, require_auth: bool = Fals
         monkeypatch.setenv("GITHUB_CLIENT_ID", "x")
         monkeypatch.setenv("GITHUB_CLIENT_SECRET", "y")
         monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "z")
+        monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "123456")
+        monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "stable-test-signing-root")
     return TestClient(server.build_server(require_auth=require_auth).http_app())
 
 
