@@ -1,14 +1,14 @@
 ## 1. Session Token and Record Contract
 
 - [ ] 1.1 Add failing pure-logic tests for versioned bearer parsing, entropy shape, HMAC verification, constant-time mismatch handling, record context validation, fingerprinted signing-key rotation, and refusal to start HTTP OAuth without explicit signing-key and immutable-user-ID anchors.
-- [ ] 1.2 Implement the opaque token codec, purpose-separated key derivation, and typed session/generation records without storing raw bearer material.
-- [ ] 1.3 Add failing tests that distinguish invalid/revoked records from session-authority failures and cover the concurrent revoke-all/issuance generation race.
+- [x] 1.2 Implement the opaque token codec, purpose-separated key derivation, and typed session/generation records without storing raw bearer material.
+- [x] 1.3 Add failing tests that distinguish invalid/revoked records from session-authority failures and cover the concurrent revoke-all/issuance generation race.
 
 ## 2. Authoritative Session Storage
 
-- [ ] 2.1 Add failing storage tests for encrypted single-node persistence, fingerprinted namespaces, remote cross-replica reads, uncached generation checks, permanent tombstones, key-rotation 401 behavior, and stale-local non-resurrection.
-- [ ] 2.2 Implement `SessionAuthority` with encrypted local and remote-canonical HA backends, fingerprinted collections, permanent tombstones, atomically initialized/randomly replaced generations, and fail-closed exceptions.
-- [ ] 2.3 Add bearer-authenticated collection enumeration to the internal coordinator state API and remote storage adapter, with tests proving HA refuses an empty storage credential and enumeration exposes no decrypted bearer material.
+- [x] 2.1 Add failing storage tests for encrypted single-node persistence, fingerprinted namespaces, remote cross-replica reads, uncached generation checks, permanent tombstones, key-rotation 401 behavior, and stale-local non-resurrection.
+- [x] 2.2 Implement `SessionAuthority` with encrypted local and remote-canonical HA backends, fingerprinted collections, permanent tombstones, atomically initialized/randomly replaced generations, and fail-closed exceptions.
+- [x] 2.3 Add bearer-authenticated collection enumeration to the internal coordinator state API and remote storage adapter, with tests proving HA refuses an empty storage credential and enumeration exposes no decrypted bearer material.
 
 ## 3. OAuth Exchange and Request Validation
 
