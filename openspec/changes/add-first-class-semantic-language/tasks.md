@@ -3,14 +3,14 @@
 - [x] 1.1 Add parser tests for Unicode category grammar/NFKC+casefold, canonical collisions, trailing-only tags, balanced/escaped context, terminal anchors, source spans, bullets outside `## Observations`, fences, `[ ]|[x]|[X]|[-]`, `[take: ]`, punctuation, and malformed candidates.
 - [ ] 1.2 Add normalization/compatibility tests proving compact observations and rich semantic blocks share one result shape while category and governed kind remain distinct, preserve existing rich graph keys, and do not double-parse/store/rank legacy `semantic_blocks` projections.
 - [x] 1.3 Add identity tests for rich IDs, cross-form duplicate anchors, compact anchors, anonymous authored-signature fingerprints, registry-alias stability, stable-ID versus legacy path moves, semantic edits, source-ordered duplicates, and stale references.
-- [ ] 1.4 Add registry tests for open unknown categories, raw/canonical identity, aliases, deprecation/replacement, scopes, custom rich kinds, conflicts, and deterministic proposal output.
+- [x] 1.4 Add registry tests for open unknown categories, raw/canonical identity, aliases, deprecation/replacement, scopes, custom rich kinds, conflicts, and deterministic proposal output.
 
 ## 2. Parser And Semantic Language Registry
 
 - [x] 2.1 Implement the focused semantic-unit data model and compact-observation parser without a model or side effect.
 - [x] 2.2 Compose compact observations with the existing semantic-block parser and emit deterministic structured diagnostics with path/span remediation.
 - [x] 2.3 Implement anchored and fingerprint-bound unit references over durable parent identity, with explicit move-unstable legacy path fallback and duplicate-occurrence invalidation behavior.
-- [ ] 2.4 Add the generic scaffold semantic-language registry for category/kind extensions and implement load/validate/resolve behavior.
+- [x] 2.4 Add the generic scaffold semantic-language registry for category/kind extensions and implement load/validate/resolve behavior.
 - [ ] 2.5 Extend `schema_memory(subject="categories")` with scoped frequency/example/alias proposals and reviewed hash-guarded persistence.
 - [ ] 2.6 Replace independent semantic-block/relation reparsing in downstream read-only consumers with the shared parsed semantic document.
 
