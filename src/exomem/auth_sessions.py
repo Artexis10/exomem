@@ -8,17 +8,24 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import errno
 import hashlib
 import hmac
 import json
 import math
+import os
 import re
 import secrets
 import time
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, BinaryIO, Literal
+
+if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
+    import msvcrt
+else:  # pragma: no cover - branch selection is platform-specific
+    import fcntl
 
 import httpx
 from cryptography.fernet import Fernet, InvalidToken
@@ -44,8 +51,8 @@ class SessionStoreUnavailable(RuntimeError):
 
 @dataclass(frozen=True)
 class SessionKeys:
-    hmac_key: bytes
-    storage_key: bytes
+    hmac_key: bytes = field(repr=False)
+    storage_key: bytes = field(repr=False)
     fingerprint: str
 
 
@@ -83,7 +90,7 @@ def derive_session_keys(signing_root: str) -> SessionKeys:
 @dataclass(frozen=True)
 class ParsedSessionToken:
     session_id: str
-    secret: str
+    secret: str = field(repr=False)
 
 
 class SessionTokenCodec:
@@ -249,7 +256,6 @@ class _EncryptedStorage:
     def __init__(self, storage: Any, storage_key: bytes):
         self.raw = storage
         self._fernet = Fernet(base64.urlsafe_b64encode(storage_key))
-        self._fallback_lock = asyncio.Lock()
 
     @staticmethod
     def _unavailable(action: str, error: Exception) -> SessionStoreUnavailable:
@@ -298,13 +304,11 @@ class _EncryptedStorage:
         encrypted = self._encrypt(value)
         try:
             operation = getattr(self.raw, "put_if_absent", None)
-            if operation is not None:
-                return bool(await operation(key, encrypted, collection=collection))
-            async with self._fallback_lock:
-                if await self.raw.get(key, collection=collection) is not None:
-                    return False
-                await self.raw.put(key, encrypted, collection=collection)
-                return True
+            if operation is None:
+                raise SessionStoreUnavailable(
+                    "session store lacks atomic put-if-absent support"
+                )
+            return bool(await operation(key, encrypted, collection=collection))
         except Exception as error:
             if isinstance(error, SessionStoreUnavailable):
                 raise
@@ -323,7 +327,60 @@ class _EncryptedStorage:
             raise self._unavailable("enumeration", error) from error
 
 
-_LOCAL_ATOMIC_LOCKS: dict[tuple[str, str, str], asyncio.Lock] = {}
+class _InterprocessFileLock:
+    """Portable advisory lock automatically released when its process exits."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        timeout: float = 10.0,
+    ):
+        self.path = path
+        self.timeout = timeout
+        self._handle: BinaryIO | None = None
+
+    def _try_acquire(self) -> bool:
+        handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
+                handle.seek(0)
+                if not handle.read(1):
+                    handle.write(b"\0")
+                    handle.flush()
+                handle.seek(0)
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as error:
+            handle.close()
+            if error.errno in {errno.EACCES, errno.EAGAIN}:
+                return False
+            raise
+        self._handle = handle
+        return True
+
+    async def __aenter__(self) -> _InterprocessFileLock:
+        deadline = time.monotonic() + self.timeout
+        while True:
+            if self._try_acquire():
+                return self
+            if time.monotonic() >= deadline:
+                raise SessionStoreUnavailable(
+                    "timed out acquiring the local session-store lock"
+                ) from None
+            await asyncio.sleep(0.01)
+
+    async def __aexit__(self, *_: object) -> None:
+        if self._handle is None:
+            return
+        if os.name == "nt":  # pragma: no cover - exercised on Windows deployments
+            self._handle.seek(0)
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+        self._handle = None
 
 
 class _LocalFileBackend:
@@ -332,6 +389,8 @@ class _LocalFileBackend:
     def __init__(self, directory: Path):
         self.directory = directory.resolve()
         self.directory.mkdir(parents=True, exist_ok=True)
+        self._lock_directory = self.directory / ".exomem-session-locks"
+        self._lock_directory.mkdir(parents=True, exist_ok=True)
         self.store = FileTreeStore(data_directory=self.directory)
 
     async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
@@ -356,8 +415,8 @@ class _LocalFileBackend:
         ttl: float | None = None,
     ) -> bool:
         collection_name = collection or "default"
-        lock_key = (str(self.directory), collection_name, key)
-        lock = _LOCAL_ATOMIC_LOCKS.setdefault(lock_key, asyncio.Lock())
+        lock_name = hashlib.sha256(f"{collection_name}\0{key}".encode()).hexdigest()
+        lock = _InterprocessFileLock(self._lock_directory / f"{lock_name}.lock")
         async with lock:
             if await self.store.get(key, collection=collection) is not None:
                 return False
@@ -386,14 +445,15 @@ class SessionAuthority:
     ):
         if not issuer or not audience:
             raise ValueError("session issuer and audience are required")
-        self.keys = derive_session_keys(signing_root)
+        keys = derive_session_keys(signing_root)
+        self.fingerprint = keys.fingerprint
         self.issuer = issuer
         self.audience = audience
         self.clock = clock
-        self.codec = SessionTokenCodec(self.keys.hmac_key)
-        self.sessions_collection = f"exomem-auth-sessions-v1-{self.keys.fingerprint}"
-        self.generations_collection = f"exomem-auth-generations-v1-{self.keys.fingerprint}"
-        self._storage = _EncryptedStorage(storage, self.keys.storage_key)
+        self.codec = SessionTokenCodec(keys.hmac_key)
+        self.sessions_collection = f"exomem-auth-sessions-v1-{keys.fingerprint}"
+        self.generations_collection = f"exomem-auth-generations-v1-{keys.fingerprint}"
+        self._storage = _EncryptedStorage(storage, keys.storage_key)
 
     @classmethod
     def local(
@@ -550,11 +610,14 @@ class SessionAuthority:
             record = SessionRecord.from_dict(raw)
         except ValueError:
             return None
+        if record.session_id != parsed.session_id:
+            raise SessionStoreUnavailable(
+                "session record does not match its authoritative storage key"
+            )
         if not self.codec.verify(bearer, record.token_digest):
             return None
         if (
-            record.session_id != parsed.session_id
-            or record.status != "active"
+            record.status != "active"
             or record.issuer != self.issuer
             or record.audience != self.audience
         ):
@@ -587,6 +650,10 @@ class SessionAuthority:
             record = SessionRecord.from_dict(raw)
         except ValueError as error:
             raise SessionStoreUnavailable("session record is corrupt") from error
+        if record.session_id != session_id:
+            raise SessionStoreUnavailable(
+                "session record does not match its authoritative storage key"
+            )
         if record.status == "revoked":
             return True
         await self._write_tombstone(record, reason=reason)
@@ -600,7 +667,12 @@ class SessionAuthority:
             if raw is None:
                 continue
             try:
-                records.append(SessionRecord.from_dict(raw))
+                record = SessionRecord.from_dict(raw)
             except ValueError as error:
                 raise SessionStoreUnavailable("session record is corrupt") from error
+            if record.session_id != key:
+                raise SessionStoreUnavailable(
+                    "session record does not match its authoritative storage key"
+                )
+            records.append(record)
         return sorted(records, key=lambda record: (record.issued_at, record.session_id))

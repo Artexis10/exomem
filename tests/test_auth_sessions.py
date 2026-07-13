@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import multiprocessing
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,7 @@ from exomem.auth_sessions import (
     SessionIdentity,
     SessionStoreUnavailable,
     SessionTokenCodec,
+    _InterprocessFileLock,
     derive_session_keys,
 )
 
@@ -71,6 +73,77 @@ class AtomicMemoryStore:
 
     async def list_keys(self, *, collection: str | None = None) -> list[str]:
         return sorted(key for coll, key in self.data if coll == collection)
+
+
+class NonAtomicMemoryStore:
+    def __init__(self) -> None:
+        self.data: dict[tuple[str | None, str], dict[str, Any]] = {}
+
+    async def get(self, key: str, *, collection: str | None = None) -> dict[str, Any] | None:
+        return self.data.get((collection, key))
+
+    async def put(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str | None = None,
+        ttl: float | None = None,
+    ) -> None:
+        del ttl
+        self.data[(collection, key)] = dict(value)
+
+    async def list_keys(self, *, collection: str | None = None) -> list[str]:
+        return sorted(key for coll, key in self.data if coll == collection)
+
+
+def _multiprocess_generation_worker(
+    directory: str,
+    start: Any,
+    barrier: Any,
+    results: Any,
+) -> None:
+    async def run() -> None:
+        authority = SessionAuthority.local(
+            directory=Path(directory),
+            signing_root="stable-root",
+            issuer="https://memory.example",
+            audience="https://memory.example/mcp",
+        )
+        backend = authority._storage.raw
+        original_get = backend.get
+        original_put = backend.store.put
+        first_generation_read = True
+
+        async def synchronized_get(
+            key: str, *, collection: str | None = None
+        ) -> dict[str, Any] | None:
+            nonlocal first_generation_read
+            value = await original_get(key, collection=collection)
+            if first_generation_read and key == "current":
+                first_generation_read = False
+                await asyncio.to_thread(barrier.wait)
+            return value
+
+        async def delayed_put(*args: Any, **kwargs: Any) -> None:
+            await asyncio.sleep(0.2)
+            await original_put(*args, **kwargs)
+
+        backend.get = synchronized_get
+        backend.store.put = delayed_put
+        await asyncio.to_thread(start.wait)
+        results.put(await authority.current_generation())
+
+    asyncio.run(run())
+
+
+def _multiprocess_lock_holder(path: str, ready: Any, release: Any) -> None:
+    async def run() -> None:
+        async with _InterprocessFileLock(Path(path), timeout=2):
+            ready.set()
+            await asyncio.to_thread(release.wait)
+
+    asyncio.run(run())
 
 
 def _authority(
@@ -137,6 +210,25 @@ def test_key_derivation_is_purpose_separated_and_fingerprinted() -> None:
     assert first.hmac_key != first.storage_key
     assert first.fingerprint != rotated.fingerprint
     assert "explicit-root" not in repr(first)
+
+
+def test_key_and_parsed_token_repr_do_not_expose_secret_material() -> None:
+    keys = derive_session_keys("explicit-root")
+    codec = SessionTokenCodec(keys.hmac_key)
+    bearer, _, _ = codec.issue()
+    parsed = codec.parse(bearer)
+
+    assert parsed is not None
+    assert "hmac_key=" not in repr(keys)
+    assert "storage_key=" not in repr(keys)
+    assert parsed.secret not in repr(parsed)
+
+
+def test_session_authority_exposes_only_nonsecret_key_fingerprint() -> None:
+    authority = _authority(AtomicMemoryStore())
+
+    assert not hasattr(authority, "keys")
+    assert authority.fingerprint == derive_session_keys("test-signing-root").fingerprint
 
 
 def test_identity_normalizes_login_and_rejects_invalid_values() -> None:
@@ -228,6 +320,19 @@ async def test_store_and_cipher_failures_are_distinct_from_invalid_sessions() ->
 
 
 @pytest.mark.anyio
+async def test_generation_initialization_refuses_non_atomic_storage() -> None:
+    authority = SessionAuthority(
+        storage=NonAtomicMemoryStore(),
+        signing_root="stable-root",
+        issuer="https://memory.example",
+        audience="https://memory.example/mcp",
+    )
+
+    with pytest.raises(SessionStoreUnavailable, match="atomic put-if-absent"):
+        await authority.current_generation()
+
+
+@pytest.mark.anyio
 async def test_replace_generation_invalidates_every_existing_session() -> None:
     raw = AtomicMemoryStore()
     authority = _authority(raw)
@@ -254,6 +359,62 @@ async def test_generation_initialization_is_atomic_across_authorities() -> None:
 
     assert first_result[1].generation == second_result[1].generation
     assert await first.validate(second_result[0]) == second_result[1]
+
+
+def test_local_generation_initialization_is_atomic_across_processes(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    start = context.Event()
+    barrier = context.Barrier(2)
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_multiprocess_generation_worker,
+            args=(str(tmp_path), start, barrier, results),
+        )
+        for _ in range(2)
+    ]
+    for process in processes:
+        process.start()
+    start.set()
+    for process in processes:
+        process.join(timeout=20)
+    try:
+        assert [process.exitcode for process in processes] == [0, 0]
+        generations = [results.get(timeout=2) for _ in processes]
+        assert generations[0] == generations[1]
+    finally:
+        for process in processes:
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+
+
+@pytest.mark.anyio
+async def test_live_interprocess_lock_is_never_reclaimed_by_elapsed_time(tmp_path: Path) -> None:
+    context = multiprocessing.get_context("spawn")
+    ready = context.Event()
+    release = context.Event()
+    lock_path = tmp_path / "authority.lock"
+    holder = context.Process(
+        target=_multiprocess_lock_holder,
+        args=(str(lock_path), ready, release),
+    )
+    holder.start()
+    try:
+        assert await asyncio.to_thread(ready.wait, 15)
+        with pytest.raises(SessionStoreUnavailable, match="timed out"):
+            async with _InterprocessFileLock(lock_path, timeout=0.1):
+                pytest.fail("a live interprocess lock was stolen")
+    finally:
+        release.set()
+        holder.join(timeout=5)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(timeout=5)
+    assert holder.exitcode == 0
+
+    async with _InterprocessFileLock(lock_path, timeout=1):
+        pass
 
 
 @pytest.mark.anyio
@@ -303,3 +464,41 @@ async def test_local_authority_encrypts_and_persists_sessions(tmp_path: Path) ->
     disk_text = "".join(path.read_text(encoding="utf-8") for path in tmp_path.rglob("*.json"))
     assert bearer not in disk_text
     assert "person" not in disk_text
+
+
+@pytest.mark.anyio
+async def test_swapped_ciphertext_fails_closed_for_validation_and_tombstone() -> None:
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+    bearer, first = await authority.issue(
+        client_id="first", scopes=("exomem:read",), identity=_identity()
+    )
+    _, second = await authority.issue(
+        client_id="second", scopes=("exomem:read",), identity=_identity()
+    )
+    raw.data[(authority.sessions_collection, first.session_id)] = raw.data[
+        (authority.sessions_collection, second.session_id)
+    ]
+
+    with pytest.raises(SessionStoreUnavailable, match="storage key"):
+        await authority.validate(bearer)
+    with pytest.raises(SessionStoreUnavailable, match="storage key"):
+        await authority.tombstone(first.session_id, reason="operator")
+
+
+@pytest.mark.anyio
+async def test_swapped_ciphertext_fails_closed_during_session_listing() -> None:
+    raw = AtomicMemoryStore()
+    authority = _authority(raw)
+    _, first = await authority.issue(
+        client_id="first", scopes=("exomem:read",), identity=_identity()
+    )
+    _, second = await authority.issue(
+        client_id="second", scopes=("exomem:read",), identity=_identity()
+    )
+    first_key = (authority.sessions_collection, first.session_id)
+    second_key = (authority.sessions_collection, second.session_id)
+    raw.data[first_key], raw.data[second_key] = raw.data[second_key], raw.data[first_key]
+
+    with pytest.raises(SessionStoreUnavailable, match="storage key"):
+        await authority.list_sessions()
