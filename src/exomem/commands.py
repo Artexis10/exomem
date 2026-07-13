@@ -19,6 +19,7 @@ named in `HAND_REGISTERED_EXCEPTIONS`.
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 from importlib.metadata import PackageNotFoundError, version
@@ -101,6 +102,8 @@ from .vault import (
 )
 
 _link_summary = link_summary_module.link_summary
+_CONNECT_MEMORY_DEFAULT_OPERATION = "suggest-links"
+_ADOPT_VAULT_DEFAULT_MODE = "scan-only"
 
 # Keep commands.py as the public command-surface facade for server, CLI, docs,
 # and tests while the implementation lives in command_surface.py.
@@ -3570,7 +3573,7 @@ def op_triage_memory(
 
 def op_connect_memory(
     vault_root: Path,
-    operation: str = "suggest-links",
+    operation: str = _CONNECT_MEMORY_DEFAULT_OPERATION,
     path: str | None = None,
     target: str | None = None,
     query: str | None = None,
@@ -3770,7 +3773,7 @@ def op_connect_memory(
 def op_adopt_vault(
     vault_root: Path,
     path: str = "",
-    mode: str = "scan-only",
+    mode: str = _ADOPT_VAULT_DEFAULT_MODE,
     max_depth: int = overview_module.DEFAULT_MAX_DEPTH,
     include_hidden: bool = False,
     samples: int = 5,
@@ -4218,6 +4221,21 @@ _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
     {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
+_MISSING_SELECTOR_DEFAULT = object()
+
+
+def _resolved_invocation_selector(
+    command: Command, kwargs: dict[str, Any], selector: str
+) -> Any:
+    if selector in kwargs:
+        return kwargs[selector]
+    try:
+        parameter = inspect.signature(command.leaf).parameters.get(selector)
+    except (TypeError, ValueError):
+        return _MISSING_SELECTOR_DEFAULT
+    if parameter is None or parameter.default is inspect.Parameter.empty:
+        return _MISSING_SELECTOR_DEFAULT
+    return parameter.default
 
 
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
@@ -4230,13 +4248,13 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     if command.read_only:
         return True
     if command.name == "connect_memory":
-        operation = "suggest-links" if "operation" not in kwargs else kwargs["operation"]
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
         return (
             isinstance(operation, str)
             and operation in _CONNECT_MEMORY_READ_ONLY_OPERATIONS
         )
     if command.name == "adopt_vault":
-        mode = "scan-only" if "mode" not in kwargs else kwargs["mode"]
+        mode = _resolved_invocation_selector(command, kwargs, "mode")
         return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
     return False
 

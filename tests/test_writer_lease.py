@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -170,6 +171,30 @@ def _unreachable_coordinator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
 
 
+def _recording_product_command(command, calls: list[dict], result: str):  # noqa: ANN001, ANN201
+    selector = {"connect_memory": "operation", "adopt_vault": "mode"}.get(command.name)
+    if selector is None:
+        return replace(
+            command,
+            leaf=lambda _vault_root, **leaf_kwargs: calls.append(leaf_kwargs) or result,
+        )
+
+    default = inspect.signature(command.leaf).parameters[selector].default
+    if selector == "operation":
+
+        def leaf(_vault_root, operation=default, **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append({"operation": operation, **leaf_kwargs})
+            return result
+
+    else:
+
+        def leaf(_vault_root, mode=default, **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append({"mode": mode, **leaf_kwargs})
+            return result
+
+    return replace(command, leaf=leaf)
+
+
 @pytest.mark.parametrize(
     ("command_name", "kwargs"),
     [
@@ -204,13 +229,14 @@ def test_read_only_product_operations_bypass_unreachable_coordinator(
     _unreachable_coordinator(monkeypatch, tmp_path)
     calls: list[dict] = []
     command = next(c for c in product_commands_for("mcp") if c.name == command_name)
-    command = replace(
-        command,
-        leaf=lambda _vault_root, **leaf_kwargs: calls.append(leaf_kwargs) or "read-ok",
-    )
+    command = _recording_product_command(command, calls, "read-ok")
     try:
         assert invoke_command(command, tmp_path, **kwargs) == "read-ok"
-        assert calls == [kwargs]
+        assert len(calls) == 1
+        selector = "operation" if command_name == "connect_memory" else "mode"
+        expected = dict(kwargs)
+        expected.setdefault(selector, inspect.signature(command.leaf).parameters[selector].default)
+        assert calls == [expected]
     finally:
         reset_managers_for_tests()
 
@@ -235,6 +261,55 @@ def test_default_connect_and_adopt_calls_run_during_coordinator_outage(
 
     assert isinstance(suggestions, list)
     assert report["mode"] == "scan-only"
+
+
+@pytest.mark.parametrize(
+    ("command_name", "selector_default"),
+    [
+        pytest.param("connect_memory", inspect.Parameter.empty, id="connect-default-absent"),
+        pytest.param("connect_memory", "future-mode", id="connect-default-unknown"),
+        pytest.param("connect_memory", "create-entity", id="connect-default-write"),
+        pytest.param("adopt_vault", inspect.Parameter.empty, id="adopt-default-absent"),
+        pytest.param("adopt_vault", "future-mode", id="adopt-default-unknown"),
+        pytest.param("adopt_vault", "save-manifest", id="adopt-default-write"),
+    ],
+)
+def test_omitted_selector_fails_closed_when_leaf_default_is_not_known_read_only(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command_name: str,
+    selector_default: object,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    _unreachable_coordinator(monkeypatch, tmp_path)
+    calls: list[dict] = []
+    command = next(c for c in product_commands_for("mcp") if c.name == command_name)
+    if selector_default is inspect.Parameter.empty:
+
+        def leaf(_vault_root, **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append(leaf_kwargs)
+            return "write-ran"
+
+    elif command_name == "connect_memory":
+
+        def leaf(_vault_root, operation=selector_default, **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append({"operation": operation, **leaf_kwargs})
+            return "write-ran"
+
+    else:
+
+        def leaf(_vault_root, mode=selector_default, **leaf_kwargs):  # noqa: ANN001, ANN202
+            calls.append({"mode": mode, **leaf_kwargs})
+            return "write-ran"
+
+    command = replace(command, leaf=leaf)
+    try:
+        with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+            invoke_command(command, tmp_path)
+        assert calls == []
+    finally:
+        reset_managers_for_tests()
 
 
 @pytest.mark.parametrize(
@@ -276,10 +351,7 @@ def test_write_and_unknown_product_operations_fail_closed_without_calling_leaf(
     _unreachable_coordinator(monkeypatch, tmp_path)
     calls: list[dict] = []
     command = next(c for c in product_commands_for("mcp") if c.name == command_name)
-    command = replace(
-        command,
-        leaf=lambda _vault_root, **leaf_kwargs: calls.append(leaf_kwargs) or "write-ran",
-    )
+    command = _recording_product_command(command, calls, "write-ran")
     try:
         with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
             invoke_command(command, tmp_path, **kwargs)
