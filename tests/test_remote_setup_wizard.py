@@ -162,6 +162,14 @@ def test_render_oauth_fields_contains_homepage_and_callback() -> None:
 # ============================================================================
 
 
+def test_default_env_path_is_service_working_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    assert rsw._default_env_path() == tmp_path / ".env"
+
+
 def _run(env_path: Path, doctor_success: bool = True, **overrides):
     lines: list[str] = []
     doctor_calls: list[dict] = []

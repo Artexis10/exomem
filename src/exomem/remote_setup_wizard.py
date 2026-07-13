@@ -207,7 +207,7 @@ def render_oauth_fields(base_url: str) -> str:
 
 
 def _default_env_path() -> Path:
-    return Path(__file__).resolve().parents[2] / ".env"
+    return Path.cwd() / ".env"
 
 
 def _ask(input_fn, prompt: str, default: str = "") -> str:

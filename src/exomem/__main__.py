@@ -111,7 +111,7 @@ def _build_auth_session_authority():
     """
     from dotenv import load_dotenv
 
-    load_dotenv(override=True)
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
     from . import env_compat
 
     env_compat.promote_legacy()
@@ -565,6 +565,12 @@ def _doctor_main(argv: list[str]) -> int:
     )
     args = parser.parse_args(argv)
 
+    from dotenv import load_dotenv
+
+    load_dotenv(dotenv_path=Path.cwd() / ".env", override=True)
+    from . import env_compat
+
+    env_compat.promote_legacy()
     from . import doctor as doctor_module
 
     report = doctor_module.doctor(
