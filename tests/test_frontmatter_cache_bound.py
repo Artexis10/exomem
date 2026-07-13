@@ -40,10 +40,10 @@ def test_cache_hit_within_bound_does_not_parse_again(tmp_path: Path, monkeypatch
     parse_calls = 0
     original_parse_page = find_corpus.parse_page
 
-    def count_parses(path: Path, mtime: float, vault_root: Path):
+    def count_parses(path: Path, mtime: float, vault_root: Path, **kwargs):
         nonlocal parse_calls
         parse_calls += 1
-        return original_parse_page(path, mtime, vault_root)
+        return original_parse_page(path, mtime, vault_root, **kwargs)
 
     monkeypatch.setattr(find_corpus, "parse_page", count_parses)
 
@@ -62,10 +62,10 @@ def test_mtime_change_invalidates_entry_within_bound(tmp_path: Path, monkeypatch
     parse_calls = 0
     original_parse_page = find_corpus.parse_page
 
-    def count_parses(path: Path, mtime: float, vault_root: Path):
+    def count_parses(path: Path, mtime: float, vault_root: Path, **kwargs):
         nonlocal parse_calls
         parse_calls += 1
-        return original_parse_page(path, mtime, vault_root)
+        return original_parse_page(path, mtime, vault_root, **kwargs)
 
     monkeypatch.setattr(find_corpus, "parse_page", count_parses)
 
@@ -79,3 +79,50 @@ def test_mtime_change_invalidates_entry_within_bound(tmp_path: Path, monkeypatch
     assert updated is not None
     assert updated.title == "Updated title"
     assert parse_calls == 2
+
+
+def test_size_change_with_preserved_mtime_invalidates_entry(tmp_path: Path) -> None:
+    page = tmp_path / "page.md"
+    _page(page, "Original title")
+    cache = find_corpus.FrontmatterCache()
+
+    first = cache.get(page, tmp_path)
+    old_stat = page.stat()
+    _page(page, "A much longer updated title")
+    os.utime(page, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
+    assert page.stat().st_mtime_ns == old_stat.st_mtime_ns
+
+    updated = cache.get(page, tmp_path)
+
+    assert first is not updated
+    assert updated is not None
+    assert updated.title == "A much longer updated title"
+
+
+def test_same_size_content_change_with_unchanged_stat_invalidates_entry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    page = tmp_path / "page.md"
+    _page(page, "Original title")
+    cache = find_corpus.FrontmatterCache()
+
+    first = cache.get(page, tmp_path)
+    old_stat = page.stat()
+    old_size = len(page.read_bytes())
+    _page(page, "Modified title")
+    assert len(page.read_bytes()) == old_size
+
+    original_stat = Path.stat
+
+    def frozen_stat(path: Path, *args, **kwargs):
+        if path == page:
+            return old_stat
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", frozen_stat)
+
+    updated = cache.get(page, tmp_path)
+
+    assert first is not updated
+    assert updated is not None
+    assert updated.title == "Modified title"
