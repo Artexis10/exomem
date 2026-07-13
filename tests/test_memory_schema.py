@@ -69,6 +69,29 @@ def test_inference_profiles_fields_blocks_relations_and_enums(tmp_path: Path) ->
     assert proposal["unknown_fields"] == "allow"
 
 
+def test_inference_orders_mixed_field_types_by_contract_type_order(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    schema_dir = vault / "Knowledge Base/_Schema"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "SKILL.md").write_text("# Test schema\n", encoding="utf-8")
+    notes = vault / "Knowledge Base/Notes"
+    notes.mkdir()
+    (notes / "null.md").write_text(
+        "---\ntype: insight\nmixed: null\n---\n\n# Null\n", encoding="utf-8"
+    )
+    (notes / "integer.md").write_text(
+        "---\ntype: insight\nmixed: 1\n---\n\n# Integer\n", encoding="utf-8"
+    )
+
+    result = memory_schema.infer_contract(vault, name="typed-order")
+
+    assert result["proposal"]["fields"]["mixed"]["types"] == ["null", "integer"]
+    assert result["frequencies"]["fields"]["mixed"]["types"] == [
+        "null",
+        "integer",
+    ]
+
+
 def test_contract_inference_and_validation_parse_each_page_once(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -193,6 +216,40 @@ def test_contract_save_requires_hash_for_overwrite(tmp_path: Path) -> None:
         expected_hash=first["saved"]["content_hash"],
     )
     assert overwritten["saved"]["created"] is False
+
+
+def test_named_contract_load_rejects_mismatch_and_symlinks(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    directory = vault / "Knowledge Base/_Schema/contracts"
+    directory.mkdir(parents=True)
+    requested = directory / "requested.yaml"
+    requested.write_text(
+        "schema_version: 1\nname: different\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ValueError, match="filename"):
+        memory_schema.load_contract(vault, "requested")
+
+    requested.unlink()
+    target = tmp_path / "target.yaml"
+    target.write_text("schema_version: 1\nname: requested\n", encoding="utf-8")
+    requested.symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        memory_schema.load_contract(vault, "requested")
+
+    symlink_vault = tmp_path / "symlink-vault"
+    schema_directory = symlink_vault / "Knowledge Base/_Schema"
+    schema_directory.mkdir(parents=True)
+    real_directory = tmp_path / "real-contracts"
+    real_directory.mkdir()
+    (real_directory / "requested.yaml").write_text(
+        "schema_version: 1\nname: requested\n", encoding="utf-8"
+    )
+    (schema_directory / "contracts").symlink_to(
+        real_directory, target_is_directory=True
+    )
+    with pytest.raises(ValueError, match="symlink"):
+        memory_schema.load_contract(symlink_vault, "requested")
 
 
 def test_validate_and_diff_report_corpus_drift_without_mutating_pages(tmp_path: Path) -> None:
@@ -767,3 +824,444 @@ def test_category_profile_retains_rich_kind_scoped_to_any_attached_project(
             ],
         }
     ]
+
+
+def _contract_data(name: str = "contract") -> dict:
+    return {
+        "schema_version": 1,
+        "name": name,
+        "scope": {},
+        "sample_size": 0,
+        "fields": {},
+        "blocks": {},
+        "relations": {},
+    }
+
+
+def test_legacy_contract_loads_with_additive_defaults_and_deterministic_round_trip() -> None:
+    contract = memory_schema.contract_from_dict(_contract_data("legacy"))
+
+    assert contract.validation == "warn"
+    assert contract.kinds == {}
+    assert contract.categories == {}
+    assert contract.unknown_kinds == "allow"
+    assert contract.unknown_categories == "allow"
+    serialized = contract.as_dict()
+    assert list(serialized) == [
+        "schema_version",
+        "name",
+        "scope",
+        "validation",
+        "sample_size",
+        "fields",
+        "blocks",
+        "kinds",
+        "categories",
+        "relations",
+        "unknown_fields",
+        "unknown_blocks",
+        "unknown_kinds",
+        "unknown_categories",
+        "unknown_relations",
+    ]
+    assert memory_schema.contract_from_dict(serialized) == contract
+
+
+@pytest.mark.parametrize(
+    ("updates", "match"),
+    [
+        ({"schema_version": True}, "schema_version"),
+        ({"name": 7}, "name"),
+        ({"sample_size": True}, "sample_size"),
+        ({"sample_size": -1}, "sample_size"),
+        ({"validation": "blocking"}, "validation"),
+        ({"unknown_fields": "sometimes"}, "unknown_fields"),
+        ({"unknown_blocks": False}, "unknown_blocks"),
+        ({"unknown_kinds": 1}, "unknown_kinds"),
+        ({"unknown_categories": "closed"}, "unknown_categories"),
+        ({"unknown_relations": None}, "unknown_relations"),
+        ({"scope": {"project": "atlas", "extra": "no"}}, "scope"),
+        ({"scope": {"project": ""}}, "scope.project"),
+        ({"fields": None}, "fields"),
+        ({"fields": {1: {"required": True}}}, "fields"),
+        ({"fields": {"status": {"other": True}}}, "fields.status"),
+        ({"fields": {"status": {"required": 1}}}, "required"),
+        ({"fields": {"status": {"types": []}}}, "types"),
+        ({"fields": {"status": {"types": ["string", "string"]}}}, "types"),
+        ({"fields": {"status": {"types": ["scalar"]}}}, "types"),
+        ({"fields": {"status": {"enum": []}}}, "enum"),
+        ({"fields": {"status": {"enum": [["nested"]]}}}, "enum"),
+        (
+            {"fields": {"status": {"types": ["string"], "enum": [1]}}},
+            "enum",
+        ),
+        ({"kinds": {"decision": {"types": ["string"]}}}, "kinds.decision"),
+        ({"categories": {"config": {"required": "yes"}}}, "required"),
+        ({"unexpected": {}}, "root"),
+    ],
+)
+def test_contract_shape_and_types_fail_closed(updates: dict, match: str) -> None:
+    data = {**_contract_data(), **updates}
+
+    with pytest.raises(ValueError, match=match):
+        memory_schema.contract_from_dict(data)
+
+
+def test_contract_enum_is_type_aware_deterministic_and_finite() -> None:
+    data = {
+        **_contract_data("typed-enum"),
+        "fields": {
+            "value": {
+                "types": ["string", "number", "integer", "boolean"],
+                "enum": ["1", 10.0, 2.0, 10, 2, True],
+            }
+        },
+    }
+
+    contract = memory_schema.contract_from_dict(data)
+
+    assert contract.fields["value"]["types"] == [
+        "boolean",
+        "integer",
+        "number",
+        "string",
+    ]
+    assert contract.fields["value"]["enum"] == [True, 2, 10, 2.0, 10.0, "1"]
+    duplicate = {
+        **data,
+        "fields": {"value": {"enum": [True, True]}},
+    }
+    with pytest.raises(ValueError, match="duplicate"):
+        memory_schema.contract_from_dict(duplicate)
+    nonfinite = {
+        **data,
+        "fields": {"value": {"enum": [float("inf")]}},
+    }
+    with pytest.raises(ValueError, match="finite"):
+        memory_schema.contract_from_dict(nonfinite)
+
+
+def _seed_semantic_contract_pages(vault: Path, count: int = 5) -> list[Path]:
+    schema_dir = vault / "Knowledge Base/_Schema"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    (schema_dir / "SKILL.md").write_text("# Test schema\n", encoding="utf-8")
+    semantic_language_registry.save_registry(
+        vault,
+        {
+            "schema_version": 1,
+            "categories": {
+                "config": {
+                    "description": "Configuration facts",
+                    "aliases": ["configuration"],
+                }
+            },
+            "kinds": {},
+        },
+    )
+    pages: list[Path] = []
+    for index in range(count):
+        path = vault / f"Knowledge Base/Notes/semantic-{index}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            "type: insight\n"
+            "project: atlas\n"
+            "status: active\n"
+            "---\n\n"
+            f"# Semantic {index}\n\n"
+            "- [configuration] Session lifetime is bounded\n\n"
+            "## Decision\n"
+            "- category: config\n\n"
+            "Use durable storage.\n",
+            encoding="utf-8",
+        )
+        pages.append(path)
+    return pages
+
+
+def test_contract_inference_profiles_kinds_and_resolved_categories_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_semantic_contract_pages(vault)
+    calls = 0
+    original = memory_schema.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(memory_schema.semantic_units, "parse_semantic_units", counted_parse)
+
+    result = memory_schema.infer_contract(
+        vault, name="semantic", project="atlas", page_type="insight"
+    )
+
+    assert calls == len(pages)
+    assert result["proposal"]["blocks"] == {"decision": {"required": True}}
+    assert result["proposal"]["kinds"] == {
+        "decision": {"required": True},
+        "observation": {"required": True},
+    }
+    assert result["proposal"]["categories"] == {
+        "config": {"required": True}
+    }
+    assert result["frequencies"]["categories"]["config"]["authored_keys"] == [
+        "config",
+        "configuration",
+    ]
+
+
+def test_contract_validation_covers_new_and_legacy_unknown_policies_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    page = _seed_semantic_contract_pages(vault, count=1)[0]
+    page.write_text(
+        page.read_text(encoding="utf-8")
+        + "\n- [mystery] Unknown category\n\n"
+        "## Relations\n\n- supports [[Knowledge Base/Notes/target]]\n",
+        encoding="utf-8",
+    )
+    contract = memory_schema.contract_from_dict(
+        {
+            **_contract_data("closed"),
+            "fields": {"status": {"required": True}},
+            "blocks": {},
+            "kinds": {"decision": {"required": True}},
+            "categories": {"config": {"required": True}},
+            "relations": {},
+            "unknown_fields": "forbid",
+            "unknown_blocks": "forbid",
+            "unknown_kinds": "forbid",
+            "unknown_categories": "forbid",
+            "unknown_relations": "forbid",
+        }
+    )
+    calls = 0
+    original = memory_schema.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(memory_schema.semantic_units, "parse_semantic_units", counted_parse)
+
+    result = memory_schema.validate_contract(vault, contract, strict=True)
+    codes = {item["code"] for item in result["findings"]}
+
+    assert calls == 1
+    assert {
+        "CONTRACT_UNKNOWN_FIELD",
+        "CONTRACT_UNKNOWN_BLOCK",
+        "CONTRACT_UNKNOWN_KIND",
+        "CONTRACT_UNKNOWN_CATEGORY",
+        "CONTRACT_UNKNOWN_RELATION",
+    } <= codes
+    unknown_category = next(
+        item
+        for item in result["findings"]
+        if item["code"] == "CONTRACT_UNKNOWN_CATEGORY"
+        and item["raw_element"] == "mystery"
+    )
+    assert unknown_category["governed_element_identity"] == [
+        "categories",
+        "mystery",
+    ]
+    assert unknown_category["resolved_rule"] == ["categories", "*", "allowed"]
+    assert result["strict_failed"] is True
+
+    open_contract = memory_schema.contract_from_dict(_contract_data("open"))
+    assert memory_schema.validate_contract(vault, open_contract)["findings"] == []
+
+
+def test_required_kind_and_category_findings_name_resolved_rules(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _seed_semantic_contract_pages(vault, count=1)
+    contract = memory_schema.contract_from_dict(
+        {
+            **_contract_data("required-units"),
+            "kinds": {"protocol": {"required": True}},
+            "categories": {"rule": {"required": True}},
+        }
+    )
+
+    findings = memory_schema.validate_contract(vault, contract)["findings"]
+
+    assert {
+        (item["code"], tuple(item["resolved_rule"])) for item in findings
+    } == {
+        ("CONTRACT_REQUIRED_KIND", ("kinds", "protocol", "required")),
+        ("CONTRACT_REQUIRED_CATEGORY", ("categories", "rule", "required")),
+    }
+
+
+def test_category_findings_retain_authored_alias_keys(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    page = _seed_semantic_contract_pages(vault, count=1)[0]
+    page.write_text(
+        "---\ntype: insight\nproject: atlas\n---\n\n# Empty page\n",
+        encoding="utf-8",
+    )
+    required = memory_schema.contract_from_dict(
+        {
+            **_contract_data("required-alias"),
+            "categories": {
+                "config": {"required": False},
+                "configuration": {"required": True},
+            },
+        }
+    )
+
+    required_finding = memory_schema.validate_contract(vault, required)["findings"][0]
+
+    assert required_finding["resolved_rule"] == [
+        "categories",
+        "config",
+        "required",
+    ]
+    assert required_finding["raw_element"] == "configuration"
+    assert required_finding["element_key"] == "configuration"
+
+    unknown_vault = tmp_path / "unknown-vault"
+    unknown_page = _seed_semantic_contract_pages(unknown_vault, count=1)[0]
+    unknown_page.write_text(
+        "---\ntype: insight\nproject: atlas\n---\n\n"
+        "# Alias page\n\n- [Configuration] Authored alias\n",
+        encoding="utf-8",
+    )
+    closed = memory_schema.contract_from_dict(
+        {**_contract_data("closed-alias"), "unknown_categories": "forbid"}
+    )
+
+    unknown_finding = next(
+        item
+        for item in memory_schema.validate_contract(unknown_vault, closed)["findings"]
+        if item["code"] == "CONTRACT_UNKNOWN_CATEGORY"
+    )
+    assert unknown_finding["resolved_rule"] == ["categories", "*", "allowed"]
+    assert unknown_finding["raw_element"] == "Configuration"
+    assert unknown_finding["element_key"] == "configuration"
+    assert "unknown category" in unknown_finding["detail"]
+
+
+def test_empty_category_rule_registry_conflict_uses_a_real_rule_identity(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    schema_dir = vault / "Knowledge Base/_Schema"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "SKILL.md").write_text("# Test schema\n", encoding="utf-8")
+    semantic_language_registry.save_registry(
+        vault,
+        {
+            "schema_version": 1,
+            "categories": {
+                "config": {
+                    "description": "Configuration",
+                    "scope": {"projects": ["other"]},
+                }
+            },
+            "kinds": {},
+        },
+    )
+    note = vault / "Knowledge Base/Notes/page.md"
+    note.parent.mkdir(parents=True)
+    note.write_text(
+        "---\ntype: insight\nproject: atlas\n---\n\n# Page\n", encoding="utf-8"
+    )
+    contract = memory_schema.contract_from_dict(
+        {
+            **_contract_data("empty-rule"),
+            "validation": "off",
+            "categories": {"config": {}},
+        }
+    )
+
+    findings = memory_schema.validate_contract(vault, contract)["findings"]
+
+    assert len(findings) == 1
+    assert findings[0]["resolved_rule"] == ["categories", "config", "declaration"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "finding_count", "strict_failed"),
+    [
+        ("off", 0, False),
+        ("warn", 1, True),
+        ("strict", 1, True),
+    ],
+)
+def test_stored_validation_mode_is_independent_from_command_strict(
+    tmp_path: Path, mode: str, finding_count: int, strict_failed: bool
+) -> None:
+    vault = tmp_path / mode
+    _seed_semantic_contract_pages(vault, count=1)
+    contract = memory_schema.contract_from_dict(
+        {
+            **_contract_data(mode),
+            "validation": mode,
+            "kinds": {"protocol": {"required": True}},
+        }
+    )
+
+    result = memory_schema.validate_contract(vault, contract, strict=True)
+
+    assert result["validation"] == mode
+    assert len(result["findings"]) == finding_count
+    assert result["strict_failed"] is strict_failed
+
+
+def test_contract_diff_includes_every_additive_field_and_unknown_policy() -> None:
+    before = memory_schema.contract_from_dict(_contract_data("before"))
+    after = memory_schema.contract_from_dict(
+        {
+            **_contract_data("after"),
+            "validation": "strict",
+            "kinds": {"decision": {"required": True}},
+            "categories": {"config": {"required": True}},
+            "unknown_fields": "forbid",
+            "unknown_blocks": "forbid",
+            "unknown_kinds": "forbid",
+            "unknown_categories": "forbid",
+            "unknown_relations": "forbid",
+        }
+    )
+
+    diff = memory_schema.diff_contracts(before, after)
+
+    assert diff["changed"] is True
+    assert diff["changes"]["validation"] == {"before": "warn", "after": "strict"}
+    assert diff["changes"]["kinds"]["added"] == ["decision"]
+    assert diff["changes"]["categories"]["added"] == ["config"]
+    for key in (
+        "unknown_fields",
+        "unknown_blocks",
+        "unknown_kinds",
+        "unknown_categories",
+        "unknown_relations",
+    ):
+        assert diff["changes"][key] == {"before": "allow", "after": "forbid"}
+
+
+def test_contract_diff_compares_enum_values_by_exact_yaml_type() -> None:
+    before = memory_schema.contract_from_dict(
+        {
+            **_contract_data("before-typed"),
+            "fields": {"value": {"enum": [True]}},
+        }
+    )
+    after = memory_schema.contract_from_dict(
+        {
+            **_contract_data("after-typed"),
+            "fields": {"value": {"enum": [1]}},
+        }
+    )
+
+    diff = memory_schema.diff_contracts(before, after)
+
+    assert diff["changes"]["fields"]["enum_changes"] == {
+        "value": {"before": [True], "after": [1]}
+    }
