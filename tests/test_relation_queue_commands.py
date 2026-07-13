@@ -66,6 +66,72 @@ def test_review_memory_relation_queue_mode_is_read_only(tmp_path: Path) -> None:
     assert result["shown"] >= 1
 
 
+def test_edit_creates_missing_section_only_when_opted_in(tmp_path: Path) -> None:
+    """`edit()` must be able to author the first entry into an absent section
+    (create_missing_section=True), while the default still errors on a missing
+    heading so an interactive typo doesn't silently spawn a section. Regression
+    for the audit's accept-relation HIGH: remember() emits no `## Relations`."""
+    from exomem import edit as edit_module
+
+    p = tmp_path / "Knowledge Base" / "Notes" / "Insights" / "n.md"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("---\ntype: insight\n---\n# N\n\nA body line.\n", encoding="utf-8")
+    rel = "Knowledge Base/Notes/Insights/n.md"
+
+    with pytest.raises(edit_module.EditError) as ei:
+        edit_module.edit(
+            tmp_path, path=rel, why="x", heading="Relations",
+            section_position="append", new_string="- relates_to [[Foo]]",
+        )
+    assert ei.value.code == "HEADING_NOT_FOUND"
+
+    edit_module.edit(
+        tmp_path, path=rel, why="x", heading="Relations",
+        section_position="append", new_string="- relates_to [[Foo]]",
+        create_missing_section=True,
+    )
+    text = p.read_text(encoding="utf-8")
+    assert "## Relations" in text
+    assert "relates_to" in text
+    assert text.count("## Relations") == 1  # exactly one section created
+
+
+def test_accept_relation_creates_relations_section_when_absent(tmp_path: Path) -> None:
+    """accept-relation must succeed on a note that has no `## Relations` section
+    (the common case — remember() doesn't emit one), creating it. Previously it
+    failed HEADING_NOT_FOUND on ~90% of notes."""
+    # 'cedar' links to birch in its BODY, with NO ## Relations section.
+    _write_page(
+        tmp_path, "cedar",
+        "Body mentions [[Knowledge Base/Notes/Insights/birch]] inline.",
+    )
+    _write_page(tmp_path, "birch", "A measured fact.")
+    find.clear_cache()
+
+    result = commands.op_review_memory(tmp_path, mode="relation-queue")
+    item = next(
+        (it for g in result["groups"] for it in g["items"]
+         if it["from"].endswith("cedar.md") and it["to"].endswith("birch.md")),
+        None,
+    )
+    if item is None:
+        pytest.skip("relation queue surfaced no cedar->birch candidate in this env")
+    group_hash = next(
+        g["content_hash"] for g in result["groups"] if g["path"].endswith("cedar.md")
+    )
+    out = commands.op_connect_memory(
+        tmp_path,
+        operation="accept-relation",
+        ref=item["ref"],
+        expected_hash=group_hash,
+        why="Accepted reviewed relation",
+        expected_fingerprint=item["fingerprint"],
+    )
+    assert out["accepted"] is True
+    text = (tmp_path / "Knowledge Base/Notes/Insights/cedar.md").read_text(encoding="utf-8")
+    assert "## Relations" in text
+
+
 def test_accept_writes_bullet_byte_identical_to_studio_path(tmp_path: Path) -> None:
     studio_vault = tmp_path / "studio"
     accept_vault = tmp_path / "accept"

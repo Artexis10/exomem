@@ -24,3 +24,51 @@ Configure both replicas with the same stable `EXOMEM_BASE_URL`, GitHub OAuth app
 different replica ID; set `EXOMEM_WRITER_LEASE_PREFERRED=1` only on the preferred
 desktop. See `docs/deployment.md` for the complete environment block and takeover
 test.
+
+## Tool-call routing safety
+
+Use two edge timeouts:
+
+- `ORIGIN_TIMEOUT_MS` (default `2500`) is the short connectivity/fallback window
+  for OAuth, discovery, initialization, tool listing, and GET/SSE traffic.
+- `MCP_TOOL_TIMEOUT_MS` (default `15000`) is the execution window for
+  `tools/call`; correctness comes from single-origin routing, not from ordering
+  this timeout against the writer-lease TTL.
+
+While a writer lease is active, a tool call goes only to that replica. The edge
+never replays an ambiguous timeout or 5xx response to the passive replica: the
+first origin may already have completed a mutation. Before routing, it admits the
+runtime through `/health/ready`: supported runtime contract, stateless transport,
+expected replica identity, healthy coordination, and takeover eligibility. The
+admission is bound to the lease fencing token in the Durable Object, so steady
+state does not add a readiness round trip to every MCP call.
+
+With no holder, both origins are probed concurrently and the call is forwarded
+exactly once to the first eligible replica. A live but stale service that lacks
+the readiness contract is skipped instead of becoming the failover writer.
+
+Configure `SUPPORTED_RUNTIME_CONTRACTS` with behavioral contract versions, not
+package versions. Compatible releases can differ during a rolling deployment.
+Before enabling enforcement, compare the checked-out and installed versions and
+probe readiness on each machine:
+
+```powershell
+git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
+& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
+  "import exomem; print(exomem.__version__)"
+curl.exe -fsS https://exomem-desktop.example.com/health/ready
+curl.exe -fsS https://exomem-laptop.example.com/health/ready
+```
+
+Run the combined read-only gate from either checkout:
+
+```powershell
+uv run python -m exomem doctor --profile ha --probe `
+  --replica-url https://exomem-desktop.example.com `
+  --replica-url https://exomem-laptop.example.com
+```
+
+For a future incompatible contract bump, use expand-roll-contract: temporarily
+accept both contracts (`"1,2"`), roll every replica, verify doctor, then remove
+the old contract. Deployment infrastructure owns release pinning and rollback;
+Exomem does not update another machine and does not depend on Syncthing.

@@ -1,7 +1,16 @@
 # live-index-freshness Specification
 
 ## Purpose
-TBD - created by archiving change improve-find-latency-token-cost. Update Purpose after archive.
+Keep `find` latency and reindex work from scaling with vault size and write
+volume: event-maintained in-memory registries for markdown freshness and
+inbound wikilinks are updated incrementally from the live file watcher and
+in-process writers, so most freshness checks and link lookups need no
+filesystem walk or full-vault rescan. Self-authored writer mutations are
+suppressed from re-triggering a duplicate embedding reindex through the
+watcher, while external edits (Obsidian, sync, git) still reindex live, and
+periodic reconciliation bounds how stale a registry can drift from a missed
+event. Every event-maintained path falls back to the prior walk/rescan
+behavior when the registry isn't live.
 ## Requirements
 ### Requirement: Suppress Exomem Self-Write Watcher Echo
 

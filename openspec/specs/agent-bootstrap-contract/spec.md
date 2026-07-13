@@ -1,7 +1,11 @@
 # agent-bootstrap-contract Specification
 
 ## Purpose
-TBD - created by archiving change add-agent-bootstrap-contract. Update Purpose after archive.
+Give a generic agent without a native Exomem skill a deterministic, versioned
+operating contract instead of guessing conventions: a read-only `bootstrap`
+operation that returns workflow guidance, tool defaults, performance profiles,
+and search guidance as structured JSON, without inspecting or summarizing any
+private vault content.
 ## Requirements
 ### Requirement: Agent Bootstrap Contract
 The system SHALL expose a read-only `bootstrap` operation that returns a

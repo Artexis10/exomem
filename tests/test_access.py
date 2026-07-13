@@ -26,6 +26,24 @@ def test_default_tiers_without_config(vault: Path) -> None:
     assert access.writable_reason(vault, "Knowledge Base/Notes/x.md") is None
 
 
+def test_append_only_tier_is_case_insensitive() -> None:
+    """On a case-insensitive filesystem (Windows/macOS) an uppercase `SOURCES/`
+    aliases the real `Sources/` on disk, so the append-only guard must match
+    regardless of case — else raw Sources/Evidence are editable via the alias.
+    Regression for the audit's confirmed HIGH."""
+    from exomem import vault as vault_module
+
+    for variant in ("SOURCES", "sources", "Sources", "SoUrCeS"):
+        assert vault_module.in_append_only_tree(f"Knowledge Base/{variant}/Articles/x.md") is not None, variant
+    for variant in ("EVIDENCE", "evidence", "Evidence"):
+        assert vault_module.in_append_only_tree(f"Knowledge Base/{variant}/Legal/x.pdf") is not None, variant
+    # access_tier (the batch-write backstop's source of truth) agrees.
+    assert access.access_tier(Path("/vault"), "Knowledge Base/SOURCES/Articles/x.md") == access.TIER_APPEND_ONLY
+    assert access.access_tier(Path("/vault"), "Knowledge Base/EVIDENCE/x.pdf") == access.TIER_APPEND_ONLY
+    # A folder that merely starts with the reserved name is NOT append-only.
+    assert vault_module.in_append_only_tree("Knowledge Base/Sources-of-truth/x.md") is None
+
+
 def test_readonly_from_config(vault: Path) -> None:
     _write_cfg(vault, "readonly:\n  - Reference\n  - Library\n")
     assert access.access_tier(vault, "Knowledge Base/Reference/Strategy.md") == access.TIER_READONLY

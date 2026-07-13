@@ -1,7 +1,13 @@
 # exomem-identity Specification
 
 ## Purpose
-TBD - created by archiving change rename-internals-to-exomem. Update Purpose after archive.
+Establish `exomem` as the canonical package name and `EXOMEM_*` as the
+canonical environment-variable prefix throughout the codebase, skill scaffold,
+tests, scripts, and docs, replacing the legacy `kb_mcp`/`KB_MCP_*` naming.
+Existing installations and integrations MUST keep working unchanged: legacy
+imports resolve to the same module objects and legacy environment variables
+are promoted to their new names automatically, with the new name always
+winning on conflict.
 ## Requirements
 ### Requirement: Exomem Is the Canonical Internal Name
 

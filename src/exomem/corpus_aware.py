@@ -148,6 +148,26 @@ def _why(hit) -> str:
     return ", ".join(bits) or "related"
 
 
+def _is_relation_target_eligible(vault_root: Path, rel_path: str) -> bool:
+    """False for out-of-KB, readonly, or excluded targets.
+
+    A `relates_to` suggestion has to be actionable: the reader can review and
+    wire it in via `note()`/`edit()`. Read-only, excluded, and out-of-KB
+    material (e.g. `find()`'s scope="kb" auto-widen reaching sibling trees
+    like `Handbooks/`/`Reference/`) fails that bar — you can't act on the
+    edge, so surfacing it just pollutes the graph (audit finding 2-02).
+    """
+    from . import access
+
+    normalized = (rel_path or "").replace("\\", "/").lstrip("/")
+    if not normalized.casefold().startswith(kb_prefix().casefold()):
+        return False
+    return access.access_tier(vault_root, rel_path) not in (
+        access.TIER_READONLY,
+        access.TIER_EXCLUDED,
+    )
+
+
 def suggest_related(
     vault_root: Path,
     *,
@@ -163,7 +183,10 @@ def suggest_related(
     Excludes the draft itself (`self_path`) and anything in `existing_links`
     (cited sources + wikilinks already in the body). Re-ranks find()'s order
     with a small log-scaled graph-in-degree bonus so well-connected hubs float
-    up — linking a hub compounds more than linking a leaf.
+    up — linking a hub compounds more than linking a leaf. Also excludes any
+    hit that isn't a governed, in-KB target (see `_is_relation_target_eligible`)
+    — `find()`'s auto-widen is correct for retrieval but wrong for a
+    suggested edge, since you can't act on a read-only/out-of-KB link.
     """
     from . import find as find_module
 
@@ -195,6 +218,8 @@ def suggest_related(
         if self_canon and hc == self_canon:
             continue
         if hc in excluded:
+            continue
+        if not _is_relation_target_eligible(vault_root, h.path):
             continue
         eligible.append(h)
 

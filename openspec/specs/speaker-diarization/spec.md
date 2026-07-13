@@ -1,7 +1,16 @@
 # speaker-diarization Specification
 
 ## Purpose
-TBD - created by archiving change add-named-speaker-diarization. Update Purpose after archive.
+Turn anonymous diarization clusters (`Speaker A`, `Speaker B`) into named
+turns when the speaker is known: when diarization is enabled and at least one
+voice profile is enrolled, each cluster's ECAPA voice embedding is matched
+against enrolled profile centroids by cosine similarity, and only a match that
+clears a configured threshold, margin, and standout rule is named — the system
+prefers leaving a cluster anonymous over mis-naming it. Profiles are managed
+via CLI enrollment and persisted in a local JSON store outside the vault's
+note trees, and the whole path is a deterministic, reasoning-model-free
+measurement that soft-fails to anonymous diarization or a plain transcript on
+any dependency or inference error.
 ## Requirements
 ### Requirement: Named-Speaker Attribution via Voice Profiles
 

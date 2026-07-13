@@ -1,6 +1,6 @@
 name = "exomem-ha-edge"
 main = "src/worker.js"
-compatibility_date = "2026-07-11"
+compatibility_date = "2026-07-12"
 
 [vars]
 VAULT_ID = "personal-main"
@@ -9,6 +9,15 @@ LAPTOP_REPLICA_ID = "laptop"
 DESKTOP_ORIGIN = "https://exomem-desktop.example.com"
 LAPTOP_ORIGIN = "https://exomem-laptop.example.com"
 ORIGIN_TIMEOUT_MS = "2500"
+# MCP tools can legitimately take longer than a connectivity probe. Keep this
+# independent from the short connectivity probe; ambiguous tool calls are
+# never cross-replica replayed regardless of timeout.
+MCP_TOOL_TIMEOUT_MS = "15000"
+# Behavioral compatibility, not exact package versions. During an incompatible
+# rolling deployment, expand to "1,2", roll every replica, then contract to "2".
+SUPPORTED_RUNTIME_CONTRACTS = "1"
+REQUIRED_RUNTIME_TRANSPORT = "streamable-http-stateless"
+REQUIRE_COORDINATION = "true"
 
 [[routes]]
 pattern = "exomem.example.com/*"

@@ -44,7 +44,10 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     if hosted_mode_enabled():
         return _initialize_hosted_runtime()
 
-    load_dotenv_func(override=True)
+    # An installed package lives under site-packages, so python-dotenv's implicit
+    # caller-relative search misses the service working directory. The documented
+    # repo-root .env is explicitly cwd-relative for both checkout and wheel installs.
+    load_dotenv_func(dotenv_path=Path.cwd() / ".env", override=True)
     env_compat.promote_legacy()
 
     vault_root = resolve_vault()

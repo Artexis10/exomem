@@ -72,6 +72,7 @@ EXOMEM_BASE_URL=https://<host>
 GITHUB_CLIENT_ID=<from step 1>
 GITHUB_CLIENT_SECRET=<from step 1>
 EXOMEM_GITHUB_USERNAME=<your-github-login>
+EXOMEM_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
 EXOMEM_JWT_SIGNING_KEY=<long-random-string>
 EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
 ```
@@ -81,6 +82,11 @@ Generate `EXOMEM_JWT_SIGNING_KEY`:
 ```bash
 python -c "import secrets;print(secrets.token_urlsafe(48))"
 ```
+
+Resolve the immutable account ID with `GET https://api.github.com/users/<login>`
+and copy its numeric `id`, or let `exomem setup --remote` resolve it. For an
+offline/headless run, pass `--github-user-id <id>`. The login comparison is
+case-insensitive; the numeric ID is the durable trust anchor.
 
 `EXOMEM_BASE_URL` has no trailing slash and no `/mcp` suffix. `EXOMEM_VAULT_PATH`
 is required: claude.ai connects over HTTP and passes no environment of its
@@ -199,7 +205,10 @@ just importable.
 
 claude.ai → **Settings** → **Connectors** → **Add custom connector** →
 `https://<host>/mcp` → log in with GitHub as the account named in
-`EXOMEM_GITHUB_USERNAME`.
+`EXOMEM_GITHUB_USERNAME`. A newly upgraded installation asks each existing
+client to do this once. Keep the connector definition and URL unchanged: after
+that final login, Codex/Claude reuse the Exomem-owned session across fresh chats
+and processes without depending on the temporary GitHub token.
 
 Then add Exomem behavior to the hosted client. Paste the instruction block from
 [ai-assistant-guide.md](ai-assistant-guide.md), or at minimum start new chats by
@@ -223,6 +232,8 @@ asking it to call `bootstrap(profile="compact")` once before using the KB.
 | ngrok setup stalls, then a `429` shows in the ngrok dashboard | Free-tier burst limit (120 req/min) hit during registration | Wait a minute and retry, or switch to Cloudflare Tunnel. |
 | GitHub OAuth redirect never completes on first ngrok use | The one-time ngrok browser interstitial intercepted the redirect | Open the ngrok URL directly once, click through the interstitial, then retry the connector add. |
 | "Couldn't reach the MCP server" during connector add | OAuth discovery failed | See [deployment.md's troubleshooting table](deployment.md#troubleshooting) — the rest of the fixes there apply regardless of ingress profile. |
+| An existing connector gets one `401 invalid_token` immediately after the durable-session cutover | Its legacy FastMCP reference token is intentionally no longer accepted | Complete one final browser login. Do not delete or recreate the connector. |
+| Tools return `503` without an OAuth challenge | The authoritative session store is unavailable, not the login | Repair coordinator/network/storage health and retry. Re-authorizing cannot fix a 503. |
 
 For everything else — service management, GPU/CUDA, revoking access,
 restarting, logs, multi-host setups — see [deployment.md](deployment.md).

@@ -28,6 +28,7 @@ from .vault import (
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
+    excluded_frontmatter_reason,
     in_append_only_tree,
     in_curated_tree,
     normalize_body_wikilinks,
@@ -35,7 +36,6 @@ from .vault import (
     serialize_frontmatter,
     write_log_entry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -68,8 +68,16 @@ def create_file(
     allow_curated: bool = False,
     today: dt.date | None = None,
 ) -> CreateFileResult:
+    if frontmatter:
+        for key in frontmatter:
+            reason = excluded_frontmatter_reason(str(key))
+            if reason is not None:
+                raise CreateFileError(code="EXCLUDED_FIELD", reason=reason)
+
     try:
-        abs_path, rel_path = resolve_under_vault(vault_root, path)
+        abs_path, rel_path = resolve_under_vault(
+            vault_root, path, must_be_under_kb=True
+        )
     except VaultPathError as e:
         raise CreateFileError(code=e.code, reason=e.reason) from e
 

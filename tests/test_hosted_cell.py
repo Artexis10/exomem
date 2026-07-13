@@ -132,7 +132,9 @@ def test_hosted_mode_is_explicit_and_local_mode_remains_ordinary(
         load_dotenv_func=lambda **kwargs: dotenv_calls.append(kwargs)
     )
 
-    assert dotenv_calls == [{"override": True}]
+    assert dotenv_calls == [
+        {"dotenv_path": Path.cwd() / ".env", "override": True}
+    ]
     assert calls == ["compute", "media", "watcher"]
     assert runtime.vault_root == tmp_path
     assert runtime.hosted_config is None

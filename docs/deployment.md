@@ -199,11 +199,11 @@ Create `.env` in the repo root:
 ```
 EXOMEM_BASE_URL=https://kb.example.com
 EXOMEM_GITHUB_USERNAME=<your-github-login>
+EXOMEM_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
-# Recommended: a long random string that pins the OAuth signing key, so the
-# claude.ai connector survives FastMCP upgrades / client-secret rotation without
-# re-authorizing. Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
+# Required root for durable opaque sessions. Rotation revokes every session.
+# Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
 EXOMEM_JWT_SIGNING_KEY=<long-random-string>
 # Required: vault root — the folder that contains Knowledge Base/
 EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
@@ -211,7 +211,9 @@ EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
 
 `EXOMEM_BASE_URL` must match your public hostname (from step 2) exactly — no
 trailing slash, no `/mcp` suffix. `EXOMEM_GITHUB_USERNAME` is case-insensitive but
-must be the *login*, not the display name. `EXOMEM_VAULT_PATH` is **required**:
+must be the *login*, not the display name. `EXOMEM_GITHUB_USER_ID` is the positive
+numeric `id` returned by `GET https://api.github.com/users/<login>`; authorization
+must match both values. `EXOMEM_VAULT_PATH` is **required**:
 claude.ai connects over HTTP and passes no environment, so the service resolves the
 vault solely from this line in `.env` at startup.
 
@@ -425,6 +427,12 @@ EXOMEM_OAUTH_STORAGE_NAMESPACE=personal-main
 EXOMEM_OAUTH_STORAGE_TOKEN=<same-edge-secret>
 ```
 
+The coordinator's `EXOMEM_LEASE_COORDINATOR_TOKEN`, each replica's
+`EXOMEM_WRITER_LEASE_TOKEN`, and `EXOMEM_OAUTH_STORAGE_TOKEN` must be the same
+non-empty value. `exomem doctor --profile ha --probe` proves that anonymous
+state reads receive `401` and an authenticated absent-key read succeeds; a
+coordinator that accepts anonymous state access is not safe for session authority.
+
 Laptop uses the same values except
 `EXOMEM_WRITER_LEASE_REPLICA_ID=laptop` and omits the preferred flag. Both remain
 readable. The first write acquires the lease; the server renews it while alive.
@@ -450,14 +458,79 @@ state is per replica: the lease prevents concurrent writers, but a retry routed 
 different replica after the first replica disappears cannot be guaranteed exactly-once
 across the local-filesystem/remote-coordinator boundary.
 
+The reference Cloudflare edge therefore treats `tools/call` as an ambiguous
+side-effect boundary. `ORIGIN_TIMEOUT_MS` remains the short connectivity window
+for discovery/initialization traffic, while `MCP_TOOL_TIMEOUT_MS` defaults to 15
+seconds for actual tools. While a lease holder exists, a tool call is sent only
+to that replica and is never replayed to the passive origin after a timeout or
+5xx response. Once the lease expires, the edge probes both origins, chooses one
+runtime-compatible replica, and forwards the next tool call exactly once. Runtime
+admission uses the content-free `/health/ready` contract: supported behavioral
+contract, stateless HTTP transport, expected replica identity, healthy writer
+coordination, and takeover eligibility. Admission is cached in the Durable Object
+against the active lease holder and fencing token, so steady-state tool calls do
+not pay another origin probe. The active origin
+renews its lease independently while a long tool runs; correctness does not rely
+on ordering `MCP_TOOL_TIMEOUT_MS` against `EXOMEM_WRITER_LEASE_TTL`.
+
 Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
-ID/secret, and `EXOMEM_JWT_SIGNING_KEY`. FastMCP access tokens are reference tokens,
-so the signing key alone is not enough: the shared OAuth store carries their JTI
-and upstream-token mappings. Values are Fernet-encrypted on the replica before
-leaving it. On first enablement, the preferred replica reads through its existing
-encrypted local FastMCP store and migrates live records on demand, while mirroring
-new writes locally for rollback. Existing connectors therefore migrate in place
-instead of requiring removal and re-registration.
+ID/secret, `EXOMEM_GITHUB_USERNAME`, `EXOMEM_GITHUB_USER_ID`, and
+`EXOMEM_JWT_SIGNING_KEY`. Durable session records are Fernet-encrypted on the
+replica before leaving it. Session and auth-generation reads are always direct to
+the coordinator: there is no read-through mirror or stale local fallback that
+could resurrect a revoked session.
+
+### Durable-session cutover and rollback
+
+Treat the upgrade from FastMCP reference tokens as a coordinated HA cutover, not
+a rolling mixed-provider deployment:
+
+1. Back up `.env`, the coordinator database/shared OAuth state, and both service
+   installations. Preserve the existing `EXOMEM_JWT_SIGNING_KEY`; add the
+   immutable GitHub ID and matching coordinator/storage credentials.
+2. Quiesce connector traffic. Upgrade active and passive replicas together so no
+   request can alternate between the legacy and durable token formats.
+3. Run offline and probed doctor on both replicas, then bring up only the new
+   provider. Keep the public connector URL and connector registrations unchanged.
+4. Each existing client receives one expected `401` for its legacy reference JWT
+   and completes one final GitHub authorization. It then holds an Exomem-owned
+   opaque session with no advertised expiry. Do not delete/recreate connectors.
+5. Prove a session issued through one replica validates through the other. Run
+   single-session and `--all` revocation checks. Run the Codex harness and the
+   supported hosted-connector smoke test; block rollout if either client asks for
+   another login or discards the response because `expires_in` is omitted.
+
+The Codex gate uses an isolated persistent home, performs exactly one interactive
+login, then starts several fresh ephemeral processes:
+
+```bash
+python scripts/codex_auth_session_harness.py \
+  --url https://kb.example.com/mcp \
+  --codex-home .rollout/codex-auth-gate \
+  --codex-auth-source ~/.codex/auth.json \
+  --runs 3 \
+  --acknowledge-disposable-target
+```
+
+Run this only against a disposable staged KB. The harness refuses a non-empty
+target `CODEX_HOME`, copies only the invoking Codex OpenAI `auth.json` into it
+with owner-only permissions, and verifies `codex login status` before registering
+Exomem. It never copies `config.toml`, `.credentials.json`, or prior MCP state.
+When `--codex-auth-source` is omitted, it resolves to `$CODEX_HOME/auth.json` for
+the invoking process, or `~/.codex/auth.json` when `CODEX_HOME` is unset. The
+acknowledgement is deliberately mandatory.
+
+Keep legacy JTI/upstream-token collections untouched for a bounded rollback
+window, but never dual-read them while the new provider is active. Rollback means
+deploying the prior provider as another coordinated cutover; clients already on
+durable sessions authorize once into the old format. Only after the window closes
+should obsolete JTI/upstream GitHub-token records be removed. New durable-session
+collections can remain inert during rollback.
+
+For troubleshooting, a malformed, unknown, revoked, or legacy bearer returns the
+normal `401 invalid_token` challenge. A coordinator/network failure or current
+session-namespace decryption problem returns `503` with no OAuth challenge. Repair
+the authority and retry a 503; logging in again cannot fix an availability outage.
 
 The coordinator contract is:
 
@@ -465,12 +538,23 @@ The coordinator contract is:
 - `POST /v1/vaults/{vault}/lease/renew`
 - `POST /v1/vaults/{vault}/lease/release`
 - `GET /v1/vaults/{vault}/lease`
-- `POST /v1/state/{namespace}/{get|ttl|put|delete|get-many|ttl-many|put-many|delete-many}`
+- `POST /v1/state/{namespace}/{get|ttl|put|put-if-absent|list-keys|delete|get-many|ttl-many|put-many|delete-many}`
 
-POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
-`fencing_token`. Responses carry only `holder`, `expires_at`, `fencing_token`, and
-`granted`; no vault content is sent. Use bearer authentication in any networked
-deployment.
+Lease POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
+`fencing_token`. Lease responses carry only `holder`, `expires_at`,
+`fencing_token`, and `granted`; no vault content is sent.
+
+State POST bodies carry `collection` plus the operation's `key`, `keys`, `value`,
+`values`, and optional positive `ttl`. Every successful state response uses the
+`{"result": ...}` envelope. `put-if-absent` is transactional: it returns `true`
+only when it creates the key, never replaces a live value, and treats a
+TTL-expired value as absent. `list-keys` returns sorted live key strings for the
+requested collection, removes expired entries, and never returns encrypted
+values. Networked coordinator deployments require `Authorization: Bearer
+<token>` on every lease and state operation. Missing or rejected credentials
+return `401 {"error":"unauthorized"}`, malformed bodies return `400
+{"error":"invalid request"}`, and unknown operations return `404
+{"error":"unknown operation"}`.
 
 With the edge deployment, clients register only the stable connector URL; the two
 origin hostnames are operational endpoints, not separate connectors. After editing
@@ -482,6 +566,42 @@ mutations, not direct Obsidian/filesystem edits, so do not edit a follower manua
 Before deliberately stopping the active writer, let replication reach **Up to
 Date**; on an unclean crash, the lease prevents concurrent Exomem writers but cannot
 recover bytes the old writer had not replicated yet.
+
+Replica release drift remains deployment housekeeping, but runtime compatibility
+is now enforced independently. Before enabling the stable route—or after every
+release—check the repo, installed service environment, and readiness contract on
+**both** machines:
+
+```powershell
+git -C "$HOME\Desktop\projects\exomem" log -1 --oneline
+& "$HOME\Desktop\projects\exomem-service-ha\.venv\Scripts\python.exe" -c `
+  "import exomem; print(exomem.__version__)"
+curl.exe -fsS https://exomem-desktop.example.com/health/ready
+curl.exe -fsS https://exomem-laptop.example.com/health/ready
+```
+
+Then run the combined read-only diagnostic:
+
+```powershell
+uv run python -m exomem doctor --profile ha --probe `
+  --replica-url https://exomem-desktop.example.com `
+  --replica-url https://exomem-laptop.example.com
+```
+
+Different package releases are allowed when they advertise a supported common
+runtime contract. A missing readiness route, unsupported contract, stateful
+transport, duplicate replica identity, unhealthy coordinator, or takeover
+ineligibility fails the HA gate. An old stateful laptop is therefore excluded
+even if its port answers.
+
+The Worker example sets `SUPPORTED_RUNTIME_CONTRACTS="1"`,
+`REQUIRED_RUNTIME_TRANSPORT="streamable-http-stateless"`, and
+`REQUIRE_COORDINATION="true"`. For an incompatible contract bump, first expand
+the accepted set (for example `"1,2"`), roll every replica, confirm doctor passes,
+then contract the set to the new version. The deployment platform owns immutable
+release pinning, rollout, and rollback. Exomem deliberately has no cross-machine
+auto-updater, and the readiness contract is independent of Syncthing or any other
+replication product.
 
 ## GPU notes (CUDA / Blackwell / Apple Silicon MPS)
 
@@ -612,6 +732,12 @@ Pick the strongest option that fits the situation:
 
 ## Restarting the service
 
+Remote Streamable HTTP runs statelessly: authenticated tool calls do not rely
+on a process-local `Mcp-Session-Id`. A service restart or active/passive route
+change therefore cannot strand a transport session on the old process. OAuth
+is still enforced on every request; a genuinely expired, revoked, or invalid
+credential still requires authorization, but a normal restart does not.
+
 **macOS / Linux:** `bash scripts/restart.sh` — launchd `kickstart -k` on macOS,
 `systemctl --user restart` on Linux. It truncates `logs/exomem.log` and tails it.
 
@@ -658,6 +784,8 @@ sc.exe start exomem
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
+| Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `exomem auth sessions`. |
+| Authenticated tools return `503` without `WWW-Authenticate` | Authoritative session storage is unavailable or corrupt | Repair the coordinator/network/storage path. Do not reauthorize: a fresh login uses the same unavailable authority. |
 | claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/exomem.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |

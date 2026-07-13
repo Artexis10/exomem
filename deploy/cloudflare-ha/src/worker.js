@@ -20,6 +20,7 @@ export class ExomemState {
   async fetch(request) {
     const url = new URL(request.url);
     if (url.pathname === "/lease") return this.lease(request);
+    if (url.pathname === "/admission") return this.admission(request);
     if (url.pathname.startsWith("/state/")) return this.sharedState(request, url.pathname.slice(7));
     return json({ error: "not found" }, 404);
   }
@@ -58,6 +59,9 @@ export class ExomemState {
               ? current.fencing_token
               : current.fencing_token + 1,
         };
+        if (active && current.holder === replica && current.admission) {
+          next.admission = current.admission;
+        }
         await tx.put("lease", next);
         return json({ ...next, granted: true });
       }
@@ -76,6 +80,7 @@ export class ExomemState {
         if (valid) {
           current.holder = null;
           current.expires_at = null;
+          delete current.admission;
           await tx.put("lease", current);
         }
         return json({ ...normalizeLease(current, now), granted: Boolean(valid) });
@@ -95,11 +100,56 @@ export class ExomemState {
     return { ...normalized, granted: false };
   }
 
+  async admission(request) {
+    if (request.method !== "POST") return json({ error: "method not allowed" }, 405);
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json({ error: "invalid request" }, 400);
+    }
+    const holder = String(body.holder || "");
+    const fencingToken = Number(body.fencing_token);
+    const readiness = body.readiness;
+    if (
+      !holder
+      || !Number.isInteger(fencingToken)
+      || !readiness
+      || typeof readiness !== "object"
+      || Array.isArray(readiness)
+    ) {
+      return json({ error: "invalid request" }, 400);
+    }
+    const now = Date.now() / 1000;
+    return this.state.storage.transaction(async (tx) => {
+      const current = (await tx.get("lease")) || {
+        holder: null,
+        expires_at: null,
+        fencing_token: 0,
+      };
+      const matches = current.holder === holder
+        && current.expires_at > now
+        && current.fencing_token === fencingToken;
+      if (!matches) return json({ stored: false, error: "lease changed" }, 409);
+      current.admission = {
+        holder,
+        fencing_token: fencingToken,
+        readiness,
+        admitted_at: now,
+      };
+      await tx.put("lease", current);
+      return json({ stored: true });
+    });
+  }
+
   async sharedState(request, operation) {
     let body;
     try {
       body = await request.json();
     } catch {
+      return json({ error: "invalid request" }, 400);
+    }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
       return json({ error: "invalid request" }, 400);
     }
     const collection = body.collection == null ? "" : String(body.collection);
@@ -123,6 +173,38 @@ export class ExomemState {
       if (operation === "put") {
         await this.state.storage.put(itemKey(body.key), stateValue(body));
         return json({ result: null });
+      }
+      if (operation === "put-if-absent") {
+        if (!Object.hasOwn(body, "key")) throw new Error("missing key");
+        const key = itemKey(body.key);
+        const value = stateValue(body);
+        const created = await this.state.storage.transaction(async (tx) => {
+          const stored = await tx.get(key);
+          const now = Date.now() / 1000;
+          if (stored && (stored.expires_at == null || stored.expires_at > now)) {
+            return false;
+          }
+          if (stored) await tx.delete(key);
+          await tx.put(key, value);
+          return true;
+        });
+        return json({ result: created });
+      }
+      if (operation === "list-keys") {
+        const prefix = itemKey("");
+        const keys = await this.state.storage.transaction(async (tx) => {
+          const entries = await tx.list({ prefix });
+          const now = Date.now() / 1000;
+          const expired = [];
+          const live = [];
+          for (const [key, stored] of entries) {
+            if (stored.expires_at != null && stored.expires_at <= now) expired.push(key);
+            else live.push(key.slice(prefix.length));
+          }
+          if (expired.length) await tx.delete(expired);
+          return live.sort();
+        });
+        return json({ result: keys });
       }
       if (operation === "delete") {
         const existed = (await this.state.storage.get(itemKey(body.key))) !== undefined;
@@ -175,7 +257,12 @@ export default {
       );
     }
 
-    const holder = await currentHolder(env);
+    const lease = await currentLease(env);
+    const holder = lease.holder;
+    if (await isMcpToolCall(request)) {
+      return proxyToolCall(request, env, lease);
+    }
+
     const replicas = holder === env.LAPTOP_REPLICA_ID
       ? [env.LAPTOP_ORIGIN, env.DESKTOP_ORIGIN]
       : [env.DESKTOP_ORIGIN, env.LAPTOP_ORIGIN];
@@ -198,10 +285,200 @@ export default {
   },
 };
 
-async function currentHolder(env) {
+export async function isMcpToolCall(request) {
+  const url = new URL(request.url);
+  if (url.pathname !== "/mcp" || request.method !== "POST") return false;
+  let payload;
+  try {
+    payload = await request.clone().json();
+  } catch {
+    // A malformed MCP POST is ambiguous. Treat it as a tool call so the edge
+    // never fans an unreadable body out to two origins.
+    return true;
+  }
+  const messages = Array.isArray(payload) ? payload : [payload];
+  return messages.some((message) => message && message.method === "tools/call");
+}
+
+async function proxyToolCall(request, env, lease) {
+  const shortTimeout = Number(env.ORIGIN_TIMEOUT_MS || 2500);
+  const toolTimeout = Number(env.MCP_TOOL_TIMEOUT_MS || 15000);
+  const holder = lease.holder;
+  let candidate = candidateForHolder(env, holder);
+
+  if (holder && !candidate) {
+    return json({ error: "active Exomem replica is not configured" }, 503);
+  }
+  if (holder) {
+    if (!admissionEligible(lease.admission, env, holder, lease.fencing_token)) {
+      candidate = await probeCandidateReadiness(candidate, env, shortTimeout);
+      if (!candidate) {
+        return json({ error: "active Exomem replica is not runtime-ready" }, 503);
+      }
+      const stored = await recordAdmission(env, lease, candidate.readiness);
+      if (!stored) return json({ error: "writer lease changed during runtime admission" }, 503);
+    }
+  } else {
+    candidate = await selectEligibleOrigin(env, shortTimeout);
+    if (!candidate) return json({ error: "both Exomem replicas are ineligible" }, 503);
+  }
+
+  try {
+    return await proxyOnce(request, candidate.origin, toolTimeout);
+  } catch {
+    // Never replay an ambiguous tools/call request. The origin may have
+    // committed after the edge stopped waiting; cross-replica replay turns a
+    // transport timeout into duplicate governed state.
+    return json({ error: "active Exomem tool call did not complete at the edge" }, 504);
+  }
+}
+
+function candidateForHolder(env, holder) {
+  if (holder === env.DESKTOP_REPLICA_ID && env.DESKTOP_ORIGIN) {
+    return { origin: env.DESKTOP_ORIGIN, replicaId: env.DESKTOP_REPLICA_ID };
+  }
+  if (holder === env.LAPTOP_REPLICA_ID && env.LAPTOP_ORIGIN) {
+    return { origin: env.LAPTOP_ORIGIN, replicaId: env.LAPTOP_REPLICA_ID };
+  }
+  return null;
+}
+
+function configuredCandidates(env) {
+  return [
+    env.DESKTOP_ORIGIN && env.DESKTOP_REPLICA_ID
+      ? { origin: env.DESKTOP_ORIGIN, replicaId: env.DESKTOP_REPLICA_ID }
+      : null,
+    env.LAPTOP_ORIGIN && env.LAPTOP_REPLICA_ID
+      ? { origin: env.LAPTOP_ORIGIN, replicaId: env.LAPTOP_REPLICA_ID }
+      : null,
+  ].filter(Boolean);
+}
+
+async function selectEligibleOrigin(env, timeoutMs) {
+  const checked = await Promise.all(
+    configuredCandidates(env).map((candidate) => probeCandidateReadiness(candidate, env, timeoutMs)),
+  );
+  return checked.find(Boolean) || null;
+}
+
+async function probeCandidateReadiness(candidate, env, timeoutMs) {
+  try {
+    const target = new URL("/health/ready", candidate.origin);
+    const response = await fetch(new Request(target), {
+      signal: AbortSignal.timeout(timeoutMs),
+      redirect: "manual",
+    });
+    if (response.status !== 200) return null;
+    const readiness = await response.json();
+    const evaluation = evaluateReadiness(readiness, env, candidate.replicaId);
+    return evaluation.eligible ? { ...candidate, readiness } : null;
+  } catch {
+    return null;
+  }
+}
+
+export function evaluateReadiness(readiness, env, expectedReplicaId) {
+  if (!readiness || typeof readiness !== "object" || Array.isArray(readiness)) {
+    return { eligible: false, reason: "invalid_readiness_payload" };
+  }
+  if (readiness.status !== "ready" || readiness.service !== "exomem") {
+    return { eligible: false, reason: "runtime_not_ready" };
+  }
+  if (typeof readiness.release !== "string" || !readiness.release) {
+    return { eligible: false, reason: "release_identity_missing" };
+  }
+  const runtimeContract = Number(readiness.runtime_contract);
+  if (!Number.isInteger(runtimeContract) || !supportedRuntimeContracts(env).has(runtimeContract)) {
+    return { eligible: false, reason: "unsupported_runtime_contract" };
+  }
+  const requiredTransport = env.REQUIRED_RUNTIME_TRANSPORT || "streamable-http-stateless";
+  if (readiness.transport !== requiredTransport) {
+    return { eligible: false, reason: "unsupported_transport" };
+  }
+  if (readiness.replica_id !== expectedReplicaId) {
+    return { eligible: false, reason: "replica_identity_mismatch" };
+  }
+  if (readiness.takeover_eligible !== true) {
+    return { eligible: false, reason: "takeover_ineligible" };
+  }
+  const coordination = readiness.coordination;
+  if (requireCoordination(env)) {
+    if (!coordination || coordination.enabled !== true) {
+      return { eligible: false, reason: "coordination_required" };
+    }
+    if (coordination.coordinator_healthy !== true) {
+      return { eligible: false, reason: "coordinator_unavailable" };
+    }
+  }
+  return { eligible: true, reason: null };
+}
+
+function supportedRuntimeContracts(env) {
+  const values = String(env.SUPPORTED_RUNTIME_CONTRACTS || "1")
+    .split(",")
+    .map((value) => Number(value.trim()))
+    .filter(Number.isInteger);
+  return new Set(values);
+}
+
+function requireCoordination(env) {
+  return !["0", "false", "no", "off"].includes(
+    String(env.REQUIRE_COORDINATION ?? "true").trim().toLowerCase(),
+  );
+}
+
+function admissionEligible(admission, env, holder, fencingToken) {
+  if (!admission || admission.holder !== holder || admission.fencing_token !== fencingToken) {
+    return false;
+  }
+  return evaluateReadiness(admission.readiness, env, holder).eligible;
+}
+
+async function recordAdmission(env, lease, readiness) {
   const id = env.EXOMEM_STATE.idFromName(`lease:${env.VAULT_ID}`);
-  const response = await env.EXOMEM_STATE.get(id).fetch("https://state/lease");
-  return (await response.json()).holder;
+  const response = await env.EXOMEM_STATE.get(id).fetch(new Request("https://state/admission", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      holder: lease.holder,
+      fencing_token: lease.fencing_token,
+      readiness: readinessSummary(readiness),
+    }),
+  }));
+  return response.status === 200;
+}
+
+function readinessSummary(readiness) {
+  return {
+    status: readiness.status,
+    service: readiness.service,
+    release: readiness.release,
+    runtime_contract: readiness.runtime_contract,
+    transport: readiness.transport,
+    replica_id: readiness.replica_id,
+    coordination: {
+      enabled: readiness.coordination?.enabled === true,
+      role: readiness.coordination?.role || "unknown",
+      coordinator_healthy: readiness.coordination?.coordinator_healthy === true,
+    },
+    takeover_eligible: readiness.takeover_eligible === true,
+    reasons: Array.isArray(readiness.reasons) ? readiness.reasons.map(String).slice(0, 8) : [],
+  };
+}
+
+function proxyOnce(request, origin, timeoutMs) {
+  const source = new URL(request.url);
+  const target = new URL(source.pathname + source.search, origin);
+  return fetch(new Request(target, request.clone()), {
+    signal: AbortSignal.timeout(timeoutMs),
+    redirect: "manual",
+  });
+}
+
+async function currentLease(env) {
+  const id = env.EXOMEM_STATE.idFromName(`lease:${env.VAULT_ID}`);
+  const response = await env.EXOMEM_STATE.get(id).fetch(new Request("https://state/lease"));
+  return response.json();
 }
 
 function normalizeLease(lease, now) {

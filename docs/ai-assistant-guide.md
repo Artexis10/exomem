@@ -325,3 +325,8 @@ search/save workflow. Ask one known vault question next and confirm it uses
 
 For remote connectors, use [remote-quickstart.md](remote-quickstart.md). For the
 memory boundary, see [vs-built-in-memory.md](vs-built-in-memory.md).
+
+After a durable-auth upgrade, keep the existing connector URL and complete its
+one final GitHub login. New conversations should reuse the stored Exomem bearer;
+a repeated login prompt is a failed client-compatibility gate, while a `503`
+means the session authority is unavailable and should not trigger reauthorization.

@@ -43,6 +43,35 @@ _GUARDED_WRITE_FIELDS = commands_module.GUARDED_WRITE_FIELDS
 _link_summary = commands_module._link_summary
 
 
+class ExomemFastMCP(FastMCP):
+    """FastMCP with stateless POST plus authenticated GET/SSE compatibility.
+
+    FastMCP normally omits GET from a stateless Streamable HTTP route because
+    stateless servers do not need server-initiated notifications. Codex and
+    Claude still open the optional GET/SSE channel, though. The MCP SDK's
+    stateless transport supports that channel without allocating a session ID,
+    so expose the method on the same OAuth-protected route.
+    """
+
+    def http_app(self, *args, stateless_http=None, **kwargs):
+        app = super().http_app(*args, stateless_http=stateless_http, **kwargs)
+        if stateless_http:
+            endpoint_found = False
+            for route in app.routes:
+                methods = getattr(route, "methods", None)
+                if (
+                    getattr(route, "path", None) == app.state.path
+                    and methods is not None
+                    and {"POST", "DELETE"}.issubset(methods)
+                ):
+                    methods.add("GET")
+                    endpoint_found = True
+                    break
+            if not endpoint_found:
+                raise RuntimeError("FastMCP stateless endpoint route was not found")
+        return app
+
+
 class CallTraceMiddleware(Middleware):
     """Per-call traceability: log every tool invocation with name + duration."""
 
@@ -144,7 +173,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         assert runtime.hosted_config is not None
         assert runtime.hosted_lifecycle is not None
         auth = HostedCellTokenVerifier(runtime.hosted_config)
-        mcp = FastMCP("exomem", auth=auth)
+        mcp = ExomemFastMCP("exomem", auth=auth)
         mcp.add_middleware(CallTraceMiddleware(hosted=True))
         expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
         register_hosted_routes(
@@ -156,7 +185,7 @@ def build_server(*, require_auth: bool) -> FastMCP:
         )
     else:
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)
-        mcp = FastMCP("exomem", auth=auth, icons=server_icons())
+        mcp = ExomemFastMCP("exomem", auth=auth, icons=server_icons())
         mcp.add_middleware(CallTraceMiddleware())
 
         register_asset_routes(mcp)
@@ -283,4 +312,10 @@ def run(
             host=host,
             port=port,
             middleware=[ASGIMiddleware(PrimeMcpSSEMiddleware)],
+            # Remote clients may be routed to another replica or outlive this
+            # process.  A process-local Mcp-Session-Id turns either event into
+            # a 404/reconnect cascade; each Exomem operation is already an
+            # independently authenticated request, so use FastMCP's transport
+            # mode designed for horizontally scaled/restartable servers.
+            stateless_http=True,
         )

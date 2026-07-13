@@ -1,7 +1,14 @@
 # ranking-autotune Specification
 
 ## Purpose
-TBD - created by archiving change close-auto-tune-loop. Update Purpose after archive.
+Close the loop from real usage to better ranking without ever risking a silent
+regression: the tuner mines `(query → cited_path)` pairs from usage logs as
+binary relevance labels (guarded off until enough real pairs exist), scores
+candidate configs against a combined pairs-plus-golden objective, and treats
+the golden-set NDCG floor as a hard constraint on both selection and adoption.
+The loop is deterministic and reasoning-model-free throughout, tuning only
+ever writes a reviewable candidate config and report, and adoption is an
+explicit, reversible step that never happens automatically.
 ## Requirements
 ### Requirement: Mined Pairs Enter the Tuning Objective as Binary Labels
 

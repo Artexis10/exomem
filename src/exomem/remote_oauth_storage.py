@@ -1,9 +1,8 @@
-"""Encrypted shared OAuth state for active/passive Exomem replicas.
+"""Shared OAuth and session state for active/passive Exomem replicas.
 
-FastMCP access tokens are reference tokens: each request needs durable JTI and
-upstream-token records.  This adapter keeps those records in an always-on HTTP
-coordinator while FastMCP's Fernet wrapper encrypts every value before it leaves
-the replica.
+This adapter carries already-encrypted values to an always-on HTTP coordinator.
+Legacy FastMCP OAuth bookkeeping may use its bounded cache; durable Exomem
+session collections bypass that cache and remain remote-canonical.
 """
 
 from __future__ import annotations
@@ -118,6 +117,35 @@ class RemoteOAuthStorage:
             },
         )
         self._remember(collection, key, value, float(ttl) if ttl is not None else None)
+
+    async def put_if_absent(
+        self,
+        key: str,
+        value: Mapping[str, Any],
+        *,
+        collection: str | None = None,
+        ttl: SupportsFloat | None = None,
+    ) -> bool:
+        """Atomically create a value without replacing an existing one."""
+        created = bool(
+            await self._request(
+                "put-if-absent",
+                {
+                    "key": key,
+                    "value": dict(value),
+                    "collection": collection,
+                    "ttl": float(ttl) if ttl is not None else None,
+                },
+            )
+        )
+        if created:
+            self._remember(collection, key, value, float(ttl) if ttl is not None else None)
+        return created
+
+    async def list_keys(self, *, collection: str | None = None) -> list[str]:
+        """Return opaque keys in a coordinator collection."""
+        result = await self._request("list-keys", {"collection": collection})
+        return [str(key) for key in result]
 
     async def delete(self, key: str, *, collection: str | None = None) -> bool:
         deleted = bool(await self._request("delete", {"key": key, "collection": collection}))

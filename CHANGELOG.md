@@ -5,6 +5,72 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/Artexis10/exomem/compare/v0.21.0...v0.22.0) (2026-07-13)
+
+
+### Features
+
+* **auth:** add durable local session authority ([256160f](https://github.com/Artexis10/exomem/commit/256160fa12ad66ff79538ec2ae1e2c843cc82ff8))
+* **auth:** add durable session operator controls ([0c1ee62](https://github.com/Artexis10/exomem/commit/0c1ee627360afd17b12c16e9a7890b2f063f020c))
+* **auth:** issue durable local OAuth sessions ([2b0ef8e](https://github.com/Artexis10/exomem/commit/2b0ef8ef3f38562c91afb33875cc944d7cbd09c9))
+
+
+### Bug Fixes
+
+* **auth:** close durable-session rollout gaps ([18e56be](https://github.com/Artexis10/exomem/commit/18e56be8ba59987c6b4f1deba1671b8465261a56))
+* **auth:** close legacy OAuth escape paths ([4f7fec3](https://github.com/Artexis10/exomem/commit/4f7fec35b3c8639ed6ba51df2851ff12ebc38ef8))
+* **auth:** close rollout harness verifier gaps ([ae4faa8](https://github.com/Artexis10/exomem/commit/ae4faa8d5cfbecdf8b2b0bd6cf7a069de69c892a))
+* **auth:** harden durable session rollout controls ([f95fe0a](https://github.com/Artexis10/exomem/commit/f95fe0a665d56972b25d370504a9fb2e0356dc89))
+* **auth:** harden session authority concurrency ([f2a633b](https://github.com/Artexis10/exomem/commit/f2a633b93c25c4f6725ce13e3210dbe5f21d7ef2))
+* **auth:** issue durable local MCP sessions ([230a1c5](https://github.com/Artexis10/exomem/commit/230a1c53bbbd92f5ed9c903015a9a278d7e0d6f7))
+* **auth:** preserve FastMCP DCR grant compatibility ([f92a35b](https://github.com/Artexis10/exomem/commit/f92a35b661894ee62636783727320199a045e038))
+* **config:** load cli dotenv from working directory ([e6cb1bc](https://github.com/Artexis10/exomem/commit/e6cb1bc9f4e839205036247726f4bdc965737ff2))
+* **config:** load packaged service dotenv from working directory ([e27766e](https://github.com/Artexis10/exomem/commit/e27766eaeb2394fab999c38698c5be052bc037bd))
+* **config:** load service dotenv from working directory ([0404da7](https://github.com/Artexis10/exomem/commit/0404da750da5805da1ed991c5a76e289463f15d6))
+* **ha:** complete durable state coordinator contract ([b2f109e](https://github.com/Artexis10/exomem/commit/b2f109e68549526a473608c847bac4ff86df16c7))
+* **ha:** reject non-object state bodies ([fd9bbba](https://github.com/Artexis10/exomem/commit/fd9bbbae301544fa85ef8e9275161c08378bcbd4))
+
+## [0.21.0](https://github.com/Artexis10/exomem/compare/v0.20.2...v0.21.0) (2026-07-12)
+
+
+### Features
+
+* gate HA failover on runtime readiness ([#221](https://github.com/Artexis10/exomem/issues/221)) ([f5aeb8c](https://github.com/Artexis10/exomem/commit/f5aeb8c812d65690e322f5b37a27f54a88de8e2c))
+
+## [0.20.2](https://github.com/Artexis10/exomem/compare/v0.20.1...v0.20.2) (2026-07-12)
+
+
+### Bug Fixes
+
+* prevent HA replay of MCP tool calls ([#219](https://github.com/Artexis10/exomem/issues/219)) ([4edd81b](https://github.com/Artexis10/exomem/commit/4edd81b07e8324dd6f95a7bcf6384079abe571e1))
+
+## [0.20.1](https://github.com/Artexis10/exomem/compare/v0.20.0...v0.20.1) (2026-07-12)
+
+
+### Bug Fixes
+
+* make remote MCP sessions restart-safe ([#217](https://github.com/Artexis10/exomem/issues/217)) ([daf8ea3](https://github.com/Artexis10/exomem/commit/daf8ea3700d947476fb13f7aeb11c6361ad7f811))
+
+## [0.20.0](https://github.com/Artexis10/exomem/compare/v0.19.1...v0.20.0) (2026-07-12)
+
+
+### Features
+
+* add an unauthenticated /health liveness endpoint ([a2573d3](https://github.com/Artexis10/exomem/commit/a2573d370ef95ed814c32faf5646d3cb77da4159))
+
+
+### Bug Fixes
+
+* accept-relation creates the ## Relations section when a note lacks one ([3fd89f7](https://github.com/Artexis10/exomem/commit/3fd89f765f233ec2a2610e4ae44b4847e1bcdb68))
+* enforce append-only immutability regardless of path casing ([3e20a1c](https://github.com/Artexis10/exomem/commit/3e20a1cd2d1ac94ca7a7ab528759bf4a7c28a212))
+* enforce the no-confidence-floats / no-decay stance in the writers ([7492c01](https://github.com/Artexis10/exomem/commit/7492c015b46806b2f34a9fc9e73fc70d2fb13a76))
+* exclude out-of-KB, readonly, and excluded targets from relation suggestions ([2fa0279](https://github.com/Artexis10/exomem/commit/2fa02793973e50d8f82d5e16fe7633660cc543e8))
+* heal reconcile count drift by default via maintain_memory ([009170f](https://github.com/Artexis10/exomem/commit/009170ffb7307513d416c5bb88fa34db36113e6e))
+* keep governed writes inside Knowledge Base/ and fail the backstop closed ([6f7245e](https://github.com/Artexis10/exomem/commit/6f7245e62e6bafb29d37b26b638412a629b8558b))
+* make MCP mutations retry-safe ([22ab936](https://github.com/Artexis10/exomem/commit/22ab936666d82e395b507444cfcf66abc3ac9f53))
+* make MCP mutations retry-safe ([cb0c47a](https://github.com/Artexis10/exomem/commit/cb0c47af757308d429e5167dfac48b60f6e32de1))
+* write-governance & lifecycle hardening from the promise audit ([9e057b4](https://github.com/Artexis10/exomem/commit/9e057b45d5cb386c4a6a0f9f6f315ff976708fb9))
+
 ## [0.19.1](https://github.com/Artexis10/exomem/compare/v0.19.0...v0.19.1) (2026-07-12)
 
 

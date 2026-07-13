@@ -13,11 +13,9 @@ the other guarantees — it loads only an ALREADY-CACHED model (skips the probe
 rather than trigger a download) and the search is read-only (never mutates the
 sidecar).
 
-The one network exception is explicit opt-in: `--probe` (remote profile only)
-performs three read-only GETs to verify the live connector endpoints — local
-/mcp expects 401, OAuth discovery expects 200, and the bare
-oauth-protected-resource path expects 200 (the claude.ai registration gate).
-Without the flag, doctor performs zero network calls.
+The one network exception is explicit opt-in: `--probe`. The remote profile
+verifies the live connector endpoints; the HA profile verifies explicit replica
+readiness origins. Without the flag, doctor performs zero network calls.
 """
 
 from __future__ import annotations
@@ -29,6 +27,7 @@ import shutil
 import sqlite3
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -36,9 +35,27 @@ from typing import Literal
 from .kbdir import kb_dirname, kb_prefix
 
 Status = Literal["pass", "warn", "fail"]
-Profile = Literal["lean", "hybrid", "standard", "media", "remote"]
-VALID_PROFILES: tuple[Profile, ...] = ("lean", "hybrid", "standard", "media", "remote")
+Profile = Literal["lean", "hybrid", "standard", "media", "remote", "ha"]
+VALID_PROFILES: tuple[Profile, ...] = (
+    "lean",
+    "hybrid",
+    "standard",
+    "media",
+    "remote",
+    "ha",
+)
 PROFILE_ENV = "EXOMEM_PROFILE"
+HA_AUTH_ENV_KEYS = (
+    "EXOMEM_WRITER_LEASE_URL",
+    "EXOMEM_WRITER_LEASE_VAULT_ID",
+    "EXOMEM_WRITER_LEASE_REPLICA_ID",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_LEASE_COORDINATOR_TOKEN",
+    "EXOMEM_OAUTH_STORAGE_URL",
+    "EXOMEM_OAUTH_STORAGE_NAMESPACE",
+    "EXOMEM_OAUTH_STORAGE_TOKEN",
+    "EXOMEM_HA_REPLICA_URLS",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -794,6 +811,26 @@ def _check_remote_env() -> list[DoctorCheck]:
         else:
             checks.append(_check(f"env.{key}", "fail", f"{key} is not set.", remediation))
 
+    raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    try:
+        user_id = int(raw_user_id)
+        valid_user_id = user_id > 0 and raw_user_id.isdecimal()
+    except ValueError:
+        valid_user_id = False
+    if valid_user_id:
+        checks.append(_check(
+            "env.EXOMEM_GITHUB_USER_ID",
+            "pass",
+            "EXOMEM_GITHUB_USER_ID is a positive immutable GitHub subject.",
+        ))
+    else:
+        checks.append(_check(
+            "env.EXOMEM_GITHUB_USER_ID",
+            "fail",
+            "EXOMEM_GITHUB_USER_ID is missing or invalid.",
+            "Set EXOMEM_GITHUB_USER_ID to the positive numeric ID returned by GitHub.",
+        ))
+
     host = os.environ.get("EXOMEM_HOST", "127.0.0.1")
     checks.append(_check("env.EXOMEM_HOST", "pass", f"EXOMEM_HOST resolves to {host}."))
     if os.environ.get("EXOMEM_REST_API_KEY"):
@@ -817,6 +854,270 @@ def _check_remote_env() -> list[DoctorCheck]:
     return checks
 
 
+def _check_ha_env() -> list[DoctorCheck]:
+    required = {
+        "EXOMEM_BASE_URL": "Set the stable public OAuth origin.",
+        "EXOMEM_JWT_SIGNING_KEY": "Set the stable durable-session signing root.",
+        "EXOMEM_WRITER_LEASE_URL": "Set the provider-neutral writer coordinator URL.",
+        "EXOMEM_WRITER_LEASE_VAULT_ID": "Set the stable vault coordination identifier.",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID": "Set a unique identifier for this replica.",
+        "EXOMEM_OAUTH_STORAGE_URL": "Set the authoritative coordinator state URL.",
+        "EXOMEM_OAUTH_STORAGE_TOKEN": "Set the coordinator bearer credential for auth state.",
+        "EXOMEM_LEASE_COORDINATOR_TOKEN": "Set the bearer enforced by the coordinator service.",
+    }
+    checks: list[DoctorCheck] = []
+    for key, remediation in required.items():
+        if os.environ.get(key, "").strip():
+            checks.append(_check(f"ha.env.{key}", "pass", f"{key} is set."))
+        else:
+            checks.append(_check(f"ha.env.{key}", "fail", f"{key} is not set.", remediation))
+    if os.environ.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip():
+        checks.append(_check("ha.env.EXOMEM_WRITER_LEASE_TOKEN", "pass", "Writer lease token is set."))
+    else:
+        checks.append(_check(
+            "ha.env.EXOMEM_WRITER_LEASE_TOKEN",
+            "fail",
+            "Writer lease token is not set.",
+            "Set EXOMEM_WRITER_LEASE_TOKEN to the same bearer as EXOMEM_OAUTH_STORAGE_TOKEN.",
+        ))
+    namespace = (
+        os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+        or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+    )
+    checks.append(_check(
+        "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
+        "pass" if namespace else "fail",
+        "OAuth storage namespace is set."
+        if namespace
+        else "OAuth storage namespace is not set.",
+        None if namespace else (
+            "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
+        ),
+    ))
+    raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    try:
+        valid_user_id = raw_user_id.isdecimal() and int(raw_user_id) > 0
+    except ValueError:
+        valid_user_id = False
+    checks.append(_check(
+        "ha.env.EXOMEM_GITHUB_USER_ID",
+        "pass" if valid_user_id else "fail",
+        "Immutable GitHub user ID is valid."
+        if valid_user_id
+        else "EXOMEM_GITHUB_USER_ID is missing or invalid.",
+        None if valid_user_id else "Set a positive numeric EXOMEM_GITHUB_USER_ID.",
+    ))
+    credential_values = [
+        os.environ.get("EXOMEM_LEASE_COORDINATOR_TOKEN", "").strip(),
+        os.environ.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip(),
+        os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip(),
+    ]
+    credentials_match = all(credential_values) and len(set(credential_values)) == 1
+    checks.append(_check(
+        "ha.auth.credentials_match",
+        "pass" if credentials_match else "fail",
+        "HA coordinator credentials are present and match."
+        if credentials_match
+        else "HA coordinator credentials are missing or do not match.",
+        None if credentials_match else (
+            "Use one bearer value for writer lease, OAuth storage, and the coordinator."
+        ),
+    ))
+    raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
+    try:
+        contracts = _parse_runtime_contracts(raw_contracts)
+    except ValueError as exc:
+        checks.append(_check(
+            "ha.supported_contracts",
+            "fail",
+            str(exc),
+            "Set EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS to comma-separated positive integers.",
+        ))
+    else:
+        checks.append(_check(
+            "ha.supported_contracts",
+            "pass",
+            f"Accepted runtime contracts: {', '.join(map(str, sorted(contracts)))}.",
+        ))
+    return checks
+
+
+def _parse_runtime_contracts(raw: str = "") -> set[int]:
+    from .runtime_readiness import RUNTIME_CONTRACT
+
+    if not raw:
+        return {RUNTIME_CONTRACT}
+    values: set[int] = set()
+    for part in raw.split(","):
+        text = part.strip()
+        if not text:
+            continue
+        try:
+            value = int(text)
+        except ValueError:
+            raise ValueError(f"Invalid HA runtime contract {text!r}.") from None
+        if value <= 0:
+            raise ValueError(f"Invalid HA runtime contract {text!r}.")
+        values.add(value)
+    if not values:
+        raise ValueError("No valid HA runtime contracts were configured.")
+    return values
+
+
+def _ha_replica_urls(explicit: list[str] | tuple[str, ...] | None) -> list[str]:
+    raw_values = list(explicit or ())
+    if not raw_values:
+        raw_values = os.environ.get("EXOMEM_HA_REPLICA_URLS", "").split(",")
+    urls: list[str] = []
+    for raw in raw_values:
+        value = raw.strip().rstrip("/")
+        if not value:
+            continue
+        parsed = urllib.parse.urlsplit(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+            raise ValueError(f"Invalid HA replica URL {value!r}.")
+        if parsed.username or parsed.password or parsed.query or parsed.fragment:
+            raise ValueError(f"HA replica URL must be a credential-free origin: {value!r}.")
+        if parsed.path not in {"", "/"}:
+            raise ValueError(f"HA replica URL must not include a path: {value!r}.")
+        origin = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, "", "", ""))
+        if origin not in urls:
+            urls.append(origin)
+    return urls
+
+
+def _evaluate_ha_readiness(
+    body: object, *, supported_contracts: set[int]
+) -> tuple[list[str], dict[str, object]]:
+    from .runtime_readiness import HTTP_TRANSPORT
+
+    if not isinstance(body, dict):
+        return ["invalid readiness payload"], {}
+    reasons: list[str] = []
+    if body.get("status") != "ready" or body.get("service") != "exomem":
+        reasons.append("runtime is not ready")
+    contract = body.get("runtime_contract")
+    if isinstance(contract, bool) or not isinstance(contract, int) or contract not in supported_contracts:
+        reasons.append("runtime contract is unsupported")
+    if body.get("transport") != HTTP_TRANSPORT:
+        reasons.append("HTTP transport is not stateless")
+    replica_id = body.get("replica_id")
+    if not isinstance(replica_id, str) or not replica_id:
+        reasons.append("replica identity is missing")
+    coordination = body.get("coordination")
+    if not isinstance(coordination, dict) or coordination.get("enabled") is not True:
+        reasons.append("writer coordination is disabled")
+    elif coordination.get("coordinator_healthy") is not True:
+        reasons.append("writer coordinator is unavailable")
+    if body.get("takeover_eligible") is not True:
+        reasons.append("replica is not takeover eligible")
+    release = body.get("release")
+    if not isinstance(release, str) or not release:
+        reasons.append("release identity is missing")
+    return reasons, {
+        "replica_id": replica_id,
+        "release": release,
+        "runtime_contract": contract,
+        "transport": body.get("transport"),
+    }
+
+
+def _check_ha_probes(replica_urls: list[str]) -> list[DoctorCheck]:
+    if len(replica_urls) < 2:
+        return [_check(
+            "ha.replica_urls",
+            "fail",
+            "HA probing requires at least two explicit replica origins.",
+            "Pass --replica-url once per replica or set EXOMEM_HA_REPLICA_URLS.",
+        )]
+    try:
+        supported = _parse_runtime_contracts(
+            os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
+        )
+    except ValueError as exc:
+        return [_check("ha.compatibility", "fail", str(exc))]
+
+    checks: list[DoctorCheck] = []
+    identities: list[str] = []
+    releases: list[str] = []
+    failed = False
+    for index, origin in enumerate(replica_urls, start=1):
+        url = f"{origin}/health/ready"
+        try:
+            status, body = _probe_get(url)
+        except Exception as exc:  # noqa: BLE001 - network failure is a diagnostic result
+            checks.append(_check(
+                f"ha.replica.{index}",
+                "fail",
+                f"Could not reach runtime readiness at {origin}: {exc}",
+                "Start or upgrade the replica and verify its private/public origin routing.",
+            ))
+            failed = True
+            continue
+        reasons, details = _evaluate_ha_readiness(body, supported_contracts=supported)
+        if status != 200:
+            reasons.insert(0, f"readiness returned HTTP {status}")
+        if reasons:
+            checks.append(_check(
+                f"ha.replica.{index}",
+                "fail",
+                f"Replica {origin} is ineligible: {', '.join(reasons)}.",
+                "Upgrade or repair this replica before enabling HA failover.",
+                details=details,
+            ))
+            failed = True
+            continue
+        replica_id = str(details["replica_id"])
+        release = str(details["release"])
+        identities.append(replica_id)
+        releases.append(release)
+        checks.append(_check(
+            f"ha.replica.{index}",
+            "pass",
+            f"Replica {replica_id} at {origin} is runtime-compatible (release {release}).",
+            details=details,
+        ))
+
+    duplicates = len(identities) != len(set(identities))
+    if duplicates:
+        failed = True
+    checks.append(_check(
+        "ha.compatibility",
+        "fail" if failed else "pass",
+        (
+            "HA replicas are not safely compatible."
+            if failed
+            else "All HA replicas are compatible and have unique identities."
+        ),
+        (
+            "Fix failing replica checks and ensure every replica ID is unique."
+            if failed
+            else None
+        ),
+    ))
+    if duplicates:
+        checks.append(_check(
+            "ha.replica_identity",
+            "fail",
+            "Two or more ready replicas report the same replica identity.",
+            "Set a unique EXOMEM_WRITER_LEASE_REPLICA_ID on every replica.",
+        ))
+    if len(set(releases)) > 1:
+        checks.append(_check(
+            "ha.release_drift",
+            "warn",
+            f"Compatible replicas run different releases: {', '.join(sorted(set(releases)))}.",
+            "Finish the rolling deployment when convenient; exact release equality is not required.",
+        ))
+    elif releases:
+        checks.append(_check(
+            "ha.release_drift",
+            "pass",
+            f"All ready replicas run release {releases[0]}.",
+        ))
+    return checks
+
+
 def _probe_get(url: str) -> tuple[int, object]:
     """GET `url` with a short timeout; returns (status, parsed-JSON-or-text).
 
@@ -831,6 +1132,120 @@ def _probe_get(url: str) -> tuple[int, object]:
     except Exception:  # noqa: BLE001 — non-JSON bodies are fine for probes
         body = resp.text
     return resp.status_code, body
+
+
+def _probe_state(url: str, namespace: str, token: str | None) -> tuple[int, object]:
+    """Read a deliberately absent coordinator key, optionally authenticated."""
+    import httpx
+
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = httpx.post(
+        f"{url.rstrip('/')}/v1/state/{namespace}/get",
+        json={
+            "key": "__exomem_doctor_absent_sentinel__",
+            "collection": "exomem-doctor-auth-probe",
+        },
+        headers=headers,
+        timeout=5.0,
+        follow_redirects=False,
+    )
+    try:
+        body: object = response.json()
+    except Exception:  # noqa: BLE001 - non-JSON error bodies are diagnostic only
+        body = response.text
+    return response.status_code, body
+
+
+def _check_ha_auth_probes(*, prefix: str = "ha.auth") -> list[DoctorCheck]:
+    url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip().rstrip("/")
+    namespace = (
+        os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+        or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+    )
+    token = os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip()
+    if not (url and namespace and token):
+        return [_check(
+            f"{prefix}.storage_credential",
+            "fail",
+            "Cannot probe authoritative auth storage because its URL, namespace, or token is missing.",
+            "Set EXOMEM_OAUTH_STORAGE_URL, its namespace, and EXOMEM_OAUTH_STORAGE_TOKEN.",
+        )]
+
+    checks: list[DoctorCheck] = []
+    try:
+        anonymous_status, _ = _probe_state(url, namespace, None)
+    except Exception as error:  # noqa: BLE001 - network diagnostic boundary
+        checks.append(_check(
+            f"{prefix}.anonymous_rejected",
+            "fail",
+            f"Could not reach coordinator for anonymous auth enforcement probe: {error}",
+            "Check coordinator routing and availability.",
+        ))
+    else:
+        checks.append(_check(
+            f"{prefix}.anonymous_rejected",
+            "pass" if anonymous_status == 401 else "fail",
+            "Coordinator rejects anonymous state access with 401."
+            if anonymous_status == 401
+            else f"Coordinator anonymous state probe returned HTTP {anonymous_status}, expected 401.",
+            None if anonymous_status == 401 else (
+                "Require bearer authentication on every coordinator state route."
+            ),
+        ))
+
+    try:
+        authenticated_status, authenticated_body = _probe_state(url, namespace, token)
+    except Exception:  # noqa: BLE001 - network diagnostic boundary
+        checks.append(_check(
+            f"{prefix}.storage_credential",
+            "fail",
+            "Could not reach authoritative auth storage.",
+            "Check coordinator routing and availability; the configured token was not printed.",
+        ))
+    else:
+        sentinel_absent = (
+            isinstance(authenticated_body, dict)
+            and "result" in authenticated_body
+            and authenticated_body.get("result") is None
+        )
+        if authenticated_status == 200 and sentinel_absent:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "pass",
+                "Authenticated read-only auth-storage probe succeeded.",
+            ))
+        elif authenticated_status in {401, 403}:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                "Coordinator rejected the configured auth-storage credential.",
+                "Set the same bearer on coordinator, writer lease, and OAuth storage.",
+            ))
+        elif authenticated_status == 200:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                "Authenticated auth-storage probe returned an unexpected sentinel value.",
+                "Check coordinator state routing and namespace configuration.",
+            ))
+        else:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                f"Authoritative auth storage returned HTTP {authenticated_status}.",
+                "Repair coordinator availability before serving authenticated traffic.",
+            ))
+    return checks
+
+
+def _ha_auth_configured() -> bool:
+    """Whether this environment declares any part of a replica/HA topology."""
+    return any(
+        os.environ.get(key, "").strip()
+        for key in HA_AUTH_ENV_KEYS
+    )
 
 
 def _check_probe_local(port: int = 8765) -> DoctorCheck:
@@ -945,7 +1360,13 @@ def _check_remote_probes() -> list[DoctorCheck]:
     return checks
 
 
-def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: bool = False) -> DoctorReport:
+def doctor(
+    *,
+    vault: str | None = None,
+    profile: Profile | None = None,
+    probe: bool = False,
+    replica_urls: list[str] | tuple[str, ...] | None = None,
+) -> DoctorReport:
     profile = profile or infer_profile()
     if profile not in VALID_PROFILES:
         raise ValueError(f"unknown profile: {profile!r}. Valid: {list(VALID_PROFILES)}")
@@ -1001,11 +1422,31 @@ def doctor(*, vault: str | None = None, profile: Profile | None = None, probe: b
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        if _ha_auth_configured():
+            checks.extend(_check_ha_env())
         # Opt-in live-endpoint verification (three read-only GETs). The
         # default stays fully offline — doctor never touches the network
         # unless --probe is passed explicitly.
         if probe:
             checks.extend(_check_remote_probes())
+            if _ha_auth_configured():
+                checks.extend(_check_ha_auth_probes(prefix="probe.auth"))
+
+    if profile == "ha":
+        checks.extend(_check_ha_env())
+        if probe:
+            checks.extend(_check_ha_auth_probes())
+            try:
+                urls = _ha_replica_urls(replica_urls)
+            except ValueError as exc:
+                checks.append(_check(
+                    "ha.replica_urls",
+                    "fail",
+                    str(exc),
+                    "Pass credential-free replica origins such as https://replica.example.com.",
+                ))
+            else:
+                checks.extend(_check_ha_probes(urls))
 
     return DoctorReport(profile=profile, checks=checks)
 

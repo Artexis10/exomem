@@ -1,7 +1,14 @@
 # find-usage-activation Specification
 
 ## Purpose
-TBD - created by archiving change usage-aware-find-ranking. Update Purpose after archive.
+Let frequently-used notes rank a little higher without changing default
+retrieval behavior: an opt-in `prefer_used` parameter on `find` applies a
+bounded, positive-only usage-activation multiplier — derived from find
+surfacings, reads, and citing writes — to candidates that content-matching
+lanes already surfaced. The boost defaults off, is always weaker than the
+compiled-note boost, can never let a superseded page outrank its active
+successor, and never introduces a candidate that content matching didn't
+already find.
 ## Requirements
 ### Requirement: Opt-In Usage-Activation Boost Defaults Off
 
