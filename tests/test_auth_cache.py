@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
+from typing import Any
 
+import httpx
 import pytest
-from fastmcp.server.auth.providers.github import GitHubTokenVerifier
 
 from exomem.server_auth import SingleUserGitHubVerifier
 
@@ -14,46 +13,50 @@ ALLOWED_LOGIN = "person"
 ALLOWED_ID = 123456
 
 
-def _verifier() -> SingleUserGitHubVerifier:
-    return SingleUserGitHubVerifier(
-        allowed_login=ALLOWED_LOGIN,
-        allowed_user_id=ALLOWED_ID,
+def _response(
+    request: httpx.Request,
+    *,
+    login: str | None = ALLOWED_LOGIN,
+    user_id: Any = ALLOWED_ID,
+    status_code: int = 200,
+) -> httpx.Response:
+    return httpx.Response(
+        status_code,
+        json={"login": login, "id": user_id},
+        request=request,
     )
 
 
-def _stub_super(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    login: str | None = ALLOWED_LOGIN,
-    user_id: object = ALLOWED_ID,
-) -> dict[str, int]:
-    calls = {"count": 0}
+@pytest.mark.anyio
+async def test_exact_identity_uses_exactly_one_uncached_github_user_request() -> None:
+    requests: list[httpx.Request] = []
 
-    async def fake(self, token):  # noqa: ANN001
-        del self
-        calls["count"] += 1
-        if login is None:
-            return None
-        return SimpleNamespace(
-            claims={"login": login, "sub": str(user_id)},
-            client_id=str(user_id),
-            token=token,
+    def github(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return _response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        verifier = SingleUserGitHubVerifier(
+            allowed_login=ALLOWED_LOGIN,
+            allowed_user_id=ALLOWED_ID,
+            http_client=client,
         )
-
-    monkeypatch.setattr(GitHubTokenVerifier, "verify_token", fake)
-    return calls
-
-
-def test_exact_login_and_immutable_id_are_required(monkeypatch: pytest.MonkeyPatch) -> None:
-    calls = _stub_super(monkeypatch)
-    verifier = _verifier()
-
-    result = asyncio.run(verifier.verify_token("temporary-github-token"))
+        result = await verifier.verify_token("temporary-github-token")
 
     assert result is not None
-    assert calls["count"] == 1
+    assert result.client_id == str(ALLOWED_ID)
+    assert result.scopes == []
+    assert result.claims == {"sub": str(ALLOWED_ID), "login": ALLOWED_LOGIN}
+    assert len(requests) == 1
+    assert requests[0].method == "GET"
+    assert requests[0].url == "https://api.github.com/user"
+    assert requests[0].headers["authorization"] == "Bearer temporary-github-token"
+    assert verifier._cache.enabled is False
+    assert verifier._cache._entries == {}
+    assert not hasattr(verifier, "_login_cache")
 
 
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("login", "user_id"),
     [
@@ -62,49 +65,79 @@ def test_exact_login_and_immutable_id_are_required(monkeypatch: pytest.MonkeyPat
         (ALLOWED_LOGIN, 999),
         (ALLOWED_LOGIN, None),
         (ALLOWED_LOGIN, "not-numeric"),
+        (ALLOWED_LOGIN, True),
     ],
 )
-def test_wrong_or_missing_identity_is_rejected(
-    monkeypatch: pytest.MonkeyPatch,
+async def test_wrong_missing_or_non_numeric_identity_is_rejected(
     login: str | None,
-    user_id: object,
+    user_id: Any,
 ) -> None:
-    _stub_super(monkeypatch, login=login, user_id=user_id)
+    requests = 0
 
-    assert asyncio.run(_verifier().verify_token("temporary-github-token")) is None
+    def github(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return _response(request, login=login, user_id=user_id)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        verifier = SingleUserGitHubVerifier(
+            allowed_login=ALLOWED_LOGIN,
+            allowed_user_id=ALLOWED_ID,
+            http_client=client,
+        )
+        assert await verifier.verify_token("temporary-github-token") is None
+
+    assert requests == 1
 
 
-def test_verification_cache_is_disabled_and_no_exomem_cache_exists(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _stub_super(monkeypatch)
-    verifier = _verifier()
+@pytest.mark.anyio
+async def test_same_proof_is_fetched_once_per_verification_without_scope_request() -> None:
+    paths: list[str] = []
 
-    first = asyncio.run(verifier.verify_token("same-token"))
-    second = asyncio.run(verifier.verify_token("same-token"))
+    def github(request: httpx.Request) -> httpx.Response:
+        paths.append(request.url.path)
+        return _response(request)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        verifier = SingleUserGitHubVerifier(
+            allowed_login=ALLOWED_LOGIN,
+            allowed_user_id=ALLOWED_ID,
+            http_client=client,
+        )
+        first = await verifier.verify_token("same-token")
+        second = await verifier.verify_token("same-token")
 
     assert first is not None and second is not None
-    assert calls["count"] == 2
+    assert paths == ["/user", "/user"]
     assert verifier._cache.enabled is False
     assert verifier._cache._entries == {}
-    assert not hasattr(verifier, "_login_cache")
 
 
-def test_boolean_claim_is_not_accepted_as_numeric_user_id(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.anyio
+@pytest.mark.parametrize("status_code", [401, 403, 429, 503])
+async def test_github_failure_alert_is_secret_safe(
+    status_code: int,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    async def fake(self, token):  # noqa: ANN001
-        del self
-        return SimpleNamespace(
-            claims={"login": ALLOWED_LOGIN, "sub": True},
-            client_id="1",
-            token=token,
+    bearer = "temporary-github-token-must-not-be-logged"
+
+    def github(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            status_code,
+            text=f"provider echoed {bearer}",
+            request=request,
         )
 
-    monkeypatch.setattr(GitHubTokenVerifier, "verify_token", fake)
-    verifier = SingleUserGitHubVerifier(allowed_login=ALLOWED_LOGIN, allowed_user_id=1)
+    async with httpx.AsyncClient(transport=httpx.MockTransport(github)) as client:
+        verifier = SingleUserGitHubVerifier(
+            allowed_login=ALLOWED_LOGIN,
+            allowed_user_id=ALLOWED_ID,
+            http_client=client,
+        )
+        assert await verifier.verify_token(bearer) is None
 
-    assert asyncio.run(verifier.verify_token("temporary-github-token")) is None
+    assert bearer not in caplog.text
+    assert str(status_code) in caplog.text
 
 
 @pytest.mark.parametrize("user_id", [0, -1, True])

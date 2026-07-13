@@ -123,6 +123,17 @@ def test_shared_session_authority_refuses_missing_storage_bearer(
         server_auth.build_session_authority(base_url="https://memory.example")
 
 
+def test_ha_runtime_refuses_replica_local_session_authority(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_oauth_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "https://coordinator.example")
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
+
+    with pytest.raises(RuntimeError, match="EXOMEM_OAUTH_STORAGE_URL"):
+        server_auth.build_session_authority(base_url="https://memory.example")
+
+
 def test_build_oauth_constructs_durable_proxy_and_cache_disabled_verifier(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

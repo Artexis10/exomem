@@ -17,12 +17,15 @@ from fastmcp.server.auth.oauth_proxy.models import (
     ClientCode,
 )
 from fastmcp.server.auth.oauth_proxy.ui import create_error_html
+from mcp.server.auth.handlers.metadata import MetadataHandler
 from mcp.server.auth.provider import AuthorizationCode, RefreshToken, TokenError
-from mcp.server.auth.settings import RevocationOptions
+from mcp.server.auth.routes import build_metadata, cors_middleware
+from mcp.server.auth.settings import ClientRegistrationOptions, RevocationOptions
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from starlette.middleware import Middleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
+from starlette.routing import Route
 from typing_extensions import override
 
 from .auth_sessions import SessionAuthority, SessionIdentity, SessionStoreUnavailable
@@ -145,6 +148,41 @@ class ExomemSessionOAuthProxy(OAuthProxy):
         )
 
     @override
+    async def load_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: str,
+    ) -> RefreshToken | None:
+        """Refuse refresh without consulting preserved FastMCP legacy state."""
+        del client, refresh_token
+        return None
+
+    @override
+    async def exchange_refresh_token(
+        self,
+        client: OAuthClientInformationFull,
+        refresh_token: RefreshToken,
+        scopes: list[str],
+    ) -> OAuthToken:
+        """Defensively prevent callers from re-entering FastMCP's legacy flow."""
+        del client, refresh_token, scopes
+        raise TokenError("invalid_grant", "Refresh tokens are not supported")
+
+    @override
+    async def register_client(self, client_info: OAuthClientInformationFull) -> None:
+        """Register authorization-code-only downstream clients."""
+        client_info.grant_types = ["authorization_code"]
+        await super().register_client(client_info)
+
+    @override
+    async def get_client(self, client_id: str) -> OAuthClientInformationFull | None:
+        """Hide refresh grants retained in bounded rollback client records."""
+        client = await super().get_client(client_id)
+        if client is None:
+            return None
+        return client.model_copy(update={"grant_types": ["authorization_code"]})
+
+    @override
     async def revoke_token(self, token: AccessToken | RefreshToken) -> None:
         record = await self._session_authority.validate(token.token)
         if record is None:
@@ -160,6 +198,46 @@ class ExomemSessionOAuthProxy(OAuthProxy):
             Middleware(SessionStoreUnavailableMiddleware),
             *super().get_middleware(),
         ]
+
+    @override
+    def get_routes(self, mcp_path: str | None = None) -> list[Route]:
+        """Preserve FastMCP routes while advertising no refresh-token grant."""
+        routes = super().get_routes(mcp_path)
+        rewritten: list[Route] = []
+        for route in routes:
+            if not route.path.startswith("/.well-known/oauth-authorization-server"):
+                rewritten.append(route)
+                continue
+
+            client_options = (
+                self.client_registration_options or ClientRegistrationOptions()
+            )
+            metadata = build_metadata(
+                self.base_url,
+                self.service_documentation_url,
+                client_options,
+                self.revocation_options or RevocationOptions(),
+            )
+            metadata.grant_types_supported = ["authorization_code"]
+            if self._cimd_manager is not None:
+                metadata.client_id_metadata_document_supported = True
+                existing = metadata.token_endpoint_auth_methods_supported or []
+                metadata.token_endpoint_auth_methods_supported = [
+                    *existing,
+                    "private_key_jwt",
+                    "none",
+                ]
+            handler = MetadataHandler(metadata)
+            rewritten.append(
+                Route(
+                    path=route.path,
+                    endpoint=cors_middleware(handler.handle, ["GET", "OPTIONS"]),
+                    methods=route.methods or ["GET", "OPTIONS"],
+                    name=route.name,
+                    include_in_schema=route.include_in_schema,
+                )
+            )
+        return rewritten
 
     async def _cleanup_github_token(self, access_token: str) -> None:
         if self._upstream_client_secret is None:
@@ -184,7 +262,7 @@ class ExomemSessionOAuthProxy(OAuthProxy):
                     json={"access_token": access_token},
                     headers={"Accept": "application/vnd.github+json"},
                 )
-            if response.status_code in {204, 404, 422}:
+            if response.status_code in {204, 404}:
                 return
             logger.warning(
                 "GitHub OAuth token cleanup failed with status %d",

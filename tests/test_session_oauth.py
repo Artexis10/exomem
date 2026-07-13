@@ -44,6 +44,40 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
     assert list(inspect.signature(OAuthProxy.load_access_token).parameters) == ["self", "token"]
     assert list(inspect.signature(OAuthProxy.revoke_token).parameters) == ["self", "token"]
     assert list(inspect.signature(OAuthProxy.get_middleware).parameters) == ["self"]
+    assert list(inspect.signature(OAuthProxy.get_routes).parameters) == [
+        "self",
+        "mcp_path",
+    ]
+    assert list(inspect.signature(OAuthProxy.load_refresh_token).parameters) == [
+        "self",
+        "client",
+        "refresh_token",
+    ]
+    assert list(inspect.signature(OAuthProxy.exchange_refresh_token).parameters) == [
+        "self",
+        "client",
+        "refresh_token",
+        "scopes",
+    ]
+    assert list(inspect.signature(OAuthProxy.register_client).parameters) == [
+        "self",
+        "client_info",
+    ]
+    assert list(inspect.signature(OAuthProxy.get_client).parameters) == [
+        "self",
+        "client_id",
+    ]
+    for seam in (
+        "load_refresh_token",
+        "exchange_refresh_token",
+        "register_client",
+        "get_client",
+        "get_routes",
+    ):
+        assert seam in ExomemSessionOAuthProxy.__dict__
+        assert list(
+            inspect.signature(getattr(ExomemSessionOAuthProxy, seam)).parameters
+        ) == list(inspect.signature(getattr(OAuthProxy, seam)).parameters)
     assert list(
         inspect.signature(OAuthProxy._validate_client_redirect_uri).parameters
     ) == ["self", "redirect_uri"]
@@ -478,7 +512,7 @@ async def test_callback_rejects_unverifiable_or_incomplete_identity_and_cleans_t
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("cleanup_status", [404, 422, 503])
-async def test_cleanup_already_gone_or_transient_failure_never_retains_token_or_blocks_code(
+async def test_cleanup_already_gone_or_failed_never_retains_token_or_blocks_code(
     cleanup_status: int,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -496,7 +530,7 @@ async def test_cleanup_already_gone_or_transient_failure_never_retains_token_or_
     stored = await proxy._code_store.get(key=code)
     assert stored is not None and not _contains_credentials(stored.idp_tokens)
     assert "temporary-github-token" not in caplog.text
-    if cleanup_status == 503:
+    if cleanup_status in {422, 503}:
         assert "cleanup" in caplog.text.lower()
 
 

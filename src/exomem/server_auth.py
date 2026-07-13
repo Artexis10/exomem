@@ -5,8 +5,10 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
+from contextlib import nullcontext
 from typing import Any
 
+import httpx
 from cryptography.fernet import Fernet
 from fastmcp.server.auth.auth import AccessToken
 from fastmcp.server.auth.jwt_issuer import derive_jwt_key
@@ -50,13 +52,38 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
         self._allowed_user_id = allowed_user_id
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        access = await super().verify_token(token)
-        if access is None:
+        try:
+            async with (
+                nullcontext(self._http_client)
+                if self._http_client is not None
+                else httpx.AsyncClient(timeout=self.timeout_seconds)
+            ) as client:
+                response = await client.get(
+                    "https://api.github.com/user",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/vnd.github+json",
+                        "User-Agent": "Exomem-GitHub-OAuth",
+                    },
+                )
+            if response.status_code != 200:
+                log.warning(
+                    "GitHub identity proof failed with status %d",
+                    response.status_code,
+                )
+                return None
+            user_data = response.json()
+            if not isinstance(user_data, dict):
+                raise ValueError("GitHub user response must be an object")
+        except (httpx.HTTPError, TypeError, ValueError) as error:
+            log.warning(
+                "GitHub identity proof failed due to %s",
+                type(error).__name__,
+            )
             return None
 
-        claims = access.claims or {}
-        login = str(claims.get("login") or "").strip().casefold()
-        raw_user_id = claims.get("sub") or access.client_id
+        login = str(user_data.get("login") or "").strip().casefold()
+        raw_user_id = user_data.get("id")
         if isinstance(raw_user_id, bool):
             return None
         try:
@@ -66,7 +93,13 @@ class SingleUserGitHubVerifier(GitHubTokenVerifier):
         if login != self._allowed_login or user_id != self._allowed_user_id:
             log.warning("rejecting GitHub token for an unexpected identity")
             return None
-        return access
+        return AccessToken(
+            token=token,
+            client_id=str(user_id),
+            scopes=[],
+            expires_at=None,
+            claims={"sub": str(user_id), "login": login},
+        )
 
 
 def _required_signing_root() -> str:
@@ -79,6 +112,11 @@ def _required_signing_root() -> str:
 def _shared_storage_settings() -> tuple[str, str, str, float] | None:
     storage_url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip()
     if not storage_url:
+        if os.environ.get("EXOMEM_WRITER_LEASE_URL", "").strip():
+            raise RuntimeError(
+                "EXOMEM_OAUTH_STORAGE_URL is required when "
+                "EXOMEM_WRITER_LEASE_URL enables HA coordination"
+            )
         return None
     namespace = (
         os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
