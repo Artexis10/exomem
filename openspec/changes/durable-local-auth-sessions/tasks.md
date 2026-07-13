@@ -28,16 +28,16 @@
 
 ## 5. Operator Surface and Migration Controls
 
-- [ ] 5.1 Add CLI tests for `exomem auth sessions`, `exomem auth revoke <session-id>`, and `exomem auth revoke --all`, including authorization/config errors and secret-free output.
-- [ ] 5.2 Implement the operator-only auth commands over the local or remote session authority without registering them as MCP knowledge tools.
+- [x] 5.1 Add CLI tests for `exomem auth sessions`, `exomem auth revoke <session-id>`, and `exomem auth revoke --all`, including authorization/config errors and secret-free output.
+- [x] 5.2 Implement the operator-only auth commands over the local or remote session authority without registering them as MCP knowledge tools.
 - [x] 5.3 Add migration tests proving legacy FastMCP JWTs are not dual-read, connector URLs/discovery/DCR/PKCE remain unchanged, and rollback can use preserved legacy state during a bounded window.
-- [ ] 5.4 Extend remote setup to generate/preserve `EXOMEM_JWT_SIGNING_KEY`, resolve/persist `EXOMEM_GITHUB_USER_ID`, and generate/configure matching non-empty coordinator OAuth-storage credentials; add offline and probed doctor validation.
-- [ ] 5.5 Document the coordinated replica cutover, one-final-login expectation, new required settings, rollback procedure, post-window legacy JTI/upstream-record cleanup, and updated troubleshooting semantics.
+- [x] 5.4 Extend remote setup to generate/preserve `EXOMEM_JWT_SIGNING_KEY`, resolve/persist `EXOMEM_GITHUB_USER_ID`, and generate/configure matching non-empty coordinator OAuth-storage credentials; add offline and probed doctor validation.
+- [x] 5.5 Document the coordinated replica cutover, one-final-login expectation, new required settings, rollback procedure, post-window legacy JTI/upstream-record cleanup, and updated troubleshooting semantics.
 
 ## 6. Dependency and Client Compatibility Gates
 
 - [x] 6.1 Pin `fastmcp==3.4.4`, refresh the lockfile, and add adapter contract tests for every private callback, transaction/code-store, token, revocation, initialization, and exception seam Exomem relies on.
-- [ ] 6.2 Add an automated black-box Codex CLI acceptance test or reproducible harness that logs in once and reuses the stored bearer across fresh processes without a browser prompt.
+- [x] 6.2 Add an automated black-box Codex CLI acceptance test or reproducible harness that logs in once and reuses the stored bearer across fresh processes without a browser prompt.
 - [ ] 6.3 Run the equivalent supported hosted-connector smoke test and record the rollout result; block deployment if omitted `expires_in` is not persisted correctly.
 - [ ] 6.4 Run focused auth/coordinator/CLI tests, the full lean pytest suite, strict OpenSpec validation, and Ruff; resolve every failure before review.
 - [ ] 6.5 Have an independent reviewer verify the implementation against every scenario in `durable-mcp-auth-sessions`, including zero post-issuance GitHub calls and 503-vs-401 behavior.
