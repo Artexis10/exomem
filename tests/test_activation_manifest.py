@@ -416,3 +416,117 @@ def test_read_only_operations_do_not_activate_a_vault(tmp_path: Path) -> None:
     adopt.adopt(tmp_path)
 
     assert not path.exists()
+
+
+def test_pure_activation_census_is_sorted_indexed_and_duplicate_ids_fail_closed() -> None:
+    census = activation_manifest.ActivationCensus.from_candidates(
+        (
+            activation_manifest.ActivationCandidate("Knowledge Base/z.md", "b" * 64, _ID_A),
+            activation_manifest.ActivationCandidate("Knowledge Base/a.md", "a" * 64, _ID_A),
+        )
+    )
+
+    assert [candidate.rel_path for candidate in census.candidates] == [
+        "Knowledge Base/a.md",
+        "Knowledge Base/z.md",
+    ]
+    assert census.by_path["Knowledge Base/a.md"].source_hash == "a" * 64
+    assert census.paths_by_id[_ID_A] == (
+        "Knowledge Base/a.md",
+        "Knowledge Base/z.md",
+    )
+    assert census.unique_path_for_id(_ID_A) is None
+
+
+def test_supplied_census_avoids_rescans_and_page_rereads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    page = _write_page(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/stable.md",
+        exomem_id=_ID_A,
+    )
+    raw = page.read_text(encoding="utf-8")
+    digest = vault.content_hash(raw)
+    census = activation_manifest.ActivationCensus.from_candidates(
+        (
+            activation_manifest.ActivationCandidate(
+                page.relative_to(tmp_path).as_posix(), digest, _ID_A
+            ),
+        )
+    )
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("supplied census/source state must avoid corpus I/O")
+
+    monkeypatch.setattr(activation_manifest, "_eligible_candidates", forbidden)
+    manifest = activation_manifest.ensure_manifest(tmp_path, census=census)
+    monkeypatch.setattr(Path, "read_text", forbidden)
+
+    assert all(
+        activation_manifest.is_grandfathered(
+            tmp_path,
+            page,
+            source_hash=digest,
+            exomem_id=_ID_A,
+            manifest=manifest,
+            census=census,
+        )
+        for _ in range(5)
+    )
+
+    legacy = activation_manifest.ActivationCandidate(
+        "Knowledge Base/Notes/Insights/legacy.md", "c" * 64, None
+    )
+    legacy_census = activation_manifest.ActivationCensus.from_candidates((legacy,))
+    legacy_manifest = activation_manifest.ActivationManifest(
+        1,
+        1,
+        (
+            activation_manifest.ActivationPage(
+                "path_source_hash", legacy.rel_path, legacy.rel_path, legacy.source_hash
+            ),
+        ),
+    )
+    assert activation_manifest.is_grandfathered(
+        tmp_path,
+        legacy.rel_path,
+        source_hash=legacy.source_hash,
+        exomem_id=None,
+        manifest=legacy_manifest,
+        census=legacy_census,
+    )
+
+
+def test_supplied_census_invalidates_duplicate_stable_identity(tmp_path: Path) -> None:
+    manifest = activation_manifest.ActivationManifest(
+        1,
+        1,
+        (
+            activation_manifest.ActivationPage(
+                "exomem_id",
+                _ID_A,
+                "Knowledge Base/Notes/Insights/original.md",
+                "a" * 64,
+            ),
+        ),
+    )
+    census = activation_manifest.ActivationCensus.from_candidates(
+        (
+            activation_manifest.ActivationCandidate(
+                "Knowledge Base/Notes/Insights/original.md", "a" * 64, _ID_A
+            ),
+            activation_manifest.ActivationCandidate(
+                "Knowledge Base/Notes/Insights/copy.md", "b" * 64, _ID_A
+            ),
+        )
+    )
+
+    assert not activation_manifest.is_grandfathered(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/original.md",
+        source_hash="a" * 64,
+        exomem_id=_ID_A,
+        manifest=manifest,
+        census=census,
+    )

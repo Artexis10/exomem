@@ -220,12 +220,30 @@ class SemanticUnitDocument:
     semantic_block_warnings: tuple[semantic_blocks.SemanticBlockValidationError, ...] = ()
     note_relations: tuple[markdown_relations.MarkdownRelation, ...] = ()
     note_relation_errors: tuple[markdown_relations.RelationValidationError, ...] = ()
+    canonical_section_present: bool = False
+    canonical_bullet_count: int = 0
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
         object.__setattr__(self, "errors", tuple(self.errors))
         object.__setattr__(self, "warnings", tuple(self.warnings))
-        object.__setattr__(self, "rich_blocks", tuple(self.rich_blocks))
+        object.__setattr__(
+            self,
+            "rich_blocks",
+            tuple(
+                semantic_blocks.SemanticBlock(
+                    type=block.type,
+                    title=block.title,
+                    level=block.level,
+                    line=block.line,
+                    end_line=block.end_line,
+                    body=block.body,
+                    metadata=MappingProxyType(dict(block.metadata)),
+                    relations=tuple(block.relations),
+                )
+                for block in self.rich_blocks
+            ),
+        )
         object.__setattr__(self, "semantic_block_errors", tuple(self.semantic_block_errors))
         object.__setattr__(self, "semantic_block_warnings", tuple(self.semantic_block_warnings))
         object.__setattr__(self, "note_relations", tuple(self.note_relations))
@@ -560,6 +578,8 @@ def parse_semantic_units(
         semantic_block_warnings=tuple(rich_document.warnings),
         note_relations=tuple(note_relation_document.relations),
         note_relation_errors=tuple(note_relation_document.errors),
+        canonical_section_present=note_relation_document.canonical_section_present,
+        canonical_bullet_count=note_relation_document.canonical_bullet_count,
     )
 
 

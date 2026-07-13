@@ -619,3 +619,19 @@ def test_resolve_saved_contracts_loads_language_registry_once(
 
     assert calls == 1
     assert _constraint(result, ("categories", "config", "required")).value is True
+
+
+def test_public_typed_helpers_preserve_exact_contract_scalar_semantics() -> None:
+    assert memory_schema.value_type(True) == "boolean"
+    assert memory_schema.value_type(1) == "integer"
+    assert memory_schema.value_type(1.0) == "number"
+    assert memory_schema.value_type(dt.date(2026, 1, 1)) == "date"
+    assert memory_schema.typed_scalar_identity(True) == ("boolean", True)
+    assert memory_schema.typed_scalar_identity(1) == ("integer", 1)
+    assert memory_schema.typed_scalar_identity(1.0) == ("number", 1.0)
+    assert memory_schema.typed_scalar_identity(dt.date(2026, 1, 1)) == (
+        "date",
+        "2026-01-01",
+    )
+    with pytest.raises(ValueError, match="finite"):
+        memory_schema.typed_scalar_identity(float("inf"))

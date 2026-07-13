@@ -1986,6 +1986,11 @@ def _value_type(value: Any) -> str:
     return "string"
 
 
+def value_type(value: Any) -> str:
+    """Return the exact public contract type tag for ``value``."""
+    return _value_type(value)
+
+
 def _frequency(count: int, sample_size: int, **extra: Any) -> dict[str, Any]:
     return {
         "count": count,
@@ -2208,6 +2213,13 @@ def _typed_scalar_identity(value: Any, *, label: str) -> tuple[str, Any]:
     raise ValueError(
         f"INVALID_CONTRACT: {label} values must be typed YAML scalars"
     )
+
+
+def typed_scalar_identity(
+    value: Any, *, label: str = "value"
+) -> tuple[str, Any]:
+    """Return exact typed scalar identity without YAML-style coercion."""
+    return _typed_scalar_identity(value, label=label)
 
 
 def _typed_scalar_sort_key(value: Any) -> tuple[int, Any]:

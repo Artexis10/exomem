@@ -147,6 +147,11 @@ def scan(vault_root: Path) -> ActivationScan:
 
 
 def _eligible(vault_root: Path, page: Any) -> bool:
+    return is_eligible_governed_page(vault_root, page)
+
+
+def is_eligible_governed_page(vault_root: Path, page: Any) -> bool:
+    """Return whether ``page`` is an active governed graph endpoint."""
     return _eligible_for_types(vault_root, page, page_types=_ELIGIBLE_TYPES)
 
 

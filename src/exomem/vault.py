@@ -1068,9 +1068,34 @@ class WikilinkResolver:
         self._title_by_rel: dict[str, str] = {}
         self._build()
 
+    @classmethod
+    def from_entries(
+        cls,
+        vault_root: Path,
+        entries: Iterable[tuple[str, str | None]],
+    ) -> WikilinkResolver:
+        """Build resolver maps from already-read paths/titles without I/O."""
+        resolver = cls.__new__(cls)
+        resolver.vault_root = Path(vault_root)
+        resolver.full_paths = set()
+        resolver.kb_stripped = set()
+        resolver.stems = {}
+        resolver.titles = {}
+        resolver._title_by_rel = {}
+        normalized = sorted(
+            (
+                str(rel_path).replace("\\", "/").lstrip("/").removesuffix(".md"),
+                str(title).strip().lower() if title and str(title).strip() else None,
+            )
+            for rel_path, title in entries
+        )
+        for no_ext, title_lower in normalized:
+            resolver._add_entry(no_ext, title_lower)
+        return resolver
+
     def _build(self) -> None:
         vault_resolved = self.vault_root.resolve()
-        for md in walk_vault_md(self.vault_root):
+        for md in sorted(walk_vault_md(self.vault_root), key=lambda item: item.as_posix()):
             try:
                 rel = md.resolve().relative_to(vault_resolved).as_posix()
             except ValueError:

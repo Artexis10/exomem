@@ -15,10 +15,11 @@ import tempfile
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, BinaryIO
 
 import yaml
@@ -43,6 +44,7 @@ _PAGE_KEYS = frozenset(
 )
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_UNSET = object()
 _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -71,11 +73,55 @@ class ActivationManifest:
     pages: tuple[ActivationPage, ...]
 
 
-@dataclass(frozen=True)
-class _Candidate:
+@dataclass(frozen=True, slots=True)
+class ActivationCandidate:
     rel_path: str
     source_hash: str
     normalized_id: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class ActivationCensus:
+    """Immutable eligible-page snapshot reusable by activation consumers."""
+
+    candidates: tuple[ActivationCandidate, ...]
+    by_path: Mapping[str, ActivationCandidate] = field(init=False, repr=False)
+    paths_by_id: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        ordered = tuple(sorted(self.candidates, key=lambda item: item.rel_path))
+        by_path: dict[str, ActivationCandidate] = {}
+        id_paths: dict[str, list[str]] = {}
+        for candidate in ordered:
+            if candidate.rel_path in by_path:
+                raise ActivationManifestError(
+                    "ACTIVATION_CENSUS_DUPLICATE_PATH",
+                    f"duplicate activation census path: {candidate.rel_path}",
+                )
+            by_path[candidate.rel_path] = candidate
+            if candidate.normalized_id is not None:
+                id_paths.setdefault(candidate.normalized_id, []).append(
+                    candidate.rel_path
+                )
+        object.__setattr__(self, "candidates", ordered)
+        object.__setattr__(self, "by_path", MappingProxyType(by_path))
+        object.__setattr__(
+            self,
+            "paths_by_id",
+            MappingProxyType(
+                {key: tuple(paths) for key, paths in sorted(id_paths.items())}
+            ),
+        )
+
+    @classmethod
+    def from_candidates(
+        cls, candidates: Iterable[ActivationCandidate]
+    ) -> ActivationCensus:
+        return cls(tuple(candidates))
+
+    def unique_path_for_id(self, normalized_id: str) -> str | None:
+        paths = self.paths_by_id.get(normalized_id, ())
+        return paths[0] if len(paths) == 1 else None
 
 
 def manifest_path(vault_root: Path) -> Path:
@@ -105,14 +151,20 @@ def load_manifest(vault_root: Path) -> ActivationManifest | None:
     return _validate_manifest(value, path=path)
 
 
-def ensure_manifest(vault_root: Path) -> ActivationManifest:
+def ensure_manifest(
+    vault_root: Path, *, census: ActivationCensus | None = None
+) -> ActivationManifest:
     """Return the existing manifest or atomically establish the boundary once."""
     vault_root = Path(vault_root)
     existing = load_manifest(vault_root)
     if existing is not None:
         return existing
 
-    candidate = _snapshot(vault_root)
+    candidate = (
+        _snapshot(vault_root)
+        if census is None
+        else _snapshot(vault_root, census=census)
+    )
     path = manifest_path(vault_root)
     with _creation_lock(path):
         winner = load_manifest(vault_root)
@@ -137,8 +189,9 @@ def is_grandfathered(
     path: Path | str,
     *,
     source_hash: str | None = None,
-    exomem_id: object | None = None,
+    exomem_id: object = _UNSET,
     manifest: ActivationManifest | None = None,
+    census: ActivationCensus | None = None,
 ) -> bool:
     """Return whether the current page belongs to the activation baseline."""
     vault_root = Path(vault_root)
@@ -148,16 +201,23 @@ def is_grandfathered(
     rel_path, absolute = _normalize_page_path(vault_root, path)
     if rel_path is None:
         return False
-    normalized_id = normalize_id(exomem_id) if exomem_id is not None else None
+    id_supplied = exomem_id is not _UNSET
+    normalized_id = normalize_id(exomem_id) if id_supplied else None
     current_hash = source_hash
-    if source_hash is None or exomem_id is None:
+    census_candidate = census.by_path.get(rel_path) if census is not None else None
+    if census_candidate is not None:
+        if current_hash is None:
+            current_hash = census_candidate.source_hash
+        if not id_supplied:
+            normalized_id = census_candidate.normalized_id
+    if current_hash is None or (not id_supplied and census_candidate is None):
         try:
             raw = absolute.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError):
             return False
         if current_hash is None:
             current_hash = content_hash(raw)
-        if exomem_id is None:
+        if not id_supplied:
             frontmatter, _, _ = parse_frontmatter(raw)
             normalized_id = normalize_id(frontmatter.get(ID_FIELD))
 
@@ -166,14 +226,10 @@ def is_grandfathered(
         for page in loaded.pages
     ):
         try:
-            matching_paths = [
-                candidate.rel_path
-                for candidate in _eligible_candidates(vault_root)
-                if candidate.normalized_id == normalized_id
-            ]
+            observed = census if census is not None else build_census(vault_root)
         except ActivationManifestError:
             return False
-        return matching_paths == [rel_path]
+        return observed.unique_path_for_id(normalized_id) == rel_path
     return bool(
         current_hash
         and any(
@@ -186,8 +242,17 @@ def is_grandfathered(
     )
 
 
-def _snapshot(vault_root: Path) -> ActivationManifest:
-    candidates = _eligible_candidates(vault_root)
+def build_census(vault_root: Path) -> ActivationCensus:
+    """Walk and read the eligible compiled corpus exactly once."""
+    return ActivationCensus.from_candidates(_eligible_candidates(Path(vault_root)))
+
+
+def _snapshot(
+    vault_root: Path, *, census: ActivationCensus | None = None
+) -> ActivationManifest:
+    candidates = (
+        census.candidates if census is not None else build_census(vault_root).candidates
+    )
     counts = Counter(
         candidate.normalized_id
         for candidate in candidates
@@ -216,9 +281,9 @@ def _snapshot(vault_root: Path) -> ActivationManifest:
     )
 
 
-def _eligible_candidates(vault_root: Path) -> list[_Candidate]:
+def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
     kb = vault_root / kb_dirname()
-    candidates: list[_Candidate] = []
+    candidates: list[ActivationCandidate] = []
     if kb.is_dir():
         paths = sorted(
             find_module._walk_md(kb),
@@ -247,7 +312,7 @@ def _eligible_candidates(vault_root: Path) -> list[_Candidate]:
             if not activation.is_eligible_compiled_page(vault_root, page):
                 continue
             candidates.append(
-                _Candidate(
+                ActivationCandidate(
                     rel_path=rel_path,
                     source_hash=content_hash(raw),
                     normalized_id=normalize_id(frontmatter.get(ID_FIELD)),

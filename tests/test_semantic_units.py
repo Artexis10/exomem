@@ -163,6 +163,19 @@ def test_task_boxes_and_workflow_rows_are_ordinary_markdown() -> None:
     assert document.warnings == ()
 
 
+def test_shared_document_projects_canonical_relation_section_metadata() -> None:
+    document = parse_semantic_units(
+        "## Relations\n- supports [[Target]]\n- (none yet)\n",
+        relation_registry=relation_registry.core_registry(),
+    )
+
+    assert document.canonical_section_present is True
+    assert document.canonical_bullet_count == 2
+    assert [error.code for error in document.note_relation_errors] == [
+        "malformed_relation"
+    ]
+
+
 def test_malformed_category_candidates_and_empty_content_are_diagnostics() -> None:
     invalid_unicode_category = "e\N{COMBINING ACUTE ACCENT}"
     markdown = (
