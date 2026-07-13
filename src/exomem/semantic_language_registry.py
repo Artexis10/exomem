@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -29,6 +29,31 @@ _DEFINITION_FIELDS = frozenset(
     {"description", "aliases", "status", "replaced_by", "scope"}
 )
 _KIND_DEFINITION_FIELDS = _DEFINITION_FIELDS | {"heading_aliases"}
+
+
+@dataclass(frozen=True, slots=True)
+class RegistryFinding(Mapping[str, str]):
+    """Deeply immutable, mapping-compatible registry validation finding."""
+
+    code: str
+    path: str
+    span: str
+    severity: str
+    detail: str
+
+    def __getitem__(self, key: str) -> str:
+        if key not in {"code", "path", "span", "severity", "detail"}:
+            raise KeyError(key)
+        return getattr(self, key)
+
+    def __iter__(self) -> Iterator[str]:
+        return iter(("code", "path", "span", "severity", "detail"))
+
+    def __len__(self) -> int:
+        return 5
+
+    def as_dict(self) -> dict[str, str]:
+        return {key: self[key] for key in self}
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +99,7 @@ class LabelResolution:
     status: str
     definition: CategoryDefinition | KindDefinition | None
     replacement: str | None = None
-    findings: tuple[dict[str, str], ...] = ()
+    findings: tuple[RegistryFinding, ...] = ()
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -84,7 +109,7 @@ class LabelResolution:
             "status": self.status,
             "definition": self.definition.as_dict() if self.definition else None,
             "replacement": self.replacement,
-            "findings": [dict(item) for item in self.findings],
+            "findings": [item.as_dict() for item in self.findings],
         }
 
 
@@ -98,7 +123,7 @@ class SemanticLanguageRegistry:
     category_aliases: Mapping[str, str] = field(default_factory=dict)
     kind_aliases: Mapping[str, str] = field(default_factory=dict)
     heading_aliases: Mapping[str, str] = field(default_factory=dict)
-    findings: tuple[dict[str, str], ...] = ()
+    findings: tuple[RegistryFinding, ...] = ()
 
     def __post_init__(self) -> None:
         for name in (
@@ -110,7 +135,7 @@ class SemanticLanguageRegistry:
             "heading_aliases",
         ):
             object.__setattr__(self, name, MappingProxyType(dict(getattr(self, name))))
-        object.__setattr__(self, "findings", tuple(dict(item) for item in self.findings))
+        object.__setattr__(self, "findings", tuple(self.findings))
 
     def as_dict(self) -> dict[str, Any]:
         """Return deterministic semantic content (the byte hash is transport metadata)."""
@@ -126,7 +151,7 @@ class SemanticLanguageRegistry:
             "category_aliases": dict(sorted(self.category_aliases.items())),
             "kind_aliases": dict(sorted(self.kind_aliases.items())),
             "heading_aliases": dict(sorted(self.heading_aliases.items())),
-            "findings": [dict(item) for item in self.findings],
+            "findings": [item.as_dict() for item in self.findings],
         }
 
     def resolve_category(
@@ -250,7 +275,8 @@ class SemanticLanguageRegistry:
 
 
 def normalize_label(raw: str) -> str:
-    normalized = unicodedata.normalize("NFKC", str(raw or "").strip()).casefold()
+    label = str(raw or "").strip().rstrip(":").strip()
+    normalized = unicodedata.normalize("NFKC", label).casefold()
     return _SEPARATORS_RE.sub("_", normalized).strip("_")
 
 
@@ -315,9 +341,8 @@ def load_registry(
 
 def validate_proposal(proposal: Any) -> list[dict[str, str]]:
     raw = yaml.safe_dump(proposal, allow_unicode=True, sort_keys=True)
-    return list(
-        _parse_registry_data(proposal, _content_hash(raw), core_registry()).findings
-    )
+    registry = _parse_registry_data(proposal, _content_hash(raw), core_registry())
+    return [finding.as_dict() for finding in registry.findings]
 
 
 def empty_proposal() -> dict[str, Any]:
@@ -329,7 +354,7 @@ def _parse_registry_data(
     digest: str,
     core: SemanticLanguageRegistry,
 ) -> SemanticLanguageRegistry:
-    findings: list[dict[str, str]] = []
+    findings: list[RegistryFinding] = []
     if not isinstance(data, dict):
         return SemanticLanguageRegistry(
             SCHEMA_VERSION,
@@ -340,7 +365,8 @@ def _parse_registry_data(
     unknown_root_fields = set(data) - {"schema_version", "categories", "kinds"}
     for key in sorted(unknown_root_fields, key=str):
         findings.append(_finding("unknown_field", str(key), "unknown registry field"))
-    if data.get("schema_version") != SCHEMA_VERSION:
+    schema_version = data.get("schema_version")
+    if type(schema_version) is not int or schema_version != SCHEMA_VERSION:
         findings.append(
             _finding("invalid_version", "schema_version", f"must be {SCHEMA_VERSION}")
         )
@@ -398,7 +424,7 @@ def _parse_definitions(
     namespace: str,
     definition_type: type[CategoryDefinition] | type[KindDefinition],
     allowed_fields: frozenset[str],
-    findings: list[dict[str, str]],
+    findings: list[RegistryFinding],
 ) -> dict[str, CategoryDefinition] | dict[str, KindDefinition]:
     definitions: dict[str, CategoryDefinition] | dict[str, KindDefinition] = {}
     canonical_sources: dict[str, str] = {}
@@ -437,13 +463,34 @@ def _parse_definitions(
             findings.append(
                 _finding("unknown_field", f"{span}.{unknown}", "unknown definition field")
             )
-        description = str(value.get("description") or "").strip()
-        if not description:
+        raw_description = value.get("description")
+        if raw_description is None:
             findings.append(
                 _finding("missing_description", f"{span}.description", "is required")
             )
-        status = str(value.get("status") or "active")
-        if status not in _STATUSES:
+            description = ""
+        elif not isinstance(raw_description, str):
+            findings.append(
+                _finding(
+                    "invalid_type", f"{span}.description", "must be a string"
+                )
+            )
+            description = ""
+        else:
+            description = raw_description.strip()
+        if isinstance(raw_description, str) and not description:
+            findings.append(
+                _finding("missing_description", f"{span}.description", "is required")
+            )
+        raw_status = value.get("status", "active")
+        if not isinstance(raw_status, str):
+            findings.append(
+                _finding("invalid_type", f"{span}.status", "must be a string")
+            )
+            status = "active"
+        else:
+            status = raw_status
+        if isinstance(raw_status, str) and status not in _STATUSES:
             findings.append(
                 _finding(
                     "invalid_status",
@@ -475,6 +522,18 @@ def _parse_definitions(
         page_types = frozenset(
             _strings(scope.get("page_types", []), f"{span}.scope.page_types", findings)
         )
+        raw_replaced_by = value.get("replaced_by")
+        if raw_replaced_by not in (None, "") and not isinstance(
+            raw_replaced_by, str
+        ):
+            findings.append(
+                _finding(
+                    "invalid_type", f"{span}.replaced_by", "must be a string or null"
+                )
+            )
+            replaced_by = None
+        else:
+            replaced_by = _optional(raw_replaced_by)
         common: dict[str, Any] = {
             "key": key,
             "description": description,
@@ -482,7 +541,7 @@ def _parse_definitions(
             "projects": projects,
             "page_types": page_types,
             "status": status,
-            "replaced_by": _optional(value.get("replaced_by")),
+            "replaced_by": replaced_by,
         }
         if definition_type is KindDefinition:
             common["heading_aliases"] = tuple(
@@ -502,7 +561,7 @@ def _build_aliases(
     namespace: str,
     *,
     core_labels: Mapping[str, str],
-    findings: list[dict[str, str]],
+    findings: list[RegistryFinding],
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
     canonical = set(definitions)
@@ -535,7 +594,7 @@ def _build_heading_aliases(
     *,
     core_labels: Mapping[str, str],
     kind_aliases: Mapping[str, str],
-    findings: list[dict[str, str]],
+    findings: list[RegistryFinding],
 ) -> dict[str, str]:
     aliases: dict[str, str] = {}
     canonical = set(kinds)
@@ -567,7 +626,7 @@ def _build_heading_aliases(
 def _validate_replacements(
     definitions: Mapping[str, CategoryDefinition | KindDefinition],
     namespace: str,
-    findings: list[dict[str, str]],
+    findings: list[RegistryFinding],
 ) -> None:
     for key in sorted(definitions):
         definition = definitions[key]
@@ -608,8 +667,8 @@ def _validate_replacements(
 
 def _replacement_cycle_findings(
     definitions: Mapping[str, CategoryDefinition | KindDefinition], namespace: str
-) -> list[dict[str, str]]:
-    findings: list[dict[str, str]] = []
+) -> list[RegistryFinding]:
+    findings: list[RegistryFinding] = []
     reported: set[frozenset[str]] = set()
     for start in sorted(definitions):
         order: list[str] = []
@@ -643,8 +702,8 @@ def _scope_findings(
     *,
     project: str | None,
     page_type: str | None,
-) -> tuple[dict[str, str], ...]:
-    findings: list[dict[str, str]] = []
+) -> tuple[RegistryFinding, ...]:
+    findings: list[RegistryFinding] = []
     for field_name, allowed, actual in (
         ("project", definition.projects, project),
         ("page_type", definition.page_types, page_type),
@@ -686,7 +745,7 @@ def _definition_dict(definition: CategoryDefinition | KindDefinition) -> dict[st
     return out
 
 
-def _strings(value: Any, path: str, findings: list[dict[str, str]]) -> list[str]:
+def _strings(value: Any, path: str, findings: list[RegistryFinding]) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
         findings.append(_finding("invalid_list", path, "must be a list of strings"))
         return []
@@ -718,14 +777,14 @@ def _all_core_kind_labels() -> frozenset[str]:
 
 def _finding(
     code: str, path: str, detail: str, *, severity: str = "error"
-) -> dict[str, str]:
-    return {
-        "code": code,
-        "path": path,
-        "span": path,
-        "severity": severity,
-        "detail": detail,
-    }
+) -> RegistryFinding:
+    return RegistryFinding(
+        code=code,
+        path=path,
+        span=path,
+        severity=severity,
+        detail=detail,
+    )
 
 
 def _content_hash(raw: str) -> str:

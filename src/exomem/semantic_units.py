@@ -91,6 +91,8 @@ class SemanticUnit:
 
     form: str
     kind: str
+    kind_raw: str
+    kind_key: str
     category_raw: str
     category_key: str
     category: str
@@ -135,6 +137,8 @@ class SemanticUnit:
         return {
             "form": self.form,
             "kind": self.kind,
+            "kind_raw": self.kind_raw,
+            "kind_key": self.kind_key,
             "category_raw": self.category_raw,
             "category_key": self.category_key,
             "category": self.category,
@@ -364,12 +368,28 @@ def parse_semantic_units(
     kind_resolver = None
     if language_registry is not None:
 
-        def kind_resolver(label: str) -> str | None:
-            return language_registry.resolve_heading(
+        def kind_resolver(
+            label: str,
+        ) -> semantic_blocks.SemanticBlockKindResolution:
+            resolution = language_registry.resolve_heading(
                 label,
                 project=project,
                 page_type=page_type,
-            ).resolved
+            )
+            return semantic_blocks.SemanticBlockKindResolution(
+                kind=resolution.resolved,
+                findings=tuple(
+                    semantic_blocks.SemanticBlockKindFinding(
+                        code=finding["code"],
+                        message=finding["detail"],
+                    )
+                    for finding in (
+                        resolution.findings
+                        if resolution.status == "scope_violation"
+                        else ()
+                    )
+                ),
+            )
 
     rich_document = semantic_blocks.parse_semantic_blocks(
         source,
@@ -389,9 +409,15 @@ def parse_semantic_units(
             SemanticUnit(
                 form="rich",
                 kind=block.type,
+                kind_raw=block.title,
+                kind_key=semantic_language_registry.normalize_label(block.title),
                 category_raw=category_raw,
                 category_key=category_key,
-                category=category_key,
+                category=(
+                    category_key
+                    if "category" in block.metadata and category_error is None
+                    else block.type
+                ),
                 content=block.body,
                 tags=(),
                 context=None,
@@ -436,9 +462,14 @@ def parse_semantic_units(
                 project=project,
                 page_type=page_type,
             )
-            resolved_units.append(
-                replace(unit, category=resolution.resolved or unit.category_key)
-            )
+            resolved_category = resolution.resolved or unit.category_key
+            if (
+                unit.form == "rich"
+                and "category" not in unit.metadata
+                and resolution.status in {"unregistered", "registry_invalid"}
+            ):
+                resolved_category = unit.kind
+            resolved_units.append(replace(unit, category=resolved_category))
             if validate and resolution.status != "registry_invalid":
                 for finding in resolution.findings:
                     diagnostic = _registry_diagnostic(
@@ -586,12 +617,15 @@ def _semantic_unit_signature(unit: SemanticUnit) -> dict[str, Any]:
         }
         for relation in unit.relations
     ]
+    category_raw_identity = (
+        unit.category_key
+        if unit.form == "rich" and "category" not in unit.metadata
+        else unicodedata.normalize("NFKC", unit.category_raw.strip())
+    )
     return {
         "form": unit.form,
-        "kind": unit.kind,
-        "category_raw_nfkc": unicodedata.normalize(
-            "NFKC", unit.category_raw.strip()
-        ),
+        "kind": unit.kind_key,
+        "category_raw_nfkc": category_raw_identity,
         "category_key": unit.category_key,
         "content": _normalize_authored_text(unit.content),
         "tags": list(unit.tags),
@@ -692,6 +726,8 @@ def _parse_compact_units(
             SemanticUnit(
                 form="compact",
                 kind="observation",
+                kind_raw="observation",
+                kind_key="observation",
                 category_raw=label,
                 category_key=category_key,
                 category=category_key,
@@ -817,7 +853,11 @@ def _rich_category(
 ) -> tuple[str, str, SemanticUnitDiagnostic | None]:
     explicit = block.metadata.get("category")
     if explicit is None:
-        return block.type, block.type, None
+        return (
+            block.title,
+            semantic_language_registry.normalize_label(block.title),
+            None,
+        )
     try:
         return explicit.strip(), canonicalize_category(explicit), None
     except ValueError:
@@ -825,8 +865,8 @@ def _rich_category(
         span = _span_for_source_line(category_line) if category_line is not None else None
         raw = category_line.text if category_line is not None else explicit
         return (
-            block.type,
-            block.type,
+            block.title,
+            semantic_language_registry.normalize_label(block.title),
             SemanticUnitDiagnostic(
                 code="invalid_rich_category",
                 message=f"invalid rich semantic-unit category: {explicit}",

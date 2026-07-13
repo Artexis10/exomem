@@ -255,7 +255,7 @@ Override category.
     document = parse_semantic_units(markdown)
 
     assert [(unit.kind, unit.category_raw, unit.category) for unit in document.units] == [
-        ("claim", "claim", "claim"),
+        ("claim", "Claim", "claim"),
         ("decision", "Äri-Reegel", "äri_reegel"),
     ]
 
@@ -708,6 +708,94 @@ def test_registry_custom_kind_requires_in_scope_injection_and_is_parsed_once() -
     assert out_of_scope.units == ()
 
 
+def test_registry_heading_retarget_changes_resolution_not_authored_identity() -> None:
+    markdown = "## Playbook\n\nFollow it.\n"
+
+    def registry_for(kind: str):
+        return semantic_language_registry.load_registry(
+            proposal={
+                "schema_version": 1,
+                "categories": {},
+                "kinds": {
+                    kind: {
+                        "description": f"Resolved {kind}",
+                        "heading_aliases": ["playbook"],
+                    }
+                },
+            }
+        )
+
+    protocol = parse_semantic_units(
+        markdown,
+        parent_ref=STABLE_PARENT_REF,
+        language_registry=registry_for("protocol"),
+    ).units[0]
+    workflow = parse_semantic_units(
+        markdown,
+        parent_ref=STABLE_PARENT_REF,
+        language_registry=registry_for("workflow"),
+    ).units[0]
+
+    assert (protocol.kind_raw, protocol.kind_key, protocol.kind) == (
+        "Playbook",
+        "playbook",
+        "protocol",
+    )
+    assert (workflow.kind_raw, workflow.kind_key, workflow.kind) == (
+        "Playbook",
+        "playbook",
+        "workflow",
+    )
+    assert (protocol.category_raw, protocol.category_key, protocol.category) == (
+        "Playbook",
+        "playbook",
+        "protocol",
+    )
+    assert (workflow.category_raw, workflow.category_key, workflow.category) == (
+        "Playbook",
+        "playbook",
+        "workflow",
+    )
+    assert workflow.fingerprint == protocol.fingerprint
+    assert workflow.unit_ref == protocol.unit_ref
+
+
+def test_authored_kind_fields_cover_compact_builtin_and_custom_units() -> None:
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {},
+            "kinds": {"protocol": {"description": "A protocol"}},
+        }
+    )
+    document = parse_semantic_units(
+        "- [config] Compact\n\n## Findings\n\nBuilt in.\n\n## Protocol\n\nCustom.\n",
+        language_registry=registry,
+    )
+
+    compact, builtin, custom = document.units
+    assert (compact.kind_raw, compact.kind_key, compact.kind) == (
+        "observation",
+        "observation",
+        "observation",
+    )
+    assert (builtin.kind_raw, builtin.kind_key, builtin.kind) == (
+        "Findings",
+        "findings",
+        "finding",
+    )
+    assert (builtin.category_raw, builtin.category_key, builtin.category) == (
+        "Findings",
+        "findings",
+        "finding",
+    )
+    assert (custom.kind_raw, custom.kind_key, custom.kind) == (
+        "Protocol",
+        "protocol",
+        "protocol",
+    )
+
+
 def test_registry_scope_finding_falls_back_to_authored_category() -> None:
     registry = semantic_language_registry.load_registry(
         proposal={
@@ -734,6 +822,45 @@ def test_registry_scope_finding_falls_back_to_authored_category() -> None:
     assert [(warning.code, warning.severity) for warning in document.warnings] == [
         ("scope_violation", "warning")
     ]
+
+
+@pytest.mark.parametrize("project", [None, "beta"], ids=["missing-scope", "out-of-scope"])
+def test_scoped_custom_heading_is_inert_with_source_addressed_warning(
+    project: str | None,
+) -> None:
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {},
+            "kinds": {
+                "protocol": {
+                    "description": "A protocol",
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+        }
+    )
+
+    document = parse_semantic_units(
+        "# Note\n\n## Protocol\n\nInert.\n",
+        path="Knowledge Base/Notes/scoped.md",
+        language_registry=registry,
+        project=project,
+    )
+
+    assert document.units == ()
+    assert document.errors == ()
+    assert len(document.warnings) == 1
+    warning = document.warnings[0]
+    assert (warning.code, warning.path, warning.line, warning.raw) == (
+        "scope_violation",
+        "Knowledge Base/Notes/scoped.md",
+        3,
+        "## Protocol",
+    )
+    assert warning.span is not None
+    assert warning.span.text == "## Protocol"
+    assert warning.remediation
 
 
 def test_invalid_injected_registry_fails_closed_with_structured_findings() -> None:

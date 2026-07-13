@@ -261,11 +261,51 @@ def test_registry_values_and_serialization_are_frozen_and_deterministic(tmp_path
         first.categories["config"].description = "changed"  # type: ignore[misc]
 
 
+def test_invalid_registry_findings_are_deeply_immutable() -> None:
+    registry = language_registry.load_registry(
+        proposal={"schema_version": 2, "categories": {}, "kinds": {}}
+    )
+    finding = registry.findings[0]
+
+    with pytest.raises(TypeError):
+        finding["severity"] = "warning"  # type: ignore[index]
+    with pytest.raises(FrozenInstanceError):
+        finding.severity = "warning"  # type: ignore[misc]
+    assert registry.findings[0]["severity"] == "error"
+    assert registry.resolve_category("config").findings[0]["severity"] == "error"
+
+
+def test_non_string_definition_scalars_fail_closed_with_stable_type_findings() -> None:
+    registry = language_registry.load_registry(
+        proposal=_proposal(
+            kinds={
+                "protocol": {
+                    "description": 42,
+                    "status": ["active"],
+                    "replaced_by": {"kind": "workflow"},
+                }
+            }
+        )
+    )
+
+    assert [
+        (finding["code"], finding["path"]) for finding in registry.findings
+    ] == [
+        ("invalid_type", "kinds.protocol.description"),
+        ("invalid_type", "kinds.protocol.replaced_by"),
+        ("invalid_type", "kinds.protocol.status"),
+    ]
+    resolution = registry.resolve_heading("Protocol")
+    assert resolution.resolved is None
+    assert resolution.status == "registry_invalid"
+
+
 @pytest.mark.parametrize(
     "proposal",
     [
         None,
         [],
+        {"schema_version": True, "categories": {}, "kinds": {}},
         {
             1: "bad",
             "extra": "bad",

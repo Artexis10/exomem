@@ -207,6 +207,20 @@ def test_builtin_heading_wins_without_calling_custom_kind_resolver() -> None:
     assert calls == []
 
 
+def test_custom_kind_resolver_cannot_promote_observation_to_rich_heading() -> None:
+    def resolver(_label: str) -> str:
+        return "observation"
+
+    assert semantic_blocks.normalize_block_type("Custom", resolver=resolver) is None
+    document = semantic_blocks.parse_semantic_blocks(
+        "## Custom\n\nMust stay ordinary Markdown.\n",
+        kind_resolver=resolver,
+    )
+    assert document.blocks == []
+    assert document.errors == []
+    assert document.warnings == []
+
+
 def test_fenced_code_is_ignored() -> None:
     markdown = """\
 ```markdown
