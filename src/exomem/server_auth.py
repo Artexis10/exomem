@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import logging
 import os
-import time
+from typing import Any
 
 from cryptography.fernet import Fernet
 from fastmcp.server.auth.auth import AccessToken
@@ -19,86 +19,181 @@ from key_value.aio.stores.filetree import (
 )
 from key_value.aio.wrappers.encryption import FernetEncryptionWrapper
 
+from .auth_sessions import SessionAuthority
 from .remote_oauth_storage import ReadThroughMirrorStorage, RemoteOAuthStorage
+from .session_oauth import ExomemSessionOAuthProxy
 
 log = logging.getLogger(__name__)
 
 
 class SingleUserGitHubVerifier(GitHubTokenVerifier):
-    """Reject any GitHub token whose login is not the allowed user.
+    """Use GitHub once to prove the configured login and immutable user ID."""
 
-    Caches validated tokens for a short TTL (``EXOMEM_AUTH_CACHE_TTL`` seconds,
-    default 300). Without it every MCP request, and a single connector operation
-    fires several, re-hits the GitHub API to revalidate the same token.
-    """
+    def __init__(
+        self,
+        *,
+        allowed_login: str,
+        allowed_user_id: int,
+        **kwargs: Any,
+    ) -> None:
+        login = allowed_login.strip().casefold()
+        if not login:
+            raise ValueError("an allowed GitHub login is required")
+        if isinstance(allowed_user_id, bool) or allowed_user_id <= 0:
+            raise ValueError("GitHub identity requires a positive numeric user ID")
 
-    _DEFAULT_TTL = 300.0
-    _MAX_ENTRIES = 64
-
-    def __init__(self, *, allowed_login: str, **kwargs):
-        super().__init__(**kwargs)
-        self._allowed_login = allowed_login.lower()
-        # Do not name this ``_cache``. The parent GitHubTokenVerifier owns that
-        # attribute and expects a fastmcp TokenCache instance.
-        self._login_cache: dict[str, tuple[float, AccessToken]] = {}
-
-    def _ttl(self) -> float:
-        raw = os.environ.get("EXOMEM_AUTH_CACHE_TTL")
-        if raw is None:
-            return self._DEFAULT_TTL
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            return self._DEFAULT_TTL
+        # A GitHub bearer is one-time identity proof. FastMCP's verifier cache
+        # must stay disabled so no bearer material survives the callback.
+        kwargs.pop("cache_ttl_seconds", None)
+        super().__init__(cache_ttl_seconds=None, **kwargs)
+        self._allowed_login = login
+        self._allowed_user_id = allowed_user_id
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        ttl = self._ttl()
-        key = hashlib.sha256(token.encode("utf-8")).hexdigest() if token else ""
-        if ttl > 0 and key:
-            hit = self._login_cache.get(key)
-            if hit is not None:
-                ts, cached = hit
-                if time.monotonic() - ts < ttl:
-                    return cached
-                del self._login_cache[key]
-
         access = await super().verify_token(token)
         if access is None:
-            log.info(
-                "exomem auth: token rejected by GitHub (expired/revoked/invalid); "
-                "client will re-authorize"
-            )
-            return None
-        login = (access.claims.get("login") or "").lower()
-        if login != self._allowed_login:
-            log.warning("rejecting token for github login=%r", login)
             return None
 
-        if ttl > 0 and key:
-            now = time.monotonic()
-            if len(self._login_cache) >= self._MAX_ENTRIES:
-                self._login_cache = {k: v for k, v in self._login_cache.items() if now - v[0] < ttl}
-            self._login_cache[key] = (now, access)
+        claims = access.claims or {}
+        login = str(claims.get("login") or "").strip().casefold()
+        raw_user_id = claims.get("sub") or access.client_id
+        if isinstance(raw_user_id, bool):
+            return None
+        try:
+            user_id = int(raw_user_id)
+        except (TypeError, ValueError):
+            return None
+        if login != self._allowed_login or user_id != self._allowed_user_id:
+            log.warning("rejecting GitHub token for an unexpected identity")
+            return None
         return access
 
 
+def _required_signing_root() -> str:
+    signing_root = os.environ.get("EXOMEM_JWT_SIGNING_KEY", "").strip()
+    if not signing_root:
+        raise RuntimeError("EXOMEM_JWT_SIGNING_KEY is required for durable OAuth sessions")
+    return signing_root
+
+
+def _shared_storage_settings() -> tuple[str, str, str, float] | None:
+    storage_url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip()
+    if not storage_url:
+        return None
+    namespace = (
+        os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+        or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+    )
+    if not namespace:
+        raise RuntimeError(
+            "EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID "
+            "is required for shared OAuth storage"
+        )
+    storage_token = os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip()
+    if not storage_token:
+        raise RuntimeError(
+            "EXOMEM_OAUTH_STORAGE_TOKEN is required for shared OAuth storage"
+        )
+    timeout = float(os.environ.get("EXOMEM_OAUTH_STORAGE_TIMEOUT", "5"))
+    return storage_url, namespace, storage_token, timeout
+
+
+def build_session_authority(*, base_url: str) -> SessionAuthority:
+    """Build the authoritative durable session store for this deployment."""
+    signing_root = _required_signing_root()
+    issuer = base_url.rstrip("/")
+    audience = f"{issuer}/mcp"
+    shared = _shared_storage_settings()
+    if shared is not None:
+        storage_url, namespace, storage_token, timeout = shared
+        return SessionAuthority.remote(
+            url=storage_url,
+            namespace=namespace,
+            storage_token=storage_token,
+            signing_root=signing_root,
+            issuer=issuer,
+            audience=audience,
+            timeout=timeout,
+        )
+
+    from fastmcp import settings
+
+    return SessionAuthority.local(
+        directory=settings.home / "oauth-sessions",
+        signing_root=signing_root,
+        issuer=issuer,
+        audience=audience,
+    )
+
+
+def _build_oauth_client_storage(*, signing_root: str) -> Any | None:
+    """Preserve FastMCP's DCR/transaction/code storage behavior in HA mode."""
+    shared = _shared_storage_settings()
+    if shared is None:
+        return None
+    storage_url, namespace, storage_token, timeout = shared
+    signing_key = derive_jwt_key(
+        low_entropy_material=signing_root,
+        salt="fastmcp-jwt-signing-key",
+    )
+    storage_key = derive_jwt_key(
+        high_entropy_material=signing_key.decode(),
+        salt="fastmcp-storage-encryption-key",
+    )
+    remote = RemoteOAuthStorage(
+        url=storage_url,
+        namespace=namespace,
+        token=storage_token,
+        timeout=timeout,
+        cache_ttl=float(os.environ.get("EXOMEM_OAUTH_STORAGE_CACHE_TTL", "300")),
+    )
+
+    from fastmcp import settings
+
+    key_fingerprint = hashlib.sha256(storage_key).hexdigest()[:12]
+    storage_dir = settings.home / "oauth-proxy" / key_fingerprint
+    storage_dir.mkdir(parents=True, exist_ok=True)
+    local = FileTreeStore(
+        data_directory=storage_dir,
+        key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(storage_dir),
+        collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(
+            storage_dir
+        ),
+    )
+    return FernetEncryptionWrapper(
+        key_value=ReadThroughMirrorStorage(primary=remote, fallback=local),
+        fernet=Fernet(key=storage_key),
+        raise_on_decryption_error=False,
+    )
+
+
 def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
-    """Return the GitHub OAuth proxy for HTTP transports, or None for stdio."""
+    """Return the durable GitHub-bootstrap OAuth proxy, or None for stdio."""
     if not require_auth:
         return None
 
     gh_id = os.environ.get("GITHUB_CLIENT_ID", "").strip()
     gh_secret = os.environ.get("GITHUB_CLIENT_SECRET", "").strip()
     gh_username = os.environ.get("EXOMEM_GITHUB_USERNAME", "").strip()
+    raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    signing_root = os.environ.get("EXOMEM_JWT_SIGNING_KEY", "").strip()
+    # Validate shared-storage trust anchors in dependency order so startup
+    # reports the broken coordinator boundary directly.
+    if not signing_root:
+        _required_signing_root()
+    if os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip():
+        _shared_storage_settings()
     missing = [
-        k
-        for k, v in {
+        key
+        for key, value in {
             "EXOMEM_BASE_URL": base_url,
             "GITHUB_CLIENT_ID": gh_id,
             "GITHUB_CLIENT_SECRET": gh_secret,
             "EXOMEM_GITHUB_USERNAME": gh_username,
+            "EXOMEM_GITHUB_USER_ID": raw_user_id,
+            "EXOMEM_JWT_SIGNING_KEY": signing_root,
         }.items()
-        if not v
+        if not value
     ]
     if missing:
         raise RuntimeError(
@@ -106,72 +201,32 @@ def build_oauth(*, require_auth: bool, base_url: str) -> OAuthProxy | None:
             "See README.md section Install for setup steps."
         )
 
-    jwt_signing_key = os.environ.get("EXOMEM_JWT_SIGNING_KEY", "").strip() or None
-    if jwt_signing_key is None:
-        log.info(
-            "EXOMEM_JWT_SIGNING_KEY not set; OAuth signing key derives from the "
-            "GitHub client secret, so connector re-auth can recur on secret "
-            "rotation or FastMCP upgrades. Set it in .env for a stable connector."
+    try:
+        github_user_id = int(raw_user_id)
+    except ValueError as error:
+        raise RuntimeError(
+            "EXOMEM_GITHUB_USER_ID must be a positive numeric GitHub user ID"
+        ) from error
+    if github_user_id <= 0:
+        raise RuntimeError(
+            "EXOMEM_GITHUB_USER_ID must be a positive numeric GitHub user ID"
         )
 
-    client_storage = None
-    storage_url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip()
-    if storage_url:
-        if jwt_signing_key is None:
-            raise RuntimeError(
-                "EXOMEM_JWT_SIGNING_KEY is required when EXOMEM_OAUTH_STORAGE_URL is set"
-            )
-        namespace = (
-            os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
-            or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
-        )
-        if not namespace:
-            raise RuntimeError(
-                "EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID "
-                "is required for shared OAuth storage"
-            )
-        signing_key = derive_jwt_key(
-            low_entropy_material=jwt_signing_key,
-            salt="fastmcp-jwt-signing-key",
-        )
-        storage_key = derive_jwt_key(
-            high_entropy_material=signing_key.decode(),
-            salt="fastmcp-storage-encryption-key",
-        )
-        remote = RemoteOAuthStorage(
-            url=storage_url,
-            namespace=namespace,
-            token=os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip() or None,
-            timeout=float(os.environ.get("EXOMEM_OAUTH_STORAGE_TIMEOUT", "5")),
-            cache_ttl=float(os.environ.get("EXOMEM_OAUTH_STORAGE_CACHE_TTL", "300")),
-        )
-        from fastmcp import settings
-
-        key_fingerprint = hashlib.sha256(storage_key).hexdigest()[:12]
-        storage_dir = settings.home / "oauth-proxy" / key_fingerprint
-        storage_dir.mkdir(parents=True, exist_ok=True)
-        local = FileTreeStore(
-            data_directory=storage_dir,
-            key_sanitization_strategy=FileTreeV1KeySanitizationStrategy(storage_dir),
-            collection_sanitization_strategy=FileTreeV1CollectionSanitizationStrategy(storage_dir),
-        )
-        client_storage = FernetEncryptionWrapper(
-            key_value=ReadThroughMirrorStorage(primary=remote, fallback=local),
-            fernet=Fernet(key=storage_key),
-            raise_on_decryption_error=False,
-        )
-
-    # Do not impose a fallback access-token lifetime here. GitHub OAuth Apps
-    # normally issue long-lived access tokens without refresh tokens; forcing a
-    # shorter downstream expiry creates an unrecoverable refresh gap. FastMCP
-    # already selects provider-aware defaults from the upstream token response.
-    return OAuthProxy(
+    authority = build_session_authority(base_url=base_url)
+    client_storage = _build_oauth_client_storage(signing_root=signing_root)
+    verifier = SingleUserGitHubVerifier(
+        allowed_login=gh_username,
+        allowed_user_id=github_user_id,
+    )
+    return ExomemSessionOAuthProxy(
+        session_authority=authority,
         upstream_authorization_endpoint="https://github.com/login/oauth/authorize",
         upstream_token_endpoint="https://github.com/login/oauth/access_token",
         upstream_client_id=gh_id,
         upstream_client_secret=gh_secret,
-        token_verifier=SingleUserGitHubVerifier(allowed_login=gh_username),
+        upstream_revocation_endpoint=None,
+        token_verifier=verifier,
         base_url=base_url,
-        jwt_signing_key=jwt_signing_key,
+        jwt_signing_key=signing_root,
         client_storage=client_storage,
     )
