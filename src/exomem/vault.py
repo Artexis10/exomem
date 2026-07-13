@@ -248,6 +248,7 @@ class PlannedWrite:
     path: Path
     content: str
     expected_hash: str | None = None
+    ensure_directories: tuple[Path, ...] = ()
 
 
 class ContentHashMismatchError(RuntimeError):
@@ -370,6 +371,8 @@ def _batch_atomic_write_locked(
     created_dirs: list[Path] = []
     try:
         for w in writes:
+            for directory in w.ensure_directories:
+                _create_parent_dirs(directory, created_dirs)
             _create_parent_dirs(w.path.parent, created_dirs)
             # NamedTemporaryFile would need delete=False + cross-platform care;
             # explicit tmp sibling is simpler and survives os.replace.
@@ -378,8 +381,8 @@ def _batch_atomic_write_locked(
             )
             os.close(fd)
             tmp = Path(tmp_str)
-            tmp.write_text(w.content, encoding="utf-8", newline="\n")
             staged.append((w.path, tmp))
+            tmp.write_text(w.content, encoding="utf-8", newline="\n")
     except Exception:
         for _, tmp in staged:
             tmp.unlink(missing_ok=True)

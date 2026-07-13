@@ -421,3 +421,108 @@ def test_replace_failure_does_not_leave_project_registration_or_folder(
     if registry_existed:
         assert _read(registry) == registry_before
     assert project_folder.exists() is folder_existed
+
+
+def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Staging Failure Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    project_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Staging Failure Project"
+    )
+    real_write_text = Path.write_text
+    temp_writes = 0
+
+    def fail_second_temp_write(path: Path, *args, **kwargs):
+        nonlocal temp_writes
+        if path.name.endswith(".tmp"):
+            temp_writes += 1
+            if temp_writes == 2:
+                raise OSError("injected supersession staging failure")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_second_temp_write)
+
+    with pytest.raises(OSError, match="injected supersession staging failure"):
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content="# Staging Failure Successor\n\nreplacement body.\n",
+            note_type="research-note",
+            title="Staging Failure Successor",
+            project="staging-failure-project",
+            today=TODAY,
+    )
+
+    assert not registry.exists()
+    assert list(vault.rglob("*.tmp")) == []
+    assert not project_folder.exists()
+
+
+def test_plural_project_registration_creates_folder_only_on_success(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Plural Project Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    failed_folder = (
+        vault / "Knowledge Base" / "Notes" / "Research" / "Failed Plural Project"
+    )
+    successful_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Successful Plural Project"
+    )
+    real_batch = replace_module.batch_atomic_write
+    real_os_replace = os.replace
+
+    def fail_second_destination(writes, *, vault_root):
+        replacements = 0
+
+        def injected_replace(src, dst):
+            nonlocal replacements
+            if str(src).endswith(".tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected plural project failure")
+            return real_os_replace(src, dst)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module.os, "replace", injected_replace)
+            return real_batch(writes, vault_root=vault_root)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
+        with pytest.raises(OSError, match="injected plural project failure"):
+            replace_module.replace(
+                vault,
+                old_path=old_rel,
+                content="# Failed Plural Successor\n\nreplacement body.\n",
+                note_type="insight",
+                title="Failed Plural Successor",
+                projects=["failed-plural-project"],
+                today=TODAY,
+            )
+
+    assert not registry.exists()
+    assert not failed_folder.exists()
+
+    replace_module.replace(
+        vault,
+        old_path=old_rel,
+        content="# Successful Plural Successor\n\nreplacement body.\n",
+        note_type="insight",
+        title="Successful Plural Successor",
+        projects=["successful-plural-project"],
+        today=TODAY,
+    )
+
+    assert "successful-plural-project:" in _read(registry)
+    assert "failed-plural-project:" not in _read(registry)
+    assert successful_folder.is_dir()

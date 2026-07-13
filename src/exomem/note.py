@@ -108,6 +108,7 @@ def _plan_project_registrations(
         expected_hash = MISSING_CONTENT_HASH
 
     warnings: list[str] = []
+    required_project_dirs: list[Path] = []
     changed = False
     for candidate in candidates:
         if candidate in folders:
@@ -132,6 +133,9 @@ def _plan_project_registrations(
         )
         folders[candidate] = folder
         categories[candidate] = category
+        required_project_dirs.append(
+            kb_root(vault_root) / "Notes" / "Research" / folder
+        )
         changed = True
         warnings.append(
             f"Auto-registered project key {candidate!r} (folder: {folder!r}"
@@ -144,6 +148,7 @@ def _plan_project_registrations(
             path=registry_path,
             content=text,
             expected_hash=expected_hash,
+            ensure_directories=tuple(required_project_dirs),
         )
         if changed
         else None
