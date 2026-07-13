@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 
 from exomem.cli_ops import OpError, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
+from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
 
 
@@ -89,6 +91,48 @@ class FakeClient:
         return LeaseRecord(None, None, fencing_token, True)
 
 
+class StoreClient:
+    def __init__(self, store: SQLiteLeaseStore, replica_id: str):
+        self.store = store
+        self.replica_id = replica_id
+
+    def acquire(self) -> LeaseRecord:
+        return LeaseRecord.from_json(self.store.acquire("main", self.replica_id, 10))
+
+    def status(self) -> LeaseRecord:
+        return LeaseRecord.from_json(self.store.status("main"))
+
+    def renew(self, fencing_token: int) -> LeaseRecord:
+        return LeaseRecord.from_json(
+            self.store.renew("main", self.replica_id, fencing_token, 10)
+        )
+
+    def release(self, fencing_token: int) -> LeaseRecord:
+        return LeaseRecord.from_json(self.store.release("main", self.replica_id, fencing_token))
+
+
+class BlockingRejectedRenewalClient(FakeClient):
+    def __init__(self):
+        super().__init__(LeaseRecord("desktop", 200, 3))
+        self.renew_started = threading.Event()
+        self.resume_renewal = threading.Event()
+
+    def renew(self, fencing_token: int) -> LeaseRecord:
+        assert fencing_token == 1
+        self.renew_started.set()
+        assert self.resume_renewal.wait(timeout=5)
+        return LeaseRecord("laptop", 200, 2, False)
+
+
+class TwoStepStop:
+    def __init__(self):
+        self.calls = 0
+
+    def wait(self, timeout: float) -> bool:  # noqa: ARG002
+        self.calls += 1
+        return self.calls > 1
+
+
 def _command(*, writes: bool, leaf):  # noqa: ANN001
     return SimpleNamespace(name="mutate" if writes else "read", read_only=not writes, leaf=leaf)
 
@@ -125,6 +169,97 @@ def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> 
     assert calls == ["write"]
     assert http_status_for("WRITER_LEASE_REQUIRED") == 409
     assert http_status_for("WRITER_COORDINATOR_UNAVAILABLE") == 503
+
+
+def test_superseded_replica_cannot_land_staged_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    clock = Clock()
+    store = SQLiteLeaseStore(tmp_path / "leases.sqlite", clock=clock)
+    replica_a = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path / "desktop-state",
+        ),
+        client=StoreClient(store, "desktop"),
+    )
+    replica_b = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="laptop",
+            state_dir=tmp_path / "laptop-state",
+        ),
+        client=StoreClient(store, "laptop"),
+    )
+    target = tmp_path / "vault" / "note.md"
+    target.parent.mkdir()
+    target.write_text("old bytes", encoding="utf-8")
+    staged = threading.Event()
+    resume = threading.Event()
+    original_write_text = Path.write_text
+
+    def pause_after_staging(path: Path, content: str, *args, **kwargs):  # noqa: ANN002, ANN003
+        result = original_write_text(path, content, *args, **kwargs)
+        if path.suffix == ".tmp":
+            staged.set()
+            assert resume.wait(timeout=5)
+        return result
+
+    monkeypatch.setattr(Path, "write_text", pause_after_staging)
+    command = _command(
+        writes=True,
+        leaf=lambda: batch_atomic_write([PlannedWrite(target, "stale bytes")]),
+    )
+    outcome: list[BaseException | object] = []
+
+    def run_replica_a() -> None:
+        try:
+            outcome.append(replica_a.invoke(command, (), {}))
+        except BaseException as exc:  # noqa: BLE001 - assertion inspects worker failure
+            outcome.append(exc)
+
+    worker = threading.Thread(target=run_replica_a)
+    worker.start()
+    assert staged.wait(timeout=5)
+    clock.value = 111
+    assert replica_b.ensure_writer().fencing_token == 2
+    resume.set()
+    worker.join(timeout=5)
+
+    assert not worker.is_alive()
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], OpError)
+    assert outcome[0].code == "WRITER_FENCED"
+    assert target.read_text(encoding="utf-8") == "old bytes"
+    assert list(target.parent.glob("*.tmp")) == []
+
+
+def test_delayed_rejected_renewal_does_not_clear_newer_local_token(tmp_path: Path) -> None:
+    client = BlockingRejectedRenewalClient()
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=client,
+    )
+    manager._fencing_token = 1
+    manager._stop = TwoStepStop()
+    renewer = threading.Thread(target=manager._renew_loop)
+    renewer.start()
+    assert client.renew_started.wait(timeout=5)
+
+    assert manager.ensure_writer().fencing_token == 3
+    client.resume_renewal.set()
+    renewer.join(timeout=5)
+
+    assert not renewer.is_alive()
+    assert manager._fencing_token == 3
 
 
 def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -> None:

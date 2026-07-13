@@ -334,6 +334,9 @@ def batch_atomic_write(
 
     replaced: list[Path] = []
     try:
+        from .writer_lease import validate_active_write_fence
+
+        validate_active_write_fence()
         for final, tmp in staged:
             os.replace(tmp, final)
             replaced.append(final)
