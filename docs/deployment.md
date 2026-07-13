@@ -491,12 +491,23 @@ The coordinator contract is:
 - `POST /v1/vaults/{vault}/lease/renew`
 - `POST /v1/vaults/{vault}/lease/release`
 - `GET /v1/vaults/{vault}/lease`
-- `POST /v1/state/{namespace}/{get|ttl|put|delete|get-many|ttl-many|put-many|delete-many}`
+- `POST /v1/state/{namespace}/{get|ttl|put|put-if-absent|list-keys|delete|get-many|ttl-many|put-many|delete-many}`
 
-POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
-`fencing_token`. Responses carry only `holder`, `expires_at`, `fencing_token`, and
-`granted`; no vault content is sent. Use bearer authentication in any networked
-deployment.
+Lease POST bodies carry `replica_id`, `ttl_seconds`, and, for renew/release,
+`fencing_token`. Lease responses carry only `holder`, `expires_at`,
+`fencing_token`, and `granted`; no vault content is sent.
+
+State POST bodies carry `collection` plus the operation's `key`, `keys`, `value`,
+`values`, and optional positive `ttl`. Every successful state response uses the
+`{"result": ...}` envelope. `put-if-absent` is transactional: it returns `true`
+only when it creates the key, never replaces a live value, and treats a
+TTL-expired value as absent. `list-keys` returns sorted live key strings for the
+requested collection, removes expired entries, and never returns encrypted
+values. Networked coordinator deployments require `Authorization: Bearer
+<token>` on every lease and state operation. Missing or rejected credentials
+return `401 {"error":"unauthorized"}`, malformed bodies return `400
+{"error":"invalid request"}`, and unknown operations return `404
+{"error":"unknown operation"}`.
 
 With the edge deployment, clients register only the stable connector URL; the two
 origin hostnames are operational endpoints, not separate connectors. After editing

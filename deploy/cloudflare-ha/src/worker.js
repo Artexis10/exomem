@@ -171,6 +171,38 @@ export class ExomemState {
         await this.state.storage.put(itemKey(body.key), stateValue(body));
         return json({ result: null });
       }
+      if (operation === "put-if-absent") {
+        if (!Object.hasOwn(body, "key")) throw new Error("missing key");
+        const key = itemKey(body.key);
+        const value = stateValue(body);
+        const created = await this.state.storage.transaction(async (tx) => {
+          const stored = await tx.get(key);
+          const now = Date.now() / 1000;
+          if (stored && (stored.expires_at == null || stored.expires_at > now)) {
+            return false;
+          }
+          if (stored) await tx.delete(key);
+          await tx.put(key, value);
+          return true;
+        });
+        return json({ result: created });
+      }
+      if (operation === "list-keys") {
+        const prefix = itemKey("");
+        const keys = await this.state.storage.transaction(async (tx) => {
+          const entries = await tx.list({ prefix });
+          const now = Date.now() / 1000;
+          const expired = [];
+          const live = [];
+          for (const [key, stored] of entries) {
+            if (stored.expires_at != null && stored.expires_at <= now) expired.push(key);
+            else live.push(key.slice(prefix.length));
+          }
+          if (expired.length) await tx.delete(expired);
+          return live.sort();
+        });
+        return json({ result: keys });
+      }
       if (operation === "delete") {
         const existed = (await this.state.storage.get(itemKey(body.key))) !== undefined;
         await this.state.storage.delete(itemKey(body.key));
