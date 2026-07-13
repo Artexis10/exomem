@@ -23,6 +23,13 @@ class MemoryStorage {
     if (Array.isArray(key)) return key.map((k) => this.data.delete(k)).filter(Boolean).length;
     return this.data.delete(key);
   }
+  async list({ prefix = "" } = {}) {
+    return new Map(
+      [...this.data.entries()]
+        .filter(([key]) => key.startsWith(prefix))
+        .sort(([left], [right]) => left.localeCompare(right)),
+    );
+  }
   async transaction(fn) {
     return fn(this);
   }
@@ -72,10 +79,130 @@ test("opaque shared state supports TTL and bulk operations", async () => {
   assert.deepEqual(values.result, [{ ciphertext: "one" }, { ciphertext: "two" }, null]);
 });
 
-test("edge rejects unauthenticated coordinator access", async () => {
+test("shared state rejects a JSON null body with the documented response", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+
+  const response = await object.fetch(post("/state/list-keys", null));
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await body(response), { error: "invalid request" });
+});
+
+test("atomic state creation never replaces a live existing value", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+  const first = await object.fetch(post("/state/put-if-absent", {
+    collection: "auth",
+    key: "generation",
+    value: { __encrypted_data__: "first-ciphertext" },
+    ttl: null,
+  }));
+  const second = await object.fetch(post("/state/put-if-absent", {
+    collection: "auth",
+    key: "generation",
+    value: { __encrypted_data__: "replacement-ciphertext" },
+    ttl: null,
+  }));
+  const stored = await body(await object.fetch(post("/state/get", {
+    collection: "auth",
+    key: "generation",
+  })));
+
+  assert.equal(first.status, 200);
+  assert.deepEqual(await body(first), { result: true });
+  assert.equal(second.status, 200);
+  assert.deepEqual(await body(second), { result: false });
+  assert.deepEqual(stored.result, { __encrypted_data__: "first-ciphertext" });
+});
+
+test("atomic state creation replaces a TTL-expired value", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+  const originalNow = Date.now;
+  let now = 100_000;
+  Date.now = () => now;
+  try {
+    const first = await body(await object.fetch(post("/state/put-if-absent", {
+      collection: "auth",
+      key: "generation",
+      value: { __encrypted_data__: "expired-ciphertext" },
+      ttl: 1,
+    })));
+    now += 2_000;
+    const replacement = await body(await object.fetch(post("/state/put-if-absent", {
+      collection: "auth",
+      key: "generation",
+      value: { __encrypted_data__: "current-ciphertext" },
+      ttl: null,
+    })));
+    const stored = await body(await object.fetch(post("/state/get", {
+      collection: "auth",
+      key: "generation",
+    })));
+
+    assert.deepEqual(first, { result: true });
+    assert.deepEqual(replacement, { result: true });
+    assert.deepEqual(stored.result, { __encrypted_data__: "current-ciphertext" });
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("state key enumeration returns sorted live keys without encrypted values", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+  const originalNow = Date.now;
+  let now = 100_000;
+  Date.now = () => now;
+  try {
+    await object.fetch(post("/state/put", {
+      collection: "auth",
+      key: "permanent",
+      value: { __encrypted_data__: "permanent-secret-ciphertext" },
+    }));
+    await object.fetch(post("/state/put", {
+      collection: "auth",
+      key: "expired",
+      value: { __encrypted_data__: "expired-secret-ciphertext" },
+      ttl: 1,
+    }));
+    await object.fetch(post("/state/put", {
+      collection: "other",
+      key: "hidden",
+      value: { __encrypted_data__: "other-secret-ciphertext" },
+    }));
+    await object.fetch(post("/state/put", {
+      collection: "auth",
+      key: "alpha",
+      value: { __encrypted_data__: "alpha-secret-ciphertext" },
+    }));
+    now += 2_000;
+
+    const response = await object.fetch(post("/state/list-keys", { collection: "auth" }));
+    const rendered = await response.text();
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(JSON.parse(rendered), { result: ["alpha", "permanent"] });
+    assert.equal(rendered.includes("ciphertext"), false);
+    assert.equal(rendered.includes("secret"), false);
+  } finally {
+    Date.now = originalNow;
+  }
+});
+
+test("edge rejects unauthenticated lease and state coordinator access", async () => {
   const env = { STATE_TOKEN: "secret", EXOMEM_STATE: { idFromName: (name) => name, get: () => { throw new Error("must not reach state"); } } };
-  const response = await worker.fetch(post("/v1/vaults/main/lease/acquire", { replica_id: "desktop", ttl_seconds: 30 }), env);
-  assert.equal(response.status, 401);
+  const requests = [
+    post("/v1/vaults/main/lease/acquire", { replica_id: "desktop", ttl_seconds: 30 }),
+    post("/v1/state/main/put-if-absent", {
+      collection: "auth",
+      key: "generation",
+      value: { __encrypted_data__: "ciphertext" },
+    }),
+    post("/v1/state/main/list-keys", { collection: "auth" }),
+  ];
+  for (const request of requests) {
+    const response = await worker.fetch(request, env);
+    assert.equal(response.status, 401);
+    assert.deepEqual(await body(response), { error: "unauthorized" });
+  }
 });
 
 test("edge accepts a piped Worker secret with trailing transport whitespace", async () => {

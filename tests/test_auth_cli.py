@@ -58,7 +58,7 @@ def _install_authority(
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com/")
     monkeypatch.setattr(
         "dotenv.load_dotenv",
-        lambda *, override: dotenv_calls.append(f"override={override}"),
+        lambda **kwargs: dotenv_calls.append(f"override={kwargs['override']}"),
     )
     monkeypatch.setattr(
         server_auth,
@@ -163,11 +163,32 @@ def test_auth_usage_errors_exit_two(argv: list[str]) -> None:
 def test_auth_missing_config_exits_two(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
     monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
 
     assert main(["auth", "sessions"]) == 2
     assert "EXOMEM_BASE_URL" in capsys.readouterr().err
+
+
+def test_auth_authority_loads_dotenv_from_service_working_directory(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
+    calls: list[tuple[object, bool]] = []
+
+    def load_env(*, dotenv_path=None, override: bool) -> None:
+        calls.append((dotenv_path, override))
+
+    monkeypatch.setattr("dotenv.load_dotenv", load_env)
+    monkeypatch.setattr(
+        server_auth,
+        "build_session_authority",
+        lambda *, base_url: FakeAuthority([]),
+    )
+
+    assert main(["auth", "sessions", "--json"]) == 0
+    assert calls == [(tmp_path / ".env", True)]
 
 
 def test_auth_promotes_legacy_env_after_loading_dotenv(
@@ -177,7 +198,8 @@ def test_auth_promotes_legacy_env_after_loading_dotenv(
     monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
     monkeypatch.delenv("KB_MCP_BASE_URL", raising=False)
 
-    def load_env(*, override: bool) -> None:
+    def load_env(*, dotenv_path, override: bool) -> None:
+        assert dotenv_path is not None
         assert override is True
         monkeypatch.setenv("KB_MCP_BASE_URL", "https://legacy.example.com")
 
@@ -201,7 +223,7 @@ def test_auth_factory_storage_failure_exits_one_without_details(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
 
     def fail_factory(*, base_url: str):
         raise OSError(f"cannot create store for {base_url} with secret-token")
@@ -226,7 +248,7 @@ def test_auth_real_oauth_configuration_error_exits_two(
     monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "octocat")
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "https://coordinator.example")
     monkeypatch.delenv("EXOMEM_JWT_SIGNING_KEY", raising=False)
-    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda **_kwargs: None)
 
     def representative_session_helper(*, base_url: str):
         return server_auth.build_oauth(require_auth=True, base_url=base_url)

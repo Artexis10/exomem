@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -51,6 +52,33 @@ def test_doctor_json_cli(vault: Path, capsys) -> None:
     assert payload["success"] is True
     assert payload["profile"] == "lean"
     assert {"id", "status", "message", "remediation"} <= set(payload["checks"][0])
+
+
+def test_doctor_cli_loads_cwd_dotenv_and_promotes_loaded_legacy_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("EXOMEM_PROFILE", raising=False)
+    monkeypatch.delenv("KB_MCP_PROFILE", raising=False)
+    calls: list[tuple[object, bool]] = []
+    seen: dict[str, str | None] = {}
+
+    def load_env(*, dotenv_path=None, override: bool) -> None:
+        calls.append((dotenv_path, override))
+        monkeypatch.setenv("KB_MCP_PROFILE", "remote")
+
+    def fake_doctor(**_kwargs):
+        seen["profile"] = os.environ.get("EXOMEM_PROFILE")
+        return doctor_module.DoctorReport(profile="remote", checks=[])
+
+    monkeypatch.setattr("dotenv.load_dotenv", load_env)
+    monkeypatch.setattr(doctor_module, "doctor", fake_doctor)
+
+    code, _out, err = _run(["doctor", "--json"], capsys)
+
+    assert code == 0, err
+    assert calls == [(tmp_path / ".env", True)]
+    assert seen == {"profile": "remote"}
 
 
 def test_doctor_infers_profile_from_env(monkeypatch: pytest.MonkeyPatch) -> None:

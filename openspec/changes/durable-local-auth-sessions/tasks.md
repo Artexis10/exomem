@@ -40,4 +40,4 @@
 - [x] 6.2 Add an automated black-box Codex CLI acceptance test or reproducible harness that logs in once and reuses the stored bearer across fresh processes without a browser prompt.
 - [ ] 6.3 Run the equivalent supported hosted-connector smoke test and record the rollout result; block deployment if omitted `expires_in` is not persisted correctly.
 - [x] 6.4 Run focused auth/coordinator/CLI tests, the full lean pytest suite, strict OpenSpec validation, and Ruff; resolve every failure before review.
-- [ ] 6.5 Have an independent reviewer verify the implementation against every scenario in `durable-mcp-auth-sessions`, including zero post-issuance GitHub calls and 503-vs-401 behavior.
+- [x] 6.5 Have an independent reviewer verify the implementation against every scenario in `durable-mcp-auth-sessions`, including zero post-issuance GitHub calls and 503-vs-401 behavior.
