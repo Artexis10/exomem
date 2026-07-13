@@ -16,12 +16,14 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
 
 import exomem
 from exomem import install_hook as hook_module
+from exomem._hooks import exomem_continuation_checkpoint as checkpoint
 
 _HOOKS = Path(exomem.__file__).parent / "_hooks"
 CAPTURE_SCRIPT = _HOOKS / "exomem_capture_nudge.py"
@@ -782,6 +784,185 @@ def test_health_check_reports_capability_matrix_hashes_and_first_run(tmp_path: P
     assert any(row["id"] == "config.SessionEnd" and row["status"] == "pass" for row in checks)
     assert any(row["id"] == "scripts.continuation" and row["status"] == "pass" for row in checks)
     assert any(row["id"] == "runtime.continuation" and row["status"] == "warn" for row in checks)
+
+
+def test_installer_capability_matrix_matches_pinned_adapter_provenance() -> None:
+    for client, provenance in checkpoint.ADAPTER_PROVENANCE.items():
+        assert tuple(
+            event for event, _matcher in hook_module._CONTINUATION_EVENTS[client]
+        ) == provenance["events"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX deployment modes")
+def test_install_deploys_restrictive_regular_hook_files(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+
+    for deployed in hd.iterdir():
+        info = deployed.lstat()
+        assert not deployed.is_symlink()
+        assert deployed.is_file()
+        assert info.st_mode & 0o077 == 0
+
+
+def test_health_rejects_matching_deployed_hook_symlink(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    deployed = hd / "exomem_continuation_checkpoint.py"
+    deployed.unlink()
+    try:
+        deployed.symlink_to(_HOOKS / "exomem_continuation_checkpoint.py")
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "scripts.continuation"
+    )
+
+    assert check["status"] == "fail"
+    assert check["details"]["exomem_continuation_checkpoint.py"]["safe_regular"] is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode diagnostics")
+def test_health_reports_broad_state_directory_and_lock_modes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    result = hook_module.install_hook(client="codex")
+    checkpoint.write_checkpoint(
+        {
+            "contract_version": 1,
+            "client": "codex",
+            "event": "PreCompact",
+            "session_id": "broad",
+            "turn_id": None,
+            "trigger": "manual",
+            "source": None,
+            "cwd": None,
+            "transcript_path": None,
+            "model": None,
+        },
+        home,
+    )
+    root = checkpoint.client_state_root(home, "codex")
+    state = checkpoint.session_state_dir(home, "codex", "broad")
+    root.chmod(0o777)
+    state.chmod(0o777)
+    (root / ".root.lock").chmod(0o666)
+    (state / ".lock").chmod(0o666)
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=Path(result["installed"][0]["script"]).parent,
+        settings_path=Path(result["settings"]),
+    )
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "runtime.continuation"
+    )
+
+    assert check["status"] == "fail"
+    assert check["details"]["permissions_ok"] is False
+    assert {"root", ".root.lock", "session", ".lock"}.issubset(
+        set(check["details"]["permission_violations"])
+    )
+
+
+def test_health_decodes_current_and_reports_valid_previous_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    result = hook_module.install_hook(client="codex")
+    event = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "diagnostic",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    checkpoint.write_checkpoint(
+        event,
+        home,
+        observed_at_ns=time.time_ns() - 10 * 1_000_000_000,
+    )
+    checkpoint.write_checkpoint(
+        {**event, "trigger": "auto"}, home, observed_at_ns=time.time_ns() - 1
+    )
+    state = checkpoint.session_state_dir(home, "codex", "diagnostic")
+    (state / "current.json").write_bytes(b"not-json")
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=home / "hooks",
+        settings_path=Path(result["settings"]),
+    )
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "runtime.continuation"
+    )
+    session = check["details"]["session_states"][0]
+
+    assert check["status"] == "fail"
+    assert session["current"] == "corrupt"
+    assert session["previous"] == "valid"
+    assert session["selection"] == "rollback_previous"
+    assert check["details"]["latest_age"] != "0s ago"
+
+
+def test_health_reports_stale_missing_and_invalid_metadata_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    result = hook_module.install_hook(client="codex")
+    event = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "stale",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    checkpoint.write_checkpoint(
+        event,
+        home,
+        observed_at_ns=time.time_ns() - checkpoint.RETENTION_NS - 1,
+    )
+    root = checkpoint.client_state_root(home, "codex")
+    missing = checkpoint.session_state_dir(home, "codex", "missing")
+    missing.mkdir(mode=0o700)
+    (missing / ".lock").write_bytes(b"\0")
+    (missing / ".lock").chmod(0o600)
+    log = root / "events.log"
+    log.write_bytes(b"{bad\n")
+    log.chmod(0o600)
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=home / "hooks",
+        settings_path=Path(result["settings"]),
+    )
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "runtime.continuation"
+    )
+    states = {row["selection"] for row in check["details"]["session_states"]}
+
+    assert check["status"] == "fail"
+    assert {"stale", "missing"}.issubset(states)
+    assert check["details"]["metadata_log"]["status"] == "corrupt"
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])

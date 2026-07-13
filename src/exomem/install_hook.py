@@ -154,15 +154,45 @@ def _hook_entry(item: dict, timeout: int) -> dict:
     return entry
 
 
-def _sha256(path: Path) -> str | None:
+def _safe_file_status(path: Path) -> dict:
+    safe_regular = False
+    mode_ok = False
+    digest = None
     try:
+        listed = os.lstat(path)
+        safe_regular = stat.S_ISREG(listed.st_mode) and not stat.S_ISLNK(listed.st_mode)
+        mode_ok = safe_regular and (
+            os.name == "nt" or not bool(stat.S_IMODE(listed.st_mode) & 0o022)
+        )
+        if not safe_regular:
+            raise OSError("not a safe regular file")
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        if os.name != "nt":
+            flags |= getattr(os, "O_NONBLOCK", 0)
+        fd = os.open(path, flags)
         h = hashlib.sha256()
-        with open(path, "rb") as f:
-            for chunk in iter(lambda: f.read(1024 * 1024), b""):
-                h.update(chunk)
-        return h.hexdigest()
+        try:
+            opened = os.fstat(fd)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or opened.st_dev != listed.st_dev
+                or opened.st_ino != listed.st_ino
+            ):
+                raise OSError("deployed file identity changed")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    h.update(chunk)
+            digest = h.hexdigest()
+        finally:
+            os.close(fd)
     except OSError:
-        return None
+        pass
+    return {
+        "exists": path.exists() or path.is_symlink(),
+        "safe_regular": safe_regular,
+        "mode_ok": mode_ok,
+        "sha256": digest,
+    }
 
 
 def _read_json(path: Path) -> tuple[dict | None, str | None]:
@@ -364,51 +394,195 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
     for name in (script, wrapper):
         src = _HOOK_DIR_SRC / name
         dst = hook_dir / name
-        src_hash = _sha256(src)
-        dst_hash = _sha256(dst)
+        source = _safe_file_status(src)
+        deployed = _safe_file_status(dst)
+        src_hash = source["sha256"]
+        dst_hash = deployed["sha256"]
         items[name] = {
             "path": str(dst),
-            "exists": dst.exists(),
-            "matches_bundle": bool(src_hash and dst_hash and src_hash == dst_hash),
+            "exists": deployed["exists"],
+            "safe_regular": deployed["safe_regular"],
+            "mode_ok": deployed["mode_ok"],
+            "matches_bundle": bool(
+                source["safe_regular"]
+                and deployed["safe_regular"]
+                and deployed["mode_ok"]
+                and src_hash
+                and dst_hash
+                and src_hash == dst_hash
+            ),
             "bundle_hash": src_hash,
             "deployed_hash": dst_hash,
         }
     return items
 
 
+def _path_mode_ok(path: Path, expected: int, *, directory: bool) -> bool:
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    expected_type = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+    return (
+        expected_type
+        and not stat.S_ISLNK(info.st_mode)
+        and (os.name == "nt" or stat.S_IMODE(info.st_mode) == expected)
+    )
+
+
+def _metadata_log_runtime_summary(root: Path) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    path = root / "events.log"
+    if not path.exists() and not path.is_symlink():
+        return {"path": str(path), "exists": False, "status": "missing", "mode_ok": True}
+    mode_ok = _path_mode_ok(path, 0o600, directory=False)
+    if not mode_ok:
+        return {"path": str(path), "exists": True, "status": "unsafe", "mode_ok": False}
+    try:
+        with safe._open_secure_directory(root, create=False) as root_handle:
+            fd = safe._open_secure_file_at(root_handle, "events.log", os.O_RDONLY, 0o600)
+            try:
+                raw = os.read(fd, 1024 * 1024 + 1)
+            finally:
+                os.close(fd)
+    except OSError:
+        return {"path": str(path), "exists": True, "status": "unsafe", "mode_ok": mode_ok}
+    valid = bool(raw) and len(raw) <= 1024 * 1024
+    allowed = {"event", "status", "duration_ms", "checkpoint_id", "error_class"}
+    for line in raw.splitlines():
+        try:
+            row = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            valid = False
+            break
+        if (
+            not isinstance(row, dict)
+            or not set(row).issubset(allowed)
+            or not isinstance(row.get("event"), str)
+            or not isinstance(row.get("status"), str)
+            or not isinstance(row.get("duration_ms"), int)
+            or any(
+                key in row and not isinstance(row[key], str)
+                for key in ("checkpoint_id", "error_class")
+            )
+        ):
+            valid = False
+            break
+    return {
+        "path": str(path),
+        "exists": True,
+        "status": "valid" if valid else "corrupt",
+        "mode_ok": mode_ok,
+    }
+
+
 def _continuation_runtime_summary(client: str) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
     root = _default_home(client) / ".cache" / "exomem-continuation" / client
     sessions: list[Path] = []
+    permission_violations: list[str] = []
+    root_exists = root.exists() or root.is_symlink()
     try:
-        if root.is_dir() and not root.is_symlink():
+        root_info = os.lstat(root)
+        root_safe_directory = stat.S_ISDIR(root_info.st_mode) and not stat.S_ISLNK(
+            root_info.st_mode
+        )
+    except OSError:
+        root_safe_directory = False
+    if root_exists and not _path_mode_ok(root, 0o700, directory=True):
+        permission_violations.append("root")
+    try:
+        if root_safe_directory:
             sessions = [
                 item for item in root.iterdir()
-                if item.is_dir() and not item.is_symlink() and not item.name.startswith(".")
+                if not item.is_symlink() and item.is_dir() and not item.name.startswith(".")
             ]
     except OSError:
         sessions = []
-    mtimes = []
-    permissions_ok = True
+    root_lock = root / ".root.lock"
+    if root_lock.exists() or root_lock.is_symlink():
+        if not _path_mode_ok(root_lock, 0o600, directory=False):
+            permission_violations.append(".root.lock")
+    observed_times: list[int] = []
+    session_states: list[dict] = []
+    now = time.time_ns()
     for session in sessions:
-        current = session / "current.json"
+        if not _path_mode_ok(session, 0o700, directory=True):
+            permission_violations.append("session")
+        lock = session / ".lock"
+        if not _path_mode_ok(lock, 0o600, directory=False):
+            permission_violations.append(".lock")
+        for name in ("current.json", "previous.json"):
+            path = session / name
+            if (path.exists() or path.is_symlink()) and not _path_mode_ok(
+                path, 0o600, directory=False
+            ):
+                permission_violations.append(name)
         try:
-            info = current.stat()
-            mtimes.append(info.st_mtime)
-            permissions_ok = permissions_ok and (info.st_mode & 0o077 == 0)
+            with safe._open_secure_directory(session, create=False) as state_handle:
+                current, current_raw = safe.load_checkpoint_status_at(
+                    state_handle, "current.json"
+                )
+                previous, previous_raw = safe.load_checkpoint_status_at(
+                    state_handle, "previous.json"
+                )
         except OSError:
-            continue
-    log = root / "events.log"
+            current = previous = None
+            current_raw = previous_raw = "corrupt"
+
+        def generation_status(value: dict | None, raw_status: str) -> str:
+            if raw_status != "valid" or value is None:
+                return raw_status
+            observed = value.get("observed_at_ns")
+            if not isinstance(observed, int):
+                return "corrupt"
+            observed_times.append(observed)
+            return "stale" if now - observed > safe.RETENTION_NS else "valid"
+
+        current_status = generation_status(current, current_raw)
+        previous_status = generation_status(previous, previous_raw)
+        if current_status == "valid":
+            selection = "valid_current"
+        elif current_status == "stale":
+            selection = "stale"
+        elif current_status in {"missing", "corrupt"} and previous_status == "valid":
+            selection = "rollback_previous"
+        elif current_status == "corrupt" or previous_status == "corrupt":
+            selection = "corrupt"
+        elif previous_status == "stale":
+            selection = "stale"
+        else:
+            selection = "missing"
+        session_states.append({
+            "name": session.name,
+            "current": current_status,
+            "previous": previous_status,
+            "selection": selection,
+        })
+    metadata_log = _metadata_log_runtime_summary(root) if root_safe_directory else {
+        "path": str(root / "events.log"),
+        "exists": False,
+        "status": "missing" if not root_exists else "unsafe",
+        "mode_ok": not root_exists,
+    }
+    if metadata_log["exists"] and not metadata_log["mode_ok"]:
+        permission_violations.append("events.log")
+    state_counts: dict[str, int] = {}
+    for row in session_states:
+        state_counts[row["selection"]] = state_counts.get(row["selection"], 0) + 1
     return {
         "path": str(root),
-        "exists": root.exists(),
+        "exists": root_exists,
         "sessions": len(sessions),
-        "latest_age": _fmt_age(max(mtimes, default=None)),
-        "permissions_ok": permissions_ok,
-        "metadata_log": {
-            "path": str(log),
-            "exists": log.exists(),
-            "latest_age": _fmt_age(_file_mtime(log)),
-        },
+        "latest_age": _fmt_age(max(observed_times, default=None) / 1_000_000_000)
+        if observed_times else None,
+        "permissions_ok": not permission_violations,
+        "permission_violations": sorted(set(permission_violations)),
+        "session_states": session_states,
+        "state_counts": state_counts,
+        "metadata_log": metadata_log,
     }
 
 
@@ -624,15 +798,32 @@ def check_hooks(
         )
 
         continuation_runtime = _continuation_runtime_summary(client)
-        if not continuation_runtime["exists"] or continuation_runtime["sessions"] == 0:
-            runtime_status = "warn"
-            runtime_message = "no continuation checkpoint exists yet; first write event has not run"
-        elif not continuation_runtime["permissions_ok"]:
+        corrupt_state = any(
+            row["current"] == "corrupt" or row["previous"] == "corrupt"
+            for row in continuation_runtime["session_states"]
+        )
+        degraded_state = any(
+            row["selection"] in {"stale", "missing"}
+            for row in continuation_runtime["session_states"]
+        )
+        invalid_log = continuation_runtime["metadata_log"]["status"] in {
+            "corrupt", "unsafe"
+        }
+        if not continuation_runtime["permissions_ok"]:
             runtime_status = "fail"
             runtime_message = "continuation checkpoint permissions are too broad"
+        elif corrupt_state or invalid_log:
+            runtime_status = "fail"
+            runtime_message = "continuation runtime state or metadata log is invalid"
+        elif not continuation_runtime["exists"] or continuation_runtime["sessions"] == 0:
+            runtime_status = "warn"
+            runtime_message = "no continuation checkpoint exists yet; first write event has not run"
+        elif degraded_state:
+            runtime_status = "warn"
+            runtime_message = "continuation runtime state is stale or incomplete"
         else:
             runtime_status = "pass"
-            runtime_message = "continuation runtime state is present and permissioned"
+            runtime_message = "continuation runtime state is valid and permissioned"
         add(
             "runtime.continuation",
             runtime_status,
@@ -699,7 +890,8 @@ def _deploy_file(source: Path, destination: Path) -> None:
         if existing is not None and not stat.S_ISREG(existing):
             raise OSError(f"refusing unsafe hook destination {destination.name}")
         temporary = f".{destination.name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
-        mode = source.stat().st_mode & 0o777
+        source_mode = stat.S_IMODE(source.stat().st_mode)
+        mode = 0o700 if source_mode & 0o111 else 0o600
         fd = safe._open_secure_file_at(
             parent,
             temporary,

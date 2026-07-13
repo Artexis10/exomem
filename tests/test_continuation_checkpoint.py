@@ -8,6 +8,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -19,9 +20,36 @@ from exomem._hooks import exomem_continuation_checkpoint as checkpoint
 HOOKS = Path(exomem.__file__).parent / "_hooks"
 CHECKPOINT_SCRIPT = HOOKS / "exomem_continuation_checkpoint.py"
 
+PINNED_ADAPTER_FIXTURES = {
+    "claude": {
+        "version": "2.1.207",
+        "source": "https://code.claude.com/docs/en/hooks",
+        "events": ("PreCompact", "SessionEnd", "SessionStart"),
+    },
+    "codex": {
+        "version": "0.144.3",
+        "source": "https://learn.chatgpt.com/docs/hooks.md",
+        "source_fetched": "2026-07-13",
+        "events": ("PreCompact", "SessionStart"),
+    },
+}
+
 
 def test_bundled_checkpoint_module_exists() -> None:
     assert CHECKPOINT_SCRIPT.is_file()
+
+
+def test_adapter_fixtures_pin_versions_sources_and_contract_matrix() -> None:
+    assert checkpoint.EVENT_CONTRACT_VERSION == 1
+    assert checkpoint.OUTPUT_CONTRACT_VERSION == 1
+    assert checkpoint.ADAPTER_PROVENANCE == PINNED_ADAPTER_FIXTURES
+    assert {
+        client: tuple(events)
+        for client, events in checkpoint._CLIENT_EVENTS.items()
+    } == {
+        client: fixture["events"]
+        for client, fixture in PINNED_ADAPTER_FIXTURES.items()
+    }
 
 
 def _event(
@@ -66,6 +94,7 @@ def test_normalizes_pinned_precompact_envelopes(client: str, camel: bool) -> Non
     normalized = checkpoint.normalize_event(client, payload)
 
     assert normalized == {
+        "contract_version": 1,
         "client": client,
         "event": "PreCompact",
         "session_id": "s-1",
@@ -253,7 +282,8 @@ def test_artifact_parent_swap_never_profiles_outside_content(
     assert swapped is True
     hashes = {row["sha256"] for row in result}
     assert outside_sha not in hashes
-    assert original_sha in hashes
+    assert original_sha not in hashes
+    assert not any(row["path"] == ".task/TASK.md" for row in result)
     assert "artifact_raced" in degradation
 
 
@@ -278,6 +308,35 @@ def test_dirty_openspec_candidate_is_seeded_before_bounded_directory_fallback(
     assert result[0]["path"] == "openspec/changes/zzzz-dirty/tasks.md"
     assert truncation["artifact_candidates"] is True
     assert "artifact_candidates_truncated" in degradation
+
+
+def test_excess_dirty_artifacts_are_bounded_before_any_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    dirty: set[str] = set()
+    for number in range(300):
+        relative = f"openspec/changes/dirty-{number:03d}/tasks.md"
+        path = root / relative
+        path.parent.mkdir(parents=True)
+        path.write_text("- [ ] active\n", encoding="utf-8")
+        dirty.add(relative)
+    reads: list[str] = []
+    real_read = checkpoint._read_regular_relative
+
+    def counted_read(root_handle, relative: str, limit: int):
+        reads.append(relative)
+        return real_read(root_handle, relative, limit)
+
+    monkeypatch.setattr(checkpoint, "_read_regular_relative", counted_read)
+    result, truncation, degradation = checkpoint.collect_artifacts(root, dirty_paths=dirty)
+
+    assert len(reads) <= checkpoint.MAX_ARTIFACT_CANDIDATE_READS
+    assert len(result) == checkpoint.MAX_OPENSPEC_ARTIFACTS
+    assert all(row["path"] in dirty for row in result)
+    assert truncation["dirty_artifact_candidates"] is True
+    assert "dirty_artifact_candidates_truncated" in degradation
 
 
 def test_porcelain_z_parser_consumes_rename_and_copy_path_pairs() -> None:
@@ -347,19 +406,61 @@ def test_renderer_is_bounded_structural_and_advisory() -> None:
     assert "objective" not in rendered.lower()
 
 
+def test_renderer_preserves_active_artifact_and_flags_before_dirty_path_overflow() -> None:
+    structural = {
+        "schema_version": 1,
+        "client": "codex",
+        "session_id": "render-priority",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "auto",
+        "source": None,
+        "model": None,
+        "state_root_binding": "c" * 64,
+        "workspace": {
+            "root": "repo",
+            "branch": "main",
+            "head": "1" * 40,
+            "dirty_paths": [f"very/long/path/{number:03d}/{'x' * 200}.py" for number in range(128)],
+        },
+        "transcript": {"available": False},
+        "artifacts": [{
+            "path": "openspec/changes/active/tasks.md",
+            "incomplete_count": 2,
+            "incomplete_lines": [7, 11],
+        }],
+        "degradation": ["git_status_unavailable"],
+        "truncation": {"dirty_paths": True},
+    }
+    candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    rendered = checkpoint.render_continuation(candidate, status="current")
+
+    assert len(rendered.encode("utf-8")) <= checkpoint.MAX_CONTEXT_BYTES
+    assert "artifact: openspec/changes/active/tasks.md" in rendered
+    assert "lines=[7, 11]" in rendered
+    assert "degraded: git_status_unavailable" in rendered
+    assert "truncated: dirty_paths" in rendered
+    assert "dirty paths omitted" in rendered or "dirty paths truncated" in rendered
+    assert "Reconcile these structural pointers" in rendered
+
+
 @pytest.mark.parametrize("client", ["claude", "codex"])
 def test_both_adapters_call_the_same_shared_core_functions(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
 ) -> None:
     calls: list[tuple[str, str]] = []
+    neutral_outputs: list[dict | None] = []
 
     def write(event: dict, home: Path, **_: object) -> dict:
+        assert event["contract_version"] == checkpoint.EVENT_CONTRACT_VERSION
         calls.append(("write", event["client"]))
         return {"status": "written", "checkpoint_id": "id"}
 
     candidate = {"checkpoint_id": "id", "structural": {}}
 
     def select(event: dict, home: Path, **_: object) -> tuple[dict, str]:
+        assert event["contract_version"] == checkpoint.EVENT_CONTRACT_VERSION
         calls.append(("select", event["client"]))
         return candidate, "current"
 
@@ -371,6 +472,13 @@ def test_both_adapters_call_the_same_shared_core_functions(
     monkeypatch.setattr(checkpoint, "write_checkpoint", write)
     monkeypatch.setattr(checkpoint, "select_checkpoint", select)
     monkeypatch.setattr(checkpoint, "render_continuation", render)
+    real_output_adapter = checkpoint._OUTPUT_ADAPTERS[client]
+
+    def output_adapter(value: dict | None) -> dict | None:
+        neutral_outputs.append(value)
+        return real_output_adapter(value)
+
+    monkeypatch.setitem(checkpoint._OUTPUT_ADAPTERS, client, output_adapter)
 
     write_result = checkpoint.dispatch_event(
         client,
@@ -391,6 +499,32 @@ def test_both_adapters_call_the_same_shared_core_functions(
         }
     }
     assert calls == [("write", client), ("select", client), ("render", client)]
+    assert neutral_outputs == [
+        None,
+        {
+            "contract_version": checkpoint.OUTPUT_CONTRACT_VERSION,
+            "kind": "continuation",
+            "event": "SessionStart",
+            "additional_context": "bounded context",
+        },
+    ]
+
+
+def test_equivalent_client_events_share_one_versioned_normalized_contract() -> None:
+    payload = {
+        "hook_event_name": "PreCompact",
+        "session_id": "same",
+        "trigger": "manual",
+        "cwd": "/tmp/repo",
+    }
+    claude = checkpoint.normalize_event("claude", payload)
+    codex = checkpoint.normalize_event("codex", payload)
+
+    assert claude is not None and codex is not None
+    assert claude["contract_version"] == codex["contract_version"] == 1
+    assert {key: value for key, value in claude.items() if key != "client"} == {
+        key: value for key, value in codex.items() if key != "client"
+    }
 
 
 def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: Path) -> None:
@@ -417,6 +551,96 @@ def _init_repo(path: Path) -> None:
     (path / "tracked.txt").write_text("base\n", encoding="utf-8")
     subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
     subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+
+
+def test_git_status_timeout_is_degraded_not_reported_clean(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    real_run = subprocess.run
+
+    def timeout_status(command, *args, **kwargs):
+        if command[0] == "git" and "status" in command:
+            raise subprocess.TimeoutExpired(command, checkpoint.GIT_TIMEOUT_SECONDS)
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", timeout_status)
+    workspace, _, _, degradation = checkpoint.profile_workspace(str(repo))
+
+    assert workspace["dirty_paths"] == []
+    assert "git_status_unavailable" in degradation
+
+
+@pytest.mark.parametrize(
+    ("returncode", "detached", "degraded"),
+    [(1, True, False), (128, None, True)],
+)
+def test_branch_probe_distinguishes_detached_from_unavailable(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+    detached: bool | None,
+    degraded: bool,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    real_run = subprocess.run
+
+    def branch_result(command, *args, **kwargs):
+        if command[0] == "git" and "symbolic-ref" in command:
+            return subprocess.CompletedProcess(command, returncode, stdout="", stderr="probe")
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", branch_result)
+    workspace, _, _, degradation = checkpoint.profile_workspace(str(repo))
+
+    assert workspace["branch"] is None
+    assert workspace["detached"] is detached
+    assert ("git_branch_unavailable" in degradation) is degraded
+
+
+@pytest.mark.skipif(os.name == "nt", reason="executable sentinel uses a POSIX shell")
+def test_workspace_profile_disables_repo_configured_fsmonitor(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    marker = tmp_path / "fsmonitor-ran"
+    monitor = tmp_path / "fsmonitor.sh"
+    monitor.write_text(f"#!/bin/sh\necho ran >> {marker}\nexit 0\n", encoding="utf-8")
+    monitor.chmod(0o700)
+    subprocess.run(
+        ["git", "-C", str(repo), "config", "core.fsmonitor", str(monitor)],
+        check=True,
+    )
+
+    workspace, _, _, _ = checkpoint.profile_workspace(str(repo))
+
+    assert workspace["available"] is True
+    assert not marker.exists()
+
+
+def test_git_probe_uses_bounded_environment_without_arbitrary_secret(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    monkeypatch.setenv("EXOMEM_ARBITRARY_SECRET", "must-not-reach-git")
+    real_run = subprocess.run
+    observed: list[dict[str, str] | None] = []
+
+    def inspect_environment(command, *args, **kwargs):
+        if command[0] == "git":
+            observed.append(kwargs.get("env"))
+        return real_run(command, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", inspect_environment)
+    checkpoint.profile_workspace(str(repo))
+
+    assert observed and all(env is not None for env in observed)
+    assert all("EXOMEM_ARBITRARY_SECRET" not in env for env in observed if env is not None)
+    assert all(env.get("GIT_OPTIONAL_LOCKS") == "0" for env in observed if env is not None)
 
 
 def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Path) -> None:
@@ -534,6 +758,34 @@ def test_truncation_rejected_and_corrupt_current_falls_back_to_valid_previous(
     assert checkpoint.select_checkpoint(start, home) is None
 
 
+def test_structurally_valid_current_binding_failure_does_not_fall_back(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    transcript = tmp_path / "transcript.jsonl"
+    original = b"A" * 80_000
+    transcript.write_bytes(original)
+    event = _event(client="codex", session_id="no-invalid-fallback", transcript=transcript)
+    checkpoint.write_checkpoint(event, home, observed_at_ns=time.time_ns() - 2)
+    transcript.write_bytes(b"B" * 80_000)
+    checkpoint.write_checkpoint(
+        {**event, "trigger": "auto"},
+        home,
+        observed_at_ns=time.time_ns() - 1,
+    )
+    transcript.write_bytes(original)
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="no-invalid-fallback",
+        trigger=None,
+        source="resume",
+        transcript=transcript,
+    )
+
+    assert checkpoint.select_checkpoint(start, home) is None
+
+
 def test_selection_rejects_foreign_stale_and_wrong_state_binding(tmp_path: Path) -> None:
     home = tmp_path / "home"
     event = _event(client="codex")
@@ -582,6 +834,38 @@ def test_symlinked_state_and_current_are_rejected_without_touching_target(tmp_pa
     with pytest.raises(OSError):
         checkpoint.write_checkpoint({**_event(), "trigger": "auto"}, home, observed_at_ns=200)
     assert outside.read_text(encoding="utf-8") == "untouched"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode policy")
+def test_insecure_existing_state_root_fails_closed_without_checkpoint(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o777)
+
+    with pytest.raises(OSError, match="permissions"):
+        checkpoint.write_checkpoint(_event(client="codex"), home, observed_at_ns=100)
+
+    state = checkpoint.session_state_dir(home, "codex", "session-1")
+    assert not (state / "current.json").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX mode policy")
+def test_insecure_existing_session_directory_fails_closed_without_checkpoint(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True, mode=0o700)
+    root.chmod(0o700)
+    state = checkpoint.session_state_dir(home, "codex", "session-1")
+    state.mkdir(mode=0o777)
+    state.chmod(0o777)
+
+    with pytest.raises(OSError, match="permissions"):
+        checkpoint.write_checkpoint(_event(client="codex"), home, observed_at_ns=100)
+
+    assert not (state / "current.json").exists()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="Windows directory handles prevent the test rename")
@@ -1340,3 +1624,60 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
     finally:
         if child.poll() is None:
             child.kill()
+
+
+def test_many_busy_prune_candidates_do_not_starve_supported_writer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    for number in range(20):
+        busy = root / f"busy-{number:02d}"
+        busy.mkdir()
+        busy.chmod(0o700)
+    real_lock = checkpoint._advisory_lock_at
+    first_busy = threading.Event()
+
+    class BusyLock:
+        def __enter__(self):
+            first_busy.set()
+            time.sleep(0.06)
+            raise TimeoutError("busy")
+
+        def __exit__(self, *_: object) -> None:
+            return None
+
+    def controlled_lock(directory, name: str, *, timeout: float = 0.5):
+        if name == ".lock" and directory.path.name.startswith("busy-"):
+            return BusyLock()
+        return real_lock(directory, name, timeout=timeout)
+
+    monkeypatch.setattr(checkpoint, "_advisory_lock_at", controlled_lock)
+    prune = threading.Thread(
+        target=checkpoint.prune_expired,
+        kwargs={
+            "home": home,
+            "client": "codex",
+            "current_session": "other",
+            "now_ns": checkpoint.RETENTION_NS + 1,
+        },
+    )
+    prune.start()
+    assert first_busy.wait(timeout=1)
+    started = time.monotonic()
+
+    outcome = checkpoint.write_checkpoint(
+        _event(client="codex", session_id="writer"),
+        home,
+        observed_at_ns=100,
+    )
+    elapsed = time.monotonic() - started
+    prune.join(timeout=3)
+
+    assert outcome["status"] == "written"
+    assert elapsed < 0.45
+    assert not prune.is_alive()
+    assert (checkpoint.session_state_dir(home, "codex", "writer") / "current.json").is_file()

@@ -24,6 +24,8 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 1
+EVENT_CONTRACT_VERSION = 1
+OUTPUT_CONTRACT_VERSION = 1
 MAX_CHECKPOINT_BYTES = 64 * 1024
 MAX_CONTEXT_BYTES = 4096
 MAX_PATH_BYTES = 512
@@ -32,6 +34,10 @@ MAX_ARTIFACTS = 16
 MAX_OPENSPEC_ARTIFACTS = 8
 MAX_INCOMPLETE_LINES = 64
 MAX_ARTIFACT_READ_BYTES = 256 * 1024
+MAX_ARTIFACT_CANDIDATE_READS = 64
+MAX_DIRTY_ARTIFACT_CANDIDATES = MAX_ARTIFACTS
+MAX_PRUNE_CANDIDATES = 16
+MAX_PRUNE_LOCK_SECONDS = 0.05
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
 RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 GIT_TIMEOUT_SECONDS = 0.35
@@ -45,6 +51,19 @@ _CLIENT_EVENTS = {
     "codex": {
         "PreCompact": {"trigger": {"manual", "auto"}},
         "SessionStart": {"source": {"compact", "resume"}},
+    },
+}
+ADAPTER_PROVENANCE = {
+    "claude": {
+        "version": "2.1.207",
+        "source": "https://code.claude.com/docs/en/hooks",
+        "events": ("PreCompact", "SessionEnd", "SessionStart"),
+    },
+    "codex": {
+        "version": "0.144.3",
+        "source": "https://learn.chatgpt.com/docs/hooks.md",
+        "source_fetched": "2026-07-13",
+        "events": ("PreCompact", "SessionStart"),
     },
 }
 _ALIASES = {
@@ -90,8 +109,10 @@ def _alias(payload: Mapping[str, object], logical: str) -> tuple[object | None, 
     return first, False
 
 
-def normalize_event(client: str, payload: Mapping[str, object]) -> dict[str, Any] | None:
-    """Map one pinned client envelope to the content-free internal contract."""
+def _normalize_event_contract(
+    client: str,
+    payload: Mapping[str, object],
+) -> dict[str, Any] | None:
     if client not in _CLIENT_EVENTS or not isinstance(payload, Mapping):
         return None
     values: dict[str, object | None] = {}
@@ -123,6 +144,7 @@ def normalize_event(client: str, payload: Mapping[str, object]) -> dict[str, Any
     if any(values[name] is not None and not isinstance(values[name], str) for name in optional):
         return None
     return {
+        "contract_version": EVENT_CONTRACT_VERSION,
         "client": client,
         "event": event,
         "session_id": session_id,
@@ -133,6 +155,28 @@ def normalize_event(client: str, payload: Mapping[str, object]) -> dict[str, Any
         "transcript_path": values["transcript_path"],
         "model": values["model"],
     }
+
+
+def _adapt_claude_event(payload: Mapping[str, object]) -> dict[str, Any] | None:
+    return _normalize_event_contract("claude", payload)
+
+
+def _adapt_codex_event(payload: Mapping[str, object]) -> dict[str, Any] | None:
+    return _normalize_event_contract("codex", payload)
+
+
+_INPUT_ADAPTERS = {
+    "claude": _adapt_claude_event,
+    "codex": _adapt_codex_event,
+}
+
+
+def normalize_event(client: str, payload: Mapping[str, object]) -> dict[str, Any] | None:
+    """Map one pinned client envelope to the versioned content-free contract."""
+    adapter = _INPUT_ADAPTERS.get(client)
+    if adapter is None or not isinstance(payload, Mapping):
+        return None
+    return adapter(payload)
 
 
 def resolve_home(client: str, environ: Mapping[str, str] | None = None) -> Path:
@@ -215,18 +259,47 @@ def profile_transcript(path_value: str | None, home: Path) -> tuple[dict[str, An
     }, []
 
 
-def _git(cwd: Path, *args: str) -> str | None:
+def _git_environment() -> dict[str, str]:
+    allowed = ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP")
+    environment = {name: os.environ[name] for name in allowed if os.environ.get(name)}
+    environment.update({
+        "GIT_CONFIG_GLOBAL": os.devnull,
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_OPTIONAL_LOCKS": "0",
+        "GIT_TERMINAL_PROMPT": "0",
+        "LC_ALL": "C",
+    })
+    return environment
+
+
+def _git_probe(cwd: Path, *args: str) -> tuple[str | None, int | None]:
     try:
         result = subprocess.run(
-            ["git", "-C", str(cwd), *args],
+            [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=",
+                "-C",
+                str(cwd),
+                *args,
+            ],
             capture_output=True,
             text=True,
+            env=_git_environment(),
             timeout=GIT_TIMEOUT_SECONDS,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):
-        return None
-    return result.stdout.rstrip("\r\n") if result.returncode == 0 else None
+        return None, None
+    value = result.stdout.rstrip("\r\n") if result.returncode == 0 else None
+    return value, result.returncode
+
+
+def _git(cwd: Path, *args: str) -> str | None:
+    value, returncode = _git_probe(cwd, *args)
+    return value if returncode == 0 else None
 
 
 def _bounded_path(value: str) -> tuple[str, bool]:
@@ -273,10 +346,26 @@ def profile_workspace(
         }, set(), truncation, ["non_git"]
     root = Path(root_raw)
     head = _git(root, "rev-parse", "HEAD")
-    branch = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
-    dirty_raw = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all") or ""
+    branch, branch_code = _git_probe(root, "symbolic-ref", "--quiet", "--short", "HEAD")
+    if branch_code == 0:
+        detached: bool | None = False
+    elif branch_code == 1:
+        detached = True
+    else:
+        detached = None
+        degradation.append("git_branch_unavailable")
+    dirty_raw, status_code = _git_probe(
+        root,
+        "status",
+        "--porcelain=v1",
+        "-z",
+        "--untracked-files=all",
+    )
+    if status_code != 0:
+        dirty_raw = ""
+        degradation.append("git_status_unavailable")
     all_dirty: list[str] = []
-    for value in _parse_porcelain_z(dirty_raw):
+    for value in _parse_porcelain_z(dirty_raw or ""):
         value, cut = _bounded_path(value)
         truncation["dirty_path_bytes"] = truncation.get("dirty_path_bytes", False) or cut
         if value and value not in all_dirty:
@@ -295,7 +384,7 @@ def profile_workspace(
         "root": root_name,
         "root_sha256": _sha256_bytes(str(root.absolute()).encode("utf-8")),
         "branch": branch,
-        "detached": branch is None,
+        "detached": detached,
         "head": head,
         "dirty_paths": dirty,
     }
@@ -328,13 +417,14 @@ def _allowed_artifact_relative(value: str) -> bool:
 def _artifact_candidate_relatives(
     root: Any,
     dirty_paths: set[str],
-) -> tuple[list[str], bool, bool]:
-    candidates = list(_FIXED_ARTIFACTS)
-    candidates.extend(sorted(
+) -> tuple[list[str], bool, bool, bool]:
+    dirty_candidates = sorted(
         value
         for value in dirty_paths
         if value.startswith("openspec/changes/") and _allowed_artifact_relative(value)
-    ))
+    )
+    dirty_truncated = len(dirty_candidates) > MAX_DIRTY_ARTIFACT_CANDIDATES
+    candidates = dirty_candidates[:MAX_DIRTY_ARTIFACT_CANDIDATES] + list(_FIXED_ARTIFACTS)
     truncated = False
     unsafe = False
     try:
@@ -357,7 +447,11 @@ def _artifact_candidate_relatives(
         pass
     except OSError:
         unsafe = True
-    return list(dict.fromkeys(candidates)), truncated, unsafe
+    candidates = list(dict.fromkeys(candidates))
+    if len(candidates) > MAX_ARTIFACT_CANDIDATE_READS:
+        candidates = candidates[:MAX_ARTIFACT_CANDIDATE_READS]
+        truncated = True
+    return candidates, truncated, unsafe, dirty_truncated
 
 
 def _read_regular_relative(
@@ -405,15 +499,20 @@ def collect_artifacts(
     except OSError:
         return [], truncation, ["artifact_root_unavailable"]
     try:
-        candidates, candidates_truncated, candidates_unsafe = _artifact_candidate_relatives(
-            root_handle,
-            dirty_paths,
-        )
+        (
+            candidates,
+            candidates_truncated,
+            candidates_unsafe,
+            dirty_candidates_truncated,
+        ) = _artifact_candidate_relatives(root_handle, dirty_paths)
         if candidates_truncated:
             truncation["artifact_candidates"] = True
             degradation.append("artifact_candidates_truncated")
         if candidates_unsafe:
             degradation.append("artifact_unsafe")
+        if dirty_candidates_truncated:
+            truncation["dirty_artifact_candidates"] = True
+            degradation.append("dirty_artifact_candidates_truncated")
         for relative in candidates:
             try:
                 raw, info, raced = _read_regular_relative(
@@ -428,6 +527,7 @@ def collect_artifacts(
                 continue
             if raced:
                 degradation.append("artifact_raced")
+                continue
             if len(raw) > MAX_ARTIFACT_READ_BYTES:
                 degradation.append("artifact_oversized")
                 truncation["artifact_bytes"] = True
@@ -597,36 +697,6 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
     structural = checkpoint["structural"]
     workspace = structural.get("workspace", {})
     transcript = structural.get("transcript", {})
-    lines = [
-        "[Exomem continuation checkpoint]",
-        f"checkpoint: {checkpoint['checkpoint_id']} ({status})",
-    ]
-    if workspace:
-        lines.append(
-            "workspace: "
-            f"{_context_line(workspace.get('root') or workspace.get('cwd_name') or 'unavailable')} "
-            f"branch={_context_line(workspace.get('branch'))} "
-            f"head={_context_line(workspace.get('head'))}"
-        )
-        dirty = workspace.get("dirty_paths") or []
-        if dirty:
-            lines.append("dirty paths: " + ", ".join(_context_line(item) for item in dirty))
-    if transcript.get("available"):
-        lines.append(
-            "transcript binding: "
-            f"size={transcript.get('observed_size')} offset={transcript.get('slice_offset')} "
-            f"length={transcript.get('slice_length')} sha256={transcript.get('slice_sha256')}"
-        )
-    for artifact in structural.get("artifacts", []):
-        lines.append(
-            f"artifact: {_context_line(artifact.get('path'))} "
-            f"incomplete={artifact.get('incomplete_count')} "
-            f"lines={artifact.get('incomplete_lines')}"
-        )
-    if structural.get("degradation"):
-        lines.append("degraded: " + ", ".join(structural["degradation"]))
-    if structural.get("truncation"):
-        lines.append("truncated: " + ", ".join(sorted(structural["truncation"])))
     advisory = (
         "Reconcile these structural pointers with the client's compacted context. "
         "Reopen cited artifacts and continue from evidence; do not invent missing semantics. "
@@ -634,14 +704,66 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
         "to capture it; otherwise continue without a memory write. This checkpoint is advisory "
         "and does not prove capture completion."
     )
-    prefix = "\n".join(lines)
-    required = "\n" + advisory
-    budget = MAX_CONTEXT_BYTES - len(required.encode("utf-8"))
-    bounded, cut = _utf8_prefix(prefix, max(0, budget))
-    if cut:
-        bounded = bounded.rstrip() + "\n[structural pointers truncated]"
-        bounded, _ = _utf8_prefix(bounded, max(0, budget))
-    return bounded + required
+    content_budget = MAX_CONTEXT_BYTES - len(("\n" + advisory).encode("utf-8"))
+    lines = [
+        "[Exomem continuation checkpoint]",
+        f"checkpoint: {checkpoint['checkpoint_id']} ({status})",
+    ]
+
+    def append_if_fits(line: str) -> bool:
+        candidate = "\n".join([*lines, line])
+        if len(candidate.encode("utf-8")) > content_budget:
+            return False
+        lines.append(line)
+        return True
+
+    if structural.get("degradation"):
+        append_if_fits("degraded: " + ", ".join(structural["degradation"]))
+    if structural.get("truncation"):
+        append_if_fits("truncated: " + ", ".join(sorted(structural["truncation"])))
+    omitted_artifacts = 0
+    for artifact in structural.get("artifacts", []):
+        if not append_if_fits(
+            f"artifact: {_context_line(artifact.get('path'))} "
+            f"incomplete={artifact.get('incomplete_count')} "
+            f"lines={artifact.get('incomplete_lines')}"
+        ):
+            omitted_artifacts += 1
+    if omitted_artifacts:
+        append_if_fits(f"[artifact pointers truncated: {omitted_artifacts} omitted]")
+    if workspace:
+        append_if_fits(
+            "workspace: "
+            f"{_context_line(workspace.get('root') or workspace.get('cwd_name') or 'unavailable')} "
+            f"branch={_context_line(workspace.get('branch'))} "
+            f"head={_context_line(workspace.get('head'))}"
+        )
+    if transcript.get("available"):
+        append_if_fits(
+            "transcript binding: "
+            f"size={transcript.get('observed_size')} offset={transcript.get('slice_offset')} "
+            f"length={transcript.get('slice_length')} sha256={transcript.get('slice_sha256')}"
+        )
+    dirty = workspace.get("dirty_paths") or []
+    if dirty:
+        shown: list[str] = []
+        for item in dirty:
+            candidate = shown + [_context_line(item)]
+            if len(candidate) == len(dirty):
+                line = "dirty paths: " + ", ".join(candidate)
+            else:
+                line = (
+                    "dirty paths: " + ", ".join(candidate)
+                    + f"\n[dirty paths truncated: {len(dirty) - len(candidate)} omitted]"
+                )
+            if len("\n".join([*lines, line]).encode("utf-8")) > content_budget:
+                break
+            shown = candidate
+        if shown:
+            append_if_fits("dirty paths: " + ", ".join(shown))
+        if len(shown) < len(dirty):
+            append_if_fits(f"[dirty paths truncated: {len(dirty) - len(shown)} omitted]")
+    return "\n".join(lines) + "\n" + advisory
 
 
 def _windows_open_path(
@@ -946,6 +1068,14 @@ def _directory_identity(directory: _SecureDirectory) -> tuple[object, ...]:
     return ("windows", *_windows_handle_identity(directory.windows_handle))
 
 
+def _require_private_state_directory(directory: _SecureDirectory) -> None:
+    if os.name == "nt":
+        return
+    mode = stat.S_IMODE(os.fstat(directory.fd).st_mode)
+    if mode != 0o700:
+        raise OSError(f"state directory permissions are too broad: {mode:04o}")
+
+
 def _directory_entry_identity(
     parent: _SecureDirectory,
     name: str,
@@ -1237,6 +1367,7 @@ def _session_lock(home: Path, client: str, session_id: str, *, create: bool) -> 
     root = client_state_root(home, client)
     state_name = session_state_dir(home, client, session_id).name
     with _open_secure_directory(root, create=create) as root_handle:
+        _require_private_state_directory(root_handle)
         with _advisory_lock_at(root_handle, ".root.lock"):
             state_context = _open_secure_child_directory(
                 root_handle,
@@ -1245,6 +1376,7 @@ def _session_lock(home: Path, client: str, session_id: str, *, create: bool) -> 
             )
             state_handle = state_context.__enter__()
             try:
+                _require_private_state_directory(state_handle)
                 session = _advisory_lock_at(state_handle, ".lock")
                 session.__enter__()
             except BaseException:
@@ -1286,7 +1418,12 @@ def _decode_checkpoint(raw: bytes) -> dict[str, Any] | None:
     return loaded
 
 
-def load_checkpoint_at(directory: _SecureDirectory, name: str) -> dict[str, Any] | None:
+def load_checkpoint_status_at(
+    directory: _SecureDirectory,
+    name: str,
+) -> tuple[dict[str, Any] | None, str]:
+    if _existing_kind(directory, name) is None:
+        return None, "missing"
     try:
         fd = _open_secure_file_at(directory, name, os.O_RDONLY, 0o600)
         try:
@@ -1294,8 +1431,13 @@ def load_checkpoint_at(directory: _SecureDirectory, name: str) -> dict[str, Any]
         finally:
             os.close(fd)
     except OSError:
-        return None
-    return _decode_checkpoint(raw)
+        return None, "corrupt"
+    decoded = _decode_checkpoint(raw)
+    return (decoded, "valid") if decoded is not None else (None, "corrupt")
+
+
+def load_checkpoint_at(directory: _SecureDirectory, name: str) -> dict[str, Any] | None:
+    return load_checkpoint_status_at(directory, name)[0]
 
 
 def load_checkpoint(path: Path) -> dict[str, Any] | None:
@@ -1488,9 +1630,11 @@ def select_checkpoint(
             str(event["session_id"]),
             create=False,
         ) as state:
-            current = load_checkpoint_at(state, "current.json")
-            if current is not None and _candidate_matches(current, event, home, now):
-                return current, "current"
+            current, current_status = load_checkpoint_status_at(state, "current.json")
+            if current_status == "valid":
+                if current is not None and _candidate_matches(current, event, home, now):
+                    return current, "current"
+                return None
             previous = load_checkpoint_at(state, "previous.json")
             if previous is not None and _candidate_matches(previous, event, home, now):
                 return previous, "rollback"
@@ -1559,6 +1703,85 @@ def _delete_tombstone_at(
         context.__exit__(None, None, None)
 
 
+def _tombstone_expired_candidate(
+    root_handle: _SecureDirectory,
+    home: Path,
+    client: str,
+    name: str,
+    now: int,
+    *,
+    force_fallback: bool,
+) -> tuple[str, tuple[object, ...]] | None:
+    state_context = None
+    state_open = False
+    try:
+        state_context = _open_secure_child_directory(root_handle, name, create=False)
+        state_handle = state_context.__enter__()
+        state_open = True
+        _require_private_state_directory(state_handle)
+        lock = _advisory_lock_at(state_handle, ".lock", timeout=0.0)
+        lock.__enter__()
+    except (OSError, TimeoutError):
+        if state_open and state_context is not None:
+            state_context.__exit__(*sys.exc_info())
+        return None
+    locked = True
+    try:
+        if not _recognized_state_directory(state_handle):
+            return None
+        candidates = (
+            load_checkpoint_at(state_handle, "current.json"),
+            load_checkpoint_at(state_handle, "previous.json"),
+        )
+        candidate = next(
+            (
+                value
+                for value in candidates
+                if value is not None
+                and _prune_candidate_authorized(value, home, client, name)
+            ),
+            None,
+        )
+        if (
+            candidate is None
+            or not isinstance(candidate.get("observed_at_ns"), int)
+            or now - int(candidate["observed_at_ns"]) <= RETENTION_NS
+        ):
+            return None
+        state_identity = _directory_identity(state_handle)
+        if _directory_entry_identity(root_handle, name) != state_identity:
+            return None
+        tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
+        if force_fallback:
+            lock.__exit__(None, None, None)
+            locked = False
+            state_context.__exit__(None, None, None)
+            state_open = False
+        try:
+            _rename_directory_at(root_handle, name, tombstone)
+        except PermissionError:
+            if locked:
+                lock.__exit__(None, None, None)
+                locked = False
+            if state_open:
+                state_context.__exit__(None, None, None)
+                state_open = False
+            _rename_directory_at(root_handle, name, tombstone)
+        if _directory_entry_identity(root_handle, tombstone) != state_identity:
+            if _existing_kind(root_handle, name) is None:
+                try:
+                    _rename_directory_at(root_handle, tombstone, name)
+                except OSError:
+                    pass
+            return None
+        return tombstone, state_identity
+    finally:
+        if locked:
+            lock.__exit__(None, None, None)
+        if state_open:
+            state_context.__exit__(None, None, None)
+
+
 def prune_expired(
     home: Path,
     client: str,
@@ -1571,90 +1794,43 @@ def prune_expired(
     now = time.time_ns() if now_ns is None else int(now_ns)
     current_name = session_state_dir(home, client, current_session).name
     tombstones: list[tuple[str, tuple[object, ...]]] = []
+    lock_deadline = time.monotonic() + MAX_PRUNE_LOCK_SECONDS
     try:
         root_context = _open_secure_directory(root, create=False)
         root_handle = root_context.__enter__()
+        _require_private_state_directory(root_handle)
     except OSError:
         return 0
     try:
-        with _advisory_lock_at(root_handle, ".root.lock"):
+        try:
+            with _advisory_lock_at(root_handle, ".root.lock"):
+                entries = [
+                    name
+                    for name in sorted(_list_directory(root_handle))
+                    if name != current_name and not name.startswith(".")
+                ][:MAX_PRUNE_CANDIDATES]
+        except (OSError, TimeoutError):
+            return 0
+        for name in entries:
+            if time.monotonic() >= lock_deadline:
+                break
             try:
-                entries = sorted(_list_directory(root_handle))
-            except OSError:
-                return 0
-            for name in entries:
-                if name == current_name or name.startswith("."):
-                    continue
-                state_context = None
-                try:
-                    state_context = _open_secure_child_directory(
+                with _advisory_lock_at(root_handle, ".root.lock"):
+                    tombstone = _tombstone_expired_candidate(
                         root_handle,
+                        home,
+                        client,
                         name,
-                        create=False,
+                        now,
+                        force_fallback=force_fallback,
                     )
-                    state_handle = state_context.__enter__()
-                    lock = _advisory_lock_at(state_handle, ".lock", timeout=0.05)
-                    lock.__enter__()
-                except (OSError, TimeoutError):
-                    if state_context is not None:
-                        state_context.__exit__(*sys.exc_info())
-                    continue
-                locked = True
-                state_open = True
-                try:
-                    if not _recognized_state_directory(state_handle):
-                        continue
-                    candidates = (
-                        load_checkpoint_at(state_handle, "current.json"),
-                        load_checkpoint_at(state_handle, "previous.json"),
-                    )
-                    candidate = next(
-                        (
-                            value
-                            for value in candidates
-                            if value is not None
-                            and _prune_candidate_authorized(value, home, client, name)
-                        ),
-                        None,
-                    )
-                    if (
-                        candidate is None
-                        or not isinstance(candidate.get("observed_at_ns"), int)
-                        or now - int(candidate["observed_at_ns"]) <= RETENTION_NS
-                    ):
-                        continue
-                    state_identity = _directory_identity(state_handle)
-                    if _directory_entry_identity(root_handle, name) != state_identity:
-                        continue
-                    tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
-                    if force_fallback:
-                        lock.__exit__(None, None, None)
-                        locked = False
-                        state_context.__exit__(None, None, None)
-                        state_open = False
-                    try:
-                        _rename_directory_at(root_handle, name, tombstone)
-                    except PermissionError:
-                        if locked:
-                            lock.__exit__(None, None, None)
-                            locked = False
-                        if state_open:
-                            state_context.__exit__(None, None, None)
-                            state_open = False
-                        _rename_directory_at(root_handle, name, tombstone)
-                    if _directory_entry_identity(root_handle, tombstone) != state_identity:
-                        if _existing_kind(root_handle, name) is None:
-                            try:
-                                _rename_directory_at(root_handle, tombstone, name)
-                            except OSError:
-                                pass
-                        continue
-                    tombstones.append((tombstone, state_identity))
-                finally:
-                    if locked:
-                        lock.__exit__(None, None, None)
-                    if state_open:
-                        state_context.__exit__(None, None, None)
+                    if tombstone is not None:
+                        tombstones.append(tombstone)
+            except (OSError, TimeoutError):
+                continue
+            if time.monotonic() >= lock_deadline:
+                break
+            time.sleep(0.001)
         return sum(
             _delete_tombstone_at(root_handle, item, identity)
             for item, identity in tombstones
@@ -1685,6 +1861,7 @@ def _metadata_log(
     if error_class:
         row["error_class"] = error_class
     with _open_secure_directory(root, create=create_root) as root_handle:
+        _require_private_state_directory(root_handle)
         fd = _open_secure_file_at(
             root_handle,
             "events.log",
@@ -1703,17 +1880,43 @@ def _disabled(environ: Mapping[str, str]) -> bool:
     }
 
 
-def dispatch_event(
-    client: str,
-    payload: Mapping[str, object],
-    *,
-    environ: Mapping[str, str] | None = None,
-) -> dict[str, Any] | None:
-    env = os.environ if environ is None else environ
-    event = normalize_event(client, payload)
-    if event is None or _disabled(env):
+def _emit_continuation_output(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if value is None:
         return None
-    home = resolve_home(client, env)
+    if (
+        value.get("contract_version") != OUTPUT_CONTRACT_VERSION
+        or value.get("kind") != "continuation"
+        or value.get("event") != "SessionStart"
+        or not isinstance(value.get("additional_context"), str)
+    ):
+        return None
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": value["additional_context"],
+        }
+    }
+
+
+def _emit_claude_output(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    return _emit_continuation_output(value)
+
+
+def _emit_codex_output(value: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    return _emit_continuation_output(value)
+
+
+_OUTPUT_ADAPTERS = {
+    "claude": _emit_claude_output,
+    "codex": _emit_codex_output,
+}
+
+
+def _dispatch_core(
+    event: Mapping[str, Any],
+    home: Path,
+) -> dict[str, Any] | None:
+    client = str(event["client"])
     started = time.monotonic_ns()
     if event["event"] in {"PreCompact", "SessionEnd"}:
         try:
@@ -1764,7 +1967,7 @@ def dispatch_event(
         candidate, status = selected
         context = render_continuation(candidate, status=status)
         try:
-                _metadata_log(
+            _metadata_log(
                 home,
                 client,
                 event["event"],
@@ -1789,11 +1992,25 @@ def dispatch_event(
             pass
         return None
     return {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
+        "contract_version": OUTPUT_CONTRACT_VERSION,
+        "kind": "continuation",
+        "event": "SessionStart",
+        "additional_context": context,
     }
+
+
+def dispatch_event(
+    client: str,
+    payload: Mapping[str, object],
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    env = os.environ if environ is None else environ
+    event = normalize_event(client, payload)
+    if event is None or _disabled(env):
+        return None
+    neutral = _dispatch_core(event, resolve_home(client, env))
+    return _OUTPUT_ADAPTERS[client](neutral)
 
 
 def main(argv: list[str] | None = None) -> int:
