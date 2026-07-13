@@ -5,6 +5,31 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.22.0](https://github.com/Artexis10/exomem/compare/v0.21.0...v0.22.0) (2026-07-13)
+
+
+### Features
+
+* **auth:** add durable local session authority ([256160f](https://github.com/Artexis10/exomem/commit/256160fa12ad66ff79538ec2ae1e2c843cc82ff8))
+* **auth:** add durable session operator controls ([0c1ee62](https://github.com/Artexis10/exomem/commit/0c1ee627360afd17b12c16e9a7890b2f063f020c))
+* **auth:** issue durable local OAuth sessions ([2b0ef8e](https://github.com/Artexis10/exomem/commit/2b0ef8ef3f38562c91afb33875cc944d7cbd09c9))
+
+
+### Bug Fixes
+
+* **auth:** close durable-session rollout gaps ([18e56be](https://github.com/Artexis10/exomem/commit/18e56be8ba59987c6b4f1deba1671b8465261a56))
+* **auth:** close legacy OAuth escape paths ([4f7fec3](https://github.com/Artexis10/exomem/commit/4f7fec35b3c8639ed6ba51df2851ff12ebc38ef8))
+* **auth:** close rollout harness verifier gaps ([ae4faa8](https://github.com/Artexis10/exomem/commit/ae4faa8d5cfbecdf8b2b0bd6cf7a069de69c892a))
+* **auth:** harden durable session rollout controls ([f95fe0a](https://github.com/Artexis10/exomem/commit/f95fe0a665d56972b25d370504a9fb2e0356dc89))
+* **auth:** harden session authority concurrency ([f2a633b](https://github.com/Artexis10/exomem/commit/f2a633b93c25c4f6725ce13e3210dbe5f21d7ef2))
+* **auth:** issue durable local MCP sessions ([230a1c5](https://github.com/Artexis10/exomem/commit/230a1c53bbbd92f5ed9c903015a9a278d7e0d6f7))
+* **auth:** preserve FastMCP DCR grant compatibility ([f92a35b](https://github.com/Artexis10/exomem/commit/f92a35b661894ee62636783727320199a045e038))
+* **config:** load cli dotenv from working directory ([e6cb1bc](https://github.com/Artexis10/exomem/commit/e6cb1bc9f4e839205036247726f4bdc965737ff2))
+* **config:** load packaged service dotenv from working directory ([e27766e](https://github.com/Artexis10/exomem/commit/e27766eaeb2394fab999c38698c5be052bc037bd))
+* **config:** load service dotenv from working directory ([0404da7](https://github.com/Artexis10/exomem/commit/0404da750da5805da1ed991c5a76e289463f15d6))
+* **ha:** complete durable state coordinator contract ([b2f109e](https://github.com/Artexis10/exomem/commit/b2f109e68549526a473608c847bac4ff86df16c7))
+* **ha:** reject non-object state bodies ([fd9bbba](https://github.com/Artexis10/exomem/commit/fd9bbbae301544fa85ef8e9275161c08378bcbd4))
+
 ## [0.21.0](https://github.com/Artexis10/exomem/compare/v0.20.2...v0.21.0) (2026-07-12)
 
 
