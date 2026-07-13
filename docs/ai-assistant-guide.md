@@ -245,6 +245,52 @@ Check deployed Claude Code and Codex hooks:
 exomem install-hook --check
 ```
 
+The continuation portion uses one client-neutral, stdlib-only core with thin
+Claude/Codex envelope and output adapters:
+
+| Lifecycle event | Claude Code | Codex CLI 0.144.3 |
+| --- | --- | --- |
+| `PreCompact(manual|auto)` | structural checkpoint | structural checkpoint |
+| `SessionEnd` | structural checkpoint | unsupported; no Exomem registration |
+| `SessionStart(compact|resume)` | validated reinjection | validated reinjection |
+
+It runs locally without MCP, REST, a model, Exomem CLI, a vault path, or an MCP
+credential. A checkpoint contains only bounded structural recovery evidence:
+repository/worktree state, bounded paths, content-free artifact hashes and
+checkbox profiles, and path-bound transcript byte-slice hashes. It never parses
+or stores transcript records, conversation/tool/system output, compaction
+summaries, secrets, or artifact/task text. Reinjection is advisory and never
+turns checkpoint data into an automatic Exomem write.
+
+State is per client and collision-resistant under
+`~/.claude/.cache/exomem-continuation/` or
+`~/.codex/.cache/exomem-continuation/`. `CLAUDE_CONFIG_DIR` and `CODEX_HOME`
+relocate the respective client roots; `EXOMEM_HOOK_HOME` overrides either root
+for isolated installs. Current state is accepted only for the exact
+client/session/root and transcript provenance, and only for 30 days. A validated
+previous generation may be reinjected as an explicit `rollback`; corrupt,
+foreign, stale, truncated, or oversized state stays silent. Metadata-only logs
+contain no environment values or absolute paths.
+
+Set `EXOMEM_CONTINUATION_DISABLE=1` in the environment that launches the client
+to bypass checkpoint writes and reinjection without deleting state. Reload or
+restart the target client after installation and accept any local-hook trust
+prompt. `install-hook --check` validates exact supported registrations and
+matchers, deployed hashes, legacy entries, runtime permissions/age/status, and
+logs; before the first write event, absent runtime state is a warning, not a
+failure.
+
+Re-running installation performs a narrow migration: only exact legacy
+`kb_continuation_checkpoint.py` and `kb-continuation-checkpoint.sh` basenames are
+retired, unrelated hook order is preserved, user-owned Codex `SessionEnd`
+handlers stay untouched, and changed valid config is backed up and replaced
+atomically. Malformed config fails closed. For manual rollback, remove only the
+Exomem groups invoking `exomem_continuation_checkpoint.py` or
+`exomem-continuation-checkpoint.sh` with that group's explicit `--client`, then
+remove the two deployed files if unused and reload the client. The local state
+is inert afterward and can be deleted independently; no uninstall command is
+provided.
+
 Codex reads repository instructions from `AGENTS.md`. Put the instruction block
 there, or keep an equivalent policy. Restart Codex sessions after changing MCP
 or hook config.

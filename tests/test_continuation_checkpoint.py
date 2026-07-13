@@ -1,0 +1,1016 @@
+"""Contract tests for the local compaction-continuation checkpoint hook."""
+
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+import sys
+import time
+from pathlib import Path
+
+import pytest
+
+import exomem
+from exomem._hooks import exomem_continuation_checkpoint as checkpoint
+
+HOOKS = Path(exomem.__file__).parent / "_hooks"
+CHECKPOINT_SCRIPT = HOOKS / "exomem_continuation_checkpoint.py"
+
+
+def test_bundled_checkpoint_module_exists() -> None:
+    assert CHECKPOINT_SCRIPT.is_file()
+
+
+def _event(
+    *,
+    client: str = "claude",
+    event: str = "PreCompact",
+    session_id: str = "session-1",
+    trigger: str | None = "manual",
+    source: str | None = None,
+    cwd: Path | None = None,
+    transcript: Path | None = None,
+) -> dict:
+    row = {
+        "client": client,
+        "event": event,
+        "session_id": session_id,
+        "turn_id": "turn-1",
+        "trigger": trigger,
+        "source": source,
+        "cwd": str(cwd) if cwd else None,
+        "transcript_path": str(transcript) if transcript else None,
+        "model": "pinned-test-model",
+    }
+    return row
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("camel", [False, True])
+def test_normalizes_pinned_precompact_envelopes(client: str, camel: bool) -> None:
+    payload = {
+        ("hookEventName" if camel else "hook_event_name"): "PreCompact",
+        ("sessionId" if camel else "session_id"): "s-1",
+        ("turnId" if camel else "turn_id"): "t-1",
+        ("transcriptPath" if camel else "transcript_path"): "/tmp/t.jsonl",
+        "cwd": "/tmp/project",
+        "trigger": "auto",
+        "model": "fixture-model",
+        "custom_instructions": "BEARER super-secret",
+        "prompt": "tool payload must be ignored",
+    }
+
+    normalized = checkpoint.normalize_event(client, payload)
+
+    assert normalized == {
+        "client": client,
+        "event": "PreCompact",
+        "session_id": "s-1",
+        "turn_id": "t-1",
+        "trigger": "auto",
+        "source": None,
+        "cwd": "/tmp/project",
+        "transcript_path": "/tmp/t.jsonl",
+        "model": "fixture-model",
+    }
+    assert "secret" not in json.dumps(normalized).lower()
+
+
+def test_lifecycle_matrix_is_closed_and_alias_conflicts_are_rejected() -> None:
+    assert checkpoint.normalize_event(
+        "claude", {"hook_event_name": "SessionEnd", "session_id": "s"}
+    )["event"] == "SessionEnd"
+    assert checkpoint.normalize_event(
+        "codex", {"hook_event_name": "SessionEnd", "session_id": "s"}
+    ) is None
+    assert checkpoint.normalize_event(
+        "claude", {"hook_event_name": "SessionStart", "session_id": "s", "source": "compact"}
+    )["source"] == "compact"
+    assert checkpoint.normalize_event(
+        "codex", {"hook_event_name": "SessionStart", "session_id": "s", "source": "resume"}
+    )["source"] == "resume"
+    assert checkpoint.normalize_event(
+        "codex", {"hook_event_name": "Stop", "session_id": "s"}
+    ) is None
+    assert checkpoint.normalize_event(
+        "claude",
+        {"hook_event_name": "PreCompact", "session_id": "a", "sessionId": "b", "trigger": "manual"},
+    ) is None
+    assert checkpoint.normalize_event(
+        "claude", {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "other"}
+    ) is None
+
+
+def test_client_home_resolution_and_collision_resistant_session_paths(tmp_path: Path) -> None:
+    shared = tmp_path / "shared"
+    assert checkpoint.resolve_home("claude", {"EXOMEM_HOOK_HOME": str(shared)}) == shared
+    assert checkpoint.resolve_home("codex", {"EXOMEM_HOOK_HOME": str(shared)}) == shared
+    assert checkpoint.resolve_home(
+        "claude", {"CLAUDE_CONFIG_DIR": str(tmp_path / "c")}
+    ) == tmp_path / "c"
+    assert checkpoint.resolve_home("codex", {"CODEX_HOME": str(tmp_path / "x")}) == tmp_path / "x"
+
+    first = checkpoint.session_state_dir(shared, "claude", "unsafe/a")
+    second = checkpoint.session_state_dir(shared, "claude", "unsafe:a")
+    other_client = checkpoint.session_state_dir(shared, "codex", "unsafe/a")
+    assert first != second
+    assert first != other_client
+    assert first.parent.name == "claude"
+    assert other_client.parent.name == "codex"
+    assert "/" not in first.name and "\\" not in first.name
+
+
+def test_transcript_is_hashed_without_parsing_or_persisting_secret_text(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    transcript = tmp_path / "malformed.jsonl"
+    secret = b"BEARER-very-secret tool_result system developer compact summary"
+    transcript.write_bytes(b"\xff\xfe" + secret + b"\n" + b"x" * 70_000)
+
+    built = checkpoint.build_checkpoint(
+        _event(cwd=tmp_path / "not-a-repo", transcript=transcript),
+        home,
+        observed_at_ns=123_000_000_000,
+    )
+    encoded = checkpoint.encode_checkpoint(built)
+
+    assert len(encoded) <= checkpoint.MAX_CHECKPOINT_BYTES
+    assert secret not in encoded
+    assert b"tool_result" not in encoded
+    binding = built["structural"]["transcript"]
+    assert binding["available"] is True
+    assert binding["slice_length"] <= checkpoint.TRANSCRIPT_SLICE_BYTES
+    assert len(binding["slice_sha256"]) == 64
+    assert "content" not in binding
+    assert "non_git" in built["structural"]["degradation"]
+
+
+def test_structural_digest_controls_identity_and_observation_time_does_not() -> None:
+    structural = {
+        "schema_version": 1,
+        "client": "codex",
+        "session_id": "same",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "auto",
+        "source": None,
+        "model": None,
+        "state_root_binding": "a" * 64,
+        "workspace": {"head": "1" * 40, "dirty_paths": ["a.py"]},
+        "transcript": {"available": False},
+        "artifacts": [],
+        "degradation": ["transcript_unavailable"],
+        "truncation": {},
+    }
+    first = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+    repeat = checkpoint.finalize_checkpoint(structural, observed_at_ns=200)
+    changed = json.loads(json.dumps(structural))
+    changed["workspace"]["head"] = "2" * 40
+    second = checkpoint.finalize_checkpoint(changed, observed_at_ns=200)
+
+    assert first["checkpoint_id"] == repeat["checkpoint_id"]
+    assert first["structural_digest"] == repeat["structural_digest"]
+    assert second["checkpoint_id"] != first["checkpoint_id"]
+    assert second["structural_digest"] != first["structural_digest"]
+    assert first["event_order"][:2] == [-1, -1]
+
+
+def test_artifact_policy_is_closed_bounded_content_free_and_dirty_first(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    active = root / "openspec" / "changes" / "active" / "tasks.md"
+    older = root / "openspec" / "changes" / "older" / "tasks.md"
+    task = root / ".task" / "TASK.md"
+    decoy = root / "notes" / "tasks.md"
+    for path in (active, older, task, decoy):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("- [ ] SECRET TASK WORDS\n- [x] done text\n", encoding="utf-8")
+    link = root / ".task" / "RESULT.md"
+    try:
+        link.symlink_to(decoy)
+    except OSError:
+        pass
+    os.utime(active, ns=(1, 1))
+    os.utime(older, ns=(9, 9))
+
+    result, truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths={"openspec/changes/active/tasks.md"},
+    )
+    serialized = json.dumps(result)
+
+    assert result[0]["path"] == "openspec/changes/active/tasks.md"
+    assert "notes/tasks.md" not in {row["path"] for row in result}
+    assert ".task/RESULT.md" not in {row["path"] for row in result}
+    assert "SECRET" not in serialized and "done text" not in serialized
+    assert result[0]["incomplete_lines"] == [1]
+    assert result[0]["completed_count"] == 1
+    assert result[0]["incomplete_count"] == 1
+    assert len(result) <= checkpoint.MAX_ARTIFACTS
+    assert isinstance(truncation, dict) and isinstance(degradation, list)
+
+
+def test_artifact_checkbox_lines_and_paths_are_utf8_byte_bounded(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    task = root / ".task" / "TASK.md"
+    task.parent.mkdir(parents=True)
+    task.write_text("".join(f"- [ ] secret {i}\n" for i in range(100)), encoding="utf-8")
+
+    result, truncation, _ = checkpoint.collect_artifacts(root, dirty_paths=set())
+
+    assert len(result[0]["incomplete_lines"]) == checkpoint.MAX_INCOMPLETE_LINES
+    assert truncation["incomplete_lines"] is True
+    assert len(result[0]["path"].encode("utf-8")) <= checkpoint.MAX_PATH_BYTES
+
+
+def test_renderer_is_bounded_structural_and_advisory() -> None:
+    structural = {
+        "schema_version": 1,
+        "client": "claude",
+        "session_id": "s",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "manual",
+        "source": None,
+        "model": None,
+        "state_root_binding": "b" * 64,
+        "workspace": {
+            "root": "project-" + "é" * 400,
+            "branch": "feature/recovery",
+            "head": "1" * 40,
+            "dirty_paths": [f"src/{i}-{'é' * 120}.py" for i in range(128)],
+        },
+        "transcript": {"available": False},
+        "artifacts": [
+            {
+                "path": f"openspec/changes/{i}/tasks.md",
+                "incomplete_count": 2,
+                "incomplete_lines": [3, 7],
+            }
+            for i in range(16)
+        ],
+        "degradation": ["transcript_unavailable"],
+        "truncation": {"dirty_paths": True},
+    }
+    candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    rendered = checkpoint.render_continuation(candidate, status="rollback")
+
+    assert len(rendered.encode("utf-8")) <= checkpoint.MAX_CONTEXT_BYTES
+    assert candidate["checkpoint_id"] in rendered
+    assert "rollback" in rendered.lower()
+    assert "reconcile" in rendered.lower()
+    assert "durable stepping-stone" in rendered
+    assert "capture completion" in rendered
+    assert "objective" not in rendered.lower()
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+def test_both_adapters_call_the_same_shared_core_functions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, client: str
+) -> None:
+    calls: list[tuple[str, str]] = []
+
+    def write(event: dict, home: Path, **_: object) -> dict:
+        calls.append(("write", event["client"]))
+        return {"status": "written", "checkpoint_id": "id"}
+
+    candidate = {"checkpoint_id": "id", "structural": {}}
+
+    def select(event: dict, home: Path, **_: object) -> tuple[dict, str]:
+        calls.append(("select", event["client"]))
+        return candidate, "current"
+
+    def render(value: dict, *, status: str) -> str:
+        assert value is candidate and status == "current"
+        calls.append(("render", client))
+        return "bounded context"
+
+    monkeypatch.setattr(checkpoint, "write_checkpoint", write)
+    monkeypatch.setattr(checkpoint, "select_checkpoint", select)
+    monkeypatch.setattr(checkpoint, "render_continuation", render)
+
+    write_result = checkpoint.dispatch_event(
+        client,
+        {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "manual"},
+        environ={"EXOMEM_HOOK_HOME": str(tmp_path)},
+    )
+    start_result = checkpoint.dispatch_event(
+        client,
+        {"hook_event_name": "SessionStart", "session_id": "s", "source": "resume"},
+        environ={"EXOMEM_HOOK_HOME": str(tmp_path)},
+    )
+
+    assert write_result is None
+    assert start_result == {
+        "hookSpecificOutput": {
+            "hookEventName": "SessionStart",
+            "additionalContext": "bounded context",
+        }
+    }
+    assert calls == [("write", client), ("select", client), ("render", client)]
+
+
+def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    result = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
+        input=json.dumps({"hook_event_name": "SessionEnd", "session_id": "s"}),
+        capture_output=True,
+        text=True,
+        env={**os.environ, "EXOMEM_HOOK_HOME": str(home)},
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == ""
+    assert not home.exists()
+
+
+def _init_repo(path: Path) -> None:
+    path.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.email", "test@example.com"], check=True)
+    subprocess.run(["git", "-C", str(path), "config", "user.name", "Test"], check=True)
+    (path / "tracked.txt").write_text("base\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(path), "add", "tracked.txt"], check=True)
+    subprocess.run(["git", "-C", str(path), "commit", "-qm", "base"], check=True)
+
+
+def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex")
+
+    first = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+    repeat = checkpoint.write_checkpoint(event, home, observed_at_ns=300)
+    state = checkpoint.session_state_dir(home, "codex", "session-1")
+
+    assert first["status"] == "written"
+    assert repeat == {"status": "idempotent", "checkpoint_id": first["checkpoint_id"]}
+    assert (state / "current.json").is_file()
+    assert not (state / "previous.json").exists()
+
+    newer = checkpoint.write_checkpoint(
+        {**event, "trigger": "auto"}, home, observed_at_ns=400
+    )
+    stale = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    current = checkpoint.load_checkpoint(state / "current.json")
+
+    assert newer["status"] == "written"
+    assert stale["status"] == "stale"
+    assert current["checkpoint_id"] == newer["checkpoint_id"]
+    assert checkpoint.load_checkpoint(state / "previous.json")["checkpoint_id"] == first[
+        "checkpoint_id"
+    ]
+    assert stat_mode(state / "current.json") == 0o600
+    assert stat_mode(state / ".lock") == 0o600
+    assert len(list(state.glob("*.tmp-*"))) == 0
+
+
+def stat_mode(path: Path) -> int:
+    return path.stat().st_mode & 0o777
+
+
+def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_bytes(b"unchanged transcript")
+    event = _event(client="codex", cwd=repo, transcript=transcript)
+
+    first = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    (repo / "tracked.txt").write_text("dirty\n", encoding="utf-8")
+    second = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+
+    assert second["checkpoint_id"] != first["checkpoint_id"]
+    current = checkpoint.load_checkpoint(
+        checkpoint.session_state_dir(home, "codex", "session-1") / "current.json"
+    )
+    assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"]
+
+
+def test_append_safe_selection_and_explicit_non_detection_outside_saved_slice(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_bytes(b"A" * 80_000)
+    write_event = _event(client="claude", transcript=transcript)
+    checkpoint.write_checkpoint(write_event, home, observed_at_ns=time.time_ns())
+    start = _event(
+        client="claude", event="SessionStart", trigger=None, source="compact", transcript=transcript
+    )
+
+    selected = checkpoint.select_checkpoint(start, home)
+    assert selected is not None and selected[1] == "current"
+
+    with transcript.open("ab") as stream:
+        stream.write(b"appended compaction record")
+    assert checkpoint.select_checkpoint(start, home) is not None
+
+    with transcript.open("r+b") as stream:
+        stream.seek(0)
+        stream.write(b"B")
+    assert checkpoint.select_checkpoint(start, home) is not None
+
+    current = selected[0]
+    offset = current["structural"]["transcript"]["slice_offset"]
+    with transcript.open("r+b") as stream:
+        stream.seek(offset)
+        stream.write(b"C")
+    assert checkpoint.select_checkpoint(start, home) is None
+
+
+def test_truncation_rejected_and_corrupt_current_falls_back_to_valid_previous(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_bytes(b"first" * 20_000)
+    manual = _event(client="claude", transcript=transcript)
+    checkpoint.write_checkpoint(manual, home, observed_at_ns=time.time_ns() - 2)
+    checkpoint.write_checkpoint(
+        {**manual, "trigger": "auto"},
+        home,
+        observed_at_ns=time.time_ns() - 1,
+    )
+    state = checkpoint.session_state_dir(home, "claude", "session-1")
+    (state / "current.json").write_bytes(b"not-json")
+    start = _event(
+        client="claude",
+        event="SessionStart",
+        trigger=None,
+        source="resume",
+        transcript=transcript,
+    )
+
+    selected = checkpoint.select_checkpoint(start, home)
+    assert selected is not None and selected[1] == "rollback"
+
+    transcript.write_bytes(b"short")
+    assert checkpoint.select_checkpoint(start, home) is None
+
+
+def test_selection_rejects_foreign_stale_and_wrong_state_binding(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    start = _event(client="codex", event="SessionStart", trigger=None, source="resume")
+
+    assert (
+        checkpoint.select_checkpoint(
+            start,
+            home,
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+        )
+        is None
+    )
+    assert checkpoint.select_checkpoint({**start, "session_id": "other"}, home) is None
+
+    state = checkpoint.session_state_dir(home, "codex", "session-1")
+    value = checkpoint.load_checkpoint(state / "current.json")
+    value["structural"]["state_root_binding"] = "wrong"
+    (state / "current.json").write_bytes(checkpoint.encode_checkpoint(value))
+    assert checkpoint.select_checkpoint(start, home, now_ns=101) is None
+
+
+def test_symlinked_state_and_current_are_rejected_without_touching_target(tmp_path: Path) -> None:
+    if not hasattr(os, "symlink"):
+        pytest.skip("symlinks unavailable")
+    home = tmp_path / "home"
+    target = tmp_path / "target"
+    target.mkdir()
+    state_root = checkpoint.client_state_root(home, "claude")
+    state_root.parent.mkdir(parents=True)
+    state_root.symlink_to(target, target_is_directory=True)
+
+    with pytest.raises(OSError):
+        checkpoint.write_checkpoint(_event(), home)
+    assert list(target.iterdir()) == []
+
+    state_root.unlink()
+    checkpoint.write_checkpoint(_event(), home, observed_at_ns=100)
+    state = checkpoint.session_state_dir(home, "claude", "session-1")
+    current = state / "current.json"
+    outside = tmp_path / "outside.json"
+    outside.write_text("untouched", encoding="utf-8")
+    current.unlink()
+    current.symlink_to(outside)
+    with pytest.raises(OSError):
+        checkpoint.write_checkpoint({**_event(), "trigger": "auto"}, home, observed_at_ns=200)
+    assert outside.read_text(encoding="utf-8") == "untouched"
+
+
+def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: Path) -> None:
+    lock = tmp_path / "lock"
+    code = (
+        "import sys,time; "
+        "from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "x=c.advisory_lock(Path(sys.argv[1]), timeout=1); x.__enter__(); "
+        "print('locked', flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "locked"
+        with pytest.raises(TimeoutError):
+            with checkpoint.advisory_lock(lock, timeout=0.05):
+                pass
+        child.kill()
+        child.wait(timeout=5)
+        with checkpoint.advisory_lock(lock, timeout=0.5):
+            assert lock.read_bytes()
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_expired_state_is_tombstoned_and_pruned_with_both_lock_orders(
+    tmp_path: Path, force_fallback: bool
+) -> None:
+    home = tmp_path / "home"
+    old = _event(client="codex", session_id="old")
+    current = _event(client="codex", session_id="current")
+    checkpoint.write_checkpoint(old, home, observed_at_ns=100)
+    checkpoint.write_checkpoint(current, home, observed_at_ns=200)
+
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session="current",
+        now_ns=100 + checkpoint.RETENTION_NS + 1,
+        force_fallback=force_fallback,
+    )
+
+    assert removed == 1
+    assert not checkpoint.session_state_dir(home, "codex", "old").exists()
+    assert checkpoint.session_state_dir(home, "codex", "current").exists()
+    assert not list(checkpoint.client_state_root(home, "codex").glob(".tombstone-*"))
+
+
+def test_hook_subprocess_writes_silently_then_reinjects_bounded_context(tmp_path: Path) -> None:
+    home = tmp_path / "home with spaces"
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text("sensitive conversation body", encoding="utf-8")
+    env = {
+        **os.environ,
+        "EXOMEM_HOOK_HOME": str(home),
+        "EXOMEM_VAULT_PATH": str(tmp_path / "must-not-be-used"),
+    }
+    write_payload = {
+        "hookEventName": "PreCompact",
+        "sessionId": "subprocess",
+        "trigger": "auto",
+        "cwd": str(tmp_path / "non-git"),
+        "transcriptPath": str(transcript),
+        "custom_instructions": "BEARER DO NOT STORE",
+    }
+    written = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
+        input=json.dumps(write_payload),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+    resumed = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
+        input=json.dumps({
+            "hook_event_name": "SessionStart",
+            "session_id": "subprocess",
+            "source": "resume",
+            "transcript_path": str(transcript),
+        }),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+
+    assert written.returncode == 0 and written.stdout == ""
+    assert resumed.returncode == 0
+    envelope = json.loads(resumed.stdout)
+    context = envelope["hookSpecificOutput"]["additionalContext"]
+    assert len(context.encode("utf-8")) <= checkpoint.MAX_CONTEXT_BYTES
+    assert "sensitive conversation body" not in context
+    assert "BEARER" not in context
+    assert not (tmp_path / "must-not-be-used").exists()
+
+
+def test_claude_session_end_is_silent_and_disable_preserves_existing_state(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    env = {**os.environ, "EXOMEM_HOOK_HOME": str(home)}
+    base = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "claude"],
+        input=json.dumps({"hook_event_name": "SessionEnd", "session_id": "ending"}),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+    )
+    state = checkpoint.session_state_dir(home, "claude", "ending") / "current.json"
+    before = state.read_bytes()
+    disabled = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "claude"],
+        input=json.dumps({
+            "hook_event_name": "PreCompact",
+            "session_id": "ending",
+            "trigger": "auto",
+        }),
+        capture_output=True,
+        text=True,
+        env={**env, "EXOMEM_CONTINUATION_DISABLE": "1"},
+        timeout=5,
+    )
+
+    assert base.returncode == disabled.returncode == 0
+    assert base.stdout == disabled.stdout == ""
+    assert state.read_bytes() == before
+
+
+def _subprocess_env(home: Path) -> dict[str, str]:
+    return {
+        **os.environ,
+        "EXOMEM_HOOK_HOME": str(home),
+        "EXOMEM_VAULT_PATH": "",
+        "OPENAI_API_KEY": "",
+        "ANTHROPIC_API_KEY": "",
+    }
+
+
+@pytest.mark.parametrize(
+    ("client", "event", "trigger"),
+    [
+        ("claude", "PreCompact", "manual"),
+        ("claude", "PreCompact", "auto"),
+        ("claude", "SessionEnd", None),
+        ("codex", "PreCompact", "manual"),
+        ("codex", "PreCompact", "auto"),
+    ],
+)
+def test_supported_write_subprocess_contract_is_silent_local_and_bounded(
+    tmp_path: Path, client: str, event: str, trigger: str | None
+) -> None:
+    home = tmp_path / f"{client} home with spaces"
+    transcript = tmp_path / "odd\\transcript.jsonl"
+    transcript.write_bytes(b"private body\xff" * 8000)
+    payload: dict[str, object] = {
+        "hookEventName": event,
+        "sessionId": "unsafe/session:identifier",
+        "cwd": str(tmp_path / "non-git cwd"),
+        "transcriptPath": str(transcript),
+    }
+    if trigger:
+        payload["trigger"] = trigger
+
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        env=_subprocess_env(home),
+        timeout=5,
+    )
+
+    assert result.returncode == 0 and result.stdout == ""
+    assert time.monotonic() - started < 5
+    state = checkpoint.session_state_dir(home, client, "unsafe/session:identifier")
+    raw = (state / "current.json").read_bytes()
+    assert len(raw) <= checkpoint.MAX_CHECKPOINT_BYTES
+    assert b"private body" not in raw
+    assert not (tmp_path / "Knowledge Base").exists()
+    log = checkpoint.client_state_root(home, client) / "events.log"
+    log_text = log.read_text(encoding="utf-8")
+    assert str(home) not in log_text and str(transcript) not in log_text
+    assert "private body" not in log_text
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+@pytest.mark.parametrize("source", ["compact", "resume"])
+def test_both_client_start_subprocesses_inject_and_repeat_valid_context(
+    tmp_path: Path, client: str, source: str
+) -> None:
+    home = tmp_path / client
+    transcript = tmp_path / f"{client}.jsonl"
+    transcript.write_bytes(b"conversation content not for output")
+    env = _subprocess_env(home)
+    write = {
+        "hook_event_name": "PreCompact",
+        "session_id": "same-session",
+        "trigger": "manual",
+        "transcript_path": str(transcript),
+    }
+    start = {
+        "hook_event_name": "SessionStart",
+        "session_id": "same-session",
+        "source": source,
+        "transcript_path": str(transcript),
+    }
+    subprocess.run(
+        [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
+        input=json.dumps(write), capture_output=True, text=True, env=env, check=True,
+    )
+
+    outputs = [
+        subprocess.run(
+            [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
+            input=json.dumps(start), capture_output=True, text=True, env=env, check=True,
+        ).stdout
+        for _ in range(2)
+    ]
+
+    assert outputs[0] == outputs[1]
+    payload = json.loads(outputs[0])
+    assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert "conversation content" not in outputs[0]
+
+
+def test_start_subprocess_is_silent_for_missing_corrupt_oversized_disabled_and_foreign(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    env = _subprocess_env(home)
+
+    def run(client: str, session: str, *, extra_env: dict[str, str] | None = None) -> str:
+        return subprocess.run(
+            [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
+            input=json.dumps({
+                "hook_event_name": "SessionStart", "session_id": session, "source": "resume"
+            }),
+            capture_output=True,
+            text=True,
+            env={**env, **(extra_env or {})},
+            timeout=5,
+            check=True,
+        ).stdout
+
+    assert run("codex", "missing") == ""
+    checkpoint.write_checkpoint(_event(client="codex", session_id="valid"), home)
+    state = checkpoint.session_state_dir(home, "codex", "valid")
+    (state / "current.json").write_bytes(b"{" + b"x" * (checkpoint.MAX_CHECKPOINT_BYTES + 1))
+    assert run("codex", "valid") == ""
+    assert run("claude", "valid") == ""
+    assert run("codex", "valid", extra_env={"EXOMEM_CONTINUATION_DISABLE": "true"}) == ""
+
+
+def test_missing_session_start_is_read_only_and_creates_no_state_root(tmp_path: Path) -> None:
+    home = tmp_path / "never-created"
+
+    result = checkpoint.dispatch_event(
+        "codex",
+        {"hook_event_name": "SessionStart", "session_id": "missing", "source": "resume"},
+        environ={"EXOMEM_HOOK_HOME": str(home)},
+    )
+
+    assert result is None
+    assert not checkpoint.client_state_root(home, "codex").exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows directory handles prevent the test rename")
+def test_handle_relative_checkpoint_read_survives_session_path_swap(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    original_event = _event(client="codex", session_id="swap-proof", trigger="manual")
+    checkpoint.write_checkpoint(original_event, home, observed_at_ns=100)
+    state = checkpoint.session_state_dir(home, "codex", "swap-proof")
+    original = checkpoint.load_checkpoint(state / "current.json")
+    assert original is not None
+
+    with checkpoint._open_secure_directory(state, create=False) as state_handle:
+        moved = state.with_name(state.name + "-moved")
+        state.rename(moved)
+        state.mkdir()
+        attacker = checkpoint.build_checkpoint(
+            {**original_event, "trigger": "auto"}, home, observed_at_ns=200
+        )
+        (state / "current.json").write_bytes(checkpoint.encode_checkpoint(attacker))
+
+        loaded = checkpoint.load_checkpoint_at(state_handle, "current.json")
+
+    assert loaded is not None
+    assert loaded["checkpoint_id"] == original["checkpoint_id"]
+    assert loaded["checkpoint_id"] != attacker["checkpoint_id"]
+
+
+def test_true_multiprocess_same_id_delivery_creates_no_duplicate_history(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    payload = json.dumps({
+        "hook_event_name": "PreCompact", "session_id": "race", "trigger": "auto"
+    })
+    processes = [
+        subprocess.Popen(
+            [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env=_subprocess_env(home),
+        )
+        for _ in range(6)
+    ]
+    results = [
+        process.communicate(payload, timeout=10) + (process.returncode,)
+        for process in processes
+    ]
+
+    assert all(stdout == "" and code == 0 for stdout, _stderr, code in results)
+    state = checkpoint.session_state_dir(home, "codex", "race")
+    assert (state / "current.json").is_file()
+    assert not (state / "previous.json").exists()
+    assert not list(state.glob("*.tmp-*"))
+
+
+def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    code = (
+        "import json,sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "time.sleep(float(sys.argv[4])); "
+        "e={'client':'codex','event':'PreCompact','session_id':'ordered','turn_id':None,"
+        "'trigger':sys.argv[2],'source':None,'cwd':None,'transcript_path':None,'model':None}; "
+        "print(json.dumps(c.write_checkpoint(e,Path(sys.argv[1]),observed_at_ns=int(sys.argv[3]))))"
+    )
+    newer = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), "auto", "200", "0"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    older = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), "manual", "100", "0.2"],
+        stdout=subprocess.PIPE, text=True,
+    )
+    assert newer.wait(timeout=10) == 0 and older.wait(timeout=10) == 0
+    state = checkpoint.session_state_dir(home, "codex", "ordered")
+    current = checkpoint.load_checkpoint(state / "current.json")
+    assert current["structural"]["trigger"] == "auto"
+
+
+def test_killed_temporary_writer_is_cleaned_by_next_delivery(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "e={'client':'codex','event':'PreCompact','session_id':'killed','turn_id':None,"
+        "'trigger':'auto','source':None,'cwd':None,'transcript_path':None,'model':None}; "
+        "h=Path(sys.argv[1]); v=c.build_checkpoint(e,h,observed_at_ns=100); "
+        "x=c._session_lock(h,'codex','killed',create=True); s=x.__enter__(); "
+        "c._write_temp(s,v); print('temporary',flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "temporary"
+        child.kill()
+        child.wait(timeout=5)
+        result = checkpoint.write_checkpoint(
+            _event(client="codex", session_id="killed"), home, observed_at_ns=200
+        )
+        state = checkpoint.session_state_dir(home, "codex", "killed")
+        assert result["status"] == "written"
+        assert not list(state.glob("*.tmp-*"))
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+@pytest.mark.parametrize(
+    "stage",
+    [
+        "directory_creation",
+        "lock_acquisition",
+        "temp_write_fsync",
+        "current_to_previous",
+        "temp_to_current",
+    ],
+)
+def test_kill_at_each_storage_stage_preserves_recoverable_state(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="kill-stage", trigger="manual")
+    if stage in {"current_to_previous", "temp_to_current"}:
+        checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "h=Path(sys.argv[1]); stage=sys.argv[2]; "
+        "e={'client':'codex','event':'PreCompact','session_id':'kill-stage','turn_id':None,"
+        "'trigger':'auto','source':None,'cwd':None,'transcript_path':None,'model':None}; "
+        "state=c.session_state_dir(h,'codex','kill-stage'); "
+        "x=(c._open_secure_directory(state,create=True) if stage=='directory_creation' "
+        "else c._session_lock(h,'codex','kill-stage',create=True)); s=x.__enter__(); "
+        "tmp=None if stage in {'directory_creation','lock_acquisition'} "
+        "else c._write_temp(s,c.build_checkpoint(e,h,observed_at_ns=200)); "
+        "c._replace_at(s,'current.json','previous.json') if stage in "
+        "{'current_to_previous','temp_to_current'} else None; "
+        "c._replace_at(s,tmp,'current.json') if stage=='temp_to_current' else None; "
+        "print(stage,flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), stage],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == stage
+        child.kill()
+        child.wait(timeout=5)
+        state = checkpoint.session_state_dir(home, "codex", "kill-stage")
+        if stage == "current_to_previous":
+            start = _event(
+                client="codex",
+                event="SessionStart",
+                session_id="kill-stage",
+                trigger=None,
+                source="resume",
+            )
+            selected = checkpoint.select_checkpoint(start, home, now_ns=201)
+            assert selected is not None and selected[1] == "rollback"
+        result = checkpoint.write_checkpoint(
+            {**event, "trigger": "auto"},
+            home,
+            observed_at_ns=300,
+        )
+        assert result["status"] in {"written", "idempotent"}
+        assert checkpoint.load_checkpoint(state / "current.json") is not None
+        assert not list(state.glob("*.tmp-*"))
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+
+def test_interrupted_rotation_recovers_labeled_previous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="rotation")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    real_replace = checkpoint._replace_at
+
+    def interrupt(directory, source: str, destination: str) -> None:
+        if destination == "current.json" and source.startswith("current.json.tmp-"):
+            raise OSError("simulated interruption after rotation")
+        real_replace(directory, source, destination)
+
+    monkeypatch.setattr(checkpoint, "_replace_at", interrupt)
+    with pytest.raises(OSError, match="simulated"):
+        checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=200)
+
+    state = checkpoint.session_state_dir(home, "codex", "rotation")
+    assert not (state / "current.json").exists()
+    assert checkpoint.load_checkpoint(state / "previous.json") is not None
+    start = _event(
+        client="codex", event="SessionStart", session_id="rotation", trigger=None, source="resume"
+    )
+    selected = checkpoint.select_checkpoint(start, home, now_ns=201)
+    assert selected is not None and selected[1] == "rollback"
+
+
+@pytest.mark.parametrize("force_fallback", [False, True])
+def test_prune_skips_multiprocess_writer_then_removes_after_release(
+    tmp_path: Path, force_fallback: bool
+) -> None:
+    home = tmp_path / "home"
+    old = _event(client="codex", session_id="busy")
+    checkpoint.write_checkpoint(old, home, observed_at_ns=100)
+    lock_path = checkpoint.session_state_dir(home, "codex", "busy") / ".lock"
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "x=c.advisory_lock(Path(sys.argv[1]),timeout=1); x.__enter__(); "
+        "print('locked',flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock_path)],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "locked"
+        assert checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+            force_fallback=force_fallback,
+        ) == 0
+        child.kill()
+        child.wait(timeout=5)
+        assert checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+            force_fallback=force_fallback,
+        ) == 1
+    finally:
+        if child.poll() is None:
+            child.kill()

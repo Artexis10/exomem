@@ -22,7 +22,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
+import os
+import re
+import secrets
+import stat
 import time
 from pathlib import Path
 
@@ -32,6 +35,23 @@ _HOOK_SPECS = (
     ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "Stop"),
     ("exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh", "UserPromptSubmit"),
 )
+_CONTINUATION_SCRIPT = "exomem_continuation_checkpoint.py"
+_CONTINUATION_WRAPPER = "exomem-continuation-checkpoint.sh"
+_CONTINUATION_LEGACY = (
+    "kb_continuation_checkpoint.py",
+    "kb-continuation-checkpoint.sh",
+)
+_CONTINUATION_EVENTS = {
+    "claude": (
+        ("PreCompact", "manual|auto"),
+        ("SessionEnd", None),
+        ("SessionStart", "compact|resume"),
+    ),
+    "codex": (
+        ("PreCompact", "manual|auto"),
+        ("SessionStart", "compact|resume"),
+    ),
+}
 DEFAULT_CLIENT = "claude"
 SUPPORTED_CLIENTS = ("claude", "codex")
 DEFAULT_CLAUDE_HOOK_DIR = Path.home() / ".claude" / "hooks"
@@ -49,7 +69,8 @@ DEFAULT_SETTINGS = DEFAULT_CLAUDE_SETTINGS
 # listed, so re-running install-hook cleanly migrates a machine off the old kb entry.
 _MARKERS = (
     "kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge",
-    "exomem_capture_nudge", "exomem_retrieve_nudge", "exomem-capture-nudge", "exomem-retrieve-nudge",
+    "exomem_capture_nudge", "exomem_retrieve_nudge", "exomem-capture-nudge",
+    "exomem-retrieve-nudge",
 )
 _LEGACY_MARKERS = ("kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge")
 
@@ -62,11 +83,22 @@ def _normalize_client(client: str) -> str:
 
 
 def _default_hook_dir(client: str) -> Path:
-    return DEFAULT_CODEX_HOOK_DIR if _normalize_client(client) == "codex" else DEFAULT_CLAUDE_HOOK_DIR
+    return _default_home(client) / "hooks"
 
 
 def _default_settings(client: str) -> Path:
-    return DEFAULT_CODEX_SETTINGS if _normalize_client(client) == "codex" else DEFAULT_CLAUDE_SETTINGS
+    client = _normalize_client(client)
+    return _default_home(client) / ("hooks.json" if client == "codex" else "settings.json")
+
+
+def _default_home(client: str) -> Path:
+    client = _normalize_client(client)
+    shared = os.environ.get("EXOMEM_HOOK_HOME")
+    if shared:
+        return Path(shared).expanduser()
+    if client == "codex":
+        return Path(os.environ.get("CODEX_HOME") or (Path.home() / ".codex")).expanduser()
+    return Path(os.environ.get("CLAUDE_CONFIG_DIR") or (Path.home() / ".claude")).expanduser()
 
 
 def _windows_python_command(script: Path) -> str:
@@ -100,14 +132,23 @@ def _command_for(
     return f'bash "{(hook_dir / wrapper).as_posix()}"'
 
 
-def _command_windows_for(script: str, hook_dir: Path, *, client: str = DEFAULT_CLIENT) -> str | None:
+def _command_windows_for(
+    script: str,
+    hook_dir: Path,
+    *,
+    client: str = DEFAULT_CLIENT,
+) -> str | None:
     if _normalize_client(client) != "codex":
         return None
     return _windows_python_command(Path(hook_dir).expanduser() / script)
 
 
 def _hook_entry(item: dict, timeout: int) -> dict:
-    entry = {"type": "command", "command": item["command"], "timeout": timeout}
+    entry = {
+        "type": "command",
+        "command": item["command"],
+        "timeout": item.get("timeout", timeout),
+    }
     if item.get("commandWindows"):
         entry["commandWindows"] = item["commandWindows"]
     return entry
@@ -156,6 +197,84 @@ def _contains_any(hook: dict, markers: tuple[str, ...]) -> bool:
     return any(marker in haystack for marker in markers)
 
 
+def _continuation_command(
+    hook_dir: Path,
+    client: str,
+) -> tuple[str, str | None]:
+    if client == "codex":
+        command = _command_for(
+            _CONTINUATION_WRAPPER,
+            hook_dir,
+            client=client,
+            script=_CONTINUATION_SCRIPT,
+        )
+        windows = _command_windows_for(_CONTINUATION_SCRIPT, hook_dir, client=client)
+        return f"{command} --client codex", f"{windows} --client codex"
+    command = _command_for(_CONTINUATION_WRAPPER, hook_dir, client=client)
+    return f"{command} --client claude", None
+
+
+def _continuation_items(hook_dir: Path, client: str) -> list[dict]:
+    command, command_windows = _continuation_command(hook_dir, client)
+    return [
+        {
+            "kind": "continuation",
+            "client": client,
+            "event": event,
+            "matcher": matcher,
+            "script": str(hook_dir / _CONTINUATION_SCRIPT),
+            "wrapper": str(hook_dir / _CONTINUATION_WRAPPER),
+            "command": command,
+            "commandWindows": command_windows,
+            "timeout": 5,
+        }
+        for event, matcher in _CONTINUATION_EVENTS[client]
+    ]
+
+
+def _command_basenames(command: str) -> set[str]:
+    return set(re.findall(r"[A-Za-z0-9_.-]+(?:\.py|\.sh)(?=[\"'\s]|$)", command))
+
+
+def _has_client_arg(command: str, client: str) -> bool:
+    return bool(re.search(rf"(?:^|\s)--client(?:=|\s+){re.escape(client)}(?:\s|$)", command))
+
+
+def _is_matching_entry(hook: dict, item: dict) -> bool:
+    command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
+    if item.get("kind") != "continuation":
+        return any(marker in command for marker in _MARKERS)
+    names = _command_basenames(command)
+    if names.intersection(_CONTINUATION_LEGACY):
+        return True
+    current = _CONTINUATION_SCRIPT if item["client"] == "codex" else _CONTINUATION_WRAPPER
+    return current in names and _has_client_arg(command, item["client"])
+
+
+def _configured_item(data: dict | None, item: dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return False
+    groups = hooks.get(item["event"])
+    if not isinstance(groups, list):
+        return False
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        if group.get("matcher") != item.get("matcher"):
+            if item.get("matcher") is not None or "matcher" in group:
+                continue
+        entries = group.get("hooks")
+        if isinstance(entries, list) and any(
+            isinstance(entry, dict) and _is_matching_entry(entry, item)
+            for entry in entries
+        ):
+            return True
+    return False
+
+
 def _fmt_age(ts: float | None) -> str | None:
     if ts is None:
         return None
@@ -177,7 +296,7 @@ def _file_mtime(path: Path) -> float | None:
 
 
 def _cache_summary(client: str) -> dict:
-    cache = Path.home() / (".codex" if client == "codex" else ".claude") / ".cache" / "exomem-nudge"
+    cache = _default_home(client) / ".cache" / "exomem-nudge"
     entries: list[Path] = []
     try:
         if cache.exists():
@@ -194,7 +313,7 @@ def _cache_summary(client: str) -> dict:
 
 
 def _log_summary(client: str, kind: str) -> dict:
-    home = Path.home() / (".codex" if client == "codex" else ".claude")
+    home = _default_home(client)
     path = home / f"exomem-{kind}-nudge.log"
     mtime = _file_mtime(path)
     return {
@@ -219,6 +338,42 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
             "deployed_hash": dst_hash,
         }
     return items
+
+
+def _continuation_runtime_summary(client: str) -> dict:
+    root = _default_home(client) / ".cache" / "exomem-continuation" / client
+    sessions: list[Path] = []
+    try:
+        if root.is_dir() and not root.is_symlink():
+            sessions = [
+                item for item in root.iterdir()
+                if item.is_dir() and not item.is_symlink() and not item.name.startswith(".")
+            ]
+    except OSError:
+        sessions = []
+    mtimes = []
+    permissions_ok = True
+    for session in sessions:
+        current = session / "current.json"
+        try:
+            info = current.stat()
+            mtimes.append(info.st_mtime)
+            permissions_ok = permissions_ok and (info.st_mode & 0o077 == 0)
+        except OSError:
+            continue
+    log = root / "events.log"
+    return {
+        "path": str(root),
+        "exists": root.exists(),
+        "sessions": len(sessions),
+        "latest_age": _fmt_age(max(mtimes, default=None)),
+        "permissions_ok": permissions_ok,
+        "metadata_log": {
+            "path": str(log),
+            "exists": log.exists(),
+            "latest_age": _fmt_age(_file_mtime(log)),
+        },
+    }
 
 
 def check_hooks(
@@ -283,7 +438,11 @@ def check_hooks(
         add(
             "config.file",
             "pass" if data is not None else "fail",
-            f"hook config readable at {sp}" if data is not None else f"hook config unavailable at {sp}: {parse_error}",
+            (
+                f"hook config readable at {sp}"
+                if data is not None
+                else f"hook config unavailable at {sp}: {parse_error}"
+            ),
             {"path": str(sp), "exists": sp.exists(), "parse_error": parse_error},
         )
 
@@ -292,10 +451,20 @@ def check_hooks(
             for hook in _commands_for_event(data, event):
                 if _contains_any(hook, _LEGACY_MARKERS):
                     any_legacy = True
+        if isinstance(data, dict) and isinstance(data.get("hooks"), dict):
+            for event in data["hooks"]:
+                for hook in _commands_for_event(data, event):
+                    command = f"{hook.get('command', '')} {hook.get('commandWindows', '')}"
+                    if _command_basenames(command).intersection(_CONTINUATION_LEGACY):
+                        any_legacy = True
         add(
             "config.legacy",
             "fail" if any_legacy else "pass",
-            "legacy kb_* hook entries are still configured" if any_legacy else "no legacy kb_* hook entries configured",
+            (
+                "legacy kb_* hook entries are still configured"
+                if any_legacy
+                else "no legacy kb_* hook entries configured"
+            ),
         )
 
         scripts = {}
@@ -333,7 +502,62 @@ def check_hooks(
                     status,
                 )
             else:
-                add(f"scripts.{event}", "pass", f"{event} deployed hook files match bundled source", status)
+                add(
+                    f"scripts.{event}",
+                    "pass",
+                    f"{event} deployed hook files match bundled source",
+                    status,
+                )
+
+        continuation_items = _continuation_items(hd, client)
+        for item in continuation_items:
+            configured = _configured_item(data, item)
+            add(
+                f"config.{item['event']}",
+                "pass" if configured else "fail",
+                (
+                    f"{item['event']} matches the pinned {client} continuation contract"
+                    if configured
+                    else f"{item['event']} does not match the pinned {client} continuation contract"
+                ),
+                {"matcher": item.get("matcher")},
+            )
+        if client == "codex":
+            unsupported = {
+                "kind": "continuation",
+                "client": "codex",
+                "event": "SessionEnd",
+                "matcher": None,
+            }
+            configured = _configured_item(data, unsupported)
+            add(
+                "config.SessionEnd",
+                "fail" if configured else "pass",
+                (
+                    "Codex SessionEnd must remain unsupported for pinned 0.144.3"
+                    if configured
+                    else "Codex 0.144.3 has no Exomem SessionEnd registration"
+                ),
+            )
+
+        continuation_status = _script_status(
+            hd, _CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER
+        )
+        scripts.update(continuation_status)
+        continuation_stale = [
+            name for name, row in continuation_status.items() if not row["matches_bundle"]
+        ]
+        add(
+            "scripts.continuation",
+            "fail" if continuation_stale else "pass",
+            (
+                "continuation deployed hook files differ or are missing: "
+                + ", ".join(continuation_stale)
+                if continuation_stale
+                else "continuation deployed hook files match bundled source"
+            ),
+            continuation_status,
+        )
 
         logs = {
             "capture": _log_summary(client, "capture"),
@@ -363,6 +587,23 @@ def check_hooks(
             cache,
         )
 
+        continuation_runtime = _continuation_runtime_summary(client)
+        if not continuation_runtime["exists"] or continuation_runtime["sessions"] == 0:
+            runtime_status = "warn"
+            runtime_message = "no continuation checkpoint exists yet; first write event has not run"
+        elif not continuation_runtime["permissions_ok"]:
+            runtime_status = "fail"
+            runtime_message = "continuation checkpoint permissions are too broad"
+        else:
+            runtime_status = "pass"
+            runtime_message = "continuation runtime state is present and permissioned"
+        add(
+            "runtime.continuation",
+            runtime_status,
+            runtime_message,
+            continuation_runtime,
+        )
+
         reports.append({
             "client": client,
             "status": (
@@ -374,6 +615,7 @@ def check_hooks(
             "scripts": scripts,
             "logs": logs,
             "cache": cache,
+            "continuation": continuation_runtime,
             "checks": checks,
         })
 
@@ -406,8 +648,236 @@ def snippet(installed: list[dict], timeout: int = 10) -> str:
     """The hook config fragment to merge by hand (for --print-only)."""
     hooks: dict[str, list] = {}
     for item in installed:
-        hooks[item["event"]] = [{"hooks": [_hook_entry(item, timeout)]}]
+        group = {"hooks": [_hook_entry(item, timeout)]}
+        if item.get("matcher") is not None:
+            group["matcher"] = item["matcher"]
+        hooks.setdefault(item["event"], []).append(group)
     return json.dumps({"hooks": hooks}, indent=2)
+
+
+def _deploy_file(source: Path, destination: Path) -> None:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    with safe._open_secure_directory(destination.parent, create=True) as parent:
+        existing = safe._existing_kind(parent, destination.name)
+        if existing is not None and not stat.S_ISREG(existing):
+            raise OSError(f"refusing unsafe hook destination {destination.name}")
+        temporary = f".{destination.name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
+        mode = source.stat().st_mode & 0o777
+        fd = safe._open_secure_file_at(
+            parent,
+            temporary,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            mode,
+        )
+        try:
+            with source.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    safe._write_all(fd, chunk)
+            os.fsync(fd)
+        except BaseException:
+            os.close(fd)
+            try:
+                safe._unlink_at(parent, temporary)
+            except OSError:
+                pass
+            raise
+        os.close(fd)
+        safe._replace_at(parent, temporary, destination.name)
+
+
+def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    kind = safe._existing_kind(directory, name)
+    if kind is None:
+        return {
+            "exists": False,
+            "raw": b"",
+            "data": {},
+            "mode": 0o600,
+            "identity": None,
+            "digest": hashlib.sha256(b"").hexdigest(),
+        }
+    if not stat.S_ISREG(kind):
+        raise OSError(f"hook config is not a regular file: {display_path}")
+    fd = safe._open_secure_file_at(directory, name, os.O_RDONLY, 0o600)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError(f"hook config is not a regular file: {display_path}")
+        chunks = []
+        while True:
+            chunk = os.read(fd, 1024 * 1024)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        raw = b"".join(chunks)
+    finally:
+        os.close(fd)
+    try:
+        data = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid hook config at {display_path}: {error}") from error
+    if not isinstance(data, dict):
+        raise ValueError(
+            f"invalid hook config at {display_path}: top-level JSON is not an object"
+        )
+    return {
+        "exists": True,
+        "raw": raw,
+        "data": data,
+        "mode": info.st_mode & 0o777,
+        "identity": (
+            info.st_dev,
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+            info.st_ctime_ns,
+        ),
+        "digest": hashlib.sha256(raw).hexdigest(),
+    }
+
+
+def _snapshot_config(path: Path) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    try:
+        with safe._open_secure_directory(path.parent, create=False) as directory:
+            return _snapshot_config_at(directory, path.name, path)
+    except FileNotFoundError:
+        return {
+            "exists": False,
+            "raw": b"",
+            "data": {},
+            "mode": 0o600,
+            "identity": None,
+            "digest": hashlib.sha256(b"").hexdigest(),
+        }
+
+
+def _same_snapshot(left: dict, right: dict) -> bool:
+    return (
+        left["exists"] == right["exists"]
+        and left["identity"] == right["identity"]
+        and left["digest"] == right["digest"]
+    )
+
+
+def _merged_config(source: dict, installed: list[dict], timeout: int) -> dict:
+    data = json.loads(json.dumps(source))
+    existing_hooks = data.get("hooks")
+    if existing_hooks is None:
+        hooks = data["hooks"] = {}
+    elif not isinstance(existing_hooks, dict):
+        raise ValueError("invalid hook config: 'hooks' is not an object")
+    else:
+        hooks = existing_hooks
+
+    for item in installed:
+        event = item["event"]
+        existing = hooks.get(event)
+        if existing is None:
+            groups = []
+        elif not isinstance(existing, list):
+            raise ValueError(f"invalid hook config: hooks.{event} is not a list")
+        else:
+            groups = existing
+        kept: list = []
+        inserted = False
+        replacement: dict = {"hooks": [_hook_entry(item, timeout)]}
+        if item.get("matcher") is not None:
+            replacement["matcher"] = item["matcher"]
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept.append(group)
+                continue
+            original = group["hooks"]
+            remaining = [
+                hook
+                for hook in original
+                if not (isinstance(hook, dict) and _is_matching_entry(hook, item))
+            ]
+            removed = len(remaining) != len(original)
+            if remaining:
+                kept.append({**group, "hooks": remaining})
+            if removed and not inserted:
+                kept.append(replacement)
+                inserted = True
+        if not inserted:
+            kept.append(replacement)
+        hooks[event] = kept
+    return data
+
+
+def _write_unique_at(directory, name: str, raw: bytes, mode: int) -> None:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    fd = safe._open_secure_file_at(
+        directory,
+        name,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+        mode,
+    )
+    try:
+        safe._write_all(fd, raw)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _write_unique(path: Path, raw: bytes, mode: int) -> None:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    with safe._open_secure_directory(path.parent, create=True) as directory:
+        _write_unique_at(directory, path.name, raw, mode)
+
+
+def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
+    """Fail-closed, drift-aware, same-directory atomic hook-config migration."""
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    path = Path(path).expanduser()
+    with safe._open_secure_directory(path.parent, create=True) as parent:
+        for _attempt in range(3):
+            initial = _snapshot_config_at(parent, path.name, path)
+            merged = _merged_config(initial["data"], installed, timeout)
+            if merged == initial["data"]:
+                return {"changed": False, "backup": None}
+            observed = _snapshot_config_at(parent, path.name, path)
+            if not _same_snapshot(initial, observed):
+                continue
+            raw = (json.dumps(merged, indent=2) + "\n").encode("utf-8")
+            temporary = f".{path.name}.tmp-{os.getpid()}-{secrets.token_hex(6)}"
+            _write_unique_at(parent, temporary, raw, initial["mode"])
+            latest = _snapshot_config_at(parent, path.name, path)
+            if not _same_snapshot(initial, latest):
+                safe._unlink_at(parent, temporary)
+                continue
+            backup_name: str | None = None
+            if initial["exists"]:
+                stamp = time.strftime("%Y%m%dT%H%M%S", time.gmtime())
+                backup_name = f"{path.name}.backup-{stamp}-{secrets.token_hex(6)}"
+                _write_unique_at(parent, backup_name, initial["raw"], initial["mode"])
+            final = _snapshot_config_at(parent, path.name, path)
+            if not _same_snapshot(initial, final):
+                safe._unlink_at(parent, temporary)
+                if backup_name:
+                    safe._unlink_at(parent, backup_name)
+                continue
+            try:
+                safe._replace_at(parent, temporary, path.name)
+            except BaseException:
+                try:
+                    safe._unlink_at(parent, temporary)
+                    if backup_name:
+                        safe._unlink_at(parent, backup_name)
+                except OSError:
+                    pass
+                raise
+            backup = path.parent / backup_name if backup_name else None
+            return {"changed": True, "backup": str(backup) if backup else None}
+    raise RuntimeError(f"concurrent hook config changes persisted at {path}")
 
 
 def install_hook(
@@ -425,82 +895,73 @@ def install_hook(
     "client"}. Raises FileNotFoundError if a bundled hook file is missing.
     """
     client = _normalize_client(client)
-    for py_name, sh_name, _event in specs:
-        for name in (py_name, sh_name):
-            if not (_HOOK_DIR_SRC / name).exists():
-                raise FileNotFoundError(
-                    f"bundled hook file missing at {_HOOK_DIR_SRC / name} — is the exomem install intact?"
-                )
+    source_specs = list(specs)
+    bundled = {
+        name
+        for py_name, sh_name, _event in source_specs
+        for name in (py_name, sh_name)
+    }
+    if specs is _HOOK_SPECS:
+        bundled.update({_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER})
+    for name in bundled:
+        if not (_HOOK_DIR_SRC / name).exists():
+            raise FileNotFoundError(
+                f"bundled hook file missing at {_HOOK_DIR_SRC / name} — "
+                "is the exomem install intact?"
+            )
     hook_dir = (Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client))
-    hook_dir.mkdir(parents=True, exist_ok=True)
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    hook_fd = safe._ensure_secure_dir(hook_dir)
+    if hook_fd is not None:
+        os.close(hook_fd)
 
     installed: list[dict] = []
-    for py_name, sh_name, event in specs:
-        shutil.copy2(_HOOK_DIR_SRC / py_name, hook_dir / py_name)
-        shutil.copy2(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
+    for py_name, sh_name, event in source_specs:
+        _deploy_file(_HOOK_DIR_SRC / py_name, hook_dir / py_name)
+        _deploy_file(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
         installed.append({
+            "kind": "nudge",
             "event": event,
             "script": str(hook_dir / py_name),
             "wrapper": str(hook_dir / sh_name),
             "command": _command_for(sh_name, hook_dir, client=client, script=py_name),
             "commandWindows": _command_windows_for(py_name, hook_dir, client=client),
         })
+    if specs is _HOOK_SPECS:
+        _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
+        _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
+        installed.extend(_continuation_items(hook_dir, client))
 
-    result = {"installed": installed, "wired": False, "settings": None, "client": client}
+    result = {
+        "installed": installed,
+        "wired": False,
+        "settings": None,
+        "client": client,
+        "config_changed": False,
+        "backup": None,
+    }
     if wire:
         sp = (Path(settings_path).expanduser() if settings_path else _default_settings(client))
-        _merge_hooks(sp, installed, timeout)
+        migration = _merge_hooks(sp, installed, timeout)
         result["wired"] = True
         result["settings"] = str(sp)
+        result["config_changed"] = migration["changed"]
+        result["backup"] = migration["backup"]
     return result
 
 
-def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> None:
-    """Add each hook to its event in settings.json, preserving every other key and
-    hook. Idempotent: strips any prior exomem/kb nudge entry from the target event
-    first (so re-running, migrating off the legacy `kb-*` names, or superseding the
-    old absolute-path command, never duplicates)."""
-    data: dict = {}
-    if path.exists():
+def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
+    reports: list[dict] = []
+    for client in SUPPORTED_CLIENTS:
         try:
-            loaded = json.loads(path.read_text(encoding="utf-8"))
-            if isinstance(loaded, dict):
-                data = loaded
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
-            data = {}
-
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        hooks = data["hooks"] = {}
-
-    for item in installed:
-        event = item["event"]
-        arr = hooks.get(event) if isinstance(hooks.get(event), list) else []
-        kept: list = []
-        inserted = False
-        replacement = {"hooks": [_hook_entry(item, timeout)]}
-        for group in arr:
-            if not isinstance(group, dict):
-                kept.append(group)
-                continue
-            original = group.get("hooks", [])
-            ghooks = [
-                h for h in original
-                if not any(
-                    m in f"{h.get('command', '')} {h.get('commandWindows', '')}"
-                    for m in _MARKERS
-                )
-            ]
-            removed_ours = len(ghooks) != len(original)
-            if ghooks:  # group still has non-ours hooks — keep it, minus ours
-                kept.append({**group, "hooks": ghooks})
-            if removed_ours and not inserted:
-                kept.append(replacement)
-                inserted = True
-            # duplicate groups whose only hook was ours are dropped entirely
-        if not inserted:
-            kept.append(replacement)
-        hooks[event] = kept
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            result = install_hook(client=client, wire=wire, timeout=timeout)
+            reports.append({"client": client, "success": True, "result": result})
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
+            reports.append({
+                "client": client,
+                "success": False,
+                "error": str(error),
+                "error_class": type(error).__name__,
+            })
+    return {"success": all(row["success"] for row in reports), "clients": reports}

@@ -88,8 +88,12 @@ The skill installs under the Claude Code name `exomem` — the same name as the
 connector, so skill, server, and tools all read as one product. The skill is
 recommended for Claude Code —
 the server gives Claude the tools, the skill is what makes it use them. Hooks
-are local-client reliability nudges for Claude Code and Codex: a read-side
-reminder before answers and a write-side reminder at natural stopping points.
+are local-client reliability helpers for Claude Code and Codex: a read-side
+reminder before answers, a write-side reminder at natural stopping points, and
+a shared local continuation checkpoint around compaction. The checkpoint stores
+bounded structural evidence (repository state, artifact hashes/counts, and
+transcript provenance hashes), never conversation, tool, summary, or artifact
+content. It needs no MCP connection or Exomem credential.
 The read-side hook suppresses obvious control/status prompts like `continue`,
 `merge it`, and `are you done?`, and can optionally upgrade that reminder to real
 retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
@@ -97,6 +101,9 @@ retrieved KB content (`EXOMEM_RETRIEVE_INJECT=1`, opt-in; the legacy
 `exomem install-hook --client codex`; for Claude Code, `exomem install-hook` —
 see
 [QUICKSTART.md § 7](QUICKSTART.md#7-recommended-make-the-kb-automatic-both-directions).
+Both clients checkpoint on manual or automatic `PreCompact` and reinject on
+`SessionStart(compact|resume)`; Claude also checkpoints on `SessionEnd`. Pinned
+Codex CLI 0.144.3 has no `SessionEnd` hook, so Exomem does not invent one.
 Other MCP clients can still use the server. If they do not support Skills,
 have them call `bootstrap()` once at the start of the session; it returns the
 same compact operating contract through MCP, including when to search, when to

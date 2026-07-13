@@ -40,17 +40,35 @@ def _hook_entries(data: dict, event: str) -> list[dict]:
     return [h for g in data["hooks"].get(event, []) for h in g["hooks"]]
 
 
+def _checkpoint_groups(data: dict, event: str, client: str) -> list[dict]:
+    marker = (
+        "exomem_continuation_checkpoint.py"
+        if client == "codex"
+        else "exomem-continuation-checkpoint.sh"
+    )
+    return [
+        group
+        for group in data["hooks"].get(event, [])
+        if any(marker in hook.get("command", "") for hook in group.get("hooks", []))
+    ]
+
+
 # --- install_hook: the installer (both hooks, py + wrapper) ----------------------
 
 def test_install_hook_copies_scripts_and_wrappers_and_wires_both(tmp_path: Path) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     r = hook_module.install_hook(hook_dir=hd, settings_path=sp)
-    for f in ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh"):
+    for f in (
+        "exomem_capture_nudge.py",
+        "exomem-capture-nudge.sh",
+        "exomem_retrieve_nudge.py",
+        "exomem-retrieve-nudge.sh",
+    ):
         assert (hd / f).exists(), f
     assert r["wired"] is True
     data = json.loads(sp.read_text(encoding="utf-8"))
-    assert any("exomem-capture-nudge.sh" in c for c in _stop_cmds(data))     # write -> Stop, via wrapper
-    assert any("exomem-retrieve-nudge.sh" in c for c in _ups_cmds(data))     # read -> UserPromptSubmit
+    assert any("exomem-capture-nudge.sh" in c for c in _stop_cmds(data))
+    assert any("exomem-retrieve-nudge.sh" in c for c in _ups_cmds(data))
 
 
 def test_command_is_machine_agnostic(tmp_path: Path) -> None:
@@ -86,9 +104,19 @@ def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> No
     # replace it with the machine-agnostic wrapper command, exactly once.
     sp = tmp_path / "settings.json"
     sp.write_text(
-        json.dumps({"hooks": {"Stop": [
-            {"hooks": [{"type": "command", "command": '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\kb_capture_nudge.py"'}]}
-        ]}}),
+        json.dumps({
+            "hooks": {
+                "Stop": [{
+                    "hooks": [{
+                        "type": "command",
+                        "command": (
+                            '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\'
+                            'kb_capture_nudge.py"'
+                        ),
+                    }]
+                }]
+            }
+        }),
         encoding="utf-8",
     )
     hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
@@ -106,8 +134,14 @@ def test_install_hook_migrates_old_kb_entry(tmp_path: Path) -> None:
     sp = tmp_path / "settings.json"
     sp.write_text(
         json.dumps({"hooks": {
-            "Stop": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-capture-nudge.sh"}]}],
-            "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh"}]}],
+            "Stop": [{"hooks": [{
+                "type": "command",
+                "command": "bash ~/.claude/hooks/kb-capture-nudge.sh",
+            }]}],
+            "UserPromptSubmit": [{"hooks": [{
+                "type": "command",
+                "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh",
+            }]}],
         }}),
         encoding="utf-8",
     )
@@ -120,16 +154,30 @@ def test_install_hook_migrates_old_kb_entry(tmp_path: Path) -> None:
     assert sum("exomem-retrieve-nudge" in c for c in ups) == 1
 
 
-def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(tmp_path: Path) -> None:
+def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(
+    tmp_path: Path,
+) -> None:
     hd, sp = tmp_path / "codex-hooks", tmp_path / "hooks.json"
     sp.write_text(
         json.dumps({"hooks": {
-            "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "python guard.py"}]}],
+            "PreToolUse": [{
+                "matcher": "Bash",
+                "hooks": [{"type": "command", "command": "python guard.py"}],
+            }],
             "UserPromptSubmit": [
-                {"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/kb_retrieve_nudge.py"}]},
-                {"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py"}]},
+                {"hooks": [{
+                    "type": "command",
+                    "command": "python3 ~/.codex/hooks/kb_retrieve_nudge.py",
+                }]},
+                {"hooks": [{
+                    "type": "command",
+                    "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py",
+                }]},
             ],
-            "Stop": [{"hooks": [{"type": "command", "command": "python3 ~/.codex/hooks/kb_capture_nudge.py"}]}],
+            "Stop": [{"hooks": [{
+                "type": "command",
+                "command": "python3 ~/.codex/hooks/kb_capture_nudge.py",
+            }]}],
         }}),
         encoding="utf-8",
     )
@@ -137,10 +185,16 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(tm
     r = hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
 
     assert r["client"] == "codex"
-    for f in ("exomem_capture_nudge.py", "exomem-capture-nudge.sh", "exomem_retrieve_nudge.py", "exomem-retrieve-nudge.sh"):
+    for f in (
+        "exomem_capture_nudge.py",
+        "exomem-capture-nudge.sh",
+        "exomem_retrieve_nudge.py",
+        "exomem-retrieve-nudge.sh",
+    ):
         assert (hd / f).exists(), f
     data = json.loads(sp.read_text(encoding="utf-8"))
-    assert _stop_cmds(data).count("python3 \"" + (hd / "exomem_capture_nudge.py").as_posix() + "\"") == 1
+    capture_command = "python3 \"" + (hd / "exomem_capture_nudge.py").as_posix() + "\""
+    assert _stop_cmds(data).count(capture_command) == 1
     ups = _ups_cmds(data)
     assert sum("exomem_retrieve_nudge.py" in c for c in ups) == 1
     assert not any("kb_retrieve_nudge" in c for c in ups)
@@ -148,7 +202,11 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(tm
     assert "exomem_retrieve_nudge.py" in ups[0]
     assert "zellij_tab_context_rename.py" in ups[1]
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "python guard.py"
-    retrieve = [h for h in _hook_entries(data, "UserPromptSubmit") if "exomem_retrieve_nudge.py" in h["command"]][0]
+    retrieve = [
+        h
+        for h in _hook_entries(data, "UserPromptSubmit")
+        if "exomem_retrieve_nudge.py" in h["command"]
+    ][0]
     assert retrieve["commandWindows"].endswith("exomem_retrieve_nudge.py\"")
 
 
@@ -158,7 +216,10 @@ def test_install_hook_preserves_other_hooks_and_keys(tmp_path: Path) -> None:
         json.dumps({
             "theme": "dark",
             "hooks": {
-                "PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command": "bash guard.sh"}]}],
+                "PreToolUse": [{
+                    "matcher": "Bash",
+                    "hooks": [{"type": "command", "command": "bash guard.sh"}],
+                }],
                 "Stop": [{"hooks": [{"type": "command", "command": "bash other-stop.sh"}]}],
             },
         }),
@@ -197,15 +258,27 @@ def test_install_hook_via_cli_for_codex(tmp_path: Path) -> None:
     from exomem.__main__ import main
 
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
-    assert main(["install-hook", "--client", "codex", "--hook-dir", str(hd), "--settings", str(sp)]) == 0
+    assert main([
+        "install-hook",
+        "--client",
+        "codex",
+        "--hook-dir",
+        str(hd),
+        "--settings",
+        str(sp),
+    ]) == 0
     assert (hd / "exomem_capture_nudge.py").exists() and (hd / "exomem_retrieve_nudge.py").exists()
     data = json.loads(sp.read_text(encoding="utf-8"))
     entries = _hook_entries(data, "UserPromptSubmit")
-    assert any("exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows") for h in entries)
+    assert any(
+        "exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows")
+        for h in entries
+    )
 
 
 def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkeypatch) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
@@ -216,7 +289,10 @@ def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkey
     assert report["success"] is True
     client = report["clients"][0]
     assert client["client"] == "codex"
-    assert any(c["id"] == "config.UserPromptSubmit" and c["status"] == "pass" for c in client["checks"])
+    assert any(
+        c["id"] == "config.UserPromptSubmit" and c["status"] == "pass"
+        for c in client["checks"]
+    )
     assert any(c["id"] == "scripts.Stop" and c["status"] == "pass" for c in client["checks"])
     assert client["logs"]["retrieve"]["path"].startswith(str(home / ".codex"))
 
@@ -286,7 +362,11 @@ def test_hook_check_skips_absent_client_in_multi_client_check(
     monkeypatch.setattr(
         hook_module,
         "_default_settings",
-        lambda client: claude_settings if client == "claude" else tmp_path / ".codex" / "hooks.json",
+        lambda client: (
+            claude_settings
+            if client == "claude"
+            else tmp_path / ".codex" / "hooks.json"
+        ),
     )
 
     report = hook_module.check_hooks(clients=("claude", "codex"))
@@ -306,6 +386,392 @@ def test_hook_check_explicit_absent_client_remains_strict(tmp_path: Path) -> Non
     assert report["clients"][0]["status"] == "failed"
 
 
+# --- continuation checkpoint installer -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("client", "events"),
+    [
+        ("claude", ("PreCompact", "SessionEnd", "SessionStart")),
+        ("codex", ("PreCompact", "SessionStart")),
+    ],
+)
+def test_install_hook_wires_pinned_continuation_matrix(
+    tmp_path: Path, client: str, events: tuple[str, ...]
+) -> None:
+    hd = tmp_path / client / "hooks"
+    sp = tmp_path / client / ("hooks.json" if client == "codex" else "settings.json")
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp, client=client)
+    data = json.loads(sp.read_text(encoding="utf-8"))
+
+    assert (hd / "exomem_continuation_checkpoint.py").is_file()
+    assert (hd / "exomem-continuation-checkpoint.sh").is_file()
+    assert set(event for event in events if _checkpoint_groups(data, event, client)) == set(events)
+    assert not _checkpoint_groups(data, "SessionEnd", "codex")
+    assert _checkpoint_groups(data, "PreCompact", client)[0]["matcher"] == "manual|auto"
+    assert _checkpoint_groups(data, "SessionStart", client)[0]["matcher"] == "compact|resume"
+    if client == "claude":
+        assert "matcher" not in _checkpoint_groups(data, "SessionEnd", client)[0]
+    installed = [row for row in result["installed"] if row.get("kind") == "continuation"]
+    assert {row["event"] for row in installed} == set(events)
+    assert all(f"--client {client}" in row["command"] for row in installed)
+    if client == "codex":
+        assert all(f"--client {client}" in row["commandWindows"] for row in installed)
+    else:
+        assert all(row["commandWindows"] is None for row in installed)
+
+
+def test_codex_preserves_unrelated_session_end_and_exact_marker_neighbors(tmp_path: Path) -> None:
+    sp = tmp_path / "hooks.json"
+    unrelated = {"hooks": [{"type": "command", "command": "python user-session-end.py"}]}
+    neighbor = {
+        "matcher": "manual|auto",
+        "hooks": [{
+            "type": "command",
+            "command": "python exomem_continuation_checkpoint.py.backup --client codex",
+        }],
+    }
+    wrong_client = {
+        "matcher": "manual|auto",
+        "hooks": [{
+            "type": "command",
+            "command": "python exomem_continuation_checkpoint.py --client claude",
+        }],
+    }
+    legacy = {
+        "matcher": "manual|auto",
+        "hooks": [{"type": "command", "command": "python kb_continuation_checkpoint.py"}],
+    }
+    sp.write_text(json.dumps({"hooks": {
+        "SessionEnd": [unrelated],
+        "PreCompact": [neighbor, wrong_client, legacy],
+    }}), encoding="utf-8")
+
+    hook_module.install_hook(
+        hook_dir=tmp_path / "hooks", settings_path=sp, client="codex"
+    )
+    data = json.loads(sp.read_text(encoding="utf-8"))
+
+    assert data["hooks"]["SessionEnd"] == [unrelated]
+    commands = [hook["command"] for group in data["hooks"]["PreCompact"] for hook in group["hooks"]]
+    assert commands[0].endswith(".backup --client codex")
+    assert commands[1].endswith("--client claude")
+    assert not any("kb_continuation_checkpoint.py" in command for command in commands)
+    assert sum(
+        "exomem_continuation_checkpoint.py" in command and "--client codex" in command
+        and not command.endswith(".backup --client codex")
+        for command in commands
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("client", "variable", "config_name"),
+    [
+        ("claude", "CLAUDE_CONFIG_DIR", "settings.json"),
+        ("codex", "CODEX_HOME", "hooks.json"),
+    ],
+)
+def test_client_specific_and_shared_home_resolution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client: str,
+    variable: str,
+    config_name: str,
+) -> None:
+    configured = tmp_path / "configured"
+    monkeypatch.setenv(variable, str(configured))
+    result = hook_module.install_hook(client=client)
+    assert Path(result["settings"]) == configured / config_name
+    assert (configured / "hooks" / "exomem_continuation_checkpoint.py").exists()
+
+    shared = tmp_path / "shared"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(shared))
+    result = hook_module.install_hook(client=client)
+    assert Path(result["settings"]) == shared / config_name
+    assert (shared / "hooks" / "exomem_continuation_checkpoint.py").exists()
+
+
+@pytest.mark.parametrize("raw", [b"{broken", b"[]", b"null"])
+def test_config_parse_fails_closed_without_replacement_or_backup(
+    tmp_path: Path,
+    raw: bytes,
+) -> None:
+    sp = tmp_path / "settings.json"
+    sp.write_bytes(raw)
+
+    with pytest.raises(ValueError):
+        hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+
+    assert sp.read_bytes() == raw
+    assert not list(tmp_path.glob("settings.json.backup-*"))
+
+
+def test_normalized_reinstall_does_not_rewrite_or_backup(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp)
+    before = (sp.read_bytes(), sp.stat().st_mtime_ns, sp.stat().st_ino)
+
+    result = hook_module.install_hook(hook_dir=hd, settings_path=sp)
+
+    assert (sp.read_bytes(), sp.stat().st_mtime_ns, sp.stat().st_ino) == before
+    assert result["config_changed"] is False
+    assert result["backup"] is None
+    assert not list(tmp_path.glob("settings.json.backup-*"))
+
+
+def test_real_config_change_creates_unique_mode_preserving_backup(tmp_path: Path) -> None:
+    sp = tmp_path / "settings.json"
+    original = b'{"theme":"dark","hooks":{}}\n'
+    sp.write_bytes(original)
+    sp.chmod(0o640)
+
+    first = hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+    backup = Path(first["backup"])
+
+    assert backup.read_bytes() == original
+    assert backup.stat().st_mode & 0o777 == 0o640
+    assert sp.stat().st_mode & 0o777 == 0o640
+    assert backup.parent == sp.parent
+    assert first["config_changed"] is True
+
+
+def test_observed_config_drift_retries_from_fresh_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sp = tmp_path / "settings.json"
+    sp.write_text('{"hooks":{}}\n', encoding="utf-8")
+    real = hook_module._snapshot_config_at
+    calls = 0
+
+    def drift_once(directory, name: str, display_path: Path):
+        nonlocal calls
+        snapshot = real(directory, name, display_path)
+        calls += 1
+        if calls == 1:
+            sp.write_text('{"theme":"newer","hooks":{}}\n', encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(hook_module, "_snapshot_config_at", drift_once)
+
+    hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+    assert json.loads(sp.read_text(encoding="utf-8"))["theme"] == "newer"
+    assert calls >= 4
+
+
+def test_persistent_config_drift_fails_without_stale_replacement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sp = tmp_path / "settings.json"
+    sp.write_text('{"counter":0,"hooks":{}}\n', encoding="utf-8")
+    real = hook_module._snapshot_config_at
+    calls = 0
+
+    def always_drift(directory, name: str, display_path: Path):
+        nonlocal calls
+        snapshot = real(directory, name, display_path)
+        calls += 1
+        if calls % 2:
+            sp.write_text(json.dumps({"counter": calls, "hooks": {}}), encoding="utf-8")
+        return snapshot
+
+    monkeypatch.setattr(hook_module, "_snapshot_config_at", always_drift)
+
+    with pytest.raises(RuntimeError, match="concurrent"):
+        hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+    assert json.loads(sp.read_text(encoding="utf-8"))["counter"] > 0
+    assert not list(tmp_path.glob("settings.json.backup-*"))
+    assert not list(tmp_path.glob(".settings.json.tmp-*"))
+
+
+def test_drift_observed_after_backup_cleans_attempt_artifacts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sp = tmp_path / "settings.json"
+    sp.write_text('{"counter":0,"hooks":{}}\n', encoding="utf-8")
+    real = hook_module._snapshot_config_at
+    calls = 0
+
+    def drift_before_final(directory, name: str, display_path: Path):
+        nonlocal calls
+        calls += 1
+        if calls % 4 == 0:
+            sp.write_text(json.dumps({"counter": calls, "hooks": {}}), encoding="utf-8")
+        return real(directory, name, display_path)
+
+    monkeypatch.setattr(hook_module, "_snapshot_config_at", drift_before_final)
+
+    with pytest.raises(RuntimeError, match="concurrent"):
+        hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
+    assert not list(tmp_path.glob("settings.json.backup-*"))
+    assert not list(tmp_path.glob(".settings.json.tmp-*"))
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows parent handles prevent the test rename")
+def test_config_merge_stays_bound_to_opened_parent_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    parent = tmp_path / "config-parent"
+    parent.mkdir()
+    config = parent / "hooks.json"
+    config.write_text('{"owner":"original","hooks":{}}\n', encoding="utf-8")
+    moved = tmp_path / "original-moved"
+    attacker_raw = b'{"owner":"attacker","hooks":{}}\n'
+    real_merge = hook_module._merged_config
+    swapped = False
+
+    def swap_parent(source: dict, installed: list[dict], timeout: int) -> dict:
+        nonlocal swapped
+        result = real_merge(source, installed, timeout)
+        if not swapped:
+            swapped = True
+            parent.rename(moved)
+            parent.mkdir()
+            (parent / "hooks.json").write_bytes(attacker_raw)
+        return result
+
+    monkeypatch.setattr(hook_module, "_merged_config", swap_parent)
+    installed = hook_module._continuation_items(tmp_path / "hooks", "codex")
+
+    result = hook_module._merge_hooks(config, installed, timeout=10)
+
+    assert result["changed"] is True
+    assert (parent / "hooks.json").read_bytes() == attacker_raw
+    original = json.loads((moved / "hooks.json").read_text(encoding="utf-8"))
+    assert original["owner"] == "original"
+    assert _checkpoint_groups(original, "PreCompact", "codex")
+
+
+def test_symlinked_config_is_refused_without_touching_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.json"
+    target.write_text('{"untouched":true}', encoding="utf-8")
+    link = tmp_path / "settings.json"
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(OSError):
+        hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=link)
+    assert target.read_text(encoding="utf-8") == '{"untouched":true}'
+
+
+def test_all_client_cli_isolated_partial_failure_and_override_rejection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from exomem.__main__ import main
+
+    shared = tmp_path / "homes"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(shared))
+    # all-client shared overrides are deliberately rejected before any write
+    with pytest.raises(SystemExit):
+        main(["install-hook", "--client", "all", "--hook-dir", str(tmp_path / "hooks")])
+
+    claude = tmp_path / "claude"
+    codex = tmp_path / "codex"
+    monkeypatch.delenv("EXOMEM_HOOK_HOME")
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude))
+    monkeypatch.setenv("CODEX_HOME", str(codex))
+    codex.mkdir()
+    (codex / "hooks.json").write_text("{broken", encoding="utf-8")
+
+    assert main(["install-hook", "--client", "all", "--json"]) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["success"] is False
+    assert next(row for row in payload["clients"] if row["client"] == "claude")["success"] is True
+    assert next(row for row in payload["clients"] if row["client"] == "codex")["success"] is False
+    assert (claude / "settings.json").exists()
+    assert (codex / "hooks.json").read_text(encoding="utf-8") == "{broken"
+
+
+def test_health_check_reports_capability_matrix_hashes_and_first_run(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+    checks = report["clients"][0]["checks"]
+
+    assert report["success"] is True
+    assert any(row["id"] == "config.PreCompact" and row["status"] == "pass" for row in checks)
+    assert any(row["id"] == "config.SessionStart" and row["status"] == "pass" for row in checks)
+    assert any(row["id"] == "config.SessionEnd" and row["status"] == "pass" for row in checks)
+    assert any(row["id"] == "scripts.continuation" and row["status"] == "pass" for row in checks)
+    assert any(row["id"] == "runtime.continuation" and row["status"] == "warn" for row in checks)
+
+
+@pytest.mark.parametrize("client", ["claude", "codex"])
+def test_isolated_installed_continuation_adapter_and_config_integration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    client: str,
+) -> None:
+    home = tmp_path / f"{client} home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    result = hook_module.install_hook(client=client)
+    config = json.loads(Path(result["settings"]).read_text(encoding="utf-8"))
+    script = home / "hooks" / "exomem_continuation_checkpoint.py"
+    wrapper = home / "hooks" / "exomem-continuation-checkpoint.sh"
+    command = [sys.executable, str(script), "--client", client]
+    if client == "claude":
+        command = ["bash", str(wrapper), "--client", client]
+
+    assert _checkpoint_groups(config, "PreCompact", client)
+    assert _checkpoint_groups(config, "SessionStart", client)
+    assert bool(_checkpoint_groups(config, "SessionEnd", client)) == (client == "claude")
+
+    transcript = tmp_path / f"{client}.jsonl"
+    transcript.write_text("private installed-adapter content", encoding="utf-8")
+    env = {**os.environ, "EXOMEM_HOOK_HOME": str(home), "EXOMEM_VAULT_PATH": ""}
+    written = subprocess.run(
+        command,
+        input=json.dumps({
+            "hook_event_name": "PreCompact",
+            "session_id": "installed-session",
+            "trigger": "manual",
+            "transcript_path": str(transcript),
+        }),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+        check=True,
+    )
+    resumed = subprocess.run(
+        command,
+        input=json.dumps({
+            "hook_event_name": "SessionStart",
+            "session_id": "installed-session",
+            "source": "resume",
+            "transcript_path": str(transcript),
+        }),
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=5,
+        check=True,
+    )
+
+    assert written.stdout == ""
+    assert "additionalContext" in resumed.stdout
+    assert "private installed-adapter content" not in resumed.stdout
+    if client == "claude":
+        ended = subprocess.run(
+            command,
+            input=json.dumps({
+                "hook_event_name": "SessionEnd",
+                "session_id": "installed-session-end",
+            }),
+            capture_output=True,
+            text=True,
+            env=env,
+            timeout=5,
+            check=True,
+        )
+        assert ended.stdout == ""
+
+
 # --- shared subprocess helper ---------------------------------------------------
 
 def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
@@ -321,15 +787,25 @@ def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
     )
 
 
-def _transcript(tmp_path: Path, user_text: str, assistant_text: str | None = None,
-                assistant_tool: str | None = None) -> Path:
+def _transcript(
+    tmp_path: Path,
+    user_text: str,
+    assistant_text: str | None = None,
+    assistant_tool: str | None = None,
+) -> Path:
     content: list[dict] = []
     if assistant_tool:
         content.append({"type": "tool_use", "name": assistant_tool})
     if assistant_text is not None:
         content.append({"type": "text", "text": assistant_text})
     lines = [
-        {"type": "user", "message": {"role": "user", "content": [{"type": "text", "text": user_text}]}},
+        {
+            "type": "user",
+            "message": {
+                "role": "user",
+                "content": [{"type": "text", "text": user_text}],
+            },
+        },
         {"type": "assistant", "message": {"role": "assistant", "content": content}},
     ]
     p = tmp_path / "t.jsonl"
@@ -340,14 +816,16 @@ def _transcript(tmp_path: Path, user_text: str, assistant_text: str | None = Non
 # --- capture (Stop) gate --------------------------------------------------------
 
 def test_capture_fires_on_substantial_turn(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     t = _transcript(tmp_path, "q?", "We landed on a clear decision. " + "x" * 450)
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s1"}, home)
     assert '"decision": "block"' in r.stdout
 
 
 def test_capture_fires_language_agnostic_japanese(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     jp = "これは重要な結論です。" * 40
     t = _transcript(tmp_path, "質問", jp)
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "jp"}, home)
@@ -355,31 +833,43 @@ def test_capture_fires_language_agnostic_japanese(tmp_path: Path) -> None:
 
 
 def test_capture_silent_on_trivial_turn(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     t = _transcript(tmp_path, "q?", "Done.")
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s2"}, home)
     assert r.stdout.strip() == ""
 
 
 def test_capture_silent_when_already_saved(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     # Real post-rename connector tool name is Exomem (not Knowledge_Base) — the guard
     # regex must recognise it, or the nudge misfires after every real capture.
-    t = _transcript(tmp_path, "q?", "Big conclusion. " + "x" * 450,
-                    assistant_tool="mcp__claude_ai_Exomem__note")
+    t = _transcript(
+        tmp_path,
+        "q?",
+        "Big conclusion. " + "x" * 450,
+        assistant_tool="mcp__claude_ai_Exomem__note",
+    )
     r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s3"}, home)
     assert r.stdout.strip() == ""
 
 
 def test_capture_silent_when_stop_hook_active(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     t = _transcript(tmp_path, "q?", "Big conclusion. " + "x" * 450)
-    r = _run(CAPTURE_SCRIPT, {"transcript_path": str(t), "session_id": "s4", "stop_hook_active": True}, home)
+    r = _run(
+        CAPTURE_SCRIPT,
+        {"transcript_path": str(t), "session_id": "s4", "stop_hook_active": True},
+        home,
+    )
     assert r.stdout.strip() == ""
 
 
 def test_capture_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     t = _transcript(tmp_path, "q?", "Big conclusion. " + "x" * 450)
     ev = {"transcript_path": str(t), "session_id": "cd"}
     first = _run(CAPTURE_SCRIPT, ev, home)
@@ -389,7 +879,8 @@ def test_capture_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
 
 
 def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     t = _transcript(tmp_path, "q?", "We landed on a clear decision. " + "x" * 450)
     r = _run(
         CAPTURE_SCRIPT,
@@ -406,27 +897,41 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
 # --- retrieval (UserPromptSubmit) gate ------------------------------------------
 
 def test_retrieve_fires_on_substantial_prompt(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
-    r = _run(RETRIEVE_SCRIPT, {"prompt": "what did I conclude about the kb hook design earlier?", "session_id": "r1"}, home)
+    home = tmp_path / "home"
+    home.mkdir()
+    r = _run(
+        RETRIEVE_SCRIPT,
+        {
+            "prompt": "what did I conclude about the kb hook design earlier?",
+            "session_id": "r1",
+        },
+        home,
+    )
     assert "additionalContext" in r.stdout
 
 
 def test_retrieve_fires_language_agnostic_japanese(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     jp = "去年このプロジェクトについて何を結論づけましたか？詳しく教えてください。"
     r = _run(RETRIEVE_SCRIPT, {"prompt": jp, "session_id": "rjp"}, home)
     assert "additionalContext" in r.stdout
 
 
 def test_retrieve_silent_on_short_prompt(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     r = _run(RETRIEVE_SCRIPT, {"prompt": "yes go", "session_id": "r2"}, home)
     assert r.stdout.strip() == ""
 
 
 def test_retrieve_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
-    ev = {"prompt": "what did I conclude about the architecture decisions here?", "session_id": "rc"}
+    home = tmp_path / "home"
+    home.mkdir()
+    ev = {
+        "prompt": "what did I conclude about the architecture decisions here?",
+        "session_id": "rc",
+    }
     first = _run(RETRIEVE_SCRIPT, ev, home)
     second = _run(RETRIEVE_SCRIPT, ev, home)
     assert "additionalContext" in first.stdout
@@ -434,10 +939,14 @@ def test_retrieve_cooldown_suppresses_second_fire(tmp_path: Path) -> None:
 
 
 def test_retrieve_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: Path) -> None:
-    home = tmp_path / "home"; home.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
     r = _run(
         RETRIEVE_SCRIPT,
-        {"userPrompt": "what did I conclude about the Codex hook setup earlier?", "sessionId": "codex-ret"},
+        {
+            "userPrompt": "what did I conclude about the Codex hook setup earlier?",
+            "sessionId": "codex-ret",
+        },
         home,
         {"EXOMEM_HOOK_CLIENT": "codex"},
     )
