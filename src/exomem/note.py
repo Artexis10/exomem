@@ -246,6 +246,7 @@ def note(
     suggestions: bool = True,
     today: dt.date | None = None,
     project_category: str | None = None,
+    _planned_writes: list[PlannedWrite] | None = None,
 ) -> NoteResult:
     """Create a compiled note + update indexes/log + back-ref cited sources atomically.
 
@@ -558,25 +559,30 @@ def note(
     else:
         warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
-    try:
-        batch_atomic_write(writes, vault_root=vault_root)
-    except Exception as e:
-        log.exception("partial write during note(); some files may be updated")
-        warnings.append(f"partial write — reconcile on desktop: {e}")
-        # Purge this write's add_pending registration from the SHARED resolver
-        # — the note never landed, and a phantom entry would resolve wikilinks
-        # to a nonexistent page until the next full rebuild.
+    if _planned_writes is None:
         try:
-            find_module.on_resolver_files_changed(
-                vault_root, [rel_note_no_ext + ".md"], []
-            )
-        except Exception:  # noqa: BLE001 — purge is best-effort cleanup
-            log.debug("resolver pending-purge failed", exc_info=True)
-        raise
+            batch_atomic_write(writes, vault_root=vault_root)
+        except Exception as e:
+            log.exception("partial write during note(); some files may be updated")
+            warnings.append(f"partial write — reconcile on desktop: {e}")
+            # Purge this write's add_pending registration from the SHARED resolver
+            # — the note never landed, and a phantom entry would resolve wikilinks
+            # to a nonexistent page until the next full rebuild.
+            try:
+                find_module.on_resolver_files_changed(
+                    vault_root, [rel_note_no_ext + ".md"], []
+                )
+            except Exception:  # noqa: BLE001 — purge is best-effort cleanup
+                log.debug("resolver pending-purge failed", exc_info=True)
+            raise
 
-    rotate_note = rotate_log_if_needed(vault_root)
-    if rotate_note:
-        warnings.append(rotate_note)
+        rotate_note = rotate_log_if_needed(vault_root)
+        if rotate_note:
+            warnings.append(rotate_note)
+    else:
+        # Internal composition seam for replace(): preserve note()'s exact
+        # write plan while letting the supersession pointers join the same batch.
+        _planned_writes.extend(writes)
 
     write_feedback["sources"]["backrefs_planned"] = backrefs_planned
 

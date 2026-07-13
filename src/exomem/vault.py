@@ -16,6 +16,7 @@ import os
 import re
 import shutil
 import tempfile
+import threading
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -242,13 +243,44 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
 
 @dataclass
 class PlannedWrite:
-    """One target file in a batch write: destination path + final content."""
+    """One target file in a batch write, with an optional commit-time CAS guard."""
 
     path: Path
     content: str
+    expected_hash: str | None = None
+
+
+class ContentHashMismatchError(RuntimeError):
+    """A planned destination changed before its guarded batch could commit."""
+
+    def __init__(self, path: Path, expected_hash: str, actual_hash: str | None):
+        self.path = path
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        actual = actual_hash or "<missing>"
+        super().__init__(
+            f"content changed before commit: {path} "
+            f"(expected {expected_hash}, found {actual})"
+        )
+
+
+_BATCH_COMMIT_LOCK = threading.RLock()
 
 
 def batch_atomic_write(
+    writes: Iterable[PlannedWrite], *, vault_root: Path | None = None
+) -> list[Path]:
+    """Commit one batch while serializing all in-process vault writers.
+
+    A process-shared lock closes the gap between validating any ``expected_hash``
+    guards and replacing destinations. The locked implementation retains the
+    existing staging, rollback, and index-refresh behavior.
+    """
+    with _BATCH_COMMIT_LOCK:
+        return _batch_atomic_write_locked(writes, vault_root=vault_root)
+
+
+def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite], *, vault_root: Path | None = None
 ) -> list[Path]:
     """Stage each write as a sibling .tmp file, then os.replace() them into place.
@@ -271,6 +303,19 @@ def batch_atomic_write(
     for write in writes:
         deduped[write.path] = write
     writes = list(deduped.values())
+    for write in writes:
+        if write.expected_hash is None:
+            continue
+        try:
+            current = write.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            actual_hash = None
+        else:
+            actual_hash = content_hash(current)
+        if actual_hash != write.expected_hash:
+            raise ContentHashMismatchError(
+                write.path, write.expected_hash, actual_hash
+            )
     # Access-tier backstop: when the caller knows the vault root, refuse any
     # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
     # here so every content writer inherits it without per-tool wiring. No
