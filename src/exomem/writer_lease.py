@@ -314,10 +314,12 @@ class LeaseManager:
         injected: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
+        read_only: bool | None = None,
         idempotency_key: str | None = None,
         implicit_idempotency_scope: str | None = None,
     ) -> Any:
-        if command.read_only:
+        invocation_read_only = command.read_only if read_only is None else read_only
+        if invocation_read_only:
             return command.leaf(*injected, **kwargs)
         lease = self.ensure_writer() if self.config.enabled else None
         digest = hashlib.sha256(
@@ -483,10 +485,13 @@ def invoke_command(
     implicit_idempotency_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
+    from .commands import invocation_is_read_only
+
     return get_manager().invoke(
         command,
         injected,
         kwargs,
+        read_only=invocation_is_read_only(command, kwargs),
         idempotency_key=idempotency_key,
         implicit_idempotency_scope=implicit_idempotency_scope,
     )

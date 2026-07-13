@@ -4214,6 +4214,33 @@ def note_description(project_keys_hint: str) -> str:
 # The registry
 # --------------------------------------------------------------------------- #
 # (name, leaf, tier, cli_writes, needs_schema, cli_positional, surfaces)
+_CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
+    {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
+)
+_ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
+
+
+def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
+    """Classify one resolved product-command invocation for lease gating.
+
+    Write-capable product commands default to requiring the lease. The two
+    mixed read/write commands opt into a finite read-only allowlist, with their
+    Python signature defaults applied only when the selector was truly omitted.
+    """
+    if command.read_only:
+        return True
+    if command.name == "connect_memory":
+        operation = "suggest-links" if "operation" not in kwargs else kwargs["operation"]
+        return (
+            isinstance(operation, str)
+            and operation in _CONNECT_MEMORY_READ_ONLY_OPERATIONS
+        )
+    if command.name == "adopt_vault":
+        mode = "scan-only" if "mode" not in kwargs else kwargs["mode"]
+        return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
+    return False
+
+
 _PRODUCT_ACTIONS: tuple[str, ...] = ("save", "adopt", "ask", "prove", "review", "update", "connect")
 _SIMPLE_ACTIONS: tuple[str, ...] = (
     "ask",

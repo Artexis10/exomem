@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,7 +10,13 @@ import pytest
 from exomem.cli_ops import OpError, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
 from exomem.vault import PlannedWrite, batch_atomic_write
-from exomem.writer_lease import LeaseConfig, LeaseManager, LeaseRecord
+from exomem.writer_lease import (
+    LeaseConfig,
+    LeaseManager,
+    LeaseRecord,
+    invoke_command,
+    reset_managers_for_tests,
+)
 
 
 def test_config_is_default_off_and_requires_identities() -> None:
@@ -154,6 +160,132 @@ def test_reads_bypass_unavailable_coordinator(tmp_path: Path) -> None:
     assert (
         manager.invoke(_command(writes=False, leaf=lambda value: value + 1), (), {"value": 2}) == 3
     )
+
+
+def _unreachable_coordinator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "http://127.0.0.1:1")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "desktop")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TIMEOUT", "0.05")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "lease-state"))
+
+
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        pytest.param("connect_memory", {}, id="connect-default-suggest-links"),
+        pytest.param(
+            "connect_memory", {"operation": "suggest-links"}, id="connect-suggest-links"
+        ),
+        pytest.param(
+            "connect_memory",
+            {"operation": "suggest-relations"},
+            id="connect-suggest-relations",
+        ),
+        pytest.param("connect_memory", {"operation": "context"}, id="connect-context"),
+        pytest.param(
+            "connect_memory", {"operation": "graph-context"}, id="connect-graph-context"
+        ),
+        pytest.param(
+            "connect_memory", {"operation": "inbound-links"}, id="connect-inbound-links"
+        ),
+        pytest.param("adopt_vault", {}, id="adopt-default-scan-only"),
+        pytest.param("adopt_vault", {"mode": "scan-only"}, id="adopt-scan-only"),
+    ],
+)
+def test_read_only_product_operations_bypass_unreachable_coordinator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command_name: str,
+    kwargs: dict,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    _unreachable_coordinator(monkeypatch, tmp_path)
+    calls: list[dict] = []
+    command = next(c for c in product_commands_for("mcp") if c.name == command_name)
+    command = replace(
+        command,
+        leaf=lambda _vault_root, **leaf_kwargs: calls.append(leaf_kwargs) or "read-ok",
+    )
+    try:
+        assert invoke_command(command, tmp_path, **kwargs) == "read-ok"
+        assert calls == [kwargs]
+    finally:
+        reset_managers_for_tests()
+
+
+def test_default_connect_and_adopt_calls_run_during_coordinator_outage(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, vault: Path
+) -> None:
+    from exomem.commands import product_commands_for
+
+    _unreachable_coordinator(monkeypatch, tmp_path)
+    commands = {c.name: c for c in product_commands_for("mcp")}
+    try:
+        suggestions = invoke_command(
+            commands["connect_memory"],
+            vault,
+            draft_title="Lease-safe read",
+            draft_body="A draft that must remain readable during coordinator downtime.",
+        )
+        report = invoke_command(commands["adopt_vault"], vault)
+    finally:
+        reset_managers_for_tests()
+
+    assert isinstance(suggestions, list)
+    assert report["mode"] == "scan-only"
+
+
+@pytest.mark.parametrize(
+    ("command_name", "kwargs"),
+    [
+        pytest.param(
+            "connect_memory", {"operation": "create-entity"}, id="connect-create-entity"
+        ),
+        pytest.param(
+            "connect_memory", {"operation": "accept-relation"}, id="connect-accept-relation"
+        ),
+        pytest.param("connect_memory", {"operation": ""}, id="connect-empty"),
+        pytest.param("connect_memory", {"operation": None}, id="connect-explicit-none"),
+        pytest.param("connect_memory", {"operation": "entity"}, id="connect-nonexistent-entity"),
+        pytest.param(
+            "connect_memory", {"operation": "future-read-mode"}, id="connect-future-mode"
+        ),
+        pytest.param("adopt_vault", {"mode": "save-manifest"}, id="adopt-save-manifest"),
+        pytest.param(
+            "adopt_vault", {"mode": "copy-as-sources"}, id="adopt-copy-as-sources"
+        ),
+        pytest.param(
+            "adopt_vault", {"mode": "compile-selected"}, id="adopt-compile-selected"
+        ),
+        pytest.param("adopt_vault", {"mode": ""}, id="adopt-empty"),
+        pytest.param("adopt_vault", {"mode": None}, id="adopt-explicit-none"),
+        pytest.param("adopt_vault", {"mode": "future-mode"}, id="adopt-future-mode"),
+        pytest.param("remember", {}, id="generic-write-capable-command"),
+    ],
+)
+def test_write_and_unknown_product_operations_fail_closed_without_calling_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    command_name: str,
+    kwargs: dict,
+) -> None:
+    from exomem.commands import product_commands_for
+
+    _unreachable_coordinator(monkeypatch, tmp_path)
+    calls: list[dict] = []
+    command = next(c for c in product_commands_for("mcp") if c.name == command_name)
+    command = replace(
+        command,
+        leaf=lambda _vault_root, **leaf_kwargs: calls.append(leaf_kwargs) or "write-ran",
+    )
+    try:
+        with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+            invoke_command(command, tmp_path, **kwargs)
+        assert calls == []
+    finally:
+        reset_managers_for_tests()
 
 
 def test_writer_executes_but_follower_and_outage_fail_closed(tmp_path: Path) -> None:
