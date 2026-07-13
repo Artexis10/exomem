@@ -1,11 +1,11 @@
 ## ADDED Requirements
 
 ### Requirement: Semantic Unit Parameters Are Consistent Across Surfaces
-The single command registry SHALL expose `result_level`, `categories`, and `kinds` on recall commands; exact unit selection on read commands; category/kind contract controls on schema commands; and semantic-unit feedback on writers consistently across MCP, REST, CLI, OpenAPI, and generated capability documentation.
+The single command registry SHALL expose `result_level`, `categories`, `kinds`, the structured `filters` expression, and `explain` on recall commands; exact unit selection on read commands; category/kind contract controls on schema commands; and semantic-unit feedback on writers consistently across MCP, REST, CLI, OpenAPI, and generated capability documentation.
 
 #### Scenario: Recall schema parity
 - **WHEN** generated schemas are inspected for MCP `ask_memory`, REST `/api/ask_memory`, CLI `ask-memory`, and OpenAPI
-- **THEN** the same accepted result-level/category/kind parameters and descriptions are present
+- **THEN** the same accepted result-level/category/kind/filter/explanation parameters and descriptions are present
 
 #### Scenario: Existing default schema remains compatible
 - **WHEN** callers omit every semantic-unit parameter
@@ -33,9 +33,17 @@ Every creation-capable governed writer surface SHALL expose `validate_only`, `dr
 - **WHEN** a reviewed-none commit changes content after validation
 - **THEN** every facade returns the same machine-readable draft-mismatch code and fresh-validation remediation
 
-### Requirement: Semantic Unit Response Shape Is Documented And Fidelity-Tested
-Generated schemas and fidelity snapshots SHALL cover page, unit, and mixed recall envelopes; semantic-unit writer feedback; category registry/schema outputs; and exact unit reads. No surface may silently drop unit identity, parent citation, category/kind, degradation, or contract findings.
+### Requirement: Semantic Unit And Explanation Response Shapes Are Documented And Fidelity-Tested
+Generated schemas and fidelity snapshots SHALL cover page, unit, and mixed recall envelopes; normalized filter validation; optional retrieval profiles and ranking explanations; semantic-unit writer feedback; category registry/schema outputs; and exact unit reads. No surface may silently drop unit identity, parent citation, category/kind, ranking metric labels, fusion contributions, degradation, normalized filters, or contract findings.
 
 #### Scenario: Unit response survives every facade
 - **WHEN** the same unit lookup runs through MCP, REST, and CLI JSON
 - **THEN** each structured response preserves the same unit and parent identity fields and contract metadata
+
+#### Scenario: Explanation survives every facade
+- **WHEN** the same `explain=true` hybrid lookup runs through MCP, REST, and CLI JSON
+- **THEN** each response preserves the same retrieval profile, per-lane metric names, fusion contributions, boost/rerank chain, and final rank
+
+#### Scenario: Invalid filter errors survive every facade
+- **WHEN** the same malformed typed filter is submitted through MCP, REST, and CLI JSON
+- **THEN** every facade returns the same stable code, JSON path, expected value shape, and remediation

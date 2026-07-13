@@ -1,15 +1,19 @@
 ## ADDED Requirements
 
 ### Requirement: Page, Unit, Mixed, And Auto Recall Levels
-`find` and `ask_memory` SHALL accept `result_level` values `auto`, `page`, `unit`, and `mixed`. `auto` SHALL be the default, SHALL resolve to `page` when no semantic-unit filter is present, and SHALL resolve to `unit` when `categories` or `kinds` is supplied. Existing calls with no new parameters MUST preserve page-hit fields and ordering.
+`find` and `ask_memory` SHALL accept `result_level` values `auto`, `page`, `unit`, and `mixed`. `auto` SHALL be the default, SHALL resolve to `page` when no semantic-unit filter is present, and SHALL resolve to `unit` when `categories`, `kinds`, or a `unit.*` structured filter is supplied. Existing calls with no new parameters MUST preserve page-hit fields and ordering.
 
 #### Scenario: Existing recall remains page-level
-- **WHEN** recall is called without `result_level`, `categories`, or `kinds`
+- **WHEN** recall is called without `result_level`, `categories`, `kinds`, or `filters`
 - **THEN** `auto` returns the existing page-level result contract with unchanged ordering
 
 #### Scenario: Category filter selects unit results automatically
 - **WHEN** recall is called with `categories=["config"]` and `result_level` is omitted
 - **THEN** the response contains independently ranked matching semantic-unit hits
+
+#### Scenario: Structured unit filter selects unit results automatically
+- **WHEN** recall is called with `filters={"unit.kind":{"$eq":"decision"}}` and `result_level` is omitted
+- **THEN** the response contains independently ranked decision-unit hits
 
 #### Scenario: Page mode annotates matching units
 - **WHEN** recall is called with `result_level="page"` and a unit filter
@@ -20,7 +24,7 @@
 - **THEN** page and unit candidates participate in ranking, repeated units per parent are capped, and any truncation is reported
 
 ### Requirement: Exact Category And Kind Filtering
-Recall SHALL accept OR-within-list `categories` and `kinds` filters and SHALL apply exact registry-resolved category/governed-kind metadata filtering before ranking. Text, category, and kind axes SHALL combine with AND when supplied together. The resolved category defaults to the immutable authored category key when no alias applies. Category-only and kind-only recall SHALL work with an empty text query. Mentioning a category word in content MUST NOT satisfy an exact category filter.
+Recall SHALL accept OR-within-list `categories` and `kinds` shortcuts and the shared structured filter contract and SHALL apply exact registry-resolved category/governed-kind metadata filtering before ranking. Text, category, kind, and structured-filter axes SHALL combine with AND when supplied together. The resolved category defaults to the immutable authored category key when no alias applies. Category-only, kind-only, and structured-filter-only recall SHALL work with an empty text query. Mentioning a category word in content MUST NOT satisfy an exact category filter.
 
 #### Scenario: Text mention cannot spoof category
 - **WHEN** a `decision` unit mentions the word `requirement` and recall filters `categories=["requirement"]`
@@ -39,7 +43,7 @@ Recall SHALL accept OR-within-list `categories` and `kinds` filters and SHALL ap
 - **THEN** unit-level recall returns distinct identities and correct category metadata for each
 
 ### Requirement: First-Class Semantic Unit Hit Contract
-Unit hits SHALL carry `result_type="semantic_unit"`, unit reference, form, `category_raw`, authored `category_key`, registry-resolved `category`, kind, content/excerpt, tags/context, source anchor/span/hash, parent path/reference/title/type/status, and applicable ranking/degradation signals. A unit citation SHALL identify both its parent page and anchor.
+Unit hits SHALL carry `result_type="semantic_unit"`, unit reference, form, `category_raw`, authored `category_key`, registry-resolved `category`, kind, content/excerpt, tags/context, source anchor/span/hash, parent path/reference/title/type/status, and applicable ranking/degradation signals. A unit citation SHALL identify both its parent page and anchor. When `explain=true`, unit hits SHALL use the same metric-labelled ranking explanation as page hits.
 
 #### Scenario: Unit hit is independently citable
 - **WHEN** a unit is returned from recall

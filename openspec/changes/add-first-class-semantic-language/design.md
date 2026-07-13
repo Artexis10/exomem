@@ -15,9 +15,11 @@ The change also completes the previously identified relation-contract gap. A sem
 - Match the useful Basic Memory observation grammar closely enough that existing `- [category] ...` notes are immediately understood.
 - Exceed that model with governed epistemic kinds, stable parent identity, addressable anchors, provenance, lifecycle state, typed block relations, schema governance, and review.
 - Make semantic units first-class in recall and tooling without changing the default page-level result contract.
+- Make page frontmatter and semantic-unit metadata queryable through one safe structured filter language, including filter-only retrieval.
+- Make ranking inspectable on demand without overloading one unlabeled score or bloating the default compact response.
 - Keep categories open and ergonomic while making their raw/canonical identity, aliases, deprecation, scope, and contract use reviewable.
 - Apply one semantic contract to all in-process writers and surface out-of-band violations without destroying user edits.
-- Prove common no-regression and scoped Exomem semantic-governance differentiation through isolated end-to-end fixtures against the sibling Basic Memory checkout.
+- Prove shared local-core parity, expose any remaining gaps, and demonstrate only recorded Exomem extensions through isolated end-to-end fixtures against the sibling Basic Memory checkout.
 - Preserve empty-vault onboarding and existing-vault adoption without bulk rewriting Markdown.
 
 **Non-Goals:**
@@ -29,6 +31,8 @@ The change also completes the previously identified relation-contract gap. A sem
 - Rewriting existing notes into compact observations or adding visible IDs in bulk.
 - Making every category a global governed enum or silently mapping domain labels such as `term`, `rule`, or `config` onto epistemic kinds.
 - Replacing page-level retrieval, semantic blocks, canonical note relations, or Markdown with a database-owned object model.
+- Arbitrary SQL, regular expressions, executable predicates, or unbounded user-defined filter code.
+- Treating BM25 magnitudes, cosine similarity, reciprocal-rank-fusion values, or reranker scores as interchangeable confidence values.
 
 ## Decisions
 
@@ -93,13 +97,33 @@ The parse result distinguishes errors from warnings and includes spans. Malforme
 
 - `result_level`: `auto` (default), `page`, `unit`, or `mixed`;
 - `categories`: exact registry-resolved category filters, OR within the list;
-- `kinds`: exact governed kind filters, OR within the list.
+- `kinds`: exact governed kind filters, OR within the list;
+- `filters`: a bounded namespaced structured expression over page and unit metadata;
+- `explain`: opt-in retrieval-plan and per-hit ranking evidence, default `false`.
 
 With no unit filters, `auto` resolves to `page` and preserves the existing result bytes and ordering. Passing `categories` or `kinds` makes `auto` resolve to `unit`. Values are ORed within each filter list, while text, category, and kind axes are ANDed when supplied together. `page` with unit filters returns parent pages whose units match and carries a bounded `matched_units` annotation. `unit` returns independently ranked semantic-unit hits. `mixed` fuses page and unit candidates, caps repeated units per parent, and preserves explicit result identity.
 
-Unit hits carry `result_type="semantic_unit"`, unit/category/kind fields, parent path/reference/title/type/status, anchor/span, excerpt/content, and ranking signals. Category-only search works with an empty text query. Exact filters apply before ranking, so text mentioning the word `decision` cannot satisfy `categories=["decision"]` unless the parsed unit is actually categorized `decision`.
+Unit hits carry `result_type="semantic_unit"`, unit/category/kind fields, parent path/reference/title/type/status, anchor/span, excerpt/content, and ranking signals. Category-only and structured-filter-only search work with an empty text query. Exact filters apply before ranking, so text mentioning the word `decision` cannot satisfy `categories=["decision"]` unless the parsed unit is actually categorized `decision`.
 
 Lexical unit records live in the existing lexical sidecar with a record discriminator. Optional unit embeddings live in the existing embedding sidecar with a unit key and parent path. The epistemic graph adds compact unit nodes and `derived_from` edges; authored rich-block relations retain their current behavior and existing rich-block graph node keys. One normalized rich unit produces one graph node/edge identity. The legacy `semantic_blocks` context field becomes a bounded compatibility projection from `semantic_units`; it does not trigger a second parse, row set, graph node, or duplicate result. A schema-version bump triggers rebuild rather than Markdown migration.
+
+### One safe filter language spans pages and semantic units
+
+`filters` is a JSON object whose field predicates use explicit namespaces. Reserved system metadata uses fixed names such as `page.status`, `page.project`, `page.updated`, and `page.file_type`. Arbitrary frontmatter uses `page.frontmatter:/<RFC-6901-pointer>`, so nested mapping keys and literal `/` or `~` characters remain unambiguous (`page.frontmatter:/priority`, `page.frontmatter:/vendor/id`, `~1` for `/`, and `~0` for `~`). Mappings are traversable and support `$exists` but are not equality-compared. Arrays are terminal scalar collections: if an array is encountered before the pointer is exhausted, that candidate is a nonmatch; the same numeric segment remains a valid mapping key when the runtime value is a mapping. `unit.<field>` addresses the closed semantic-unit metadata set: `category`, `category_key`, `kind`, `tags`, `context`, and `form`. Unit results evaluate the complete expression against one `(parent page, unit)` pair. Page results evaluate it existentially over one child unit at a time, so category and tag predicates cannot be satisfied by different units; a page-only logical branch may still match a page with no units through a missing-unit sentinel. A page-only expression keeps `result_level="auto"` at page level, while any `unit.*` predicate makes `auto` resolve to unit level, like `categories` and `kinds`.
+
+Leaf predicates support `$eq`, `$ne`, `$in`, `$all`, `$contains`, `$exists`, `$gt`, `$gte`, `$lt`, `$lte`, and inclusive `$between`. Multiple operators on one field are ANDed. `$eq`/`$ne` accept scalar or null operands and compare only scalar/null fields with exact type identity; a runtime array or mapping is a nonmatch, and using them on a closed field known to be an array is a validation error. Arrays use `$in` for scalar membership/array overlap, `$contains` for exact scalar membership, and `$all` for requiring every requested scalar, with operand order and duplicates semantically irrelevant. `$contains` on an explicitly string-valued field means exact substring. `$in`/`$all` and logical lists must be non-empty, `$between` has exactly two ordered values, and `$not` has exactly one child expression. Ordered comparison is allowed only for scalar numbers, ISO date values, or timezone-qualified RFC 3339 date-times; date-times normalize to UTC, and date/date-time types do not mix. Values are not silently coerced between strings, numbers, booleans, and dates. Comparisons against a missing field or incompatible runtime type are false—including `$ne`—except `$exists:false`; logical `$not` is the actual complement and may therefore include missing fields. Logical `$and`, `$or`, and `$not` compose predicates with maximum nesting depth four and at most 32 leaf clauses.
+
+Resource bounds apply before candidate work: the encoded `filters` JSON and both structurally normalized and alias-resolved combined filter plans (generic expression plus shortcuts) are each at most 16 KiB; each RFC 6901 pointer is at most 512 UTF-8 bytes and 16 decoded segments; each string operand or shortcut value is at most 1,024 Unicode code points and 4,096 UTF-8 bytes; each `$in`/`$all` operand and each shortcut list is at most 64 scalar values; all scalar collection and shortcut values together carry at most 256 values; and numeric operands must be finite JSON numbers with at most 64 encoded characters. Raw counts apply before deduplication or alias resolution; raw/structural bounds are checked before alias resolution, resolved bounds again before backend access, and the bounded resolved combined plan is the only filter payload echoed by `explain=true`. Regex, arbitrary SQL, and executable expressions are rejected.
+
+Existing typed shortcuts (`types`, `projects`, `tags`, `speakers`, file types, dates, `categories`, and `kinds`) remain stable and compile into the same normalized filter plan. Shortcut lists retain their documented OR-within-list behavior; independent shortcut/filter/query axes combine with AND. Reserved system/unit fields use the same canonicalizers and case behavior as their shortcuts; arbitrary frontmatter strings compare exactly after YAML parsing. Category aliases resolve before comparison, status/type/date use their canonical typed representations, and invalid paths/operators/value types fail with a path-addressed validation error rather than producing an empty result. Access scope and excluded-subtree rules run before caller filters and cannot be weakened by an expression. Filters then run before candidate ranking in every retrieval lane and identically across SQLite and optional backends. Empty query plus filters returns filtered-most-recent results at the resolved result level.
+
+### Retrieval explanations are opt-in, exact, and mode-safe
+
+The default remains `explain=false`. Existing `detail="compact"` and `detail="full"` responses keep their current bytes and ordering when explanation is omitted. `explain=true` is orthogonal to detail: it adds bounded diagnostic objects but does not add note bodies, excerpts, semantic-unit content, or other full-detail fields on its own.
+
+The top-level `retrieval_profile` records an explanation schema version, the resolved intent, result level, requested/effective modes, normalized filter plan, available/degraded lanes and reasons, lane weights, fusion algorithm/constants when fusion ran, rerank decision, and final ordering/tie-break policy. Each lane identifies its backend or model where relevant, metric name, better-direction/range, and rounding. Each hit gains `ranking_explanation` containing only lanes in which it participated: lane rank; metric name and value where one exists; reciprocal-rank-fusion contribution only when fusion ran; graph seed/relation/direction/hop provenance; applied type/status/recency/usage multipliers; reranker raw and adjusted value when used; the actual final sortable tuple; and final rank. Unavailable lanes and available lanes that did not return a given hit are represented only in the top-level profile, never by a fabricated per-hit entry or zero.
+
+BM25 explanation carries backend name, rank, raw backend score, and score direction labelled diagnostic and non-comparable across corpora/backends. Vector and CLIP measurements are labelled cosine similarity with their documented range/direction and model identity; the existing `vector_score` compatibility field remains, while the explanation names the metric. Keyword lanes expose rank but no invented score. When RRF runs it exposes `k`, lane weight, `weight / (k + rank)`, and the sum before later multipliers. Single-lane and filter-only modes omit fusion fields and instead expose the real deterministic lane or filtered-most-recent sort tuple and tie-break values. Reranking identifies its model/backend and exposes the raw/adjusted direction. Reranking, boosts, and deterministic tie-breaks expose the exact before/after chain so a caller can reproduce the returned order within documented rounding. No value is called confidence or relevance unless it is actually that metric.
 
 ### Tooling can create and mutate units without string surgery
 
@@ -147,13 +171,19 @@ Memory contracts extend from fields/blocks/relations to semantic-unit kinds and 
 
 `warn` permits the write and returns findings. `strict` blocks in-process create/edit/replace/observe operations before filesystem mutation. It cannot block out-of-band edits; watcher/reconcile report strict drift and keep user Markdown intact. This is stronger and more honest than claiming sync enforcement without proving the actual write call graph.
 
-### Isolated scoped outcome benchmark, not source-only inference
+### Layered full local-core benchmark, not source-only inference
 
-The existing direct graph benchmark will be generalized with a neutral semantic-language manifest and two native renderers. The Basic Memory adapter runs a sibling checkout against a temporary project/home/config/database, performs full indexing, and talks through one persistent public MCP session. Mutation cases use only the throwaway corpus. The harness records revisions, configuration, corpus hashes, raw envelopes, latency, and mutation diffs.
+The existing direct graph benchmark becomes the single comparison harness with a versioned neutral manifest and native renderers. The Basic Memory adapter runs a pinned sibling checkout in a benchmark-managed virtual environment against a temporary project/home/config/database, performs full indexing, and talks through one persistent public MCP session. Exomem uses the same public-session rule. Mutation cases operate only on disposable corpora. The harness records revisions, dependency locks, configuration, corpus/manifest hashes, raw request/response envelopes, latency, response bytes, and before/after filesystem/database evidence.
 
-The manifest predeclares corpus, contender revisions, dimensions, pass criteria, latency/response-size thresholds, normalization, and unsupported/error handling before a run. Contender-neutral user outcomes are exact knowledge-unit retrieval, source-location citation, current/history distinction, safe schema enforcement, external-edit repair without content loss, typed relation direction fidelity, bounded context, and complete mutation cleanup. Supporting measures cover open category parsing, same-content/different-category identity, category-only/text/hybrid recall, edits, moves, deletes, and multi-hop traversal.
+The manifest starts with a full local knowledge-engine capability inventory reconciled against Exomem's generated command registry and each pinned contender's runtime MCP tool list/public CLI inventory. Every supported in-scope capability must map to an executed public-path runtime probe backed by a representative deterministic fixture. Only a verified unsupported result or a justified boundary exclusion may replace execution; a fixture alone never earns coverage. A newly discovered public operation makes inventory validation fail until classified. Hosting, accounts, billing, teams, cloud sync, deployment operations, and graphical interfaces are excluded. Agent-facing shared behavior is exercised over persistent MCP; a product-native CLI may cover a genuinely CLI-only local maintenance operation but cannot substitute for a missing MCP capability and is labelled by surface. The benchmark is layered so one missing optional dependency cannot hide shared-core regressions:
 
-The report keeps every dimension independent and may claim a scoped semantic-governance advantage for the recorded revisions only when Exomem passes every required user outcome, stays within every predeclared no-regression threshold, and demonstrates strictly more of the governed outcomes. Unsupported behavior is reported, never awarded. It never claims overall product superiority, and the harness does not point Basic Memory at a live user vault.
+1. **Shared authoring and retrieval:** create/read/update notes and atomic observations/relations; permalink/title/exact lookup; rare-token and phrase/full-text cases; semantic paraphrase without lexical overlap; hybrid adversarial distractors; type/project/tag/status/date/nested numeric/category/kind filters; combined text-plus-filter and filter-only queries; score/explanation truth; one-to-three-hop typed/directional graph traversal; and bounded context assembly.
+2. **Schema and lifecycle reliability:** infer/diff/validate/save schema behavior; public writes; direct filesystem edits; watcher/reconcile/full-reindex; moves, deletes, recovery, and stale-row removal; current/superseded history; and content-preserving failure behavior.
+3. **Exomem local-core extensions:** durable references, Sources/Evidence and returned provenance, governed typed relations and semantic blocks, review/audit/adoption/reconcile, context packs, dataset-card/query behavior, and representative deterministic PDF/image/audio/video ingestion, search, and read behavior where the local extras are installed. Basic Memory receives `unsupported`, never a synthetic emulation, for capabilities outside its public core.
+
+Each query family includes isolated lane probes and public hybrid probes. Score-truth cases verify that returned BM25, cosine, fusion, graph, boost, and rerank labels agree with the isolated lane membership/order and that one field never changes meaning silently between modes. Retrieval quality cases record exact expected sets/order constraints rather than judging from attractive prose. Model-backed cases pin resolved model revisions and artifact hashes for embeddings, rerankers, CLIP, ASR, and other learned components plus backend, device, dtype/quantization, runtime versions, deterministic seeds where supported, and predeclared numeric/order tolerances. Performance runs record host/OS/CPU/RAM, compute/model/backend configuration, dependency and cache state, warm-up count, repeated counterbalanced samples, timeouts, median and p95 latency, index duration, response bytes, and bounded-context size under predeclared paired non-inferiority bands. They run only on a quiesced machine and never compensate for functional errors through a weighted aggregate.
+
+The report emits independent `shared_core`, `lifecycle_integrity`, `explanation_truth`, `performance_envelope`, and `exomem_extensions` gates. Unsupported behavior on a contender-neutral shared-core case counts as not passed, not as an exemption. A recorded local-core advantage may be claimed only for the pinned revisions/corpus when preflight proves both environments valid and every required probe completes as pass, behavioral fail, or verified unsupported; every required Exomem shared-core case and outcome passes; Exomem passes every individual case that Basic Memory passes; all required Exomem fixture invariants and paired performance/no-regression thresholds pass; every advertised in-scope Exomem extension designated required by the full profile passes in the pinned extras environment; and at least one such extension is publicly absent from Basic Memory. A case both contenders fail still blocks the full claim, and failures are never hidden inside a coarse dimension aggregate. A valid public operation returning an error is a behavioral result under the predeclared policy, while harness/setup/adapter failure invalidates the claim rather than counting as a contender loss. A lean run with missing media/model extras may still report shared-core results but cannot produce the full local-core-advantage claim. Any unsupported behavior, execution failure, configuration difference, or dependency omission remains visible. The result is never generalized to hosting or overall product superiority, and neither contender is pointed at a live user vault.
 
 ## Data Flow
 
@@ -162,7 +192,7 @@ The report keeps every dimension independent and may claim a scoped semantic-gov
 3. The semantic contract resolves registries, schemas, page lifecycle, and review dispositions.
 4. In-process writers stop on contract errors or atomically commit the file batch.
 5. One post-commit coordinator applies the same parsed result to lexical, embedding, and graph sidecars; stale records for that parent are replaced transactionally within each sidecar.
-6. Recall filters/ranks page and/or unit records and returns parent-aware citations.
+6. Recall normalizes shortcuts and `filters`, filters candidates before ranking, ranks page and/or unit records, and returns parent-aware citations plus optional reproducible explanation evidence.
 7. Context assembly reuses selected unit records, adds bounded graph/provenance/lifecycle context, and reports truncation.
 8. Every derived record carries the same `parent_generation`, parent source hash, and parser schema version. Query-time validation compares candidate records with the current on-disk parent hash and rejects absent, mismatched, or mixed-generation records; a partial sidecar update can temporarily omit fresh results but cannot surface stale identity/content as current.
 9. Watcher/reconcile follows the same parse/index path; it reports but never destroys externally authored invalid Markdown and repairs incomplete generations.
@@ -174,6 +204,8 @@ The report keeps every dimension independent and may claim a scoped semantic-gov
 - Expected-hash and unit-fingerprint mismatches return stale-reference errors with the current parent hash; no best-effort mutation occurs.
 - Sidecar update failure after a committed Markdown write marks deterministic index drift and schedules/recommends reconcile; Markdown success is not rolled back by deleting user content. Any old-generation candidates fail the current-parent hash check until repaired.
 - Optional embedding import/model failures are reported as degraded unit retrieval and fall back to lexical/category filtering.
+- Filter validation fails before retrieval with the exact field path/operator and expected value shape; unsupported backend filtering never silently broadens the query.
+- Explanation reports missing/degraded lanes and unavailable measurements explicitly; it never substitutes zero or overloads one score field across retrieval modes.
 - Unregistered categories remain valid unless an explicitly resolved contract forbids them. Unregistered relations remain preserved but semantically inert under the existing relation-registry rules and cannot satisfy the relation disposition.
 - Category-registry or contract conflicts fail closed for in-process strict writes and surface actionable audit findings for existing/out-of-band content.
 
@@ -181,12 +213,14 @@ The report keeps every dimension independent and may claim a scoped semantic-gov
 
 - [Risk] Parsing bracketed bullets anywhere can classify unrelated prose as observations. → Exclude task boxes/fences, use a strict grammar, preserve spans, make canonical authoring section-scoped, and benchmark false positives on the existing vault before changing defaults.
 - [Risk] Unit-level retrieval floods results from a single page. → Keep page-level default, require explicit/implicit unit mode through filters, cap per-parent results in mixed mode, and expose truncation/grouping.
+- [Risk] A generic filter DSL becomes an unsafe query language or diverges by backend. → Restrict namespaces/operators/types/depth/clause count, compile to one typed AST, and conformance-test every backend against the same fixture matrix.
+- [Risk] Raw scores look authoritative or comparable when they are not. → Label metric/backend/normalization, expose the ordering chain rather than a synthetic confidence, and test explanation truth against isolated lanes.
 - [Risk] Open categories fragment into near-duplicates. → Preserve raw labels, normalize exact matching, surface frequency/alias proposals, and require review before registry changes.
 - [Risk] Automatic category-to-kind inference launders semantics. → Never infer kind from an open category; only explicit rich headings/structured tool inputs assign governed kinds.
 - [Risk] Multiple derived indexes drift. → Parse once, stamp every record with one parent generation/source hash, reject mismatches at query time, replace parent-owned rows transactionally per sidecar, and make reconcile authoritative.
 - [Risk] Strict schemas make legacy notes uneditable. → Default to warn, grandfather existing debt, require explicit strict activation, and report resolution precedence.
 - [Risk] Relation enforcement makes the first note impossible. → Permit the narrowly defined empty-corpus bootstrap disposition; require review once real candidates can exist.
-- [Risk] The direct contender's documented strict schema behavior differs from runtime. → Score executed public behavior only and keep unsupported/contradictory claims visible in benchmark output.
+- [Risk] The direct contender's documentation differs from runtime or its environment drifts. → Pin the sibling revision and lock/config hashes, score executed public behavior only, and keep unsupported/contradictory claims visible.
 - [Risk] Scope grows across too many modules. → Implement in dependency-ordered slices around the parser/contract boundary, maintain additive defaults, and require focused + lean-suite gates after every slice.
 
 ## Migration Plan
@@ -194,15 +228,17 @@ The report keeps every dimension independent and may claim a scoped semantic-gov
 1. Ship parser/model and read-only census behind no feature flag; unknown existing syntax remains Markdown. First activation writes one portable governed baseline manifest but does not rewrite existing pages.
 2. Add sidecar schema versions and rebuild paths; compare unit census/false positives on fixtures and a read-only existing-vault scan.
 3. Add read/context and explicit unit retrieval while preserving page-default bytes.
-4. Add category/kind schema inference and proposal-only registries.
-5. Add `observe_memory` and shared warn-mode writer feedback.
-6. Enable strict saved-contract behavior only when a user explicitly saves/activates it.
-7. Activate the new-page relation contract; grandfather existing pages into the review queue.
-8. Land the direct semantic-language benchmark and require the scoped outcome gate before claiming a recorded core semantic-governance advantage.
-9. Update the generic scaffold, docs, generated surfaces, and capability snapshots.
+4. Add the typed filter compiler and backend conformance before exposing generic filters on public surfaces.
+5. Propagate lane measurements and add opt-in retrieval explanations without changing default envelopes.
+6. Add category/kind schema inference and proposal-only registries.
+7. Add `observe_memory` and shared warn-mode writer feedback.
+8. Enable strict saved-contract behavior only when a user explicitly saves/activates it.
+9. Activate the new-page relation contract; grandfather existing pages into the review queue.
+10. Land the layered local-core benchmark, pin/setup its isolated Basic Memory environment, and close or explicitly record every shared-core gap before making a revision-bound claim.
+11. Update the generic scaffold, docs, generated surfaces, and capability snapshots.
 
 Rollback disables unit indexing/retrieval and restores the prior sidecar schema. No Markdown rollback or migration is required because the syntax is ordinary Markdown and all new indexes are derived. Explicit compact observations remain readable text if an older Exomem version is used.
 
 ## Open Questions
 
-None. The user selected open Basic Memory-compatible categories with stronger Exomem governance and authorized the complete core-product implementation. Runtime uncertainties about Basic Memory schema enforcement are benchmark questions, not design blockers.
+None. The user selected open Basic Memory-compatible categories with stronger Exomem governance, one namespaced filter language, opt-in score explanations, and a layered full local-core comparison. Runtime uncertainties about Basic Memory behavior are benchmark questions, not design blockers.
