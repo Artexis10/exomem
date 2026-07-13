@@ -149,6 +149,9 @@ export class ExomemState {
     } catch {
       return json({ error: "invalid request" }, 400);
     }
+    if (!body || typeof body !== "object" || Array.isArray(body)) {
+      return json({ error: "invalid request" }, 400);
+    }
     const collection = body.collection == null ? "" : String(body.collection);
     const itemKey = (key) => `state\0${collection}\0${String(key)}`;
     const read = async (key) => {

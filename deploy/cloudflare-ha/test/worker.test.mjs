@@ -79,6 +79,15 @@ test("opaque shared state supports TTL and bulk operations", async () => {
   assert.deepEqual(values.result, [{ ciphertext: "one" }, { ciphertext: "two" }, null]);
 });
 
+test("shared state rejects a JSON null body with the documented response", async () => {
+  const object = new ExomemState({ storage: new MemoryStorage() });
+
+  const response = await object.fetch(post("/state/list-keys", null));
+
+  assert.equal(response.status, 400);
+  assert.deepEqual(await body(response), { error: "invalid request" });
+});
+
 test("atomic state creation never replaces a live existing value", async () => {
   const object = new ExomemState({ storage: new MemoryStorage() });
   const first = await object.fetch(post("/state/put-if-absent", {
