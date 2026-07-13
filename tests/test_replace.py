@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 import datetime as dt
+import os
+import threading
 from pathlib import Path
 
 import pytest
@@ -10,7 +13,7 @@ import yaml
 
 from exomem import note as note_module
 from exomem import replace as replace_module
-
+from exomem import vault as vault_module
 
 TODAY = dt.date(2026, 5, 25)
 
@@ -34,6 +37,13 @@ def _make_insight(vault: Path, title: str) -> str:
         today=TODAY,
     )
     return result.path
+
+
+def _markdown_snapshot(vault: Path) -> dict[str, str]:
+    return {
+        path.relative_to(vault).as_posix(): _read(path)
+        for path in sorted((vault / "Knowledge Base").rglob("*.md"))
+    }
 
 
 def test_replace_writes_new_and_flips_old(vault: Path) -> None:
@@ -240,3 +250,279 @@ def test_replace_propagates_new_note_validation_errors(vault: Path) -> None:
     # Old should be untouched (no half-state)
     old_fm = _fm(vault / old_rel)
     assert old_fm.get("status") != "superseded"
+
+
+def test_concurrent_replace_has_exactly_one_winner(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Concurrent Supersession Source")
+    real_note = note_module.note
+    both_eligible = threading.Barrier(2)
+
+    def note_after_both_eligibility_reads(*args, **kwargs):
+        both_eligible.wait(timeout=5)
+        return real_note(*args, **kwargs)
+
+    monkeypatch.setattr(replace_module.note_module, "note", note_after_both_eligibility_reads)
+
+    def supersede(label: str):
+        title = f"Concurrent Successor {label}"
+        try:
+            return label, replace_module.replace(
+                vault,
+                old_path=old_rel,
+                content=f"# {title}\n\nrevised by {label}.\n",
+                note_type="insight",
+                title=title,
+                today=TODAY,
+            )
+        except replace_module.ReplaceError as error:
+            return label, error
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
+        outcomes = list(pool.map(supersede, ("A", "B")))
+
+    winners = [
+        (label, result)
+        for label, result in outcomes
+        if isinstance(result, replace_module.ReplaceResult)
+    ]
+    losers = [
+        (label, result)
+        for label, result in outcomes
+        if isinstance(result, replace_module.ReplaceError)
+    ]
+    assert len(winners) == 1
+    assert len(losers) == 1
+    assert losers[0][1].code == "STALE_SUPERSEDE"
+
+    winner_label, winner = winners[0]
+    loser_label = losers[0][0]
+    old_fm = _fm(vault / old_rel)
+    assert old_fm["status"] == "superseded"
+    assert old_fm["superseded_by"] == [
+        f"[[{winner.new_path.removesuffix('.md')}]]"
+    ]
+    assert (vault / winner.new_path).exists()
+    loser_path = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Insights"
+        / f"concurrent-successor-{loser_label.lower()}.md"
+    )
+    assert not loser_path.exists()
+    log_text = _read(vault / "Knowledge Base" / "log.md")
+    assert f"Concurrent Successor {winner_label}" in log_text
+    assert f"Concurrent Successor {loser_label}" not in log_text
+
+
+def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Atomic Supersession Source")
+    before = _markdown_snapshot(vault)
+    real_batch = replace_module.batch_atomic_write
+    real_os_replace = os.replace
+
+    def fail_second_destination(writes, *, vault_root):
+        replacements = 0
+
+        def injected_replace(src, dst):
+            nonlocal replacements
+            if str(src).endswith(".tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected supersession commit failure")
+            return real_os_replace(src, dst)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module.os, "replace", injected_replace)
+            return real_batch(writes, vault_root=vault_root)
+
+    monkeypatch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
+
+    with pytest.raises(OSError, match="injected supersession commit failure"):
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content="# Atomic Successor\n\nreplacement body.\n",
+            note_type="insight",
+            title="Atomic Successor",
+            sources=[
+                "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements"
+            ],
+            today=TODAY,
+        )
+
+    assert _markdown_snapshot(vault) == before
+    resolver = replace_module.find_module._get_query_resolver(vault)
+    assert "Knowledge Base/Notes/Insights/atomic-successor" not in resolver.full_paths
+
+
+@pytest.mark.parametrize("registry_existed", [False, True])
+def test_replace_failure_does_not_leave_project_registration_or_folder(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registry_existed: bool,
+) -> None:
+    old_rel = _make_insight(vault, "Project Registration Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    if registry_existed:
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(
+            "projects:\n"
+            "  personal:\n"
+            "    folder: Personal\n"
+            "    category: cross-cutting\n",
+            encoding="utf-8",
+        )
+    project_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Atomic Deferred Project"
+    )
+    registry_before = _read(registry) if registry_existed else None
+    folder_existed = project_folder.exists()
+    real_batch = replace_module.batch_atomic_write
+    real_os_replace = os.replace
+
+    def fail_second_destination(writes, *, vault_root):
+        replacements = 0
+
+        def injected_replace(src, dst):
+            nonlocal replacements
+            if str(src).endswith(".tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected project supersession failure")
+            return real_os_replace(src, dst)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module.os, "replace", injected_replace)
+            return real_batch(writes, vault_root=vault_root)
+
+    monkeypatch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
+
+    with pytest.raises(OSError, match="injected project supersession failure"):
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content="# Atomic Project Successor\n\nreplacement body.\n",
+            note_type="research-note",
+            title="Atomic Project Successor",
+            project="atomic-deferred-project",
+            today=TODAY,
+        )
+
+    assert registry.exists() is registry_existed
+    if registry_existed:
+        assert _read(registry) == registry_before
+    assert project_folder.exists() is folder_existed
+
+
+def test_replace_staging_failure_cleans_temp_registry_and_project_folder(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Staging Failure Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    project_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Staging Failure Project"
+    )
+    real_write_text = Path.write_text
+    temp_writes = 0
+
+    def fail_second_temp_write(path: Path, *args, **kwargs):
+        nonlocal temp_writes
+        if path.name.endswith(".tmp"):
+            temp_writes += 1
+            if temp_writes == 2:
+                raise OSError("injected supersession staging failure")
+        return real_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", fail_second_temp_write)
+
+    with pytest.raises(OSError, match="injected supersession staging failure"):
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content="# Staging Failure Successor\n\nreplacement body.\n",
+            note_type="research-note",
+            title="Staging Failure Successor",
+            project="staging-failure-project",
+            today=TODAY,
+    )
+
+    assert not registry.exists()
+    assert list(vault.rglob("*.tmp")) == []
+    assert not project_folder.exists()
+
+
+def test_plural_project_registration_creates_folder_only_on_success(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    old_rel = _make_insight(vault, "Plural Project Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    failed_folder = (
+        vault / "Knowledge Base" / "Notes" / "Research" / "Failed Plural Project"
+    )
+    successful_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Successful Plural Project"
+    )
+    real_batch = replace_module.batch_atomic_write
+    real_os_replace = os.replace
+
+    def fail_second_destination(writes, *, vault_root):
+        replacements = 0
+
+        def injected_replace(src, dst):
+            nonlocal replacements
+            if str(src).endswith(".tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected plural project failure")
+            return real_os_replace(src, dst)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module.os, "replace", injected_replace)
+            return real_batch(writes, vault_root=vault_root)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
+        with pytest.raises(OSError, match="injected plural project failure"):
+            replace_module.replace(
+                vault,
+                old_path=old_rel,
+                content="# Failed Plural Successor\n\nreplacement body.\n",
+                note_type="insight",
+                title="Failed Plural Successor",
+                projects=["failed-plural-project"],
+                today=TODAY,
+            )
+
+    assert not registry.exists()
+    assert not failed_folder.exists()
+
+    replace_module.replace(
+        vault,
+        old_path=old_rel,
+        content="# Successful Plural Successor\n\nreplacement body.\n",
+        note_type="insight",
+        title="Successful Plural Successor",
+        projects=["successful-plural-project"],
+        today=TODAY,
+    )
+
+    assert "successful-plural-project:" in _read(registry)
+    assert "failed-plural-project:" not in _read(registry)
+    assert successful_folder.is_dir()
