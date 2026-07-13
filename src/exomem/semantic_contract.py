@@ -653,7 +653,7 @@ def build_corpus_context(
             source = disk_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             if (
-                rel_path.startswith(f"{vault.kb_dirname()}/")
+                activation.is_managed_governed_path(root, disk_path)
                 and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
             ):
                 raise activation_manifest.ActivationManifestError(
@@ -1111,7 +1111,12 @@ def _relation_disposition(
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
     if qualifying:
-        actions = ("cleanup_stale_review",) if stale_review else ()
+        if stale_review:
+            actions = ("cleanup_stale_review",)
+        elif review is not None:
+            actions = ("cleanup_relation_review",)
+        else:
+            actions = ()
         return RelationDisposition(
             kind="qualifying_relation",
             satisfied=True,
@@ -1256,7 +1261,16 @@ def _registry_findings(
     findings: list[ContractFinding] = []
     for registry_finding in corpus.registry.findings:
         raw = str(registry_finding.get("path", "registry"))
-        relation = relation_registry.normalize_relation(raw.split(".")[-1]) or raw
+        matching_extensions = tuple(
+            key
+            for key in corpus.registry.extensions
+            if raw == f"extensions.{key}" or raw.startswith(f"extensions.{key}.")
+        )
+        relation = (
+            max(matching_extensions, key=lambda key: (len(key), key))
+            if matching_extensions
+            else raw
+        )
         findings.append(
             ContractFinding(
                 code=str(registry_finding.get("code", "invalid_relation_registry")),
@@ -1540,15 +1554,27 @@ def _raw_findings(
     return findings, disposition
 
 
-def _corpus_mismatch_finding(page: SemanticPageState) -> ContractFinding:
+def _corpus_mismatch_finding(
+    page: SemanticPageState,
+    *,
+    phase: str,
+) -> ContractFinding:
     return ContractFinding(
         code="SEMANTIC_CORPUS_STATE_MISMATCH",
         severity="error",
         path=page.path,
         span=None,
-        detail="the supplied after-corpus snapshot does not contain the evaluated page state",
+        detail=(
+            f"the supplied {phase}-corpus snapshot does not contain the evaluated "
+            "page state"
+        ),
         remediation="Rebuild the immutable corpus context with the exact pending candidate.",
-        governed_element_identity=("corpus", page.identity_kind, page.identity),
+        governed_element_identity=(
+            "corpus",
+            phase,
+            page.identity_kind,
+            page.identity,
+        ),
         resolved_rule=("semantic_contract", "corpus", "context"),
     )
 
@@ -1578,6 +1604,14 @@ def evaluate(
     """Evaluate supplied immutable state without crossing any adapter boundary."""
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
+    before_context_matches = (
+        before is None or before_corpus.pages.get(before.path) == before
+    )
+    effective_before_corpus = (
+        before_corpus
+        if before_context_matches or before is None
+        else before_corpus.with_candidate(before)
+    )
     after_context_matches = after_corpus.pages.get(after.path) == after
     effective_after_corpus = (
         after_corpus if after_context_matches else after_corpus.with_candidate(after)
@@ -1589,22 +1623,24 @@ def evaluate(
         review=after_review,
         operation=operation,
         before=before,
-        before_corpus=before_corpus,
+        before_corpus=effective_before_corpus,
         mode=mode,
     )
     if not after_context_matches:
-        after_findings.append(_corpus_mismatch_finding(after))
+        after_findings.append(_corpus_mismatch_finding(after, phase="after"))
+    if before is not None and not before_context_matches:
+        after_findings.append(_corpus_mismatch_finding(before, phase="before"))
     before_findings: list[ContractFinding] = []
     before_disposition: RelationDisposition | None = None
     if before is not None:
         before_findings, before_disposition = _raw_findings(
             before,
             before_contracts,
-            before_corpus,
+            effective_before_corpus,
             review=before_review,
             operation=operation,
             before=before,
-            before_corpus=before_corpus,
+            before_corpus=effective_before_corpus,
             mode=mode,
         )
 

@@ -269,6 +269,98 @@ def test_evaluate_fails_closed_when_after_corpus_does_not_match_after_state(
     assert not result.relation_disposition.qualifying_facts
 
 
+def test_evaluate_fails_closed_when_before_corpus_does_not_match_before_state(
+    tmp_path: Path,
+) -> None:
+    before = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n"),
+    )
+    stale_before = _state(
+        tmp_path,
+        before.path,
+        _source(body="## Relations\n- custom.rel [[Missing]]\n"),
+    )
+    after = _state(
+        tmp_path,
+        before.path,
+        _source(body="Changed.\n\n## Relations\n- custom.rel [[Missing]]\n"),
+    )
+    stale_before_corpus = _corpus(tmp_path, stale_before)
+    after_corpus = _corpus(tmp_path, after)
+
+    result = _evaluate(
+        before=before,
+        after=after,
+        before_corpus=stale_before_corpus,
+        after_corpus=after_corpus,
+        grandfathered=True,
+    )
+
+    assert result.should_block
+    assert any(
+        finding.code == "SEMANTIC_CORPUS_STATE_MISMATCH"
+        for finding in result.blocking_findings
+    )
+    unregistered = [
+        finding
+        for finding in result.findings
+        if finding.code == "unregistered_relation"
+    ]
+    assert len(unregistered) == 1
+    assert unregistered[0].severity == "error"
+
+
+def test_outside_kb_pages_remain_resolvable_but_never_governed(
+    tmp_path: Path,
+) -> None:
+    outside_compiled = _state(
+        tmp_path,
+        "Outside/compiled.md",
+        _source(title="Outside Compiled", page_type="insight"),
+    )
+    outside_entity = _state(
+        tmp_path,
+        "Outside/entity.md",
+        _source(title="Outside Entity", page_type="entity"),
+    )
+    candidate = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/candidate.md",
+        _source(body="## Relations\n- supports [[Outside Entity]]\n"),
+    )
+    before_corpus = _corpus(tmp_path, outside_compiled, outside_entity)
+    after_corpus = _corpus(tmp_path, outside_compiled, outside_entity, candidate)
+    fact = after_corpus.outbound[candidate.path][0]
+
+    qualification = semantic_contract.qualify_relation(
+        fact,
+        registry=relation_registry.core_registry(),
+        corpus=after_corpus,
+    )
+    result = _evaluate(
+        before=None,
+        after=candidate,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        operation="create",
+    )
+
+    assert outside_compiled.path in after_corpus.pages
+    assert outside_entity.path in after_corpus.pages
+    assert fact.target_status == "resolved"
+    assert not outside_compiled.eligible_compiled
+    assert not outside_entity.eligible_governed
+    assert after_corpus.eligible_governed_paths == frozenset({candidate.path})
+    assert [item.rel_path for item in after_corpus.activation_census.candidates] == [
+        candidate.path
+    ]
+    assert not qualification.qualifies
+    assert "ineligible_target" in qualification.reasons
+    assert result.relation_disposition.kind == "bootstrap"
+
+
 def test_relation_qualification_outbound_inbound_entity_and_self_rejection(
     tmp_path: Path,
 ) -> None:
@@ -791,6 +883,45 @@ def test_reviewed_none_bootstrap_and_stale_cleanup_order(tmp_path: Path) -> None
     assert "cleanup_stale_review" in stale_plus_relation.actions
 
 
+@pytest.mark.parametrize("kind", ["reviewed_none", "bootstrap"])
+def test_qualifying_relation_cleans_up_current_non_edge_review(
+    tmp_path: Path,
+    kind: str,
+) -> None:
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern"),
+    )
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            exomem_id=_ID_A,
+            body="## Relations\n- supports [[Target]]\n",
+        ),
+    )
+    corpus = _corpus(tmp_path, page, target)
+    review = semantic_contract.RelationReviewState(
+        kind=kind,
+        page_identity=page.identity,
+        content_fingerprint=page.review_fingerprint,
+        reason="Previously reviewed",
+    )
+
+    result = _evaluate(
+        before=page,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+        before_review=review,
+        after_review=review,
+    )
+
+    assert result.relation_disposition.kind == "qualifying_relation"
+    assert result.actions == ("cleanup_relation_review",)
+
+
 def test_edit_cannot_synthesize_bootstrap_and_entity_expires_bound_bootstrap(
     tmp_path: Path,
 ) -> None:
@@ -1027,6 +1158,43 @@ def test_registry_diagnostics_keep_structured_category_and_relation_identities(
         finding.resolved_rule == ("relations", "relations", "registry")
         for finding in result.findings
     )
+
+
+def test_global_relation_registry_finding_uses_exact_extension_identity(
+    tmp_path: Path,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "extensions": {
+                "science.bad": {
+                    "parent": "not_a_core_relation",
+                    "description": "Invalid extension",
+                }
+            },
+        }
+    )
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n"),
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page,),
+        registry=registry,
+    )
+
+    result = _evaluate(
+        before=page,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    finding = next(item for item in result.findings if item.code == "invalid_parent")
+    assert finding.governed_element_identity == ("relations", "science.bad")
+    assert finding.resolved_rule == ("relations", "science.bad", "registry")
 
 
 def test_contract_finding_key_is_exact_public_triple() -> None:

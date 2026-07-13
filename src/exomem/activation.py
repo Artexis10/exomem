@@ -165,9 +165,23 @@ def is_eligible_compiled_page(vault_root: Path, page: Any) -> bool:
     return _eligible_for_types(vault_root, page, page_types=_COMPILED_PAGE_TYPES)
 
 
+def is_managed_governed_path(vault_root: Path, path: Path | str) -> bool:
+    """Return whether ``path`` resolves inside the configured governed subtree."""
+    root = Path(vault_root)
+    candidate = Path(path)
+    absolute = candidate if candidate.is_absolute() else root / candidate
+    try:
+        absolute.resolve().relative_to(kb_root(root).resolve())
+    except (OSError, ValueError):
+        return False
+    return True
+
+
 def _eligible_for_types(
     vault_root: Path, page: Any, *, page_types: frozenset[str]
 ) -> bool:
+    if not is_managed_governed_path(vault_root, page.path):
+        return False
     if page.page_type not in page_types:
         return False
     if page.path.name in {"index.md", "log.md"}:
