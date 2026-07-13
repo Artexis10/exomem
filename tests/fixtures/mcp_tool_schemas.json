@@ -2298,7 +2298,7 @@
         },
         "subject": {
           "default": "contract",
-          "description": "`contract`, `relations`, or `traversal-profiles`.",
+          "description": "`contract`, `categories`, `relations`, or `traversal-profiles`.",
           "type": "string"
         },
         "project": {
@@ -2370,7 +2370,7 @@
             }
           ],
           "default": null,
-          "description": "Reviewed relation registry or traversal-profile proposal."
+          "description": "Reviewed semantic-language, relation, or traversal-profile proposal."
         },
         "include_model_suggestions": {
           "default": false,

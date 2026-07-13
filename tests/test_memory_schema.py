@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import audit, commands, memory_schema
+from exomem import audit, commands, memory_schema, semantic_language_registry
 from exomem.__main__ import main
 
 
@@ -389,3 +389,267 @@ def test_relation_diff_without_proposal_compares_corpus_reality(tmp_path: Path) 
     assert result["comparison"] == "corpus"
     assert result["changed"] is True
     assert result["changes"]["added"] == ["science.replicates"]
+
+
+def _seed_category_pages(vault: Path) -> list[Path]:
+    schema_dir = vault / "Knowledge Base" / "_Schema"
+    schema_dir.mkdir(parents=True, exist_ok=True)
+    (schema_dir / "SKILL.md").write_text("# Test schema\n", encoding="utf-8")
+    pages: list[Path] = []
+    bodies = (
+        "- [Äri Reegel] " + "A" * 190 + " ^long-example\n\n"
+        + "".join(f"- [Äri Reegel] Extra example {index}\n" for index in range(5))
+        + "\n"
+        "## Decision\n- category: configuration\n- id: rich-config\n\nUse SQLite.\n",
+        "- [äri-reegel] Keep evidence attached\n"
+        "- [configuration] Session lifetime is 30 days\n",
+    )
+    for index, body in enumerate(bodies):
+        path = vault / "Knowledge Base" / "Notes" / f"categories-{index}.md"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "---\n"
+            "type: insight\n"
+            "project: atlas\n"
+            "projects:\n"
+            "  - atlas\n"
+            "  - companion\n"
+            "---\n\n"
+            f"# Categories {index}\n\n{body}",
+            encoding="utf-8",
+        )
+        pages.append(path)
+    return pages
+
+
+def test_category_inference_profiles_authored_keys_forms_scopes_and_examples(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_category_pages(vault)
+    reviewed = {
+        "schema_version": 1,
+        "categories": {
+            "config": {
+                "description": "Configuration facts",
+                "aliases": ["configuration"],
+                "scope": {"projects": ["companion"], "page_types": ["insight"]},
+            }
+        },
+        "kinds": {},
+    }
+    semantic_language_registry.save_registry(vault, reviewed)
+    parse_calls = 0
+    original_parse = memory_schema.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(memory_schema.semantic_units, "parse_semantic_units", counted_parse)
+    before = [path.read_text(encoding="utf-8") for path in pages]
+
+    first = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", project="atlas"
+    )
+    second = commands.op_schema_memory(
+        vault, operation="infer", subject="categories", project="atlas"
+    )
+
+    assert first == second
+    assert parse_calls == 2 * len(pages)
+    assert first["page_count"] == first["sample_size"] == 2
+    assert first["unit_count"] == first["observation_count"] == 9
+    assert first["proposal"] == reviewed
+    assert first["candidate_changes"] == []
+    assert first["registry_findings"] == []
+    assert [path.read_text(encoding="utf-8") for path in pages] == before
+
+    authored = next(
+        item for item in first["categories"] if item["category_key"] == "äri_reegel"
+    )
+    assert authored["unit_count"] == 7
+    assert authored["page_count"] == 2
+    assert authored["raw_forms"] == {"Äri Reegel": 6, "äri-reegel": 1}
+    assert authored["canonical_collision"] is True
+    assert authored["forms"] == {"compact": 7}
+    assert authored["page_types"] == {"insight": 7}
+    assert authored["projects"] == {"atlas": 7, "companion": 7}
+    assert authored["examples"][0]["path"].endswith("categories-0.md")
+    assert authored["examples"][0]["anchor"] == "long-example"
+    assert authored["examples"][0]["excerpt_truncated"] is True
+    assert len(authored["examples"]) == 5
+
+    aliased = next(
+        item
+        for item in first["categories"]
+        if item["category_key"] == "configuration"
+    )
+    assert aliased["resolved_category"] == "config"
+    assert aliased["registry_status"] == "alias"
+    assert aliased["unit_count"] == 2
+    assert aliased["forms"] == {"compact": 1, "rich": 1}
+    assert all(item["category_key"] != "config" for item in first["categories"])
+    assert first["normalization_candidates"][0]["basis"] == "shared_authored_normalization"
+
+
+def test_category_validation_keeps_unknown_open_and_reports_deprecation_and_scope(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed_category_pages(vault)
+    proposal = {
+        "schema_version": 1,
+        "categories": {
+            "configuration": {
+                "description": "Retired configuration facts",
+                "status": "deprecated",
+                "replaced_by": "config",
+            },
+            "config": {
+                "description": "Configuration facts",
+                "scope": {"projects": ["other"]},
+            },
+        },
+        "kinds": {},
+    }
+
+    result = commands.op_schema_memory(
+        vault,
+        operation="validate",
+        subject="categories",
+        proposal=proposal,
+        strict=True,
+    )
+
+    codes = {finding["code"] for finding in result["findings"]}
+    assert "deprecated" in codes
+    assert "scope_violation" not in codes
+    assert result["valid"] is True
+    assert result["strict_failed"] is True
+    assert "äri_reegel" not in codes
+
+    scoped = {
+        **proposal,
+        "categories": {
+            **proposal["categories"],
+            "configuration": {
+                "description": "Configuration facts",
+                "scope": {"projects": ["other"]},
+            },
+        },
+    }
+    scoped_result = commands.op_schema_memory(
+        vault, operation="validate", subject="categories", proposal=scoped
+    )
+    assert "scope_violation" in {
+        finding["code"] for finding in scoped_result["findings"]
+    }
+
+    invalid = {
+        "schema_version": 1,
+        "categories": {
+            "config": {"description": 42, "aliases": ["shared"]},
+            "rule": {"description": "Rules", "aliases": ["shared"]},
+        },
+        "kinds": {},
+    }
+    invalid_validation = commands.op_schema_memory(
+        vault, operation="validate", subject="categories", proposal=invalid
+    )
+    invalid_diff = commands.op_schema_memory(
+        vault, operation="diff", subject="categories", proposal=invalid
+    )
+    invalid_codes = {item["code"] for item in invalid_validation["findings"]}
+    assert {"invalid_type", "alias_conflict"} <= invalid_codes
+    assert invalid_validation["valid"] is False
+    assert {item["code"] for item in invalid_diff["registry_findings"]} >= invalid_codes
+
+
+def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
+    tmp_path: Path,
+) -> None:
+    vault = tmp_path / "vault"
+    _seed_category_pages(vault)
+    current = {
+        "schema_version": 1,
+        "categories": {},
+        "kinds": {
+            "protocol": {
+                "description": "A repeatable protocol",
+                "heading_aliases": ["protocols"],
+            }
+        },
+    }
+    created = semantic_language_registry.save_registry(vault, current)
+    reviewed = {
+        **current,
+        "categories": {"config": {"description": "Configuration facts"}},
+    }
+
+    diff = commands.op_schema_memory(
+        vault, operation="diff", subject="categories", proposal=reviewed
+    )
+    assert diff["comparison"] == "proposal"
+    assert diff["changes"]["categories"]["added"] == ["config"]
+    assert diff["changes"]["kinds"] == {"added": [], "removed": [], "modified": {}}
+
+    inferred = commands.op_schema_memory(vault, operation="infer", subject="categories")
+    assert inferred["proposal"]["kinds"] == current["kinds"]
+    with pytest.raises(ValueError, match="INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL"):
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal={"schema_version": 1, "categories": reviewed["categories"]},
+            expected_hash=created["content_hash"],
+        )
+    with pytest.raises(ValueError, match="CATEGORY_SAVE_KIND_CHANGE"):
+        commands.op_schema_memory(
+            vault,
+            operation="infer",
+            subject="categories",
+            save=True,
+            proposal={**reviewed, "kinds": {}},
+            expected_hash=created["content_hash"],
+        )
+    with pytest.raises(ValueError, match="INVALID_SCHEMA_OPERATION"):
+        commands.op_schema_memory(
+            vault,
+            operation="validate",
+            subject="categories",
+            save=True,
+            proposal=reviewed,
+        )
+
+    saved = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="categories",
+        save=True,
+        proposal=reviewed,
+        expected_hash=created["content_hash"],
+    )["saved"]
+    assert saved["created"] is False
+    loaded = semantic_language_registry.load_registry(vault)
+    assert "protocol" in loaded.kinds
+    assert "config" in loaded.categories
+
+    kind_change = {
+        **reviewed,
+        "kinds": {
+            "workflow": {"description": "A workflow"},
+        },
+    }
+    separate = commands.op_schema_memory(
+        vault, operation="diff", subject="categories", proposal=kind_change
+    )
+    assert separate["changes"]["categories"] == {
+        "added": [],
+        "removed": [],
+        "modified": {},
+    }
+    assert separate["changes"]["kinds"]["added"] == ["workflow"]
+    assert separate["changes"]["kinds"]["removed"] == ["protocol"]

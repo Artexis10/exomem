@@ -73,6 +73,7 @@ from . import relation_registry as relation_registry_module
 from . import replace as replace_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
+from . import semantic_language_registry as semantic_language_registry_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -3873,14 +3874,14 @@ def op_schema_memory(
     Args:
         operation: infer, validate, or diff.
         name: Lowercase contract slug; required only for `subject="contract"`.
-        subject: `contract`, `relations`, or `traversal-profiles`.
+        subject: `contract`, `categories`, `relations`, or `traversal-profiles`.
         project: Optional project scope for inference.
         page_type: Optional page-type scope for inference.
         save: Persist an inferred proposal. Default false.
         expected_hash: Required current hash when overwriting a saved contract.
         strict: In validate mode, signal a failing CLI/CI outcome on findings.
         compare_to: In diff mode, compare to this saved contract instead of corpus reality.
-        proposal: Reviewed relation registry or traversal-profile proposal.
+        proposal: Reviewed semantic-language, relation, or traversal-profile proposal.
         include_model_suggestions: Request response-only optional relation suggestions.
 
     Returns:
@@ -3888,6 +3889,86 @@ def op_schema_memory(
     """
     operation = operation.strip().lower()
     subject = subject.strip().lower()
+    if subject == "categories":
+        if operation == "infer":
+            result = memory_schema_module.infer_category_registry(
+                vault_root,
+                project=project,
+                page_type=page_type,
+            )
+            if save:
+                if proposal is None or not isinstance(proposal, dict) or not {
+                    "categories",
+                    "kinds",
+                } <= set(proposal):
+                    raise ValueError(
+                        "INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL: "
+                        "save requires one reviewed categories-and-kinds document"
+                    )
+                current = semantic_language_registry_module.load_registry(vault_root)
+                candidate = semantic_language_registry_module.load_registry(
+                    proposal=proposal
+                )
+                registry_file_exists = semantic_language_registry_module.registry_path(
+                    vault_root
+                ).exists()
+                if (
+                    registry_file_exists
+                    and not candidate.findings
+                    and semantic_language_registry_module.registry_proposal(current)["kinds"]
+                    != semantic_language_registry_module.registry_proposal(candidate)["kinds"]
+                ):
+                    raise ValueError(
+                        "CATEGORY_SAVE_KIND_CHANGE: category governance must preserve "
+                        "the reviewed custom-kind namespace"
+                    )
+                result["saved"] = semantic_language_registry_module.save_registry(
+                    vault_root,
+                    proposal,
+                    expected_hash=expected_hash,
+                )
+            return result
+        if save:
+            raise ValueError(
+                "INVALID_SCHEMA_OPERATION: save is supported only for infer"
+            )
+        if operation == "validate":
+            return memory_schema_module.validate_category_registry(
+                vault_root,
+                proposal=proposal,
+                project=project,
+                page_type=page_type,
+                strict=strict,
+            )
+        if operation == "diff":
+            before = semantic_language_registry_module.load_registry(vault_root)
+            if proposal is not None:
+                after = semantic_language_registry_module.load_registry(proposal=proposal)
+                comparison = "proposal"
+            else:
+                inferred = memory_schema_module.infer_category_registry(
+                    vault_root,
+                    project=project,
+                    page_type=page_type,
+                )
+                after = semantic_language_registry_module.load_registry(
+                    proposal=inferred["proposal"]
+                )
+                comparison = "corpus"
+            result = memory_schema_module.diff_category_registries(before, after)
+            result.update(
+                {
+                    "content_hash": before.content_hash,
+                    "comparison": comparison,
+                    "registry_findings": [
+                        item.as_dict() for item in after.findings
+                    ],
+                }
+            )
+            return result
+        raise ValueError(
+            "INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff"
+        )
     if subject == "relations":
         if operation == "infer":
             result = memory_schema_module.infer_relation_registry(
@@ -3980,7 +4061,10 @@ def op_schema_memory(
             }
         raise ValueError("INVALID_SCHEMA_OPERATION: operation must be infer, validate, or diff")
     if subject != "contract":
-        raise ValueError("INVALID_SCHEMA_SUBJECT: subject must be contract, relations, or traversal-profiles")
+        raise ValueError(
+            "INVALID_SCHEMA_SUBJECT: subject must be contract, categories, relations, "
+            "or traversal-profiles"
+        )
     if not name:
         raise ValueError("INVALID_CONTRACT: name is required for contract governance")
     if operation == "infer":

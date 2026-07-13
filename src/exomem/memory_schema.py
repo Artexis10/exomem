@@ -16,6 +16,8 @@ from . import (
     markdown_relations,
     relation_registry,
     semantic_blocks,
+    semantic_language_registry,
+    semantic_units,
     traversal_profiles,
     vault,
 )
@@ -398,6 +400,330 @@ def relation_registry_proposal(registry: relation_registry.RelationRegistry) -> 
             value["scope"] = scope
         extensions[key] = value
     return {"schema_version": 1, "extensions": extensions}
+
+
+def infer_category_registry(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+) -> dict[str, Any]:
+    """Profile authored category identity without proposing semantic equivalence."""
+    registry = semantic_language_registry.load_registry(vault_root)
+    pages, observations = _scan_category_observations(
+        vault_root,
+        project=project,
+        page_type=page_type,
+        registry=registry,
+    )
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for item in observations:
+        grouped.setdefault(str(item["category_key"]), []).append(item)
+
+    categories: list[dict[str, Any]] = []
+    normalization_candidates: list[dict[str, Any]] = []
+    for key in sorted(grouped):
+        items = grouped[key]
+        raw_forms = Counter(str(item["category_raw"]) for item in items)
+        forms = Counter(str(item["form"]) for item in items)
+        page_types = Counter(str(item["page_type"]) for item in items)
+        projects = Counter(
+            project_key
+            for item in items
+            for project_key in item["projects"]
+        )
+        resolved = Counter(str(item["resolved_category"]) for item in items)
+        statuses = Counter(str(item["registry_status"]) for item in items)
+        replacements = Counter(
+            str(item["replacement"])
+            for item in items
+            if item["replacement"] is not None
+        )
+        examples = sorted(
+            (
+                {
+                    "path": item["path"],
+                    "line": item["line"],
+                    "anchor": item["anchor"],
+                    "raw_category": item["category_raw"],
+                    "excerpt": item["excerpt"],
+                    "excerpt_truncated": item["excerpt_truncated"],
+                }
+                for item in items
+            ),
+            key=lambda item: (
+                item["path"],
+                item["line"],
+                item["anchor"] or "",
+                item["raw_category"],
+            ),
+        )[:5]
+        raw_form_map = dict(sorted(raw_forms.items()))
+        canonical_collision = len(raw_form_map) > 1
+        if canonical_collision:
+            normalization_candidates.append(
+                {
+                    "category_key": key,
+                    "raw_forms": list(raw_form_map),
+                    "basis": "shared_authored_normalization",
+                }
+            )
+        resolved_map = dict(sorted(resolved.items()))
+        status_map = dict(sorted(statuses.items()))
+        replacement_map = dict(sorted(replacements.items()))
+        categories.append(
+            {
+                "category_key": key,
+                "resolved_category": _single_counter_key(resolved),
+                "registry_status": _single_counter_key(statuses),
+                "replacement": _single_counter_key(replacements),
+                "resolved_categories": resolved_map,
+                "registry_statuses": status_map,
+                "replacements": replacement_map,
+                "unit_count": len(items),
+                "page_count": len({item["path"] for item in items}),
+                "raw_forms": raw_form_map,
+                "canonical_collision": canonical_collision,
+                "forms": dict(sorted(forms.items())),
+                "page_types": dict(sorted(page_types.items())),
+                "projects": dict(sorted(projects.items())),
+                "examples": examples,
+            }
+        )
+
+    return {
+        "subject": "categories",
+        "sample_size": len(pages),
+        "page_count": len(pages),
+        "unit_count": len(observations),
+        "observation_count": len(observations),
+        "categories": categories,
+        "normalization_candidates": normalization_candidates,
+        "explicit_alias_relationships": [
+            {"alias": alias, "category": canonical, "basis": "reviewed_registry"}
+            for alias, canonical in sorted(registry.category_aliases.items())
+        ],
+        "candidate_changes": [],
+        "proposal": semantic_language_registry.registry_proposal(registry),
+        "content_hash": registry.content_hash,
+        "registry_findings": [item.as_dict() for item in registry.findings],
+    }
+
+
+def category_observations(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> list[dict[str, Any]]:
+    """Return deterministic compact and rich category occurrences."""
+    return _scan_category_observations(
+        vault_root,
+        project=project,
+        page_type=page_type,
+        registry=registry,
+    )[1]
+
+
+def _scan_category_observations(
+    vault_root: Path,
+    *,
+    project: str | None = None,
+    page_type: str | None = None,
+    registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> tuple[list[Any], list[dict[str, Any]]]:
+    registry = registry or semantic_language_registry.load_registry(vault_root)
+    pages = _select_pages(vault_root, ContractScope(project, page_type))
+    observations: list[dict[str, Any]] = []
+    for page in pages:
+        projects = tuple(sorted(_page_projects(page.frontmatter)))
+        parse_project = project or (projects[0] if projects else None)
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=registry,
+            project=parse_project,
+            page_type=page.page_type,
+        )
+        for unit in document.units:
+            resolution = _resolve_observed_category(
+                registry,
+                unit.category_raw,
+                projects=projects,
+                page_type=page.page_type,
+                preferred_project=project,
+            )
+            excerpt, truncated = _bounded_excerpt(unit.content)
+            observations.append(
+                {
+                    "category_raw": unit.category_raw,
+                    "category_key": unit.category_key,
+                    "resolved_category": resolution.resolved or unit.category_key,
+                    "registry_status": resolution.status,
+                    "replacement": resolution.replacement,
+                    "form": unit.form,
+                    "kind": unit.kind,
+                    "path": page.rel_path,
+                    "line": unit.line,
+                    "anchor": unit.anchor,
+                    "excerpt": excerpt,
+                    "excerpt_truncated": truncated,
+                    "page_type": page.page_type,
+                    "projects": projects,
+                }
+            )
+    return pages, sorted(
+        observations,
+        key=lambda item: (
+            item["path"],
+            item["line"],
+            item["form"],
+            item["category_key"],
+        ),
+    )
+
+
+def validate_category_registry(
+    vault_root: Path,
+    *,
+    proposal: dict[str, Any] | None = None,
+    project: str | None = None,
+    page_type: str | None = None,
+    strict: bool = False,
+) -> dict[str, Any]:
+    """Validate registry structure and observed deprecated/scoped categories."""
+    registry = (
+        semantic_language_registry.load_registry(proposal=proposal)
+        if proposal is not None
+        else semantic_language_registry.load_registry(vault_root)
+    )
+    findings: list[dict[str, Any]] = [item.as_dict() for item in registry.findings]
+    if not registry.findings:
+        for item in category_observations(
+            vault_root,
+            project=project,
+            page_type=page_type,
+            registry=registry,
+        ):
+            status = item["registry_status"]
+            if status not in {"deprecated", "scope_violation"}:
+                continue
+            findings.append(
+                {
+                    "code": status,
+                    "path": item["path"],
+                    "span": item["anchor"] or f"line-{item['line']}",
+                    "severity": "warning" if status == "deprecated" else "error",
+                    "detail": (
+                        f"observed category {item['category_raw']!r} is "
+                        f"{status}"
+                    ),
+                }
+            )
+    findings.sort(
+        key=lambda item: (
+            str(item.get("path", "")),
+            str(item.get("span", "")),
+            str(item.get("code", "")),
+            str(item.get("detail", "")),
+        )
+    )
+    return {
+        "subject": "categories",
+        "valid": not any(item.get("severity") == "error" for item in findings),
+        "strict": strict,
+        "strict_failed": bool(strict and findings),
+        "content_hash": registry.content_hash,
+        "findings": findings,
+    }
+
+
+def diff_category_registries(
+    before: semantic_language_registry.SemanticLanguageRegistry,
+    after: semantic_language_registry.SemanticLanguageRegistry,
+) -> dict[str, Any]:
+    """Diff reviewed categories and custom kinds as distinct namespaces."""
+    before_proposal = semantic_language_registry.registry_proposal(before)
+    after_proposal = semantic_language_registry.registry_proposal(after)
+    changes = {
+        namespace: _definition_changes(
+            before_proposal[namespace], after_proposal[namespace]
+        )
+        for namespace in ("categories", "kinds")
+    }
+    return {
+        "subject": "categories",
+        "changed": any(_definition_changes_present(value) for value in changes.values()),
+        "categories_changed": _definition_changes_present(changes["categories"]),
+        "kinds_changed": _definition_changes_present(changes["kinds"]),
+        "before_hash": before.content_hash,
+        "after_hash": after.content_hash,
+        "changes": changes,
+    }
+
+
+def _definition_changes(
+    before: dict[str, Any], after: dict[str, Any]
+) -> dict[str, Any]:
+    common = set(before) & set(after)
+    return {
+        "added": sorted(set(after) - set(before)),
+        "removed": sorted(set(before) - set(after)),
+        "modified": {
+            key: {"before": before[key], "after": after[key]}
+            for key in sorted(common)
+            if before[key] != after[key]
+        },
+    }
+
+
+def _definition_changes_present(changes: dict[str, Any]) -> bool:
+    return bool(changes["added"] or changes["removed"] or changes["modified"])
+
+
+def _single_counter_key(values: Counter[str]) -> str | None:
+    return next(iter(values)) if len(values) == 1 else None
+
+
+def _resolve_observed_category(
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    raw: str,
+    *,
+    projects: tuple[str, ...],
+    page_type: str,
+    preferred_project: str | None,
+) -> semantic_language_registry.LabelResolution:
+    key = semantic_language_registry.normalize_label(raw)
+    canonical = registry.category_aliases.get(key, key)
+    definition = registry.categories.get(canonical)
+    matching_projects = (
+        sorted(definition.projects & set(projects)) if definition is not None else []
+    )
+    effective_project = (
+        preferred_project
+        if preferred_project in projects
+        else matching_projects[0]
+        if matching_projects
+        else projects[0]
+        if projects
+        else preferred_project
+    )
+    if matching_projects and preferred_project not in matching_projects:
+        effective_project = matching_projects[0]
+    return registry.resolve_category(
+        raw,
+        project=effective_project,
+        page_type=page_type,
+    )
+
+
+def _bounded_excerpt(value: str, limit: int = 160) -> tuple[str, bool]:
+    excerpt = " ".join(str(value).split())
+    if len(excerpt) <= limit:
+        return excerpt, False
+    return excerpt[: limit - 1].rstrip() + "…", True
 
 
 def infer_traversal_profiles(vault_root: Path) -> dict[str, Any]:

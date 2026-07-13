@@ -1,8 +1,8 @@
-"""Read-only governance for open categories and extensible semantic kinds.
+"""Governance for open categories and extensible semantic kinds.
 
-The registry never mutates a vault and never assigns semantics to an unknown
-category.  It preserves portable rich-block kinds while allowing reviewed,
-vault-owned category aliases and custom rich headings.
+The registry never assigns semantics to an unknown category. It preserves
+portable rich-block kinds while allowing explicitly reviewed, vault-owned
+category aliases and custom rich headings.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any
 
 import yaml
 
-from . import semantic_blocks
+from . import semantic_blocks, vault
 from .kbdir import kb_dirname
 
 SCHEMA_VERSION = 1
@@ -347,6 +347,72 @@ def validate_proposal(proposal: Any) -> list[dict[str, str]]:
 
 def empty_proposal() -> dict[str, Any]:
     return {"schema_version": SCHEMA_VERSION, "categories": {}, "kinds": {}}
+
+
+def registry_proposal(registry: SemanticLanguageRegistry) -> dict[str, Any]:
+    """Serialize the complete reviewed document without derived core metadata."""
+    return {
+        "schema_version": registry.schema_version,
+        "categories": {
+            key: _definition_proposal(registry.categories[key])
+            for key in sorted(registry.categories)
+        },
+        "kinds": {
+            key: _definition_proposal(registry.kinds[key])
+            for key in sorted(registry.kinds)
+        },
+    }
+
+
+def save_registry(
+    vault_root: Path,
+    proposal: dict[str, Any],
+    *,
+    expected_hash: str | None = None,
+) -> dict[str, Any]:
+    """Atomically save one reviewed, complete semantic-language document."""
+    if not isinstance(proposal, dict) or not {"categories", "kinds"} <= set(proposal):
+        raise ValueError(
+            "INCOMPLETE_SEMANTIC_LANGUAGE_PROPOSAL: "
+            "save requires categories and kinds in one reviewed document"
+        )
+    registry = load_registry(proposal=proposal)
+    if registry.findings:
+        raise ValueError(
+            "INVALID_SEMANTIC_LANGUAGE_REGISTRY: "
+            f"{[item.as_dict() for item in registry.findings]!r}"
+        )
+
+    path = registry_path(vault_root)
+    current_hash: str | None = None
+    if path.exists():
+        current_raw = path.read_text(encoding="utf-8")
+        current_hash = _content_hash(current_raw)
+        if expected_hash is None:
+            raise ValueError(
+                "SEMANTIC_LANGUAGE_REGISTRY_EXISTS: provide current expected_hash"
+            )
+        if expected_hash != current_hash:
+            raise ValueError(
+                "STALE_SEMANTIC_LANGUAGE_REGISTRY: "
+                "expected_hash does not match current hash"
+            )
+
+    rendered = yaml.safe_dump(
+        registry_proposal(registry),
+        allow_unicode=True,
+        sort_keys=True,
+    )
+    vault.batch_atomic_write(
+        [vault.PlannedWrite(path=path, content=rendered)], vault_root=Path(vault_root)
+    )
+    _CACHE.pop(path, None)
+    return {
+        "path": path.relative_to(vault_root).as_posix(),
+        "content_hash": _content_hash(rendered),
+        "previous_hash": current_hash,
+        "created": current_hash is None,
+    }
 
 
 def _parse_registry_data(
@@ -742,6 +808,28 @@ def _definition_dict(definition: CategoryDefinition | KindDefinition) -> dict[st
         out["page_types"] = sorted(definition.page_types)
     if definition.replaced_by:
         out["replaced_by"] = definition.replaced_by
+    return out
+
+
+def _definition_proposal(
+    definition: CategoryDefinition | KindDefinition,
+) -> dict[str, Any]:
+    out: dict[str, Any] = {"description": definition.description}
+    if definition.aliases:
+        out["aliases"] = sorted(definition.aliases)
+    if isinstance(definition, KindDefinition) and definition.heading_aliases:
+        out["heading_aliases"] = sorted(definition.heading_aliases)
+    if definition.status != "active":
+        out["status"] = definition.status
+    if definition.replaced_by is not None:
+        out["replaced_by"] = definition.replaced_by
+    scope: dict[str, list[str]] = {}
+    if definition.projects:
+        scope["projects"] = sorted(definition.projects)
+    if definition.page_types:
+        scope["page_types"] = sorted(definition.page_types)
+    if scope:
+        out["scope"] = scope
     return out
 
 
