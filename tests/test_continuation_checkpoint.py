@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -207,6 +209,87 @@ def test_artifact_policy_is_closed_bounded_content_free_and_dirty_first(tmp_path
     assert result[0]["incomplete_count"] == 1
     assert len(result) <= checkpoint.MAX_ARTIFACTS
     assert isinstance(truncation, dict) and isinstance(degradation, list)
+
+
+def test_artifact_parent_swap_never_profiles_outside_content(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    if os.name == "nt":
+        pytest.skip("the live rename race is POSIX-specific")
+    root = tmp_path / "repo"
+    task_dir = root / ".task"
+    task_dir.mkdir(parents=True)
+    task = task_dir / "TASK.md"
+    task.write_text("- [ ] original task\n", encoding="utf-8")
+    original_sha = checkpoint._sha256_bytes(task.read_bytes())
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_task = outside / "TASK.md"
+    outside_task.write_text("- [ ] outside secret\n", encoding="utf-8")
+    outside_sha = checkpoint._sha256_bytes(outside_task.read_bytes())
+    moved = root / ".task-original"
+    real_open = os.open
+    swapped = False
+
+    def racing_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        path_text = os.fspath(path)
+        directory_fd = kwargs.get("dir_fd")
+        if not swapped and path_text == str(task):
+            task_dir.rename(moved)
+            task_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        fd = real_open(path, flags, *args, **kwargs)
+        if not swapped and path_text == ".task" and directory_fd is not None:
+            task_dir.rename(moved)
+            task_dir.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(os, "open", racing_open)
+    result, _, degradation = checkpoint.collect_artifacts(root, dirty_paths=set())
+
+    assert swapped is True
+    hashes = {row["sha256"] for row in result}
+    assert outside_sha not in hashes
+    assert original_sha in hashes
+    assert "artifact_raced" in degradation
+
+
+def test_dirty_openspec_candidate_is_seeded_before_bounded_directory_fallback(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    changes = root / "openspec" / "changes"
+    for number in range(257):
+        path = changes / f"change-{number:03d}" / "tasks.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("- [x] complete\n", encoding="utf-8")
+    dirty = changes / "zzzz-dirty" / "tasks.md"
+    dirty.parent.mkdir()
+    dirty.write_text("- [x] dirty complete\n", encoding="utf-8")
+
+    result, truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths={"openspec/changes/zzzz-dirty/tasks.md"},
+    )
+
+    assert result[0]["path"] == "openspec/changes/zzzz-dirty/tasks.md"
+    assert truncation["artifact_candidates"] is True
+    assert "artifact_candidates_truncated" in degradation
+
+
+def test_porcelain_z_parser_consumes_rename_and_copy_path_pairs() -> None:
+    raw = "R  destination.md\0source.md\0C  copied.md\0original.md\0 M ordinary.md\0"
+
+    assert checkpoint._parse_porcelain_z(raw) == [
+        "destination.md",
+        "source.md",
+        "copied.md",
+        "original.md",
+        "ordinary.md",
+    ]
 
 
 def test_artifact_checkbox_lines_and_paths_are_utf8_byte_bounded(tmp_path: Path) -> None:
@@ -501,6 +584,39 @@ def test_symlinked_state_and_current_are_rejected_without_touching_target(tmp_pa
     assert outside.read_text(encoding="utf-8") == "untouched"
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows directory handles prevent the test rename")
+def test_session_writer_stays_on_retained_root_after_root_path_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    moved = root.with_name("codex-original")
+    real_open = checkpoint._open_posix_directory
+    swapped = False
+
+    def swap_after_open(path: Path, *, create: bool, mode: int) -> int:
+        nonlocal swapped
+        fd = real_open(path, create=create, mode=mode)
+        if not swapped and path.absolute() == root.absolute():
+            root.rename(moved)
+            root.mkdir(mode=0o700)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(checkpoint, "_open_posix_directory", swap_after_open)
+    checkpoint.write_checkpoint(
+        _event(client="codex", session_id="retained-root"),
+        home,
+        observed_at_ns=100,
+    )
+
+    state_name = checkpoint.session_state_dir(home, "codex", "retained-root").name
+    assert swapped is True
+    assert not (root / state_name).exists()
+    assert (moved / state_name / "current.json").is_file()
+
+
 def test_os_advisory_lock_times_out_and_releases_when_owner_is_killed(tmp_path: Path) -> None:
     lock = tmp_path / "lock"
     code = (
@@ -552,6 +668,216 @@ def test_expired_state_is_tombstoned_and_pruned_with_both_lock_orders(
     assert not checkpoint.session_state_dir(home, "codex", "old").exists()
     assert checkpoint.session_state_dir(home, "codex", "current").exists()
     assert not list(checkpoint.client_state_root(home, "codex").glob(".tombstone-*"))
+
+
+def test_prune_refuses_copied_checkpoint_in_arbitrary_user_directory(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    checkpoint.write_checkpoint(
+        _event(client="codex", session_id="real-expired"),
+        home,
+        observed_at_ns=100,
+    )
+    source = checkpoint.session_state_dir(home, "codex", "real-expired")
+    valuable = checkpoint.client_state_root(home, "codex") / "important-user-directory"
+    shutil.copytree(source, valuable)
+    (valuable / "valuable.txt").write_text("do not delete", encoding="utf-8")
+
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session="active",
+        now_ns=100 + checkpoint.RETENTION_NS + 1,
+    )
+
+    assert removed == 1
+    assert valuable.is_dir()
+    assert (valuable / "valuable.txt").read_text(encoding="utf-8") == "do not delete"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits replacing an open directory entry")
+def test_tombstone_replacement_is_not_removed_by_stale_retained_handle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_path = tmp_path / "root"
+    tombstone_path = root_path / ".tombstone-session-token"
+    tombstone_path.mkdir(parents=True)
+    (tombstone_path / "current.json").write_text("discard", encoding="utf-8")
+    moved = root_path / ".tombstone-original"
+    real_unlink = checkpoint._unlink_at
+    swapped = False
+
+    def swap_after_unlink(directory, name: str) -> None:
+        nonlocal swapped
+        real_unlink(directory, name)
+        if not swapped:
+            tombstone_path.rename(moved)
+            tombstone_path.mkdir()
+            swapped = True
+
+    monkeypatch.setattr(checkpoint, "_unlink_at", swap_after_unlink)
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        removed = checkpoint._delete_tombstone_at(root, tombstone_path.name)
+
+    assert swapped is True
+    assert removed is False
+    assert tombstone_path.is_dir()
+
+
+def test_tombstone_revalidates_exact_child_allowlist_before_unlink(tmp_path: Path) -> None:
+    root_path = tmp_path / "root"
+    tombstone_path = root_path / ".tombstone-session-token"
+    tombstone_path.mkdir(parents=True)
+    current = tombstone_path / "current.json"
+    valuable = tombstone_path / "valuable.txt"
+    current.write_text("checkpoint", encoding="utf-8")
+    valuable.write_text("preserve", encoding="utf-8")
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        removed = checkpoint._delete_tombstone_at(root, tombstone_path.name)
+
+    assert removed is False
+    assert current.read_text(encoding="utf-8") == "checkpoint"
+    assert valuable.read_text(encoding="utf-8") == "preserve"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permits replacing an open directory entry")
+def test_tombstone_expected_identity_rejects_replacement_before_open(tmp_path: Path) -> None:
+    root_path = tmp_path / "root"
+    tombstone_path = root_path / ".tombstone-session-token"
+    tombstone_path.mkdir(parents=True)
+    (tombstone_path / "current.json").write_text("original", encoding="utf-8")
+    moved = root_path / ".tombstone-original"
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._open_secure_child_directory(
+            root, tombstone_path.name, create=False
+        ) as original:
+            identity = checkpoint._directory_identity(original)
+        tombstone_path.rename(moved)
+        tombstone_path.mkdir()
+        replacement = tombstone_path / "current.json"
+        replacement.write_text("replacement", encoding="utf-8")
+        removed = checkpoint._delete_tombstone_at(root, tombstone_path.name, identity)
+
+    assert removed is False
+    assert replacement.read_text(encoding="utf-8") == "replacement"
+    assert (moved / "current.json").read_text(encoding="utf-8") == "original"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-specific")
+def test_fifo_transcript_fails_soft_without_blocking(tmp_path: Path) -> None:
+    fifo = tmp_path / "transcript.fifo"
+    os.mkfifo(fifo)
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "print(json.dumps(c.profile_transcript(sys.argv[1],Path(sys.argv[2]))))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(fifo), str(tmp_path / "home")],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=True,
+    )
+
+    profile, degradation = json.loads(result.stdout)
+    assert profile["available"] is False
+    assert degradation == ["transcript_unavailable"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-specific")
+def test_fifo_state_file_rolls_back_without_corrupting_previous(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="fifo-state", trigger="manual")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=200)
+    state = checkpoint.session_state_dir(home, "codex", "fifo-state")
+    previous_before = (state / "previous.json").read_bytes()
+    (state / "current.json").unlink()
+    os.mkfifo(state / "current.json")
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "e={'client':'codex','event':'SessionStart','session_id':'fifo-state',"
+        "'turn_id':None,'trigger':None,'source':'resume','cwd':None,"
+        "'transcript_path':None,'model':None}; "
+        "r=c.select_checkpoint(e,Path(sys.argv[1]),now_ns=201); "
+        "print(json.dumps([r[1],r[0]['checkpoint_id']] if r else None))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(home)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=True,
+    )
+
+    assert json.loads(result.stdout)[0] == "rollback"
+    assert (state / "previous.json").read_bytes() == previous_before
+    assert not (state / "current.json").is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-specific")
+def test_fifo_artifact_and_metadata_log_fail_soft_without_blocking(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    task = repo / ".task" / "TASK.md"
+    task.parent.mkdir(parents=True)
+    os.mkfifo(task)
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    os.mkfifo(root / "events.log")
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "a=c.collect_artifacts(Path(sys.argv[1]),dirty_paths=set()); "
+        "ok=False; "
+        "\ntry: c._metadata_log(Path(sys.argv[2]),'codex','PreCompact','failed',1)"
+        "\nexcept OSError: ok=True"
+        "\nprint(json.dumps([a,ok]))"
+    )
+
+    result = subprocess.run(
+        [sys.executable, "-c", code, str(repo), str(home)],
+        capture_output=True,
+        text=True,
+        timeout=2,
+        check=True,
+    )
+
+    artifacts, log_failed = json.loads(result.stdout)
+    assert artifacts[0] == []
+    assert log_failed is True
+
+
+def test_windows_handle_relative_guards_are_present_even_when_not_executable_here() -> None:
+    child_source = inspect.getsource(checkpoint._open_secure_child_directory)
+    rename_source = inspect.getsource(checkpoint._windows_rename_at)
+
+    assert "_windows_open_path" in child_source
+    assert "parent.windows_handle" in child_source
+    assert "SetFileInformationByHandle" in rename_source
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires live Windows reparse-point semantics")
+def test_windows_reparse_child_directory_is_rejected(tmp_path: Path) -> None:
+    root = tmp_path / "root"
+    outside = tmp_path / "outside"
+    root.mkdir()
+    outside.mkdir()
+    link = root / "child"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("Windows symlink creation is unavailable")
+    with checkpoint._open_secure_directory(root, create=False) as parent:
+        with pytest.raises(OSError):
+            with checkpoint._open_secure_child_directory(parent, "child", create=False):
+                pass
 
 
 def test_hook_subprocess_writes_silently_then_reinjects_bounded_context(tmp_path: Path) -> None:

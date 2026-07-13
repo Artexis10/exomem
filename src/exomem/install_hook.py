@@ -260,19 +260,55 @@ def _configured_item(data: dict | None, item: dict) -> bool:
     groups = hooks.get(item["event"])
     if not isinstance(groups, list):
         return False
+    if item.get("kind") != "continuation":
+        return any(
+            isinstance(group, dict)
+            and group.get("matcher") == item.get("matcher")
+            and (item.get("matcher") is not None or "matcher" not in group)
+            and isinstance(group.get("hooks"), list)
+            and any(
+                isinstance(entry, dict) and _is_matching_entry(entry, item)
+                for entry in group["hooks"]
+            )
+            for group in groups
+        )
+    if "command" not in item:
+        return any(
+            isinstance(group, dict)
+            and isinstance(group.get("hooks"), list)
+            and any(
+                isinstance(entry, dict) and _is_matching_entry(entry, item)
+                for entry in group["hooks"]
+            )
+            for group in groups
+        )
+    owned = 0
+    exact = 0
     for group in groups:
         if not isinstance(group, dict):
             continue
-        if group.get("matcher") != item.get("matcher"):
-            if item.get("matcher") is not None or "matcher" in group:
-                continue
         entries = group.get("hooks")
-        if isinstance(entries, list) and any(
-            isinstance(entry, dict) and _is_matching_entry(entry, item)
-            for entry in entries
-        ):
-            return True
-    return False
+        if not isinstance(entries, list):
+            continue
+        matcher_exact = group.get("matcher") == item.get("matcher") and (
+            item.get("matcher") is not None or "matcher" not in group
+        )
+        for entry in entries:
+            if not isinstance(entry, dict) or not _is_matching_entry(entry, item):
+                continue
+            owned += 1
+            command_windows_exact = entry.get("commandWindows") == item.get("commandWindows")
+            if item.get("commandWindows") is None:
+                command_windows_exact = command_windows_exact and "commandWindows" not in entry
+            if (
+                matcher_exact
+                and entry.get("type") == "command"
+                and entry.get("command") == item.get("command")
+                and command_windows_exact
+                and entry.get("timeout") == item.get("timeout")
+            ):
+                exact += 1
+    return owned == 1 and exact == 1
 
 
 def _fmt_age(ts: float | None) -> str | None:
@@ -868,9 +904,17 @@ def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
             try:
                 safe._replace_at(parent, temporary, path.name)
             except BaseException:
+                committed: bool | None = None
+                try:
+                    replacement = _snapshot_config_at(parent, path.name, path)
+                    committed = replacement["raw"] == raw
+                    if not committed and not _same_snapshot(initial, replacement):
+                        committed = None
+                except (OSError, ValueError):
+                    committed = None
                 try:
                     safe._unlink_at(parent, temporary)
-                    if backup_name:
+                    if backup_name and committed is False:
                         safe._unlink_at(parent, backup_name)
                 except OSError:
                     pass

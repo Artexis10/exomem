@@ -297,6 +297,60 @@ def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkey
     assert client["logs"]["retrieve"]["path"].startswith(str(home / ".codex"))
 
 
+@pytest.mark.parametrize(
+    "drift",
+    ["command", "commandWindows", "timeout", "matcher", "duplicate"],
+)
+def test_install_hook_check_requires_one_exact_continuation_registration(
+    tmp_path: Path,
+    drift: str,
+) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    groups = data["hooks"]["PreCompact"]
+    group = _checkpoint_groups(data, "PreCompact", "codex")[0]
+    entry = group["hooks"][0]
+    if drift == "command":
+        entry["command"] = entry["command"].replace(str(hd), str(tmp_path / "wrong"))
+    elif drift == "commandWindows":
+        entry["commandWindows"] += ".wrong"
+    elif drift == "timeout":
+        entry["timeout"] = 6
+    elif drift == "matcher":
+        group["matcher"] = "manual"
+    else:
+        groups.append(json.loads(json.dumps(group)))
+    groups.append({"matcher": "anything", "hooks": [{
+        "type": "command", "command": "python unrelated.py", "timeout": 99,
+    }]})
+    sp.write_text(json.dumps(data), encoding="utf-8")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+
+    assert report["success"] is False
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "config.PreCompact"
+    )
+    assert check["status"] == "fail"
+
+
+def test_install_hook_check_rejects_unsupported_codex_session_end(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    data = json.loads(sp.read_text(encoding="utf-8"))
+    entry = json.loads(json.dumps(_checkpoint_groups(data, "PreCompact", "codex")[0]["hooks"][0]))
+    data["hooks"]["SessionEnd"] = [{"hooks": [entry]}]
+    sp.write_text(json.dumps(data), encoding="utf-8")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "config.SessionEnd"
+    )
+    assert check["status"] == "fail"
+
+
 def test_install_hook_check_flags_stale_deployed_copy(tmp_path: Path) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp)
@@ -534,6 +588,35 @@ def test_real_config_change_creates_unique_mode_preserving_backup(tmp_path: Path
     assert sp.stat().st_mode & 0o777 == 0o640
     assert backup.parent == sp.parent
     assert first["config_changed"] is True
+
+
+def test_postcommit_replace_error_retains_backup_and_committed_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem._hooks import exomem_continuation_checkpoint as safe
+
+    sp = tmp_path / "settings.json"
+    original = b'{"owner":"original","hooks":{}}\n'
+    sp.write_bytes(original)
+    installed = hook_module._continuation_items(tmp_path / "hooks", "codex")
+    real_replace = safe._replace_at
+
+    def replace_then_raise(directory, source: str, destination: str) -> None:
+        real_replace(directory, source, destination)
+        raise OSError("simulated directory fsync failure after commit")
+
+    monkeypatch.setattr(safe, "_replace_at", replace_then_raise)
+    with pytest.raises(OSError, match="after commit"):
+        hook_module._merge_hooks(sp, installed, timeout=10)
+
+    committed = json.loads(sp.read_text(encoding="utf-8"))
+    assert committed["owner"] == "original"
+    assert _checkpoint_groups(committed, "PreCompact", "codex")
+    backups = list(tmp_path.glob("settings.json.backup-*"))
+    assert len(backups) == 1
+    assert backups[0].read_bytes() == original
+    assert not list(tmp_path.glob(".settings.json.tmp-*"))
 
 
 def test_observed_config_drift_retries_from_fresh_bytes(

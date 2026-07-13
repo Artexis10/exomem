@@ -166,6 +166,8 @@ def _state_root_binding(home: Path, client: str) -> str:
 def _safe_regular_fd(path: Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     flags |= getattr(os, "O_NOFOLLOW", 0)
+    if os.name != "nt":
+        flags |= getattr(os, "O_NONBLOCK", 0)
     fd = os.open(path, flags)
     try:
         if not stat.S_ISREG(os.fstat(fd).st_mode):
@@ -174,34 +176,6 @@ def _safe_regular_fd(path: Path) -> int:
     except BaseException:
         os.close(fd)
         raise
-
-
-def _path_has_link(path: Path, stop: Path | None = None) -> bool:
-    current = path
-    boundary = stop.absolute() if stop is not None else None
-    while True:
-        try:
-            if stat.S_ISLNK(os.lstat(current).st_mode):
-                return True
-        except OSError:
-            return True
-        if boundary is not None and current.absolute() == boundary:
-            return False
-        parent = current.parent
-        if parent == current:
-            return False
-        current = parent
-
-
-def _read_regular(path: Path, limit: int, *, offset: int = 0) -> tuple[bytes, os.stat_result]:
-    fd = _safe_regular_fd(path)
-    try:
-        info = os.fstat(fd)
-        if offset:
-            os.lseek(fd, offset, os.SEEK_SET)
-        return os.read(fd, limit), info
-    finally:
-        os.close(fd)
 
 
 def _path_binding(path: Path, home: Path) -> dict[str, str]:
@@ -259,6 +233,26 @@ def _bounded_path(value: str) -> tuple[str, bool]:
     return _utf8_prefix(value.replace("\\", "/"), MAX_PATH_BYTES)
 
 
+def _parse_porcelain_z(raw: str) -> list[str]:
+    """Parse porcelain v1 -z records, including paired rename/copy paths."""
+    records = raw.split("\0")
+    paths: list[str] = []
+    index = 0
+    while index < len(records):
+        record = records[index]
+        index += 1
+        if len(record) < 4 or record[2] != " ":
+            continue
+        status = record[:2]
+        paths.append(record[3:])
+        if ("R" in status or "C" in status) and index < len(records):
+            paired = records[index]
+            index += 1
+            if paired:
+                paths.append(paired)
+    return paths
+
+
 def profile_workspace(
     cwd_value: str | None,
 ) -> tuple[dict[str, Any], set[str], dict[str, bool], list[str]]:
@@ -281,18 +275,15 @@ def profile_workspace(
     head = _git(root, "rev-parse", "HEAD")
     branch = _git(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     dirty_raw = _git(root, "status", "--porcelain=v1", "-z", "--untracked-files=all") or ""
-    dirty: list[str] = []
-    for record in dirty_raw.split("\0"):
-        if len(record) < 4:
-            continue
-        value = record[3:]
-        if " -> " in value:
-            value = value.split(" -> ", 1)[1]
+    all_dirty: list[str] = []
+    for value in _parse_porcelain_z(dirty_raw):
         value, cut = _bounded_path(value)
         truncation["dirty_path_bytes"] = truncation.get("dirty_path_bytes", False) or cut
-        if value and value not in dirty:
-            dirty.append(value)
-    dirty.sort()
+        if value and value not in all_dirty:
+            all_dirty.append(value)
+    all_dirty.sort()
+    artifact_dirty = {value for value in all_dirty if _allowed_artifact_relative(value)}
+    dirty = list(all_dirty)
     if len(dirty) > MAX_DIRTY_PATHS:
         dirty = dirty[:MAX_DIRTY_PATHS]
         truncation["dirty_paths"] = True
@@ -310,30 +301,94 @@ def profile_workspace(
     }
     if head is None:
         degradation.append("git_head_unavailable")
-    return workspace, set(dirty), truncation, degradation
+    return workspace, set(dirty) | artifact_dirty, truncation, degradation
 
 
-def _inside(path: Path, root: Path) -> bool:
-    try:
-        path.absolute().relative_to(root.absolute())
+_FIXED_ARTIFACTS = (
+    ".superpowers/sdd/progress.md",
+    ".task/TASK.md",
+    ".task/RESULT.md",
+)
+
+
+def _allowed_artifact_relative(value: str) -> bool:
+    if value in _FIXED_ARTIFACTS:
         return True
-    except ValueError:
+    if "\\" in value:
         return False
+    parts = value.split("/")
+    return (
+        len(parts) == 4
+        and parts[:2] == ["openspec", "changes"]
+        and parts[2] not in {"", ".", ".."}
+        and parts[3] == "tasks.md"
+    )
 
 
-def _artifact_candidates(root: Path) -> list[Path]:
-    candidates = [
-        root / ".superpowers" / "sdd" / "progress.md",
-        root / ".task" / "TASK.md",
-        root / ".task" / "RESULT.md",
-    ]
-    changes = root / "openspec" / "changes"
+def _artifact_candidate_relatives(
+    root: Any,
+    dirty_paths: set[str],
+) -> tuple[list[str], bool, bool]:
+    candidates = list(_FIXED_ARTIFACTS)
+    candidates.extend(sorted(
+        value
+        for value in dirty_paths
+        if value.startswith("openspec/changes/") and _allowed_artifact_relative(value)
+    ))
+    truncated = False
+    unsafe = False
     try:
-        children = sorted(changes.iterdir(), key=lambda item: item.name)[:256]
+        with _open_secure_child_directory(root, "openspec", create=False) as openspec:
+            with _open_secure_child_directory(openspec, "changes", create=False) as changes:
+                entries = sorted(_list_directory(changes))
+                truncated = len(entries) > 256
+                for name in entries[:256]:
+                    try:
+                        _validate_child_name(name)
+                        mode = _existing_kind(changes, name)
+                    except OSError:
+                        unsafe = True
+                        continue
+                    if mode is not None and stat.S_ISDIR(mode):
+                        candidates.append(f"openspec/changes/{name}/tasks.md")
+                    elif mode is not None and stat.S_ISLNK(mode):
+                        unsafe = True
+    except FileNotFoundError:
+        pass
     except OSError:
-        children = []
-    candidates.extend(child / "tasks.md" for child in children)
-    return candidates
+        unsafe = True
+    return list(dict.fromkeys(candidates)), truncated, unsafe
+
+
+def _read_regular_relative(
+    root: Any,
+    relative: str,
+    limit: int,
+) -> tuple[bytes, os.stat_result, bool]:
+    if not _allowed_artifact_relative(relative):
+        raise OSError("artifact path is outside the closed allowlist")
+    parts = relative.split("/")
+    with contextlib.ExitStack() as stack:
+        directory = root
+        retained: list[tuple[Any, str, Any]] = []
+        for component in parts[:-1]:
+            child = stack.enter_context(
+                _open_secure_child_directory(directory, component, create=False)
+            )
+            retained.append((directory, component, child))
+            directory = child
+        fd = _open_secure_file_at(directory, parts[-1], os.O_RDONLY, 0o600)
+        try:
+            info = os.fstat(fd)
+            raw = os.read(fd, limit)
+            raced = not _same_file_entry(directory, parts[-1], fd)
+        finally:
+            os.close(fd)
+        raced = raced or any(
+            not _same_directory_entry(parent, name, child)
+            for parent, name, child in retained
+        )
+        return raw, info, raced
 
 
 def collect_artifacts(
@@ -341,57 +396,77 @@ def collect_artifacts(
     *,
     dirty_paths: set[str],
 ) -> tuple[list[dict[str, Any]], dict[str, bool], list[str]]:
-    root = root.absolute()
     truncation: dict[str, bool] = {}
     degradation: list[str] = []
     profiled: list[dict[str, Any]] = []
-    for path in _artifact_candidates(root):
-        relative = path.absolute().relative_to(root).as_posix()
-        if not _inside(path, root) or _path_has_link(path, root):
-            if path.exists() or path.is_symlink():
-                degradation.append("artifact_unsafe")
-            continue
-        try:
-            raw, info = _read_regular(path, MAX_ARTIFACT_READ_BYTES + 1)
-        except OSError:
-            continue
-        if len(raw) > MAX_ARTIFACT_READ_BYTES:
-            degradation.append("artifact_oversized")
-            truncation["artifact_bytes"] = True
-            continue
-        completed = 0
-        incomplete = 0
-        lines: list[int] = []
-        for number, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
-            match = _CHECKBOX.match(line)
-            if not match:
+    try:
+        root_context = _open_secure_directory(root, create=False)
+        root_handle = root_context.__enter__()
+    except OSError:
+        return [], truncation, ["artifact_root_unavailable"]
+    try:
+        candidates, candidates_truncated, candidates_unsafe = _artifact_candidate_relatives(
+            root_handle,
+            dirty_paths,
+        )
+        if candidates_truncated:
+            truncation["artifact_candidates"] = True
+            degradation.append("artifact_candidates_truncated")
+        if candidates_unsafe:
+            degradation.append("artifact_unsafe")
+        for relative in candidates:
+            try:
+                raw, info, raced = _read_regular_relative(
+                    root_handle,
+                    relative,
+                    MAX_ARTIFACT_READ_BYTES + 1,
+                )
+            except FileNotFoundError:
                 continue
-            if match.group(1).lower() == "x":
-                completed += 1
-            else:
-                incomplete += 1
-                if len(lines) < MAX_INCOMPLETE_LINES:
-                    lines.append(number)
-        if incomplete > len(lines):
-            truncation["incomplete_lines"] = True
-        bounded, cut = _bounded_path(relative)
-        if cut:
-            truncation["artifact_path_bytes"] = True
-        is_open = relative.startswith("openspec/changes/")
-        is_dirty = relative in dirty_paths and is_open
-        if is_open and not is_dirty and incomplete == 0:
-            continue
-        profiled.append({
-            "path": bounded,
-            "size": info.st_size,
-            "mtime_ns": info.st_mtime_ns,
-            "sha256": _sha256_bytes(raw),
-            "completed_count": completed,
-            "incomplete_count": incomplete,
-            "incomplete_lines": lines,
-            "dirty": is_dirty,
-            "openspec": is_open,
-        })
+            except OSError:
+                degradation.append("artifact_unsafe")
+                continue
+            if raced:
+                degradation.append("artifact_raced")
+            if len(raw) > MAX_ARTIFACT_READ_BYTES:
+                degradation.append("artifact_oversized")
+                truncation["artifact_bytes"] = True
+                continue
+            completed = 0
+            incomplete = 0
+            lines: list[int] = []
+            for number, line in enumerate(raw.decode("utf-8", "replace").splitlines(), 1):
+                match = _CHECKBOX.match(line)
+                if not match:
+                    continue
+                if match.group(1).lower() == "x":
+                    completed += 1
+                else:
+                    incomplete += 1
+                    if len(lines) < MAX_INCOMPLETE_LINES:
+                        lines.append(number)
+            if incomplete > len(lines):
+                truncation["incomplete_lines"] = True
+            bounded, cut = _bounded_path(relative)
+            if cut:
+                truncation["artifact_path_bytes"] = True
+            is_open = relative.startswith("openspec/changes/")
+            is_dirty = relative in dirty_paths and is_open
+            if is_open and not is_dirty and incomplete == 0:
+                continue
+            profiled.append({
+                "path": bounded,
+                "size": info.st_size,
+                "mtime_ns": info.st_mtime_ns,
+                "sha256": _sha256_bytes(raw),
+                "completed_count": completed,
+                "incomplete_count": incomplete,
+                "incomplete_lines": lines,
+                "dirty": is_dirty,
+                "openspec": is_open,
+            })
+    finally:
+        root_context.__exit__(None, None, None)
     profiled.sort(
         key=lambda row: (
             0 if row["dirty"] and row["openspec"] else 1,
@@ -633,6 +708,68 @@ def _windows_close_handle(handle: int) -> None:
     ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle(handle)
 
 
+def _windows_final_path(handle: int) -> str:
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_path = kernel32.GetFinalPathNameByHandleW
+    get_path.argtypes = [wintypes.HANDLE, wintypes.LPWSTR, wintypes.DWORD, wintypes.DWORD]
+    get_path.restype = wintypes.DWORD
+    size = get_path(handle, None, 0, 0)
+    if not size:
+        raise OSError(ctypes.get_last_error(), "cannot resolve retained Windows handle")
+    buffer = ctypes.create_unicode_buffer(size + 1)
+    written = get_path(handle, buffer, len(buffer), 0)
+    if not written or written >= len(buffer):
+        raise OSError(ctypes.get_last_error(), "cannot resolve retained Windows handle")
+    return buffer.value
+
+
+def _windows_handle_identity(handle: int) -> tuple[int, int, int]:
+    import ctypes
+    from ctypes import wintypes
+
+    class _FileInfo(ctypes.Structure):
+        _fields_ = [
+            ("attributes", wintypes.DWORD),
+            ("creation_time", wintypes.FILETIME),
+            ("access_time", wintypes.FILETIME),
+            ("write_time", wintypes.FILETIME),
+            ("volume_serial", wintypes.DWORD),
+            ("size_high", wintypes.DWORD),
+            ("size_low", wintypes.DWORD),
+            ("links", wintypes.DWORD),
+            ("file_index_high", wintypes.DWORD),
+            ("file_index_low", wintypes.DWORD),
+        ]
+
+    info = _FileInfo()
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    get_info = kernel32.GetFileInformationByHandle
+    get_info.argtypes = [wintypes.HANDLE, ctypes.POINTER(_FileInfo)]
+    get_info.restype = wintypes.BOOL
+    if not get_info(handle, ctypes.byref(info)):
+        raise OSError(ctypes.get_last_error(), "cannot identify retained Windows handle")
+    return info.volume_serial, info.file_index_high, info.file_index_low
+
+
+def _windows_delete_directory_handle(handle: int) -> None:
+    import ctypes
+    from ctypes import wintypes
+
+    class _Disposition(ctypes.Structure):
+        _fields_ = [("delete", wintypes.BOOLEAN)]
+
+    disposition = _Disposition(True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    set_info = kernel32.SetFileInformationByHandle
+    set_info.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
+    set_info.restype = wintypes.BOOL
+    if not set_info(handle, 4, ctypes.byref(disposition), ctypes.sizeof(disposition)):
+        raise OSError(ctypes.get_last_error(), "handle-relative Windows deletion failed")
+
+
 class _SecureDirectory:
     def __init__(
         self,
@@ -732,6 +869,125 @@ def _validate_child_name(name: str) -> None:
         raise OSError("state operations require one child basename")
 
 
+def _normalized_windows_path(value: str) -> str:
+    if value.startswith("\\\\?\\UNC\\"):
+        value = "\\\\" + value[8:]
+    elif value.startswith("\\\\?\\"):
+        value = value[4:]
+    return value.rstrip("\\/").replace("/", "\\").casefold()
+
+
+@contextlib.contextmanager
+def _open_secure_child_directory(
+    parent: _SecureDirectory,
+    name: str,
+    *,
+    create: bool,
+    mode: int = 0o700,
+    delete_access: bool = False,
+) -> Any:
+    """Open one child relative to a retained, already-validated parent."""
+    _validate_child_name(name)
+    child_path = parent.path / name
+    if os.name != "nt":
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(name, flags, dir_fd=parent.fd)
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(name, mode=mode, dir_fd=parent.fd)
+            fd = os.open(name, flags, dir_fd=parent.fd)
+        directory = _SecureDirectory(child_path, fd=fd)
+    else:
+        parent_final = _normalized_windows_path(_windows_final_path(parent.windows_handle))
+        access = 0x80 | (0x00010000 if delete_access else 0)
+        share = 0x3
+        try:
+            handle = _windows_open_path(
+                child_path,
+                directory=True,
+                access=access,
+                share=share,
+            )
+        except FileNotFoundError:
+            if not create:
+                raise
+            os.mkdir(child_path, mode=mode)
+            handle = _windows_open_path(
+                child_path,
+                directory=True,
+                access=access,
+                share=share,
+            )
+        child_final = _normalized_windows_path(_windows_final_path(handle))
+        if child_final.rsplit("\\", 1)[0] != parent_final:
+            _windows_close_handle(handle)
+            raise OSError("Windows child escaped its retained parent")
+        directory = _SecureDirectory(child_path, windows_handles=[handle])
+    try:
+        yield directory
+    finally:
+        directory.close()
+
+
+def _same_directory_entry(
+    parent: _SecureDirectory,
+    name: str,
+    child: _SecureDirectory,
+) -> bool:
+    return _directory_entry_identity(parent, name) == _directory_identity(child)
+
+
+def _directory_identity(directory: _SecureDirectory) -> tuple[object, ...]:
+    if os.name != "nt":
+        retained = os.fstat(directory.fd)
+        return "posix", retained.st_dev, retained.st_ino
+    return ("windows", *_windows_handle_identity(directory.windows_handle))
+
+
+def _directory_entry_identity(
+    parent: _SecureDirectory,
+    name: str,
+) -> tuple[object, ...] | None:
+    try:
+        if os.name != "nt":
+            current = os.stat(name, dir_fd=parent.fd, follow_symlinks=False)
+            if not stat.S_ISDIR(current.st_mode):
+                return None
+            return "posix", current.st_dev, current.st_ino
+        current_handle = _windows_open_path(parent.path / name, directory=True)
+        try:
+            return "windows", *_windows_handle_identity(current_handle)
+        finally:
+            _windows_close_handle(current_handle)
+    except OSError:
+        return None
+
+
+def _same_file_entry(directory: _SecureDirectory, name: str, fd: int) -> bool:
+    try:
+        if os.name != "nt":
+            current = os.stat(name, dir_fd=directory.fd, follow_symlinks=False)
+            retained = os.fstat(fd)
+            return (
+                stat.S_ISREG(current.st_mode)
+                and current.st_dev == retained.st_dev
+                and current.st_ino == retained.st_ino
+            )
+        import msvcrt
+
+        current_handle = _windows_open_path(directory.path / name, directory=False)
+        try:
+            return _windows_handle_identity(current_handle) == _windows_handle_identity(
+                msvcrt.get_osfhandle(fd)
+            )
+        finally:
+            _windows_close_handle(current_handle)
+    except OSError:
+        return False
+
+
 def _open_secure_file_at(
     directory: _SecureDirectory,
     name: str,
@@ -741,6 +997,7 @@ def _open_secure_file_at(
     _validate_child_name(name)
     actual_flags = flags | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
     if os.name != "nt":
+        actual_flags |= getattr(os, "O_NONBLOCK", 0)
         fd = os.open(name, actual_flags, mode, dir_fd=directory.fd)
     else:
         import msvcrt
@@ -978,10 +1235,14 @@ def _advisory_lock_at(
 @contextlib.contextmanager
 def _session_lock(home: Path, client: str, session_id: str, *, create: bool) -> Any:
     root = client_state_root(home, client)
-    state = session_state_dir(home, client, session_id)
+    state_name = session_state_dir(home, client, session_id).name
     with _open_secure_directory(root, create=create) as root_handle:
         with _advisory_lock_at(root_handle, ".root.lock"):
-            state_context = _open_secure_directory(state, create=create)
+            state_context = _open_secure_child_directory(
+                root_handle,
+                state_name,
+                create=create,
+            )
             state_handle = state_context.__enter__()
             try:
                 session = _advisory_lock_at(state_handle, ".lock")
@@ -1094,6 +1355,48 @@ def _cleanup_temporaries(state: _SecureDirectory) -> None:
             _unlink_at(state, name)
         except OSError:
             continue
+
+
+_STATE_TEMPORARY = re.compile(r"^current\.json\.tmp-[0-9]+-[0-9a-f]{16}$")
+
+
+def _recognized_state_name(name: str) -> bool:
+    return name in {".lock", "current.json", "previous.json"} or bool(
+        _STATE_TEMPORARY.fullmatch(name)
+    )
+
+
+def _recognized_state_directory(state: _SecureDirectory) -> bool:
+    try:
+        names = _list_directory(state)
+    except OSError:
+        return False
+    for name in names:
+        if not _recognized_state_name(name):
+            return False
+        mode = _existing_kind(state, name)
+        if mode is None or not stat.S_ISREG(mode):
+            return False
+    return True
+
+
+def _prune_candidate_authorized(
+    candidate: Mapping[str, Any],
+    home: Path,
+    client: str,
+    enumerated_name: str,
+) -> bool:
+    structural = candidate.get("structural")
+    if not isinstance(structural, Mapping):
+        return False
+    session_id = structural.get("session_id")
+    return (
+        isinstance(session_id, str)
+        and bool(session_id)
+        and structural.get("client") == client
+        and structural.get("state_root_binding") == _state_root_binding(home, client)
+        and session_state_dir(home, client, session_id).name == enumerated_name
+    )
 
 
 def write_checkpoint(
@@ -1214,32 +1517,46 @@ def _rename_directory_at(root: _SecureDirectory, source: str, destination: str) 
         os.replace(source, destination, src_dir_fd=root.fd, dst_dir_fd=root.fd)
 
 
-def _delete_tombstone_at(root: _SecureDirectory, name: str) -> bool:
+def _delete_tombstone_at(
+    root: _SecureDirectory,
+    name: str,
+    expected_identity: tuple[object, ...] | None = None,
+) -> bool:
     if not name.startswith(".tombstone-"):
         return False
     try:
-        context = _open_secure_directory(root.path / name, create=False)
+        context = _open_secure_child_directory(
+            root,
+            name,
+            create=False,
+            delete_access=os.name == "nt",
+        )
         tombstone = context.__enter__()
     except OSError:
         return False
     try:
+        if expected_identity is not None and _directory_identity(tombstone) != expected_identity:
+            return False
         children = _list_directory(tombstone)
-        if any(not stat.S_ISREG(_existing_kind(tombstone, child) or 0) for child in children):
+        if any(
+            not _recognized_state_name(child)
+            or not stat.S_ISREG(_existing_kind(tombstone, child) or 0)
+            for child in children
+        ):
             return False
         for child in children:
             _unlink_at(tombstone, child)
+        if os.name == "nt":
+            _windows_delete_directory_handle(tombstone.windows_handle)
+            return True
+        if not _same_directory_entry(root, name, tombstone):
+            return False
+        os.rmdir(name, dir_fd=root.fd)
+        return True
     except OSError:
         return False
     finally:
         context.__exit__(None, None, None)
-    try:
-        if os.name == "nt":
-            os.rmdir(root.path / name)
-        else:
-            os.rmdir(name, dir_fd=root.fd)
-        return True
-    except OSError:
-        return False
 
 
 def prune_expired(
@@ -1253,7 +1570,7 @@ def prune_expired(
     root = client_state_root(home, client)
     now = time.time_ns() if now_ns is None else int(now_ns)
     current_name = session_state_dir(home, client, current_session).name
-    tombstones: list[str] = []
+    tombstones: list[tuple[str, tuple[object, ...]]] = []
     try:
         root_context = _open_secure_directory(root, create=False)
         root_handle = root_context.__enter__()
@@ -1270,7 +1587,11 @@ def prune_expired(
                     continue
                 state_context = None
                 try:
-                    state_context = _open_secure_directory(root / name, create=False)
+                    state_context = _open_secure_child_directory(
+                        root_handle,
+                        name,
+                        create=False,
+                    )
                     state_handle = state_context.__enter__()
                     lock = _advisory_lock_at(state_handle, ".lock", timeout=0.05)
                     lock.__enter__()
@@ -1281,11 +1602,29 @@ def prune_expired(
                 locked = True
                 state_open = True
                 try:
-                    candidate = load_checkpoint_at(
-                        state_handle,
-                        "current.json",
-                    ) or load_checkpoint_at(state_handle, "previous.json")
-                    if candidate is None or now - int(candidate["observed_at_ns"]) <= RETENTION_NS:
+                    if not _recognized_state_directory(state_handle):
+                        continue
+                    candidates = (
+                        load_checkpoint_at(state_handle, "current.json"),
+                        load_checkpoint_at(state_handle, "previous.json"),
+                    )
+                    candidate = next(
+                        (
+                            value
+                            for value in candidates
+                            if value is not None
+                            and _prune_candidate_authorized(value, home, client, name)
+                        ),
+                        None,
+                    )
+                    if (
+                        candidate is None
+                        or not isinstance(candidate.get("observed_at_ns"), int)
+                        or now - int(candidate["observed_at_ns"]) <= RETENTION_NS
+                    ):
+                        continue
+                    state_identity = _directory_identity(state_handle)
+                    if _directory_entry_identity(root_handle, name) != state_identity:
                         continue
                     tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
                     if force_fallback:
@@ -1303,13 +1642,23 @@ def prune_expired(
                             state_context.__exit__(None, None, None)
                             state_open = False
                         _rename_directory_at(root_handle, name, tombstone)
-                    tombstones.append(tombstone)
+                    if _directory_entry_identity(root_handle, tombstone) != state_identity:
+                        if _existing_kind(root_handle, name) is None:
+                            try:
+                                _rename_directory_at(root_handle, tombstone, name)
+                            except OSError:
+                                pass
+                        continue
+                    tombstones.append((tombstone, state_identity))
                 finally:
                     if locked:
                         lock.__exit__(None, None, None)
                     if state_open:
                         state_context.__exit__(None, None, None)
-        return sum(_delete_tombstone_at(root_handle, item) for item in tombstones)
+        return sum(
+            _delete_tombstone_at(root_handle, item, identity)
+            for item, identity in tombstones
+        )
     finally:
         root_context.__exit__(None, None, None)
 
