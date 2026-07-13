@@ -1,6 +1,6 @@
 # Verification — hosted multi-tenant service
 
-Verified on 2026-07-12 in the isolated Exomem worktree.
+Verified again on 2026-07-13 in the isolated Exomem worktree.
 
 ## Scorecard
 
@@ -18,7 +18,7 @@ Verified on 2026-07-12 in the isolated Exomem worktree.
 - Lifecycle/watcher/lexical rereview: **69 focused tests passed** after closing restartable-watcher and live-process preserved-mtime FTS gaps.
 - Changed-file Ruff checks: clean.
 - Gateway contract fixture: 21 registry-derived commands, pinned digest `983c4447f77ef31c1109b565e0149e053d222d87adabb84d5b3bc3581d1dfee2`; gateway focused suite **7 passed**.
-- Strict OpenSpec validation: `openspec validate add-hosted-multi-tenant-service --strict --no-interactive` — **valid**.
+- Strict OpenSpec validation: `openspec validate --all --strict --no-interactive` — **64 passed, 0 failed**.
 
 ## Security review closures
 
