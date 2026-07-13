@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -394,6 +395,72 @@ def test_install_hook_check_requires_one_exact_continuation_registration(
     assert report["success"] is False
     check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.PreCompact")
     assert check["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    ("client", "alternate_basename", "preferred_basename"),
+    [
+        ("claude", "exomem_continuation_checkpoint.py", "exomem-continuation-checkpoint.sh"),
+        ("codex", "exomem-continuation-checkpoint.sh", "exomem_continuation_checkpoint.py"),
+    ],
+)
+def test_reinstall_normalizes_same_client_alternate_continuation_basename(
+    tmp_path: Path,
+    client: str,
+    alternate_basename: str,
+    preferred_basename: str,
+) -> None:
+    hd = tmp_path / "hooks"
+    sp = tmp_path / ("settings.json" if client == "claude" else "hooks.json")
+    hooks: dict[str, list[dict]] = {}
+    for event, matcher in hook_module._CONTINUATION_EVENTS[client]:
+        group: dict[str, object] = {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"python {alternate_basename} --client {client}",
+                    "timeout": 5,
+                },
+                {
+                    "type": "command",
+                    "command": f"python {alternate_basename} --client wrong-client",
+                    "timeout": 5,
+                },
+                {
+                    "type": "command",
+                    "command": f"python {alternate_basename}.backup --client {client}",
+                    "timeout": 5,
+                },
+            ]
+        }
+        if matcher is not None:
+            group["matcher"] = matcher
+        hooks[event] = [group]
+    sp.write_text(json.dumps({"hooks": hooks}), encoding="utf-8")
+
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client=client)
+    data = json.loads(sp.read_text(encoding="utf-8"))
+
+    for event, _matcher in hook_module._CONTINUATION_EVENTS[client]:
+        commands = [entry["command"] for entry in _hook_entries(data, event)]
+        assert (
+            sum(
+                preferred_basename in command and f"--client {client}" in command
+                for command in commands
+            )
+            == 1
+        )
+        assert not any(
+            alternate_basename in command
+            and f"--client {client}" in command
+            and ".backup" not in command
+            for command in commands
+        )
+        assert any("--client wrong-client" in command for command in commands)
+        assert any(".backup" in command for command in commands)
+
+    report = hook_module.check_hooks(clients=(client,), hook_dir=hd, settings_path=sp)
+    assert report["success"] is True
 
 
 def test_install_hook_check_rejects_unsupported_codex_session_end(tmp_path: Path) -> None:
@@ -977,6 +1044,65 @@ def test_health_rejects_group_writable_hook_directory(tmp_path: Path) -> None:
     assert all(not item["safe_regular"] for item in check["details"].values())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestor ownership and mode trust")
+def test_install_rejects_replaceable_nonsticky_ancestor_with_safe_child(
+    tmp_path: Path,
+) -> None:
+    broad = tmp_path / "replaceable"
+    broad.mkdir(mode=0o700)
+    broad.chmod(0o777)
+    hook_dir = broad / "hooks"
+    hook_dir.mkdir(mode=0o700)
+    config_dir = broad / "config"
+    config_dir.mkdir(mode=0o700)
+
+    with pytest.raises(OSError, match="unsafe|writable|trusted"):
+        hook_module.install_hook(
+            hook_dir=hook_dir,
+            settings_path=tmp_path / "safe-settings.json",
+            client="codex",
+            wire=False,
+        )
+    with pytest.raises(OSError, match="unsafe|writable|trusted"):
+        hook_module.install_hook(
+            hook_dir=tmp_path / "safe-hooks",
+            settings_path=config_dir / "hooks.json",
+            client="codex",
+        )
+
+    safe_root = tmp_path / "safe-isolated"
+    result = hook_module.install_hook(
+        hook_dir=safe_root / "hooks",
+        settings_path=safe_root / "hooks.json",
+        client="codex",
+    )
+    assert Path(result["settings"]).is_file()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ancestor ownership and mode trust")
+def test_health_rejects_replaceable_nonsticky_ancestor_after_install(
+    tmp_path: Path,
+) -> None:
+    container = tmp_path / "container"
+    hook_dir = container / "hooks"
+    settings = container / "config" / "hooks.json"
+    hook_module.install_hook(hook_dir=hook_dir, settings_path=settings, client="codex")
+    container.chmod(0o777)
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=hook_dir,
+        settings_path=settings,
+    )
+    config_check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.file")
+    script_check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "scripts.continuation"
+    )
+
+    assert config_check["status"] == "fail"
+    assert script_check["status"] == "fail"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode trust")
 def test_install_rejects_group_writable_config_parent_and_leaf(tmp_path: Path) -> None:
     hd = tmp_path / "hooks"
@@ -1201,6 +1327,35 @@ def test_health_and_live_selection_reject_inverted_generation_order(
     assert checkpoint.select_checkpoint(start, home, now_ns=observed) is None
 
 
+def test_health_rejects_duplicate_current_and_previous_generation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    observed = time.time_ns()
+    event = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "health-duplicate",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    checkpoint.write_checkpoint(event, home, observed_at_ns=observed)
+    state = checkpoint.session_state_dir(home, "codex", "health-duplicate")
+    shutil.copy2(state / "current.json", state / "previous.json")
+
+    runtime = hook_module._continuation_runtime_summary("codex")
+
+    assert runtime["session_states"][0]["current"] == "generation_invalid"
+    assert runtime["session_states"][0]["selection"] == "corrupt"
+
+
 def test_health_surfaces_stale_previous_behind_valid_current(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1289,6 +1444,13 @@ def test_health_identifies_authorized_stale_interrupted_session(
             "duration_ms": 0,
             "error_class": "Bearer /tmp/SECRET",
         },
+        {
+            "event": ["PreCompact"],
+            "status": "written",
+            "duration_ms": 0,
+            "checkpoint_id": "a" * 64,
+        },
+        {"event": "SessionStart", "status": ["empty"], "duration_ms": 0},
     ],
 )
 def test_metadata_log_health_rejects_content_path_and_invalid_domains(

@@ -308,8 +308,8 @@ def _is_matching_entry(hook: dict, item: dict) -> bool:
     names = _command_basenames(command)
     if names.intersection(_CONTINUATION_LEGACY):
         return True
-    current = _CONTINUATION_SCRIPT if item["client"] == "codex" else _CONTINUATION_WRAPPER
-    return current in names and _has_client_arg(command, item["client"])
+    current = {_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER}
+    return bool(current.intersection(names)) and _has_client_arg(command, item["client"])
 
 
 def _configured_item(data: dict | None, item: dict) -> bool:

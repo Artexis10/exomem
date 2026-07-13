@@ -68,7 +68,7 @@ Under the lock, the writer:
 1. canonicalizes all non-volatile checkpoint evidence—normalized event identity, transcript binding, git/workspace state, artifact profiles, and degradation/truncation flags—without observation time or checkpoint ID, and hashes it as the structural-payload digest;
 2. computes a checkpoint ID including schema version, client/session/optional-turn/event/trigger, transcript size/mtime/tail digest, and the structural-payload digest;
 3. loads and validates `current.json`;
-4. treats the same checkpoint ID as idempotent;
+4. treats the same checkpoint ID as idempotent without rotating or duplicating history, while permitting a newer delivery to atomically refresh current observation/order/freshness fields under that same ID;
 5. compares the lexicographic event-order tuple `(transcript_mtime_ns, transcript_size, observed_at_ns, checkpoint_id)` recorded at hook entry (with fixed sentinels for unavailable transcript fields) and refuses a stale writer that would replace a newer checkpoint;
 6. writes with a unique same-directory temporary name, restrictive mode, flush/fsync where supported, and `os.replace`;
 7. retains at most `current.json` and `previous.json`, cleaning abandoned temporary files while holding the lock.

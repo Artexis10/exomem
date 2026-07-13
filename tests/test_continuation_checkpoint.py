@@ -230,15 +230,24 @@ def test_structural_digest_controls_identity_and_observation_time_does_not() -> 
     [
         "inner_schema",
         "client_event",
+        "client_type",
+        "trigger_type",
         "session_control",
         "model_type",
         "workspace_path",
+        "workspace_path_type",
         "artifact_path",
         "artifact_hash",
         "artifact_lines",
         "transcript_hash",
         "unknown_degradation",
+        "degradation_type",
         "branch_bound",
+        "workspace_absolute_name",
+        "workspace_nested_name",
+        "workspace_control_name",
+        "codex_session_start",
+        "claude_session_start",
     ],
 )
 def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) -> None:
@@ -262,6 +271,10 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
         structural["schema_version"] = 999
     elif case == "client_event":
         structural["event"] = "SessionEnd"
+    elif case == "client_type":
+        structural["client"] = ["codex"]
+    elif case == "trigger_type":
+        structural["trigger"] = ["manual"]
     elif case == "session_control":
         structural["session_id"] = "session\nSECRET"
     elif case == "model_type":
@@ -275,6 +288,16 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
             "detached": False,
             "head": "c" * 40,
             "dirty_paths": ["/etc/passwd"],
+        }
+    elif case == "workspace_path_type":
+        structural["workspace"] = {
+            "available": True,
+            "root": "repo",
+            "root_sha256": "b" * 64,
+            "branch": "main",
+            "detached": False,
+            "head": "c" * 40,
+            "dirty_paths": [["not", "text"]],
         }
     elif case.startswith("artifact_"):
         artifact = {
@@ -305,6 +328,28 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
         }
     elif case == "unknown_degradation":
         structural["degradation"] = ["SECRET /tmp/path"]
+    elif case == "degradation_type":
+        structural["degradation"] = [["not", "text"]]
+    elif case.startswith("workspace_"):
+        workspace_name = {
+            "workspace_absolute_name": "/tmp/SECRET",
+            "workspace_nested_name": "nested/SECRET",
+            "workspace_control_name": "repo\nSECRET",
+        }[case]
+        structural["workspace"] = {
+            "available": False,
+            "cwd_name": workspace_name,
+            "cwd_sha256": "b" * 64,
+        }
+    elif case.endswith("session_start"):
+        structural.update(
+            {
+                "client": "claude" if case.startswith("claude") else "codex",
+                "event": "SessionStart",
+                "trigger": None,
+                "source": "resume",
+            }
+        )
     else:
         structural["workspace"] = {
             "available": True,
@@ -318,6 +363,29 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
     candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
 
     assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(candidate)) is None
+
+
+@pytest.mark.parametrize(
+    ("client", "event", "trigger"),
+    [
+        ("codex", "PreCompact", "manual"),
+        ("claude", "PreCompact", "auto"),
+        ("claude", "SessionEnd", None),
+    ],
+)
+def test_supported_write_generations_round_trip_closed_decoder(
+    tmp_path: Path,
+    client: str,
+    event: str,
+    trigger: str | None,
+) -> None:
+    built = checkpoint.build_checkpoint(
+        _event(client=client, event=event, trigger=trigger),
+        tmp_path,
+        observed_at_ns=100,
+    )
+
+    assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(built)) == built
 
 
 def test_artifact_policy_is_closed_bounded_content_free_and_dirty_first(tmp_path: Path) -> None:
@@ -474,6 +542,118 @@ def test_non_dirty_fallback_prefers_newest_artifact_before_read_bound(tmp_path: 
     assert "openspec/changes/zzz-newest/tasks.md" in {row["path"] for row in result}
     assert truncation["artifact_candidates"] is True
     assert "artifact_candidates_truncated" in degradation
+
+
+def test_empty_change_directories_do_not_report_false_candidate_truncation(
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "repo"
+    changes = root / "openspec" / "changes"
+    for number in range(300):
+        (changes / f"empty-{number:03d}").mkdir(parents=True)
+    fixed = root / ".task" / "TASK.md"
+    fixed.parent.mkdir()
+    fixed.write_text("- [ ] active\n", encoding="utf-8")
+
+    result, truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths=set(),
+    )
+
+    assert [row["path"] for row in result] == [".task/TASK.md"]
+    assert "artifact_candidates" not in truncation
+    assert "artifact_candidates_truncated" not in degradation
+
+
+def test_large_artifact_tree_bounds_metadata_scan_and_keeps_dirty_priority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "repo"
+    changes = root / "openspec" / "changes"
+    for number in range(700):
+        task = changes / f"change-{number:03d}" / "tasks.md"
+        task.parent.mkdir(parents=True)
+        task.write_text("- [x] complete\n", encoding="utf-8")
+        os.utime(task, ns=(number + 1, number + 1))
+    dirty = changes / "change-699" / "tasks.md"
+    dirty.write_text("- [ ] dirty active\n", encoding="utf-8")
+    opened_changes = 0
+    scanned_changes = 0
+    real_open_child = checkpoint._open_secure_child_directory
+    real_scandir = os.scandir
+    changes_info = changes.stat()
+
+    def counted_open_child(parent, name: str, **kwargs):
+        nonlocal opened_changes
+        if parent.path.name == "changes":
+            opened_changes += 1
+        return real_open_child(parent, name, **kwargs)
+
+    class CountedScandir:
+        def __init__(self, iterator, counted: bool) -> None:
+            self.iterator = iterator
+            self.counted = counted
+
+        def __enter__(self):
+            self.iterator.__enter__()
+            return self
+
+        def __exit__(self, *args):
+            return self.iterator.__exit__(*args)
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            nonlocal scanned_changes
+            value = next(self.iterator)
+            if self.counted:
+                scanned_changes += 1
+            return value
+
+    def counted_scandir(target):
+        counted = False
+        if isinstance(target, int):
+            info = os.fstat(target)
+            counted = (info.st_dev, info.st_ino) == (
+                changes_info.st_dev,
+                changes_info.st_ino,
+            )
+        return CountedScandir(real_scandir(target), counted)
+
+    monkeypatch.setattr(checkpoint, "_open_secure_child_directory", counted_open_child)
+    monkeypatch.setattr(os, "scandir", counted_scandir)
+    started = time.monotonic()
+
+    result, truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths={"openspec/changes/change-699/tasks.md"},
+    )
+
+    assert opened_changes <= (
+        checkpoint.MAX_ARTIFACT_METADATA_CANDIDATES + checkpoint.MAX_ARTIFACT_CANDIDATE_READS
+    )
+    assert scanned_changes <= checkpoint.MAX_ARTIFACT_METADATA_CANDIDATES + 1
+    assert time.monotonic() - started < 2.0
+    assert result[0]["path"] == "openspec/changes/change-699/tasks.md"
+    assert truncation["artifact_candidates"] is True
+    assert "artifact_candidates_truncated" in degradation
+
+
+def test_unsafe_artifact_change_directory_is_skipped_explicitly(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    unsafe = root / "openspec" / "changes" / "bad\nchange" / "tasks.md"
+    unsafe.parent.mkdir(parents=True)
+    unsafe.write_text("- [ ] active\n", encoding="utf-8")
+
+    result, _truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths=set(),
+    )
+
+    assert result == []
+    assert "artifact_unsafe" in degradation
 
 
 def test_porcelain_z_parser_consumes_rename_and_copy_path_pairs() -> None:
@@ -793,6 +973,62 @@ def test_shared_core_rejects_unknown_event_contract_before_state_access(
     assert not checkpoint.client_state_root(tmp_path, "codex").exists()
 
 
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"event": "Stop", "trigger": None},
+        {"client": "claude"},
+        {"trigger": "automatic"},
+        {"trigger": ["manual"]},
+        {"source": "resume"},
+        {"session_id": ["not", "text"]},
+        {"normalization": {"degradation": [["not", "text"]], "truncation": {}}},
+    ],
+)
+def test_shared_core_rejects_malformed_v1_normalized_event_before_state_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    override: dict[str, object],
+) -> None:
+    normalized: dict[str, object] = {
+        "contract_version": checkpoint.EVENT_CONTRACT_VERSION,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "closed-contract",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+        "normalization": {"degradation": [], "truncation": {}},
+    }
+    normalized.update(override)
+    calls: list[str] = []
+    monkeypatch.setitem(checkpoint._INPUT_ADAPTERS, "codex", lambda _payload: normalized)
+    monkeypatch.setattr(
+        checkpoint,
+        "write_checkpoint",
+        lambda *_args, **_kwargs: calls.append("write"),
+    )
+    monkeypatch.setattr(
+        checkpoint,
+        "select_checkpoint",
+        lambda *_args, **_kwargs: calls.append("select"),
+    )
+
+    output = checkpoint.dispatch_event(
+        "codex",
+        {"hook_event_name": "PreCompact", "session_id": "ignored"},
+        environ={"EXOMEM_HOOK_HOME": str(tmp_path)},
+    )
+
+    assert output is None
+    assert calls == []
+    assert not checkpoint.client_state_root(tmp_path, "codex").exists()
+    assert not checkpoint.client_state_root(tmp_path, "claude").exists()
+
+
 def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: Path) -> None:
     home = tmp_path / "home"
     result = subprocess.run(
@@ -979,6 +1215,76 @@ def test_control_or_surrogate_session_normalization_round_trips_without_leak(
     assert current is not None
     raw = (state / "current.json").read_bytes()
     assert b"secret" not in raw
+
+
+def test_control_workspace_paths_are_omitted_or_hashed_before_round_trip(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo\nunsafe"
+    _init_repo(repo)
+    (repo / "dirty\nunsafe.txt").write_text("dirty\n", encoding="utf-8")
+
+    built = checkpoint.build_checkpoint(
+        _event(client="codex", cwd=repo),
+        home,
+        observed_at_ns=100,
+    )
+    raw = checkpoint.encode_checkpoint(built)
+    decoded = checkpoint._decode_checkpoint(raw)
+
+    assert decoded == built
+    workspace = built["structural"]["workspace"]
+    assert "\n" not in workspace["root"]
+    assert workspace["dirty_paths"] == []
+    assert "workspace_name_hashed" in built["structural"]["degradation"]
+    assert "dirty_path_unsafe" in built["structural"]["degradation"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="surrogateescape path is POSIX-specific")
+@pytest.mark.parametrize(
+    "name", ["transcript\nunsafe.jsonl", os.fsdecode(b"transcript-\xff.jsonl")]
+)
+def test_unsafe_transcript_relative_path_hashes_and_round_trips(
+    tmp_path: Path,
+    name: str,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    transcript = home / name
+    transcript.write_bytes(b"bounded transcript")
+
+    built = checkpoint.build_checkpoint(
+        _event(client="codex", transcript=transcript),
+        home,
+        observed_at_ns=100,
+    )
+
+    assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(built)) == built
+    assert built["structural"]["transcript"]["path"]["kind"] == "sha256"
+    assert "transcript_path_hashed" in built["structural"]["degradation"]
+
+
+def test_overbound_relative_transcript_path_surfaces_byte_truncation(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    transcript = home
+    for number in range(8):
+        transcript /= f"{number}-{'é' * 40}"
+    transcript.mkdir(parents=True)
+    transcript /= "transcript.jsonl"
+    transcript.write_bytes(b"bounded transcript")
+
+    built = checkpoint.build_checkpoint(
+        _event(client="codex", transcript=transcript),
+        home,
+        observed_at_ns=100,
+    )
+
+    assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(built)) == built
+    assert built["structural"]["transcript"]["path"]["kind"] == "sha256"
+    assert built["structural"]["truncation"]["transcript_path_bytes"] is True
 
 
 def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Path) -> None:
@@ -1243,6 +1549,26 @@ def test_generation_order_inversion_is_rejected_by_live_selection(tmp_path: Path
         client="codex",
         event="SessionStart",
         session_id="inverted",
+        trigger=None,
+        source="resume",
+    )
+
+    assert checkpoint.select_checkpoint(start, home, now_ns=observed) is None
+
+
+def test_duplicate_current_and_previous_generation_is_rejected_by_live_selection(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    observed = time.time_ns()
+    event = _event(client="codex", session_id="duplicate-history", trigger="manual")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=observed - 1)
+    state = checkpoint.session_state_dir(home, "codex", "duplicate-history")
+    shutil.copy2(state / "current.json", state / "previous.json")
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="duplicate-history",
         trigger=None,
         source="resume",
     )
@@ -1625,6 +1951,38 @@ def test_metadata_log_rotates_at_cap_with_complete_valid_jsonl(tmp_path: Path) -
     assert records[-1]["duration_ms"] == 1
     assert all(checkpoint._valid_metadata_record(record) for record in records)
     assert stat_mode(log) == 0o600
+
+
+def test_metadata_rotation_replace_failure_preserves_log_and_removes_temp(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    log = root / "events.log"
+    row = (
+        checkpoint._canonical_bytes({"event": "SessionStart", "status": "empty", "duration_ms": 0})
+        + b"\n"
+    )
+    log.write_bytes(row * (checkpoint.MAX_METADATA_LOG_BYTES // len(row)))
+    log.chmod(0o600)
+    before = log.read_bytes()
+    real_replace = checkpoint._replace_at
+
+    def fail_log_replace(directory, source: str, destination: str) -> None:
+        if source.startswith(".events.log.tmp-") and destination == "events.log":
+            raise OSError("forced metadata replace failure")
+        real_replace(directory, source, destination)
+
+    monkeypatch.setattr(checkpoint, "_replace_at", fail_log_replace)
+
+    with pytest.raises(OSError, match="forced metadata replace failure"):
+        checkpoint._metadata_log(home, "codex", "SessionStart", "empty", 1)
+
+    assert log.read_bytes() == before
+    assert list(root.glob(".events.log.tmp-*")) == []
 
 
 def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: Path) -> None:
@@ -2351,6 +2709,60 @@ def test_prune_removes_stale_previous_behind_fresh_current(tmp_path: Path) -> No
     assert not (state / "previous.json").exists()
 
 
+def test_prune_cleans_stale_history_for_active_session_without_tombstoning_current(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "only"
+    event = _event(client="codex", session_id=session, trigger="manual")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=101)
+    now = checkpoint.RETENTION_NS + 200
+    checkpoint.write_checkpoint(
+        {**event, "turn_id": "fresh"},
+        home,
+        observed_at_ns=now,
+    )
+    state = checkpoint.session_state_dir(home, "codex", session)
+    assert (state / "previous.json").exists()
+
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session=session,
+        now_ns=now,
+    )
+
+    assert removed == 0
+    assert (state / "current.json").exists()
+    assert not (state / "previous.json").exists()
+
+
+def test_prune_cleans_stale_history_after_same_id_freshness_refresh(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "same-id-active"
+    manual = _event(client="codex", session_id=session, trigger="manual")
+    automatic = {**manual, "trigger": "auto"}
+    checkpoint.write_checkpoint(manual, home, observed_at_ns=100)
+    checkpoint.write_checkpoint(automatic, home, observed_at_ns=101)
+    now = checkpoint.RETENTION_NS + 200
+    checkpoint.write_checkpoint(automatic, home, observed_at_ns=now)
+    state = checkpoint.session_state_dir(home, "codex", session)
+    assert (state / "previous.json").exists()
+
+    checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session=session,
+        now_ns=now,
+    )
+
+    assert checkpoint.load_checkpoint(state / "current.json")["observed_at_ns"] == now
+    assert not (state / "previous.json").exists()
+
+
 def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     home = tmp_path / "home"
     client = "codex"
@@ -2399,3 +2811,94 @@ def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     assert outside.is_dir()
     if symlink is not None:
         assert symlink.is_symlink()
+
+
+def test_crash_tombstone_recovery_rotates_past_unauthorized_prefix(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "zz-crashed-prune"
+    checkpoint.write_checkpoint(
+        _event(client=client, session_id=session),
+        home,
+        observed_at_ns=100,
+    )
+    root_path = checkpoint.client_state_root(home, client)
+    state_name = checkpoint.session_state_dir(home, client, session).name
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock"):
+            recovered = checkpoint._tombstone_expired_candidate(
+                root,
+                home,
+                client,
+                state_name,
+                100 + checkpoint.RETENTION_NS + 1,
+                force_fallback=False,
+            )
+    assert recovered is not None
+    authorized_name, _identity = recovered
+    lookalikes: list[Path] = []
+    for number in range(checkpoint.MAX_PRUNE_CANDIDATES):
+        lookalike = root_path / f".tombstone-aa{number:02d}-0000000000000000"
+        lookalike.mkdir(mode=0o700)
+        (lookalike / "valuable.txt").write_text("preserve", encoding="utf-8")
+        lookalikes.append(lookalike)
+
+    removed = sum(
+        checkpoint.prune_expired(
+            home,
+            client,
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 2,
+        )
+        for _ in range(20)
+    )
+
+    assert removed == 1
+    assert not (root_path / authorized_name).exists()
+    assert all(path.is_dir() for path in lookalikes)
+
+
+def test_true_kill_between_session_directory_creation_and_manifest_is_prunable(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "abandoned-create"
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "h=Path(sys.argv[1]); real=c._ensure_session_manifest; "
+        "c._ensure_session_manifest=lambda *args,**kwargs: "
+        "(print('created',flush=True),time.sleep(60)); "
+        "x=c._session_lock(h,'codex','abandoned-create',create=True,created_at_ns=100); "
+        "x.__enter__()"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "created"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    state = checkpoint.session_state_dir(home, "codex", session)
+    assert state.is_dir()
+
+    removed = sum(
+        checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=100 + 60 * 24 * 60 * 60 * 1_000_000_000,
+        )
+        for _ in range(20)
+    )
+
+    assert removed == 1
+    assert not state.exists()
