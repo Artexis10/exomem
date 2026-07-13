@@ -1261,16 +1261,24 @@ def _registry_findings(
     findings: list[ContractFinding] = []
     for registry_finding in corpus.registry.findings:
         raw = str(registry_finding.get("path", "registry"))
-        matching_extensions = tuple(
-            key
-            for key in corpus.registry.extensions
-            if raw == f"extensions.{key}" or raw.startswith(f"extensions.{key}.")
-        )
-        relation = (
-            max(matching_extensions, key=lambda key: (len(key), key))
-            if matching_extensions
-            else raw
-        )
+        extension_prefix = "extensions."
+        if raw.startswith(extension_prefix):
+            matching_extensions = tuple(
+                key
+                for key in corpus.registry.extensions
+                if raw == f"{extension_prefix}{key}"
+                or raw.startswith(f"{extension_prefix}{key}.")
+            )
+            relation = (
+                max(matching_extensions, key=lambda key: (len(key), key))
+                if matching_extensions
+                else raw.removeprefix(extension_prefix)
+            )
+            governed_element_identity = ("relations", relation)
+            resolved_rule = ("relations", relation, "registry")
+        else:
+            governed_element_identity = ("relations", "registry", raw)
+            resolved_rule = ("relations", "*", "registry")
         findings.append(
             ContractFinding(
                 code=str(registry_finding.get("code", "invalid_relation_registry")),
@@ -1279,8 +1287,8 @@ def _registry_findings(
                 span=None,
                 detail=str(registry_finding.get("detail", "invalid relation registry")),
                 remediation="Repair the relation registry before validating pages.",
-                governed_element_identity=("relations", relation),
-                resolved_rule=("relations", relation, "registry"),
+                governed_element_identity=governed_element_identity,
+                resolved_rule=resolved_rule,
             )
         )
     for fact in corpus.relation_facts:

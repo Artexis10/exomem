@@ -1160,18 +1160,39 @@ def test_registry_diagnostics_keep_structured_category_and_relation_identities(
     )
 
 
+@pytest.mark.parametrize(
+    ("raw_key", "definition", "finding_code"),
+    [
+        (
+            "science.bad",
+            {
+                "parent": "not_a_core_relation",
+                "description": "Invalid extension",
+            },
+            "invalid_parent",
+        ),
+        ("science.rejected", "not an object", "invalid_definition"),
+        ("science.rejected.multi.dot", "not an object", "invalid_definition"),
+        (
+            "science.invalid.multi.dot",
+            {
+                "parent": "not_a_core_relation",
+                "description": "Invalid extension key and parent",
+            },
+            "invalid_parent",
+        ),
+    ],
+)
 def test_global_relation_registry_finding_uses_exact_extension_identity(
     tmp_path: Path,
+    raw_key: str,
+    definition: object,
+    finding_code: str,
 ) -> None:
     registry = relation_registry.load_registry(
         proposal={
             "schema_version": 1,
-            "extensions": {
-                "science.bad": {
-                    "parent": "not_a_core_relation",
-                    "description": "Invalid extension",
-                }
-            },
+            "extensions": {raw_key: definition},
         }
     )
     page = _state(
@@ -1192,9 +1213,60 @@ def test_global_relation_registry_finding_uses_exact_extension_identity(
         after_corpus=corpus,
     )
 
-    finding = next(item for item in result.findings if item.code == "invalid_parent")
-    assert finding.governed_element_identity == ("relations", "science.bad")
-    assert finding.resolved_rule == ("relations", "science.bad", "registry")
+    finding = next(item for item in result.findings if item.code == finding_code)
+    assert finding.governed_element_identity == ("relations", raw_key)
+    assert finding.resolved_rule == ("relations", raw_key, "registry")
+
+
+def test_root_relation_registry_findings_use_distinct_registry_level_identities(
+    tmp_path: Path,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 2,
+            "extensions": ["not an object"],
+            "alpha": True,
+            "beta": True,
+        }
+    )
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n"),
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page,),
+        registry=registry,
+    )
+
+    result = _evaluate(
+        before=page,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    by_code_and_path = {
+        (finding.code, finding.governed_element_identity[-1]): finding
+        for finding in result.findings
+    }
+    expected = {
+        ("invalid_version", "schema_version"),
+        ("invalid_extensions", "extensions"),
+        ("unknown_field", "alpha"),
+        ("unknown_field", "beta"),
+    }
+    assert expected <= set(by_code_and_path)
+    for key in expected:
+        finding = by_code_and_path[key]
+        assert finding.governed_element_identity == (
+            "relations",
+            "registry",
+            key[1],
+        )
+        assert finding.resolved_rule == ("relations", "*", "registry")
+    assert len({by_code_and_path[key].key for key in expected}) == len(expected)
 
 
 def test_contract_finding_key_is_exact_public_triple() -> None:
