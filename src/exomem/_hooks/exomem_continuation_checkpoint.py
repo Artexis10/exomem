@@ -29,6 +29,7 @@ OUTPUT_CONTRACT_VERSION = 1
 MAX_CHECKPOINT_BYTES = 64 * 1024
 MAX_CONTEXT_BYTES = 4096
 MAX_PATH_BYTES = 512
+MAX_IDENTIFIER_BYTES = 512
 MAX_DIRTY_PATHS = 128
 MAX_ARTIFACTS = 16
 MAX_OPENSPEC_ARTIFACTS = 8
@@ -38,6 +39,8 @@ MAX_ARTIFACT_CANDIDATE_READS = 64
 MAX_DIRTY_ARTIFACT_CANDIDATES = MAX_ARTIFACTS
 MAX_PRUNE_CANDIDATES = 16
 MAX_PRUNE_LOCK_SECONDS = 0.05
+MAX_METADATA_LOG_BYTES = 1024 * 1024
+MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
 RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
 GIT_TIMEOUT_SECONDS = 0.35
@@ -77,6 +80,49 @@ _ALIASES = {
     "model": ("model",),
 }
 _CHECKBOX = re.compile(r"^\s*[-*]\s+\[([ xX])\]")
+_HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_HEX_40 = re.compile(r"^[0-9a-f]{40}$")
+_ERROR_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
+_METADATA_EVENTS = {"PreCompact", "SessionEnd", "SessionStart"}
+_METADATA_STATUSES_WITH_CHECKPOINT = {"written", "idempotent", "stale", "current", "rollback"}
+_METADATA_STATUSES = _METADATA_STATUSES_WITH_CHECKPOINT | {"empty", "error"}
+_ALLOWED_DEGRADATION = {
+    "artifact_candidates_truncated",
+    "artifact_oversized",
+    "artifact_raced",
+    "artifact_root_unavailable",
+    "artifact_unsafe",
+    "cwd_unavailable",
+    "dirty_artifact_candidates_truncated",
+    "git_branch_truncated",
+    "git_branch_unavailable",
+    "git_head_unavailable",
+    "git_status_unavailable",
+    "model_hashed",
+    "model_truncated",
+    "non_git",
+    "session_id_hashed",
+    "transcript_unavailable",
+    "turn_id_hashed",
+}
+_ALLOWED_TRUNCATION = {
+    "artifact_bytes",
+    "artifact_candidates",
+    "artifact_path_bytes",
+    "artifacts",
+    "branch_bytes",
+    "checkpoint_artifacts",
+    "checkpoint_dirty_paths",
+    "dirty_artifact_candidates",
+    "dirty_path_bytes",
+    "dirty_paths",
+    "incomplete_lines",
+    "model_bytes",
+    "openspec_artifacts",
+    "session_id_bytes",
+    "turn_id_bytes",
+    "workspace_name",
+}
 
 
 def _utf8_prefix(value: str, limit: int) -> tuple[str, bool]:
@@ -97,6 +143,50 @@ def _canonical_bytes(value: object) -> bytes:
 
 def _sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
+
+
+def _unsafe_text(value: str) -> bool:
+    return any(
+        ord(char) < 32 or ord(char) == 127 or 0xD800 <= ord(char) <= 0xDFFF for char in value
+    )
+
+
+def _bound_event_identifiers(event: Mapping[str, Any]) -> dict[str, Any]:
+    bounded = dict(event)
+    normalization = event.get("normalization")
+    degradation = (
+        list(normalization.get("degradation", [])) if isinstance(normalization, Mapping) else []
+    )
+    truncation = (
+        dict(normalization.get("truncation", {})) if isinstance(normalization, Mapping) else {}
+    )
+
+    for key in ("session_id", "turn_id"):
+        value = bounded.get(key)
+        if not isinstance(value, str):
+            continue
+        raw = value.encode("utf-8", "surrogatepass")
+        if _unsafe_text(value) or len(raw) > MAX_IDENTIFIER_BYTES:
+            bounded[key] = "sha256:" + _sha256_bytes(raw)
+            truncation[f"{key}_bytes"] = True
+            degradation.append(f"{key}_hashed")
+
+    model = bounded.get("model")
+    if isinstance(model, str):
+        raw = model.encode("utf-8", "surrogatepass")
+        if _unsafe_text(model):
+            bounded["model"] = "sha256:" + _sha256_bytes(raw)
+            truncation["model_bytes"] = True
+            degradation.append("model_hashed")
+        elif len(raw) > MAX_IDENTIFIER_BYTES:
+            bounded["model"], _ = _utf8_prefix(model, MAX_IDENTIFIER_BYTES)
+            truncation["model_bytes"] = True
+            degradation.append("model_truncated")
+    bounded["normalization"] = {
+        "degradation": sorted(set(degradation)),
+        "truncation": {key: True for key in sorted(truncation) if truncation[key]},
+    }
+    return bounded
 
 
 def _alias(payload: Mapping[str, object], logical: str) -> tuple[object | None, bool]:
@@ -143,18 +233,20 @@ def _normalize_event_contract(
     optional = ("turn_id", "cwd", "transcript_path", "model")
     if any(values[name] is not None and not isinstance(values[name], str) for name in optional):
         return None
-    return {
-        "contract_version": EVENT_CONTRACT_VERSION,
-        "client": client,
-        "event": event,
-        "session_id": session_id,
-        "turn_id": values["turn_id"],
-        "trigger": trigger,
-        "source": source,
-        "cwd": values["cwd"],
-        "transcript_path": values["transcript_path"],
-        "model": values["model"],
-    }
+    return _bound_event_identifiers(
+        {
+            "contract_version": EVENT_CONTRACT_VERSION,
+            "client": client,
+            "event": event,
+            "session_id": session_id,
+            "turn_id": values["turn_id"],
+            "trigger": trigger,
+            "source": source,
+            "cwd": values["cwd"],
+            "transcript_path": values["transcript_path"],
+            "model": values["model"],
+        }
+    )
 
 
 def _adapt_claude_event(payload: Mapping[str, object]) -> dict[str, Any] | None:
@@ -262,13 +354,15 @@ def profile_transcript(path_value: str | None, home: Path) -> tuple[dict[str, An
 def _git_environment() -> dict[str, str]:
     allowed = ("PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "COMSPEC", "TMPDIR", "TEMP", "TMP")
     environment = {name: os.environ[name] for name in allowed if os.environ.get(name)}
-    environment.update({
-        "GIT_CONFIG_GLOBAL": os.devnull,
-        "GIT_CONFIG_NOSYSTEM": "1",
-        "GIT_OPTIONAL_LOCKS": "0",
-        "GIT_TERMINAL_PROMPT": "0",
-        "LC_ALL": "C",
-    })
+    environment.update(
+        {
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_OPTIONAL_LOCKS": "0",
+            "GIT_TERMINAL_PROMPT": "0",
+            "LC_ALL": "C",
+        }
+    )
     return environment
 
 
@@ -326,29 +420,40 @@ def _parse_porcelain_z(raw: str) -> list[str]:
     return paths
 
 
-def profile_workspace(
+def _profile_workspace_with_root(
     cwd_value: str | None,
-) -> tuple[dict[str, Any], set[str], dict[str, bool], list[str]]:
+) -> tuple[dict[str, Any], set[str], dict[str, bool], list[str], Path | None]:
     truncation: dict[str, bool] = {}
     degradation: list[str] = []
     if not cwd_value:
-        return {"available": False}, set(), truncation, ["cwd_unavailable", "non_git"]
+        return {"available": False}, set(), truncation, ["cwd_unavailable", "non_git"], None
     cwd = Path(cwd_value).expanduser()
     root_raw = _git(cwd, "rev-parse", "--show-toplevel")
     if not root_raw:
         name, cut = _bounded_path(cwd.name)
         if cut:
             truncation["workspace_name"] = True
-        return {
-            "available": False,
-            "cwd_name": name,
-            "cwd_sha256": _sha256_bytes(str(cwd.absolute()).encode("utf-8")),
-        }, set(), truncation, ["non_git"]
+        return (
+            {
+                "available": False,
+                "cwd_name": name,
+                "cwd_sha256": _sha256_bytes(str(cwd.absolute()).encode("utf-8")),
+            },
+            set(),
+            truncation,
+            ["non_git"],
+            None,
+        )
     root = Path(root_raw)
     head = _git(root, "rev-parse", "HEAD")
     branch, branch_code = _git_probe(root, "symbolic-ref", "--quiet", "--short", "HEAD")
     if branch_code == 0:
         detached: bool | None = False
+        if branch is not None:
+            branch, cut = _bounded_path(branch)
+            if cut:
+                truncation["branch_bytes"] = True
+                degradation.append("git_branch_truncated")
     elif branch_code == 1:
         detached = True
     else:
@@ -367,7 +472,8 @@ def profile_workspace(
     all_dirty: list[str] = []
     for value in _parse_porcelain_z(dirty_raw or ""):
         value, cut = _bounded_path(value)
-        truncation["dirty_path_bytes"] = truncation.get("dirty_path_bytes", False) or cut
+        if cut:
+            truncation["dirty_path_bytes"] = True
         if value and value not in all_dirty:
             all_dirty.append(value)
     all_dirty.sort()
@@ -390,7 +496,14 @@ def profile_workspace(
     }
     if head is None:
         degradation.append("git_head_unavailable")
-    return workspace, set(dirty) | artifact_dirty, truncation, degradation
+    return workspace, set(dirty) | artifact_dirty, truncation, degradation, root
+
+
+def profile_workspace(
+    cwd_value: str | None,
+) -> tuple[dict[str, Any], set[str], dict[str, bool], list[str]]:
+    workspace, dirty, truncation, degradation, _root = _profile_workspace_with_root(cwd_value)
+    return workspace, dirty, truncation, degradation
 
 
 _FIXED_ARTIFACTS = (
@@ -427,12 +540,13 @@ def _artifact_candidate_relatives(
     candidates = dirty_candidates[:MAX_DIRTY_ARTIFACT_CANDIDATES] + list(_FIXED_ARTIFACTS)
     truncated = False
     unsafe = False
+    fallback: list[tuple[int, str]] = []
     try:
         with _open_secure_child_directory(root, "openspec", create=False) as openspec:
             with _open_secure_child_directory(openspec, "changes", create=False) as changes:
                 entries = sorted(_list_directory(changes))
                 truncated = len(entries) > 256
-                for name in entries[:256]:
+                for name in entries:
                     try:
                         _validate_child_name(name)
                         mode = _existing_kind(changes, name)
@@ -440,13 +554,33 @@ def _artifact_candidate_relatives(
                         unsafe = True
                         continue
                     if mode is not None and stat.S_ISDIR(mode):
-                        candidates.append(f"openspec/changes/{name}/tasks.md")
+                        relative = f"openspec/changes/{name}/tasks.md"
+                        try:
+                            with _open_secure_child_directory(
+                                changes, name, create=False
+                            ) as change:
+                                fd = _open_secure_file_at(change, "tasks.md", os.O_RDONLY, 0o600)
+                                try:
+                                    info = os.fstat(fd)
+                                finally:
+                                    os.close(fd)
+                                if not _same_directory_entry(changes, name, change):
+                                    unsafe = True
+                                    continue
+                                fallback.append((info.st_mtime_ns, relative))
+                        except FileNotFoundError:
+                            continue
+                        except OSError:
+                            unsafe = True
                     elif mode is not None and stat.S_ISLNK(mode):
                         unsafe = True
     except FileNotFoundError:
         pass
     except OSError:
         unsafe = True
+    candidates.extend(
+        relative for _mtime, relative in sorted(fallback, key=lambda item: (-item[0], item[1]))
+    )
     candidates = list(dict.fromkeys(candidates))
     if len(candidates) > MAX_ARTIFACT_CANDIDATE_READS:
         candidates = candidates[:MAX_ARTIFACT_CANDIDATE_READS]
@@ -479,8 +613,7 @@ def _read_regular_relative(
         finally:
             os.close(fd)
         raced = raced or any(
-            not _same_directory_entry(parent, name, child)
-            for parent, name, child in retained
+            not _same_directory_entry(parent, name, child) for parent, name, child in retained
         )
         return raw, info, raced
 
@@ -554,17 +687,19 @@ def collect_artifacts(
             is_dirty = relative in dirty_paths and is_open
             if is_open and not is_dirty and incomplete == 0:
                 continue
-            profiled.append({
-                "path": bounded,
-                "size": info.st_size,
-                "mtime_ns": info.st_mtime_ns,
-                "sha256": _sha256_bytes(raw),
-                "completed_count": completed,
-                "incomplete_count": incomplete,
-                "incomplete_lines": lines,
-                "dirty": is_dirty,
-                "openspec": is_open,
-            })
+            profiled.append(
+                {
+                    "path": bounded,
+                    "size": info.st_size,
+                    "mtime_ns": info.st_mtime_ns,
+                    "sha256": _sha256_bytes(raw),
+                    "completed_count": completed,
+                    "incomplete_count": incomplete,
+                    "incomplete_lines": lines,
+                    "dirty": is_dirty,
+                    "openspec": is_open,
+                }
+            )
     finally:
         root_context.__exit__(None, None, None)
     profiled.sort(
@@ -652,19 +787,25 @@ def build_checkpoint(
     *,
     observed_at_ns: int | None = None,
 ) -> dict[str, Any]:
+    event = _bound_event_identifiers(event)
     transcript, transcript_degradation = profile_transcript(event.get("transcript_path"), home)
-    workspace, dirty, workspace_truncation, workspace_degradation = profile_workspace(
-        event.get("cwd")
-    )
+    (
+        workspace,
+        dirty,
+        workspace_truncation,
+        workspace_degradation,
+        artifact_root,
+    ) = _profile_workspace_with_root(event.get("cwd"))
     artifacts: list[dict[str, Any]] = []
     artifact_truncation: dict[str, bool] = {}
     artifact_degradation: list[str] = []
-    if workspace.get("available") and event.get("cwd"):
-        root_value = _git(Path(str(event["cwd"])), "rev-parse", "--show-toplevel")
-        if root_value:
-            artifacts, artifact_truncation, artifact_degradation = collect_artifacts(
-                Path(root_value), dirty_paths=dirty
-            )
+    if artifact_root is not None:
+        artifacts, artifact_truncation, artifact_degradation = collect_artifacts(
+            artifact_root, dirty_paths=dirty
+        )
+    normalization = event.get("normalization", {})
+    normalization_degradation = normalization.get("degradation", [])
+    normalization_truncation = normalization.get("truncation", {})
     structural = {
         "schema_version": SCHEMA_VERSION,
         "client": event["client"],
@@ -678,10 +819,19 @@ def build_checkpoint(
         "workspace": workspace,
         "transcript": transcript,
         "artifacts": artifacts,
-        "degradation": sorted(set(
-            transcript_degradation + workspace_degradation + artifact_degradation
-        )),
-        "truncation": {**workspace_truncation, **artifact_truncation},
+        "degradation": sorted(
+            set(
+                list(normalization_degradation)
+                + transcript_degradation
+                + workspace_degradation
+                + artifact_degradation
+            )
+        ),
+        "truncation": {
+            **normalization_truncation,
+            **workspace_truncation,
+            **artifact_truncation,
+        },
     }
     return finalize_checkpoint(
         structural,
@@ -705,6 +855,11 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
         "and does not prove capture completion."
     )
     content_budget = MAX_CONTEXT_BYTES - len(("\n" + advisory).encode("utf-8"))
+    maximum_footer = (
+        f"[continuation fields omitted: artifact pointers={MAX_ARTIFACTS}; "
+        f"workspace=1; transcript binding=1; dirty paths={MAX_DIRTY_PATHS}]"
+    )
+    section_budget = content_budget - len(("\n" + maximum_footer).encode("utf-8"))
     lines = [
         "[Exomem continuation checkpoint]",
         f"checkpoint: {checkpoint['checkpoint_id']} ({status})",
@@ -712,7 +867,7 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
 
     def append_if_fits(line: str) -> bool:
         candidate = "\n".join([*lines, line])
-        if len(candidate.encode("utf-8")) > content_budget:
+        if len(candidate.encode("utf-8")) > section_budget:
             return False
         lines.append(line)
         return True
@@ -721,6 +876,22 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
         append_if_fits("degraded: " + ", ".join(structural["degradation"]))
     if structural.get("truncation"):
         append_if_fits("truncated: " + ", ".join(sorted(structural["truncation"])))
+    omissions: dict[str, int] = {}
+    if workspace:
+        if not append_if_fits(
+            "workspace: "
+            f"{_context_line(workspace.get('root') or workspace.get('cwd_name') or 'unavailable')} "
+            f"branch={_context_line(workspace.get('branch'))} "
+            f"head={_context_line(workspace.get('head'))}"
+        ):
+            omissions["workspace"] = 1
+    if transcript.get("available"):
+        if not append_if_fits(
+            "transcript binding: "
+            f"size={transcript.get('observed_size')} offset={transcript.get('slice_offset')} "
+            f"length={transcript.get('slice_length')} sha256={transcript.get('slice_sha256')}"
+        ):
+            omissions["transcript binding"] = 1
     omitted_artifacts = 0
     for artifact in structural.get("artifacts", []):
         if not append_if_fits(
@@ -730,39 +901,28 @@ def render_continuation(checkpoint: Mapping[str, Any], *, status: str) -> str:
         ):
             omitted_artifacts += 1
     if omitted_artifacts:
-        append_if_fits(f"[artifact pointers truncated: {omitted_artifacts} omitted]")
-    if workspace:
-        append_if_fits(
-            "workspace: "
-            f"{_context_line(workspace.get('root') or workspace.get('cwd_name') or 'unavailable')} "
-            f"branch={_context_line(workspace.get('branch'))} "
-            f"head={_context_line(workspace.get('head'))}"
-        )
-    if transcript.get("available"):
-        append_if_fits(
-            "transcript binding: "
-            f"size={transcript.get('observed_size')} offset={transcript.get('slice_offset')} "
-            f"length={transcript.get('slice_length')} sha256={transcript.get('slice_sha256')}"
-        )
+        omissions["artifact pointers"] = omitted_artifacts
     dirty = workspace.get("dirty_paths") or []
     if dirty:
         shown: list[str] = []
         for item in dirty:
             candidate = shown + [_context_line(item)]
-            if len(candidate) == len(dirty):
-                line = "dirty paths: " + ", ".join(candidate)
-            else:
-                line = (
-                    "dirty paths: " + ", ".join(candidate)
-                    + f"\n[dirty paths truncated: {len(dirty) - len(candidate)} omitted]"
-                )
-            if len("\n".join([*lines, line]).encode("utf-8")) > content_budget:
+            line = "dirty paths: " + ", ".join(candidate)
+            if len("\n".join([*lines, line]).encode("utf-8")) > section_budget:
                 break
             shown = candidate
         if shown:
             append_if_fits("dirty paths: " + ", ".join(shown))
         if len(shown) < len(dirty):
-            append_if_fits(f"[dirty paths truncated: {len(dirty) - len(shown)} omitted]")
+            omissions["dirty paths"] = len(dirty) - len(shown)
+    if omissions:
+        order = ("artifact pointers", "workspace", "transcript binding", "dirty paths")
+        footer = (
+            "[continuation fields omitted: "
+            + "; ".join(f"{name}={omissions[name]}" for name in order if name in omissions)
+            + "]"
+        )
+        lines.append(footer)
     return "\n".join(lines) + "\n" + advisory
 
 
@@ -1076,6 +1236,19 @@ def _require_private_state_directory(directory: _SecureDirectory) -> None:
         raise OSError(f"state directory permissions are too broad: {mode:04o}")
 
 
+def _require_trusted_directory(directory: _SecureDirectory) -> None:
+    """Reject hook/config directories writable by another local principal."""
+    if os.name == "nt":
+        return
+    info = os.fstat(directory.fd)
+    mode = stat.S_IMODE(info.st_mode)
+    if info.st_uid != os.geteuid() or mode & 0o022:
+        raise OSError(
+            errno.EPERM,
+            f"unsafe writable or foreign-owned directory: {directory.path}",
+        )
+
+
 def _directory_entry_identity(
     parent: _SecureDirectory,
     name: str,
@@ -1362,13 +1535,107 @@ def _advisory_lock_at(
     return _AdvisoryLock(directory.path / name, timeout, directory=directory, name=name)
 
 
+def _session_manifest(
+    home: Path,
+    client: str,
+    session_id: str,
+    created_at_ns: int,
+) -> dict[str, Any]:
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "kind": "session",
+        "client": client,
+        "session_id": session_id,
+        "state_name": session_state_dir(home, client, session_id).name,
+        "state_root_binding": _state_root_binding(home, client),
+        "created_at_ns": int(created_at_ns),
+    }
+
+
+def _ensure_session_manifest(
+    state: _SecureDirectory,
+    home: Path,
+    client: str,
+    session_id: str,
+    created_at_ns: int,
+) -> None:
+    fd = _open_secure_file_at(state, ".lock", os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        raw = os.read(fd, 4097)
+        if raw not in {b"", b"\0"}:
+            return
+        payload = b"\0" + _canonical_bytes(
+            _session_manifest(home, client, session_id, created_at_ns)
+        )
+        os.lseek(fd, 0, os.SEEK_SET)
+        _write_all(fd, payload)
+        os.ftruncate(fd, len(payload))
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def load_session_manifest_at(
+    state: _SecureDirectory,
+    home: Path,
+    client: str,
+    state_name: str,
+) -> tuple[dict[str, Any] | None, str]:
+    try:
+        fd = _open_secure_file_at(state, ".lock", os.O_RDONLY, 0o600)
+        try:
+            info = os.fstat(fd)
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+                return None, "corrupt"
+            raw = os.read(fd, 4097)
+        finally:
+            os.close(fd)
+        if not raw.startswith(b"\0") or len(raw) > 4096:
+            return None, "missing"
+        value = json.loads(raw[1:])
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None, "corrupt"
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "kind",
+        "client",
+        "session_id",
+        "state_name",
+        "state_root_binding",
+        "created_at_ns",
+    }:
+        return None, "corrupt"
+    session_id = value.get("session_id")
+    if (
+        value.get("schema_version") != SCHEMA_VERSION
+        or value.get("kind") != "session"
+        or value.get("client") != client
+        or not _bounded_safe_text(session_id)
+        or value.get("state_name") != state_name
+        or value.get("state_root_binding") != _state_root_binding(home, client)
+        or session_state_dir(home, client, str(session_id)).name != state_name
+        or type(value.get("created_at_ns")) is not int
+        or value["created_at_ns"] < 0
+    ):
+        return None, "corrupt"
+    return value, "valid"
+
+
 @contextlib.contextmanager
-def _session_lock(home: Path, client: str, session_id: str, *, create: bool) -> Any:
+def _session_lock(
+    home: Path,
+    client: str,
+    session_id: str,
+    *,
+    create: bool,
+    created_at_ns: int | None = None,
+) -> Any:
     root = client_state_root(home, client)
     state_name = session_state_dir(home, client, session_id).name
     with _open_secure_directory(root, create=create) as root_handle:
         _require_private_state_directory(root_handle)
         with _advisory_lock_at(root_handle, ".root.lock"):
+            state_existed = _existing_kind(root_handle, state_name) is not None
             state_context = _open_secure_child_directory(
                 root_handle,
                 state_name,
@@ -1377,6 +1644,14 @@ def _session_lock(home: Path, client: str, session_id: str, *, create: bool) -> 
             state_handle = state_context.__enter__()
             try:
                 _require_private_state_directory(state_handle)
+                if create and not state_existed:
+                    _ensure_session_manifest(
+                        state_handle,
+                        home,
+                        client,
+                        session_id,
+                        time.time_ns() if created_at_ns is None else int(created_at_ns),
+                    )
                 session = _advisory_lock_at(state_handle, ".lock")
                 session.__enter__()
             except BaseException:
@@ -1400,6 +1675,200 @@ def _recomputed(checkpoint: Mapping[str, Any]) -> dict[str, Any] | None:
         return None
 
 
+def _bounded_safe_text(value: object, limit: int = MAX_IDENTIFIER_BYTES) -> bool:
+    return (
+        isinstance(value, str) and not _unsafe_text(value) and len(value.encode("utf-8")) <= limit
+    )
+
+
+def _safe_relative_path(value: object) -> bool:
+    if not _bounded_safe_text(value, MAX_PATH_BYTES) or not isinstance(value, str):
+        return False
+    if value.startswith(("/", "\\")) or "\\" in value:
+        return False
+    parts = value.split("/")
+    return bool(parts) and all(part not in {"", ".", ".."} for part in parts)
+
+
+def _valid_path_binding(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {"kind", "value"}:
+        return False
+    if value["kind"] == "sha256":
+        return isinstance(value["value"], str) and bool(_HEX_64.fullmatch(value["value"]))
+    return value["kind"] == "relative" and _safe_relative_path(value["value"])
+
+
+def _valid_workspace(value: object) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("available"), bool):
+        return False
+    if not value["available"]:
+        if not set(value).issubset({"available", "cwd_name", "cwd_sha256"}):
+            return False
+        if "cwd_name" in value and not _bounded_safe_text(value["cwd_name"], MAX_PATH_BYTES):
+            return False
+        return "cwd_sha256" not in value or (
+            isinstance(value["cwd_sha256"], str) and bool(_HEX_64.fullmatch(value["cwd_sha256"]))
+        )
+    if set(value) != {
+        "available",
+        "root",
+        "root_sha256",
+        "branch",
+        "detached",
+        "head",
+        "dirty_paths",
+    }:
+        return False
+    branch = value["branch"]
+    head = value["head"]
+    dirty = value["dirty_paths"]
+    return (
+        _bounded_safe_text(value["root"], MAX_PATH_BYTES)
+        and isinstance(value["root_sha256"], str)
+        and bool(_HEX_64.fullmatch(value["root_sha256"]))
+        and (branch is None or _bounded_safe_text(branch, MAX_PATH_BYTES))
+        and (value["detached"] is None or isinstance(value["detached"], bool))
+        and (
+            head is None
+            or isinstance(head, str)
+            and (bool(_HEX_40.fullmatch(head)) or bool(_HEX_64.fullmatch(head)))
+        )
+        and isinstance(dirty, list)
+        and len(dirty) <= MAX_DIRTY_PATHS
+        and dirty == sorted(set(dirty))
+        and all(_safe_relative_path(path) for path in dirty)
+    )
+
+
+def _valid_transcript(value: object) -> bool:
+    if not isinstance(value, dict) or not isinstance(value.get("available"), bool):
+        return False
+    if not value["available"]:
+        return set(value).issubset({"available", "path"}) and (
+            "path" not in value or _valid_path_binding(value["path"])
+        )
+    if set(value) != {
+        "available",
+        "path",
+        "observed_size",
+        "observed_mtime_ns",
+        "slice_offset",
+        "slice_length",
+        "slice_sha256",
+    }:
+        return False
+    numeric = (
+        value["observed_size"],
+        value["observed_mtime_ns"],
+        value["slice_offset"],
+        value["slice_length"],
+    )
+    if any(type(item) is not int or item < 0 for item in numeric):
+        return False
+    return (
+        _valid_path_binding(value["path"])
+        and value["slice_length"] <= TRANSCRIPT_SLICE_BYTES
+        and value["slice_offset"] + value["slice_length"] <= value["observed_size"]
+        and isinstance(value["slice_sha256"], str)
+        and bool(_HEX_64.fullmatch(value["slice_sha256"]))
+    )
+
+
+def _valid_artifact(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "path",
+        "size",
+        "mtime_ns",
+        "sha256",
+        "completed_count",
+        "incomplete_count",
+        "incomplete_lines",
+    }:
+        return False
+    path = value["path"]
+    numbers = (
+        value["size"],
+        value["mtime_ns"],
+        value["completed_count"],
+        value["incomplete_count"],
+    )
+    lines = value["incomplete_lines"]
+    return (
+        isinstance(path, str)
+        and _safe_relative_path(path)
+        and _allowed_artifact_relative(path)
+        and all(type(number) is int and number >= 0 for number in numbers)
+        and isinstance(value["sha256"], str)
+        and bool(_HEX_64.fullmatch(value["sha256"]))
+        and isinstance(lines, list)
+        and len(lines) <= MAX_INCOMPLETE_LINES
+        and all(type(line) is int and line > 0 for line in lines)
+        and lines == sorted(set(lines))
+        and value["incomplete_count"] >= len(lines)
+    )
+
+
+def _valid_structural_contract(value: object) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version",
+        "client",
+        "session_id",
+        "turn_id",
+        "event",
+        "trigger",
+        "source",
+        "model",
+        "state_root_binding",
+        "workspace",
+        "transcript",
+        "artifacts",
+        "degradation",
+        "truncation",
+    }:
+        return False
+    client = value["client"]
+    event = value["event"]
+    if value["schema_version"] != SCHEMA_VERSION or client not in _CLIENT_EVENTS:
+        return False
+    if not isinstance(event, str) or event not in _CLIENT_EVENTS[client]:
+        return False
+    contract = _CLIENT_EVENTS[client][event]
+    trigger = value["trigger"]
+    source = value["source"]
+    if "trigger" in contract:
+        if trigger not in contract["trigger"] or source is not None:
+            return False
+    elif "source" in contract:
+        if source not in contract["source"] or trigger is not None:
+            return False
+    elif trigger is not None or source is not None:
+        return False
+    if not _bounded_safe_text(value["session_id"]):
+        return False
+    if value["turn_id"] is not None and not _bounded_safe_text(value["turn_id"]):
+        return False
+    if value["model"] is not None and not _bounded_safe_text(value["model"]):
+        return False
+    artifacts = value["artifacts"]
+    degradation = value["degradation"]
+    truncation = value["truncation"]
+    return (
+        isinstance(value["state_root_binding"], str)
+        and bool(_HEX_64.fullmatch(value["state_root_binding"]))
+        and _valid_workspace(value["workspace"])
+        and _valid_transcript(value["transcript"])
+        and isinstance(artifacts, list)
+        and len(artifacts) <= MAX_ARTIFACTS
+        and all(_valid_artifact(artifact) for artifact in artifacts)
+        and isinstance(degradation, list)
+        and degradation == sorted(set(degradation))
+        and all(item in _ALLOWED_DEGRADATION for item in degradation)
+        and isinstance(truncation, dict)
+        and set(truncation).issubset(_ALLOWED_TRUNCATION)
+        and all(flag is True for flag in truncation.values())
+    )
+
+
 def _decode_checkpoint(raw: bytes) -> dict[str, Any] | None:
     try:
         if len(raw) > MAX_CHECKPOINT_BYTES:
@@ -1407,7 +1876,26 @@ def _decode_checkpoint(raw: bytes) -> dict[str, Any] | None:
         loaded = json.loads(raw)
     except (UnicodeDecodeError, json.JSONDecodeError):
         return None
-    if not isinstance(loaded, dict) or loaded.get("schema_version") != SCHEMA_VERSION:
+    if (
+        not isinstance(loaded, dict)
+        or set(loaded)
+        != {
+            "schema_version",
+            "checkpoint_id",
+            "structural_digest",
+            "observed_at_ns",
+            "event_order",
+            "structural",
+        }
+        or loaded.get("schema_version") != SCHEMA_VERSION
+        or not isinstance(loaded.get("checkpoint_id"), str)
+        or _HEX_64.fullmatch(loaded["checkpoint_id"]) is None
+        or not isinstance(loaded.get("structural_digest"), str)
+        or _HEX_64.fullmatch(loaded["structural_digest"]) is None
+        or type(loaded.get("observed_at_ns")) is not int
+        or loaded["observed_at_ns"] < 0
+        or not _valid_structural_contract(loaded.get("structural"))
+    ):
         return None
     recomputed = _recomputed(loaded)
     if recomputed is None:
@@ -1427,6 +1915,9 @@ def load_checkpoint_status_at(
     try:
         fd = _open_secure_file_at(directory, name, os.O_RDONLY, 0o600)
         try:
+            info = os.fstat(fd)
+            if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+                return None, "corrupt"
             raw = os.read(fd, MAX_CHECKPOINT_BYTES + 1)
         finally:
             os.close(fd)
@@ -1547,12 +2038,29 @@ def write_checkpoint(
     *,
     observed_at_ns: int | None = None,
 ) -> dict[str, Any]:
+    event = _bound_event_identifiers(event)
     observed = time.time_ns() if observed_at_ns is None else int(observed_at_ns)
     candidate = build_checkpoint(event, home, observed_at_ns=observed)
-    with _session_lock(home, str(event["client"]), str(event["session_id"]), create=True) as state:
+    with _session_lock(
+        home,
+        str(event["client"]),
+        str(event["session_id"]),
+        create=True,
+        created_at_ns=observed,
+    ) as state:
         _cleanup_temporaries(state)
         current = load_checkpoint_at(state, "current.json")
         if current is not None and current["checkpoint_id"] == candidate["checkpoint_id"]:
+            if tuple(candidate["event_order"]) > tuple(current["event_order"]):
+                temporary = _write_temp(state, candidate)
+                try:
+                    _replace_at(state, temporary, "current.json")
+                except BaseException:
+                    try:
+                        _unlink_at(state, temporary)
+                    except OSError:
+                        pass
+                    raise
             return {"status": "idempotent", "checkpoint_id": candidate["checkpoint_id"]}
         if current is not None and tuple(current["event_order"]) > tuple(candidate["event_order"]):
             return {"status": "stale", "checkpoint_id": candidate["checkpoint_id"]}
@@ -1622,6 +2130,7 @@ def select_checkpoint(
     *,
     now_ns: int | None = None,
 ) -> tuple[dict[str, Any], str] | None:
+    event = _bound_event_identifiers(event)
     now = time.time_ns() if now_ns is None else int(now_ns)
     try:
         with _session_lock(
@@ -1631,16 +2140,32 @@ def select_checkpoint(
             create=False,
         ) as state:
             current, current_status = load_checkpoint_status_at(state, "current.json")
+            previous, previous_status = load_checkpoint_status_at(state, "previous.json")
             if current_status == "valid":
+                if (
+                    previous_status == "valid"
+                    and current is not None
+                    and previous is not None
+                    and not _generation_pair_ordered(current, previous)
+                ):
+                    return None
                 if current is not None and _candidate_matches(current, event, home, now):
                     return current, "current"
                 return None
-            previous = load_checkpoint_at(state, "previous.json")
-            if previous is not None and _candidate_matches(previous, event, home, now):
+            if (
+                current_status in {"missing", "corrupt"}
+                and previous_status == "valid"
+                and previous is not None
+                and _candidate_matches(previous, event, home, now)
+            ):
                 return previous, "rollback"
     except (OSError, TimeoutError):
         return None
     return None
+
+
+def _generation_pair_ordered(current: Mapping[str, Any], previous: Mapping[str, Any]) -> bool:
+    return tuple(current["event_order"]) >= tuple(previous["event_order"])
 
 
 def _rename_directory_at(root: _SecureDirectory, source: str, destination: str) -> None:
@@ -1729,25 +2254,35 @@ def _tombstone_expired_candidate(
     try:
         if not _recognized_state_directory(state_handle):
             return None
-        candidates = (
-            load_checkpoint_at(state_handle, "current.json"),
-            load_checkpoint_at(state_handle, "previous.json"),
+        current = load_checkpoint_at(state_handle, "current.json")
+        previous = load_checkpoint_at(state_handle, "previous.json")
+        current_authorized = current is not None and _prune_candidate_authorized(
+            current, home, client, name
         )
-        candidate = next(
-            (
-                value
-                for value in candidates
-                if value is not None
-                and _prune_candidate_authorized(value, home, client, name)
-            ),
-            None,
+        previous_authorized = previous is not None and _prune_candidate_authorized(
+            previous, home, client, name
         )
-        if (
-            candidate is None
-            or not isinstance(candidate.get("observed_at_ns"), int)
-            or now - int(candidate["observed_at_ns"]) <= RETENTION_NS
-        ):
-            return None
+        if current_authorized and isinstance(current.get("observed_at_ns"), int):
+            current_expired = now - int(current["observed_at_ns"]) > RETENTION_NS
+            if not current_expired:
+                if (
+                    previous_authorized
+                    and isinstance(previous.get("observed_at_ns"), int)
+                    and now - int(previous["observed_at_ns"]) > RETENTION_NS
+                ):
+                    _unlink_at(state_handle, "previous.json")
+                return None
+        elif previous_authorized and isinstance(previous.get("observed_at_ns"), int):
+            if now - int(previous["observed_at_ns"]) <= RETENTION_NS:
+                return None
+        else:
+            manifest, manifest_status = load_session_manifest_at(state_handle, home, client, name)
+            if (
+                manifest_status != "valid"
+                or manifest is None
+                or now - int(manifest["created_at_ns"]) <= RETENTION_NS
+            ):
+                return None
         state_identity = _directory_identity(state_handle)
         if _directory_entry_identity(root_handle, name) != state_identity:
             return None
@@ -1782,6 +2317,85 @@ def _tombstone_expired_candidate(
             state_context.__exit__(None, None, None)
 
 
+def _read_prune_sequence(lock: _AdvisoryLock) -> int:
+    if lock.fd is None:
+        return 0
+    os.lseek(lock.fd, 1, os.SEEK_SET)
+    raw = os.read(lock.fd, 8)
+    return int.from_bytes(raw, "big") if len(raw) == 8 else 0
+
+
+def _write_prune_sequence(lock: _AdvisoryLock, value: int) -> None:
+    if lock.fd is None:
+        return
+    os.lseek(lock.fd, 1, os.SEEK_SET)
+    _write_all(lock.fd, (value % (1 << 64)).to_bytes(8, "big"))
+
+
+_TOMBSTONE = re.compile(r"^\.tombstone-(.+)-[0-9a-f]{16}$")
+
+
+def _authorize_recovery_tombstone(
+    root: _SecureDirectory,
+    home: Path,
+    client: str,
+    tombstone_name: str,
+    now: int,
+) -> tuple[str, tuple[object, ...]] | None:
+    match = _TOMBSTONE.fullmatch(tombstone_name)
+    if match is None:
+        return None
+    original_name = match.group(1)
+    context = None
+    state_open = False
+    lock = None
+    locked = False
+    try:
+        context = _open_secure_child_directory(root, tombstone_name, create=False)
+        state = context.__enter__()
+        state_open = True
+        _require_private_state_directory(state)
+        lock = _advisory_lock_at(state, ".lock", timeout=0.0)
+        lock.__enter__()
+        locked = True
+    except (OSError, TimeoutError):
+        if state_open and context is not None:
+            context.__exit__(*sys.exc_info())
+        return None
+    try:
+        if not _recognized_state_directory(state):
+            return None
+        candidates = (
+            load_checkpoint_at(state, "current.json"),
+            load_checkpoint_at(state, "previous.json"),
+        )
+        authorized = next(
+            (
+                candidate
+                for candidate in candidates
+                if candidate is not None
+                and _prune_candidate_authorized(candidate, home, client, original_name)
+                and isinstance(candidate.get("observed_at_ns"), int)
+                and now - int(candidate["observed_at_ns"]) > RETENTION_NS
+            ),
+            None,
+        )
+        if authorized is None:
+            manifest, status_value = load_session_manifest_at(state, home, client, original_name)
+            if (
+                status_value != "valid"
+                or manifest is None
+                or now - int(manifest["created_at_ns"]) <= RETENTION_NS
+            ):
+                return None
+        return tombstone_name, _directory_identity(state)
+    finally:
+        if locked and lock is not None:
+            lock.__exit__(None, None, None)
+        if state_open and context is not None:
+            context.__exit__(None, None, None)
+
+
 def prune_expired(
     home: Path,
     client: str,
@@ -1803,19 +2417,42 @@ def prune_expired(
         return 0
     try:
         try:
-            with _advisory_lock_at(root_handle, ".root.lock"):
-                entries = [
+            remaining = max(0.0, lock_deadline - time.monotonic())
+            with _advisory_lock_at(root_handle, ".root.lock", timeout=remaining) as root_lock:
+                all_entries = [
                     name
                     for name in sorted(_list_directory(root_handle))
                     if name != current_name and not name.startswith(".")
+                ]
+                if all_entries:
+                    sequence = _read_prune_sequence(root_lock)
+                    start = sequence % len(all_entries)
+                    rotated = all_entries[start:] + all_entries[:start]
+                    entries = rotated[:MAX_PRUNE_CANDIDATES]
+                    _write_prune_sequence(root_lock, sequence + len(entries))
+                else:
+                    entries = []
+                recovery_names = [
+                    name
+                    for name in sorted(_list_directory(root_handle))
+                    if name.startswith(".tombstone-")
                 ][:MAX_PRUNE_CANDIDATES]
+                for recovery_name in recovery_names:
+                    if time.monotonic() >= lock_deadline:
+                        break
+                    recovered = _authorize_recovery_tombstone(
+                        root_handle, home, client, recovery_name, now
+                    )
+                    if recovered is not None:
+                        tombstones.append(recovered)
         except (OSError, TimeoutError):
             return 0
         for name in entries:
             if time.monotonic() >= lock_deadline:
                 break
             try:
-                with _advisory_lock_at(root_handle, ".root.lock"):
+                remaining = max(0.0, lock_deadline - time.monotonic())
+                with _advisory_lock_at(root_handle, ".root.lock", timeout=remaining):
                     tombstone = _tombstone_expired_candidate(
                         root_handle,
                         home,
@@ -1832,8 +2469,7 @@ def prune_expired(
                 break
             time.sleep(0.001)
         return sum(
-            _delete_tombstone_at(root_handle, item, identity)
-            for item, identity in tombstones
+            _delete_tombstone_at(root_handle, item, identity) for item, identity in tombstones
         )
     finally:
         root_context.__exit__(None, None, None)
@@ -1860,23 +2496,138 @@ def _metadata_log(
         row["checkpoint_id"] = checkpoint_id
     if error_class:
         row["error_class"] = error_class
+    if not _valid_metadata_record(row):
+        raise ValueError("invalid continuation metadata record")
     with _open_secure_directory(root, create=create_root) as root_handle:
         _require_private_state_directory(root_handle)
-        fd = _open_secure_file_at(
-            root_handle,
-            "events.log",
-            os.O_WRONLY | os.O_CREAT | os.O_APPEND,
-            0o600,
+        with _advisory_lock_at(root_handle, ".events.lock", timeout=0.5):
+            row_bytes = _canonical_bytes(row) + b"\n"
+            if _append_metadata_if_room(root_handle, row_bytes):
+                return
+            records = _read_metadata_records(root_handle)
+            encoded = [_canonical_bytes(record) + b"\n" for record in records]
+            encoded.append(row_bytes)
+            if sum(map(len, encoded)) > MAX_METADATA_LOG_BYTES:
+                retained: list[bytes] = []
+                retained_bytes = 0
+                target = MAX_METADATA_LOG_BYTES // 2
+                for item in reversed(encoded):
+                    if retained and retained_bytes + len(item) > target:
+                        break
+                    retained.append(item)
+                    retained_bytes += len(item)
+                encoded = list(reversed(retained))
+            payload = b"".join(encoded)
+            temporary = f".events.log.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+            fd = _open_secure_file_at(
+                root_handle,
+                temporary,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                _write_all(fd, payload)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            try:
+                _replace_at(root_handle, temporary, "events.log")
+            except BaseException:
+                _unlink_at(root_handle, temporary, missing_ok=True)
+                raise
+
+
+def _append_metadata_if_room(root_handle: _SecureDirectory, row_bytes: bytes) -> bool:
+    kind = _existing_kind(root_handle, "events.log")
+    if kind is None:
+        return False
+    if not stat.S_ISREG(kind):
+        raise OSError(errno.EINVAL, "unsafe continuation metadata log")
+    fd = _open_secure_file_at(root_handle, "events.log", os.O_RDWR, 0o600)
+    try:
+        info = os.fstat(fd)
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError(errno.EPERM, "unsafe continuation metadata log mode")
+        if info.st_size <= 0 or info.st_size + len(row_bytes) > MAX_METADATA_LOG_BYTES:
+            return False
+        os.lseek(fd, -1, os.SEEK_END)
+        if os.read(fd, 1) != b"\n":
+            return False
+        os.lseek(fd, 0, os.SEEK_END)
+        _write_all(fd, row_bytes)
+        return True
+    finally:
+        os.close(fd)
+
+
+def _valid_metadata_record(value: object) -> bool:
+    if not isinstance(value, dict):
+        return False
+    required = {"event", "status", "duration_ms"}
+    if not required <= value.keys():
+        return False
+    if value["event"] not in _METADATA_EVENTS or value["status"] not in _METADATA_STATUSES:
+        return False
+    duration = value["duration_ms"]
+    if type(duration) is not int or not 0 <= duration <= MAX_METADATA_DURATION_MS:
+        return False
+    status = value["status"]
+    if status in _METADATA_STATUSES_WITH_CHECKPOINT:
+        return (
+            set(value) == required | {"checkpoint_id"}
+            and isinstance(value["checkpoint_id"], str)
+            and _HEX_64.fullmatch(value["checkpoint_id"]) is not None
         )
+    if status == "empty":
+        return set(value) == required
+    return (
+        status == "error"
+        and set(value) == required | {"error_class"}
+        and isinstance(value["error_class"], str)
+        and _ERROR_CLASS.fullmatch(value["error_class"]) is not None
+    )
+
+
+def _read_metadata_records(root_handle: _SecureDirectory) -> list[dict[str, object]]:
+    kind = _existing_kind(root_handle, "events.log")
+    if kind is None:
+        return []
+    if not stat.S_ISREG(kind):
+        raise OSError(errno.EINVAL, "unsafe continuation metadata log")
+    fd = _open_secure_file_at(root_handle, "events.log", os.O_RDONLY)
+    try:
+        info = os.fstat(fd)
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600:
+            raise OSError(errno.EPERM, "unsafe continuation metadata log mode")
+        read_limit = MAX_METADATA_LOG_BYTES // 2
+        offset = max(0, info.st_size - read_limit)
+        os.lseek(fd, offset, os.SEEK_SET)
+        raw = os.read(fd, read_limit)
+    finally:
+        os.close(fd)
+    if offset:
+        separator = raw.find(b"\n")
+        raw = raw[separator + 1 :] if separator >= 0 else b""
+    if raw and not raw.endswith(b"\n"):
+        separator = raw.rfind(b"\n")
+        raw = raw[: separator + 1] if separator >= 0 else b""
+    records: list[dict[str, object]] = []
+    for line in raw.splitlines():
         try:
-            _write_all(fd, _canonical_bytes(row) + b"\n")
-        finally:
-            os.close(fd)
+            record = json.loads(line)
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        if _valid_metadata_record(record):
+            records.append(record)
+    return records
 
 
 def _disabled(environ: Mapping[str, str]) -> bool:
     return environ.get("EXOMEM_CONTINUATION_DISABLE", "").strip().lower() in {
-        "1", "true", "yes", "on",
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 
@@ -1916,6 +2667,8 @@ def _dispatch_core(
     event: Mapping[str, Any],
     home: Path,
 ) -> dict[str, Any] | None:
+    if event.get("contract_version") != EVENT_CONTRACT_VERSION:
+        return None
     client = str(event["client"])
     started = time.monotonic_ns()
     if event["event"] in {"PreCompact", "SessionEnd"}:

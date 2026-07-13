@@ -43,12 +43,8 @@ def test_adapter_fixtures_pin_versions_sources_and_contract_matrix() -> None:
     assert checkpoint.EVENT_CONTRACT_VERSION == 1
     assert checkpoint.OUTPUT_CONTRACT_VERSION == 1
     assert checkpoint.ADAPTER_PROVENANCE == PINNED_ADAPTER_FIXTURES
-    assert {
-        client: tuple(events)
-        for client, events in checkpoint._CLIENT_EVENTS.items()
-    } == {
-        client: fixture["events"]
-        for client, fixture in PINNED_ADAPTER_FIXTURES.items()
+    assert {client: tuple(events) for client, events in checkpoint._CLIENT_EVENTS.items()} == {
+        client: fixture["events"] for client, fixture in PINNED_ADAPTER_FIXTURES.items()
     }
 
 
@@ -104,42 +100,65 @@ def test_normalizes_pinned_precompact_envelopes(client: str, camel: bool) -> Non
         "cwd": "/tmp/project",
         "transcript_path": "/tmp/t.jsonl",
         "model": "fixture-model",
+        "normalization": {"degradation": [], "truncation": {}},
     }
     assert "secret" not in json.dumps(normalized).lower()
 
 
 def test_lifecycle_matrix_is_closed_and_alias_conflicts_are_rejected() -> None:
-    assert checkpoint.normalize_event(
-        "claude", {"hook_event_name": "SessionEnd", "session_id": "s"}
-    )["event"] == "SessionEnd"
-    assert checkpoint.normalize_event(
-        "codex", {"hook_event_name": "SessionEnd", "session_id": "s"}
-    ) is None
-    assert checkpoint.normalize_event(
-        "claude", {"hook_event_name": "SessionStart", "session_id": "s", "source": "compact"}
-    )["source"] == "compact"
-    assert checkpoint.normalize_event(
-        "codex", {"hook_event_name": "SessionStart", "session_id": "s", "source": "resume"}
-    )["source"] == "resume"
-    assert checkpoint.normalize_event(
-        "codex", {"hook_event_name": "Stop", "session_id": "s"}
-    ) is None
-    assert checkpoint.normalize_event(
-        "claude",
-        {"hook_event_name": "PreCompact", "session_id": "a", "sessionId": "b", "trigger": "manual"},
-    ) is None
-    assert checkpoint.normalize_event(
-        "claude", {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "other"}
-    ) is None
+    assert (
+        checkpoint.normalize_event("claude", {"hook_event_name": "SessionEnd", "session_id": "s"})[
+            "event"
+        ]
+        == "SessionEnd"
+    )
+    assert (
+        checkpoint.normalize_event("codex", {"hook_event_name": "SessionEnd", "session_id": "s"})
+        is None
+    )
+    assert (
+        checkpoint.normalize_event(
+            "claude", {"hook_event_name": "SessionStart", "session_id": "s", "source": "compact"}
+        )["source"]
+        == "compact"
+    )
+    assert (
+        checkpoint.normalize_event(
+            "codex", {"hook_event_name": "SessionStart", "session_id": "s", "source": "resume"}
+        )["source"]
+        == "resume"
+    )
+    assert (
+        checkpoint.normalize_event("codex", {"hook_event_name": "Stop", "session_id": "s"}) is None
+    )
+    assert (
+        checkpoint.normalize_event(
+            "claude",
+            {
+                "hook_event_name": "PreCompact",
+                "session_id": "a",
+                "sessionId": "b",
+                "trigger": "manual",
+            },
+        )
+        is None
+    )
+    assert (
+        checkpoint.normalize_event(
+            "claude", {"hook_event_name": "PreCompact", "session_id": "s", "trigger": "other"}
+        )
+        is None
+    )
 
 
 def test_client_home_resolution_and_collision_resistant_session_paths(tmp_path: Path) -> None:
     shared = tmp_path / "shared"
     assert checkpoint.resolve_home("claude", {"EXOMEM_HOOK_HOME": str(shared)}) == shared
     assert checkpoint.resolve_home("codex", {"EXOMEM_HOOK_HOME": str(shared)}) == shared
-    assert checkpoint.resolve_home(
-        "claude", {"CLAUDE_CONFIG_DIR": str(tmp_path / "c")}
-    ) == tmp_path / "c"
+    assert (
+        checkpoint.resolve_home("claude", {"CLAUDE_CONFIG_DIR": str(tmp_path / "c")})
+        == tmp_path / "c"
+    )
     assert checkpoint.resolve_home("codex", {"CODEX_HOME": str(tmp_path / "x")}) == tmp_path / "x"
 
     first = checkpoint.session_state_dir(shared, "claude", "unsafe/a")
@@ -204,6 +223,101 @@ def test_structural_digest_controls_identity_and_observation_time_does_not() -> 
     assert second["checkpoint_id"] != first["checkpoint_id"]
     assert second["structural_digest"] != first["structural_digest"]
     assert first["event_order"][:2] == [-1, -1]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "inner_schema",
+        "client_event",
+        "session_control",
+        "model_type",
+        "workspace_path",
+        "artifact_path",
+        "artifact_hash",
+        "artifact_lines",
+        "transcript_hash",
+        "unknown_degradation",
+        "branch_bound",
+    ],
+)
+def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) -> None:
+    structural = {
+        "schema_version": checkpoint.SCHEMA_VERSION,
+        "client": "codex",
+        "session_id": "schema-session",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "manual",
+        "source": None,
+        "model": None,
+        "state_root_binding": "a" * 64,
+        "workspace": {"available": False},
+        "transcript": {"available": False},
+        "artifacts": [],
+        "degradation": ["non_git", "transcript_unavailable"],
+        "truncation": {},
+    }
+    if case == "inner_schema":
+        structural["schema_version"] = 999
+    elif case == "client_event":
+        structural["event"] = "SessionEnd"
+    elif case == "session_control":
+        structural["session_id"] = "session\nSECRET"
+    elif case == "model_type":
+        structural["model"] = ["not", "a", "string"]
+    elif case == "workspace_path":
+        structural["workspace"] = {
+            "available": True,
+            "root": "repo",
+            "root_sha256": "b" * 64,
+            "branch": "main",
+            "detached": False,
+            "head": "c" * 40,
+            "dirty_paths": ["/etc/passwd"],
+        }
+    elif case.startswith("artifact_"):
+        artifact = {
+            "path": ".task/TASK.md",
+            "size": 10,
+            "mtime_ns": 20,
+            "sha256": "d" * 64,
+            "completed_count": 0,
+            "incomplete_count": 1,
+            "incomplete_lines": [1],
+        }
+        if case == "artifact_path":
+            artifact["path"] = "notes/tasks.md"
+        elif case == "artifact_hash":
+            artifact["sha256"] = "SECRET/path"
+        else:
+            artifact["incomplete_lines"] = [0, 2]
+        structural["artifacts"] = [artifact]
+    elif case == "transcript_hash":
+        structural["transcript"] = {
+            "available": True,
+            "path": {"kind": "relative", "value": "transcript.jsonl"},
+            "observed_size": 10,
+            "observed_mtime_ns": 20,
+            "slice_offset": 0,
+            "slice_length": 10,
+            "slice_sha256": "not-a-hash",
+        }
+    elif case == "unknown_degradation":
+        structural["degradation"] = ["SECRET /tmp/path"]
+    else:
+        structural["workspace"] = {
+            "available": True,
+            "root": "repo",
+            "root_sha256": "b" * 64,
+            "branch": "é" * 300,
+            "detached": False,
+            "head": "c" * 40,
+            "dirty_paths": [],
+        }
+    candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(candidate)) is None
 
 
 def test_artifact_policy_is_closed_bounded_content_free_and_dirty_first(tmp_path: Path) -> None:
@@ -339,6 +453,29 @@ def test_excess_dirty_artifacts_are_bounded_before_any_read(
     assert "dirty_artifact_candidates_truncated" in degradation
 
 
+def test_non_dirty_fallback_prefers_newest_artifact_before_read_bound(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    changes = root / "openspec" / "changes"
+    for number in range(300):
+        path = changes / f"a{number:03d}" / "tasks.md"
+        path.parent.mkdir(parents=True)
+        path.write_text("- [x] complete\n", encoding="utf-8")
+        os.utime(path, ns=(number + 1, number + 1))
+    newest = changes / "zzz-newest" / "tasks.md"
+    newest.parent.mkdir()
+    newest.write_text("- [ ] still active\n", encoding="utf-8")
+    os.utime(newest, ns=(10_000, 10_000))
+
+    result, truncation, degradation = checkpoint.collect_artifacts(
+        root,
+        dirty_paths=set(),
+    )
+
+    assert "openspec/changes/zzz-newest/tasks.md" in {row["path"] for row in result}
+    assert truncation["artifact_candidates"] is True
+    assert "artifact_candidates_truncated" in degradation
+
+
 def test_porcelain_z_parser_consumes_rename_and_copy_path_pairs() -> None:
     raw = "R  destination.md\0source.md\0C  copied.md\0original.md\0 M ordinary.md\0"
 
@@ -424,11 +561,13 @@ def test_renderer_preserves_active_artifact_and_flags_before_dirty_path_overflow
             "dirty_paths": [f"very/long/path/{number:03d}/{'x' * 200}.py" for number in range(128)],
         },
         "transcript": {"available": False},
-        "artifacts": [{
-            "path": "openspec/changes/active/tasks.md",
-            "incomplete_count": 2,
-            "incomplete_lines": [7, 11],
-        }],
+        "artifacts": [
+            {
+                "path": "openspec/changes/active/tasks.md",
+                "incomplete_count": 2,
+                "incomplete_lines": [7, 11],
+            }
+        ],
         "degradation": ["git_status_unavailable"],
         "truncation": {"dirty_paths": True},
     }
@@ -441,8 +580,104 @@ def test_renderer_preserves_active_artifact_and_flags_before_dirty_path_overflow
     assert "lines=[7, 11]" in rendered
     assert "degraded: git_status_unavailable" in rendered
     assert "truncated: dirty_paths" in rendered
-    assert "dirty paths omitted" in rendered or "dirty paths truncated" in rendered
+    assert "[continuation fields omitted:" in rendered
+    assert "dirty paths=" in rendered
     assert "Reconcile these structural pointers" in rendered
+
+
+def test_renderer_reserves_artifact_omission_marker_at_max_payload() -> None:
+    artifacts = [
+        {
+            "path": "p" * 435,
+            "incomplete_count": 64,
+            "incomplete_lines": list(range(1, 65)),
+        }
+        for number in range(checkpoint.MAX_ARTIFACTS)
+    ]
+    structural = {
+        "schema_version": 1,
+        "client": "codex",
+        "session_id": "artifact-marker-budget",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "auto",
+        "source": None,
+        "model": None,
+        "state_root_binding": "d" * 64,
+        "workspace": {},
+        "transcript": {"available": False},
+        "artifacts": artifacts,
+        "degradation": [],
+        "truncation": {},
+    }
+    candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    rendered = checkpoint.render_continuation(candidate, status="current")
+    emitted = sum(line.startswith("artifact: ") for line in rendered.splitlines())
+
+    assert 0 < emitted < len(artifacts)
+    assert (
+        f"[continuation fields omitted: artifact pointers={len(artifacts) - emitted}]" in rendered
+    )
+    assert len(rendered.encode("utf-8")) <= checkpoint.MAX_CONTEXT_BYTES
+
+
+def test_renderer_reserves_required_evidence_and_global_omission_footer() -> None:
+    artifacts = [
+        {
+            "path": "p" * 407,
+            "incomplete_count": 64,
+            "incomplete_lines": list(range(1, 65)),
+        }
+        for _ in range(checkpoint.MAX_ARTIFACTS)
+    ]
+    dirty = [f"src/{number:03d}-{'d' * 200}.py" for number in range(128)]
+    structural = {
+        "schema_version": 1,
+        "client": "codex",
+        "session_id": "required-render-evidence",
+        "turn_id": None,
+        "event": "PreCompact",
+        "trigger": "auto",
+        "source": None,
+        "model": None,
+        "state_root_binding": "e" * 64,
+        "workspace": {
+            "available": True,
+            "root": "repo",
+            "root_sha256": "f" * 64,
+            "branch": "main",
+            "detached": False,
+            "head": "1" * 40,
+            "dirty_paths": dirty,
+        },
+        "transcript": {
+            "available": True,
+            "path": {"kind": "relative", "value": "transcript.jsonl"},
+            "observed_size": 100,
+            "observed_mtime_ns": 200,
+            "slice_offset": 0,
+            "slice_length": 100,
+            "slice_sha256": "a" * 64,
+        },
+        "artifacts": artifacts,
+        "degradation": [],
+        "truncation": {"dirty_paths": True},
+    }
+    candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    rendered = checkpoint.render_continuation(candidate, status="current")
+
+    assert "workspace: repo branch=main head=" in rendered
+    assert "transcript binding: size=100 offset=0 length=100 sha256=" in rendered
+    assert "[continuation fields omitted:" in rendered
+    assert "artifact pointers=" in rendered
+    footer = next(
+        line for line in rendered.splitlines() if line.startswith("[continuation fields omitted:")
+    )
+    omitted_dirty = int(footer.split("dirty paths=", 1)[1].split("]", 1)[0])
+    assert 0 < omitted_dirty <= len(dirty)
+    assert len(rendered.encode("utf-8")) <= checkpoint.MAX_CONTEXT_BYTES
 
 
 @pytest.mark.parametrize("client", ["claude", "codex"])
@@ -525,6 +760,37 @@ def test_equivalent_client_events_share_one_versioned_normalized_contract() -> N
     assert {key: value for key, value in claude.items() if key != "client"} == {
         key: value for key, value in codex.items() if key != "client"
     }
+
+
+def test_shared_core_rejects_unknown_event_contract_before_state_access(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def future_adapter(_payload: object) -> dict:
+        return {
+            "contract_version": 999,
+            "client": "codex",
+            "event": "PreCompact",
+            "session_id": "future-contract",
+            "turn_id": None,
+            "trigger": "manual",
+            "source": None,
+            "cwd": None,
+            "transcript_path": None,
+            "model": None,
+            "normalization": {"degradation": [], "truncation": {}},
+        }
+
+    monkeypatch.setitem(checkpoint._INPUT_ADAPTERS, "codex", future_adapter)
+
+    output = checkpoint.dispatch_event(
+        "codex",
+        {"hook_event_name": "PreCompact", "session_id": "ignored"},
+        environ={"EXOMEM_HOOK_HOME": str(tmp_path)},
+    )
+
+    assert output is None
+    assert not checkpoint.client_state_root(tmp_path, "codex").exists()
 
 
 def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: Path) -> None:
@@ -643,6 +909,78 @@ def test_git_probe_uses_bounded_environment_without_arbitrary_secret(
     assert all(env.get("GIT_OPTIONAL_LOCKS") == "0" for env in observed if env is not None)
 
 
+def test_workspace_branch_is_utf8_byte_bounded_with_explicit_flags(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    branch = "/".join(["é" * 100] * 4)
+    subprocess.run(["git", "-C", str(repo), "checkout", "-b", branch], check=True)
+
+    workspace, _, truncation, degradation = checkpoint.profile_workspace(str(repo))
+
+    assert len(workspace["branch"].encode("utf-8")) <= checkpoint.MAX_PATH_BYTES
+    assert "�" not in workspace["branch"]
+    assert truncation["branch_bytes"] is True
+    assert "git_branch_truncated" in degradation
+
+
+def test_normalized_identifiers_are_bounded_with_explicit_metadata() -> None:
+    payload = {
+        "hook_event_name": "PreCompact",
+        "session_id": "会" * 300,
+        "turn_id": "é" * 400,
+        "model": "m" * 700,
+        "trigger": "manual",
+    }
+
+    event = checkpoint.normalize_event("codex", payload)
+
+    assert event is not None
+    assert len(event["session_id"].encode("utf-8")) <= checkpoint.MAX_IDENTIFIER_BYTES
+    assert len(event["turn_id"].encode("utf-8")) <= checkpoint.MAX_IDENTIFIER_BYTES
+    assert len(event["model"].encode("utf-8")) <= checkpoint.MAX_IDENTIFIER_BYTES
+    assert event["session_id"].startswith("sha256:")
+    assert event["turn_id"].startswith("sha256:")
+    assert event["normalization"]["truncation"] == {
+        "model_bytes": True,
+        "session_id_bytes": True,
+        "turn_id_bytes": True,
+    }
+    assert set(event["normalization"]["degradation"]) == {
+        "model_truncated",
+        "session_id_hashed",
+        "turn_id_hashed",
+    }
+
+
+@pytest.mark.parametrize("raw_session", ["s\nsecret", "s\ud800secret"])
+def test_control_or_surrogate_session_normalization_round_trips_without_leak(
+    tmp_path: Path,
+    raw_session: str,
+) -> None:
+    event = checkpoint.normalize_event(
+        "codex",
+        {
+            "hook_event_name": "PreCompact",
+            "session_id": raw_session,
+            "turn_id": "turn\rsecret",
+            "model": "model\x00secret",
+            "trigger": "manual",
+        },
+    )
+
+    assert event is not None
+    assert event["session_id"].startswith("sha256:")
+    assert event["turn_id"].startswith("sha256:")
+    assert event["model"].startswith("sha256:")
+    checkpoint.write_checkpoint(event, tmp_path, observed_at_ns=100)
+    state = checkpoint.session_state_dir(tmp_path, "codex", event["session_id"])
+    current = checkpoint.load_checkpoint(state / "current.json")
+
+    assert current is not None
+    raw = (state / "current.json").read_bytes()
+    assert b"secret" not in raw
+
+
 def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Path) -> None:
     home = tmp_path / "home"
     event = _event(client="codex")
@@ -656,21 +994,64 @@ def test_write_is_idempotent_rotates_once_and_rejects_stale_writer(tmp_path: Pat
     assert (state / "current.json").is_file()
     assert not (state / "previous.json").exists()
 
-    newer = checkpoint.write_checkpoint(
-        {**event, "trigger": "auto"}, home, observed_at_ns=400
-    )
+    newer = checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=400)
     stale = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
     current = checkpoint.load_checkpoint(state / "current.json")
 
     assert newer["status"] == "written"
     assert stale["status"] == "stale"
     assert current["checkpoint_id"] == newer["checkpoint_id"]
-    assert checkpoint.load_checkpoint(state / "previous.json")["checkpoint_id"] == first[
-        "checkpoint_id"
-    ]
+    assert (
+        checkpoint.load_checkpoint(state / "previous.json")["checkpoint_id"]
+        == first["checkpoint_id"]
+    )
     assert stat_mode(state / "current.json") == 0o600
     assert stat_mode(state / ".lock") == 0o600
     assert len(list(state.glob("*.tmp-*"))) == 0
+
+
+def test_idempotent_redelivery_refreshes_retention_without_rotating_history(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="refresh")
+    first_observed = 100
+    first = checkpoint.write_checkpoint(event, home, observed_at_ns=first_observed)
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="refresh",
+        trigger=None,
+        source="resume",
+    )
+    refresh_observed = first_observed + checkpoint.RETENTION_NS + 2
+    assert (
+        checkpoint.select_checkpoint(
+            start,
+            home,
+            now_ns=refresh_observed,
+        )
+        is None
+    )
+
+    repeated = checkpoint.write_checkpoint(
+        event,
+        home,
+        observed_at_ns=refresh_observed,
+    )
+    selected = checkpoint.select_checkpoint(
+        start,
+        home,
+        now_ns=refresh_observed + 1,
+    )
+    state = checkpoint.session_state_dir(home, "codex", "refresh")
+    current = checkpoint.load_checkpoint(state / "current.json")
+
+    assert repeated == {"status": "idempotent", "checkpoint_id": first["checkpoint_id"]}
+    assert selected is not None and selected[1] == "current"
+    assert current["observed_at_ns"] == refresh_observed
+    assert current["event_order"][-2] == refresh_observed
+    assert not (state / "previous.json").exists()
 
 
 def stat_mode(path: Path) -> int:
@@ -694,6 +1075,39 @@ def test_structural_workspace_change_rotates_with_unchanged_transcript(tmp_path:
         checkpoint.session_state_dir(home, "codex", "session-1") / "current.json"
     )
     assert current["structural"]["workspace"]["dirty_paths"] == ["tracked.txt"]
+
+
+def test_build_reuses_validated_workspace_root_for_artifact_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    repo = tmp_path / "repo"
+    _init_repo(repo)
+    task = repo / ".task" / "TASK.md"
+    task.parent.mkdir()
+    task.write_text("- [ ] active\n", encoding="utf-8")
+    real_git = checkpoint._git
+    root_probes = 0
+
+    def flaky_second_probe(cwd: Path, *args: str) -> str | None:
+        nonlocal root_probes
+        if args == ("rev-parse", "--show-toplevel"):
+            root_probes += 1
+            if root_probes > 1:
+                return None
+        return real_git(cwd, *args)
+
+    monkeypatch.setattr(checkpoint, "_git", flaky_second_probe)
+
+    built = checkpoint.build_checkpoint(
+        _event(client="codex", cwd=repo),
+        home,
+        observed_at_ns=100,
+    )
+
+    assert root_probes == 1
+    assert ".task/TASK.md" in {artifact["path"] for artifact in built["structural"]["artifacts"]}
 
 
 def test_append_safe_selection_and_explicit_non_detection_outside_saved_slice(
@@ -784,6 +1198,56 @@ def test_structurally_valid_current_binding_failure_does_not_fall_back(
     )
 
     assert checkpoint.select_checkpoint(start, home) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX generation modes")
+def test_broad_current_mode_is_corrupt_and_rolls_back_to_restrictive_previous(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="broad-current", trigger="manual")
+    previous = checkpoint.write_checkpoint(event, home, observed_at_ns=time.time_ns() - 2)
+    checkpoint.write_checkpoint(
+        {**event, "trigger": "auto"},
+        home,
+        observed_at_ns=time.time_ns() - 1,
+    )
+    state = checkpoint.session_state_dir(home, "codex", "broad-current")
+    (state / "current.json").chmod(0o644)
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="broad-current",
+        trigger=None,
+        source="resume",
+    )
+
+    selected = checkpoint.select_checkpoint(start, home)
+
+    assert selected is not None and selected[1] == "rollback"
+    assert selected[0]["checkpoint_id"] == previous["checkpoint_id"]
+
+
+def test_generation_order_inversion_is_rejected_by_live_selection(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    observed = time.time_ns()
+    event = _event(client="codex", session_id="inverted", trigger="manual")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=observed - 2)
+    checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=observed - 1)
+    state = checkpoint.session_state_dir(home, "codex", "inverted")
+    current_raw = (state / "current.json").read_bytes()
+    previous_raw = (state / "previous.json").read_bytes()
+    (state / "current.json").write_bytes(previous_raw)
+    (state / "previous.json").write_bytes(current_raw)
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="inverted",
+        trigger=None,
+        source="resume",
+    )
+
+    assert checkpoint.select_checkpoint(start, home, now_ns=observed) is None
 
 
 def test_selection_rejects_foreign_stale_and_wrong_state_binding(tmp_path: Path) -> None:
@@ -1120,7 +1584,7 @@ def test_fifo_artifact_and_metadata_log_fail_soft_without_blocking(tmp_path: Pat
         "from exomem._hooks import exomem_continuation_checkpoint as c; "
         "a=c.collect_artifacts(Path(sys.argv[1]),dirty_paths=set()); "
         "ok=False; "
-        "\ntry: c._metadata_log(Path(sys.argv[2]),'codex','PreCompact','failed',1)"
+        "\ntry: c._metadata_log(Path(sys.argv[2]),'codex','PreCompact','empty',1)"
         "\nexcept OSError: ok=True"
         "\nprint(json.dumps([a,ok]))"
     )
@@ -1136,6 +1600,71 @@ def test_fifo_artifact_and_metadata_log_fail_soft_without_blocking(tmp_path: Pat
     artifacts, log_failed = json.loads(result.stdout)
     assert artifacts[0] == []
     assert log_failed is True
+
+
+def test_metadata_log_rotates_at_cap_with_complete_valid_jsonl(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    log = root / "events.log"
+    row = (
+        checkpoint._canonical_bytes({"event": "SessionStart", "status": "empty", "duration_ms": 0})
+        + b"\n"
+    )
+    limit = 1024 * 1024
+    log.write_bytes(row * (limit // len(row)))
+    log.chmod(0o600)
+
+    checkpoint._metadata_log(home, "codex", "SessionStart", "empty", 1)
+    raw = log.read_bytes()
+    records = [json.loads(line) for line in raw.splitlines()]
+
+    assert len(raw) <= limit
+    assert raw.endswith(b"\n")
+    assert records[-1]["duration_ms"] == 1
+    assert all(checkpoint._valid_metadata_record(record) for record in records)
+    assert stat_mode(log) == 0o600
+
+
+def test_metadata_log_rotation_serializes_concurrent_process_writers(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    log = root / "events.log"
+    seed = (
+        checkpoint._canonical_bytes({"event": "SessionStart", "status": "empty", "duration_ms": 0})
+        + b"\n"
+    )
+    limit = 1024 * 1024
+    log.write_bytes(seed * (limit // len(seed)))
+    log.chmod(0o600)
+    code = (
+        "import sys; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "[(c._metadata_log(Path(sys.argv[1]),'codex','SessionStart','empty',i)) "
+        "for i in range(20)]"
+    )
+    children = [
+        subprocess.Popen(
+            [sys.executable, "-c", code, str(home)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for _ in range(4)
+    ]
+
+    results = [child.communicate(timeout=20) + (child.returncode,) for child in children]
+    raw = log.read_bytes()
+    records = [json.loads(line) for line in raw.splitlines()]
+
+    assert all(returncode == 0 for _stdout, _stderr, returncode in results), results
+    assert len(raw) <= limit
+    assert raw.endswith(b"\n")
+    assert all(checkpoint._valid_metadata_record(record) for record in records)
+    assert stat_mode(root / ".events.lock") == 0o600
 
 
 def test_windows_handle_relative_guards_are_present_even_when_not_executable_here() -> None:
@@ -1191,12 +1720,14 @@ def test_hook_subprocess_writes_silently_then_reinjects_bounded_context(tmp_path
     )
     resumed = subprocess.run(
         [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
-        input=json.dumps({
-            "hook_event_name": "SessionStart",
-            "session_id": "subprocess",
-            "source": "resume",
-            "transcript_path": str(transcript),
-        }),
+        input=json.dumps(
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "subprocess",
+                "source": "resume",
+                "transcript_path": str(transcript),
+            }
+        ),
         capture_output=True,
         text=True,
         env=env,
@@ -1228,11 +1759,13 @@ def test_claude_session_end_is_silent_and_disable_preserves_existing_state(tmp_p
     before = state.read_bytes()
     disabled = subprocess.run(
         [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "claude"],
-        input=json.dumps({
-            "hook_event_name": "PreCompact",
-            "session_id": "ending",
-            "trigger": "auto",
-        }),
+        input=json.dumps(
+            {
+                "hook_event_name": "PreCompact",
+                "session_id": "ending",
+                "trigger": "auto",
+            }
+        ),
         capture_output=True,
         text=True,
         env={**env, "EXOMEM_CONTINUATION_DISABLE": "1"},
@@ -1325,13 +1858,21 @@ def test_both_client_start_subprocesses_inject_and_repeat_valid_context(
     }
     subprocess.run(
         [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
-        input=json.dumps(write), capture_output=True, text=True, env=env, check=True,
+        input=json.dumps(write),
+        capture_output=True,
+        text=True,
+        env=env,
+        check=True,
     )
 
     outputs = [
         subprocess.run(
             [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
-            input=json.dumps(start), capture_output=True, text=True, env=env, check=True,
+            input=json.dumps(start),
+            capture_output=True,
+            text=True,
+            env=env,
+            check=True,
         ).stdout
         for _ in range(2)
     ]
@@ -1351,9 +1892,9 @@ def test_start_subprocess_is_silent_for_missing_corrupt_oversized_disabled_and_f
     def run(client: str, session: str, *, extra_env: dict[str, str] | None = None) -> str:
         return subprocess.run(
             [sys.executable, str(CHECKPOINT_SCRIPT), "--client", client],
-            input=json.dumps({
-                "hook_event_name": "SessionStart", "session_id": session, "source": "resume"
-            }),
+            input=json.dumps(
+                {"hook_event_name": "SessionStart", "session_id": session, "source": "resume"}
+            ),
             capture_output=True,
             text=True,
             env={**env, **(extra_env or {})},
@@ -1410,9 +1951,7 @@ def test_handle_relative_checkpoint_read_survives_session_path_swap(tmp_path: Pa
 
 def test_true_multiprocess_same_id_delivery_creates_no_duplicate_history(tmp_path: Path) -> None:
     home = tmp_path / "home"
-    payload = json.dumps({
-        "hook_event_name": "PreCompact", "session_id": "race", "trigger": "auto"
-    })
+    payload = json.dumps({"hook_event_name": "PreCompact", "session_id": "race", "trigger": "auto"})
     processes = [
         subprocess.Popen(
             [sys.executable, str(CHECKPOINT_SCRIPT), "--client", "codex"],
@@ -1425,8 +1964,7 @@ def test_true_multiprocess_same_id_delivery_creates_no_duplicate_history(tmp_pat
         for _ in range(6)
     ]
     results = [
-        process.communicate(payload, timeout=10) + (process.returncode,)
-        for process in processes
+        process.communicate(payload, timeout=10) + (process.returncode,) for process in processes
     ]
 
     assert all(stdout == "" and code == 0 for stdout, _stderr, code in results)
@@ -1448,11 +1986,13 @@ def test_true_multiprocess_older_observation_cannot_replace_newer(tmp_path: Path
     )
     newer = subprocess.Popen(
         [sys.executable, "-c", code, str(home), "auto", "200", "0"],
-        stdout=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
     older = subprocess.Popen(
         [sys.executable, "-c", code, str(home), "manual", "100", "0.2"],
-        stdout=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        text=True,
     )
     assert newer.wait(timeout=10) == 0 and older.wait(timeout=10) == 0
     state = checkpoint.session_state_dir(home, "codex", "ordered")
@@ -1473,7 +2013,9 @@ def test_killed_temporary_writer_is_cleaned_by_next_delivery(tmp_path: Path) -> 
     )
     child = subprocess.Popen(
         [sys.executable, "-c", code, str(home)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "temporary"
@@ -1601,26 +2143,34 @@ def test_prune_skips_multiprocess_writer_then_removes_after_release(
     )
     child = subprocess.Popen(
         [sys.executable, "-c", code, str(lock_path)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     try:
         assert child.stdout is not None and child.stdout.readline().strip() == "locked"
-        assert checkpoint.prune_expired(
-            home,
-            "codex",
-            current_session="other",
-            now_ns=100 + checkpoint.RETENTION_NS + 1,
-            force_fallback=force_fallback,
-        ) == 0
+        assert (
+            checkpoint.prune_expired(
+                home,
+                "codex",
+                current_session="other",
+                now_ns=100 + checkpoint.RETENTION_NS + 1,
+                force_fallback=force_fallback,
+            )
+            == 0
+        )
         child.kill()
         child.wait(timeout=5)
-        assert checkpoint.prune_expired(
-            home,
-            "codex",
-            current_session="other",
-            now_ns=100 + checkpoint.RETENTION_NS + 1,
-            force_fallback=force_fallback,
-        ) == 1
+        assert (
+            checkpoint.prune_expired(
+                home,
+                "codex",
+                current_session="other",
+                now_ns=100 + checkpoint.RETENTION_NS + 1,
+                force_fallback=force_fallback,
+            )
+            == 1
+        )
     finally:
         if child.poll() is None:
             child.kill()
@@ -1681,3 +2231,171 @@ def test_many_busy_prune_candidates_do_not_starve_supported_writer(
     assert elapsed < 0.45
     assert not prune.is_alive()
     assert (checkpoint.session_state_dir(home, "codex", "writer") / "current.json").is_file()
+
+
+def test_prune_respects_total_budget_when_root_lock_is_held(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    lock_path = root / ".root.lock"
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "lock=c.advisory_lock(Path(sys.argv[1]),timeout=1); lock.__enter__(); "
+        "print('locked',flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(lock_path)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "locked"
+        started = time.monotonic()
+
+        removed = checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="current",
+            now_ns=checkpoint.RETENTION_NS + 1,
+        )
+        elapsed = time.monotonic() - started
+
+        assert removed == 0
+        assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.15
+    finally:
+        child.kill()
+        child.wait(timeout=5)
+
+
+def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    now = checkpoint.RETENTION_NS + 1_000
+    for number in range(checkpoint.MAX_PRUNE_CANDIDATES):
+        checkpoint.write_checkpoint(
+            _event(client="codex", session_id=f"a{number:02d}"),
+            home,
+            observed_at_ns=now,
+        )
+    expired_session = "zz-expired"
+    checkpoint.write_checkpoint(
+        _event(client="codex", session_id=expired_session),
+        home,
+        observed_at_ns=100,
+    )
+
+    removals = [
+        checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="current",
+            now_ns=now,
+        )
+        for _ in range(20)
+    ]
+
+    assert removals[0] == 0
+    assert sum(removals) == 1
+    assert not checkpoint.session_state_dir(home, "codex", expired_session).exists()
+
+
+def test_prune_removes_authorized_expired_interrupted_first_write(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    with checkpoint._session_lock(
+        home,
+        "codex",
+        "interrupted-first-write",
+        create=True,
+        created_at_ns=100,
+    ):
+        pass
+    state = checkpoint.session_state_dir(home, "codex", "interrupted-first-write")
+
+    assert {item.name for item in state.iterdir()} == {".lock"}
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session="other",
+        now_ns=100 + checkpoint.RETENTION_NS + 1,
+    )
+
+    assert removed == 1
+    assert not state.exists()
+
+
+def test_prune_removes_stale_previous_behind_fresh_current(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="stale-history", trigger="manual")
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=101)
+    fresh_observed = checkpoint.RETENTION_NS + 200
+    checkpoint.write_checkpoint(
+        {**event, "trigger": "manual", "turn_id": "fresh"},
+        home,
+        observed_at_ns=fresh_observed,
+    )
+    state = checkpoint.session_state_dir(home, "codex", "stale-history")
+    assert checkpoint.load_checkpoint(state / "previous.json")["observed_at_ns"] == 101
+
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session="other",
+        now_ns=fresh_observed,
+    )
+
+    assert removed == 0
+    assert checkpoint.load_checkpoint(state / "current.json")["observed_at_ns"] == fresh_observed
+    assert not (state / "previous.json").exists()
+
+
+def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "crashed-prune"
+    checkpoint.write_checkpoint(_event(client=client, session_id=session), home, observed_at_ns=100)
+    root_path = checkpoint.client_state_root(home, client)
+    state_name = checkpoint.session_state_dir(home, client, session).name
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock"):
+            tombstone = checkpoint._tombstone_expired_candidate(
+                root,
+                home,
+                client,
+                state_name,
+                100 + checkpoint.RETENTION_NS + 1,
+                force_fallback=False,
+            )
+    assert tombstone is not None
+    tombstone_name, _identity = tombstone
+    assert (root_path / tombstone_name).is_dir()
+
+    lookalike = root_path / ".tombstone-not-authorized"
+    lookalike.mkdir()
+    (lookalike / "valuable.txt").write_text("preserve", encoding="utf-8")
+    foreign = root_path / ".tombstone-foreign-session-0123456789abcdef"
+    shutil.copytree(root_path / tombstone_name, foreign)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    symlink = root_path / ".tombstone-symlink-0000000000000000"
+    try:
+        symlink.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        symlink = None
+
+    removed = checkpoint.prune_expired(
+        home,
+        client,
+        current_session="other",
+        now_ns=100 + checkpoint.RETENTION_NS + 2,
+    )
+
+    assert removed == 1
+    assert not (root_path / tombstone_name).exists()
+    assert (lookalike / "valuable.txt").read_text(encoding="utf-8") == "preserve"
+    assert foreign.is_dir()
+    assert outside.is_dir()
+    if symlink is not None:
+        assert symlink.is_symlink()

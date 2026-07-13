@@ -68,8 +68,13 @@ DEFAULT_SETTINGS = DEFAULT_CLAUDE_SETTINGS
 # BOTH the legacy `kb_*`/`kb-*` names AND the current `exomem_*`/`exomem-*` names are
 # listed, so re-running install-hook cleanly migrates a machine off the old kb entry.
 _MARKERS = (
-    "kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge",
-    "exomem_capture_nudge", "exomem_retrieve_nudge", "exomem-capture-nudge",
+    "kb_capture_nudge",
+    "kb_retrieve_nudge",
+    "kb-capture-nudge",
+    "kb-retrieve-nudge",
+    "exomem_capture_nudge",
+    "exomem_retrieve_nudge",
+    "exomem-capture-nudge",
     "exomem-retrieve-nudge",
 )
 _LEGACY_MARKERS = ("kb_capture_nudge", "kb_retrieve_nudge", "kb-capture-nudge", "kb-retrieve-nudge")
@@ -196,8 +201,34 @@ def _safe_file_status(path: Path) -> dict:
 
 
 def _read_json(path: Path) -> tuple[dict | None, str | None]:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
     try:
-        loaded = json.loads(path.read_text(encoding="utf-8"))
+        with safe._open_secure_directory(path.parent, create=False) as directory:
+            safe._require_trusted_directory(directory)
+            kind = safe._existing_kind(directory, path.name)
+            if kind is None or not stat.S_ISREG(kind):
+                raise OSError(f"unsafe hook config file: {path}")
+            fd = safe._open_secure_file_at(directory, path.name, os.O_RDONLY)
+            try:
+                info = os.fstat(fd)
+                if os.name != "nt" and (
+                    info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022
+                ):
+                    raise OSError(f"unsafe writable hook config file: {path}")
+                chunks: list[bytes] = []
+                total = 0
+                while total <= 8 * 1024 * 1024:
+                    chunk = os.read(fd, min(1024 * 1024, 8 * 1024 * 1024 + 1 - total))
+                    if not chunk:
+                        break
+                    chunks.append(chunk)
+                    total += len(chunk)
+                if total > 8 * 1024 * 1024:
+                    raise OSError(f"hook config is too large: {path}")
+            finally:
+                os.close(fd)
+        loaded = json.loads(b"".join(chunks).decode("utf-8"))
     except Exception as e:  # noqa: BLE001 - diagnostic boundary
         return None, str(e)
     return (loaded, None) if isinstance(loaded, dict) else (None, "top-level JSON is not an object")
@@ -390,12 +421,34 @@ def _log_summary(client: str, kind: str) -> dict:
 
 
 def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
     items = {}
+    directory = None
+    directory_context = None
+    try:
+        directory_context = safe._open_secure_directory(hook_dir, create=False)
+        directory = directory_context.__enter__()
+        safe._require_trusted_directory(directory)
+    except OSError:
+        if directory_context is not None:
+            directory_context.__exit__(None, None, None)
+        directory_context = None
+        directory = None
     for name in (script, wrapper):
         src = _HOOK_DIR_SRC / name
         dst = hook_dir / name
         source = _safe_file_status(src)
-        deployed = _safe_file_status(dst)
+        deployed = (
+            _safe_file_status_at(directory, name, dst)
+            if directory is not None
+            else {
+                "exists": dst.exists() or dst.is_symlink(),
+                "safe_regular": False,
+                "mode_ok": False,
+                "sha256": None,
+            }
+        )
         src_hash = source["sha256"]
         dst_hash = deployed["sha256"]
         items[name] = {
@@ -414,7 +467,46 @@ def _script_status(hook_dir: Path, script: str, wrapper: str) -> dict:
             "bundle_hash": src_hash,
             "deployed_hash": dst_hash,
         }
+    if directory_context is not None:
+        directory_context.__exit__(None, None, None)
     return items
+
+
+def _safe_file_status_at(directory, name: str, display_path: Path) -> dict:
+    from ._hooks import exomem_continuation_checkpoint as safe
+
+    safe_regular = False
+    mode_ok = False
+    digest = None
+    try:
+        kind = safe._existing_kind(directory, name)
+        if kind is None or not stat.S_ISREG(kind):
+            raise OSError("not a safe regular file")
+        fd = safe._open_secure_file_at(directory, name, os.O_RDONLY)
+        try:
+            info = os.fstat(fd)
+            safe_regular = stat.S_ISREG(info.st_mode)
+            mode_ok = safe_regular and (
+                os.name == "nt"
+                or (info.st_uid == os.geteuid() and not stat.S_IMODE(info.st_mode) & 0o022)
+            )
+            h = hashlib.sha256()
+            while True:
+                chunk = os.read(fd, 1024 * 1024)
+                if not chunk:
+                    break
+                h.update(chunk)
+            digest = h.hexdigest()
+        finally:
+            os.close(fd)
+    except OSError:
+        pass
+    return {
+        "exists": display_path.exists() or display_path.is_symlink(),
+        "safe_regular": safe_regular,
+        "mode_ok": mode_ok,
+        "sha256": digest,
+    }
 
 
 def _path_mode_ok(path: Path, expected: int, *, directory: bool) -> bool:
@@ -448,25 +540,14 @@ def _metadata_log_runtime_summary(root: Path) -> dict:
                 os.close(fd)
     except OSError:
         return {"path": str(path), "exists": True, "status": "unsafe", "mode_ok": mode_ok}
-    valid = bool(raw) and len(raw) <= 1024 * 1024
-    allowed = {"event", "status", "duration_ms", "checkpoint_id", "error_class"}
+    valid = bool(raw) and len(raw) <= safe.MAX_METADATA_LOG_BYTES and raw.endswith(b"\n")
     for line in raw.splitlines():
         try:
             row = json.loads(line)
         except (UnicodeDecodeError, json.JSONDecodeError):
             valid = False
             break
-        if (
-            not isinstance(row, dict)
-            or not set(row).issubset(allowed)
-            or not isinstance(row.get("event"), str)
-            or not isinstance(row.get("status"), str)
-            or not isinstance(row.get("duration_ms"), int)
-            or any(
-                key in row and not isinstance(row[key], str)
-                for key in ("checkpoint_id", "error_class")
-            )
-        ):
+        if not safe._valid_metadata_record(row):
             valid = False
             break
     return {
@@ -496,7 +577,8 @@ def _continuation_runtime_summary(client: str) -> dict:
     try:
         if root_safe_directory:
             sessions = [
-                item for item in root.iterdir()
+                item
+                for item in root.iterdir()
                 if not item.is_symlink() and item.is_dir() and not item.name.startswith(".")
             ]
     except OSError:
@@ -509,6 +591,7 @@ def _continuation_runtime_summary(client: str) -> dict:
     session_states: list[dict] = []
     now = time.time_ns()
     for session in sessions:
+        state_name = session.name
         if not _path_mode_ok(session, 0o700, directory=True):
             permission_violations.append("session")
         lock = session / ".lock"
@@ -522,19 +605,30 @@ def _continuation_runtime_summary(client: str) -> dict:
                 permission_violations.append(name)
         try:
             with safe._open_secure_directory(session, create=False) as state_handle:
-                current, current_raw = safe.load_checkpoint_status_at(
-                    state_handle, "current.json"
-                )
+                current, current_raw = safe.load_checkpoint_status_at(state_handle, "current.json")
                 previous, previous_raw = safe.load_checkpoint_status_at(
                     state_handle, "previous.json"
+                )
+                manifest, manifest_status = safe.load_session_manifest_at(
+                    state_handle, _default_home(client), client, state_name
                 )
         except OSError:
             current = previous = None
             current_raw = previous_raw = "corrupt"
+            manifest = None
+            manifest_status = "corrupt"
 
-        def generation_status(value: dict | None, raw_status: str) -> str:
+        def generation_status(
+            value: dict | None,
+            raw_status: str,
+            expected_name: str = state_name,
+        ) -> str:
             if raw_status != "valid" or value is None:
                 return raw_status
+            if not safe._prune_candidate_authorized(
+                value, _default_home(client), client, expected_name
+            ):
+                return "binding_invalid"
             observed = value.get("observed_at_ns")
             if not isinstance(observed, int):
                 return "corrupt"
@@ -543,32 +637,67 @@ def _continuation_runtime_summary(client: str) -> dict:
 
         current_status = generation_status(current, current_raw)
         previous_status = generation_status(previous, previous_raw)
+        if (
+            current_raw == "valid"
+            and previous_raw == "valid"
+            and current is not None
+            and previous is not None
+            and not safe._generation_pair_ordered(current, previous)
+        ):
+            current_status = "generation_invalid"
+        history = (
+            "stale_previous"
+            if (current_status == "valid" and previous_status == "stale")
+            else "clean"
+        )
         if current_status == "valid":
             selection = "valid_current"
         elif current_status == "stale":
             selection = "stale"
         elif current_status in {"missing", "corrupt"} and previous_status == "valid":
             selection = "rollback_previous"
-        elif current_status == "corrupt" or previous_status == "corrupt":
+        elif current_status in {"corrupt", "binding_invalid", "generation_invalid"} or (
+            previous_status in {"corrupt", "binding_invalid"}
+        ):
             selection = "corrupt"
         elif previous_status == "stale":
             selection = "stale"
+        elif (
+            current_status == "missing"
+            and previous_status == "missing"
+            and manifest_status == "valid"
+            and manifest is not None
+            and now - int(manifest["created_at_ns"]) > safe.RETENTION_NS
+        ):
+            selection = "stale_incomplete"
         else:
             selection = "missing"
-        session_states.append({
-            "name": session.name,
-            "current": current_status,
-            "previous": previous_status,
-            "selection": selection,
-        })
-    metadata_log = _metadata_log_runtime_summary(root) if root_safe_directory else {
-        "path": str(root / "events.log"),
-        "exists": False,
-        "status": "missing" if not root_exists else "unsafe",
-        "mode_ok": not root_exists,
-    }
+        session_states.append(
+            {
+                "name": state_name,
+                "current": current_status,
+                "previous": previous_status,
+                "selection": selection,
+                "history": history,
+                "manifest": manifest_status,
+            }
+        )
+    metadata_log = (
+        _metadata_log_runtime_summary(root)
+        if root_safe_directory
+        else {
+            "path": str(root / "events.log"),
+            "exists": False,
+            "status": "missing" if not root_exists else "unsafe",
+            "mode_ok": not root_exists,
+        }
+    )
     if metadata_log["exists"] and not metadata_log["mode_ok"]:
         permission_violations.append("events.log")
+    events_lock = root / ".events.lock"
+    if events_lock.exists() or events_lock.is_symlink():
+        if not _path_mode_ok(events_lock, 0o600, directory=False):
+            permission_violations.append(".events.lock")
     state_counts: dict[str, int] = {}
     for row in session_states:
         state_counts[row["selection"]] = state_counts.get(row["selection"], 0) + 1
@@ -577,7 +706,8 @@ def _continuation_runtime_summary(client: str) -> dict:
         "exists": root_exists,
         "sessions": len(sessions),
         "latest_age": _fmt_age(max(observed_times, default=None) / 1_000_000_000)
-        if observed_times else None,
+        if observed_times
+        else None,
         "permissions_ok": not permission_violations,
         "permission_violations": sorted(set(permission_violations)),
         "session_states": session_states,
@@ -611,21 +741,25 @@ def check_hooks(
         sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
         has_client_footprint = sp.exists() or hd.exists() or sp.parent.exists()
         if not has_client_footprint and not strict_single_client:
-            reports.append({
-                "client": client,
-                "status": "skipped",
-                "success": True,
-                "hook_dir": str(hd),
-                "settings_path": str(sp),
-                "scripts": {},
-                "logs": {},
-                "cache": {},
-                "checks": [{
-                    "id": "client.installation",
-                    "status": "skip",
-                    "message": f"{client} is not installed; hook checks skipped",
-                }],
-            })
+            reports.append(
+                {
+                    "client": client,
+                    "status": "skipped",
+                    "success": True,
+                    "hook_dir": str(hd),
+                    "settings_path": str(sp),
+                    "scripts": {},
+                    "logs": {},
+                    "cache": {},
+                    "checks": [
+                        {
+                            "id": "client.installation",
+                            "status": "skip",
+                            "message": f"{client} is not installed; hook checks skipped",
+                        }
+                    ],
+                }
+            )
             continue
         data, parse_error = (None, "file does not exist")
         if sp.exists():
@@ -750,9 +884,7 @@ def check_hooks(
                 ),
             )
 
-        continuation_status = _script_status(
-            hd, _CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER
-        )
+        continuation_status = _script_status(hd, _CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER)
         scripts.update(continuation_status)
         continuation_stale = [
             name for name, row in continuation_status.items() if not row["matches_bundle"]
@@ -799,16 +931,16 @@ def check_hooks(
 
         continuation_runtime = _continuation_runtime_summary(client)
         corrupt_state = any(
-            row["current"] == "corrupt" or row["previous"] == "corrupt"
+            row["current"] in {"corrupt", "binding_invalid", "generation_invalid"}
+            or row["previous"] in {"corrupt", "binding_invalid"}
             for row in continuation_runtime["session_states"]
         )
         degraded_state = any(
-            row["selection"] in {"stale", "missing"}
+            row["selection"] in {"stale", "missing", "stale_incomplete"}
+            or row.get("history") == "stale_previous"
             for row in continuation_runtime["session_states"]
         )
-        invalid_log = continuation_runtime["metadata_log"]["status"] in {
-            "corrupt", "unsafe"
-        }
+        invalid_log = continuation_runtime["metadata_log"]["status"] in {"corrupt", "unsafe"}
         if not continuation_runtime["permissions_ok"]:
             runtime_status = "fail"
             runtime_message = "continuation checkpoint permissions are too broad"
@@ -831,20 +963,20 @@ def check_hooks(
             continuation_runtime,
         )
 
-        reports.append({
-            "client": client,
-            "status": (
-                "failed" if any(c["status"] == "fail" for c in checks) else "healthy"
-            ),
-            "success": not any(c["status"] == "fail" for c in checks),
-            "hook_dir": str(hd),
-            "settings_path": str(sp),
-            "scripts": scripts,
-            "logs": logs,
-            "cache": cache,
-            "continuation": continuation_runtime,
-            "checks": checks,
-        })
+        reports.append(
+            {
+                "client": client,
+                "status": ("failed" if any(c["status"] == "fail" for c in checks) else "healthy"),
+                "success": not any(c["status"] == "fail" for c in checks),
+                "hook_dir": str(hd),
+                "settings_path": str(sp),
+                "scripts": scripts,
+                "logs": logs,
+                "cache": cache,
+                "continuation": continuation_runtime,
+                "checks": checks,
+            }
+        )
 
     return {
         "success": not any(not c["success"] for c in reports),
@@ -886,6 +1018,7 @@ def _deploy_file(source: Path, destination: Path) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(destination.parent, create=True) as parent:
+        safe._require_trusted_directory(parent)
         existing = safe._existing_kind(parent, destination.name)
         if existing is not None and not stat.S_ISREG(existing):
             raise OSError(f"refusing unsafe hook destination {destination.name}")
@@ -934,6 +1067,8 @@ def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise OSError(f"hook config is not a regular file: {display_path}")
+        if os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022):
+            raise OSError(f"hook config is unsafe or writable: {display_path}")
         chunks = []
         while True:
             chunk = os.read(fd, 1024 * 1024)
@@ -948,9 +1083,7 @@ def _snapshot_config_at(directory, name: str, display_path: Path) -> dict:
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ValueError(f"invalid hook config at {display_path}: {error}") from error
     if not isinstance(data, dict):
-        raise ValueError(
-            f"invalid hook config at {display_path}: top-level JSON is not an object"
-        )
+        raise ValueError(f"invalid hook config at {display_path}: top-level JSON is not an object")
     return {
         "exists": True,
         "raw": raw,
@@ -972,6 +1105,7 @@ def _snapshot_config(path: Path) -> dict:
 
     try:
         with safe._open_secure_directory(path.parent, create=False) as directory:
+            safe._require_trusted_directory(directory)
             return _snapshot_config_at(directory, path.name, path)
     except FileNotFoundError:
         return {
@@ -1058,6 +1192,7 @@ def _write_unique(path: Path, raw: bytes, mode: int) -> None:
     from ._hooks import exomem_continuation_checkpoint as safe
 
     with safe._open_secure_directory(path.parent, create=True) as directory:
+        safe._require_trusted_directory(directory)
         _write_unique_at(directory, path.name, raw, mode)
 
 
@@ -1067,6 +1202,7 @@ def _merge_hooks(path: Path, installed: list[dict], timeout: int) -> dict:
 
     path = Path(path).expanduser()
     with safe._open_secure_directory(path.parent, create=True) as parent:
+        safe._require_trusted_directory(parent)
         for _attempt in range(3):
             initial = _snapshot_config_at(parent, path.name, path)
             merged = _merged_config(initial["data"], installed, timeout)
@@ -1132,11 +1268,7 @@ def install_hook(
     """
     client = _normalize_client(client)
     source_specs = list(specs)
-    bundled = {
-        name
-        for py_name, sh_name, _event in source_specs
-        for name in (py_name, sh_name)
-    }
+    bundled = {name for py_name, sh_name, _event in source_specs for name in (py_name, sh_name)}
     if specs is _HOOK_SPECS:
         bundled.update({_CONTINUATION_SCRIPT, _CONTINUATION_WRAPPER})
     for name in bundled:
@@ -1145,7 +1277,7 @@ def install_hook(
                 f"bundled hook file missing at {_HOOK_DIR_SRC / name} — "
                 "is the exomem install intact?"
             )
-    hook_dir = (Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client))
+    hook_dir = Path(hook_dir).expanduser() if hook_dir else _default_hook_dir(client)
     from ._hooks import exomem_continuation_checkpoint as safe
 
     hook_fd = safe._ensure_secure_dir(hook_dir)
@@ -1156,14 +1288,16 @@ def install_hook(
     for py_name, sh_name, event in source_specs:
         _deploy_file(_HOOK_DIR_SRC / py_name, hook_dir / py_name)
         _deploy_file(_HOOK_DIR_SRC / sh_name, hook_dir / sh_name)
-        installed.append({
-            "kind": "nudge",
-            "event": event,
-            "script": str(hook_dir / py_name),
-            "wrapper": str(hook_dir / sh_name),
-            "command": _command_for(sh_name, hook_dir, client=client, script=py_name),
-            "commandWindows": _command_windows_for(py_name, hook_dir, client=client),
-        })
+        installed.append(
+            {
+                "kind": "nudge",
+                "event": event,
+                "script": str(hook_dir / py_name),
+                "wrapper": str(hook_dir / sh_name),
+                "command": _command_for(sh_name, hook_dir, client=client, script=py_name),
+                "commandWindows": _command_windows_for(py_name, hook_dir, client=client),
+            }
+        )
     if specs is _HOOK_SPECS:
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_SCRIPT, hook_dir / _CONTINUATION_SCRIPT)
         _deploy_file(_HOOK_DIR_SRC / _CONTINUATION_WRAPPER, hook_dir / _CONTINUATION_WRAPPER)
@@ -1178,7 +1312,7 @@ def install_hook(
         "backup": None,
     }
     if wire:
-        sp = (Path(settings_path).expanduser() if settings_path else _default_settings(client))
+        sp = Path(settings_path).expanduser() if settings_path else _default_settings(client)
         migration = _merge_hooks(sp, installed, timeout)
         result["wired"] = True
         result["settings"] = str(sp)
@@ -1194,10 +1328,12 @@ def install_all_hooks(*, wire: bool = True, timeout: int = 10) -> dict:
             result = install_hook(client=client, wire=wire, timeout=timeout)
             reports.append({"client": client, "success": True, "result": result})
         except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
-            reports.append({
-                "client": client,
-                "success": False,
-                "error": str(error),
-                "error_class": type(error).__name__,
-            })
+            reports.append(
+                {
+                    "client": client,
+                    "success": False,
+                    "error": str(error),
+                    "error_class": type(error).__name__,
+                }
+            )
     return {"success": all(row["success"] for row in reports), "clients": reports}

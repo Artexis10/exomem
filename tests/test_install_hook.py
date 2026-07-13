@@ -57,6 +57,7 @@ def _checkpoint_groups(data: dict, event: str, client: str) -> list[dict]:
 
 # --- install_hook: the installer (both hooks, py + wrapper) ----------------------
 
+
 def test_install_hook_copies_scripts_and_wrappers_and_wires_both(tmp_path: Path) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "settings.json"
     r = hook_module.install_hook(hook_dir=hd, settings_path=sp)
@@ -106,25 +107,31 @@ def test_install_hook_supersedes_prior_absolute_path_entry(tmp_path: Path) -> No
     # replace it with the machine-agnostic wrapper command, exactly once.
     sp = tmp_path / "settings.json"
     sp.write_text(
-        json.dumps({
-            "hooks": {
-                "Stop": [{
-                    "hooks": [{
-                        "type": "command",
-                        "command": (
-                            '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\'
-                            'kb_capture_nudge.py"'
-                        ),
-                    }]
-                }]
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        '"C:\\Python\\python.exe" "C:\\Users\\x\\.claude\\hooks\\'
+                                        'kb_capture_nudge.py"'
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                }
             }
-        }),
+        ),
         encoding="utf-8",
     )
     hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
     data = json.loads(sp.read_text(encoding="utf-8"))
     stop = _stop_cmds(data)
-    assert not any("python.exe" in c for c in stop)             # absolute-path form gone
+    assert not any("python.exe" in c for c in stop)  # absolute-path form gone
     assert sum("exomem-capture-nudge" in c for c in stop) == 1  # exactly one, the wrapper
 
 
@@ -135,24 +142,40 @@ def test_install_hook_migrates_old_kb_entry(tmp_path: Path) -> None:
     # one — a clean migration, not a duplicate.
     sp = tmp_path / "settings.json"
     sp.write_text(
-        json.dumps({"hooks": {
-            "Stop": [{"hooks": [{
-                "type": "command",
-                "command": "bash ~/.claude/hooks/kb-capture-nudge.sh",
-            }]}],
-            "UserPromptSubmit": [{"hooks": [{
-                "type": "command",
-                "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh",
-            }]}],
-        }}),
+        json.dumps(
+            {
+                "hooks": {
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash ~/.claude/hooks/kb-capture-nudge.sh",
+                                }
+                            ]
+                        }
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "bash ~/.claude/hooks/kb-retrieve-nudge.sh",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        ),
         encoding="utf-8",
     )
     hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
     data = json.loads(sp.read_text(encoding="utf-8"))
     stop, ups = _stop_cmds(data), _ups_cmds(data)
-    assert not any("kb-capture-nudge" in c for c in stop)        # legacy entry gone
+    assert not any("kb-capture-nudge" in c for c in stop)  # legacy entry gone
     assert not any("kb-retrieve-nudge" in c for c in ups)
-    assert sum("exomem-capture-nudge" in c for c in stop) == 1   # new entry present, once
+    assert sum("exomem-capture-nudge" in c for c in stop) == 1  # new entry present, once
     assert sum("exomem-retrieve-nudge" in c for c in ups) == 1
 
 
@@ -161,26 +184,46 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(
 ) -> None:
     hd, sp = tmp_path / "codex-hooks", tmp_path / "hooks.json"
     sp.write_text(
-        json.dumps({"hooks": {
-            "PreToolUse": [{
-                "matcher": "Bash",
-                "hooks": [{"type": "command", "command": "python guard.py"}],
-            }],
-            "UserPromptSubmit": [
-                {"hooks": [{
-                    "type": "command",
-                    "command": "python3 ~/.codex/hooks/kb_retrieve_nudge.py",
-                }]},
-                {"hooks": [{
-                    "type": "command",
-                    "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py",
-                }]},
-            ],
-            "Stop": [{"hooks": [{
-                "type": "command",
-                "command": "python3 ~/.codex/hooks/kb_capture_nudge.py",
-            }]}],
-        }}),
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "python guard.py"}],
+                        }
+                    ],
+                    "UserPromptSubmit": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python3 ~/.codex/hooks/kb_retrieve_nudge.py",
+                                }
+                            ]
+                        },
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py",
+                                }
+                            ]
+                        },
+                    ],
+                    "Stop": [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": "python3 ~/.codex/hooks/kb_capture_nudge.py",
+                                }
+                            ]
+                        }
+                    ],
+                }
+            }
+        ),
         encoding="utf-8",
     )
 
@@ -195,7 +238,7 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(
     ):
         assert (hd / f).exists(), f
     data = json.loads(sp.read_text(encoding="utf-8"))
-    capture_command = "python3 \"" + (hd / "exomem_capture_nudge.py").as_posix() + "\""
+    capture_command = 'python3 "' + (hd / "exomem_capture_nudge.py").as_posix() + '"'
     assert _stop_cmds(data).count(capture_command) == 1
     ups = _ups_cmds(data)
     assert sum("exomem_retrieve_nudge.py" in c for c in ups) == 1
@@ -209,30 +252,34 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(
         for h in _hook_entries(data, "UserPromptSubmit")
         if "exomem_retrieve_nudge.py" in h["command"]
     ][0]
-    assert retrieve["commandWindows"].endswith("exomem_retrieve_nudge.py\"")
+    assert retrieve["commandWindows"].endswith('exomem_retrieve_nudge.py"')
 
 
 def test_install_hook_preserves_other_hooks_and_keys(tmp_path: Path) -> None:
     sp = tmp_path / "settings.json"
     sp.write_text(
-        json.dumps({
-            "theme": "dark",
-            "hooks": {
-                "PreToolUse": [{
-                    "matcher": "Bash",
-                    "hooks": [{"type": "command", "command": "bash guard.sh"}],
-                }],
-                "Stop": [{"hooks": [{"type": "command", "command": "bash other-stop.sh"}]}],
-            },
-        }),
+        json.dumps(
+            {
+                "theme": "dark",
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "Bash",
+                            "hooks": [{"type": "command", "command": "bash guard.sh"}],
+                        }
+                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": "bash other-stop.sh"}]}],
+                },
+            }
+        ),
         encoding="utf-8",
     )
     hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp)
     data = json.loads(sp.read_text(encoding="utf-8"))
     assert data["theme"] == "dark"
     assert data["hooks"]["PreToolUse"][0]["hooks"][0]["command"] == "bash guard.sh"
-    assert "bash other-stop.sh" in _stop_cmds(data)                     # unrelated Stop hook kept
-    assert any("exomem-capture-nudge" in c for c in _stop_cmds(data))   # ours added
+    assert "bash other-stop.sh" in _stop_cmds(data)  # unrelated Stop hook kept
+    assert any("exomem-capture-nudge" in c for c in _stop_cmds(data))  # ours added
     assert any("exomem-retrieve-nudge" in c for c in _ups_cmds(data))
 
 
@@ -260,21 +307,25 @@ def test_install_hook_via_cli_for_codex(tmp_path: Path) -> None:
     from exomem.__main__ import main
 
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
-    assert main([
-        "install-hook",
-        "--client",
-        "codex",
-        "--hook-dir",
-        str(hd),
-        "--settings",
-        str(sp),
-    ]) == 0
+    assert (
+        main(
+            [
+                "install-hook",
+                "--client",
+                "codex",
+                "--hook-dir",
+                str(hd),
+                "--settings",
+                str(sp),
+            ]
+        )
+        == 0
+    )
     assert (hd / "exomem_capture_nudge.py").exists() and (hd / "exomem_retrieve_nudge.py").exists()
     data = json.loads(sp.read_text(encoding="utf-8"))
     entries = _hook_entries(data, "UserPromptSubmit")
     assert any(
-        "exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows")
-        for h in entries
+        "exomem_retrieve_nudge.py" in h["command"] and h.get("commandWindows") for h in entries
     )
 
 
@@ -292,8 +343,7 @@ def test_install_hook_check_reports_healthy_codex_install(tmp_path: Path, monkey
     client = report["clients"][0]
     assert client["client"] == "codex"
     assert any(
-        c["id"] == "config.UserPromptSubmit" and c["status"] == "pass"
-        for c in client["checks"]
+        c["id"] == "config.UserPromptSubmit" and c["status"] == "pass" for c in client["checks"]
     )
     assert any(c["id"] == "scripts.Stop" and c["status"] == "pass" for c in client["checks"])
     assert client["logs"]["retrieve"]["path"].startswith(str(home / ".codex"))
@@ -323,17 +373,24 @@ def test_install_hook_check_requires_one_exact_continuation_registration(
         group["matcher"] = "manual"
     else:
         groups.append(json.loads(json.dumps(group)))
-    groups.append({"matcher": "anything", "hooks": [{
-        "type": "command", "command": "python unrelated.py", "timeout": 99,
-    }]})
+    groups.append(
+        {
+            "matcher": "anything",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": "python unrelated.py",
+                    "timeout": 99,
+                }
+            ],
+        }
+    )
     sp.write_text(json.dumps(data), encoding="utf-8")
 
     report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
 
     assert report["success"] is False
-    check = next(
-        row for row in report["clients"][0]["checks"] if row["id"] == "config.PreCompact"
-    )
+    check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.PreCompact")
     assert check["status"] == "fail"
 
 
@@ -347,9 +404,7 @@ def test_install_hook_check_rejects_unsupported_codex_session_end(tmp_path: Path
 
     report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
 
-    check = next(
-        row for row in report["clients"][0]["checks"] if row["id"] == "config.SessionEnd"
-    )
+    check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.SessionEnd")
     assert check["status"] == "fail"
 
 
@@ -390,10 +445,22 @@ def test_install_hook_check_via_cli_json(tmp_path: Path, capsys) -> None:
     hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
     hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
 
-    assert main([
-        "install-hook", "--check", "--client", "codex",
-        "--hook-dir", str(hd), "--settings", str(sp), "--json",
-    ]) == 0
+    assert (
+        main(
+            [
+                "install-hook",
+                "--check",
+                "--client",
+                "codex",
+                "--hook-dir",
+                str(hd),
+                "--settings",
+                str(sp),
+                "--json",
+            ]
+        )
+        == 0
+    )
     payload = json.loads(capsys.readouterr().out)
     assert payload["success"] is True
     assert payload["clients"][0]["client"] == "codex"
@@ -419,9 +486,7 @@ def test_hook_check_skips_absent_client_in_multi_client_check(
         hook_module,
         "_default_settings",
         lambda client: (
-            claude_settings
-            if client == "claude"
-            else tmp_path / ".codex" / "hooks.json"
+            claude_settings if client == "claude" else tmp_path / ".codex" / "hooks.json"
         ),
     )
 
@@ -483,30 +548,39 @@ def test_codex_preserves_unrelated_session_end_and_exact_marker_neighbors(tmp_pa
     unrelated = {"hooks": [{"type": "command", "command": "python user-session-end.py"}]}
     neighbor = {
         "matcher": "manual|auto",
-        "hooks": [{
-            "type": "command",
-            "command": "python exomem_continuation_checkpoint.py.backup --client codex",
-        }],
+        "hooks": [
+            {
+                "type": "command",
+                "command": "python exomem_continuation_checkpoint.py.backup --client codex",
+            }
+        ],
     }
     wrong_client = {
         "matcher": "manual|auto",
-        "hooks": [{
-            "type": "command",
-            "command": "python exomem_continuation_checkpoint.py --client claude",
-        }],
+        "hooks": [
+            {
+                "type": "command",
+                "command": "python exomem_continuation_checkpoint.py --client claude",
+            }
+        ],
     }
     legacy = {
         "matcher": "manual|auto",
         "hooks": [{"type": "command", "command": "python kb_continuation_checkpoint.py"}],
     }
-    sp.write_text(json.dumps({"hooks": {
-        "SessionEnd": [unrelated],
-        "PreCompact": [neighbor, wrong_client, legacy],
-    }}), encoding="utf-8")
-
-    hook_module.install_hook(
-        hook_dir=tmp_path / "hooks", settings_path=sp, client="codex"
+    sp.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionEnd": [unrelated],
+                    "PreCompact": [neighbor, wrong_client, legacy],
+                }
+            }
+        ),
+        encoding="utf-8",
     )
+
+    hook_module.install_hook(hook_dir=tmp_path / "hooks", settings_path=sp, client="codex")
     data = json.loads(sp.read_text(encoding="utf-8"))
 
     assert data["hooks"]["SessionEnd"] == [unrelated]
@@ -514,11 +588,15 @@ def test_codex_preserves_unrelated_session_end_and_exact_marker_neighbors(tmp_pa
     assert commands[0].endswith(".backup --client codex")
     assert commands[1].endswith("--client claude")
     assert not any("kb_continuation_checkpoint.py" in command for command in commands)
-    assert sum(
-        "exomem_continuation_checkpoint.py" in command and "--client codex" in command
-        and not command.endswith(".backup --client codex")
-        for command in commands
-    ) == 1
+    assert (
+        sum(
+            "exomem_continuation_checkpoint.py" in command
+            and "--client codex" in command
+            and not command.endswith(".backup --client codex")
+            for command in commands
+        )
+        == 1
+    )
 
 
 @pytest.mark.parametrize(
@@ -788,9 +866,10 @@ def test_health_check_reports_capability_matrix_hashes_and_first_run(tmp_path: P
 
 def test_installer_capability_matrix_matches_pinned_adapter_provenance() -> None:
     for client, provenance in checkpoint.ADAPTER_PROVENANCE.items():
-        assert tuple(
-            event for event, _matcher in hook_module._CONTINUATION_EVENTS[client]
-        ) == provenance["events"]
+        assert (
+            tuple(event for event, _matcher in hook_module._CONTINUATION_EVENTS[client])
+            == provenance["events"]
+        )
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX deployment modes")
@@ -822,6 +901,126 @@ def test_health_rejects_matching_deployed_hook_symlink(tmp_path: Path) -> None:
 
     assert check["status"] == "fail"
     assert check["details"]["exomem_continuation_checkpoint.py"]["safe_regular"] is False
+
+
+def test_health_rejects_deployed_hook_directory_with_symlinked_ancestor(
+    tmp_path: Path,
+) -> None:
+    real_parent = tmp_path / "real"
+    hd, sp = real_parent / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    alias_parent = tmp_path / "alias"
+    try:
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=alias_parent / "hooks",
+        settings_path=sp,
+    )
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "scripts.continuation"
+    )
+
+    assert check["status"] == "fail"
+    assert all(not item["safe_regular"] for item in check["details"].values())
+
+
+def test_health_rejects_symlinked_config_leaf(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    target = tmp_path / "real-hooks.json"
+    sp.replace(target)
+    try:
+        sp.symlink_to(target)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+    check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.file")
+
+    assert check["status"] == "fail"
+    assert "unsafe" in check["message"].lower()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode trust")
+def test_install_and_health_reject_group_writable_hook_directory(tmp_path: Path) -> None:
+    hd = tmp_path / "hooks"
+    hd.mkdir(mode=0o700)
+    hd.chmod(0o777)
+
+    with pytest.raises(OSError, match="trusted|writable|permissions"):
+        hook_module.install_hook(
+            hook_dir=hd,
+            settings_path=tmp_path / "hooks.json",
+            client="codex",
+            wire=False,
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode trust")
+def test_health_rejects_group_writable_hook_directory(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    hd.chmod(0o777)
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "scripts.continuation"
+    )
+
+    assert check["status"] == "fail"
+    assert all(not item["safe_regular"] for item in check["details"].values())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX ownership and mode trust")
+def test_install_rejects_group_writable_config_parent_and_leaf(tmp_path: Path) -> None:
+    hd = tmp_path / "hooks"
+    broad_parent = tmp_path / "broad-config"
+    broad_parent.mkdir(mode=0o700)
+    broad_parent.chmod(0o777)
+    with pytest.raises(OSError, match="trusted|writable|permissions"):
+        hook_module.install_hook(
+            hook_dir=hd,
+            settings_path=broad_parent / "hooks.json",
+            client="codex",
+        )
+
+    safe_parent = tmp_path / "safe-config"
+    safe_parent.mkdir(mode=0o700)
+    config = safe_parent / "hooks.json"
+    config.write_text("{}\n", encoding="utf-8")
+    config.chmod(0o666)
+    with pytest.raises(OSError, match="writable|permissions"):
+        hook_module.install_hook(
+            hook_dir=hd,
+            settings_path=config,
+            client="codex",
+        )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX config mode trust")
+def test_health_rejects_group_writable_config_leaf(tmp_path: Path) -> None:
+    hd, sp = tmp_path / "hooks", tmp_path / "hooks.json"
+    hook_module.install_hook(hook_dir=hd, settings_path=sp, client="codex")
+    sp.chmod(0o666)
+
+    report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+    check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.file")
+
+    assert check["status"] == "fail"
+    assert "writable" in check["message"].lower()
+
+    sp.chmod(0o644)
+    tmp_path.chmod(0o777)
+    try:
+        report = hook_module.check_hooks(clients=("codex",), hook_dir=hd, settings_path=sp)
+        check = next(row for row in report["clients"][0]["checks"] if row["id"] == "config.file")
+        assert check["status"] == "fail"
+    finally:
+        tmp_path.chmod(0o700)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX mode diagnostics")
@@ -917,6 +1116,194 @@ def test_health_decodes_current_and_reports_valid_previous_rollback(
     assert check["details"]["latest_age"] != "0s ago"
 
 
+def test_health_rejects_checkpoint_copied_into_another_session_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    result = hook_module.install_hook(client="codex")
+    base = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    checkpoint.write_checkpoint(
+        {**base, "session_id": "alpha"}, home, observed_at_ns=time.time_ns()
+    )
+    checkpoint.write_checkpoint({**base, "session_id": "beta"}, home, observed_at_ns=time.time_ns())
+    alpha = checkpoint.session_state_dir(home, "codex", "alpha")
+    beta = checkpoint.session_state_dir(home, "codex", "beta")
+    (beta / "current.json").write_bytes((alpha / "current.json").read_bytes())
+
+    report = hook_module.check_hooks(
+        clients=("codex",),
+        hook_dir=home / "hooks",
+        settings_path=Path(result["settings"]),
+    )
+    check = next(
+        row for row in report["clients"][0]["checks"] if row["id"] == "runtime.continuation"
+    )
+    beta_status = next(
+        row for row in check["details"]["session_states"] if row["name"] == beta.name
+    )
+
+    assert check["status"] == "fail"
+    assert beta_status["current"] == "binding_invalid"
+    assert beta_status["selection"] == "corrupt"
+
+
+def test_health_and_live_selection_reject_inverted_generation_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    observed = time.time_ns()
+    event = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "health-inverted",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    checkpoint.write_checkpoint(event, home, observed_at_ns=observed - 2)
+    checkpoint.write_checkpoint({**event, "trigger": "auto"}, home, observed_at_ns=observed - 1)
+    state = checkpoint.session_state_dir(home, "codex", "health-inverted")
+    current = (state / "current.json").read_bytes()
+    previous = (state / "previous.json").read_bytes()
+    (state / "current.json").write_bytes(previous)
+    (state / "previous.json").write_bytes(current)
+    start = {
+        **event,
+        "event": "SessionStart",
+        "trigger": None,
+        "source": "resume",
+    }
+
+    runtime = hook_module._continuation_runtime_summary("codex")
+
+    assert runtime["session_states"][0]["current"] == "generation_invalid"
+    assert runtime["session_states"][0]["selection"] == "corrupt"
+    assert checkpoint.select_checkpoint(start, home, now_ns=observed) is None
+
+
+def test_health_surfaces_stale_previous_behind_valid_current(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    event = {
+        "contract_version": 1,
+        "client": "codex",
+        "event": "PreCompact",
+        "session_id": "health-stale-history",
+        "turn_id": None,
+        "trigger": "manual",
+        "source": None,
+        "cwd": None,
+        "transcript_path": None,
+        "model": None,
+    }
+    now = time.time_ns()
+    checkpoint.write_checkpoint(event, home, observed_at_ns=now - checkpoint.RETENTION_NS - 2)
+    checkpoint.write_checkpoint(
+        {**event, "trigger": "auto"},
+        home,
+        observed_at_ns=now - checkpoint.RETENTION_NS - 1,
+    )
+    checkpoint.write_checkpoint({**event, "turn_id": "fresh"}, home, observed_at_ns=now)
+
+    runtime = hook_module._continuation_runtime_summary("codex")
+
+    assert runtime["session_states"][0]["selection"] == "valid_current"
+    assert runtime["session_states"][0]["history"] == "stale_previous"
+
+
+def test_health_identifies_authorized_stale_interrupted_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    monkeypatch.setenv("EXOMEM_HOOK_HOME", str(home))
+    with checkpoint._session_lock(
+        home,
+        "codex",
+        "health-interrupted",
+        create=True,
+        created_at_ns=time.time_ns() - checkpoint.RETENTION_NS - 1,
+    ):
+        pass
+
+    runtime = hook_module._continuation_runtime_summary("codex")
+
+    assert runtime["session_states"][0]["selection"] == "stale_incomplete"
+    assert runtime["session_states"][0]["manifest"] == "valid"
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        {
+            "event": "PreCompact/SECRET",
+            "status": "written",
+            "duration_ms": 0,
+            "checkpoint_id": "a" * 64,
+        },
+        {
+            "event": "PreCompact",
+            "status": "written /tmp/SECRET",
+            "duration_ms": 0,
+            "checkpoint_id": "a" * 64,
+        },
+        {"event": "PreCompact", "status": "written", "duration_ms": -1, "checkpoint_id": "a" * 64},
+        {
+            "event": "PreCompact",
+            "status": "written",
+            "duration_ms": 60_001,
+            "checkpoint_id": "a" * 64,
+        },
+        {
+            "event": "PreCompact",
+            "status": "written",
+            "duration_ms": 0,
+            "checkpoint_id": "SECRET/path",
+        },
+        {
+            "event": "PreCompact",
+            "status": "error",
+            "duration_ms": 0,
+            "error_class": "Bearer /tmp/SECRET",
+        },
+    ],
+)
+def test_metadata_log_health_rejects_content_path_and_invalid_domains(
+    tmp_path: Path,
+    row: dict,
+) -> None:
+    root = tmp_path / "root"
+    root.mkdir(mode=0o700)
+    log = root / "events.log"
+    log.write_text(json.dumps(row) + "\n", encoding="utf-8")
+    log.chmod(0o600)
+
+    summary = hook_module._metadata_log_runtime_summary(root)
+
+    assert summary["status"] == "corrupt"
+
+
 def test_health_reports_stale_missing_and_invalid_metadata_log(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -990,12 +1377,14 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
     env = {**os.environ, "EXOMEM_HOOK_HOME": str(home), "EXOMEM_VAULT_PATH": ""}
     written = subprocess.run(
         command,
-        input=json.dumps({
-            "hook_event_name": "PreCompact",
-            "session_id": "installed-session",
-            "trigger": "manual",
-            "transcript_path": str(transcript),
-        }),
+        input=json.dumps(
+            {
+                "hook_event_name": "PreCompact",
+                "session_id": "installed-session",
+                "trigger": "manual",
+                "transcript_path": str(transcript),
+            }
+        ),
         capture_output=True,
         text=True,
         env=env,
@@ -1004,12 +1393,14 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
     )
     resumed = subprocess.run(
         command,
-        input=json.dumps({
-            "hook_event_name": "SessionStart",
-            "session_id": "installed-session",
-            "source": "resume",
-            "transcript_path": str(transcript),
-        }),
+        input=json.dumps(
+            {
+                "hook_event_name": "SessionStart",
+                "session_id": "installed-session",
+                "source": "resume",
+                "transcript_path": str(transcript),
+            }
+        ),
         capture_output=True,
         text=True,
         env=env,
@@ -1023,10 +1414,12 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
     if client == "claude":
         ended = subprocess.run(
             command,
-            input=json.dumps({
-                "hook_event_name": "SessionEnd",
-                "session_id": "installed-session-end",
-            }),
+            input=json.dumps(
+                {
+                    "hook_event_name": "SessionEnd",
+                    "session_id": "installed-session-end",
+                }
+            ),
             capture_output=True,
             text=True,
             env=env,
@@ -1038,6 +1431,7 @@ def test_isolated_installed_continuation_adapter_and_config_integration(
 
 # --- shared subprocess helper ---------------------------------------------------
 
+
 def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
     env = {
         **os.environ,
@@ -1047,7 +1441,10 @@ def _run(script: Path, event: dict, home: Path, extra_env: dict | None = None):
     }  # redirect Path.home()
     return subprocess.run(
         [sys.executable, str(script)],
-        input=json.dumps(event), capture_output=True, text=True, env=env,
+        input=json.dumps(event),
+        capture_output=True,
+        text=True,
+        env=env,
     )
 
 
@@ -1078,6 +1475,7 @@ def _transcript(
 
 
 # --- capture (Stop) gate --------------------------------------------------------
+
 
 def test_capture_fires_on_substantial_turn(tmp_path: Path) -> None:
     home = tmp_path / "home"
@@ -1159,6 +1557,7 @@ def test_capture_codex_client_accepts_camel_case_and_uses_codex_state(tmp_path: 
 
 
 # --- retrieval (UserPromptSubmit) gate ------------------------------------------
+
 
 def test_retrieve_fires_on_substantial_prompt(tmp_path: Path) -> None:
     home = tmp_path / "home"
