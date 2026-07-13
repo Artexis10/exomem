@@ -208,6 +208,55 @@ class SQLiteStateStore:
             )
             conn.execute("COMMIT")
 
+    def put_if_absent(
+        self, namespace: str, collection: object, key: str, value: dict, ttl: float | None
+    ) -> bool:
+        """Atomically insert a state value unless a live value already exists."""
+        now = self.clock()
+        expires = None if ttl is None else now + ttl
+        coll = self._collection(collection)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM shared_state "
+                "WHERE namespace=? AND collection=? AND key=? "
+                "AND expires_at IS NOT NULL AND expires_at <= ?",
+                (namespace, coll, key, now),
+            )
+            result = conn.execute(
+                "INSERT OR IGNORE INTO shared_state"
+                "(namespace, collection, key, value, expires_at) VALUES(?,?,?,?,?)",
+                (
+                    namespace,
+                    coll,
+                    key,
+                    json.dumps(value, separators=(",", ":")),
+                    expires,
+                ),
+            )
+            conn.execute("COMMIT")
+        return bool(result.rowcount)
+
+    def list_keys(self, namespace: str, collection: object) -> list[str]:
+        """List live opaque keys without returning encrypted values."""
+        now = self.clock()
+        coll = self._collection(collection)
+        with self._connect() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute(
+                "DELETE FROM shared_state "
+                "WHERE namespace=? AND collection=? "
+                "AND expires_at IS NOT NULL AND expires_at <= ?",
+                (namespace, coll, now),
+            )
+            rows = conn.execute(
+                "SELECT key FROM shared_state "
+                "WHERE namespace=? AND collection=? ORDER BY key",
+                (namespace, coll),
+            ).fetchall()
+            conn.execute("COMMIT")
+        return [str(row[0]) for row in rows]
+
     def delete(self, namespace: str, collection: object, key: str) -> bool:
         with self._connect() as conn:
             result = conn.execute(
@@ -279,6 +328,16 @@ def create_app(
                     namespace, collection, str(body["key"]), dict(body["value"]), _state_ttl(body)
                 )
                 result = None
+            elif operation == "put-if-absent":
+                result = state_store.put_if_absent(
+                    namespace,
+                    collection,
+                    str(body["key"]),
+                    dict(body["value"]),
+                    _state_ttl(body),
+                )
+            elif operation == "list-keys":
+                result = state_store.list_keys(namespace, collection)
             elif operation == "delete":
                 result = state_store.delete(namespace, collection, str(body["key"]))
             elif operation == "get-many":

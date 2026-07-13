@@ -45,6 +45,17 @@ VALID_PROFILES: tuple[Profile, ...] = (
     "ha",
 )
 PROFILE_ENV = "EXOMEM_PROFILE"
+HA_AUTH_ENV_KEYS = (
+    "EXOMEM_WRITER_LEASE_URL",
+    "EXOMEM_WRITER_LEASE_VAULT_ID",
+    "EXOMEM_WRITER_LEASE_REPLICA_ID",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_LEASE_COORDINATOR_TOKEN",
+    "EXOMEM_OAUTH_STORAGE_URL",
+    "EXOMEM_OAUTH_STORAGE_NAMESPACE",
+    "EXOMEM_OAUTH_STORAGE_TOKEN",
+    "EXOMEM_HA_REPLICA_URLS",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -800,6 +811,26 @@ def _check_remote_env() -> list[DoctorCheck]:
         else:
             checks.append(_check(f"env.{key}", "fail", f"{key} is not set.", remediation))
 
+    raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    try:
+        user_id = int(raw_user_id)
+        valid_user_id = user_id > 0 and raw_user_id.isdecimal()
+    except ValueError:
+        valid_user_id = False
+    if valid_user_id:
+        checks.append(_check(
+            "env.EXOMEM_GITHUB_USER_ID",
+            "pass",
+            "EXOMEM_GITHUB_USER_ID is a positive immutable GitHub subject.",
+        ))
+    else:
+        checks.append(_check(
+            "env.EXOMEM_GITHUB_USER_ID",
+            "fail",
+            "EXOMEM_GITHUB_USER_ID is missing or invalid.",
+            "Set EXOMEM_GITHUB_USER_ID to the positive numeric ID returned by GitHub.",
+        ))
+
     host = os.environ.get("EXOMEM_HOST", "127.0.0.1")
     checks.append(_check("env.EXOMEM_HOST", "pass", f"EXOMEM_HOST resolves to {host}."))
     if os.environ.get("EXOMEM_REST_API_KEY"):
@@ -825,9 +856,14 @@ def _check_remote_env() -> list[DoctorCheck]:
 
 def _check_ha_env() -> list[DoctorCheck]:
     required = {
+        "EXOMEM_BASE_URL": "Set the stable public OAuth origin.",
+        "EXOMEM_JWT_SIGNING_KEY": "Set the stable durable-session signing root.",
         "EXOMEM_WRITER_LEASE_URL": "Set the provider-neutral writer coordinator URL.",
         "EXOMEM_WRITER_LEASE_VAULT_ID": "Set the stable vault coordination identifier.",
         "EXOMEM_WRITER_LEASE_REPLICA_ID": "Set a unique identifier for this replica.",
+        "EXOMEM_OAUTH_STORAGE_URL": "Set the authoritative coordinator state URL.",
+        "EXOMEM_OAUTH_STORAGE_TOKEN": "Set the coordinator bearer credential for auth state.",
+        "EXOMEM_LEASE_COORDINATOR_TOKEN": "Set the bearer enforced by the coordinator service.",
     }
     checks: list[DoctorCheck] = []
     for key, remediation in required.items():
@@ -840,10 +876,53 @@ def _check_ha_env() -> list[DoctorCheck]:
     else:
         checks.append(_check(
             "ha.env.EXOMEM_WRITER_LEASE_TOKEN",
-            "warn",
+            "fail",
             "Writer lease token is not set.",
-            "Set EXOMEM_WRITER_LEASE_TOKEN unless the coordinator is private and explicitly unauthenticated.",
+            "Set EXOMEM_WRITER_LEASE_TOKEN to the same bearer as EXOMEM_OAUTH_STORAGE_TOKEN.",
         ))
+    namespace = (
+        os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+        or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+    )
+    checks.append(_check(
+        "ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE",
+        "pass" if namespace else "fail",
+        "OAuth storage namespace is set."
+        if namespace
+        else "OAuth storage namespace is not set.",
+        None if namespace else (
+            "Set EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID."
+        ),
+    ))
+    raw_user_id = os.environ.get("EXOMEM_GITHUB_USER_ID", "").strip()
+    try:
+        valid_user_id = raw_user_id.isdecimal() and int(raw_user_id) > 0
+    except ValueError:
+        valid_user_id = False
+    checks.append(_check(
+        "ha.env.EXOMEM_GITHUB_USER_ID",
+        "pass" if valid_user_id else "fail",
+        "Immutable GitHub user ID is valid."
+        if valid_user_id
+        else "EXOMEM_GITHUB_USER_ID is missing or invalid.",
+        None if valid_user_id else "Set a positive numeric EXOMEM_GITHUB_USER_ID.",
+    ))
+    credential_values = [
+        os.environ.get("EXOMEM_LEASE_COORDINATOR_TOKEN", "").strip(),
+        os.environ.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip(),
+        os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip(),
+    ]
+    credentials_match = all(credential_values) and len(set(credential_values)) == 1
+    checks.append(_check(
+        "ha.auth.credentials_match",
+        "pass" if credentials_match else "fail",
+        "HA coordinator credentials are present and match."
+        if credentials_match
+        else "HA coordinator credentials are missing or do not match.",
+        None if credentials_match else (
+            "Use one bearer value for writer lease, OAuth storage, and the coordinator."
+        ),
+    ))
     raw_contracts = os.environ.get("EXOMEM_HA_SUPPORTED_RUNTIME_CONTRACTS", "").strip()
     try:
         contracts = _parse_runtime_contracts(raw_contracts)
@@ -1055,6 +1134,120 @@ def _probe_get(url: str) -> tuple[int, object]:
     return resp.status_code, body
 
 
+def _probe_state(url: str, namespace: str, token: str | None) -> tuple[int, object]:
+    """Read a deliberately absent coordinator key, optionally authenticated."""
+    import httpx
+
+    headers = {"Accept": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    response = httpx.post(
+        f"{url.rstrip('/')}/v1/state/{namespace}/get",
+        json={
+            "key": "__exomem_doctor_absent_sentinel__",
+            "collection": "exomem-doctor-auth-probe",
+        },
+        headers=headers,
+        timeout=5.0,
+        follow_redirects=False,
+    )
+    try:
+        body: object = response.json()
+    except Exception:  # noqa: BLE001 - non-JSON error bodies are diagnostic only
+        body = response.text
+    return response.status_code, body
+
+
+def _check_ha_auth_probes(*, prefix: str = "ha.auth") -> list[DoctorCheck]:
+    url = os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip().rstrip("/")
+    namespace = (
+        os.environ.get("EXOMEM_OAUTH_STORAGE_NAMESPACE", "").strip()
+        or os.environ.get("EXOMEM_WRITER_LEASE_VAULT_ID", "").strip()
+    )
+    token = os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip()
+    if not (url and namespace and token):
+        return [_check(
+            f"{prefix}.storage_credential",
+            "fail",
+            "Cannot probe authoritative auth storage because its URL, namespace, or token is missing.",
+            "Set EXOMEM_OAUTH_STORAGE_URL, its namespace, and EXOMEM_OAUTH_STORAGE_TOKEN.",
+        )]
+
+    checks: list[DoctorCheck] = []
+    try:
+        anonymous_status, _ = _probe_state(url, namespace, None)
+    except Exception as error:  # noqa: BLE001 - network diagnostic boundary
+        checks.append(_check(
+            f"{prefix}.anonymous_rejected",
+            "fail",
+            f"Could not reach coordinator for anonymous auth enforcement probe: {error}",
+            "Check coordinator routing and availability.",
+        ))
+    else:
+        checks.append(_check(
+            f"{prefix}.anonymous_rejected",
+            "pass" if anonymous_status == 401 else "fail",
+            "Coordinator rejects anonymous state access with 401."
+            if anonymous_status == 401
+            else f"Coordinator anonymous state probe returned HTTP {anonymous_status}, expected 401.",
+            None if anonymous_status == 401 else (
+                "Require bearer authentication on every coordinator state route."
+            ),
+        ))
+
+    try:
+        authenticated_status, authenticated_body = _probe_state(url, namespace, token)
+    except Exception:  # noqa: BLE001 - network diagnostic boundary
+        checks.append(_check(
+            f"{prefix}.storage_credential",
+            "fail",
+            "Could not reach authoritative auth storage.",
+            "Check coordinator routing and availability; the configured token was not printed.",
+        ))
+    else:
+        sentinel_absent = (
+            isinstance(authenticated_body, dict)
+            and "result" in authenticated_body
+            and authenticated_body.get("result") is None
+        )
+        if authenticated_status == 200 and sentinel_absent:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "pass",
+                "Authenticated read-only auth-storage probe succeeded.",
+            ))
+        elif authenticated_status in {401, 403}:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                "Coordinator rejected the configured auth-storage credential.",
+                "Set the same bearer on coordinator, writer lease, and OAuth storage.",
+            ))
+        elif authenticated_status == 200:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                "Authenticated auth-storage probe returned an unexpected sentinel value.",
+                "Check coordinator state routing and namespace configuration.",
+            ))
+        else:
+            checks.append(_check(
+                f"{prefix}.storage_credential",
+                "fail",
+                f"Authoritative auth storage returned HTTP {authenticated_status}.",
+                "Repair coordinator availability before serving authenticated traffic.",
+            ))
+    return checks
+
+
+def _ha_auth_configured() -> bool:
+    """Whether this environment declares any part of a replica/HA topology."""
+    return any(
+        os.environ.get(key, "").strip()
+        for key in HA_AUTH_ENV_KEYS
+    )
+
+
 def _check_probe_local(port: int = 8765) -> DoctorCheck:
     url = f"http://127.0.0.1:{port}/mcp"
     try:
@@ -1229,15 +1422,20 @@ def doctor(
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        if _ha_auth_configured():
+            checks.extend(_check_ha_env())
         # Opt-in live-endpoint verification (three read-only GETs). The
         # default stays fully offline — doctor never touches the network
         # unless --probe is passed explicitly.
         if probe:
             checks.extend(_check_remote_probes())
+            if _ha_auth_configured():
+                checks.extend(_check_ha_auth_probes(prefix="probe.auth"))
 
     if profile == "ha":
         checks.extend(_check_ha_env())
         if probe:
+            checks.extend(_check_ha_auth_probes())
             try:
                 urls = _ha_replica_urls(replica_urls)
             except ValueError as exc:

@@ -12,7 +12,8 @@ server.build_server). Re-running is always safe.
 
 The env-var contract is the source of truth in `server.build_server`
 (require_auth branch): EXOMEM_BASE_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
-EXOMEM_GITHUB_USERNAME, EXOMEM_JWT_SIGNING_KEY, plus EXOMEM_VAULT_PATH.
+EXOMEM_GITHUB_USERNAME, EXOMEM_GITHUB_USER_ID, EXOMEM_JWT_SIGNING_KEY, plus
+EXOMEM_VAULT_PATH and matching coordinator credentials when HA is configured.
 
 CLI-only by design: it writes `.env` (secrets), reloads the environment, and
 runs doctor's live probes. All side-effect seams (`input_fn`, `print_fn`,
@@ -25,7 +26,9 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import doctor as doctor_module
 
@@ -36,7 +39,11 @@ _OAUTH_KEYS = (
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
     "EXOMEM_GITHUB_USERNAME",
+    "EXOMEM_GITHUB_USER_ID",
     "EXOMEM_JWT_SIGNING_KEY",
+    "EXOMEM_LEASE_COORDINATOR_TOKEN",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_OAUTH_STORAGE_TOKEN",
     "EXOMEM_VAULT_PATH",
 )
 
@@ -55,6 +62,40 @@ class BaseUrlError(ValueError):
 def generate_signing_key() -> str:
     """A fresh, stable JWT signing key — `secrets.token_urlsafe(48)` (64 chars)."""
     return secrets.token_urlsafe(48)
+
+
+def generate_storage_credential() -> str:
+    """Generate one shared bearer for coordinator, lease, and OAuth state."""
+    return secrets.token_urlsafe(48)
+
+
+def resolve_github_user(username: str) -> dict[str, Any]:
+    """Resolve GitHub's immutable numeric user ID for a login."""
+    import httpx
+
+    response = httpx.get(
+        f"https://api.github.com/users/{username}",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=10.0,
+        follow_redirects=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub returned an invalid user response")
+    return payload
+
+
+def _positive_user_id(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("GitHub user ID must be a positive integer")
+    try:
+        user_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("GitHub user ID must be a positive integer") from None
+    if user_id <= 0:
+        raise ValueError("GitHub user ID must be a positive integer")
+    return user_id
 
 
 def validate_base_url(raw: str) -> str:
@@ -212,6 +253,7 @@ def run_remote_setup(
     github_client_id: str | None = None,
     github_client_secret: str | None = None,
     github_username: str | None = None,
+    github_user_id: str | int | None = None,
     yes: bool = False,
     probe: bool = True,
     env_path: Path | None = None,
@@ -219,9 +261,11 @@ def run_remote_setup(
     print_fn=print,
     doctor_fn=None,
     load_env_fn=None,
+    github_user_resolver: Callable[[str], dict[str, Any]] | None = None,
 ) -> int:
     doctor_fn = doctor_fn or doctor_module.doctor
     load_env_fn = load_env_fn or _load_env
+    github_user_resolver = github_user_resolver or resolve_github_user
     env_path = env_path or _default_env_path()
 
     steps: list[tuple[str, str]] = []
@@ -294,12 +338,19 @@ def run_remote_setup(
             return 2
         github_client_id = _ask(input_fn, "GitHub Client ID", _existing("GITHUB_CLIENT_ID"))
     if not github_client_secret:
+        existing_secret = _existing("GITHUB_CLIENT_SECRET")
         if yes:
-            print_fn("setup --remote: --yes requires --github-client-secret.")
-            return 2
-        github_client_secret = _ask(
-            input_fn, "GitHub Client Secret", _existing("GITHUB_CLIENT_SECRET")
-        )
+            if not existing_secret:
+                print_fn("setup --remote: --yes requires --github-client-secret.")
+                return 2
+            github_client_secret = existing_secret
+        elif existing_secret:
+            entered = input_fn(
+                "GitHub Client Secret [press Enter to keep existing]: "
+            ).strip()
+            github_client_secret = entered or existing_secret
+        else:
+            github_client_secret = _ask(input_fn, "GitHub Client Secret")
     if not github_username:
         if yes:
             print_fn("setup --remote: --yes requires --github-username.")
@@ -312,6 +363,52 @@ def run_remote_setup(
         return 2
     report("oauth_app", "[done] fields printed + credentials captured")
 
+    # GitHub login names are mutable; pin authorization to GitHub's immutable
+    # positive numeric subject. Preserve a prior ID unless an explicit flag
+    # confirms the same value. Otherwise resolve it once from GitHub.
+    existing_user_id = _existing("EXOMEM_GITHUB_USER_ID").strip()
+    try:
+        preserved_user_id = (
+            _positive_user_id(existing_user_id) if existing_user_id else None
+        )
+        if github_user_id is not None:
+            resolved_user_id = _positive_user_id(github_user_id)
+            if (
+                preserved_user_id is not None
+                and resolved_user_id != preserved_user_id
+            ):
+                raise ValueError(
+                    "--github-user-id conflicts with existing EXOMEM_GITHUB_USER_ID"
+                )
+            report("github_id", "[done] supplied explicitly")
+        else:
+            identity = github_user_resolver(github_username)
+            resolved_login = str(identity.get("login") or "").strip().casefold()
+            if resolved_login != github_username.strip().casefold():
+                raise ValueError(
+                    "GitHub resolved a different login; use the canonical login or "
+                    "provide --github-user-id for offline setup"
+                )
+            online_user_id = _positive_user_id(identity.get("id"))
+            if (
+                preserved_user_id is not None
+                and online_user_id != preserved_user_id
+            ):
+                raise ValueError(
+                    "GitHub login resolves to a different immutable user ID than "
+                    "the existing EXOMEM_GITHUB_USER_ID"
+                )
+            resolved_user_id = preserved_user_id or online_user_id
+            report(
+                "github_id",
+                "[skipped: existing ID verified and kept stable]"
+                if preserved_user_id is not None
+                else "[done] resolved immutable ID",
+            )
+    except Exception as error:  # noqa: BLE001 - setup boundary, before any write
+        print_fn(f"setup --remote: could not establish GitHub identity: {error}")
+        return 2
+
     # 5. JWT signing key — generate ONCE and keep it (rotating orphans the store).
     signing_key = _existing("EXOMEM_JWT_SIGNING_KEY")
     if signing_key:
@@ -320,6 +417,59 @@ def run_remote_setup(
         signing_key = generate_signing_key()
         report("signing_key", "[done] generated")
 
+    # Active/passive auth state and the writer lease share one authenticated
+    # coordinator. If HA is configured, converge all three credential views to
+    # one value. Reject conflicts before touching the environment file.
+    writer_url = _existing("EXOMEM_WRITER_LEASE_URL").strip()
+    writer_vault_id = _existing("EXOMEM_WRITER_LEASE_VAULT_ID").strip()
+    writer_replica_id = _existing("EXOMEM_WRITER_LEASE_REPLICA_ID").strip()
+    storage_url = _existing("EXOMEM_OAUTH_STORAGE_URL").strip()
+    storage_namespace = (
+        _existing("EXOMEM_OAUTH_STORAGE_NAMESPACE").strip()
+        or writer_vault_id
+    )
+    ha_enabled = any(
+        _existing(key).strip() for key in doctor_module.HA_AUTH_ENV_KEYS
+    )
+    storage_credential: str | None = None
+    if ha_enabled:
+        missing_ha = [
+            name
+            for name, value in (
+                ("EXOMEM_WRITER_LEASE_URL", writer_url),
+                ("EXOMEM_WRITER_LEASE_VAULT_ID", writer_vault_id),
+                ("EXOMEM_WRITER_LEASE_REPLICA_ID", writer_replica_id),
+                ("EXOMEM_OAUTH_STORAGE_URL", storage_url),
+                ("EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID", storage_namespace),
+            )
+            if not value
+        ]
+        if missing_ha:
+            print_fn(
+                "setup --remote: HA durable sessions require "
+                f"{', '.join(missing_ha)}. No changes were written."
+            )
+            return 2
+        token_keys = (
+            "EXOMEM_LEASE_COORDINATOR_TOKEN",
+            "EXOMEM_WRITER_LEASE_TOKEN",
+            "EXOMEM_OAUTH_STORAGE_TOKEN",
+        )
+        configured = {value for key in token_keys if (value := _existing(key).strip())}
+        if len(configured) > 1:
+            print_fn(
+                "setup --remote: HA credential conflict; coordinator, writer lease, "
+                "and OAuth storage tokens must match. No changes were written."
+            )
+            return 2
+        storage_credential = next(iter(configured), None) or generate_storage_credential()
+        report(
+            "ha_auth",
+            "[skipped: existing matching credential preserved]"
+            if configured
+            else "[done] generated matching coordinator credential",
+        )
+
     # 6. Patch .env in place, preserving every other line.
     updates = {
         "EXOMEM_VAULT_PATH": vault_path,
@@ -327,8 +477,17 @@ def run_remote_setup(
         "GITHUB_CLIENT_ID": github_client_id,
         "GITHUB_CLIENT_SECRET": github_client_secret,
         "EXOMEM_GITHUB_USERNAME": github_username,
+        "EXOMEM_GITHUB_USER_ID": str(resolved_user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_key,
     }
+    if storage_credential is not None:
+        updates.update(
+            {
+                "EXOMEM_LEASE_COORDINATOR_TOKEN": storage_credential,
+                "EXOMEM_WRITER_LEASE_TOKEN": storage_credential,
+                "EXOMEM_OAUTH_STORAGE_TOKEN": storage_credential,
+            }
+        )
     env_path.write_text(patch_env(existing_text, updates), encoding="utf-8")
     try:
         env_path.chmod(0o600)  # secrets — owner-only on POSIX; near-no-op on Windows
@@ -404,6 +563,11 @@ def remote_setup_main(argv: list[str]) -> int:
     parser.add_argument("--github-client-secret", dest="github_client_secret", help="GitHub OAuth App Client Secret.")
     parser.add_argument("--github-username", dest="github_username", help="The single GitHub login allowed to sign in.")
     parser.add_argument(
+        "--github-user-id",
+        dest="github_user_id",
+        help="Immutable positive numeric GitHub user ID (avoids the setup lookup).",
+    )
+    parser.add_argument(
         "--yes", action="store_true",
         help="Non-interactive; requires --vault, --base-url, --tunnel, and the three --github-* flags.",
     )
@@ -435,6 +599,7 @@ def remote_setup_main(argv: list[str]) -> int:
         github_client_id=args.github_client_id,
         github_client_secret=args.github_client_secret,
         github_username=args.github_username,
+        github_user_id=args.github_user_id,
         yes=args.yes,
         probe=args.probe,
     )

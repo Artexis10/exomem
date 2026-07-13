@@ -152,11 +152,11 @@ Create `.env` in the repo root:
 ```
 EXOMEM_BASE_URL=https://kb.example.com
 EXOMEM_GITHUB_USERNAME=<your-github-login>
+EXOMEM_GITHUB_USER_ID=<positive-numeric-id-from-GitHub>
 GITHUB_CLIENT_ID=<from step 3>
 GITHUB_CLIENT_SECRET=<from step 3>
-# Recommended: a long random string that pins the OAuth signing key, so the
-# claude.ai connector survives FastMCP upgrades / client-secret rotation without
-# re-authorizing. Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
+# Required root for durable opaque sessions. Rotation revokes every session.
+# Generate: python -c "import secrets;print(secrets.token_urlsafe(48))"
 EXOMEM_JWT_SIGNING_KEY=<long-random-string>
 # Required: vault root — the folder that contains Knowledge Base/
 EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
@@ -164,7 +164,9 @@ EXOMEM_VAULT_PATH=<your-Obsidian-vault-root>
 
 `EXOMEM_BASE_URL` must match your public hostname (from step 2) exactly — no
 trailing slash, no `/mcp` suffix. `EXOMEM_GITHUB_USERNAME` is case-insensitive but
-must be the *login*, not the display name. `EXOMEM_VAULT_PATH` is **required**:
+must be the *login*, not the display name. `EXOMEM_GITHUB_USER_ID` is the positive
+numeric `id` returned by `GET https://api.github.com/users/<login>`; authorization
+must match both values. `EXOMEM_VAULT_PATH` is **required**:
 claude.ai connects over HTTP and passes no environment, so the service resolves the
 vault solely from this line in `.env` at startup.
 
@@ -378,6 +380,12 @@ EXOMEM_OAUTH_STORAGE_NAMESPACE=personal-main
 EXOMEM_OAUTH_STORAGE_TOKEN=<same-edge-secret>
 ```
 
+The coordinator's `EXOMEM_LEASE_COORDINATOR_TOKEN`, each replica's
+`EXOMEM_WRITER_LEASE_TOKEN`, and `EXOMEM_OAUTH_STORAGE_TOKEN` must be the same
+non-empty value. `exomem doctor --profile ha --probe` proves that anonymous
+state reads receive `401` and an authenticated absent-key read succeeds; a
+coordinator that accepts anonymous state access is not safe for session authority.
+
 Laptop uses the same values except
 `EXOMEM_WRITER_LEASE_REPLICA_ID=laptop` and omits the preferred flag. Both remain
 readable. The first write acquires the lease; the server renews it while alive.
@@ -419,13 +427,63 @@ renews its lease independently while a long tool runs; correctness does not rely
 on ordering `MCP_TOOL_TIMEOUT_MS` against `EXOMEM_WRITER_LEASE_TTL`.
 
 Both replicas must also use the same stable `EXOMEM_BASE_URL`, GitHub OAuth client
-ID/secret, and `EXOMEM_JWT_SIGNING_KEY`. FastMCP access tokens are reference tokens,
-so the signing key alone is not enough: the shared OAuth store carries their JTI
-and upstream-token mappings. Values are Fernet-encrypted on the replica before
-leaving it. On first enablement, the preferred replica reads through its existing
-encrypted local FastMCP store and migrates live records on demand, while mirroring
-new writes locally for rollback. Existing connectors therefore migrate in place
-instead of requiring removal and re-registration.
+ID/secret, `EXOMEM_GITHUB_USERNAME`, `EXOMEM_GITHUB_USER_ID`, and
+`EXOMEM_JWT_SIGNING_KEY`. Durable session records are Fernet-encrypted on the
+replica before leaving it. Session and auth-generation reads are always direct to
+the coordinator: there is no read-through mirror or stale local fallback that
+could resurrect a revoked session.
+
+### Durable-session cutover and rollback
+
+Treat the upgrade from FastMCP reference tokens as a coordinated HA cutover, not
+a rolling mixed-provider deployment:
+
+1. Back up `.env`, the coordinator database/shared OAuth state, and both service
+   installations. Preserve the existing `EXOMEM_JWT_SIGNING_KEY`; add the
+   immutable GitHub ID and matching coordinator/storage credentials.
+2. Quiesce connector traffic. Upgrade active and passive replicas together so no
+   request can alternate between the legacy and durable token formats.
+3. Run offline and probed doctor on both replicas, then bring up only the new
+   provider. Keep the public connector URL and connector registrations unchanged.
+4. Each existing client receives one expected `401` for its legacy reference JWT
+   and completes one final GitHub authorization. It then holds an Exomem-owned
+   opaque session with no advertised expiry. Do not delete/recreate connectors.
+5. Prove a session issued through one replica validates through the other. Run
+   single-session and `--all` revocation checks. Run the Codex harness and the
+   supported hosted-connector smoke test; block rollout if either client asks for
+   another login or discards the response because `expires_in` is omitted.
+
+The Codex gate uses an isolated persistent home, performs exactly one interactive
+login, then starts several fresh ephemeral processes:
+
+```bash
+python scripts/codex_auth_session_harness.py \
+  --url https://kb.example.com/mcp \
+  --codex-home .rollout/codex-auth-gate \
+  --codex-auth-source ~/.codex/auth.json \
+  --runs 3 \
+  --acknowledge-disposable-target
+```
+
+Run this only against a disposable staged KB. The harness refuses a non-empty
+target `CODEX_HOME`, copies only the invoking Codex OpenAI `auth.json` into it
+with owner-only permissions, and verifies `codex login status` before registering
+Exomem. It never copies `config.toml`, `.credentials.json`, or prior MCP state.
+When `--codex-auth-source` is omitted, it resolves to `$CODEX_HOME/auth.json` for
+the invoking process, or `~/.codex/auth.json` when `CODEX_HOME` is unset. The
+acknowledgement is deliberately mandatory.
+
+Keep legacy JTI/upstream-token collections untouched for a bounded rollback
+window, but never dual-read them while the new provider is active. Rollback means
+deploying the prior provider as another coordinated cutover; clients already on
+durable sessions authorize once into the old format. Only after the window closes
+should obsolete JTI/upstream GitHub-token records be removed. New durable-session
+collections can remain inert during rollback.
+
+For troubleshooting, a malformed, unknown, revoked, or legacy bearer returns the
+normal `401 invalid_token` challenge. A coordinator/network failure or current
+session-namespace decryption problem returns `503` with no OAuth challenge. Repair
+the authority and retry a 503; logging in again cannot fix an availability outage.
 
 The coordinator contract is:
 
@@ -668,6 +726,8 @@ sc.exe start exomem
 | GitHub redirects to "The redirect_uri MUST match…" error | OAuth App callback URL mismatch | At github.com/settings/developers → exomem, set the callback to exactly `https://<your-host>/auth/callback` (no trailing slash). |
 | GitHub: "The redirect_uri is not associated with this application" on a *second* machine | Reused another host's OAuth App client ID/secret (the app's one callback points at the other host) | Create a per-host OAuth App with callback `https://<this-host>.example.com/auth/callback`, put its client ID/secret in this `.env`, restart the service. See § Deploying on a second machine. |
 | claude.ai connector connects but every tool call returns 401 | Wrong GitHub user | `EXOMEM_GITHUB_USERNAME` must equal the login of the GitHub account you authorized with. Check the exomem log for `rejecting token for github login=...`. |
+| Existing client receives one `401 invalid_token` after the durable-session cutover | Legacy FastMCP reference JWT is intentionally not dual-read | Complete one final login without deleting or changing the connector URL. If a durable session later gets 401, inspect it with `exomem auth sessions`. |
+| Authenticated tools return `503` without `WWW-Authenticate` | Authoritative session storage is unavailable or corrupt | Repair the coordinator/network/storage path. Do not reauthorize: a fresh login uses the same unavailable authority. |
 | claude.ai shows "connector failed" | service down (host asleep, service stopped, crash loop) | Check the service status; tail `logs/service.err.log` and `logs/exomem.log`. Multiple startup banners within seconds = orphan python processes — kill them and force-restart. |
 | Edits to `.env` not picked up | service didn't restart | Restart the service (elevated on Windows). Confirm the python process restarted. |
 | 404 / Funnel "no service" | Tunnel disabled or pointing at the wrong port | `tailscale funnel status` (or check `cloudflared`); re-run the tunnel command from step 2. |
