@@ -61,6 +61,14 @@ def test_invalid_or_nontrailing_tag_like_text_remains_content() -> None:
     ]
 
 
+def test_terminal_trailing_slash_tag_is_retained_as_content() -> None:
+    document = parse_semantic_units("- [config] Keep #bad/\n")
+
+    unit = document.units[0]
+    assert unit.content == "Keep #bad/"
+    assert unit.tags == ()
+
+
 def test_suffixes_parse_from_anchor_to_context_to_tags() -> None:
     document = parse_semantic_units(
         r"- [rule] Keep \(literal\) #one #路径/二 (outer (inner)) ^anchor-1" "\n"
@@ -165,6 +173,21 @@ def test_malformed_category_candidates_and_empty_content_are_diagnostics() -> No
     assert all(error.severity == "error" for error in document.errors)
     assert all(error.span is not None for error in document.errors)
     assert all(error.remediation for error in document.errors)
+
+
+def test_letter_leading_invalid_category_punctuation_is_diagnostic() -> None:
+    document = parse_semantic_units(
+        "- [config/rule] value\n",
+        path="bad-category.md",
+    )
+
+    assert document.units == ()
+    assert len(document.errors) == 1
+    error = document.errors[0]
+    assert error.code == "invalid_compact_category"
+    assert error.line == 1
+    assert error.path == "bad-category.md"
+    assert error.raw == "- [config/rule] value"
 
 
 def test_compact_source_span_uses_full_file_codepoint_coordinates() -> None:

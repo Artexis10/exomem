@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import string
 import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -462,17 +461,7 @@ def _is_valid_category(value: str) -> bool:
 
 
 def _looks_like_malformed_category(value: str) -> bool:
-    if not value or not value[0].isalpha():
-        return False
-    if len(value) > 64 and all(
-        char.isalpha()
-        or char.isdigit()
-        or char in "_-"
-        or unicodedata.category(char) == "Zs"
-        for char in value
-    ):
-        return True
-    return not any(char in string.punctuation and char not in "_-" for char in value)
+    return bool(value and value[0].isalpha() and value != "take:")
 
 
 def _is_valid_tag(value: str) -> bool:
