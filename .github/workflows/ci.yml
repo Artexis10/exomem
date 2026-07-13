@@ -119,7 +119,8 @@ jobs:
             -v /tmp/vault:/vault -e EXOMEM_VAULT_PATH=/vault \
             -e EXOMEM_BASE_URL=http://127.0.0.1:8765 \
             -e GITHUB_CLIENT_ID=dummy -e GITHUB_CLIENT_SECRET=dummy \
-            -e EXOMEM_GITHUB_USERNAME=dummy -e EXOMEM_JWT_SIGNING_KEY=dummy \
+            -e EXOMEM_GITHUB_USERNAME=dummy -e EXOMEM_GITHUB_USER_ID=1 \
+            -e EXOMEM_JWT_SIGNING_KEY=dummy \
             exomem:pr-smoke
           for i in $(seq 1 30); do
             code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:8765/mcp || true)
