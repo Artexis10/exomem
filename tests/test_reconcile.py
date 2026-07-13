@@ -10,8 +10,8 @@ from __future__ import annotations
 from pathlib import Path
 from types import SimpleNamespace
 
+from exomem import activation_manifest, commands, index_sync
 from exomem import audit as audit_module
-from exomem import commands, index_sync
 from exomem import reconcile as reconcile_module
 
 
@@ -113,6 +113,32 @@ def test_reconcile_dry_run_reports_without_writing(vault: Path) -> None:
     assert rep.dry_run is True
     assert "Knowledge Base/index.md" in rep.indexes_updated
     assert top.read_text(encoding="utf-8") == drifted, "dry_run must not write"
+
+
+def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it(
+    vault: Path,
+) -> None:
+    path = activation_manifest.manifest_path(vault)
+    assert not path.exists()
+    page = vault / "Knowledge Base/Notes/Insights/legacy-reconcile.md"
+    page.write_text("---\ntype: insight\nstatus: active\n---\n\n# Legacy\n", encoding="utf-8")
+    before_page = page.read_bytes()
+
+    reconcile_module.reconcile(vault, dry_run=True)
+    assert not path.exists()
+
+    reconcile_module.reconcile(vault)
+    first_bytes = path.read_bytes()
+    assert activation_manifest.is_grandfathered(vault, page)
+    assert page.read_bytes() == before_page
+    assert "exomem_id:" not in page.read_text(encoding="utf-8")
+    assert not (vault / "Knowledge Base/.review-state.json").exists()
+
+    later = vault / "Knowledge Base/Notes/Insights/later-reconcile.md"
+    later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8")
+    reconcile_module.reconcile(vault)
+    assert path.read_bytes() == first_bytes
+    assert not activation_manifest.is_grandfathered(vault, later)
 
 
 def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(

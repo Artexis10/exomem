@@ -41,6 +41,16 @@ _ELIGIBLE_TYPES = frozenset(
         "entity",
     }
 )
+_COMPILED_PAGE_TYPES = frozenset(
+    {
+        "research-note",
+        "insight",
+        "pattern",
+        "failure",
+        "experiment",
+        "production-log",
+    }
+)
 _INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "dropped"})
 _SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _SKIP_TAGS = frozenset({"hub", "snapshot"})
@@ -137,7 +147,23 @@ def scan(vault_root: Path) -> ActivationScan:
 
 
 def _eligible(vault_root: Path, page: Any) -> bool:
-    if page.page_type not in _ELIGIBLE_TYPES:
+    return _eligible_for_types(vault_root, page, page_types=_ELIGIBLE_TYPES)
+
+
+def is_eligible_compiled_page(vault_root: Path, page: Any) -> bool:
+    """Return whether ``page`` belongs to the writable compiled-page domain.
+
+    Activation coverage historically includes entities.  The semantic contract
+    applies to the six compiled conclusion types only, while sharing every
+    other activation eligibility rule.
+    """
+    return _eligible_for_types(vault_root, page, page_types=_COMPILED_PAGE_TYPES)
+
+
+def _eligible_for_types(
+    vault_root: Path, page: Any, *, page_types: frozenset[str]
+) -> bool:
+    if page.page_type not in page_types:
         return False
     if page.path.name in {"index.md", "log.md"}:
         return False
@@ -241,7 +267,11 @@ def _frontmatter_links(value: Any) -> list[str]:
         return []
     if isinstance(value, str):
         matches = _WIKILINK_RE.findall(value)
-        return [item.strip() for item in matches] if matches else ([value.strip()] if value.strip() else [])
+        return (
+            [item.strip() for item in matches]
+            if matches
+            else ([value.strip()] if value.strip() else [])
+        )
     if isinstance(value, list):
         return [link for item in value for link in _frontmatter_links(item)]
     if isinstance(value, dict):
@@ -274,7 +304,10 @@ def _relation_debt(path: str, meta: dict[str, Any]) -> AuditFinding:
             **meta,
             "next_actions": [
                 {"tool": "connect_memory", "args": {"operation": "suggest-links", "path": path}},
-                {"tool": "connect_memory", "args": {"operation": "suggest-relations", "path": path}},
+                {
+                    "tool": "connect_memory",
+                    "args": {"operation": "suggest-relations", "path": path},
+                },
             ],
         },
     )
@@ -286,11 +319,17 @@ def _typed_relation_debt(path: str, meta: dict[str, Any]) -> AuditFinding:
         severity="info",
         path=path,
         detail="Page has generic connections but no registered typed semantic relation.",
-        proposed_fix="Review relation proposals; generic links may remain generic when that is accurate.",
+        proposed_fix=(
+            "Review relation proposals; generic links may remain generic when that "
+            "is accurate."
+        ),
         meta={
             **meta,
             "next_actions": [
-                {"tool": "connect_memory", "args": {"operation": "suggest-relations", "path": path}},
+                {
+                    "tool": "connect_memory",
+                    "args": {"operation": "suggest-relations", "path": path},
+                },
                 {"tool": "read_memory", "args": {"identifier": path}},
             ],
         },
@@ -306,12 +345,18 @@ def _provenance_debt(path: str, meta: dict[str, Any]) -> AuditFinding:
             "Page has assertion-bearing semantic blocks but no explicit page-level provenance; "
             "page-level provenance would not by itself establish support for every block."
         ),
-        proposed_fix="Review the assertions and add only provenance that the stored sources or evidence support.",
+        proposed_fix=(
+            "Review the assertions and add only provenance that the stored sources "
+            "or evidence support."
+        ),
         meta={
             **meta,
             "next_actions": [
                 {"tool": "read_memory", "args": {"identifier": path}},
-                {"tool": "connect_memory", "args": {"operation": "suggest-relations", "path": path}},
+                {
+                    "tool": "connect_memory",
+                    "args": {"operation": "suggest-relations", "path": path},
+                },
             ],
         },
     )
@@ -326,7 +371,10 @@ def _unregistered_relation(
         severity="warn",
         path=path,
         detail=f"Page uses relation vocabulary not governed by the loaded registry: {labels}.",
-        proposed_fix="Review corpus-wide usage before registering, aliasing, replacing, or removing the vocabulary.",
+        proposed_fix=(
+            "Review corpus-wide usage before registering, aliasing, replacing, or "
+            "removing the vocabulary."
+        ),
         meta={
             **meta,
             "unregistered": observations,

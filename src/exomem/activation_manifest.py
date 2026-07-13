@@ -1,0 +1,437 @@
+"""Portable, immutable boundary for semantic-contract activation.
+
+The manifest records which compiled pages existed when a vault first acquired
+the semantic contract.  It is governed vault state: create-once, portable, and
+independent from rebuildable indexes and review decisions.
+"""
+
+from __future__ import annotations
+
+import errno
+import hashlib
+import os
+import re
+import tempfile
+import threading
+import time
+from collections import Counter
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
+from pathlib import Path, PurePosixPath
+from typing import Any, BinaryIO
+
+import yaml
+
+from . import access, activation
+from . import find as find_module
+from .kbdir import kb_dirname
+from .memory_refs import ID_FIELD, normalize_id
+from .vault import PlannedWrite, batch_atomic_write, content_hash, parse_frontmatter
+
+if os.name == "nt":  # pragma: no cover - imported only on Windows
+    import msvcrt
+else:  # pragma: no cover - platform branch, behavior exercised on POSIX
+    import fcntl
+
+
+SCHEMA_VERSION = 1
+CONTRACT_VERSION = 1
+_MANIFEST_NAME = "semantic-activation.yaml"
+_PAGE_KEYS = frozenset(
+    {"identity_kind", "identity", "path_at_activation", "source_hash"}
+)
+_ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
+_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ActivationManifestError(ValueError):
+    code: str
+    reason: str
+
+    def as_dict(self) -> dict[str, str]:
+        return {"code": self.code, "reason": self.reason}
+
+
+@dataclass(frozen=True)
+class ActivationPage:
+    identity_kind: str
+    identity: str
+    path_at_activation: str
+    source_hash: str
+
+
+@dataclass(frozen=True)
+class ActivationManifest:
+    schema_version: int
+    contract_version: int
+    pages: tuple[ActivationPage, ...]
+
+
+@dataclass(frozen=True)
+class _Candidate:
+    rel_path: str
+    source_hash: str
+    normalized_id: str | None
+
+
+def manifest_path(vault_root: Path) -> Path:
+    """Return the governed activation-manifest path for ``vault_root``."""
+    return Path(vault_root) / kb_dirname() / "_Schema" / _MANIFEST_NAME
+
+
+def load_manifest(vault_root: Path) -> ActivationManifest | None:
+    """Load and validate an existing manifest without changing its bytes."""
+    path = manifest_path(vault_root)
+    try:
+        raw = path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeDecodeError) as error:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNREADABLE",
+            f"could not read {path}: {error}",
+        ) from error
+    try:
+        value = yaml.safe_load(raw)
+    except yaml.YAMLError as error:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_INVALID_YAML",
+            f"{path} is not valid YAML: {error}",
+        ) from error
+    return _validate_manifest(value, path=path)
+
+
+def ensure_manifest(vault_root: Path) -> ActivationManifest:
+    """Return the existing manifest or atomically establish the boundary once."""
+    vault_root = Path(vault_root)
+    existing = load_manifest(vault_root)
+    if existing is not None:
+        return existing
+
+    candidate = _snapshot(vault_root)
+    path = manifest_path(vault_root)
+    with _creation_lock(path):
+        winner = load_manifest(vault_root)
+        if winner is not None:
+            return winner
+        path.parent.mkdir(parents=True, exist_ok=True)
+        batch_atomic_write(
+            [PlannedWrite(path=path, content=_serialize(candidate))],
+            vault_root=vault_root,
+        )
+        written = load_manifest(vault_root)
+        if written is None:  # pragma: no cover - atomic writer guarantees destination
+            raise ActivationManifestError(
+                "ACTIVATION_MANIFEST_WRITE_FAILED",
+                f"activation manifest was not present after writing {path}",
+            )
+        return written
+
+
+def is_grandfathered(
+    vault_root: Path,
+    path: Path | str,
+    *,
+    source_hash: str | None = None,
+    exomem_id: object | None = None,
+    manifest: ActivationManifest | None = None,
+) -> bool:
+    """Return whether the current page belongs to the activation baseline."""
+    vault_root = Path(vault_root)
+    loaded = manifest if manifest is not None else load_manifest(vault_root)
+    if loaded is None:
+        return False
+    rel_path, absolute = _normalize_page_path(vault_root, path)
+    if rel_path is None:
+        return False
+    normalized_id = normalize_id(exomem_id) if exomem_id is not None else None
+    current_hash = source_hash
+    if source_hash is None or exomem_id is None:
+        try:
+            raw = absolute.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        if current_hash is None:
+            current_hash = content_hash(raw)
+        if exomem_id is None:
+            frontmatter, _, _ = parse_frontmatter(raw)
+            normalized_id = normalize_id(frontmatter.get(ID_FIELD))
+
+    if normalized_id is not None and any(
+        page.identity_kind == "exomem_id" and page.identity == normalized_id
+        for page in loaded.pages
+    ):
+        try:
+            matching_paths = [
+                candidate.rel_path
+                for candidate in _eligible_candidates(vault_root)
+                if candidate.normalized_id == normalized_id
+            ]
+        except ActivationManifestError:
+            return False
+        return matching_paths == [rel_path]
+    return bool(
+        current_hash
+        and any(
+            page.identity_kind == "path_source_hash"
+            and page.identity == rel_path
+            and page.path_at_activation == rel_path
+            and page.source_hash == current_hash
+            for page in loaded.pages
+        )
+    )
+
+
+def _snapshot(vault_root: Path) -> ActivationManifest:
+    candidates = _eligible_candidates(vault_root)
+    counts = Counter(
+        candidate.normalized_id
+        for candidate in candidates
+        if candidate.normalized_id is not None
+    )
+    pages = []
+    for candidate in candidates:
+        stable = (
+            candidate.normalized_id is not None
+            and counts[candidate.normalized_id] == 1
+        )
+        pages.append(
+            ActivationPage(
+                identity_kind="exomem_id" if stable else "path_source_hash",
+                identity=(
+                    candidate.normalized_id if stable else candidate.rel_path
+                ),
+                path_at_activation=candidate.rel_path,
+                source_hash=candidate.source_hash,
+            )
+        )
+    return ActivationManifest(
+        schema_version=SCHEMA_VERSION,
+        contract_version=CONTRACT_VERSION,
+        pages=tuple(pages),
+    )
+
+
+def _eligible_candidates(vault_root: Path) -> list[_Candidate]:
+    kb = vault_root / kb_dirname()
+    candidates: list[_Candidate] = []
+    if kb.is_dir():
+        paths = sorted(
+            find_module._walk_md(kb),
+            key=lambda item: item.relative_to(vault_root).as_posix(),
+        )
+        for path in paths:
+            rel_path = path.relative_to(vault_root).as_posix()
+            if access.access_tier(vault_root, rel_path) != access.TIER_READ_WRITE:
+                continue
+            try:
+                raw = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                raise ActivationManifestError(
+                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+                    f"could not read activation candidate {path}: {error}",
+                ) from error
+            frontmatter, body, _ = parse_frontmatter(raw)
+            page = find_module.ParsedPage(
+                path=path,
+                rel_path=rel_path,
+                frontmatter=frontmatter,
+                body=body,
+                title="",
+                mtime=0.0,
+            )
+            if not activation.is_eligible_compiled_page(vault_root, page):
+                continue
+            candidates.append(
+                _Candidate(
+                    rel_path=rel_path,
+                    source_hash=content_hash(raw),
+                    normalized_id=normalize_id(frontmatter.get(ID_FIELD)),
+                )
+            )
+    return candidates
+
+
+def _serialize(manifest: ActivationManifest) -> str:
+    value = {
+        "schema_version": manifest.schema_version,
+        "contract_version": manifest.contract_version,
+        "pages": [
+            {
+                "identity_kind": page.identity_kind,
+                "identity": page.identity,
+                "path_at_activation": page.path_at_activation,
+                "source_hash": page.source_hash,
+            }
+            for page in manifest.pages
+        ],
+    }
+    return yaml.safe_dump(
+        value,
+        sort_keys=False,
+        allow_unicode=True,
+        default_flow_style=False,
+    )
+
+
+def _validate_manifest(value: Any, *, path: Path) -> ActivationManifest:
+    if not isinstance(value, dict):
+        _invalid(path, "root must be a mapping")
+    if set(value) != _ROOT_KEYS:
+        _invalid(path, "root must contain exactly schema_version, contract_version, and pages")
+    schema_version = value["schema_version"]
+    contract_version = value["contract_version"]
+    if isinstance(schema_version, bool) or not isinstance(schema_version, int):
+        _invalid(path, "schema_version must be an integer")
+    if schema_version != SCHEMA_VERSION:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNSUPPORTED_SCHEMA",
+            f"unsupported activation manifest schema_version: {schema_version!r}",
+        )
+    if isinstance(contract_version, bool) or not isinstance(contract_version, int):
+        _invalid(path, "contract_version must be an integer")
+    if contract_version != CONTRACT_VERSION:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_UNSUPPORTED_CONTRACT",
+            f"unsupported semantic contract_version: {contract_version!r}",
+        )
+    raw_pages = value["pages"]
+    if not isinstance(raw_pages, list):
+        _invalid(path, "pages must be a list")
+
+    pages: list[ActivationPage] = []
+    seen_paths: set[str] = set()
+    seen_identities: set[tuple[str, str]] = set()
+    previous_path: str | None = None
+    for index, raw_page in enumerate(raw_pages):
+        if not isinstance(raw_page, dict) or set(raw_page) != _PAGE_KEYS:
+            _invalid(path, f"pages[{index}] must contain exactly the four page fields")
+        if not all(isinstance(raw_page[key], str) for key in _PAGE_KEYS):
+            _invalid(path, f"pages[{index}] fields must be strings")
+        kind = raw_page["identity_kind"]
+        identity = raw_page["identity"]
+        rel_path = raw_page["path_at_activation"]
+        source_hash = raw_page["source_hash"]
+        _validate_rel_path(rel_path, path=path, index=index)
+        if kind == "exomem_id":
+            normalized = normalize_id(identity)
+            if normalized is None or normalized != identity:
+                _invalid(path, f"pages[{index}].identity must be a normalized UUID")
+        elif kind == "path_source_hash":
+            if identity != rel_path:
+                _invalid(path, f"pages[{index}] path identity must equal path_at_activation")
+        else:
+            _invalid(path, f"pages[{index}].identity_kind is unsupported")
+        if not _HASH_RE.fullmatch(source_hash):
+            _invalid(path, f"pages[{index}].source_hash must be a lowercase full SHA-256")
+        if rel_path in seen_paths:
+            _invalid(path, f"duplicate activation path: {rel_path}")
+        identity_key = (kind, identity)
+        if identity_key in seen_identities:
+            _invalid(path, f"duplicate activation identity: {kind}:{identity}")
+        if previous_path is not None and rel_path < previous_path:
+            _invalid(path, "pages must be sorted by path_at_activation")
+        seen_paths.add(rel_path)
+        seen_identities.add(identity_key)
+        previous_path = rel_path
+        pages.append(ActivationPage(kind, identity, rel_path, source_hash))
+    return ActivationManifest(schema_version, contract_version, tuple(pages))
+
+
+def _validate_rel_path(value: str, *, path: Path, index: int) -> None:
+    posix = PurePosixPath(value)
+    if (
+        not value
+        or "\\" in value
+        or posix.as_posix() != value
+        or posix.is_absolute()
+        or any(part in {"", ".", ".."} for part in posix.parts)
+        or not posix.parts
+        or posix.parts[0] != kb_dirname()
+        or posix.suffix.lower() != ".md"
+    ):
+        _invalid(path, f"pages[{index}].path_at_activation must be a safe KB Markdown path")
+
+
+def _invalid(path: Path, reason: str) -> None:
+    raise ActivationManifestError(
+        "ACTIVATION_MANIFEST_INVALID",
+        f"invalid activation manifest {path}: {reason}",
+    )
+
+
+def _normalize_page_path(vault_root: Path, path: Path | str) -> tuple[str | None, Path]:
+    candidate = Path(path)
+    absolute = candidate if candidate.is_absolute() else vault_root / candidate
+    try:
+        rel_path = absolute.resolve().relative_to(vault_root.resolve()).as_posix()
+    except (OSError, ValueError):
+        return None, absolute
+    return rel_path, absolute
+
+
+def _thread_lock(path: Path) -> threading.Lock:
+    key = str(path.resolve())
+    with _THREAD_LOCKS_GUARD:
+        return _THREAD_LOCKS.setdefault(key, threading.Lock())
+
+
+class _InterprocessFileLock:
+    """Portable advisory lock, released automatically when the process exits."""
+
+    def __init__(self, path: Path, *, timeout: float = 30.0):
+        self.path = path
+        self.timeout = timeout
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> _InterprocessFileLock:
+        deadline = time.monotonic() + self.timeout
+        while True:
+            handle = self.path.open("a+b")
+            try:
+                if os.name == "nt":  # pragma: no cover - Windows deployment
+                    handle.seek(0)
+                    if not handle.read(1):
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                handle.close()
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise
+                if time.monotonic() >= deadline:
+                    raise ActivationManifestError(
+                        "ACTIVATION_MANIFEST_LOCK_TIMEOUT",
+                        "timed out acquiring the activation-manifest creation lock",
+                    ) from None
+                time.sleep(0.01)
+                continue
+            self._handle = handle
+            return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._handle is None:
+            return
+        if os.name == "nt":  # pragma: no cover - Windows deployment
+            self._handle.seek(0)
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+        self._handle = None
+
+
+@contextmanager
+def _creation_lock(path: Path) -> Iterator[None]:
+    digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
+    lock_dir = Path(tempfile.gettempdir()) / "exomem-activation-locks"
+    lock_dir.mkdir(parents=True, exist_ok=True)
+    with _thread_lock(path), _InterprocessFileLock(lock_dir / f"{digest}.lock"):
+        yield

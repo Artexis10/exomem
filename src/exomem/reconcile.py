@@ -91,8 +91,12 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
 
     See the module docstring. Read-only when `dry_run=True`.
     """
-    kb = kb_root(vault_root)
     report = ReconcileReport(dry_run=dry_run)
+    if not dry_run:
+        from .activation_manifest import ensure_manifest
+
+        ensure_manifest(vault_root)
+    kb = kb_root(vault_root)
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----
     top_index_path = kb / "index.md"
