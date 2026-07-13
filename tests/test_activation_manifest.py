@@ -14,6 +14,7 @@ from exomem import (
     audit,
     memory_refs,
     relation_registry,
+    semantic_contract,
     semantic_language_registry,
     vault,
 )
@@ -436,6 +437,72 @@ def test_pure_activation_census_is_sorted_indexed_and_duplicate_ids_fail_closed(
         "Knowledge Base/z.md",
     )
     assert census.unique_path_for_id(_ID_A) is None
+
+
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        activation_manifest.ActivationCandidate(
+            "../escape.md", "a" * 64, None
+        ),
+        activation_manifest.ActivationCandidate(
+            "Knowledge Base/Notes/Insights/page.md", "not-a-hash", None
+        ),
+        activation_manifest.ActivationCandidate(
+            "Knowledge Base/Notes/Insights/page.md", "a" * 64, "not-a-uuid"
+        ),
+    ],
+)
+def test_activation_census_rejects_invalid_candidates_before_any_write(
+    tmp_path: Path,
+    candidate: activation_manifest.ActivationCandidate,
+) -> None:
+    with pytest.raises(activation_manifest.ActivationManifestError) as exc:
+        activation_manifest.ActivationCensus.from_candidates((candidate,))
+
+    assert exc.value.code == "ACTIVATION_CENSUS_INVALID"
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_creation_lock_does_not_mask_activation_manifest_error(tmp_path: Path) -> None:
+    path = activation_manifest.manifest_path(tmp_path)
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as exc:
+        with activation_manifest._creation_lock(path):
+            raise activation_manifest.ActivationManifestError("TEST_ERROR", "expected")
+
+    assert exc.value.code == "TEST_ERROR"
+
+
+def test_unreadable_governed_markdown_fails_census_and_semantic_context(
+    tmp_path: Path,
+) -> None:
+    unreadable = tmp_path / "Knowledge Base/Notes/Insights/unreadable.md"
+    unreadable.parent.mkdir(parents=True)
+    unreadable.write_bytes(b"\xff\xfe")
+    candidate_source = (
+        "---\n"
+        "title: Candidate\n"
+        "type: insight\n"
+        "status: active\n"
+        "---\n\n"
+        "## Relations\n"
+    )
+    candidate = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/candidate.md",
+        candidate_source,
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+    )
+
+    with pytest.raises(activation_manifest.ActivationManifestError) as census_exc:
+        activation_manifest.build_census(tmp_path)
+    with pytest.raises(activation_manifest.ActivationManifestError) as context_exc:
+        semantic_contract.build_corpus_context(tmp_path, candidate=candidate)
+
+    assert census_exc.value.code == "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
+    assert context_exc.value.code == census_exc.value.code
 
 
 def test_supplied_census_avoids_rescans_and_page_rereads(

@@ -78,9 +78,11 @@ class SemanticUnitDiagnostic:
     raw: str
     remediation: str
     severity: str
+    registry_namespace: str | None = None
+    registry_key: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "code": self.code,
             "message": self.message,
             "path": self.path,
@@ -90,6 +92,12 @@ class SemanticUnitDiagnostic:
             "remediation": self.remediation,
             "severity": self.severity,
         }
+        if self.registry_namespace is not None and self.registry_key is not None:
+            out["registry"] = {
+                "namespace": self.registry_namespace,
+                "key": self.registry_key,
+            }
+        return out
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,9 +425,16 @@ def parse_semantic_units(
     units: list[SemanticUnit] = []
     errors: list[SemanticUnitDiagnostic] = []
     warnings: list[SemanticUnitDiagnostic] = []
+    kind_registry_findings: list[tuple[str, str, str]] = []
     if validate and language_registry is not None:
         for finding in language_registry.findings:
-            diagnostic = _registry_diagnostic(finding, path=source_path)
+            namespace, key = _registry_identity(finding)
+            diagnostic = _registry_diagnostic(
+                finding,
+                path=source_path,
+                namespace=namespace,
+                key=key,
+            )
             (warnings if diagnostic.severity == "warning" else errors).append(diagnostic)
 
     _parse_compact_units(
@@ -440,6 +455,15 @@ def parse_semantic_units(
                 label,
                 project=project,
                 page_type=page_type,
+            )
+            registry_key = (
+                resolution.definition.key
+                if resolution.definition is not None
+                else resolution.resolved or resolution.key
+            )
+            kind_registry_findings.extend(
+                (finding["code"], "kinds", registry_key)
+                for finding in resolution.findings
             )
             return semantic_blocks.SemanticBlockKindResolution(
                 kind=resolution.resolved,
@@ -517,17 +541,18 @@ def parse_semantic_units(
                 severity="error",
             )
         )
+        rich_warnings = _normalize_rich_diagnostics(
+            [
+                warning
+                for warning in rich_document.warnings
+                if warning.code != "duplicate_id"
+            ],
+            path=source_path,
+            line_by_number=line_by_number,
+            severity="warning",
+        )
         warnings.extend(
-            _normalize_rich_diagnostics(
-                [
-                    warning
-                    for warning in rich_document.warnings
-                    if warning.code != "duplicate_id"
-                ],
-                path=source_path,
-                line_by_number=line_by_number,
-                severity="warning",
-            )
+            _attach_registry_identities(rich_warnings, kind_registry_findings)
         )
 
     if language_registry is not None:
@@ -552,6 +577,12 @@ def parse_semantic_units(
                         finding,
                         path=source_path,
                         unit=unit,
+                        namespace="categories",
+                        key=(
+                            resolution.definition.key
+                            if resolution.definition is not None
+                            else resolution.resolved or resolution.key
+                        ),
                     )
                     (warnings if diagnostic.severity == "warning" else errors).append(
                         diagnostic
@@ -588,6 +619,8 @@ def _registry_diagnostic(
     *,
     path: str,
     unit: SemanticUnit | None = None,
+    namespace: str | None = None,
+    key: str | None = None,
 ) -> SemanticUnitDiagnostic:
     severity = finding.get("severity", "error")
     detail = finding.get("detail", "semantic-language registry validation failed")
@@ -603,7 +636,46 @@ def _registry_diagnostic(
             "using this category or kind."
         ),
         severity=severity,
+        registry_namespace=namespace,
+        registry_key=key,
     )
+
+
+def _registry_identity(finding: Mapping[str, str]) -> tuple[str, str]:
+    path = str(finding.get("path", "registry"))
+    parts = path.split(".")
+    if len(parts) >= 2 and parts[0] in {"categories", "kinds"}:
+        return parts[0], parts[1]
+    return "semantic_language", path
+
+
+def _attach_registry_identities(
+    diagnostics: list[SemanticUnitDiagnostic],
+    identities: list[tuple[str, str, str]],
+) -> list[SemanticUnitDiagnostic]:
+    remaining = list(identities)
+    attached: list[SemanticUnitDiagnostic] = []
+    for diagnostic in diagnostics:
+        match_index = next(
+            (
+                index
+                for index, (code, _namespace, _key) in enumerate(remaining)
+                if code == diagnostic.code
+            ),
+            None,
+        )
+        if match_index is None:
+            attached.append(diagnostic)
+            continue
+        _code, namespace, key = remaining.pop(match_index)
+        attached.append(
+            replace(
+                diagnostic,
+                registry_namespace=namespace,
+                registry_key=key,
+            )
+        )
+    return attached
 
 
 def _effective_parent_ref(parent_ref: str | None, path: str) -> str | None:

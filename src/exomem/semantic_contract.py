@@ -13,6 +13,7 @@ from types import MappingProxyType
 from typing import Any
 
 from . import (
+    access,
     activation,
     activation_manifest,
     memory_schema,
@@ -650,7 +651,15 @@ def build_corpus_context(
             continue
         try:
             source = disk_path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except (OSError, UnicodeDecodeError) as error:
+            if (
+                rel_path.startswith(f"{vault.kb_dirname()}/")
+                and access.access_tier(root, rel_path) == access.TIER_READ_WRITE
+            ):
+                raise activation_manifest.ActivationManifestError(
+                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE",
+                    f"could not read governed semantic page {disk_path}: {error}",
+                ) from error
             continue
         states[rel_path] = build_page_state(
             root,
@@ -830,7 +839,7 @@ def _registry_resolution(
         for registry_origin in origins
         for project in project_values
     )
-    return next(
+    selected = next(
         (
             item
             for item in resolutions
@@ -838,6 +847,24 @@ def _registry_resolution(
         ),
         resolutions[0],
     )
+    if (
+        selected.definition is not None
+        and selected.definition.projects
+        and not projects
+    ):
+        return replace(
+            selected,
+            status="scope_violation",
+            findings=(
+                *selected.findings,
+                {
+                    "code": "scope_violation",
+                    "path": f"relations.{selected.canonical}.project",
+                    "detail": "an attached project is required by the relation scope",
+                },
+            ),
+        )
+    return selected
 
 
 def _fact_identity(payload: Mapping[str, Any]) -> str:
@@ -862,7 +889,8 @@ def _derive_relation_facts(
                     ),
                     "raw_target": _raw_note_target(relation.raw, relation.target),
                     "line": relation.line,
-                    "anchor": f"line-{relation.line}",
+                    "anchor": None,
+                    "element_identity": None,
                     "source_kind": "file",
                     "origin": "markdown_relation" if relation.canonical else "semantic_relation",
                     "reverse": False,
@@ -878,7 +906,8 @@ def _derive_relation_facts(
                         ),
                         "raw_target": relation.target,
                         "line": relation.line,
-                        "anchor": unit.anchor or f"line-{relation.line}",
+                        "anchor": unit.anchor,
+                        "element_identity": unit.unit_ref or unit.fingerprint,
                         "source_kind": unit.kind,
                         "origin": "semantic_relation",
                         "reverse": False,
@@ -902,13 +931,14 @@ def _derive_relation_facts(
                         "raw_target": raw_target,
                         "line": None,
                         "anchor": field_name,
+                        "element_identity": field_name,
                         "source_kind": "file",
                         "origin": "frontmatter",
                         "reverse": reverse,
                     }
                 )
 
-    occurrences: Counter[tuple[str, str, str, str, str]] = Counter()
+    occurrences: Counter[tuple[str, str, str, str, str, str]] = Counter()
     facts: list[RelationFact] = []
     for raw in raw_facts:
         state = raw["authored"]
@@ -935,21 +965,24 @@ def _derive_relation_facts(
             logical_source = state.path
             logical_target = resolved_base or _target_parts(raw["raw_target"])[0]
         occurrence_key = (
-            state.path,
+            f"{state.identity_kind}:{state.identity}",
             raw["origin"],
             relation_registry.normalize_relation(raw["raw_relation"]),
             str(raw["raw_target"]),
             str(raw["anchor"] or ""),
+            str(raw["element_identity"] or ""),
         )
         occurrences[occurrence_key] += 1
         identity_payload = {
-            "authored_path": state.path,
+            "authored_identity_kind": state.identity_kind,
+            "authored_identity": state.identity,
             "origin": raw["origin"],
-            "raw_relation": raw["raw_relation"],
+            "relation": relation_registry.normalize_relation(raw["raw_relation"]),
             "raw_target": raw["raw_target"],
             "authored_anchor": raw["anchor"],
-            "logical_source": logical_source,
-            "logical_target": logical_target,
+            "authored_element_identity": raw["element_identity"],
+            "source_kind": raw["source_kind"],
+            "reverse": raw["reverse"],
             "occurrence": occurrences[occurrence_key],
         }
         facts.append(
@@ -1005,9 +1038,12 @@ def qualify_relation(
         else None
     )
     if fact.target_status == "resolved":
-        if resolved_base not in corpus.eligible_governed_paths:
+        if (
+            fact.logical_source_path not in corpus.eligible_governed_paths
+            or fact.logical_target_path not in corpus.eligible_governed_paths
+        ):
             reasons.append("ineligible_target")
-        if resolved_base == fact.authored_path:
+        if fact.logical_source_path == fact.logical_target_path:
             reasons.append("self_target")
     definition = registry.definition(fact.canonical_relation or "")
     if definition is None:
@@ -1058,6 +1094,7 @@ def _relation_disposition(
     operation: str,
     before: SemanticPageState | None,
     before_corpus: SemanticCorpusContext,
+    mode: str,
 ) -> RelationDisposition:
     directional: list[tuple[str, RelationFact]] = []
     directional.extend(("outbound", fact) for fact in corpus.outbound.get(page.path, ()))
@@ -1097,6 +1134,7 @@ def _relation_disposition(
         return RelationDisposition("bootstrap", True, True, rejected_facts=tuple(rejected))
     automatic_bootstrap = (
         review is None
+        and mode == "precommit"
         and operation in _CREATE_LIKE
         and before is None
         and not before_corpus.eligible_governed_paths
@@ -1131,16 +1169,17 @@ def _diagnostic_findings(page: SemanticPageState) -> list[ContractFinding]:
     occurrences: Counter[tuple[str, str]] = Counter()
     diagnostics = tuple(page.document.errors) + tuple(page.document.warnings)
     for diagnostic in diagnostics:
+        if (
+            diagnostic.code == "unsupported_relation"
+            and diagnostic.registry_namespace is None
+        ):
+            continue
         raw_key = " ".join(diagnostic.raw.casefold().split())
         occurrences[(diagnostic.code, raw_key)] += 1
-        registry_diagnostic = diagnostic.code in {
-            "unsupported_relation",
-            "scope_violation",
-            "deprecated_relation",
-        }
-        relation_label = relation_registry.normalize_relation(diagnostic.raw.split()[1]) if (
-            registry_diagnostic and len(diagnostic.raw.split()) > 1
-        ) else "*"
+        registry_diagnostic = (
+            diagnostic.registry_namespace is not None
+            and diagnostic.registry_key is not None
+        )
         findings.append(
             ContractFinding(
                 code=diagnostic.code,
@@ -1155,21 +1194,21 @@ def _diagnostic_findings(page: SemanticPageState) -> list[ContractFinding]:
                     occurrences[(diagnostic.code, raw_key)],
                 ),
                 resolved_rule=(
-                    ("relations", relation_label, "registry")
+                    (
+                        diagnostic.registry_namespace,
+                        diagnostic.registry_key,
+                        "registry",
+                    )
                     if registry_diagnostic
                     else ("semantic_units", "*", "syntax")
                 ),
             )
         )
     for diagnostic in page.document.note_relation_errors:
+        if diagnostic.code == "unsupported_relation":
+            continue
         raw_key = " ".join(diagnostic.raw.casefold().split())
         occurrences[(diagnostic.code, raw_key)] += 1
-        registry_diagnostic = diagnostic.code == "unsupported_relation"
-        raw_relation = (
-            relation_registry.normalize_relation(diagnostic.raw.split()[1])
-            if registry_diagnostic and len(diagnostic.raw.split()) > 1
-            else "*"
-        )
         findings.append(
             ContractFinding(
                 code=diagnostic.code,
@@ -1183,11 +1222,7 @@ def _diagnostic_findings(page: SemanticPageState) -> list[ContractFinding]:
                     diagnostic.raw,
                     occurrences[(diagnostic.code, raw_key)],
                 ),
-                resolved_rule=(
-                    ("relations", raw_relation, "registry")
-                    if registry_diagnostic
-                    else ("relations", "*", "syntax")
-                ),
+                resolved_rule=("relations", "*", "syntax"),
             )
         )
     return findings
@@ -1484,6 +1519,7 @@ def _raw_findings(
     operation: str,
     before: SemanticPageState | None,
     before_corpus: SemanticCorpusContext,
+    mode: str,
 ) -> tuple[list[ContractFinding], RelationDisposition]:
     disposition = _relation_disposition(
         page,
@@ -1492,6 +1528,7 @@ def _raw_findings(
         operation=operation,
         before=before,
         before_corpus=before_corpus,
+        mode=mode,
     )
     findings = _diagnostic_findings(page)
     findings.extend(_conflict_findings(page, contracts))
@@ -1501,6 +1538,19 @@ def _raw_findings(
     if disposition_finding is not None:
         findings.append(disposition_finding)
     return findings, disposition
+
+
+def _corpus_mismatch_finding(page: SemanticPageState) -> ContractFinding:
+    return ContractFinding(
+        code="SEMANTIC_CORPUS_STATE_MISMATCH",
+        severity="error",
+        path=page.path,
+        span=None,
+        detail="the supplied after-corpus snapshot does not contain the evaluated page state",
+        remediation="Rebuild the immutable corpus context with the exact pending candidate.",
+        governed_element_identity=("corpus", page.identity_kind, page.identity),
+        resolved_rule=("semantic_contract", "corpus", "context"),
+    )
 
 
 def _migration_warning(finding: ContractFinding) -> ContractFinding:
@@ -1528,15 +1578,22 @@ def evaluate(
     """Evaluate supplied immutable state without crossing any adapter boundary."""
     if mode not in {"precommit", "posthoc"}:
         raise ValueError("mode must be precommit or posthoc")
+    after_context_matches = after_corpus.pages.get(after.path) == after
+    effective_after_corpus = (
+        after_corpus if after_context_matches else after_corpus.with_candidate(after)
+    )
     after_findings, disposition = _raw_findings(
         after,
         after_contracts,
-        after_corpus,
+        effective_after_corpus,
         review=after_review,
         operation=operation,
         before=before,
         before_corpus=before_corpus,
+        mode=mode,
     )
+    if not after_context_matches:
+        after_findings.append(_corpus_mismatch_finding(after))
     before_findings: list[ContractFinding] = []
     before_disposition: RelationDisposition | None = None
     if before is not None:
@@ -1548,6 +1605,7 @@ def evaluate(
             operation=operation,
             before=before,
             before_corpus=before_corpus,
+            mode=mode,
         )
 
     raw_before_error_keys = {

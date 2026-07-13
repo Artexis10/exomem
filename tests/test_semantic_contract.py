@@ -233,6 +233,42 @@ def test_candidate_insertion_reresolves_forward_and_ambiguous_facts_without_io(
     assert first_target.path not in ambiguous.inbound
 
 
+def test_evaluate_fails_closed_when_after_corpus_does_not_match_after_state(
+    tmp_path: Path,
+) -> None:
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern"),
+    )
+    before = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n- supports [[Target]]\n"),
+    )
+    after = _state(
+        tmp_path,
+        before.path,
+        _source(body="## Relations\n"),
+    )
+    stale_corpus = _corpus(tmp_path, before, target)
+
+    result = _evaluate(
+        before=before,
+        after=after,
+        before_corpus=stale_corpus,
+        after_corpus=stale_corpus,
+    )
+
+    assert result.relation_disposition.kind == "missing"
+    assert result.should_block
+    assert any(
+        finding.code == "SEMANTIC_CORPUS_STATE_MISMATCH"
+        for finding in result.errors
+    )
+    assert not result.relation_disposition.qualifying_facts
+
+
 def test_relation_qualification_outbound_inbound_entity_and_self_rejection(
     tmp_path: Path,
 ) -> None:
@@ -269,6 +305,42 @@ def test_relation_qualification_outbound_inbound_entity_and_self_rejection(
         corpus=self_corpus,
     )
     assert self_result.reasons == ("self_target",)
+
+
+def test_inbound_relation_requires_eligible_opposite_logical_endpoint(
+    tmp_path: Path,
+) -> None:
+    source = _state(
+        tmp_path,
+        "Knowledge Base/Sources/raw.md",
+        _source(
+            title="Raw",
+            page_type="source",
+            body="## Relations\n- supports [[Target]]\n",
+        ),
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/target.md",
+        _source(title="Target"),
+    )
+    corpus = _corpus(tmp_path, source, target)
+    fact = corpus.inbound[target.path][0]
+
+    qualified = semantic_contract.qualify_relation(
+        fact, registry=relation_registry.core_registry(), corpus=corpus
+    )
+    result = _evaluate(
+        before=target,
+        after=target,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    assert not source.eligible_governed
+    assert not qualified.qualifies
+    assert "ineligible_target" in qualified.reasons
+    assert result.relation_disposition.kind == "missing"
 
 
 @pytest.mark.parametrize(
@@ -344,6 +416,48 @@ def test_attached_projects_use_any_valid_scope_and_superseded_by_keeps_authored_
     assert lifecycle.authored_path == authored.path
     assert lifecycle.logical_source_path == older.path
     assert lifecycle.logical_target_path == authored.path
+
+
+def test_project_scoped_relation_requires_an_attached_authored_project(
+    tmp_path: Path,
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "extensions": {
+                "science.replicates": {
+                    "parent": "supports",
+                    "description": "Replicates",
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+        }
+    )
+    authored = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/current.md",
+        _source(
+            project=None,
+            body="## Relations\n- science.replicates [[Target]]\n",
+        ),
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern", project="alpha"),
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path, (authored, target), registry=registry
+    )
+    fact = corpus.outbound[authored.path][0]
+
+    qualified = semantic_contract.qualify_relation(
+        fact, registry=registry, corpus=corpus
+    )
+
+    assert authored.projects == ()
+    assert not qualified.qualifies
+    assert "scope_violation" in qualified.reasons
 
 
 def test_relation_scope_uses_graph_file_target_kind_and_preserves_raw_alias(
@@ -535,6 +649,89 @@ def test_stable_malformed_key_ignores_unrelated_line_shift(tmp_path: Path) -> No
     assert first_key == shifted_key
 
 
+def test_relation_fact_and_debt_identity_survive_line_shift_and_target_resolution(
+    tmp_path: Path,
+) -> None:
+    before = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n- custom.rel [[Missing]]\n"),
+    )
+    after = _state(
+        tmp_path,
+        before.path,
+        _source(body="Unrelated.\n\n## Relations\n- custom.rel [[Missing]]\n"),
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/missing.md",
+        _source(title="Missing", page_type="pattern"),
+    )
+    before_corpus = _corpus(tmp_path, before)
+    after_corpus = _corpus(tmp_path, after, target)
+    before_fact = before_corpus.outbound[before.path][0]
+    after_fact = after_corpus.outbound[after.path][0]
+
+    result = _evaluate(
+        before=before,
+        after=after,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        grandfathered=True,
+    )
+
+    assert before_fact.target_status == "unresolved"
+    assert after_fact.target_status == "resolved"
+    assert before_fact.authored_line != after_fact.authored_line
+    assert before_fact.identity == after_fact.identity
+    debt = [
+        finding
+        for finding in result.findings
+        if finding.code == "unregistered_relation"
+    ]
+    assert len(debt) == 1
+    assert debt[0].severity == "warning"
+    assert not result.should_block
+
+
+def test_anonymous_rich_relation_fact_identity_uses_unit_binding_not_line_number(
+    tmp_path: Path,
+) -> None:
+    before = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            body=(
+                "## Finding\n"
+                "- relations: custom.rel: [[Missing]]\n\n"
+                "Finding body.\n"
+            )
+        ),
+    )
+    after = _state(
+        tmp_path,
+        before.path,
+        _source(
+            body=(
+                "Unrelated.\n\n"
+                "## Finding\n"
+                "- relations: custom.rel: [[Missing]]\n\n"
+                "Finding body.\n"
+            )
+        ),
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/missing.md",
+        _source(title="Missing", page_type="pattern"),
+    )
+    before_fact = _corpus(tmp_path, before).outbound[before.path][0]
+    after_fact = _corpus(tmp_path, after, target).outbound[after.path][0]
+
+    assert before_fact.authored_line != after_fact.authored_line
+    assert before_fact.identity == after_fact.identity
+
+
 def test_reviewed_none_bootstrap_and_stale_cleanup_order(tmp_path: Path) -> None:
     page = _state(
         tmp_path,
@@ -638,6 +835,30 @@ def test_edit_cannot_synthesize_bootstrap_and_entity_expires_bound_bootstrap(
     assert stale.should_block
 
 
+def test_posthoc_create_never_synthesizes_bootstrap(tmp_path: Path) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(exomem_id=_ID_A, body="## Relations\n"),
+    )
+    empty = _corpus(tmp_path)
+    singleton = _corpus(tmp_path, page)
+
+    result = _evaluate(
+        before=None,
+        after=page,
+        before_corpus=empty,
+        after_corpus=singleton,
+        operation="create",
+        mode="posthoc",
+    )
+
+    assert result.relation_disposition.kind == "missing"
+    assert not result.relation_disposition.satisfied
+    assert "record_bootstrap_review" not in result.actions
+    assert not result.should_block
+
+
 def test_grandfathering_is_key_subset_not_error_count_and_posthoc_never_blocks(
     tmp_path: Path,
 ) -> None:
@@ -737,6 +958,75 @@ def test_evaluate_is_pure_over_supplied_state(
     )
 
     assert result.operation == "edit"
+
+
+def test_registry_diagnostics_keep_structured_category_and_relation_identities(
+    tmp_path: Path,
+) -> None:
+    language = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {
+                "config": {
+                    "description": "Configuration",
+                    "aliases": ["configuration"],
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+            "kinds": {},
+        }
+    )
+    source = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(
+            project="beta",
+            body=(
+                "- [configuration] Value\n\n"
+                "## Finding\n"
+                "- relations: custom.rel: [[Target]]\n\n"
+                "Finding body.\n"
+            ),
+        ),
+        relation_registry=relation_registry.core_registry(),
+        language_registry=language,
+        review_fingerprint="review-v1",
+    )
+    target = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Patterns/target.md",
+        _source(title="Target", page_type="pattern"),
+    )
+    corpus = _corpus(tmp_path, source, target)
+
+    result = _evaluate(
+        before=source,
+        after=source,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    category_scope = [
+        finding for finding in result.findings if finding.code == "scope_violation"
+    ]
+    assert [finding.resolved_rule for finding in category_scope] == [
+        ("categories", "config", "registry")
+    ]
+    relation_registry_findings = [
+        finding
+        for finding in result.findings
+        if finding.code in {"unsupported_relation", "unregistered_relation"}
+    ]
+    assert len(relation_registry_findings) == 1
+    assert relation_registry_findings[0].resolved_rule == (
+        "relations",
+        "custom.rel",
+        "registry",
+    )
+    assert not any(
+        finding.resolved_rule == ("relations", "relations", "registry")
+        for finding in result.findings
+    )
 
 
 def test_contract_finding_key_is_exact_public_triple() -> None:

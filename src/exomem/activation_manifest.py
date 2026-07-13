@@ -49,7 +49,7 @@ _THREAD_LOCKS: dict[str, threading.Lock] = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 
 
-@dataclass(frozen=True)
+@dataclass
 class ActivationManifestError(ValueError):
     code: str
     reason: str
@@ -89,7 +89,10 @@ class ActivationCensus:
     paths_by_id: Mapping[str, tuple[str, ...]] = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
-        ordered = tuple(sorted(self.candidates, key=lambda item: item.rel_path))
+        raw_candidates = tuple(self.candidates)
+        for index, candidate in enumerate(raw_candidates):
+            _validate_candidate(candidate, index=index)
+        ordered = tuple(sorted(raw_candidates, key=lambda item: item.rel_path))
         by_path: dict[str, ActivationCandidate] = {}
         id_paths: dict[str, list[str]] = {}
         for candidate in ordered:
@@ -122,6 +125,40 @@ class ActivationCensus:
     def unique_path_for_id(self, normalized_id: str) -> str | None:
         paths = self.paths_by_id.get(normalized_id, ())
         return paths[0] if len(paths) == 1 else None
+
+
+def _validate_candidate(candidate: ActivationCandidate, *, index: int) -> None:
+    if not isinstance(candidate, ActivationCandidate):
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            f"activation census candidate {index} has an unsupported type",
+        )
+    try:
+        _validate_rel_path(
+            candidate.rel_path,
+            path=Path("<activation-census>"),
+            index=index,
+        )
+    except ActivationManifestError as error:
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            f"invalid activation census candidate {index}: {error.reason}",
+        ) from error
+    if not isinstance(candidate.source_hash, str) or not _HASH_RE.fullmatch(
+        candidate.source_hash
+    ):
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            f"activation census candidate {index} source_hash must be a lowercase full SHA-256",
+        )
+    if candidate.normalized_id is not None and (
+        not isinstance(candidate.normalized_id, str)
+        or normalize_id(candidate.normalized_id) != candidate.normalized_id
+    ):
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            f"activation census candidate {index} normalized_id must be a normalized UUID",
+        )
 
 
 def manifest_path(vault_root: Path) -> Path:
