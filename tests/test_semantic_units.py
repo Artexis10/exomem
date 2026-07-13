@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
+from exomem import semantic_units
 from exomem.semantic_blocks import parse_semantic_blocks
 from exomem.semantic_units import canonicalize_category, parse_semantic_units
+
+STABLE_PARENT_REF = "exomem://memory/12345678-1234-5678-1234-567812345678"
 
 
 def test_unicode_categories_preserve_raw_and_share_a_canonical_key() -> None:
@@ -349,3 +352,321 @@ def test_validate_false_still_excludes_malformed_units_without_diagnostics() -> 
     assert document.units == ()
     assert document.errors == ()
     assert document.warnings == ()
+
+
+def test_legacy_compact_anchor_binds_to_percent_encoded_path_reference() -> None:
+    document = parse_semantic_units(
+        "- [config] Value ^session-ttl\n",
+        path="Knowledge Base/Notes/Ünicode page.md",
+    )
+
+    assert document.units[0].to_dict().get("unit_ref") == (
+        "exomem://vault/Knowledge%20Base/Notes/%C3%9Cnicode%20page.md#session-ttl"
+    )
+
+
+def test_identity_stable_compact_and_legacy_rich_anchors_are_uri_encoded() -> None:
+    markdown = """\
+- [config] Compact ^compact-1
+
+## Claim
+- id: legacy/ü?# value
+
+Rich.
+"""
+
+    document = parse_semantic_units(
+        markdown,
+        path="Knowledge Base/Notes/current.md",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    assert document.parent_ref == STABLE_PARENT_REF
+    assert [unit.unit_ref for unit in document.units] == [
+        f"{STABLE_PARENT_REF}#compact-1",
+        f"{STABLE_PARENT_REF}#legacy%2F%C3%BC%3F%23%20value",
+    ]
+    assert all(unit.fingerprint and len(unit.fingerprint) == 64 for unit in document.units)
+
+
+def test_identity_stable_parent_path_move_preserves_anchored_and_anonymous_refs() -> None:
+    markdown = "- [config] Anchored ^stable\n- [config] Anonymous\n"
+
+    before = parse_semantic_units(
+        markdown,
+        path="Knowledge Base/Notes/before.md",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    after = parse_semantic_units(
+        markdown,
+        path="Knowledge Base/Archive/after.md",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    assert [unit.unit_ref for unit in before.units] == [
+        unit.unit_ref for unit in after.units
+    ]
+    assert [unit.fingerprint for unit in before.units] == [
+        unit.fingerprint for unit in after.units
+    ]
+
+
+def test_identity_legacy_parent_path_move_changes_refs_but_not_authored_fingerprint() -> None:
+    markdown = "- [config] Anchored ^legacy\n- [config] Anonymous\n"
+
+    before = parse_semantic_units(markdown, path="Knowledge Base/Notes/before.md")
+    after = parse_semantic_units(markdown, path="Knowledge Base/Notes/after.md")
+
+    assert before.parent_ref == "exomem://vault/Knowledge%20Base/Notes/before.md"
+    assert after.parent_ref == "exomem://vault/Knowledge%20Base/Notes/after.md"
+    assert [unit.unit_ref for unit in before.units] != [
+        unit.unit_ref for unit in after.units
+    ]
+    assert [unit.fingerprint for unit in before.units] == [
+        unit.fingerprint for unit in after.units
+    ]
+
+
+@pytest.mark.parametrize(
+    "markdown",
+    [
+        "- [config] First ^same\n- [rule] Second ^same\n",
+        """\
+## Claim
+- id: same
+
+First.
+
+## Decision
+- id: same
+
+Second.
+""",
+        """\
+- [config] Compact ^same
+
+## Claim
+- id: same
+
+Rich.
+""",
+    ],
+    ids=["compact-compact", "rich-rich", "cross-form"],
+)
+def test_identity_duplicate_anchor_sets_are_one_error_and_have_no_winner(
+    markdown: str,
+) -> None:
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    duplicates = [unit for unit in document.units if unit.anchor == "same"]
+    assert len(duplicates) == 2
+    assert [unit.unit_ref for unit in duplicates] == [None, None]
+    assert [error.code for error in document.errors] == ["duplicate_anchor"]
+    assert [warning.code for warning in document.warnings] == []
+    assert document.resolve_unit(f"{STABLE_PARENT_REF}#same").status == "ambiguous"
+
+
+def test_identity_direct_rich_parser_keeps_legacy_duplicate_id_warning() -> None:
+    markdown = """\
+## Claim
+- id: same
+
+First.
+
+## Decision
+- id: same
+
+Second.
+"""
+
+    legacy = parse_semantic_blocks(markdown)
+
+    assert [warning.code for warning in legacy.warnings] == ["duplicate_id"]
+
+
+def test_identity_identical_anonymous_compact_units_are_occurrence_qualified() -> None:
+    markdown = "- [config] Same\n- [config] Same\n"
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [unit.occurrence for unit in document.units] == [1, 2]
+    assert len({unit.fingerprint for unit in document.units}) == 2
+    assert len({unit.unit_ref for unit in document.units}) == 2
+    assert all(
+        unit.unit_ref == f"{STABLE_PARENT_REF}#unit-{unit.fingerprint}"
+        for unit in document.units
+    )
+
+
+def test_identity_inserting_or_removing_identical_unit_invalidates_later_occurrence() -> None:
+    before = parse_semantic_units(
+        "- [config] Same\n- [config] Same\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    after = parse_semantic_units(
+        "- [config] Same\n- [config] Same\n- [config] Same\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+
+    assert before.units[1].occurrence == 2
+    assert after.units[2].occurrence == 3
+    assert before.units[1].fingerprint != after.units[2].fingerprint
+    assert before.units[1].unit_ref != after.units[2].unit_ref
+
+
+def test_identity_identical_anonymous_rich_units_are_occurrence_qualified() -> None:
+    markdown = "## Claim\n\nSame.\n\n## Claim\n\nSame.\n"
+
+    document = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+
+    assert [unit.form for unit in document.units] == ["rich", "rich"]
+    assert [unit.occurrence for unit in document.units] == [1, 2]
+    assert len({unit.fingerprint for unit in document.units}) == 2
+    assert len({unit.unit_ref for unit in document.units}) == 2
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        "- [rule] Value #tag (ctx)\n",
+        "- [config] Other #tag (ctx)\n",
+        "- [config] Value #other (ctx)\n",
+        "- [config] Value #tag (other)\n",
+    ],
+    ids=["category", "content", "tags", "context"],
+)
+def test_identity_compact_semantic_edits_change_anonymous_identity(edited: str) -> None:
+    baseline = parse_semantic_units(
+        "- [config] Value #tag (ctx)\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+
+    changed = parse_semantic_units(edited, parent_ref=STABLE_PARENT_REF).units[0]
+
+    assert changed.fingerprint != baseline.fingerprint
+    assert changed.unit_ref != baseline.unit_ref
+
+
+@pytest.mark.parametrize(
+    "edited",
+    [
+        "## Decision\n- status: active\n- relations: supports: [[A]]\n\nBody.\n",
+        "## Claim\n- status: draft\n- relations: supports: [[A]]\n\nBody.\n",
+        "## Claim\n- status: active\n- relations: supports: [[B]]\n\nBody.\n",
+    ],
+    ids=["kind", "metadata", "relation"],
+)
+def test_identity_rich_semantic_edits_change_anonymous_identity(edited: str) -> None:
+    baseline_markdown = (
+        "## Claim\n- status: active\n- relations: supports: [[A]]\n\nBody.\n"
+    )
+    baseline = parse_semantic_units(
+        baseline_markdown,
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+
+    changed = parse_semantic_units(edited, parent_ref=STABLE_PARENT_REF).units[0]
+
+    assert changed.fingerprint != baseline.fingerprint
+    assert changed.unit_ref != baseline.unit_ref
+
+
+def test_identity_line_span_and_line_endings_do_not_change_anonymous_identity() -> None:
+    baseline = parse_semantic_units(
+        "- [config] Value\n",
+        path="one.md",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    moved = parse_semantic_units(
+        "\n\n- [config] Value\r\n",
+        path="two.md",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+
+    assert baseline.span != moved.span
+    assert baseline.fingerprint == moved.fingerprint
+    assert baseline.unit_ref == moved.unit_ref
+
+
+def test_identity_nfkc_raw_category_forms_share_authored_fingerprint() -> None:
+    full_width = parse_semantic_units(
+        "- [Ａ] Value\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    ascii_form = parse_semantic_units(
+        "- [A] Value\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+
+    assert full_width.category_raw != ascii_form.category_raw
+    assert full_width.category_key == ascii_form.category_key
+    assert full_width.fingerprint == ascii_form.fingerprint
+    assert full_width.unit_ref == ascii_form.unit_ref
+
+
+def test_identity_registry_resolved_category_does_not_affect_fingerprint() -> None:
+    unit = parse_semantic_units(
+        "- [configuration] Value\n",
+        parent_ref=STABLE_PARENT_REF,
+    ).units[0]
+    alias_resolved = replace(unit, category="config")
+
+    assert semantic_units.fingerprint_semantic_unit(
+        alias_resolved,
+        occurrence=alias_resolved.occurrence,
+    ) == unit.fingerprint
+
+
+def test_identity_exact_resolution_rejects_missing_and_stale_references() -> None:
+    document = parse_semantic_units(
+        "- [config] Value\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    unit = document.units[0]
+
+    current = document.resolve_unit(
+        unit.unit_ref or "",
+        expected_fingerprint=unit.fingerprint,
+    )
+    wrong_fingerprint = document.resolve_unit(
+        unit.unit_ref or "",
+        expected_fingerprint="0" * 64,
+    )
+    edited = parse_semantic_units(
+        "- [config] Value edited\n- [config] Nearby\n",
+        parent_ref=STABLE_PARENT_REF,
+    )
+    old_reference = edited.resolve_unit(unit.unit_ref or "")
+
+    assert current.status == "found"
+    assert current.unit == unit
+    assert wrong_fingerprint.status == "stale"
+    assert wrong_fingerprint.unit is None
+    assert old_reference.status == "missing"
+    assert old_reference.unit is None
+
+
+def test_identity_serialization_and_unicode_legacy_uri_are_deterministic() -> None:
+    markdown = """\
+## Claim
+- id: résumés/第一?# anchor
+
+Body.
+"""
+
+    first = parse_semantic_units(
+        markdown,
+        path="Knowledge Base/Notes/Ünicode page.md",
+    )
+    second = parse_semantic_units(
+        markdown,
+        path="Knowledge Base/Notes/Ünicode page.md",
+    )
+
+    assert first.units[0].unit_ref == (
+        "exomem://vault/Knowledge%20Base/Notes/%C3%9Cnicode%20page.md"
+        "#r%C3%A9sum%C3%A9s%2F%E7%AC%AC%E4%B8%80%3F%23%20anchor"
+    )
+    assert json.dumps(first.to_dict(), ensure_ascii=False, sort_keys=True) == json.dumps(
+        second.to_dict(), ensure_ascii=False, sort_keys=True
+    )

@@ -8,14 +8,16 @@ registry mutation, indexing, or model work.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 import unicodedata
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
+from urllib.parse import quote
 
-from . import semantic_blocks
+from . import context_refs, memory_refs, semantic_blocks
 from .semantic_blocks import SemanticRelation
 
 _COMPACT_RE = re.compile(
@@ -30,6 +32,7 @@ _ANCHOR_RE = re.compile(
 _TRAILING_TAG_RE = re.compile(r"(?:^|[ \t])#(?P<tag>[^\s#]+)$")
 _RICH_CATEGORY_RE = re.compile(r"^\s*[-*+]\s+category\s*:", re.IGNORECASE)
 _TASK_LABELS = frozenset({"", " ", "x", "X", "-"})
+_IDENTITY_SCHEMA = "exomem.semantic-unit.identity.v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +105,10 @@ class SemanticUnit:
     title: str | None = None
     level: int | None = None
     body: str | None = None
+    parent_ref: str | None = None
+    unit_ref: str | None = None
+    fingerprint: str | None = None
+    occurrence: int | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "tags", tuple(self.tags))
@@ -144,6 +151,10 @@ class SemanticUnit:
             "line": self.line,
             "end_line": self.end_line,
             "body": self.body,
+            "parent_ref": self.parent_ref,
+            "unit_ref": self.unit_ref,
+            "fingerprint": self.fingerprint,
+            "occurrence": self.occurrence,
         }
 
     def to_legacy_block_dict(self) -> dict[str, Any] | None:
@@ -166,12 +177,33 @@ class SemanticUnit:
 
 
 @dataclass(frozen=True, slots=True)
+class SemanticUnitResolution:
+    """Result of exact, non-fuzzy semantic-unit reference resolution."""
+
+    status: str
+    unit_ref: str
+    unit: SemanticUnit | None = None
+    expected_fingerprint: str | None = None
+    actual_fingerprint: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "unit_ref": self.unit_ref,
+            "unit": self.unit.to_dict() if self.unit is not None else None,
+            "expected_fingerprint": self.expected_fingerprint,
+            "actual_fingerprint": self.actual_fingerprint,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SemanticUnitDocument:
     """Source-ordered normalized units and deterministic parser findings."""
 
     units: tuple[SemanticUnit, ...]
     errors: tuple[SemanticUnitDiagnostic, ...] = ()
     warnings: tuple[SemanticUnitDiagnostic, ...] = ()
+    parent_ref: str = ""
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
@@ -194,8 +226,50 @@ class SemanticUnitDocument:
     def legacy_semantic_blocks(self) -> list[dict[str, Any]]:
         return self.semantic_blocks
 
+    def resolve_unit(
+        self,
+        unit_ref: str,
+        *,
+        expected_fingerprint: str | None = None,
+    ) -> SemanticUnitResolution:
+        """Resolve only an exact current reference, never text/span similarity."""
+        requested = str(unit_ref or "")
+        matches = [unit for unit in self.units if unit.unit_ref == requested]
+        if len(matches) > 1:
+            return SemanticUnitResolution(status="ambiguous", unit_ref=requested)
+        if matches:
+            unit = matches[0]
+            if (
+                expected_fingerprint is not None
+                and unit.fingerprint != expected_fingerprint
+            ):
+                return SemanticUnitResolution(
+                    status="stale",
+                    unit_ref=requested,
+                    expected_fingerprint=expected_fingerprint,
+                    actual_fingerprint=unit.fingerprint,
+                )
+            return SemanticUnitResolution(
+                status="found",
+                unit_ref=requested,
+                unit=unit,
+                expected_fingerprint=expected_fingerprint,
+                actual_fingerprint=unit.fingerprint,
+            )
+
+        ambiguous = [
+            unit
+            for unit in self.units
+            if unit.anchor
+            and _anchored_unit_ref(self.parent_ref, unit.anchor) == requested
+        ]
+        if len(ambiguous) > 1:
+            return SemanticUnitResolution(status="ambiguous", unit_ref=requested)
+        return SemanticUnitResolution(status="missing", unit_ref=requested)
+
     def to_dict(self) -> dict[str, Any]:
         return {
+            "parent_ref": self.parent_ref,
             "units": [unit.to_dict() for unit in self.units],
             "errors": [error.to_dict() for error in self.errors],
             "warnings": [warning.to_dict() for warning in self.warnings],
@@ -228,15 +302,43 @@ def canonicalize_category(raw: str) -> str:
     return _CATEGORY_SEPARATORS_RE.sub("_", normalized).strip("_")
 
 
+def fingerprint_semantic_unit(
+    unit: SemanticUnit,
+    *,
+    occurrence: int | None = None,
+) -> str:
+    """Return the versioned authored-state fingerprint for one semantic unit."""
+    signature = _semantic_unit_signature(unit)
+    payload: dict[str, Any] = {
+        "schema": _IDENTITY_SCHEMA,
+        "signature": signature,
+    }
+    if unit.anchor:
+        payload.update({"binding": "anchor", "anchor": unit.anchor})
+    else:
+        if occurrence is None or occurrence < 1:
+            raise ValueError("anonymous semantic-unit occurrence must be at least 1")
+        payload.update({"binding": "anonymous", "occurrence": occurrence})
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
 def parse_semantic_units(
     markdown: str,
     *,
     path: str = "",
+    parent_ref: str | None = None,
     validate: bool = True,
 ) -> SemanticUnitDocument:
     """Parse compact observations and rich semantic blocks exactly once each."""
     source = markdown or ""
     source_path = str(path)
+    effective_parent_ref = _effective_parent_ref(parent_ref, source_path)
     lines = _source_lines(source)
     line_by_number = {line.number: line for line in lines}
     units: list[SemanticUnit] = []
@@ -293,7 +395,11 @@ def parse_semantic_units(
         )
         warnings.extend(
             _normalize_rich_diagnostics(
-                rich_document.warnings,
+                [
+                    warning
+                    for warning in rich_document.warnings
+                    if warning.code != "duplicate_id"
+                ],
                 path=source_path,
                 line_by_number=line_by_number,
                 severity="warning",
@@ -301,13 +407,146 @@ def parse_semantic_units(
         )
 
     units.sort(key=lambda unit: (unit.span.start_offset, unit.form))
+    bound_units, identity_errors = _bind_unit_identities(
+        units,
+        parent_ref=effective_parent_ref,
+        path=source_path,
+        validate=validate,
+    )
+    errors.extend(identity_errors)
     errors.sort(key=_diagnostic_sort_key)
     warnings.sort(key=_diagnostic_sort_key)
     return SemanticUnitDocument(
-        units=tuple(units),
+        units=bound_units,
         errors=tuple(errors),
         warnings=tuple(warnings),
+        parent_ref=effective_parent_ref,
     )
+
+
+def _effective_parent_ref(parent_ref: str | None, path: str) -> str:
+    if parent_ref is None:
+        return context_refs.vault_ref(path)
+    parsed = memory_refs.parse_memory_ref(str(parent_ref))
+    if parsed is None:
+        raise ValueError("parent_ref must be a canonical exomem://memory/<uuid> reference")
+    return memory_refs.memory_ref(parsed)
+
+
+def _bind_unit_identities(
+    units: list[SemanticUnit],
+    *,
+    parent_ref: str,
+    path: str,
+    validate: bool,
+) -> tuple[tuple[SemanticUnit, ...], list[SemanticUnitDiagnostic]]:
+    anchor_groups: dict[str, list[SemanticUnit]] = {}
+    for unit in units:
+        if unit.anchor:
+            anchor_groups.setdefault(unit.anchor, []).append(unit)
+    duplicate_anchors = {
+        anchor for anchor, members in anchor_groups.items() if len(members) > 1
+    }
+
+    occurrences: dict[str, int] = {}
+    bound: list[SemanticUnit] = []
+    for unit in units:
+        if unit.anchor:
+            fingerprint = fingerprint_semantic_unit(unit)
+            unit_ref = (
+                None
+                if unit.anchor in duplicate_anchors
+                else _anchored_unit_ref(parent_ref, unit.anchor)
+            )
+            occurrence = None
+        else:
+            signature_key = _stable_json(_semantic_unit_signature(unit))
+            occurrence = occurrences.get(signature_key, 0) + 1
+            occurrences[signature_key] = occurrence
+            fingerprint = fingerprint_semantic_unit(unit, occurrence=occurrence)
+            unit_ref = f"{parent_ref}#unit-{fingerprint}"
+        bound.append(
+            replace(
+                unit,
+                parent_ref=parent_ref,
+                unit_ref=unit_ref,
+                fingerprint=fingerprint,
+                occurrence=occurrence,
+            )
+        )
+
+    errors: list[SemanticUnitDiagnostic] = []
+    if validate:
+        for anchor, members in anchor_groups.items():
+            if len(members) < 2:
+                continue
+            first = members[0]
+            errors.append(
+                SemanticUnitDiagnostic(
+                    code="duplicate_anchor",
+                    message=f"duplicate semantic-unit anchor: {anchor}",
+                    path=path,
+                    span=first.span,
+                    line=first.line,
+                    raw=first.span.text,
+                    remediation=(
+                        "Give every compact and rich semantic unit a unique authored "
+                        "anchor within this page."
+                    ),
+                    severity="error",
+                )
+            )
+    return tuple(bound), errors
+
+
+def _semantic_unit_signature(unit: SemanticUnit) -> dict[str, Any]:
+    metadata = {
+        key: _normalize_authored_text(value)
+        for key, value in unit.metadata.items()
+        if key != "id"
+    }
+    relations = [
+        {
+            "kind": relation.kind,
+            "target": _normalize_authored_text(relation.target),
+            "raw": _normalize_authored_text(relation.raw),
+        }
+        for relation in unit.relations
+    ]
+    return {
+        "form": unit.form,
+        "kind": unit.kind,
+        "category_raw_nfkc": unicodedata.normalize(
+            "NFKC", unit.category_raw.strip()
+        ),
+        "category_key": unit.category_key,
+        "content": _normalize_authored_text(unit.content),
+        "tags": list(unit.tags),
+        "context": (
+            _normalize_authored_text(unit.context)
+            if unit.context is not None
+            else None
+        ),
+        "metadata": metadata,
+        "relations": relations,
+    }
+
+
+def _normalize_authored_text(value: str) -> str:
+    return str(value).replace("\r\n", "\n").replace("\r", "\n").strip()
+
+
+def _stable_json(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
+def _anchored_unit_ref(parent_ref: str, anchor: str) -> str:
+    return f"{parent_ref}#{quote(anchor, safe='')}"
 
 
 def _parse_compact_units(
