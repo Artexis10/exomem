@@ -44,10 +44,6 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
     assert list(inspect.signature(OAuthProxy.load_access_token).parameters) == ["self", "token"]
     assert list(inspect.signature(OAuthProxy.revoke_token).parameters) == ["self", "token"]
     assert list(inspect.signature(OAuthProxy.get_middleware).parameters) == ["self"]
-    assert list(inspect.signature(OAuthProxy.get_routes).parameters) == [
-        "self",
-        "mcp_path",
-    ]
     assert list(inspect.signature(OAuthProxy.load_refresh_token).parameters) == [
         "self",
         "client",
@@ -59,25 +55,16 @@ def test_fastmcp_private_adapter_contract_is_pinned() -> None:
         "refresh_token",
         "scopes",
     ]
-    assert list(inspect.signature(OAuthProxy.register_client).parameters) == [
-        "self",
-        "client_info",
-    ]
-    assert list(inspect.signature(OAuthProxy.get_client).parameters) == [
-        "self",
-        "client_id",
-    ]
     for seam in (
         "load_refresh_token",
         "exchange_refresh_token",
-        "register_client",
-        "get_client",
-        "get_routes",
     ):
         assert seam in ExomemSessionOAuthProxy.__dict__
         assert list(
             inspect.signature(getattr(ExomemSessionOAuthProxy, seam)).parameters
         ) == list(inspect.signature(getattr(OAuthProxy, seam)).parameters)
+    for inherited_compatibility_seam in ("register_client", "get_client", "get_routes"):
+        assert inherited_compatibility_seam not in ExomemSessionOAuthProxy.__dict__
     assert list(
         inspect.signature(OAuthProxy._validate_client_redirect_uri).parameters
     ) == ["self", "redirect_uri"]

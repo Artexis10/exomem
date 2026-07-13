@@ -140,35 +140,95 @@ def test_connector_routes_discovery_dcr_callback_and_consent_remain_compatible()
     assert durable._forward_resource is legacy._forward_resource is True
 
 
+def _registration_payload(grant_types: list[str]) -> dict[str, Any]:
+    return {
+        "client_name": "Codex compatibility client",
+        "redirect_uris": ["http://127.0.0.1:8765/callback"],
+        "token_endpoint_auth_method": "none",
+        "grant_types": grant_types,
+        "response_types": ["code"],
+        "scope": "exomem:read",
+    }
+
+
+def _stable_registration_fields(body: dict[str, Any]) -> dict[str, Any]:
+    unstable = {
+        "client_id",
+        "client_secret",
+        "client_id_issued_at",
+        "client_secret_expires_at",
+    }
+    return {key: value for key, value in body.items() if key not in unstable}
+
+
 @pytest.mark.anyio
-async def test_discovery_and_dcr_advertise_authorization_code_without_refresh() -> None:
-    proxy = ExomemSessionOAuthProxy(
+async def test_discovery_and_real_http_dcr_match_legacy_fastmcp() -> None:
+    legacy = OAuthProxy(**_kwargs(MemoryStore()))
+    durable = ExomemSessionOAuthProxy(
         session_authority=Authority(),
         **_kwargs(MemoryStore()),
     )
-    app = Starlette(routes=proxy.get_routes("/mcp"))
-    async with httpx.AsyncClient(
-        transport=httpx.ASGITransport(app=app),
-        base_url="https://memory.example",
-    ) as client:
-        metadata = await client.get("/.well-known/oauth-authorization-server")
+    legacy_app = Starlette(routes=legacy.get_routes("/mcp"))
+    durable_app = Starlette(routes=durable.get_routes("/mcp"))
+    async with (
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=legacy_app),
+            base_url="https://memory.example",
+        ) as legacy_client,
+        httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=durable_app),
+            base_url="https://memory.example",
+        ) as durable_client,
+    ):
+        legacy_metadata = await legacy_client.get(
+            "/.well-known/oauth-authorization-server"
+        )
+        durable_metadata = await durable_client.get(
+            "/.well-known/oauth-authorization-server"
+        )
+        auth_code_only = _registration_payload(["authorization_code"])
+        legacy_auth_code_only = await legacy_client.post(
+            "/register", json=auth_code_only
+        )
+        durable_auth_code_only = await durable_client.post(
+            "/register", json=auth_code_only
+        )
+        both_grants = _registration_payload(
+            ["authorization_code", "refresh_token"]
+        )
+        legacy_both = await legacy_client.post("/register", json=both_grants)
+        durable_both = await durable_client.post("/register", json=both_grants)
 
-    assert metadata.status_code == 200
-    assert metadata.json()["grant_types_supported"] == ["authorization_code"]
-
-    registered = _client("registered-client")
-    await proxy.register_client(registered)
-    assert registered.grant_types == ["authorization_code"]
-    assert (await proxy.get_client("registered-client")).grant_types == [
-        "authorization_code"
+    assert legacy_metadata.status_code == durable_metadata.status_code == 200
+    assert durable_metadata.json()["grant_types_supported"] == legacy_metadata.json()[
+        "grant_types_supported"
     ]
-
-    legacy = _client("legacy-client")
-    await OAuthProxy.register_client(proxy, legacy)
-    assert "refresh_token" in (await proxy._client_store.get(key="legacy-client")).grant_types
-    assert (await proxy.get_client("legacy-client")).grant_types == [
-        "authorization_code"
+    assert durable_metadata.json()["grant_types_supported"] == [
+        "authorization_code",
+        "refresh_token",
     ]
+    durable_metadata_without_local_revocation = durable_metadata.json()
+    durable_metadata_without_local_revocation.pop("revocation_endpoint")
+    durable_metadata_without_local_revocation.pop(
+        "revocation_endpoint_auth_methods_supported"
+    )
+    assert durable_metadata_without_local_revocation == legacy_metadata.json()
+
+    assert durable_auth_code_only.status_code == legacy_auth_code_only.status_code
+    assert durable_auth_code_only.json() == legacy_auth_code_only.json()
+
+    assert durable_both.status_code == legacy_both.status_code == 201
+    durable_registration = durable_both.json()
+    legacy_registration = legacy_both.json()
+    assert _stable_registration_fields(durable_registration) == (
+        _stable_registration_fields(legacy_registration)
+    )
+    assert durable_registration["grant_types"] == legacy_registration["grant_types"] == [
+        "authorization_code",
+        "refresh_token",
+    ]
+    assert durable_registration["client_id"]
+    assert legacy_registration["client_id"]
 
 
 @pytest.mark.anyio
