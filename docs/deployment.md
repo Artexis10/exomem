@@ -460,13 +460,18 @@ login, then starts several fresh ephemeral processes:
 python scripts/codex_auth_session_harness.py \
   --url https://kb.example.com/mcp \
   --codex-home .rollout/codex-auth-gate \
+  --codex-auth-source ~/.codex/auth.json \
   --runs 3 \
   --acknowledge-disposable-target
 ```
 
 Run this only against a disposable staged KB. The harness refuses a non-empty
-`CODEX_HOME`, so its one interactive authorization cannot accidentally reuse a
-personal Codex login; the acknowledgement is deliberately mandatory.
+target `CODEX_HOME`, copies only the invoking Codex OpenAI `auth.json` into it
+with owner-only permissions, and verifies `codex login status` before registering
+Exomem. It never copies `config.toml`, `.credentials.json`, or prior MCP state.
+When `--codex-auth-source` is omitted, it resolves to `$CODEX_HOME/auth.json` for
+the invoking process, or `~/.codex/auth.json` when `CODEX_HOME` is unset. The
+acknowledgement is deliberately mandatory.
 
 Keep legacy JTI/upstream-token collections untouched for a bounded rollback
 window, but never dual-read them while the new provider is active. Rollback means

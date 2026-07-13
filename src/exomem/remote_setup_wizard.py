@@ -421,15 +421,15 @@ def run_remote_setup(
     # coordinator. If HA is configured, converge all three credential views to
     # one value. Reject conflicts before touching the environment file.
     writer_url = _existing("EXOMEM_WRITER_LEASE_URL").strip()
+    writer_vault_id = _existing("EXOMEM_WRITER_LEASE_VAULT_ID").strip()
+    writer_replica_id = _existing("EXOMEM_WRITER_LEASE_REPLICA_ID").strip()
     storage_url = _existing("EXOMEM_OAUTH_STORAGE_URL").strip()
     storage_namespace = (
         _existing("EXOMEM_OAUTH_STORAGE_NAMESPACE").strip()
-        or _existing("EXOMEM_WRITER_LEASE_VAULT_ID").strip()
+        or writer_vault_id
     )
-    ha_enabled = bool(
-        writer_url
-        or storage_url
-        or _existing("EXOMEM_WRITER_LEASE_REPLICA_ID").strip()
+    ha_enabled = any(
+        _existing(key).strip() for key in doctor_module.HA_AUTH_ENV_KEYS
     )
     storage_credential: str | None = None
     if ha_enabled:
@@ -437,6 +437,8 @@ def run_remote_setup(
             name
             for name, value in (
                 ("EXOMEM_WRITER_LEASE_URL", writer_url),
+                ("EXOMEM_WRITER_LEASE_VAULT_ID", writer_vault_id),
+                ("EXOMEM_WRITER_LEASE_REPLICA_ID", writer_replica_id),
                 ("EXOMEM_OAUTH_STORAGE_URL", storage_url),
                 ("EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID", storage_namespace),
             )

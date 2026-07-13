@@ -45,6 +45,17 @@ VALID_PROFILES: tuple[Profile, ...] = (
     "ha",
 )
 PROFILE_ENV = "EXOMEM_PROFILE"
+HA_AUTH_ENV_KEYS = (
+    "EXOMEM_WRITER_LEASE_URL",
+    "EXOMEM_WRITER_LEASE_VAULT_ID",
+    "EXOMEM_WRITER_LEASE_REPLICA_ID",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_LEASE_COORDINATOR_TOKEN",
+    "EXOMEM_OAUTH_STORAGE_URL",
+    "EXOMEM_OAUTH_STORAGE_NAMESPACE",
+    "EXOMEM_OAUTH_STORAGE_TOKEN",
+    "EXOMEM_HA_REPLICA_URLS",
+)
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -1233,17 +1244,7 @@ def _ha_auth_configured() -> bool:
     """Whether this environment declares any part of a replica/HA topology."""
     return any(
         os.environ.get(key, "").strip()
-        for key in (
-            "EXOMEM_WRITER_LEASE_URL",
-            "EXOMEM_WRITER_LEASE_VAULT_ID",
-            "EXOMEM_WRITER_LEASE_REPLICA_ID",
-            "EXOMEM_WRITER_LEASE_TOKEN",
-            "EXOMEM_LEASE_COORDINATOR_TOKEN",
-            "EXOMEM_OAUTH_STORAGE_URL",
-            "EXOMEM_OAUTH_STORAGE_NAMESPACE",
-            "EXOMEM_OAUTH_STORAGE_TOKEN",
-            "EXOMEM_HA_REPLICA_URLS",
-        )
+        for key in HA_AUTH_ENV_KEYS
     )
 
 

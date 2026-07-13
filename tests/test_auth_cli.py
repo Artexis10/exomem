@@ -216,6 +216,34 @@ def test_auth_factory_storage_failure_exits_one_without_details(
     assert "secret-token" not in error
 
 
+def test_auth_real_oauth_configuration_error_exits_two(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """The merged session helper uses RuntimeError for invalid OAuth env."""
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
+    monkeypatch.setenv("GITHUB_CLIENT_ID", "github-client")
+    monkeypatch.setenv("GITHUB_CLIENT_SECRET", "github-secret")
+    monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "octocat")
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "https://coordinator.example")
+    monkeypatch.delenv("EXOMEM_JWT_SIGNING_KEY", raising=False)
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+
+    def representative_session_helper(*, base_url: str):
+        return server_auth.build_oauth(require_auth=True, base_url=base_url)
+
+    monkeypatch.setattr(
+        server_auth,
+        "build_session_authority",
+        representative_session_helper,
+        raising=False,
+    )
+
+    assert main(["auth", "sessions"]) == 2
+    error = capsys.readouterr().err
+    assert "auth configuration error" in error
+    assert "EXOMEM_JWT_SIGNING_KEY" in error
+
+
 def test_auth_authority_failure_exits_one(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

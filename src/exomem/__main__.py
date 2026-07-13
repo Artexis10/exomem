@@ -170,7 +170,7 @@ def _auth_main(argv: list[str]) -> int:
             file=sys.stderr,
         )
         return 1
-    except ValueError as error:
+    except (ValueError, RuntimeError) as error:
         print(f"auth configuration error: {error}", file=sys.stderr)
         return 2
 

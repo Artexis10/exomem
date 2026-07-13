@@ -330,9 +330,9 @@ def test_invalid_or_mismatched_github_identity_fails_before_write(
 @pytest.mark.parametrize(
     ("existing", "expected"),
     [
-        ("EXOMEM_WRITER_LEASE_TOKEN=writer-only\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "writer-only"),
-        ("EXOMEM_OAUTH_STORAGE_TOKEN=oauth-only\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "oauth-only"),
-        ("EXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", None),
+        ("EXOMEM_WRITER_LEASE_TOKEN=writer-only\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_WRITER_LEASE_VAULT_ID=main\nEXOMEM_WRITER_LEASE_REPLICA_ID=replica-a\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "writer-only"),
+        ("EXOMEM_OAUTH_STORAGE_TOKEN=oauth-only\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_WRITER_LEASE_VAULT_ID=main\nEXOMEM_WRITER_LEASE_REPLICA_ID=replica-a\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "oauth-only"),
+        ("EXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_WRITER_LEASE_VAULT_ID=main\nEXOMEM_WRITER_LEASE_REPLICA_ID=replica-a\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", None),
     ],
 )
 def test_ha_setup_preserves_or_generates_one_matching_storage_credential(
@@ -357,6 +357,8 @@ def test_ha_setup_conflicting_credentials_fail_before_any_write(tmp_path: Path) 
     env_path = tmp_path / ".env"
     original = (
         "EXOMEM_WRITER_LEASE_URL=https://c\n"
+        "EXOMEM_WRITER_LEASE_VAULT_ID=main\n"
+        "EXOMEM_WRITER_LEASE_REPLICA_ID=replica-a\n"
         "EXOMEM_OAUTH_STORAGE_URL=https://c\n"
         "EXOMEM_OAUTH_STORAGE_NAMESPACE=main\n"
         "EXOMEM_WRITER_LEASE_TOKEN=one\n"
@@ -391,6 +393,62 @@ def test_ha_setup_requires_shared_session_url_and_namespace_before_write(
     assert "HA" in output
     assert doctor_calls == []
     assert env_path.read_text() == existing
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        (
+            "EXOMEM_WRITER_LEASE_URL=https://c\n"
+            "EXOMEM_OAUTH_STORAGE_URL=https://c\n"
+            "EXOMEM_OAUTH_STORAGE_NAMESPACE=main\n"
+        ),
+        (
+            "EXOMEM_WRITER_LEASE_URL=https://c\n"
+            "EXOMEM_WRITER_LEASE_VAULT_ID=main\n"
+            "EXOMEM_OAUTH_STORAGE_URL=https://c\n"
+        ),
+    ],
+)
+def test_ha_setup_requires_complete_writer_topology_before_write(
+    tmp_path: Path, existing: str
+) -> None:
+    env_path = tmp_path / ".env"
+    original = existing.encode()
+    env_path.write_bytes(original)
+
+    code, output, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert "HA" in output
+    assert doctor_calls == []
+    assert env_path.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "EXOMEM_WRITER_LEASE_TOKEN=token-only\n",
+        "EXOMEM_LEASE_COORDINATOR_TOKEN=token-only\n",
+        "EXOMEM_OAUTH_STORAGE_TOKEN=token-only\n",
+        "EXOMEM_OAUTH_STORAGE_NAMESPACE=namespace-only\n",
+        "EXOMEM_WRITER_LEASE_VAULT_ID=vault-only\n",
+        "EXOMEM_HA_REPLICA_URLS=https://replica.example\n",
+    ],
+)
+def test_partial_ha_signal_fails_before_writing_env(
+    tmp_path: Path, existing: str
+) -> None:
+    env_path = tmp_path / ".env"
+    original = existing.encode()
+    env_path.write_bytes(original)
+
+    code, output, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert "HA" in output
+    assert doctor_calls == []
+    assert env_path.read_bytes() == original
 
 
 def test_interactive_existing_client_secret_is_preserved_without_rendering_it(

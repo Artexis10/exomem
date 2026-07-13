@@ -11,6 +11,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable
@@ -25,6 +26,9 @@ class HarnessFailure(RuntimeError):
 SENTINEL_QUERY = "__exomem_codex_session_smoke_absent__"
 _SUCCESS_STATUSES = {"completed", "success", "succeeded"}
 _ERROR_STATUSES = {"cancelled", "error", "failed", "failure"}
+_ERROR_LIKE_STDERR = re.compile(
+    r"\b(?:error|failed|failure|fatal|panic|traceback)\b", re.IGNORECASE
+)
 
 
 _FORBIDDEN = (
@@ -77,26 +81,48 @@ def _arguments(value: object) -> dict[str, object] | None:
     return None
 
 
+def _is_command_lifecycle(value: object) -> bool:
+    normalized = re.sub(r"[.\s-]+", "_", str(value or "").casefold())
+    return (
+        "command_execution" in normalized
+        or normalized == "command"
+        or normalized.startswith("shell_")
+        or normalized.endswith("_shell")
+    )
+
+
 def classify_exec_output(stdout: str, stderr: str) -> None:
     """Require exactly one explicit successful sentinel ``ask_memory`` call."""
     combined = f"{stdout}\n{stderr}"
     for pattern in _FORBIDDEN:
         if pattern.search(combined):
             raise HarnessFailure("fresh Codex process attempted or requested a new login")
+    if _ERROR_LIKE_STDERR.search(stderr):
+        raise HarnessFailure("fresh Codex process emitted error-like stderr")
 
     observed_call_ids: set[str] = set()
     completed_call_ids: list[str] = []
     for line_number, line in enumerate(stdout.splitlines(), start=1):
+        if not line.strip():
+            continue
         try:
             event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+        except json.JSONDecodeError as error:
+            raise HarnessFailure(
+                "fresh Codex process emitted non-JSON stdout"
+            ) from error
         if not isinstance(event, dict):
             continue
         if _has_error_marker(event):
             raise HarnessFailure("fresh Codex process emitted an error event")
         item = event.get("item")
-        if not isinstance(item, dict) or item.get("type") != "mcp_tool_call":
+        if _is_command_lifecycle(event.get("type")):
+            raise HarnessFailure("fresh Codex process attempted shell execution")
+        if not isinstance(item, dict):
+            continue
+        if _is_command_lifecycle(item.get("type")):
+            raise HarnessFailure("fresh Codex process attempted shell execution")
+        if item.get("type") != "mcp_tool_call":
             continue
         server = str(item.get("server") or item.get("server_name") or "")
         tool = str(item.get("tool") or item.get("name") or "")
@@ -104,7 +130,7 @@ def classify_exec_output(stdout: str, stderr: str) -> None:
             server.casefold() == "exomem"
             or tool.casefold().startswith("mcp__exomem__")
         ):
-            continue
+            raise HarnessFailure("fresh Codex process called an unexpected MCP tool")
         if tool.casefold() not in {"ask_memory", "mcp__exomem__ask_memory"}:
             raise HarnessFailure("fresh Codex process called an unexpected Exomem tool")
         if _arguments(item.get("arguments")) != {"query": SENTINEL_QUERY}:
@@ -162,6 +188,7 @@ def run_harness(
     *,
     url: str,
     codex_home: Path,
+    codex_auth_source: Path | None = None,
     runs: int = 3,
     runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
     acknowledge_disposable_target: bool = False,
@@ -190,14 +217,42 @@ def run_harness(
         raise HarnessFailure(
             "CODEX_HOME must be a new or empty isolated directory for the initial login"
         )
+
+    if codex_auth_source is None:
+        invoking_home = os.environ.get("CODEX_HOME", "").strip()
+        source_home = Path(invoking_home) if invoking_home else Path.home() / ".codex"
+        codex_auth_source = source_home / "auth.json"
+    codex_auth_source = codex_auth_source.expanduser().resolve()
+    if not codex_auth_source.is_file():
+        raise HarnessFailure(
+            "Codex OpenAI auth source must be an existing auth.json file"
+        )
+
     codex_home.mkdir(parents=True, exist_ok=True)
     try:
         codex_home.chmod(0o700)
     except OSError:
         pass
+    auth_destination = codex_home / "auth.json"
+    if codex_auth_source == auth_destination:
+        raise HarnessFailure("Codex OpenAI auth source must be outside isolated CODEX_HOME")
+    try:
+        shutil.copyfile(codex_auth_source, auth_destination)
+        auth_destination.chmod(0o600)
+    except OSError as error:
+        raise HarnessFailure(
+            "could not seed isolated Codex OpenAI auth.json"
+        ) from error
     env = os.environ.copy()
     env["CODEX_HOME"] = str(codex_home)
 
+    _run_checked(
+        runner,
+        ["codex", "login", "status"],
+        env=env,
+        action="verify the isolated Codex OpenAI login",
+        timeout=30.0,
+    )
     _run_checked(
         runner,
         ["codex", "mcp", "add", "exomem", "--url", url.strip()],
@@ -249,6 +304,14 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
         help="isolated persistent CODEX_HOME used only by this rollout gate",
     )
+    parser.add_argument(
+        "--codex-auth-source",
+        type=Path,
+        help=(
+            "source auth.json for the invoking Codex OpenAI login; defaults to "
+            "$CODEX_HOME/auth.json (or ~/.codex/auth.json)"
+        ),
+    )
     parser.add_argument("--runs", type=int, default=3, help="fresh process count (minimum 2)")
     parser.add_argument(
         "--acknowledge-disposable-target",
@@ -261,6 +324,7 @@ def main(argv: list[str] | None = None) -> int:
         return run_harness(
             url=args.url,
             codex_home=args.codex_home,
+            codex_auth_source=args.codex_auth_source,
             runs=args.runs,
             acknowledge_disposable_target=args.acknowledge_disposable_target,
         )
