@@ -11,7 +11,7 @@
 - [x] 2.2 Compose compact observations with the existing semantic-block parser and emit deterministic structured diagnostics with path/span remediation.
 - [x] 2.3 Implement anchored and fingerprint-bound unit references over durable parent identity, with explicit move-unstable legacy path fallback and duplicate-occurrence invalidation behavior.
 - [x] 2.4 Add the generic scaffold semantic-language registry for category/kind extensions and implement load/validate/resolve behavior.
-- [ ] 2.5 Extend `schema_memory(subject="categories")` with scoped frequency/example/alias proposals and reviewed hash-guarded persistence.
+- [x] 2.5 Extend `schema_memory(subject="categories")` with scoped frequency/example/alias proposals and reviewed hash-guarded persistence.
 - [ ] 2.6 Replace independent semantic-block/relation reparsing in downstream read-only consumers with the shared parsed semantic document.
 
 ## 3. Memory Contracts And Relation Disposition
