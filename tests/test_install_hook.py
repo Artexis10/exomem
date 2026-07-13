@@ -206,7 +206,9 @@ def test_install_hook_codex_migrates_old_kb_entries_and_preserves_other_hooks(
                             "hooks": [
                                 {
                                     "type": "command",
-                                    "command": "python3 ~/.codex/hooks/zellij_tab_context_rename.py",
+                                    "command": (
+                                        "python3 ~/.codex/hooks/zellij_tab_context_rename.py"
+                                    ),
                                 }
                             ]
                         },
