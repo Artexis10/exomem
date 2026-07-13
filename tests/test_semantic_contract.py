@@ -1218,6 +1218,75 @@ def test_global_relation_registry_finding_uses_exact_extension_identity(
     assert finding.resolved_rule == ("relations", raw_key, "registry")
 
 
+@pytest.mark.parametrize(
+    ("extensions", "expected"),
+    [
+        (
+            {
+                "science.bad": {
+                    "parent": "supports",
+                    "description": "Short relation",
+                    "extra": True,
+                },
+                "science.bad.extra": "not an object",
+            },
+            {
+                "unknown_field": "science.bad",
+                "invalid_key": "science.bad.extra",
+                "invalid_definition": "science.bad.extra",
+            },
+        ),
+        (
+            {
+                "science.bad": {
+                    "parent": "supports",
+                    "description": "Short relation",
+                    "extra.parent": True,
+                },
+                "science.bad.extra": {
+                    "parent": "not_core",
+                    "description": "Long relation",
+                },
+            },
+            {
+                "unknown_field": "science.bad",
+                "invalid_parent": "science.bad.extra",
+            },
+        ),
+    ],
+)
+def test_relation_registry_identity_is_exact_when_extension_paths_collide(
+    tmp_path: Path,
+    extensions: dict[str, object],
+    expected: dict[str, str],
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={"schema_version": 1, "extensions": extensions}
+    )
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(body="## Relations\n"),
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page,),
+        registry=registry,
+    )
+
+    result = _evaluate(
+        before=page,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+    )
+
+    findings = {finding.code: finding for finding in result.findings}
+    for code, relation in expected.items():
+        assert findings[code].governed_element_identity == ("relations", relation)
+        assert findings[code].resolved_rule == ("relations", relation, "registry")
+
+
 def test_root_relation_registry_findings_use_distinct_registry_level_identities(
     tmp_path: Path,
 ) -> None:

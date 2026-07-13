@@ -1261,19 +1261,9 @@ def _registry_findings(
     findings: list[ContractFinding] = []
     for registry_finding in corpus.registry.findings:
         raw = str(registry_finding.get("path", "registry"))
-        extension_prefix = "extensions."
-        if raw.startswith(extension_prefix):
-            matching_extensions = tuple(
-                key
-                for key in corpus.registry.extensions
-                if raw == f"{extension_prefix}{key}"
-                or raw.startswith(f"{extension_prefix}{key}.")
-            )
-            relation = (
-                max(matching_extensions, key=lambda key: (len(key), key))
-                if matching_extensions
-                else raw.removeprefix(extension_prefix)
-            )
+        relation = registry_finding.get("relation")
+        if relation is not None:
+            relation = str(relation)
             governed_element_identity = ("relations", relation)
             resolved_rule = ("relations", relation, "registry")
         else:
