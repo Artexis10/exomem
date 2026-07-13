@@ -265,6 +265,33 @@ class ContentHashMismatchError(RuntimeError):
 
 
 _BATCH_COMMIT_LOCK = threading.RLock()
+MISSING_CONTENT_HASH = "<missing>"
+
+
+def _create_parent_dirs(parent: Path, created_dirs: list[Path]) -> None:
+    """Create missing parents and record only directories created by this call."""
+    missing: list[Path] = []
+    cursor = parent
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        created_dirs.append(directory)
+
+
+def _remove_empty_created_dirs(created_dirs: list[Path]) -> None:
+    """Best-effort rollback for empty parent directories created during staging."""
+    for directory in reversed(created_dirs):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
 
 
 def batch_atomic_write(
@@ -312,7 +339,8 @@ def _batch_atomic_write_locked(
             actual_hash = None
         else:
             actual_hash = content_hash(current)
-        if actual_hash != write.expected_hash:
+        expected_missing = write.expected_hash == MISSING_CONTENT_HASH
+        if not (expected_missing and actual_hash is None) and actual_hash != write.expected_hash:
             raise ContentHashMismatchError(
                 write.path, write.expected_hash, actual_hash
             )
@@ -339,9 +367,10 @@ def _batch_atomic_write_locked(
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
     staged: list[tuple[Path, Path]] = []  # (final, tmp)
+    created_dirs: list[Path] = []
     try:
         for w in writes:
-            w.path.parent.mkdir(parents=True, exist_ok=True)
+            _create_parent_dirs(w.path.parent, created_dirs)
             # NamedTemporaryFile would need delete=False + cross-platform care;
             # explicit tmp sibling is simpler and survives os.replace.
             fd, tmp_str = tempfile.mkstemp(
@@ -354,6 +383,7 @@ def _batch_atomic_write_locked(
     except Exception:
         for _, tmp in staged:
             tmp.unlink(missing_ok=True)
+        _remove_empty_created_dirs(created_dirs)
         raise
 
     backups: dict[Path, Path | None] = {}
@@ -375,6 +405,7 @@ def _batch_atomic_write_locked(
         for backup in backups.values():
             if backup is not None:
                 backup.unlink(missing_ok=True)
+        _remove_empty_created_dirs(created_dirs)
         raise
 
     replaced: list[Path] = []
@@ -403,6 +434,7 @@ def _batch_atomic_write_locked(
                 tmp.unlink(missing_ok=True)
         if rollback_errors:
             retained = [str(path) for path in backups.values() if path is not None]
+            _remove_empty_created_dirs(created_dirs)
             raise RuntimeError(
                 f"batch commit failed ({commit_error}); rollback also failed: "
                 + "; ".join(rollback_errors)
@@ -411,6 +443,7 @@ def _batch_atomic_write_locked(
         for backup in backups.values():
             if backup is not None:
                 backup.unlink(missing_ok=True)
+        _remove_empty_created_dirs(created_dirs)
         raise
     else:
         for backup in backups.values():

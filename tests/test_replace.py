@@ -358,3 +358,66 @@ def test_replace_rolls_back_entire_note_plan_on_mid_commit_failure(
     assert _markdown_snapshot(vault) == before
     resolver = replace_module.find_module._get_query_resolver(vault)
     assert "Knowledge Base/Notes/Insights/atomic-successor" not in resolver.full_paths
+
+
+@pytest.mark.parametrize("registry_existed", [False, True])
+def test_replace_failure_does_not_leave_project_registration_or_folder(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    registry_existed: bool,
+) -> None:
+    old_rel = _make_insight(vault, "Project Registration Supersession Source")
+    registry = vault / "Knowledge Base" / "_Schema" / "project-keys.yaml"
+    if registry_existed:
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(
+            "projects:\n"
+            "  personal:\n"
+            "    folder: Personal\n"
+            "    category: cross-cutting\n",
+            encoding="utf-8",
+        )
+    project_folder = (
+        vault
+        / "Knowledge Base"
+        / "Notes"
+        / "Research"
+        / "Atomic Deferred Project"
+    )
+    registry_before = _read(registry) if registry_existed else None
+    folder_existed = project_folder.exists()
+    real_batch = replace_module.batch_atomic_write
+    real_os_replace = os.replace
+
+    def fail_second_destination(writes, *, vault_root):
+        replacements = 0
+
+        def injected_replace(src, dst):
+            nonlocal replacements
+            if str(src).endswith(".tmp"):
+                replacements += 1
+                if replacements == 2:
+                    raise OSError("injected project supersession failure")
+            return real_os_replace(src, dst)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(vault_module.os, "replace", injected_replace)
+            return real_batch(writes, vault_root=vault_root)
+
+    monkeypatch.setattr(replace_module, "batch_atomic_write", fail_second_destination)
+
+    with pytest.raises(OSError, match="injected project supersession failure"):
+        replace_module.replace(
+            vault,
+            old_path=old_rel,
+            content="# Atomic Project Successor\n\nreplacement body.\n",
+            note_type="research-note",
+            title="Atomic Project Successor",
+            project="atomic-deferred-project",
+            today=TODAY,
+        )
+
+    assert registry.exists() is registry_existed
+    if registry_existed:
+        assert _read(registry) == registry_before
+    assert project_folder.exists() is folder_existed
