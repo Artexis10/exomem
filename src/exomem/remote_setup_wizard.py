@@ -12,7 +12,8 @@ server.build_server). Re-running is always safe.
 
 The env-var contract is the source of truth in `server.build_server`
 (require_auth branch): EXOMEM_BASE_URL, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET,
-EXOMEM_GITHUB_USERNAME, EXOMEM_JWT_SIGNING_KEY, plus EXOMEM_VAULT_PATH.
+EXOMEM_GITHUB_USERNAME, EXOMEM_GITHUB_USER_ID, EXOMEM_JWT_SIGNING_KEY, plus
+EXOMEM_VAULT_PATH and matching coordinator credentials when HA is configured.
 
 CLI-only by design: it writes `.env` (secrets), reloads the environment, and
 runs doctor's live probes. All side-effect seams (`input_fn`, `print_fn`,
@@ -25,7 +26,9 @@ from __future__ import annotations
 import argparse
 import os
 import secrets
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 from . import doctor as doctor_module
 
@@ -36,7 +39,11 @@ _OAUTH_KEYS = (
     "GITHUB_CLIENT_ID",
     "GITHUB_CLIENT_SECRET",
     "EXOMEM_GITHUB_USERNAME",
+    "EXOMEM_GITHUB_USER_ID",
     "EXOMEM_JWT_SIGNING_KEY",
+    "EXOMEM_LEASE_COORDINATOR_TOKEN",
+    "EXOMEM_WRITER_LEASE_TOKEN",
+    "EXOMEM_OAUTH_STORAGE_TOKEN",
     "EXOMEM_VAULT_PATH",
 )
 
@@ -55,6 +62,40 @@ class BaseUrlError(ValueError):
 def generate_signing_key() -> str:
     """A fresh, stable JWT signing key — `secrets.token_urlsafe(48)` (64 chars)."""
     return secrets.token_urlsafe(48)
+
+
+def generate_storage_credential() -> str:
+    """Generate one shared bearer for coordinator, lease, and OAuth state."""
+    return secrets.token_urlsafe(48)
+
+
+def resolve_github_user(username: str) -> dict[str, Any]:
+    """Resolve GitHub's immutable numeric user ID for a login."""
+    import httpx
+
+    response = httpx.get(
+        f"https://api.github.com/users/{username}",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=10.0,
+        follow_redirects=False,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        raise ValueError("GitHub returned an invalid user response")
+    return payload
+
+
+def _positive_user_id(value: object) -> int:
+    if isinstance(value, bool):
+        raise ValueError("GitHub user ID must be a positive integer")
+    try:
+        user_id = int(str(value).strip())
+    except (TypeError, ValueError):
+        raise ValueError("GitHub user ID must be a positive integer") from None
+    if user_id <= 0:
+        raise ValueError("GitHub user ID must be a positive integer")
+    return user_id
 
 
 def validate_base_url(raw: str) -> str:
@@ -212,6 +253,7 @@ def run_remote_setup(
     github_client_id: str | None = None,
     github_client_secret: str | None = None,
     github_username: str | None = None,
+    github_user_id: str | int | None = None,
     yes: bool = False,
     probe: bool = True,
     env_path: Path | None = None,
@@ -219,9 +261,11 @@ def run_remote_setup(
     print_fn=print,
     doctor_fn=None,
     load_env_fn=None,
+    github_user_resolver: Callable[[str], dict[str, Any]] | None = None,
 ) -> int:
     doctor_fn = doctor_fn or doctor_module.doctor
     load_env_fn = load_env_fn or _load_env
+    github_user_resolver = github_user_resolver or resolve_github_user
     env_path = env_path or _default_env_path()
 
     steps: list[tuple[str, str]] = []
@@ -312,6 +356,35 @@ def run_remote_setup(
         return 2
     report("oauth_app", "[done] fields printed + credentials captured")
 
+    # GitHub login names are mutable; pin authorization to GitHub's immutable
+    # positive numeric subject. Preserve a prior ID unless an explicit flag
+    # confirms the same value. Otherwise resolve it once from GitHub.
+    existing_user_id = _existing("EXOMEM_GITHUB_USER_ID").strip()
+    try:
+        if existing_user_id:
+            resolved_user_id = _positive_user_id(existing_user_id)
+            if github_user_id is not None and _positive_user_id(github_user_id) != resolved_user_id:
+                raise ValueError(
+                    "--github-user-id conflicts with existing EXOMEM_GITHUB_USER_ID"
+                )
+            report("github_id", "[skipped: already set — kept stable]")
+        elif github_user_id is not None:
+            resolved_user_id = _positive_user_id(github_user_id)
+            report("github_id", "[done] supplied explicitly")
+        else:
+            identity = github_user_resolver(github_username)
+            resolved_login = str(identity.get("login") or "").strip().casefold()
+            if resolved_login != github_username.strip().casefold():
+                raise ValueError(
+                    "GitHub resolved a different login; use the canonical login or "
+                    "provide --github-user-id for offline setup"
+                )
+            resolved_user_id = _positive_user_id(identity.get("id"))
+            report("github_id", "[done] resolved immutable ID")
+    except Exception as error:  # noqa: BLE001 - setup boundary, before any write
+        print_fn(f"setup --remote: could not establish GitHub identity: {error}")
+        return 2
+
     # 5. JWT signing key — generate ONCE and keep it (rotating orphans the store).
     signing_key = _existing("EXOMEM_JWT_SIGNING_KEY")
     if signing_key:
@@ -320,6 +393,35 @@ def run_remote_setup(
         signing_key = generate_signing_key()
         report("signing_key", "[done] generated")
 
+    # Active/passive auth state and the writer lease share one authenticated
+    # coordinator. If HA is configured, converge all three credential views to
+    # one value. Reject conflicts before touching the environment file.
+    ha_enabled = bool(
+        _existing("EXOMEM_WRITER_LEASE_URL").strip()
+        or _existing("EXOMEM_OAUTH_STORAGE_URL").strip()
+    )
+    storage_credential: str | None = None
+    if ha_enabled:
+        token_keys = (
+            "EXOMEM_LEASE_COORDINATOR_TOKEN",
+            "EXOMEM_WRITER_LEASE_TOKEN",
+            "EXOMEM_OAUTH_STORAGE_TOKEN",
+        )
+        configured = {value for key in token_keys if (value := _existing(key).strip())}
+        if len(configured) > 1:
+            print_fn(
+                "setup --remote: HA credential conflict; coordinator, writer lease, "
+                "and OAuth storage tokens must match. No changes were written."
+            )
+            return 2
+        storage_credential = next(iter(configured), None) or generate_storage_credential()
+        report(
+            "ha_auth",
+            "[skipped: existing matching credential preserved]"
+            if configured
+            else "[done] generated matching coordinator credential",
+        )
+
     # 6. Patch .env in place, preserving every other line.
     updates = {
         "EXOMEM_VAULT_PATH": vault_path,
@@ -327,8 +429,17 @@ def run_remote_setup(
         "GITHUB_CLIENT_ID": github_client_id,
         "GITHUB_CLIENT_SECRET": github_client_secret,
         "EXOMEM_GITHUB_USERNAME": github_username,
+        "EXOMEM_GITHUB_USER_ID": str(resolved_user_id),
         "EXOMEM_JWT_SIGNING_KEY": signing_key,
     }
+    if storage_credential is not None:
+        updates.update(
+            {
+                "EXOMEM_LEASE_COORDINATOR_TOKEN": storage_credential,
+                "EXOMEM_WRITER_LEASE_TOKEN": storage_credential,
+                "EXOMEM_OAUTH_STORAGE_TOKEN": storage_credential,
+            }
+        )
     env_path.write_text(patch_env(existing_text, updates), encoding="utf-8")
     try:
         env_path.chmod(0o600)  # secrets — owner-only on POSIX; near-no-op on Windows
@@ -404,6 +515,11 @@ def remote_setup_main(argv: list[str]) -> int:
     parser.add_argument("--github-client-secret", dest="github_client_secret", help="GitHub OAuth App Client Secret.")
     parser.add_argument("--github-username", dest="github_username", help="The single GitHub login allowed to sign in.")
     parser.add_argument(
+        "--github-user-id",
+        dest="github_user_id",
+        help="Immutable positive numeric GitHub user ID (avoids the setup lookup).",
+    )
+    parser.add_argument(
         "--yes", action="store_true",
         help="Non-interactive; requires --vault, --base-url, --tunnel, and the three --github-* flags.",
     )
@@ -435,6 +551,7 @@ def remote_setup_main(argv: list[str]) -> int:
         github_client_id=args.github_client_id,
         github_client_secret=args.github_client_secret,
         github_username=args.github_username,
+        github_user_id=args.github_user_id,
         yes=args.yes,
         probe=args.probe,
     )

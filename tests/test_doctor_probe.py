@@ -36,7 +36,23 @@ def _set_remote_env(monkeypatch: pytest.MonkeyPatch, *, base_url: str | None = B
     monkeypatch.setenv("GITHUB_CLIENT_ID", "test-client-id")
     monkeypatch.setenv("GITHUB_CLIENT_SECRET", "test-client-secret")
     monkeypatch.setenv("EXOMEM_GITHUB_USERNAME", "octocat")
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "1234")
     monkeypatch.setenv("EXOMEM_JWT_SIGNING_KEY", "test-signing-key")
+
+
+def test_remote_doctor_requires_positive_immutable_github_id(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_remote_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_GITHUB_USER_ID", "not-numeric")
+
+    checks = {
+        check.id: check
+        for check in doctor_module.doctor(vault=str(vault), profile="remote").checks
+    }
+
+    assert checks["env.EXOMEM_GITHUB_USER_ID"].status == "fail"
+    assert "positive" in (checks["env.EXOMEM_GITHUB_USER_ID"].remediation or "")
 
 
 def _make_probe_get(

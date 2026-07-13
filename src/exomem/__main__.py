@@ -13,6 +13,7 @@ Subcommands:
   bundled sample vault, no clone/config/vault needed (`uvx exomem demo`)
 - `studio` — print the local Review Studio URL; `--open` launches it explicitly
 - `doctor` — read-only local install/setup preflight
+- `auth sessions|revoke` — operator-only durable MCP session administration
 - `status` — resource posture/residency diagnostics without loading models
 - `warm` — pre-download/load the search models (bge, reranker, CLIP) so the first
   server start doesn't pay the download in the background; optional `--vault`
@@ -27,6 +28,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import sys
@@ -59,6 +61,8 @@ def main(argv: list[str] | None = None) -> int:
         return _studio_main(raw[1:])
     if raw and raw[0] == "doctor":
         return _doctor_main(raw[1:])
+    if raw and raw[0] == "auth":
+        return _auth_main(raw[1:])
     if raw and raw[0] == "status":
         return _status_main(raw[1:])
     if raw and raw[0] == "warm":
@@ -96,6 +100,119 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
     return _serve_main(raw)
+
+
+def _build_auth_session_authority():
+    """Load operator configuration and reuse the HTTP auth authority factory.
+
+    Keeping this adapter tiny makes the CLI and HTTP paths share the exact same
+    issuer, audience, storage namespace, and local-vs-HA selection without
+    importing server auth during unrelated CLI startup.
+    """
+    from dotenv import load_dotenv
+
+    load_dotenv(override=True)
+    base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
+    if not base_url:
+        raise ValueError("EXOMEM_BASE_URL is required for session administration")
+    from .server_auth import build_session_authority
+
+    return build_session_authority(base_url=base_url)
+
+
+def _session_metadata(record, *, current_generation: str) -> dict[str, object]:
+    effective_status = record.status
+    if effective_status == "active" and record.generation != current_generation:
+        effective_status = "generation_revoked"
+    return {
+        "session_id": record.session_id,
+        "client_id": record.client_id,
+        "scopes": list(record.scopes),
+        "github_login": record.github_login,
+        "github_user_id": record.github_user_id,
+        "issued_at": record.issued_at,
+        "status": effective_status,
+    }
+
+
+def _auth_main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(
+        prog="exomem auth",
+        description="Inspect and revoke durable MCP sessions (operator-only).",
+    )
+    subcommands = parser.add_subparsers(dest="command", required=True)
+    sessions = subcommands.add_parser("sessions", help="list non-secret session metadata")
+    sessions.add_argument("--json", action="store_true", help="emit stable JSON")
+
+    revoke = subcommands.add_parser("revoke", help="revoke one session or every session")
+    revoke.add_argument("session_id", nargs="?", help="opaque session ID (not the bearer)")
+    revoke.add_argument("--all", action="store_true", dest="revoke_all")
+    revoke.add_argument("--reason", default=None, help="operator audit reason")
+    revoke.add_argument("--json", action="store_true", help="emit stable JSON")
+    args = parser.parse_args(argv)
+
+    if args.command == "revoke":
+        if bool(args.session_id) == bool(args.revoke_all):
+            parser.error("revoke requires exactly one session ID or --all")
+        if args.reason is not None and not args.reason.strip():
+            parser.error("--reason must not be empty")
+
+    try:
+        authority = _build_auth_session_authority()
+    except (ValueError, RuntimeError) as error:
+        print(f"auth configuration error: {error}", file=sys.stderr)
+        return 2
+
+    async def run() -> dict[str, object]:
+        if args.command == "sessions":
+            records = await authority.list_sessions()
+            current_generation = await authority.current_generation()
+            return {
+                "sessions": [
+                    _session_metadata(record, current_generation=current_generation)
+                    for record in records
+                ]
+            }
+        reason = (
+            args.reason
+            or ("operator-revoke-all" if args.revoke_all else "operator-revocation")
+        ).strip()
+        if args.revoke_all:
+            await authority.replace_generation()
+            return {"revoked_all": True}
+        revoked = await authority.tombstone(args.session_id, reason=reason)
+        return {"revoked": revoked, "session_id": args.session_id}
+
+    from .auth_sessions import SessionStoreUnavailable
+
+    try:
+        result = asyncio.run(run())
+    except SessionStoreUnavailable:
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False))
+    elif args.command == "sessions":
+        rows = result["sessions"]
+        if not rows:
+            print("No durable MCP sessions.")
+        else:
+            for row in rows:
+                print(
+                    f"{row['session_id']}  {row['status']}  {row['client_id']}  "
+                    f"{row['github_login']}  {row['issued_at']}"
+                )
+    elif result.get("revoked_all"):
+        print("Revoked all durable MCP sessions.")
+    elif result.get("revoked"):
+        print(f"Revoked session {result['session_id']}.")
+    else:
+        print(f"Session {result['session_id']} was not found.")
+    return 0
 
 
 def _serve_main(argv: list[str]) -> int:

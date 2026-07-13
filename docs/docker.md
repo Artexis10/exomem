@@ -95,7 +95,9 @@ documented in [deployment.md](deployment.md).
    compose-only ones below — uncomment the ones you need):
    - The OAuth vars from [deployment.md](deployment.md): `EXOMEM_BASE_URL`,
      `GITHUB_CLIENT_ID`, `GITHUB_CLIENT_SECRET`, `EXOMEM_GITHUB_USERNAME`,
-     `EXOMEM_JWT_SIGNING_KEY`.
+     `EXOMEM_GITHUB_USER_ID`, and `EXOMEM_JWT_SIGNING_KEY`. HA deployments also
+     require matching non-empty `EXOMEM_LEASE_COORDINATOR_TOKEN`,
+     `EXOMEM_WRITER_LEASE_TOKEN`, and `EXOMEM_OAUTH_STORAGE_TOKEN` values.
    - `EXOMEM_VAULT_HOST_PATH` is the **host** path bind-mounted to `/vault`
      (`compose.yaml` maps it in; the container always sees `/vault`). Compose
      fails fast with `set in .env` if it is missing.

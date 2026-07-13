@@ -20,7 +20,6 @@ import pytest
 from exomem import remote_setup_wizard as rsw
 from exomem.__main__ import main
 
-
 # ============================================================================
 # generate_signing_key
 # ============================================================================
@@ -178,6 +177,7 @@ def _run(env_path: Path, doctor_success: bool = True, **overrides):
         github_client_id="Iv1.abc",
         github_client_secret="secret-xyz",
         github_username="octocat",
+        github_user_id="1234",
         yes=True,
         env_path=env_path,
         input_fn=lambda prompt="": pytest.fail(f"unexpected prompt: {prompt}"),
@@ -201,6 +201,7 @@ def test_happy_path_writes_env_and_prints_connector(tmp_path: Path) -> None:
     assert written["GITHUB_CLIENT_ID"] == "Iv1.abc"
     assert written["GITHUB_CLIENT_SECRET"] == "secret-xyz"
     assert written["EXOMEM_GITHUB_USERNAME"] == "octocat"
+    assert written["EXOMEM_GITHUB_USER_ID"] == "1234"
     assert len(written["EXOMEM_JWT_SIGNING_KEY"]) >= 64  # freshly generated
 
     # doctor ran as the remote gate, with the live probe on
@@ -224,6 +225,109 @@ def test_existing_signing_key_is_preserved(tmp_path: Path) -> None:
     assert written["EXOMEM_JWT_SIGNING_KEY"] == "keep-this-stable-key"
     assert written["UNRELATED"] == "x"  # unrelated key preserved
     assert "[skipped: already set" in out
+
+
+def test_existing_github_user_id_is_preserved_without_network(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXOMEM_GITHUB_USER_ID=1234\n", encoding="utf-8")
+
+    def fail_resolver(_username: str):
+        pytest.fail("existing immutable user ID should not be resolved again")
+
+    code, _, _ = _run(
+        env_path,
+        github_user_id=None,
+        github_user_resolver=fail_resolver,
+    )
+
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text())["EXOMEM_GITHUB_USER_ID"] == "1234"
+
+
+def test_setup_resolves_numeric_id_and_requires_normalized_login_match(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    calls: list[str] = []
+
+    def resolver(username: str):
+        calls.append(username)
+        return {"id": 1234, "login": "OctoCat"}
+
+    code, _, _ = _run(
+        env_path,
+        github_user_id=None,
+        github_user_resolver=resolver,
+    )
+
+    assert code == 0
+    assert calls == ["octocat"]
+    assert rsw.parse_env(env_path.read_text())["EXOMEM_GITHUB_USER_ID"] == "1234"
+
+
+@pytest.mark.parametrize(
+    ("github_user_id", "resolver_result"),
+    [
+        ("0", None),
+        ("not-a-number", None),
+        (None, {"id": 1234, "login": "someone-else"}),
+        (None, {"id": None, "login": "octocat"}),
+    ],
+)
+def test_invalid_or_mismatched_github_identity_fails_before_write(
+    tmp_path: Path, github_user_id, resolver_result
+) -> None:
+    env_path = tmp_path / ".env"
+    code, _, doctor_calls = _run(
+        env_path,
+        github_user_id=github_user_id,
+        github_user_resolver=lambda _username: resolver_result,
+    )
+
+    assert code == 2
+    assert doctor_calls == []
+    assert not env_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("existing", "expected"),
+    [
+        ("EXOMEM_WRITER_LEASE_TOKEN=writer-only\nEXOMEM_WRITER_LEASE_URL=https://c\n", "writer-only"),
+        ("EXOMEM_OAUTH_STORAGE_TOKEN=oauth-only\nEXOMEM_OAUTH_STORAGE_URL=https://c\n", "oauth-only"),
+        ("EXOMEM_WRITER_LEASE_URL=https://c\n", None),
+    ],
+)
+def test_ha_setup_preserves_or_generates_one_matching_storage_credential(
+    tmp_path: Path, existing: str, expected: str | None
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(existing, encoding="utf-8")
+
+    code, output, _ = _run(env_path)
+
+    assert code == 0
+    values = rsw.parse_env(env_path.read_text())
+    assert values["EXOMEM_WRITER_LEASE_TOKEN"]
+    assert values["EXOMEM_WRITER_LEASE_TOKEN"] == values["EXOMEM_OAUTH_STORAGE_TOKEN"]
+    assert values["EXOMEM_WRITER_LEASE_TOKEN"] == values["EXOMEM_LEASE_COORDINATOR_TOKEN"]
+    if expected is not None:
+        assert values["EXOMEM_WRITER_LEASE_TOKEN"] == expected
+    assert values["EXOMEM_WRITER_LEASE_TOKEN"] not in output
+
+
+def test_ha_setup_conflicting_credentials_fail_before_any_write(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    original = (
+        "EXOMEM_WRITER_LEASE_URL=https://c\n"
+        "EXOMEM_WRITER_LEASE_TOKEN=one\n"
+        "EXOMEM_OAUTH_STORAGE_TOKEN=two\n"
+    )
+    env_path.write_text(original, encoding="utf-8")
+
+    code, output, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert "conflict" in output.lower()
+    assert doctor_calls == []
+    assert env_path.read_text() == original
 
 
 def test_doctor_failure_is_a_hard_gate(tmp_path: Path) -> None:
@@ -266,11 +370,13 @@ def test_setup_remote_dispatches_from_main(monkeypatch: pytest.MonkeyPatch) -> N
         "--tunnel", "cloudflare",
         "--github-client-id", "id", "--github-client-secret", "sec",
         "--github-username", "octocat", "--yes",
+        "--github-user-id", "1234",
     ])
     assert code == 0
     assert called["base_url"] == "https://kb.example.com"
     assert called["tunnel"] == "cloudflare"
     assert called["probe"] is True
+    assert called["github_user_id"] == "1234"
 
 
 def test_setup_remote_yes_without_required_flags_is_usage_error() -> None:

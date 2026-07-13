@@ -1,0 +1,186 @@
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+
+import pytest
+
+from exomem import server_auth
+from exomem.__main__ import main
+from exomem.auth_sessions import SessionRecord, SessionStoreUnavailable
+
+
+def _record(*, generation: str = "current", status: str = "active") -> SessionRecord:
+    return SessionRecord(
+        schema_version=1,
+        session_id="abcdefghijklmnop",
+        token_digest="0" * 64,
+        client_id="codex-client",
+        scopes=("read",),
+        issuer="https://kb.example.com",
+        audience="https://kb.example.com/mcp",
+        github_user_id=1234,
+        github_login="octocat",
+        issued_at=1_700_000_000.0,
+        generation=generation,
+        status=status,  # type: ignore[arg-type]
+        revoked_at=1_700_000_001.0 if status == "revoked" else None,
+        revocation_reason="operator" if status == "revoked" else None,
+    )
+
+
+class FakeAuthority:
+    def __init__(self, records: list[SessionRecord] | None = None) -> None:
+        self.records = records or [_record()]
+        self.tombstone_calls: list[tuple[str, str]] = []
+        self.replace_calls = 0
+
+    async def list_sessions(self) -> list[SessionRecord]:
+        return self.records
+
+    async def current_generation(self) -> str:
+        return "current"
+
+    async def tombstone(self, session_id: str, *, reason: str) -> bool:
+        self.tombstone_calls.append((session_id, reason))
+        return session_id == "abcdefghijklmnop"
+
+    async def replace_generation(self) -> str:
+        self.replace_calls += 1
+        return "new-secret-generation"
+
+
+def _install_authority(
+    monkeypatch: pytest.MonkeyPatch, authority: FakeAuthority
+) -> list[str]:
+    dotenv_calls: list[str] = []
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com/")
+    monkeypatch.setattr(
+        "dotenv.load_dotenv",
+        lambda *, override: dotenv_calls.append(f"override={override}"),
+    )
+    monkeypatch.setattr(
+        server_auth,
+        "build_session_authority",
+        lambda *, base_url: (
+            authority
+            if base_url == "https://kb.example.com"
+            else pytest.fail(f"unexpected base URL: {base_url}")
+        ),
+        raising=False,
+    )
+    return dotenv_calls
+
+
+def test_auth_sessions_json_is_secret_free_and_marks_generation_revoked(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    records = [
+        _record(),
+        replace(_record(), session_id="qrstuvwxyzABCDEF", generation="old"),
+    ]
+    authority = FakeAuthority(records)
+    dotenv_calls = _install_authority(monkeypatch, authority)
+
+    assert main(["auth", "sessions", "--json"]) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert dotenv_calls == ["override=True"]
+    assert payload == {
+        "sessions": [
+            {
+                "session_id": "abcdefghijklmnop",
+                "client_id": "codex-client",
+                "scopes": ["read"],
+                "github_login": "octocat",
+                "github_user_id": 1234,
+                "issued_at": 1_700_000_000.0,
+                "status": "active",
+            },
+            {
+                "session_id": "qrstuvwxyzABCDEF",
+                "client_id": "codex-client",
+                "scopes": ["read"],
+                "github_login": "octocat",
+                "github_user_id": 1234,
+                "issued_at": 1_700_000_000.0,
+                "status": "generation_revoked",
+            },
+        ]
+    }
+    rendered = json.dumps(payload)
+    assert "token_digest" not in rendered
+    assert '"generation":' not in rendered
+    assert "new-secret-generation" not in rendered
+
+
+def test_auth_revoke_one_uses_tombstone_and_custom_reason(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    authority = FakeAuthority()
+    _install_authority(monkeypatch, authority)
+
+    assert main([
+        "auth", "revoke", "abcdefghijklmnop", "--reason", "lost laptop", "--json"
+    ]) == 0
+
+    assert authority.tombstone_calls == [("abcdefghijklmnop", "lost laptop")]
+    assert json.loads(capsys.readouterr().out) == {
+        "revoked": True,
+        "session_id": "abcdefghijklmnop",
+    }
+
+
+def test_auth_revoke_all_replaces_generation_without_printing_it(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    authority = FakeAuthority()
+    _install_authority(monkeypatch, authority)
+
+    assert main(["auth", "revoke", "--all", "--json"]) == 0
+
+    assert authority.replace_calls == 1
+    output = capsys.readouterr().out
+    assert json.loads(output) == {"revoked_all": True}
+    assert "new-secret-generation" not in output
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["auth", "revoke"],
+        ["auth", "revoke", "abcdefghijklmnop", "--all"],
+        ["auth", "revoke", "--all", "--reason", ""],
+    ],
+)
+def test_auth_usage_errors_exit_two(argv: list[str]) -> None:
+    with pytest.raises(SystemExit) as exc:
+        main(argv)
+    assert exc.value.code == 2
+
+
+def test_auth_missing_config_exits_two(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+
+    assert main(["auth", "sessions"]) == 2
+    assert "EXOMEM_BASE_URL" in capsys.readouterr().err
+
+
+def test_auth_authority_failure_exits_one(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    authority = FakeAuthority()
+
+    async def unavailable() -> list[SessionRecord]:
+        raise SessionStoreUnavailable("coordinator rejected request with secret-token")
+
+    authority.list_sessions = unavailable  # type: ignore[method-assign]
+    _install_authority(monkeypatch, authority)
+
+    assert main(["auth", "sessions"]) == 1
+    error = capsys.readouterr().err
+    assert "session authority unavailable" in error
+    assert "secret-token" not in error
