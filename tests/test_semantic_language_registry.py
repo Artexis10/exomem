@@ -433,3 +433,16 @@ def test_registry_alias_changes_resolution_without_changing_authored_identity() 
         before.category_key,
     )
     assert (after.fingerprint, after.unit_ref) == (before.fingerprint, before.unit_ref)
+
+
+def test_expected_hash_refuses_recreating_a_missing_registry(tmp_path: Path) -> None:
+    path = language_registry.registry_path(tmp_path)
+
+    with pytest.raises(ValueError, match="SEMANTIC_LANGUAGE_REGISTRY_MISSING"):
+        language_registry.save_registry(
+            tmp_path,
+            _proposal(categories={"config": {"description": "Configuration"}}),
+            expected_hash="deleted-registry-hash",
+        )
+
+    assert not path.exists()

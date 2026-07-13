@@ -653,3 +653,86 @@ def test_category_command_diff_and_reviewed_save_preserve_custom_kinds(
     }
     assert separate["changes"]["kinds"]["added"] == ["workflow"]
     assert separate["changes"]["kinds"]["removed"] == ["protocol"]
+
+
+def test_category_profile_retains_rich_kind_scoped_to_any_attached_project(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    schema_dir = vault / "Knowledge Base" / "_Schema"
+    schema_dir.mkdir(parents=True)
+    (schema_dir / "SKILL.md").write_text("# Test schema\n", encoding="utf-8")
+    page = vault / "Knowledge Base" / "Notes" / "multi-project.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        "---\n"
+        "type: insight\n"
+        "project: atlas\n"
+        "projects:\n"
+        "  - atlas\n"
+        "  - companion\n"
+        "---\n\n"
+        "# Multi-project page\n\n"
+        "## Protocol\n\n"
+        "Run the recovery steps in order.\n",
+        encoding="utf-8",
+    )
+    reviewed = {
+        "schema_version": 1,
+        "categories": {},
+        "kinds": {
+            "protocol": {
+                "description": "A repeatable protocol",
+                "scope": {"projects": ["companion"]},
+            }
+        },
+    }
+    semantic_language_registry.save_registry(vault, reviewed)
+    parse_calls = 0
+    original_parse = memory_schema.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(memory_schema.semantic_units, "parse_semantic_units", counted_parse)
+
+    result = commands.op_schema_memory(
+        vault,
+        operation="infer",
+        subject="categories",
+        project="atlas",
+    )
+
+    assert parse_calls == 1
+    assert result["unit_count"] == 1
+    assert result["proposal"] == reviewed
+    assert result["categories"] == [
+        {
+            "category_key": "protocol",
+            "resolved_category": "protocol",
+            "registry_status": "unregistered",
+            "replacement": None,
+            "resolved_categories": {"protocol": 1},
+            "registry_statuses": {"unregistered": 1},
+            "replacements": {},
+            "unit_count": 1,
+            "page_count": 1,
+            "raw_forms": {"Protocol": 1},
+            "canonical_collision": False,
+            "forms": {"rich": 1},
+            "page_types": {"insight": 1},
+            "projects": {"atlas": 1, "companion": 1},
+            "examples": [
+                {
+                    "path": "Knowledge Base/Notes/multi-project.md",
+                    "line": 3,
+                    "anchor": None,
+                    "raw_category": "Protocol",
+                    "excerpt": "Run the recovery steps in order.",
+                    "excerpt_truncated": False,
+                }
+            ],
+        }
+    ]

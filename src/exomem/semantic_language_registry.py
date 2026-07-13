@@ -397,6 +397,11 @@ def save_registry(
                 "STALE_SEMANTIC_LANGUAGE_REGISTRY: "
                 "expected_hash does not match current hash"
             )
+    elif expected_hash is not None:
+        raise ValueError(
+            "SEMANTIC_LANGUAGE_REGISTRY_MISSING: "
+            "expected_hash was provided but the registry does not exist"
+        )
 
     rendered = yaml.safe_dump(
         registry_proposal(registry),
