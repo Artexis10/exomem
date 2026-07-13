@@ -231,17 +231,57 @@ def test_existing_github_user_id_is_preserved_without_network(tmp_path: Path) ->
     env_path = tmp_path / ".env"
     env_path.write_text("EXOMEM_GITHUB_USER_ID=1234\n", encoding="utf-8")
 
-    def fail_resolver(_username: str):
-        pytest.fail("existing immutable user ID should not be resolved again")
+    calls: list[str] = []
+
+    def resolver(username: str):
+        calls.append(username)
+        return {"id": 1234, "login": "octocat"}
 
     code, _, _ = _run(
         env_path,
         github_user_id=None,
-        github_user_resolver=fail_resolver,
+        github_user_resolver=resolver,
     )
 
     assert code == 0
+    assert calls == ["octocat"]
     assert rsw.parse_env(env_path.read_text())["EXOMEM_GITHUB_USER_ID"] == "1234"
+
+
+def test_existing_id_rejects_changed_login_resolving_to_another_account(
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / ".env"
+    original = "EXOMEM_GITHUB_USERNAME=old-login\nEXOMEM_GITHUB_USER_ID=1234\n"
+    env_path.write_text(original, encoding="utf-8")
+
+    code, output, doctor_calls = _run(
+        env_path,
+        github_username="new-login",
+        github_user_id=None,
+        github_user_resolver=lambda _username: {"id": 9999, "login": "new-login"},
+    )
+
+    assert code == 2
+    assert "identity" in output.lower()
+    assert doctor_calls == []
+    assert env_path.read_text() == original
+
+
+def test_existing_id_accepts_online_resolution_of_same_account(tmp_path: Path) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text("EXOMEM_GITHUB_USER_ID=1234\n", encoding="utf-8")
+
+    code, _, _ = _run(
+        env_path,
+        github_user_id=None,
+        github_user_resolver=lambda _username: {"id": 1234, "login": "OctoCat"},
+    )
+
+    assert code == 0
+    values = rsw.parse_env(env_path.read_text())
+    assert values["EXOMEM_GITHUB_USER_ID"] == "1234"
+    assert values["EXOMEM_GITHUB_USERNAME"] == "octocat"
 
 
 def test_setup_resolves_numeric_id_and_requires_normalized_login_match(tmp_path: Path) -> None:
@@ -290,9 +330,9 @@ def test_invalid_or_mismatched_github_identity_fails_before_write(
 @pytest.mark.parametrize(
     ("existing", "expected"),
     [
-        ("EXOMEM_WRITER_LEASE_TOKEN=writer-only\nEXOMEM_WRITER_LEASE_URL=https://c\n", "writer-only"),
-        ("EXOMEM_OAUTH_STORAGE_TOKEN=oauth-only\nEXOMEM_OAUTH_STORAGE_URL=https://c\n", "oauth-only"),
-        ("EXOMEM_WRITER_LEASE_URL=https://c\n", None),
+        ("EXOMEM_WRITER_LEASE_TOKEN=writer-only\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "writer-only"),
+        ("EXOMEM_OAUTH_STORAGE_TOKEN=oauth-only\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", "oauth-only"),
+        ("EXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_URL=https://c\nEXOMEM_OAUTH_STORAGE_NAMESPACE=main\n", None),
     ],
 )
 def test_ha_setup_preserves_or_generates_one_matching_storage_credential(
@@ -317,6 +357,8 @@ def test_ha_setup_conflicting_credentials_fail_before_any_write(tmp_path: Path) 
     env_path = tmp_path / ".env"
     original = (
         "EXOMEM_WRITER_LEASE_URL=https://c\n"
+        "EXOMEM_OAUTH_STORAGE_URL=https://c\n"
+        "EXOMEM_OAUTH_STORAGE_NAMESPACE=main\n"
         "EXOMEM_WRITER_LEASE_TOKEN=one\n"
         "EXOMEM_OAUTH_STORAGE_TOKEN=two\n"
     )
@@ -328,6 +370,63 @@ def test_ha_setup_conflicting_credentials_fail_before_any_write(tmp_path: Path) 
     assert "conflict" in output.lower()
     assert doctor_calls == []
     assert env_path.read_text() == original
+
+
+@pytest.mark.parametrize(
+    "existing",
+    [
+        "EXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_WRITER_LEASE_VAULT_ID=main\n",
+        "EXOMEM_WRITER_LEASE_URL=https://c\nEXOMEM_OAUTH_STORAGE_URL=https://c\n",
+    ],
+)
+def test_ha_setup_requires_shared_session_url_and_namespace_before_write(
+    tmp_path: Path, existing: str
+) -> None:
+    env_path = tmp_path / ".env"
+    env_path.write_text(existing, encoding="utf-8")
+
+    code, output, doctor_calls = _run(env_path)
+
+    assert code == 2
+    assert "HA" in output
+    assert doctor_calls == []
+    assert env_path.read_text() == existing
+
+
+def test_interactive_existing_client_secret_is_preserved_without_rendering_it(
+    tmp_path: Path,
+) -> None:
+    env_path = tmp_path / ".env"
+    secret = "existing-super-secret"
+    env_path.write_text(f"GITHUB_CLIENT_SECRET={secret}\n", encoding="utf-8")
+    prompts: list[str] = []
+    output: list[str] = []
+
+    def input_fn(prompt: str = "") -> str:
+        prompts.append(prompt)
+        return ""
+
+    code = rsw.run_remote_setup(
+        vault="/vault",
+        base_url="https://kb.example.com",
+        tunnel="ngrok",
+        github_client_id="client-id",
+        github_client_secret=None,
+        github_username="octocat",
+        github_user_id="1234",
+        yes=False,
+        probe=False,
+        env_path=env_path,
+        input_fn=input_fn,
+        print_fn=output.append,
+        doctor_fn=lambda **_kwargs: SimpleNamespace(success=True),
+        load_env_fn=lambda _path: None,
+    )
+
+    assert code == 0
+    assert rsw.parse_env(env_path.read_text())["GITHUB_CLIENT_SECRET"] == secret
+    assert secret not in "\n".join(prompts + output)
+    assert any("keep existing" in prompt.lower() for prompt in prompts)
 
 
 def test_doctor_failure_is_a_hard_gate(tmp_path: Path) -> None:

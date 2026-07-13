@@ -112,6 +112,9 @@ def _build_auth_session_authority():
     from dotenv import load_dotenv
 
     load_dotenv(override=True)
+    from . import env_compat
+
+    env_compat.promote_legacy()
     base_url = os.environ.get("EXOMEM_BASE_URL", "").strip().rstrip("/")
     if not base_url:
         raise ValueError("EXOMEM_BASE_URL is required for session administration")
@@ -157,9 +160,17 @@ def _auth_main(argv: list[str]) -> int:
         if args.reason is not None and not args.reason.strip():
             parser.error("--reason must not be empty")
 
+    from .auth_sessions import SessionStoreUnavailable
+
     try:
         authority = _build_auth_session_authority()
-    except (ValueError, RuntimeError) as error:
+    except (SessionStoreUnavailable, OSError):
+        print(
+            "session authority unavailable; check storage configuration and connectivity",
+            file=sys.stderr,
+        )
+        return 1
+    except ValueError as error:
         print(f"auth configuration error: {error}", file=sys.stderr)
         return 2
 
@@ -182,8 +193,6 @@ def _auth_main(argv: list[str]) -> int:
             return {"revoked_all": True}
         revoked = await authority.tombstone(args.session_id, reason=reason)
         return {"revoked": revoked, "session_id": args.session_id}
-
-    from .auth_sessions import SessionStoreUnavailable
 
     try:
         result = asyncio.run(run())

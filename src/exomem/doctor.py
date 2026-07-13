@@ -852,6 +852,7 @@ def _check_ha_env() -> list[DoctorCheck]:
         "EXOMEM_WRITER_LEASE_REPLICA_ID": "Set a unique identifier for this replica.",
         "EXOMEM_OAUTH_STORAGE_URL": "Set the authoritative coordinator state URL.",
         "EXOMEM_OAUTH_STORAGE_TOKEN": "Set the coordinator bearer credential for auth state.",
+        "EXOMEM_LEASE_COORDINATOR_TOKEN": "Set the bearer enforced by the coordinator service.",
     }
     checks: list[DoctorCheck] = []
     for key, remediation in required.items():
@@ -896,12 +897,10 @@ def _check_ha_env() -> list[DoctorCheck]:
         None if valid_user_id else "Set a positive numeric EXOMEM_GITHUB_USER_ID.",
     ))
     credential_values = [
+        os.environ.get("EXOMEM_LEASE_COORDINATOR_TOKEN", "").strip(),
         os.environ.get("EXOMEM_WRITER_LEASE_TOKEN", "").strip(),
         os.environ.get("EXOMEM_OAUTH_STORAGE_TOKEN", "").strip(),
     ]
-    coordinator_token = os.environ.get("EXOMEM_LEASE_COORDINATOR_TOKEN", "").strip()
-    if coordinator_token:
-        credential_values.append(coordinator_token)
     credentials_match = all(credential_values) and len(set(credential_values)) == 1
     checks.append(_check(
         "ha.auth.credentials_match",
@@ -1230,6 +1229,24 @@ def _check_ha_auth_probes(*, prefix: str = "ha.auth") -> list[DoctorCheck]:
     return checks
 
 
+def _ha_auth_configured() -> bool:
+    """Whether this environment declares any part of a replica/HA topology."""
+    return any(
+        os.environ.get(key, "").strip()
+        for key in (
+            "EXOMEM_WRITER_LEASE_URL",
+            "EXOMEM_WRITER_LEASE_VAULT_ID",
+            "EXOMEM_WRITER_LEASE_REPLICA_ID",
+            "EXOMEM_WRITER_LEASE_TOKEN",
+            "EXOMEM_LEASE_COORDINATOR_TOKEN",
+            "EXOMEM_OAUTH_STORAGE_URL",
+            "EXOMEM_OAUTH_STORAGE_NAMESPACE",
+            "EXOMEM_OAUTH_STORAGE_TOKEN",
+            "EXOMEM_HA_REPLICA_URLS",
+        )
+    )
+
+
 def _check_probe_local(port: int = 8765) -> DoctorCheck:
     url = f"http://127.0.0.1:{port}/mcp"
     try:
@@ -1404,12 +1421,14 @@ def doctor(
 
     if profile == "remote":
         checks.extend(_check_remote_env())
+        if _ha_auth_configured():
+            checks.extend(_check_ha_env())
         # Opt-in live-endpoint verification (three read-only GETs). The
         # default stays fully offline — doctor never touches the network
         # unless --probe is passed explicitly.
         if probe:
             checks.extend(_check_remote_probes())
-            if os.environ.get("EXOMEM_OAUTH_STORAGE_URL", "").strip():
+            if _ha_auth_configured():
                 checks.extend(_check_ha_auth_probes(prefix="probe.auth"))
 
     if profile == "ha":

@@ -460,8 +460,13 @@ login, then starts several fresh ephemeral processes:
 python scripts/codex_auth_session_harness.py \
   --url https://kb.example.com/mcp \
   --codex-home .rollout/codex-auth-gate \
-  --runs 3
+  --runs 3 \
+  --acknowledge-disposable-target
 ```
+
+Run this only against a disposable staged KB. The harness refuses a non-empty
+`CODEX_HOME`, so its one interactive authorization cannot accidentally reuse a
+personal Codex login; the acknowledgement is deliberately mandatory.
 
 Keep legacy JTI/upstream-token collections untouched for a bounded rollback
 window, but never dual-read them while the new provider is active. Rollback means

@@ -15,6 +15,7 @@ def _set_ha_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "desktop")
     monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOKEN", "secret")
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_TOKEN", "secret")
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_URL", "https://coordinator.example.com")
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_NAMESPACE", "main")
     monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_TOKEN", "secret")
@@ -63,7 +64,23 @@ def test_ha_profile_is_offline_by_default(
     assert not any(check_id.startswith("ha.replica.") for check_id in checks)
 
 
-def test_ha_profile_reports_missing_coordination_configuration(vault: Path) -> None:
+def test_ha_profile_reports_missing_coordination_configuration(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    for key in (
+        "EXOMEM_BASE_URL",
+        "EXOMEM_JWT_SIGNING_KEY",
+        "EXOMEM_WRITER_LEASE_URL",
+        "EXOMEM_WRITER_LEASE_VAULT_ID",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID",
+        "EXOMEM_WRITER_LEASE_TOKEN",
+        "EXOMEM_OAUTH_STORAGE_URL",
+        "EXOMEM_OAUTH_STORAGE_NAMESPACE",
+        "EXOMEM_OAUTH_STORAGE_TOKEN",
+        "EXOMEM_LEASE_COORDINATOR_TOKEN",
+        "EXOMEM_GITHUB_USER_ID",
+    ):
+        monkeypatch.delenv(key, raising=False)
     report = doctor_module.doctor(vault=str(vault), profile="ha")
     checks = {check.id: check for check in report.checks}
 
@@ -90,6 +107,21 @@ def test_ha_profile_rejects_mismatched_storage_credentials(
     rendered = doctor_module.render_human(report)
     assert "different-secret" not in rendered
     assert "secret" not in rendered
+
+
+def test_ha_profile_requires_coordinator_token_even_when_replica_tokens_match(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_ha_env(monkeypatch)
+    monkeypatch.delenv("EXOMEM_LEASE_COORDINATOR_TOKEN")
+
+    checks = {
+        check.id: check
+        for check in doctor_module.doctor(vault=str(vault), profile="ha").checks
+    }
+
+    assert checks["ha.env.EXOMEM_LEASE_COORDINATOR_TOKEN"].status == "fail"
+    assert checks["ha.auth.credentials_match"].status == "fail"
 
 
 def test_ha_probe_proves_coordinator_requires_and_accepts_auth(

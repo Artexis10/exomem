@@ -55,6 +55,65 @@ def test_remote_doctor_requires_positive_immutable_github_id(
     assert "positive" in (checks["env.EXOMEM_GITHUB_USER_ID"].remediation or "")
 
 
+def test_remote_ha_mode_requires_shared_session_url_and_namespace_offline(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_remote_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "https://coordinator.example.com")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "desktop")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOKEN", "secret")
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_TOKEN", "secret")
+    monkeypatch.setenv(
+        "EXOMEM_HA_REPLICA_URLS",
+        "https://desktop.example.com,https://laptop.example.com",
+    )
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_NAMESPACE", raising=False)
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_TOKEN", "secret")
+
+    checks = {
+        check.id: check
+        for check in doctor_module.doctor(vault=str(vault), profile="remote").checks
+    }
+
+    assert checks["ha.env.EXOMEM_OAUTH_STORAGE_URL"].status == "fail"
+    assert checks["ha.env.EXOMEM_OAUTH_STORAGE_NAMESPACE"].status == "fail"
+
+
+def test_remote_ha_probe_runs_even_when_shared_storage_url_is_missing(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _set_remote_env(monkeypatch)
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_URL", "https://coordinator.example.com")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_VAULT_ID", "main")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_REPLICA_ID", "desktop")
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_TOKEN", "secret")
+    monkeypatch.setenv("EXOMEM_LEASE_COORDINATOR_TOKEN", "secret")
+    monkeypatch.setenv("EXOMEM_OAUTH_STORAGE_TOKEN", "secret")
+    monkeypatch.delenv("EXOMEM_OAUTH_STORAGE_URL", raising=False)
+    monkeypatch.setattr(
+        doctor_module,
+        "_probe_get",
+        _make_probe_get(
+            {
+                LOCAL_MCP_URL: (401, "unauthorized"),
+                OAUTH_DISCOVERY_URL: (200, {"issuer": f"{BASE_URL}/"}),
+                PROTECTED_RESOURCE_URL: (200, {"resource": f"{BASE_URL}/mcp"}),
+            }
+        ),
+    )
+
+    checks = {
+        check.id: check
+        for check in doctor_module.doctor(
+            vault=str(vault), profile="remote", probe=True
+        ).checks
+    }
+
+    assert checks["probe.auth.storage_credential"].status == "fail"
+
+
 def _make_probe_get(
     responses: dict[str, tuple[int, dict | str] | BaseException],
 ) -> Callable[[str], tuple[int, dict | str]]:

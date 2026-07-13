@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import replace
 
 import pytest
 
-from exomem import server_auth
+from exomem import env_compat, server_auth
 from exomem.__main__ import main
 from exomem.auth_sessions import SessionRecord, SessionStoreUnavailable
 
@@ -31,7 +32,7 @@ def _record(*, generation: str = "current", status: str = "active") -> SessionRe
 
 class FakeAuthority:
     def __init__(self, records: list[SessionRecord] | None = None) -> None:
-        self.records = records or [_record()]
+        self.records = [_record()] if records is None else records
         self.tombstone_calls: list[tuple[str, str]] = []
         self.replace_calls = 0
 
@@ -167,6 +168,52 @@ def test_auth_missing_config_exits_two(
 
     assert main(["auth", "sessions"]) == 2
     assert "EXOMEM_BASE_URL" in capsys.readouterr().err
+
+
+def test_auth_promotes_legacy_env_after_loading_dotenv(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    authority = FakeAuthority([])
+    monkeypatch.delenv("EXOMEM_BASE_URL", raising=False)
+    monkeypatch.delenv("KB_MCP_BASE_URL", raising=False)
+
+    def load_env(*, override: bool) -> None:
+        assert override is True
+        monkeypatch.setenv("KB_MCP_BASE_URL", "https://legacy.example.com")
+
+    seen: list[str] = []
+    monkeypatch.setattr("dotenv.load_dotenv", load_env)
+    monkeypatch.setattr(env_compat, "_advised", False)
+    monkeypatch.setattr(
+        server_auth,
+        "build_session_authority",
+        lambda *, base_url: seen.append(base_url) or authority,
+        raising=False,
+    )
+
+    assert main(["auth", "sessions", "--json"]) == 0
+    assert seen == ["https://legacy.example.com"]
+    assert json.loads(capsys.readouterr().out) == {"sessions": []}
+    os.environ.pop("EXOMEM_BASE_URL", None)
+
+
+def test_auth_factory_storage_failure_exits_one_without_details(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setenv("EXOMEM_BASE_URL", "https://kb.example.com")
+    monkeypatch.setattr("dotenv.load_dotenv", lambda *, override: None)
+
+    def fail_factory(*, base_url: str):
+        raise OSError(f"cannot create store for {base_url} with secret-token")
+
+    monkeypatch.setattr(
+        server_auth, "build_session_authority", fail_factory, raising=False
+    )
+
+    assert main(["auth", "sessions"]) == 1
+    error = capsys.readouterr().err
+    assert "session authority unavailable" in error
+    assert "secret-token" not in error
 
 
 def test_auth_authority_failure_exits_one(

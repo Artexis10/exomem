@@ -338,12 +338,19 @@ def run_remote_setup(
             return 2
         github_client_id = _ask(input_fn, "GitHub Client ID", _existing("GITHUB_CLIENT_ID"))
     if not github_client_secret:
+        existing_secret = _existing("GITHUB_CLIENT_SECRET")
         if yes:
-            print_fn("setup --remote: --yes requires --github-client-secret.")
-            return 2
-        github_client_secret = _ask(
-            input_fn, "GitHub Client Secret", _existing("GITHUB_CLIENT_SECRET")
-        )
+            if not existing_secret:
+                print_fn("setup --remote: --yes requires --github-client-secret.")
+                return 2
+            github_client_secret = existing_secret
+        elif existing_secret:
+            entered = input_fn(
+                "GitHub Client Secret [press Enter to keep existing]: "
+            ).strip()
+            github_client_secret = entered or existing_secret
+        else:
+            github_client_secret = _ask(input_fn, "GitHub Client Secret")
     if not github_username:
         if yes:
             print_fn("setup --remote: --yes requires --github-username.")
@@ -361,15 +368,18 @@ def run_remote_setup(
     # confirms the same value. Otherwise resolve it once from GitHub.
     existing_user_id = _existing("EXOMEM_GITHUB_USER_ID").strip()
     try:
-        if existing_user_id:
-            resolved_user_id = _positive_user_id(existing_user_id)
-            if github_user_id is not None and _positive_user_id(github_user_id) != resolved_user_id:
+        preserved_user_id = (
+            _positive_user_id(existing_user_id) if existing_user_id else None
+        )
+        if github_user_id is not None:
+            resolved_user_id = _positive_user_id(github_user_id)
+            if (
+                preserved_user_id is not None
+                and resolved_user_id != preserved_user_id
+            ):
                 raise ValueError(
                     "--github-user-id conflicts with existing EXOMEM_GITHUB_USER_ID"
                 )
-            report("github_id", "[skipped: already set — kept stable]")
-        elif github_user_id is not None:
-            resolved_user_id = _positive_user_id(github_user_id)
             report("github_id", "[done] supplied explicitly")
         else:
             identity = github_user_resolver(github_username)
@@ -379,8 +389,22 @@ def run_remote_setup(
                     "GitHub resolved a different login; use the canonical login or "
                     "provide --github-user-id for offline setup"
                 )
-            resolved_user_id = _positive_user_id(identity.get("id"))
-            report("github_id", "[done] resolved immutable ID")
+            online_user_id = _positive_user_id(identity.get("id"))
+            if (
+                preserved_user_id is not None
+                and online_user_id != preserved_user_id
+            ):
+                raise ValueError(
+                    "GitHub login resolves to a different immutable user ID than "
+                    "the existing EXOMEM_GITHUB_USER_ID"
+                )
+            resolved_user_id = preserved_user_id or online_user_id
+            report(
+                "github_id",
+                "[skipped: existing ID verified and kept stable]"
+                if preserved_user_id is not None
+                else "[done] resolved immutable ID",
+            )
     except Exception as error:  # noqa: BLE001 - setup boundary, before any write
         print_fn(f"setup --remote: could not establish GitHub identity: {error}")
         return 2
@@ -396,12 +420,34 @@ def run_remote_setup(
     # Active/passive auth state and the writer lease share one authenticated
     # coordinator. If HA is configured, converge all three credential views to
     # one value. Reject conflicts before touching the environment file.
+    writer_url = _existing("EXOMEM_WRITER_LEASE_URL").strip()
+    storage_url = _existing("EXOMEM_OAUTH_STORAGE_URL").strip()
+    storage_namespace = (
+        _existing("EXOMEM_OAUTH_STORAGE_NAMESPACE").strip()
+        or _existing("EXOMEM_WRITER_LEASE_VAULT_ID").strip()
+    )
     ha_enabled = bool(
-        _existing("EXOMEM_WRITER_LEASE_URL").strip()
-        or _existing("EXOMEM_OAUTH_STORAGE_URL").strip()
+        writer_url
+        or storage_url
+        or _existing("EXOMEM_WRITER_LEASE_REPLICA_ID").strip()
     )
     storage_credential: str | None = None
     if ha_enabled:
+        missing_ha = [
+            name
+            for name, value in (
+                ("EXOMEM_WRITER_LEASE_URL", writer_url),
+                ("EXOMEM_OAUTH_STORAGE_URL", storage_url),
+                ("EXOMEM_OAUTH_STORAGE_NAMESPACE or EXOMEM_WRITER_LEASE_VAULT_ID", storage_namespace),
+            )
+            if not value
+        ]
+        if missing_ha:
+            print_fn(
+                "setup --remote: HA durable sessions require "
+                f"{', '.join(missing_ha)}. No changes were written."
+            )
+            return 2
         token_keys = (
             "EXOMEM_LEASE_COORDINATOR_TOKEN",
             "EXOMEM_WRITER_LEASE_TOKEN",
