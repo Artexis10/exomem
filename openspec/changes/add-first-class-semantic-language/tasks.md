@@ -18,7 +18,7 @@
 
 - [ ] 3.1 Add failing tests for per-rule multi-project contract resolution, specificity, compatible conjunction, warn/strict/off modes, category/kind requirements, unknown-category policy, equal-specificity conflicts, and strict pre-write rejection.
 - [ ] 3.2 Add failing lifecycle tests for every exact qualifying-relation predicate branch, normal origins, the frontmatter+supersession-only exception, family exclusions, target resolution, fingerprint-bound reviewed-none, empty-corpus bootstrap expiry, invalid placeholder, generic-link exclusion, and provenance separation.
-- [ ] 3.3 Extend saved memory contracts and infer/validate/diff output to semantic-unit kinds/categories with deterministic scope resolution.
+- [x] 3.3 Extend saved memory contracts and infer/validate/diff output to semantic-unit kinds/categories with deterministic scope resolution.
 - [ ] 3.4 Implement one pure semantic contract result over fields, units, categories, typed relations, schema findings, page lifecycle, and review disposition, with precommit-blocking and posthoc-nonblocking caller modes.
 - [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output and atomic unchanged-draft commit/reuse guards.
 - [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
