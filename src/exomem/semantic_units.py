@@ -203,7 +203,7 @@ class SemanticUnitDocument:
     units: tuple[SemanticUnit, ...]
     errors: tuple[SemanticUnitDiagnostic, ...] = ()
     warnings: tuple[SemanticUnitDiagnostic, ...] = ()
-    parent_ref: str = ""
+    parent_ref: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
@@ -260,7 +260,8 @@ class SemanticUnitDocument:
         ambiguous = [
             unit
             for unit in self.units
-            if unit.anchor
+            if self.parent_ref
+            and unit.anchor
             and _anchored_unit_ref(self.parent_ref, unit.anchor) == requested
         ]
         if len(ambiguous) > 1:
@@ -424,9 +425,10 @@ def parse_semantic_units(
     )
 
 
-def _effective_parent_ref(parent_ref: str | None, path: str) -> str:
+def _effective_parent_ref(parent_ref: str | None, path: str) -> str | None:
     if parent_ref is None:
-        return context_refs.vault_ref(path)
+        legacy_ref = context_refs.vault_ref(path)
+        return legacy_ref if legacy_ref != "exomem://vault/" else None
     parsed = memory_refs.parse_memory_ref(str(parent_ref))
     if parsed is None:
         raise ValueError("parent_ref must be a canonical exomem://memory/<uuid> reference")
@@ -436,7 +438,7 @@ def _effective_parent_ref(parent_ref: str | None, path: str) -> str:
 def _bind_unit_identities(
     units: list[SemanticUnit],
     *,
-    parent_ref: str,
+    parent_ref: str | None,
     path: str,
     validate: bool,
 ) -> tuple[tuple[SemanticUnit, ...], list[SemanticUnitDiagnostic]]:
@@ -455,7 +457,7 @@ def _bind_unit_identities(
             fingerprint = fingerprint_semantic_unit(unit)
             unit_ref = (
                 None
-                if unit.anchor in duplicate_anchors
+                if parent_ref is None or unit.anchor in duplicate_anchors
                 else _anchored_unit_ref(parent_ref, unit.anchor)
             )
             occurrence = None
@@ -464,7 +466,11 @@ def _bind_unit_identities(
             occurrence = occurrences.get(signature_key, 0) + 1
             occurrences[signature_key] = occurrence
             fingerprint = fingerprint_semantic_unit(unit, occurrence=occurrence)
-            unit_ref = f"{parent_ref}#unit-{fingerprint}"
+            unit_ref = (
+                f"{parent_ref}#unit-{fingerprint}"
+                if parent_ref is not None
+                else None
+            )
         bound.append(
             replace(
                 unit,

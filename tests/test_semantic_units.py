@@ -365,6 +365,22 @@ def test_legacy_compact_anchor_binds_to_percent_encoded_path_reference() -> None
     )
 
 
+def test_identity_pathless_units_are_fingerprinted_but_remain_unbound() -> None:
+    markdown = "- [config] Anchored ^local\n- [config] Anonymous\n"
+
+    first = parse_semantic_units(markdown)
+    second = parse_semantic_units(markdown)
+
+    assert len(first.units) == 2
+    assert first.parent_ref is None
+    assert [unit.parent_ref for unit in first.units] == [None, None]
+    assert [unit.unit_ref for unit in first.units] == [None, None]
+    assert all(unit.fingerprint and len(unit.fingerprint) == 64 for unit in first.units)
+    assert [unit.fingerprint for unit in first.units] == [
+        unit.fingerprint for unit in second.units
+    ]
+
+
 def test_identity_stable_compact_and_legacy_rich_anchors_are_uri_encoded() -> None:
     markdown = """\
 - [config] Compact ^compact-1
