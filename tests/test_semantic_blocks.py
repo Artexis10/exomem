@@ -178,6 +178,35 @@ A.
     assert [block.type for block in document.blocks] == ["finding", "risk", "action"]
 
 
+def test_optional_kind_resolver_adds_custom_heading_without_changing_defaults() -> None:
+    markdown = "## Protocol\n\nCustom.\n\n## Background\n\nOrdinary.\n"
+    calls: list[str] = []
+
+    def resolve(label: str) -> str | None:
+        calls.append(label)
+        return "protocol" if label == "Protocol" else None
+
+    default = semantic_blocks.parse_semantic_blocks(markdown)
+    extended = semantic_blocks.parse_semantic_blocks(markdown, kind_resolver=resolve)
+
+    assert default.blocks == []
+    assert [(block.type, block.body) for block in extended.blocks] == [
+        ("protocol", "Custom.")
+    ]
+    assert calls == ["Protocol", "Background"]
+
+
+def test_builtin_heading_wins_without_calling_custom_kind_resolver() -> None:
+    calls: list[str] = []
+
+    def resolve(label: str) -> str | None:
+        calls.append(label)
+        return "protocol"
+
+    assert semantic_blocks.normalize_block_type("Findings", resolver=resolve) == "finding"
+    assert calls == []
+
+
 def test_fenced_code_is_ignored() -> None:
     markdown = """\
 ```markdown

@@ -5,7 +5,7 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from exomem import semantic_units
+from exomem import semantic_language_registry, semantic_units
 from exomem.semantic_blocks import parse_semantic_blocks
 from exomem.semantic_units import canonicalize_category, parse_semantic_units
 
@@ -631,6 +631,132 @@ def test_identity_registry_resolved_category_does_not_affect_fingerprint() -> No
         alias_resolved,
         occurrence=alias_resolved.occurrence,
     ) == unit.fingerprint
+
+
+def test_registry_alias_resolves_compact_and_rich_categories_without_identity_drift() -> None:
+    markdown = "- [configuration] Value\n\n## Decision\n- category: configuration\n\nBody.\n"
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {
+                "config": {
+                    "description": "Configuration",
+                    "aliases": ["configuration"],
+                }
+            },
+            "kinds": {},
+        }
+    )
+
+    baseline = parse_semantic_units(markdown, parent_ref=STABLE_PARENT_REF)
+    resolved = parse_semantic_units(
+        markdown,
+        parent_ref=STABLE_PARENT_REF,
+        language_registry=registry,
+    )
+
+    assert [unit.category_raw for unit in resolved.units] == [
+        "configuration",
+        "configuration",
+    ]
+    assert [unit.category_key for unit in resolved.units] == [
+        "configuration",
+        "configuration",
+    ]
+    assert [unit.category for unit in resolved.units] == ["config", "config"]
+    assert [unit.fingerprint for unit in resolved.units] == [
+        unit.fingerprint for unit in baseline.units
+    ]
+    assert [unit.unit_ref for unit in resolved.units] == [
+        unit.unit_ref for unit in baseline.units
+    ]
+
+
+def test_registry_custom_kind_requires_in_scope_injection_and_is_parsed_once() -> None:
+    markdown = "## Protocol\n- id: p1\n\nFollow it.\n"
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {},
+            "kinds": {
+                "protocol": {
+                    "description": "Repeatable protocol",
+                    "heading_aliases": ["Protocols"],
+                    "scope": {"projects": ["alpha"]},
+                }
+            },
+        }
+    )
+
+    default = parse_semantic_units(markdown)
+    in_scope = parse_semantic_units(
+        markdown,
+        language_registry=registry,
+        project="alpha",
+    )
+    out_of_scope = parse_semantic_units(
+        markdown,
+        language_registry=registry,
+        project="beta",
+    )
+
+    assert default.units == ()
+    assert [(unit.form, unit.kind, unit.category) for unit in in_scope.units] == [
+        ("rich", "protocol", "protocol")
+    ]
+    assert len(in_scope.semantic_blocks) == 1
+    assert out_of_scope.units == ()
+
+
+def test_registry_scope_finding_falls_back_to_authored_category() -> None:
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {
+                "config": {
+                    "description": "Configuration",
+                    "aliases": ["configuration"],
+                    "scope": {"page_types": ["runbook"]},
+                }
+            },
+            "kinds": {},
+        }
+    )
+
+    document = parse_semantic_units(
+        "- [configuration] Value\n",
+        path="note.md",
+        language_registry=registry,
+        page_type="note",
+    )
+
+    assert document.units[0].category == "configuration"
+    assert [(warning.code, warning.severity) for warning in document.warnings] == [
+        ("scope_violation", "warning")
+    ]
+
+
+def test_invalid_injected_registry_fails_closed_with_structured_findings() -> None:
+    registry = semantic_language_registry.load_registry(
+        proposal={
+            "schema_version": 1,
+            "categories": {
+                "config": {"description": "Config", "aliases": ["shared"]},
+                "rule": {"description": "Rule", "aliases": ["shared"]},
+            },
+            "kinds": {},
+        }
+    )
+
+    document = parse_semantic_units(
+        "- [shared] Value\n",
+        path="conflict.md",
+        language_registry=registry,
+    )
+
+    assert document.units[0].category == "shared"
+    assert document.errors
+    assert {error.code for error in document.errors} >= {"alias_conflict"}
 
 
 def test_identity_exact_resolution_rejects_missing_and_stale_references() -> None:

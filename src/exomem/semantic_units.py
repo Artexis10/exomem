@@ -17,7 +17,7 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
-from . import context_refs, memory_refs, semantic_blocks
+from . import context_refs, memory_refs, semantic_blocks, semantic_language_registry
 from .semantic_blocks import SemanticRelation
 
 _COMPACT_RE = re.compile(
@@ -335,6 +335,9 @@ def parse_semantic_units(
     path: str = "",
     parent_ref: str | None = None,
     validate: bool = True,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    project: str | None = None,
+    page_type: str | None = None,
 ) -> SemanticUnitDocument:
     """Parse compact observations and rich semantic blocks exactly once each."""
     source = markdown or ""
@@ -345,6 +348,10 @@ def parse_semantic_units(
     units: list[SemanticUnit] = []
     errors: list[SemanticUnitDiagnostic] = []
     warnings: list[SemanticUnitDiagnostic] = []
+    if validate and language_registry is not None:
+        for finding in language_registry.findings:
+            diagnostic = _registry_diagnostic(finding, path=source_path)
+            (warnings if diagnostic.severity == "warning" else errors).append(diagnostic)
 
     _parse_compact_units(
         lines,
@@ -354,7 +361,21 @@ def parse_semantic_units(
         errors=errors,
     )
 
-    rich_document = semantic_blocks.parse_semantic_blocks(source, validate=validate)
+    kind_resolver = None
+    if language_registry is not None:
+
+        def kind_resolver(label: str) -> str | None:
+            return language_registry.resolve_heading(
+                label,
+                project=project,
+                page_type=page_type,
+            ).resolved
+
+    rich_document = semantic_blocks.parse_semantic_blocks(
+        source,
+        validate=validate,
+        kind_resolver=kind_resolver,
+    )
     for block in rich_document.blocks:
         span = _span_for_line_range(source, line_by_number, block.line, block.end_line)
         category_raw, category_key, category_error = _rich_category(
@@ -407,6 +428,29 @@ def parse_semantic_units(
             )
         )
 
+    if language_registry is not None:
+        resolved_units: list[SemanticUnit] = []
+        for unit in units:
+            resolution = language_registry.resolve_category(
+                unit.category_raw,
+                project=project,
+                page_type=page_type,
+            )
+            resolved_units.append(
+                replace(unit, category=resolution.resolved or unit.category_key)
+            )
+            if validate and resolution.status != "registry_invalid":
+                for finding in resolution.findings:
+                    diagnostic = _registry_diagnostic(
+                        finding,
+                        path=source_path,
+                        unit=unit,
+                    )
+                    (warnings if diagnostic.severity == "warning" else errors).append(
+                        diagnostic
+                    )
+        units = resolved_units
+
     units.sort(key=lambda unit: (unit.span.start_offset, unit.form))
     bound_units, identity_errors = _bind_unit_identities(
         units,
@@ -422,6 +466,29 @@ def parse_semantic_units(
         errors=tuple(errors),
         warnings=tuple(warnings),
         parent_ref=effective_parent_ref,
+    )
+
+
+def _registry_diagnostic(
+    finding: Mapping[str, str],
+    *,
+    path: str,
+    unit: SemanticUnit | None = None,
+) -> SemanticUnitDiagnostic:
+    severity = finding.get("severity", "error")
+    detail = finding.get("detail", "semantic-language registry validation failed")
+    return SemanticUnitDiagnostic(
+        code=finding.get("code", "invalid_semantic_language_registry"),
+        message=detail,
+        path=path,
+        span=unit.span if unit is not None else None,
+        line=unit.line if unit is not None else None,
+        raw=unit.span.text if unit is not None else detail,
+        remediation=(
+            "Review the semantic-language registry definition and its scope before "
+            "using this category or kind."
+        ),
+        severity=severity,
     )
 
 

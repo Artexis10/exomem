@@ -24,6 +24,11 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert (kb / "log.md").exists()
     assert (kb / "_Schema" / "SKILL.md").exists()
     assert (kb / "_Schema" / "workflow-skills" / "index.yaml").exists()
+    semantic_registry = kb / "_Schema" / "semantic-language-registry.yaml"
+    assert semantic_registry.exists()
+    assert semantic_registry.read_text(encoding="utf-8") == (
+        "schema_version: 1\ncategories: {}\nkinds: {}\n"
+    )
     assert (
         kb / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
     ).exists()

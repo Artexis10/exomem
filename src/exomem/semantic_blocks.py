@@ -9,6 +9,7 @@ validation only; no model, sidecar, or graph store is involved.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -188,11 +189,17 @@ def normalize_label(label: str) -> str:
     return normalized.strip("_")
 
 
-def normalize_block_type(label: str) -> str | None:
+def normalize_block_type(
+    label: str,
+    *,
+    resolver: Callable[[str], str | None] | None = None,
+) -> str | None:
     """Return the canonical semantic block type for a heading label."""
     normalized = normalize_label(label)
     block_type = _BLOCK_TYPE_ALIASES.get(normalized, normalized)
-    return block_type if block_type in BLOCK_TYPES else None
+    if block_type in BLOCK_TYPES:
+        return block_type
+    return resolver(label) if resolver is not None else None
 
 
 def parse_semantic_blocks(
@@ -200,6 +207,7 @@ def parse_semantic_blocks(
     *,
     validate: bool = True,
     registry: relation_registry.RelationRegistry | None = None,
+    kind_resolver: Callable[[str], str | None] | None = None,
 ) -> SemanticBlockDocument:
     """Parse semantic blocks from Markdown.
 
@@ -243,7 +251,7 @@ def parse_semantic_blocks(
         if heading and not in_fence:
             flush(line_number - 1)
             title = heading.group(2).strip()
-            block_type = normalize_block_type(title)
+            block_type = normalize_block_type(title, resolver=kind_resolver)
             if block_type is not None:
                 current = (block_type, title, len(heading.group(1)), line_number, [])
             continue
