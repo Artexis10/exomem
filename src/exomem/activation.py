@@ -13,7 +13,12 @@ from typing import Any
 
 import yaml
 
-from . import access, markdown_relations, relation_registry, semantic_blocks
+from . import (
+    access,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from . import find as find_module
 from .audit import AuditFinding
 from .vault import content_hash, find_body_wikilinks, kb_root
@@ -62,6 +67,7 @@ def scan(vault_root: Path) -> ActivationScan:
     """Measure activation coverage and review deficits in one tolerant vault walk."""
     vault_root = Path(vault_root)
     registry = relation_registry.load_registry(vault_root)
+    language_registry = semantic_language_registry.load_registry(vault_root)
     findings: list[AuditFinding] = []
     coverage = {
         "eligible_pages": 0,
@@ -87,7 +93,7 @@ def scan(vault_root: Path) -> ActivationScan:
             continue
 
         coverage["eligible_pages"] += 1
-        measurement = _measure_page(page, registry)
+        measurement = _measure_page(page, registry, language_registry=language_registry)
         meta = {
             "signal_version": _signal_version(page),
             "typed_relations": measurement["typed_relations"],
@@ -145,21 +151,27 @@ def _eligible(vault_root: Path, page: Any) -> bool:
     return not bool(_SKIP_TAGS & set(page.tags))
 
 
-def _measure_page(page: Any, registry: relation_registry.RelationRegistry) -> dict[str, Any]:
+def _measure_page(
+    page: Any,
+    registry: relation_registry.RelationRegistry,
+    *,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+) -> dict[str, Any]:
     project = _page_project(page.frontmatter)
-    note_doc = markdown_relations.parse_markdown_relations(
+    document = semantic_units.parse_semantic_units(
         page.body,
-        include_legacy=True,
-        relation_types=registry.keys | frozenset(registry.aliases),
-        retain_unknown=True,
-    )
-    block_doc = semantic_blocks.parse_semantic_blocks(
-        page.body, validate=False, registry=registry
+        validate=False,
+        language_registry=language_registry,
+        relation_registry=registry,
+        include_legacy_relations=True,
+        retain_unknown_relations=True,
+        project=project,
+        page_type=page.page_type,
     )
 
     registered: list[str] = []
     unregistered: list[dict[str, str | int]] = []
-    for relation in note_doc.relations:
+    for relation in document.note_relations:
         resolution = registry.resolve(
             relation.kind,
             project=project,
@@ -174,19 +186,22 @@ def _measure_page(page: Any, registry: relation_registry.RelationRegistry) -> di
         else:
             registered.append(resolution.canonical)
 
-    for block in block_doc.blocks:
-        for relation in block.relations:
+    for unit in document.rich_units:
+        for relation in unit.relations:
             raw = relation.raw.split(":", 1)[0].strip()
             resolution = registry.resolve(
                 raw,
                 project=project,
                 page_type=page.page_type,
-                source_kind=block.type,
+                source_kind=unit.kind,
                 origin="semantic_relation",
             )
             if resolution.canonical is None:
                 unregistered.append(
-                    {"label": relation_registry.normalize_relation(raw), "anchor": block.id or f"line-{relation.line}"}
+                    {
+                        "label": relation_registry.normalize_relation(raw),
+                        "anchor": unit.anchor or f"line-{relation.line}",
+                    }
                 )
             else:
                 registered.append(resolution.canonical)
@@ -201,14 +216,14 @@ def _measure_page(page: Any, registry: relation_registry.RelationRegistry) -> di
 
     body_wikilinks = sum(1 for _ in find_body_wikilinks(page.body))
     assertion_blocks = sum(
-        1 for block in block_doc.blocks if block.type in _ASSERTION_BLOCK_TYPES
+        1 for unit in document.rich_units if unit.kind in _ASSERTION_BLOCK_TYPES
     )
     provenance_relations = sum(1 for kind in registered if kind in _PROVENANCE_RELATIONS)
     unique_unknown = {
         (str(item["label"]), str(item["anchor"])): item for item in unregistered
     }
-    authored_relations = len(note_doc.relations) + sum(
-        len(block.relations) for block in block_doc.blocks
+    authored_relations = len(document.note_relations) + sum(
+        len(unit.relations) for unit in document.rich_units
     )
     return {
         "connected": bool(body_wikilinks or frontmatter_links or authored_relations),

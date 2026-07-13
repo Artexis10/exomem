@@ -5,7 +5,12 @@ from dataclasses import FrozenInstanceError, replace
 
 import pytest
 
-from exomem import semantic_language_registry, semantic_units
+from exomem import (
+    markdown_relations,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from exomem.semantic_blocks import parse_semantic_blocks
 from exomem.semantic_units import canonicalize_category, parse_semantic_units
 
@@ -292,6 +297,97 @@ Rich body.
     assert document.legacy_semantic_blocks == document.semantic_blocks
     assert len(document.semantic_blocks) == 1
     assert len([unit for unit in document.units if unit.form == "rich"]) == 1
+
+
+def test_shared_document_carries_compact_rich_and_note_relations() -> None:
+    markdown = """\
+- [claim] Compact observation
+
+## Claim
+- id: rich-claim
+
+Rich claim.
+
+## Relations
+- supports [[Architecture]]
+"""
+
+    document = parse_semantic_units(markdown)
+
+    assert [unit.form for unit in document.units] == ["compact", "rich"]
+    assert [unit.anchor for unit in document.rich_units] == ["rich-claim"]
+    assert [relation.kind for relation in document.note_relations] == ["supports"]
+    assert document.note_relation_errors == ()
+
+
+def test_exact_legacy_block_projection_and_diagnostics_retain_block_id() -> None:
+    markdown = """\
+## Claim
+- id: repeated
+
+First.
+
+## Decision
+- id: repeated
+
+Second.
+"""
+    legacy = parse_semantic_blocks(markdown)
+
+    document = parse_semantic_units(markdown)
+
+    assert document.semantic_blocks == [block.to_dict() for block in legacy.blocks]
+    assert document.semantic_block_errors == tuple(legacy.errors)
+    assert document.semantic_block_warnings == tuple(legacy.warnings)
+    assert document.legacy_semantic_block_errors == [
+        finding.to_dict() for finding in legacy.errors
+    ]
+    assert document.legacy_semantic_block_warnings == [
+        finding.to_dict() for finding in legacy.warnings
+    ]
+    assert document.legacy_semantic_block_warnings == [
+        {
+            "code": "duplicate_id",
+            "message": "duplicate semantic block id: repeated",
+            "line": 6,
+            "block_id": "repeated",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    ("include_legacy", "retain_unknown"),
+    [(False, False), (True, False), (True, True)],
+)
+def test_note_relation_modes_match_direct_parser(
+    include_legacy: bool,
+    retain_unknown: bool,
+) -> None:
+    markdown = """\
+## Relations
+- supports: [[A]]
+
+Legacy style agrees_with: [[B]]
+- invented.edge: [[C]]
+"""
+    registry = relation_registry.core_registry()
+    expected = markdown_relations.parse_markdown_relations(
+        markdown,
+        include_legacy=include_legacy,
+        relation_types=registry.keys | frozenset(registry.aliases),
+        retain_unknown=retain_unknown,
+    )
+
+    document = parse_semantic_units(
+        markdown,
+        relation_registry=registry,
+        include_legacy_relations=include_legacy,
+        retain_unknown_relations=retain_unknown,
+    )
+
+    assert document.note_relations == tuple(expected.relations)
+    assert document.note_relation_errors == tuple(expected.errors)
+    assert document.canonical_note_relations == tuple(expected.canonical_relations)
 
 
 def test_legacy_diagnostics_are_normalized_with_source_context() -> None:

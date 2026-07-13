@@ -47,7 +47,13 @@ from pathlib import Path
 
 import yaml
 
-from . import access, indexes, markdown_relations, semantic_blocks
+from . import (
+    access,
+    indexes,
+    relation_registry,
+    semantic_language_registry,
+    semantic_units,
+)
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -1102,6 +1108,8 @@ def _check_relation_debt(
 ) -> list[AuditFinding]:
     """Surface active compiled pages with no explicit outbound Markdown edges."""
     findings: list[AuditFinding] = []
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
     for page in pages:
         if page.page_type not in _RELATION_DEBT_TYPES:
             continue
@@ -1117,12 +1125,15 @@ def _check_relation_debt(
         if _STALE_SKIP_TAGS & set(page.tags):
             continue
 
-        note_relations = markdown_relations.parse_markdown_relations(page.body)
-        block_relations = semantic_blocks.parse_semantic_blocks(
-            page.body, validate=False
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            page_type=page.page_type,
         )
-        typed_count = len(note_relations.relations) + sum(
-            len(block.relations) for block in block_relations.blocks
+        typed_count = len(document.note_relations) + sum(
+            len(unit.relations) for unit in document.rich_units
         )
         body_link_count = sum(1 for _ in find_body_wikilinks(page.body))
         if typed_count or body_link_count:

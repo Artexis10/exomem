@@ -69,6 +69,37 @@ def test_inference_profiles_fields_blocks_relations_and_enums(tmp_path: Path) ->
     assert proposal["unknown_fields"] == "allow"
 
 
+def test_contract_inference_and_validation_parse_each_page_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = tmp_path / "vault"
+    pages = _seed_pages(vault)
+    parse_calls = 0
+    original_parse = memory_schema.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(
+        memory_schema.semantic_units, "parse_semantic_units", counted_parse
+    )
+    inferred = memory_schema.infer_contract(
+        vault, name="one-parse", project="atlas", page_type="insight"
+    )
+
+    assert parse_calls == len(pages)
+
+    parse_calls = 0
+    contract = memory_schema.contract_from_dict(inferred["proposal"])
+    validation = memory_schema.validate_contract(vault, contract)
+
+    assert validation["valid"] is True
+    assert parse_calls == len(pages)
+
+
 def test_canonical_relations_drive_contract_inference_validation_and_diff(
     tmp_path: Path,
 ) -> None:

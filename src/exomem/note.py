@@ -35,7 +35,7 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import corpus_aware, indexes, markdown_relations, memory_refs, semantic_blocks
+from . import corpus_aware, indexes, memory_refs, semantic_units
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
@@ -127,17 +127,16 @@ def _build_write_feedback(
     backrefs_planned: int,
     suggestions_count: int,
 ) -> dict:
-    document = semantic_blocks.parse_semantic_blocks(body_clean)
-    relation_document = markdown_relations.parse_markdown_relations(body_clean)
+    document = semantic_units.parse_semantic_units(body_clean)
     by_kind: dict[str, int] = {}
-    for block in document.blocks:
-        by_kind[block.type] = by_kind.get(block.type, 0) + 1
+    for unit in document.rich_units:
+        by_kind[unit.kind] = by_kind.get(unit.kind, 0) + 1
 
-    note_relation_lines = {relation.line for relation in relation_document.relations}
+    note_relation_lines = {relation.line for relation in document.note_relations}
     block_relation_lines = {
         relation.line
-        for block in document.blocks
-        for relation in block.relations
+        for unit in document.rich_units
+        for relation in unit.relations
     }
     typed_lines = note_relation_lines | block_relation_lines
 
@@ -155,8 +154,8 @@ def _build_write_feedback(
             seen_generic_targets.add(target)
             generic_targets.append(target)
 
-    typed_note_relations = len(relation_document.relations)
-    typed_block_relations = sum(len(block.relations) for block in document.blocks)
+    typed_note_relations = len(document.note_relations)
+    typed_block_relations = sum(len(unit.relations) for unit in document.rich_units)
     relation_debt = not (
         typed_note_relations
         or typed_block_relations
@@ -185,10 +184,12 @@ def _build_write_feedback(
         "contract": "compiled-note",
         "note_type": note_type,
         "semantic_blocks": {
-            "total": len(document.blocks),
+            "total": len(document.rich_units),
             "by_kind": by_kind,
-            "errors": [error.to_dict() for error in document.errors],
-            "warnings": [warning.to_dict() for warning in document.warnings],
+            "errors": [error.to_dict() for error in document.semantic_block_errors],
+            "warnings": [
+                warning.to_dict() for warning in document.semantic_block_warnings
+            ],
         },
         "sources": {
             "cited": len(sources_norm),
@@ -204,7 +205,7 @@ def _build_write_feedback(
         "relations": {
             "typed_note": typed_note_relations,
             "typed_block": typed_block_relations,
-            "errors": [error.as_dict() for error in relation_document.errors],
+            "errors": [error.as_dict() for error in document.note_relation_errors],
             "relation_debt": relation_debt,
         },
         "suggestions": {

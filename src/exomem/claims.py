@@ -48,7 +48,7 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import embeddings, index_paths, semantic_blocks, sidecar_store
+from . import embeddings, index_paths, semantic_units, sidecar_store
 from .kbdir import kb_dirname
 
 log = logging.getLogger(__name__)
@@ -215,7 +215,15 @@ def extract_claim_text(
     the return contract (a short claim string, or None) stays the same.
     """
     title = (title or "").strip()
-    semantic_claim = semantic_blocks.first_block_body(body or "", "claim")
+    document = semantic_units.parse_semantic_units(body or "", validate=False)
+    semantic_claim = next(
+        (
+            unit.body
+            for unit in document.rich_units
+            if unit.kind == "claim" and unit.body and unit.body.strip()
+        ),
+        None,
+    )
     if semantic_claim:
         claim_body = _cap_words(semantic_claim.strip())
         if title and claim_body:
@@ -499,7 +507,8 @@ class ClaimIndex:
         """Wipe + re-extract/re-embed a claim for every compiled page. Returns the
         row count. The recovery path (mirrors `EmbeddingIndex.rebuild_all`) for a
         lost/stale sidecar; safe to call from an audit-fix lane."""
-        from . import access, find as find_module
+        from . import access
+        from . import find as find_module
 
         kb = self.vault_root / kb_dirname()
         if not kb.is_dir():
@@ -576,7 +585,8 @@ def upsert_claims_after_write(vault_root: Path, written_paths: list[Path]) -> No
         return
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         return
-    from . import access, find as find_module
+    from . import access
+    from . import find as find_module
 
     md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
     if not md_paths:

@@ -17,7 +17,14 @@ from types import MappingProxyType
 from typing import Any
 from urllib.parse import quote
 
-from . import context_refs, memory_refs, semantic_blocks, semantic_language_registry
+from . import (
+    context_refs,
+    markdown_relations,
+    memory_refs,
+    semantic_blocks,
+    semantic_language_registry,
+)
+from .relation_registry import RelationRegistry
 from .semantic_blocks import SemanticRelation
 
 _COMPACT_RE = re.compile(
@@ -208,27 +215,49 @@ class SemanticUnitDocument:
     errors: tuple[SemanticUnitDiagnostic, ...] = ()
     warnings: tuple[SemanticUnitDiagnostic, ...] = ()
     parent_ref: str | None = None
+    rich_blocks: tuple[semantic_blocks.SemanticBlock, ...] = ()
+    semantic_block_errors: tuple[semantic_blocks.SemanticBlockValidationError, ...] = ()
+    semantic_block_warnings: tuple[semantic_blocks.SemanticBlockValidationError, ...] = ()
+    note_relations: tuple[markdown_relations.MarkdownRelation, ...] = ()
+    note_relation_errors: tuple[markdown_relations.RelationValidationError, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "units", tuple(self.units))
         object.__setattr__(self, "errors", tuple(self.errors))
         object.__setattr__(self, "warnings", tuple(self.warnings))
+        object.__setattr__(self, "rich_blocks", tuple(self.rich_blocks))
+        object.__setattr__(self, "semantic_block_errors", tuple(self.semantic_block_errors))
+        object.__setattr__(self, "semantic_block_warnings", tuple(self.semantic_block_warnings))
+        object.__setattr__(self, "note_relations", tuple(self.note_relations))
+        object.__setattr__(self, "note_relation_errors", tuple(self.note_relation_errors))
 
     @property
     def is_valid(self) -> bool:
         return not self.errors
 
     @property
+    def rich_units(self) -> tuple[SemanticUnit, ...]:
+        return tuple(unit for unit in self.units if unit.form == "rich")
+
+    @property
     def semantic_blocks(self) -> list[dict[str, Any]]:
-        return [
-            projection
-            for unit in self.units
-            if (projection := unit.to_legacy_block_dict()) is not None
-        ]
+        return [block.to_dict() for block in self.rich_blocks]
 
     @property
     def legacy_semantic_blocks(self) -> list[dict[str, Any]]:
         return self.semantic_blocks
+
+    @property
+    def legacy_semantic_block_errors(self) -> list[dict[str, Any]]:
+        return [finding.to_dict() for finding in self.semantic_block_errors]
+
+    @property
+    def legacy_semantic_block_warnings(self) -> list[dict[str, Any]]:
+        return [finding.to_dict() for finding in self.semantic_block_warnings]
+
+    @property
+    def canonical_note_relations(self) -> tuple[markdown_relations.MarkdownRelation, ...]:
+        return tuple(relation for relation in self.note_relations if relation.canonical)
 
     def resolve_unit(
         self,
@@ -279,6 +308,21 @@ class SemanticUnitDocument:
             "errors": [error.to_dict() for error in self.errors],
             "warnings": [warning.to_dict() for warning in self.warnings],
             "semantic_blocks": self.semantic_blocks,
+            "semantic_block_errors": self.legacy_semantic_block_errors,
+            "semantic_block_warnings": self.legacy_semantic_block_warnings,
+            "note_relations": [
+                {
+                    "kind": relation.kind,
+                    "target": relation.target,
+                    "raw": relation.raw,
+                    "line": relation.line,
+                    "canonical": relation.canonical,
+                }
+                for relation in self.note_relations
+            ],
+            "note_relation_errors": [
+                finding.as_dict() for finding in self.note_relation_errors
+            ],
         }
 
 
@@ -340,6 +384,9 @@ def parse_semantic_units(
     parent_ref: str | None = None,
     validate: bool = True,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    relation_registry: RelationRegistry | None = None,
+    include_legacy_relations: bool = False,
+    retain_unknown_relations: bool = False,
     project: str | None = None,
     page_type: str | None = None,
 ) -> SemanticUnitDocument:
@@ -394,7 +441,18 @@ def parse_semantic_units(
     rich_document = semantic_blocks.parse_semantic_blocks(
         source,
         validate=validate,
+        registry=relation_registry,
         kind_resolver=kind_resolver,
+    )
+    note_relation_document = markdown_relations.parse_markdown_relations(
+        source,
+        include_legacy=include_legacy_relations,
+        relation_types=(
+            relation_registry.keys | frozenset(relation_registry.aliases)
+            if relation_registry is not None
+            else None
+        ),
+        retain_unknown=retain_unknown_relations,
     )
     for block in rich_document.blocks:
         span = _span_for_line_range(source, line_by_number, block.line, block.end_line)
@@ -497,6 +555,11 @@ def parse_semantic_units(
         errors=tuple(errors),
         warnings=tuple(warnings),
         parent_ref=effective_parent_ref,
+        rich_blocks=tuple(rich_document.blocks),
+        semantic_block_errors=tuple(rich_document.errors),
+        semantic_block_warnings=tuple(rich_document.warnings),
+        note_relations=tuple(note_relation_document.relations),
+        note_relation_errors=tuple(note_relation_document.errors),
     )
 
 

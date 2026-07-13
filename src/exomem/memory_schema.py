@@ -13,9 +13,7 @@ import yaml
 
 from . import (
     epistemic_graph,
-    markdown_relations,
     relation_registry,
-    semantic_blocks,
     semantic_language_registry,
     semantic_units,
     traversal_profiles,
@@ -81,6 +79,8 @@ def infer_contract(
     field_values: dict[str, Counter[str]] = {}
     block_counts: Counter[str] = Counter()
     relation_counts: Counter[str] = Counter()
+    relations = relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
 
     for page in pages:
         for key, value in page.frontmatter.items():
@@ -89,9 +89,22 @@ def infer_contract(
             field_types.setdefault(key, Counter())[_value_type(value)] += 1
             if isinstance(value, (str, bool, int, float, dt.date)):
                 field_values.setdefault(key, Counter())[str(value)] += 1
-        document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
-        page_blocks = {block.type for block in document.blocks}
-        page_relations = _page_relations(vault_root, page, document)
+        page_project = next(iter(sorted(_page_projects(page.frontmatter))), None)
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=relations,
+            include_legacy_relations=True,
+            retain_unknown_relations=True,
+            project=page_project,
+            page_type=page.page_type,
+        )
+        page_blocks = {unit.kind for unit in document.rich_units}
+        page_relations = _page_relations(
+            vault_root, page, document, registry=relations
+        )
         block_counts.update(page_blocks)
         relation_counts.update(page_relations)
 
@@ -259,35 +272,41 @@ def _scan_relation_observations(
     registry: relation_registry.RelationRegistry | None = None,
 ) -> tuple[list[Any], list[dict[str, Any]]]:
     registry = registry or relation_registry.load_registry(vault_root)
+    language = semantic_language_registry.load_registry(vault_root)
     pages = _select_pages(vault_root, ContractScope(project, page_type))
     out: list[dict[str, Any]] = []
     for page in pages:
         page_project = next(iter(sorted(_page_projects(page.frontmatter))), None)
-        document = semantic_blocks.parse_semantic_blocks(
-            page.body, validate=False, registry=registry
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language,
+            relation_registry=registry,
+            include_legacy_relations=True,
+            retain_unknown_relations=True,
+            project=page_project,
+            page_type=page.page_type,
         )
-        for block in document.blocks:
-            for relation in block.relations:
+        for unit in document.rich_units:
+            for relation in unit.relations:
                 raw = relation.raw.split(":", 1)[0].strip()
                 resolution = registry.resolve(
                     raw,
                     project=page_project,
                     page_type=page.page_type,
-                    source_kind=block.type,
+                    source_kind=unit.kind,
                     origin="semantic_relation",
                 )
                 out.append(
                     _observation(
-                        page.rel_path, block.id or f"line-{relation.line}", raw, resolution
+                        page.rel_path,
+                        unit.anchor or f"line-{relation.line}",
+                        raw,
+                        resolution,
                     )
                 )
-        note_relations = markdown_relations.parse_markdown_relations(
-            page.body,
-            include_legacy=True,
-            relation_types=registry.keys | frozenset(registry.aliases),
-            retain_unknown=True,
-        )
-        for relation in note_relations.relations:
+        for relation in document.note_relations:
             raw = relation.kind
             resolution = registry.resolve(
                 raw,
@@ -858,10 +877,25 @@ def load_contract(vault_root: Path, name: str) -> tuple[MemoryContract, str, str
 def validate_contract(vault_root: Path, contract: MemoryContract, *, strict: bool = False) -> dict:
     pages = _select_pages(vault_root, contract.scope)
     findings: list[dict[str, Any]] = []
+    relations_registry = relation_registry.load_registry(vault_root)
+    language_registry = semantic_language_registry.load_registry(vault_root)
     for page in pages:
-        document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
-        blocks = {block.type for block in document.blocks}
-        relations = _page_relations(vault_root, page, document)
+        page_project = next(iter(sorted(_page_projects(page.frontmatter))), None)
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=language_registry,
+            relation_registry=relations_registry,
+            include_legacy_relations=True,
+            retain_unknown_relations=True,
+            project=page_project,
+            page_type=page.page_type,
+        )
+        blocks = {unit.kind for unit in document.rich_units}
+        relations = _page_relations(
+            vault_root, page, document, registry=relations_registry
+        )
         for field, rule in contract.fields.items():
             if rule.get("required") and field not in page.frontmatter:
                 findings.append(
@@ -999,10 +1033,21 @@ def _page_projects(frontmatter: dict[str, Any]) -> set[str]:
     return out
 
 
-def _page_relations(vault_root: Path, page, document) -> set[str]:
+def _page_relations(
+    vault_root: Path,
+    page,
+    document: semantic_units.SemanticUnitDocument,
+    *,
+    registry: relation_registry.RelationRegistry | None = None,
+) -> set[str]:
     return {
         edge.relation_type
-        for edge in epistemic_graph._edges_for_page(vault_root, page, tuple(document.blocks))
+        for edge in epistemic_graph._edges_for_page(
+            vault_root,
+            page,
+            document,
+            registry=registry,
+        )
         if edge.origin in CONTRACT_RELATION_ORIGINS and edge.relation_type is not None
     }
 

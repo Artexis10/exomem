@@ -6,7 +6,13 @@ import builtins
 from pathlib import Path
 from types import SimpleNamespace
 
-from exomem import corpus_aware, epistemic_graph
+from exomem import (
+    corpus_aware,
+    epistemic_graph,
+    markdown_relations,
+    semantic_blocks,
+    semantic_units,
+)
 
 SOURCE = "Knowledge Base/Sources/Articles/2026-07-08-source.md"
 EVIDENCE = "Knowledge Base/Evidence/Cases/receipt.md"
@@ -132,6 +138,232 @@ def test_rebuild_indexes_files_blocks_and_core_edges(tmp_path: Path) -> None:
     assert ("supersedes", CURRENT) in edge_types
     assert ("links_to", CURRENT) in edge_types
     assert ("evidenced_by", CURRENT) in edge_types
+
+
+def test_graph_rich_units_keep_legacy_keys_nodes_and_parse_once(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    vault = _seed_graph_vault(tmp_path)
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    current_path = vault / CURRENT
+    raw = current_path.read_text(encoding="utf-8")
+    page = epistemic_graph.find_module._parse_page(
+        current_path, current_path.stat().st_mtime, vault
+    )
+    legacy = semantic_blocks.parse_semantic_blocks(
+        page.body, validate=False, registry=idx.registry
+    )
+    document = semantic_units.parse_semantic_units(
+        page.body,
+        path=page.rel_path,
+        validate=False,
+        language_registry=idx.language_registry,
+        relation_registry=idx.registry,
+        include_legacy_relations=True,
+        retain_unknown_relations=True,
+        page_type=page.page_type,
+    )
+
+    assert len(document.rich_units) == len(legacy.blocks)
+    for block, unit in zip(legacy.blocks, document.rich_units, strict=True):
+        expected_material = "\n".join(
+            [
+                page.rel_path,
+                block.type,
+                block.id or f"line-{block.line}",
+                block.title,
+                block.body,
+            ]
+        )
+        assert epistemic_graph._block_key(page, unit) == (
+            f"block:{epistemic_graph._hash(expected_material)}"
+        )
+        node = epistemic_graph._block_node(page, unit, raw)
+        assert node.anchor == (
+            block.id
+            or semantic_blocks.normalize_label(block.title)
+            or f"line-{block.line}"
+        )
+        assert node.source_hash == epistemic_graph.vault_module.content_hash(raw)
+        assert node.line_start == block.line
+        assert node.line_end == block.end_line
+        assert node.metadata == {
+            **block.metadata,
+            "origin": "semantic_block",
+            "level": block.level,
+        }
+
+    parse_calls = 0
+    original_parse = epistemic_graph.semantic_units.parse_semantic_units
+
+    def counted_parse(*args, **kwargs):
+        nonlocal parse_calls
+        parse_calls += 1
+        return original_parse(*args, **kwargs)
+
+    monkeypatch.setattr(
+        epistemic_graph.semantic_units, "parse_semantic_units", counted_parse
+    )
+    idx.rebuild_all()
+
+    assert parse_calls == len(list(vault.rglob("*.md")))
+
+
+def test_graph_edges_exactly_match_legacy_parser_oracle(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source_rel = "Knowledge Base/Notes/Insights/edge-source.md"
+    rich_target = "Knowledge Base/Notes/Insights/rich-target"
+    note_target = "Knowledge Base/Notes/Insights/note-target"
+    generic_target = "Knowledge Base/Notes/Insights/generic-target"
+    for target in (rich_target, note_target, generic_target):
+        _write(vault, f"{target}.md", "---\ntype: insight\n---\n# Target\n")
+    source_path = _write(
+        vault,
+        source_rel,
+        f"""\
+---
+type: insight
+status: active
+---
+# Edge Source
+
+## Claim
+- id: claim-1
+- relations: supports: [[{rich_target}]]
+
+The rich claim.
+
+## Relations
+- refines [[{note_target}]]
+
+## Notes
+See [[{generic_target}]].
+""",
+    )
+    idx = epistemic_graph.EpistemicGraphIndex(vault)
+    page = epistemic_graph.find_module._parse_page(
+        source_path, source_path.stat().st_mtime, vault
+    )
+    source_hash = epistemic_graph.vault_module.content_hash(page.body)
+    legacy_block = semantic_blocks.parse_semantic_blocks(
+        page.body, validate=False, registry=idx.registry
+    ).blocks[0]
+    legacy_note_relation = markdown_relations.parse_markdown_relations(
+        page.body,
+        include_legacy=True,
+        relation_types=idx.registry.keys | frozenset(idx.registry.aliases),
+        retain_unknown=True,
+    ).relations[0]
+    document = semantic_units.parse_semantic_units(
+        page.body,
+        path=page.rel_path,
+        validate=False,
+        language_registry=idx.language_registry,
+        relation_registry=idx.registry,
+        include_legacy_relations=True,
+        retain_unknown_relations=True,
+        page_type=page.page_type,
+    )
+
+    file_key = epistemic_graph._file_key(source_rel)
+    block_key = "block:" + epistemic_graph._hash(
+        "\n".join(
+            [
+                source_rel,
+                legacy_block.type,
+                legacy_block.id or f"line-{legacy_block.line}",
+                legacy_block.title,
+                legacy_block.body,
+            ]
+        )
+    )
+    block_relation = legacy_block.relations[0]
+    expected = [
+        epistemic_graph._edge(
+            block_key,
+            file_key,
+            "derived_from",
+            "semantic_block",
+            source_path=source_rel,
+            source_anchor="claim-1",
+            metadata={"block_kind": "claim"},
+            registry=idx.registry,
+            page_type="insight",
+            source_hash=source_hash,
+        ),
+        epistemic_graph._edge(
+            block_key,
+            epistemic_graph._file_key(f"{rich_target}.md"),
+            block_relation.kind,
+            "semantic_relation",
+            source_path=source_rel,
+            source_anchor="claim-1",
+            raw_relation=block_relation.raw.split(":", 1)[0].strip(),
+            registry=idx.registry,
+            page_type="insight",
+            source_kind="claim",
+            target_kind="file",
+            source_hash=source_hash,
+            metadata={
+                "block_kind": "claim",
+                "line": block_relation.line,
+                "raw": block_relation.raw,
+                "target_resolution": "resolved",
+            },
+        ),
+        epistemic_graph._edge(
+            file_key,
+            epistemic_graph._file_key(f"{rich_target}.md"),
+            "links_to",
+            "wikilink",
+            source_path=source_rel,
+            registry=idx.registry,
+            page_type="insight",
+            source_hash=source_hash,
+        ),
+        epistemic_graph._edge(
+            file_key,
+            epistemic_graph._file_key(f"{generic_target}.md"),
+            "links_to",
+            "wikilink",
+            source_path=source_rel,
+            registry=idx.registry,
+            page_type="insight",
+            source_hash=source_hash,
+        ),
+        epistemic_graph._edge(
+            file_key,
+            epistemic_graph._file_key(f"{note_target}.md"),
+            legacy_note_relation.kind,
+            "markdown_relation",
+            source_path=source_rel,
+            source_anchor=f"line-{legacy_note_relation.line}",
+            raw_relation=legacy_note_relation.kind,
+            registry=idx.registry,
+            page_type="insight",
+            source_kind="file",
+            target_kind="file",
+            source_hash=source_hash,
+            metadata={
+                "line": legacy_note_relation.raw,
+                "canonical": True,
+                "target_resolution": "resolved",
+            },
+        ),
+    ]
+
+    actual = epistemic_graph._edges_for_page(
+        vault,
+        page,
+        document,
+        registry=idx.registry,
+        source_hash=source_hash,
+    )
+
+    assert [edge.as_dict() for edge in actual] == [
+        edge.as_dict() for edge in expected
+    ]
 
 
 def test_sidecar_can_be_deleted_and_rebuilt_equivalently(tmp_path: Path) -> None:

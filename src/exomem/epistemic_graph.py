@@ -17,10 +17,16 @@ from pathlib import Path
 from typing import Any
 
 from . import find as find_module
-from . import relation_registry, semantic_blocks, traversal_profiles
+from . import (
+    relation_registry,
+    semantic_blocks,
+    semantic_language_registry,
+    semantic_units,
+    traversal_profiles,
+)
 from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
-from .markdown_relations import MarkdownRelation, parse_markdown_relations
+from .markdown_relations import MarkdownRelation
 
 SCHEMA_VERSION = 2
 
@@ -122,6 +128,7 @@ class EpistemicGraphIndex:
         self.vault_root = Path(vault_root)
         self.path = sidecar_path(self.vault_root)
         self.registry = relation_registry.load_registry(self.vault_root)
+        self.language_registry = semantic_language_registry.load_registry(self.vault_root)
 
     def _connect(self) -> sqlite3.Connection:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -320,16 +327,24 @@ class EpistemicGraphIndex:
         page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
         if page is None:
             return False
-        document = semantic_blocks.parse_semantic_blocks(
-            page.body, validate=False, registry=self.registry
+        document = semantic_units.parse_semantic_units(
+            page.body,
+            path=page.rel_path,
+            validate=False,
+            language_registry=self.language_registry,
+            relation_registry=self.registry,
+            include_legacy_relations=True,
+            retain_unknown_relations=True,
+            project=_page_project(page.frontmatter),
+            page_type=page.page_type,
         )
-        blocks = tuple(document.blocks)
+        blocks = document.rich_units
         file_node = _file_node(page, raw)
         block_nodes = [_block_node(page, block, raw) for block in blocks]
         edges = _edges_for_page(
             self.vault_root,
             page,
-            blocks,
+            document,
             registry=self.registry,
             source_hash=file_node.source_hash,
         )
@@ -787,35 +802,41 @@ def _file_node(page, raw_text: str) -> GraphNode:
     )
 
 
-def _block_key(page, block: semantic_blocks.SemanticBlock) -> str:
-    block_id = block.id or f"line-{block.line}"
-    key_material = "\n".join([page.rel_path, block.type, block_id, block.title, block.body])
+def _block_key(page, unit: semantic_units.SemanticUnit) -> str:
+    block_id = unit.anchor or f"line-{unit.line}"
+    key_material = "\n".join(
+        [page.rel_path, unit.kind, block_id, unit.title or "", unit.body or ""]
+    )
     return f"block:{_hash(key_material)}"
 
 
-def _block_anchor(block: semantic_blocks.SemanticBlock) -> str:
-    return block.id or semantic_blocks.normalize_label(block.title) or f"line-{block.line}"
+def _block_anchor(unit: semantic_units.SemanticUnit) -> str:
+    return (
+        unit.anchor
+        or semantic_blocks.normalize_label(unit.title or "")
+        or f"line-{unit.line}"
+    )
 
 
-def _block_node(page, block: semantic_blocks.SemanticBlock, raw_text: str) -> GraphNode:
+def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> GraphNode:
     return GraphNode(
-        node_key=_block_key(page, block),
-        kind=block.type,
+        node_key=_block_key(page, unit),
+        kind=unit.kind,
         path=page.rel_path,
-        anchor=_block_anchor(block),
-        title=block.title,
-        text=block.body or block.title,
+        anchor=_block_anchor(unit),
+        title=unit.title,
+        text=unit.body or unit.title or "",
         source_hash=vault_module.content_hash(raw_text),
-        line_start=block.line,
-        line_end=block.end_line,
-        metadata={**block.metadata, "origin": "semantic_block", "level": block.level},
+        line_start=unit.line,
+        line_end=unit.end_line,
+        metadata={**unit.metadata, "origin": "semantic_block", "level": unit.level},
     )
 
 
 def _edges_for_page(
     vault_root: Path,
     page,
-    blocks: tuple[semantic_blocks.SemanticBlock, ...],
+    document: semantic_units.SemanticUnitDocument,
     *,
     registry: relation_registry.RelationRegistry | None = None,
     source_hash: str | None = None,
@@ -838,9 +859,9 @@ def _edges_for_page(
     file_key = _file_key(rel)
     resolver = find_module.shared_resolver(vault_root)
     edges: list[GraphEdge] = []
-    for block in blocks:
-        block_key = _block_key(page, block)
-        block_anchor = _block_anchor(block)
+    for unit in document.rich_units:
+        block_key = _block_key(page, unit)
+        block_anchor = _block_anchor(unit)
         edges.append(
             page_edge(
                 block_key,
@@ -849,10 +870,10 @@ def _edges_for_page(
                 "semantic_block",
                 source_path=rel,
                 source_anchor=block_anchor,
-                metadata={"block_kind": block.type},
+                metadata={"block_kind": unit.kind},
             )
         )
-        for relation in block.relations:
+        for relation in unit.relations:
             target = relation.target
             if target.startswith("[[") and target.endswith("]]"):
                 target = target[2:-2]
@@ -874,10 +895,10 @@ def _edges_for_page(
                     source_path=rel,
                     source_anchor=block_anchor,
                     raw_relation=relation.raw.split(":", 1)[0].strip(),
-                    source_kind=block.type,
+                    source_kind=unit.kind,
                     target_kind=_target_kind(vault_root, canonical),
                     metadata={
-                        "block_kind": block.type,
+                        "block_kind": unit.kind,
                         "line": relation.line,
                         "raw": relation.raw,
                         "target_resolution": "unresolved" if warning else "resolved",
@@ -940,15 +961,9 @@ def _edges_for_page(
                 source_anchor="related",
             )
         )
-    relation_doc = parse_markdown_relations(
-        page.body,
-        include_legacy=True,
-        relation_types=registry.keys | frozenset(registry.aliases),
-        retain_unknown=True,
-    )
     relation_edges, canonical_lines = _relation_line_edges(
         vault_root,
-        relation_doc.relations,
+        list(document.note_relations),
         rel,
         file_key,
         resolver=resolver,
