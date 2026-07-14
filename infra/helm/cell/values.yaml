@@ -23,4 +23,3 @@ initOperationId: ""
 routes:
   enabled: false
   controlHostname: ""
-  transferHostname: ""

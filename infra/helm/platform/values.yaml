@@ -4,6 +4,13 @@ cloudflared:
   tokenSecretName: exomem-cloudflared-token
   tokenSecretKey: token
 
+runtime:
+  image: ""
+
+admission:
+  namespaceContractOperatorUsernames:
+    - system:admin
+
 scheduler:
   contractVersion: 1
   contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc

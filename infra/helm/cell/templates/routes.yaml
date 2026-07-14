@@ -37,7 +37,7 @@ spec:
   entryPoints: [web]
   routes:
     - kind: Rule
-      match: Host(`{{ .Values.routes.transferHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/upload`) || Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/download`))
+      match: Host(`{{ .Values.transferHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/upload`) || Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/download`))
       middlewares:
         - name: {{ .Values.resourceName }}-strip-cell
       services:

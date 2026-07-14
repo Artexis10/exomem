@@ -23,4 +23,3 @@ initOperationId: provision-alpha-1
 routes:
   enabled: false
   controlHostname: control.example.test
-  transferHostname: transfer.example.test

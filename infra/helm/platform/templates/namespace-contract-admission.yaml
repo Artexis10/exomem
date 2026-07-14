@@ -1,0 +1,50 @@
+{{- $operatorUsernames := .Values.admission.namespaceContractOperatorUsernames | toJson -}}
+{{- $protectedLabels := list "exomem.io/tenant-cell" "exomem.io/cell-resource" "pod-security.kubernetes.io/enforce" "pod-security.kubernetes.io/enforce-version" "pod-security.kubernetes.io/audit" "pod-security.kubernetes.io/audit-version" "pod-security.kubernetes.io/warn" "pod-security.kubernetes.io/warn-version" -}}
+{{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/init-request-configmap-name" -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-tenant-namespace-contract
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces"]
+  variables:
+    - name: oldLabels
+      expression: >-
+        has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}
+    - name: newLabels
+      expression: >-
+        has(object.metadata.labels) ? object.metadata.labels : {}
+    - name: oldAnnotations
+      expression: >-
+        has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+    - name: newAnnotations
+      expression: >-
+        has(object.metadata.annotations) ? object.metadata.annotations : {}
+  validations:
+    - expression: >-
+        request.userInfo.username in {{ $operatorUsernames }} ||
+        (
+{{- range $field := $protectedLabels }}
+        (('{{ $field }}' in variables.oldLabels) == ('{{ $field }}' in variables.newLabels) &&
+          (!('{{ $field }}' in variables.oldLabels) || variables.oldLabels['{{ $field }}'] == variables.newLabels['{{ $field }}'])) &&
+{{- end }}
+{{- range $field := $protectedAnnotations }}
+        (('{{ $field }}' in variables.oldAnnotations) == ('{{ $field }}' in variables.newAnnotations) &&
+          (!('{{ $field }}' in variables.oldAnnotations) || variables.oldAnnotations['{{ $field }}'] == variables.newAnnotations['{{ $field }}'])) &&
+{{- end }}
+        true)
+      message: Tenant namespace contract fields require platform operator authority.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-tenant-namespace-contract
+spec:
+  policyName: exomem-tenant-namespace-contract
+  validationActions: [Deny]

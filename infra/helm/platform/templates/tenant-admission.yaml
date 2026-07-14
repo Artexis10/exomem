@@ -29,7 +29,6 @@ spec:
         namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true' &&
         has(namespaceObject.metadata.annotations) &&
         'exomem.io/resource-name' in namespaceObject.metadata.annotations &&
-        'exomem.io/approved-image' in namespaceObject.metadata.annotations &&
         'exomem.io/pvc-name' in namespaceObject.metadata.annotations &&
         'exomem.io/credentials-secret-name' in namespaceObject.metadata.annotations &&
         'exomem.io/init-request-configmap-name' in namespaceObject.metadata.annotations &&
@@ -77,7 +76,7 @@ spec:
         !variables.inScope ||
         (
         object.spec.containers[0].name == 'exomem' &&
-        object.spec.containers[0].image == namespaceObject.metadata.annotations['exomem.io/approved-image'] &&
+        object.spec.containers[0].image == {{ .Values.runtime.image | quote }} &&
         object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
@@ -97,8 +96,31 @@ spec:
         object.spec.containers[0].securityContext.runAsGroup == 0 &&
         size(object.spec.containers[0].securityContext.capabilities.add) == 3 &&
         object.spec.containers[0].securityContext.capabilities.add.all(capability,
-          capability in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER']))
+          capability in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER']) &&
+        (!has(object.spec.containers[0].securityContext.procMount) ||
+          object.spec.containers[0].securityContext.procMount == 'Default') &&
+        !has(object.spec.containers[0].securityContext.seLinuxOptions) &&
+        !has(object.spec.containers[0].securityContext.windowsOptions) &&
+        !has(object.spec.containers[0].securityContext.appArmorProfile))
       message: Storage initialization must use the exact approved operator command, identity, and capabilities.
+    - expression: >-
+        !variables.inScope ||
+        !variables.storageInit ||
+        (
+        !has(object.spec.containers[0].lifecycle) &&
+        !has(object.spec.containers[0].livenessProbe) &&
+        !has(object.spec.containers[0].readinessProbe) &&
+        !has(object.spec.containers[0].startupProbe) &&
+        (!has(object.spec.containers[0].ports) || size(object.spec.containers[0].ports) == 0) &&
+        (!has(object.spec.containers[0].envFrom) || size(object.spec.containers[0].envFrom) == 0) &&
+        (!has(object.spec.containers[0].volumeDevices) || size(object.spec.containers[0].volumeDevices) == 0) &&
+        (!has(object.spec.containers[0].resizePolicy) || size(object.spec.containers[0].resizePolicy) == 0) &&
+        (!has(object.spec.containers[0].workingDir) || object.spec.containers[0].workingDir == '') &&
+        (!has(object.spec.containers[0].stdin) || object.spec.containers[0].stdin == false) &&
+        (!has(object.spec.containers[0].stdinOnce) || object.spec.containers[0].stdinOnce == false) &&
+        (!has(object.spec.containers[0].tty) || object.spec.containers[0].tty == false) &&
+        !has(object.spec.containers[0].restartPolicy))
+      message: Storage initialization cannot expose additional executable or interactive surfaces.
     - expression: >-
         !variables.inScope ||
         (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||

@@ -1,4 +1,6 @@
 cloudflared:
   replicas: 1
+runtime:
+  image: ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 scheduler:
   contractVersion: 1

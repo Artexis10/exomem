@@ -66,6 +66,17 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert dependencies["traefik"]["version"] == "41.0.2"
 
     values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    assert values["runtime"]["image"] == ""
+    assert validation_values["runtime"]["image"] == (
+        "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    )
+    platform_schema = json.loads(
+        (PLATFORM / "values.schema.json").read_text(encoding="utf-8")
+    )
+    assert "@sha256:" in json.dumps(platform_schema["properties"]["runtime"])
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
@@ -115,7 +126,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         for validation in tenant_admission["spec"]["validations"]
     )
     admission_text = json.dumps(tenant_admission)
-    assert "namespaceObject.metadata.annotations['exomem.io/approved-image']" in admission_text
+    assert "namespaceObject.metadata.annotations['exomem.io/approved-image']" not in admission_text
+    assert "ghcr.io/artexis10/exomem@sha256:" + "a" * 64 in admission_text
     assert "runAsUser == 10001" in admission_text
     assert "persistentVolumeClaim.claimName" in admission_text
     assert "secret.secretName" in admission_text
@@ -124,6 +136,36 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "has(object.spec.initContainers)" in admission_text
     assert "has(dyn(volume.emptyDir).sizeLimit)" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
+    for forbidden_surface in (
+        "lifecycle",
+        "livenessProbe",
+        "readinessProbe",
+        "startupProbe",
+        "ports",
+        "stdin",
+        "stdinOnce",
+        "tty",
+        "envFrom",
+        "workingDir",
+    ):
+        assert forbidden_surface in admission_text
+
+    namespace_policy = _find(
+        documents, "ValidatingAdmissionPolicy", "exomem-tenant-namespace-contract"
+    )
+    namespace_policy_text = json.dumps(namespace_policy)
+    assert "request.userInfo.username" in namespace_policy_text
+    assert "system:admin" in namespace_policy_text
+    for protected_field in (
+        "exomem.io/resource-name",
+        "exomem.io/approved-image",
+        "exomem.io/pvc-name",
+        "exomem.io/credentials-secret-name",
+        "exomem.io/init-request-configmap-name",
+        "exomem.io/tenant-cell",
+        "exomem.io/cell-resource",
+    ):
+        assert protected_field in namespace_policy_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     cronjobs = {
@@ -235,7 +277,6 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert namespace["metadata"]["annotations"] == {
         "helm.sh/resource-policy": "keep",
         "exomem.io/resource-name": "cell-alpha",
-        "exomem.io/approved-image": "ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
         "exomem.io/pvc-name": "cell-alpha-data",
         "exomem.io/credentials-secret-name": "cell-alpha-credentials",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
@@ -307,6 +348,7 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
     assert '"const": 94371840' in text
     assert '"const": 0' in text
     assert '"const": "10Gi"' in text
+    assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
@@ -345,6 +387,30 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
     rendered_text = json.dumps(documents).lower()
     assert "email" not in rendered_text
     assert "owner-name" not in rendered_text
+
+
+def test_cell_route_and_runtime_share_one_transfer_hostname() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.validation.yaml",
+        namespace="cell-alpha-test",
+        extra_args=(
+            "--set",
+            "routes.enabled=true",
+            "--set",
+            "transferHostname=files.example.test",
+        ),
+    )
+    stateful_set = _find(documents, "StatefulSet", "cell-alpha")
+    environment = {
+        item["name"]: item.get("value")
+        for item in stateful_set["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert environment["EXOMEM_HOSTED_TRANSFER_HOST"] == "files.example.test"
+    route = _find(documents, "IngressRoute", "cell-alpha-transfer")
+    assert route["spec"]["routes"][0]["match"].startswith(
+        "Host(`files.example.test`)"
+    )
 
 
 def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> None:

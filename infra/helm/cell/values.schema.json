@@ -29,11 +29,10 @@
     "routes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled", "controlHostname", "transferHostname"],
+      "required": ["enabled", "controlHostname"],
       "properties": {
         "enabled": {"type": "boolean"},
-        "controlHostname": {"type": "string"},
-        "transferHostname": {"type": "string"}
+        "controlHostname": {"type": "string"}
       }
     }
   }

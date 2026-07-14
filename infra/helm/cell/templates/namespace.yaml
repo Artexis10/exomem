@@ -14,7 +14,6 @@ metadata:
   annotations:
     helm.sh/resource-policy: keep
     exomem.io/resource-name: {{ .Values.resourceName | quote }}
-    exomem.io/approved-image: {{ .Values.image | quote }}
     exomem.io/pvc-name: {{ printf "%s-data" .Values.resourceName | quote }}
     exomem.io/credentials-secret-name: {{ .Values.credentialsSecretName | quote }}
     exomem.io/init-request-configmap-name: {{ printf "%s-init-request" .Values.resourceName | quote }}

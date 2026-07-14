@@ -184,22 +184,117 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         documents=[service_account],
     )
 
-    for _ in range(30):
-        policy = _kubectl(
-            k3s,
-            ["get", "validatingadmissionpolicy", "exomem-tenant-boundary", "--output=json"],
-        )
-        status = json.loads(policy.stdout).get("status", {})
-        if status.get("observedGeneration") == 1:
-            assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
-            break
-        time.sleep(1)
-    else:
-        raise AssertionError("K3s did not type-check the tenant admission policy")
+    routine_username = "system:serviceaccount:exomem-platform:routine-provisioner"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": "exomem-platform"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": "routine-provisioner",
+                    "namespace": "exomem-platform",
+                },
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {"name": "admission-test-namespace-editor"},
+                "rules": [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["namespaces"],
+                        "verbs": ["get", "patch", "update"],
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": "admission-test-namespace-editor"},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "admission-test-namespace-editor",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "routine-provisioner",
+                        "namespace": "exomem-platform",
+                    }
+                ],
+            },
+        ],
+    )
+
+    for policy_name in (
+        "exomem-tenant-boundary",
+        "exomem-tenant-namespace-contract",
+    ):
+        for _ in range(30):
+            policy = _kubectl(
+                k3s,
+                ["get", "validatingadmissionpolicy", policy_name, "--output=json"],
+            )
+            status = json.loads(policy.stdout).get("status", {})
+            if status.get("observedGeneration") == 1:
+                assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError(f"K3s did not type-check {policy_name}")
 
     init_job = next(item for item in initialize if item.get("kind") == "Job")
     init_pod = _pod(init_job, name="cell-alpha-init-positive", namespace=namespace)
     assert _server_dry_run(k3s, init_pod).returncode == 0
+
+    protected_update = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/resource-name=cell-foreign",
+            "--overwrite",
+            f"--as={routine_username}",
+        ],
+        check=False,
+    )
+    assert protected_update.returncode != 0
+    assert "operator authority" in protected_update.stderr
+
+    legacy_allowlist_update = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/approved-image=ghcr.io/example/wrong@sha256:" + "c" * 64,
+            "--overwrite",
+            f"--as={routine_username}",
+        ],
+        check=False,
+    )
+    assert legacy_allowlist_update.returncode != 0
+    assert "operator authority" in legacy_allowlist_update.stderr
+
+    _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/approved-image=ghcr.io/example/wrong@sha256:" + "c" * 64,
+            "--overwrite",
+        ],
+    )
 
     _kubectl(
         k3s,
@@ -237,6 +332,66 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     excessive_resources["metadata"]["name"] = "cell-alpha-init-excessive-resources"
     excessive_resources["spec"]["containers"][0]["resources"]["limits"]["memory"] = "2Gi"
     _assert_denied(k3s, excessive_resources, message="exact approved compute resources")
+
+    surface_mutations = (
+        ("command", ["/bin/sh"], "exact approved operator command"),
+        ("args", ["hosted", "serve"], "exact approved operator command"),
+        (
+            "env",
+            [{"name": "UNTRUSTED", "value": "1"}],
+            "exact approved operator command",
+        ),
+        (
+            "lifecycle",
+            {"postStart": {"exec": {"command": ["/bin/sh"]}}},
+            "executable or interactive surfaces",
+        ),
+        (
+            "livenessProbe",
+            {"exec": {"command": ["/bin/true"]}},
+            "executable or interactive surfaces",
+        ),
+        (
+            "readinessProbe",
+            {"httpGet": {"path": "/", "port": 8765}},
+            "executable or interactive surfaces",
+        ),
+        (
+            "startupProbe",
+            {"tcpSocket": {"port": 8765}},
+            "executable or interactive surfaces",
+        ),
+        (
+            "startupProbe",
+            {"grpc": {"port": 8765}},
+            "executable or interactive surfaces",
+        ),
+        (
+            "ports",
+            [{"containerPort": 8765, "hostPort": 8765}],
+            "executable or interactive surfaces",
+        ),
+        ("stdin", True, "executable or interactive surfaces"),
+        ("stdinOnce", True, "executable or interactive surfaces"),
+        ("tty", True, "executable or interactive surfaces"),
+        (
+            "envFrom",
+            [{"configMapRef": {"name": "foreign-env"}}],
+            "executable or interactive surfaces",
+        ),
+        ("workingDir", "/tmp", "executable or interactive surfaces"),
+    )
+    for index, (field, value, message) in enumerate(surface_mutations):
+        shape_drift = copy.deepcopy(init_pod)
+        shape_drift["metadata"]["name"] = f"cell-alpha-init-surface-{index}"
+        shape_drift["spec"]["containers"][0][field] = value
+        _assert_denied(k3s, shape_drift, message=message)
+
+    unmasked_proc = copy.deepcopy(init_pod)
+    unmasked_proc["metadata"]["name"] = "cell-alpha-init-unmasked-proc"
+    unmasked_proc["spec"]["hostUsers"] = False
+    unmasked_proc["spec"]["containers"][0]["securityContext"]["procMount"] = "Unmasked"
+    _assert_denied(k3s, unmasked_proc, message="exact approved operator command")
 
     for volume_name, source, key, message in (
         ("data", "persistentVolumeClaim", "claimName", "exact tenant PVC"),
