@@ -102,7 +102,10 @@ location, release, protocol, policy, or admission drift.
 User-export `expiresAt` is admitted only when a new idempotency key is future
 and no more than 30 days away. Once that exact key and canonical input have been
 accepted, pending and completed replays continue after expiry; a first-time
-expired request is rejected before an operation or provider artifact exists.
+expired request receives the content-free terminal code
+`EXPORT_REQUEST_EXPIRED` before an operation or provider artifact exists.
+Missing, malformed, or more-than-30-day expiry values remain
+`PROVISIONER_REJECTED` validation failures.
 
 One immutable hosted release manifest is the sole runtime deploy pin. The
 platform chart places `exomem-hosted-release-v1.json` in an immutable ConfigMap,

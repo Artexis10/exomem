@@ -23,15 +23,23 @@ from .provider_identity import (
     provider_operation_resource_name,
 )
 from .repository import IdempotencyConflict, OperationRepository, StaleFence
-from .schemas import FINAL_MODELS, REQUEST_MODELS, PendingResponse, request_plaintext
+from .schemas import (
+    FINAL_MODELS,
+    REQUEST_MODELS,
+    FailureCode,
+    FailureResponse,
+    PendingResponse,
+    request_plaintext,
+)
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
 Clock = Callable[[], datetime]
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,256}$")
 
 
-def _failure(code: str, status: int, *, retryable: bool = False) -> JSONResponse:
-    return JSONResponse(status_code=status, content={"code": code, "retryable": retryable})
+def _failure(code: FailureCode, status: int, *, retryable: bool = False) -> JSONResponse:
+    value = FailureResponse(code=code, retryable=retryable)
+    return JSONResponse(status_code=status, content=value.model_dump(mode="json"))
 
 
 def _validated_final(
@@ -67,13 +75,17 @@ def _validated_final(
     return JSONResponse(status_code=200, content=value.model_dump(mode="json"))
 
 
-def _new_export_expiry_is_valid(value: object, *, now: datetime) -> bool:
+def _new_export_expiry_rejection(value: object, *, now: datetime) -> FailureCode | None:
     if not isinstance(value, str):
-        return False
+        return "PROVISIONER_REJECTED"
     expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
     checked_at = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
     ttl = expires_at.astimezone(UTC) - checked_at.astimezone(UTC)
-    return timedelta(0) < ttl <= timedelta(days=30)
+    if ttl <= timedelta(0):
+        return "EXPORT_REQUEST_EXPIRED"
+    if ttl > timedelta(days=30):
+        return "PROVISIONER_REJECTED"
+    return None
 
 
 def create_app(
@@ -184,16 +196,21 @@ def create_app(
                         resource_name=cell_resource_name(cell_id),
                         operation_resource_name=provider_operation_resource_name(operation_id),
                     )
-                if action == "export" and not _new_export_expiry_is_valid(
-                    request_data.get("expiresAt"),
-                    now=clock(),
-                ):
+                expiry_rejection = (
+                    _new_export_expiry_rejection(
+                        request_data.get("expiresAt"),
+                        now=clock(),
+                    )
+                    if action == "export"
+                    else None
+                )
+                if expiry_rejection is not None:
                     existing = await repository.get(
                         action,
                         request.headers["idempotency-key"],
                     )
                     if existing is None:
-                        return _failure("PROVISIONER_REJECTED", 422)
+                        return _failure(expiry_rejection, 422)
                 operation = await repository.submit(
                     action,
                     request.headers["idempotency-key"],

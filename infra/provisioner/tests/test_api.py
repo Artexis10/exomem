@@ -8,6 +8,7 @@ from typing import Any
 
 import httpx
 import pytest
+from pydantic import ValidationError
 
 from exomem_provisioner.app import create_app
 from exomem_provisioner.config import PROVISIONER_PROTOCOL, ProvisionerSettings
@@ -16,6 +17,7 @@ from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import FakeDriver
 from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
+from exomem_provisioner.schemas import FailureResponse
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
@@ -133,12 +135,22 @@ async def test_export_requires_canonical_bounded_expiry(
     )
     assert conflict.status_code == 409
 
-    for index, expires_at in enumerate(
+    for index, (expires_at, expected_code) in enumerate(
         (
-            None,
-            (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
-            (datetime.now(UTC) + timedelta(days=30, seconds=5)).isoformat().replace("+00:00", "Z"),
-            (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+            (None, "PROVISIONER_REJECTED"),
+            (
+                (datetime.now(UTC) - timedelta(seconds=1))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "EXPORT_REQUEST_EXPIRED",
+            ),
+            (
+                (datetime.now(UTC) + timedelta(days=30, seconds=5))
+                .isoformat()
+                .replace("+00:00", "Z"),
+                "PROVISIONER_REJECTED",
+            ),
+            ((datetime.now(UTC) + timedelta(days=1)).isoformat(), "PROVISIONER_REJECTED"),
         )
     ):
         body = _target_body()
@@ -150,6 +162,19 @@ async def test_export_requires_canonical_bounded_expiry(
             json=body,
         )
         assert rejected.status_code == 422
+        assert rejected.json() == {"code": expected_code, "retryable": False}
+
+
+def test_failure_schema_has_exact_content_free_expired_export_code() -> None:
+    assert FailureResponse(
+        code="EXPORT_REQUEST_EXPIRED",
+        retryable=False,
+    ).model_dump(mode="json") == {
+        "code": "EXPORT_REQUEST_EXPIRED",
+        "retryable": False,
+    }
+    with pytest.raises(ValidationError):
+        FailureResponse.model_validate({"code": "EXPORT_EXPIRED", "retryable": False})
 
 
 @pytest.mark.asyncio
@@ -238,7 +263,7 @@ async def test_accepted_export_continues_and_replays_after_expiry_but_new_expire
             json={**body, "operationId": "new-expired-export-operation"},
         )
         assert rejected.status_code == 422
-        assert rejected.json() == {"code": "PROVISIONER_REJECTED", "retryable": False}
+        assert rejected.json() == {"code": "EXPORT_REQUEST_EXPIRED", "retryable": False}
         assert await repository.get("export", "new-expired-export") is None
     finally:
         await client.aclose()

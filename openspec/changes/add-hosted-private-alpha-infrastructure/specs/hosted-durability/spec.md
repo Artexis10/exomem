@@ -51,7 +51,11 @@ An export `expiresAt` SHALL be canonical RFC3339 UTC, future, and no more than 3
 
 #### Scenario: First export request is already expired
 - **WHEN** no accepted idempotency claim exists and a request arrives with `expiresAt` in the past
-- **THEN** the provider rejects it definitively without creating an operation or provider artifact
+- **THEN** the provider returns HTTP 422 with the exact content-free code `EXPORT_REQUEST_EXPIRED` and `retryable: false`, without creating an operation or provider artifact
+
+#### Scenario: Export expiry validation is otherwise invalid
+- **WHEN** `expiresAt` is missing, malformed, non-canonical, or more than 30 days away
+- **THEN** the provider returns the ordinary content-free `PROVISIONER_REJECTED` validation error and never substitutes `EXPORT_REQUEST_EXPIRED`
 
 ### Requirement: Restore publishes into a new candidate identity
 Restore SHALL stop the candidate runtime, fetch/decrypt the provider object, verify ciphertext, expected size/digests, manifest/schema/source identity, release compatibility, path safety, and absence of forbidden hosted state, and invoke the version-pinned offline restore helper. Publication SHALL be atomic into an empty candidate vault, SHALL recreate destination binding markers and credentials, and SHALL rebuild derived state before authenticated readiness.

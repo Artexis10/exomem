@@ -48,6 +48,13 @@ ShortLabel = Annotated[
     ),
 ]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+FailureCode = Literal[
+    "CONTROL_PLANE_STATE_CONFLICT",
+    "EXPORT_REQUEST_EXPIRED",
+    "PROVISIONER_REJECTED",
+    "PROVISIONER_RESPONSE_INVALID",
+    "PROVISIONER_UNAVAILABLE",
+]
 
 
 def _validate_secret_value(value: SecretStr) -> SecretStr:
@@ -66,6 +73,11 @@ _CANONICAL_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\
 
 class StrictSchema(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
+
+
+class FailureResponse(StrictSchema):
+    code: FailureCode
+    retryable: bool
 
 
 class WorkerPolicy(StrictSchema):
