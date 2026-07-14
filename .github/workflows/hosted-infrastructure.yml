@@ -67,6 +67,7 @@ jobs:
       - name: Install exact infrastructure validators
         run: |
           source infra/tool-versions.env
+          install -d -m 0755 "$HOME/.local/bin"
           go install github.com/terraform-linters/tflint@v${TFLINT_VERSION}
           go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
           go install github.com/yannh/kubeconform/cmd/kubeconform@v${KUBECONFORM_VERSION}

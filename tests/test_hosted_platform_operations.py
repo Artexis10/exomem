@@ -83,6 +83,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'NODE_VERSION: "22.17.1"' in workflow
     assert "go install github.com/aquasecurity/trivy" not in workflow
     assert "https://github.com/aquasecurity/trivy/releases/download/" in workflow
+    assert 'install -d -m 0755 "$HOME/.local/bin"' in workflow
     assert "${TRIVY_LINUX_AMD64_SHA256}" in workflow
     assert (
         "TRIVY_LINUX_AMD64_SHA256="
