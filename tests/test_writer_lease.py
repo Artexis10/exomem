@@ -443,6 +443,35 @@ def test_corrupt_committed_failure_row_fails_closed_without_reinvoking(
     assert calls == 1
 
 
+def test_corrupt_implicit_committed_failure_timestamp_fails_closed_without_reinvoking(
+    tmp_path: Path,
+) -> None:
+    calls = 0
+    original = _committed_error(tmp_path)
+
+    def committed_failure() -> None:
+        nonlocal calls
+        calls += 1
+        raise original
+
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+    command = _command(writes=True, leaf=committed_failure)
+    marker = {"implicit_idempotency_scope": "alice"}
+    with pytest.raises(vault_module.BatchWriteError):
+        manager.invoke(command, (), {}, **marker)
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "UPDATE mutations SET updated_at = 'corrupt' "
+            "WHERE state = 'committed_failure'"
+        )
+
+    with pytest.raises(OpError) as blocked:
+        manager.invoke(command, (), {}, **marker)
+    assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
+    assert "corrupt" not in str(blocked.value)
+    assert calls == 1
+
+
 @pytest.mark.parametrize("failure_point", ["serialize", "update"])
 def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
     tmp_path: Path,

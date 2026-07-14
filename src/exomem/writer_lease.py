@@ -11,6 +11,7 @@ import atexit
 import hashlib
 import json
 import logging
+import math
 import os
 import pickle
 import re
@@ -367,15 +368,33 @@ class IdempotencyStore:
             if expires_after is not None:
                 conn.execute(
                     "DELETE FROM mutations WHERE key LIKE 'implicit:%' "
-                    "AND state IN ('completed', 'committed_failure') AND updated_at <= ?",
+                    "AND state IN ('completed', 'committed_failure') "
+                    "AND typeof(updated_at) IN ('integer', 'real') "
+                    "AND updated_at >= 0 AND updated_at <= ?",
                     (now - expires_after,),
                 )
             row = conn.execute(
                 "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?", (key,)
             ).fetchone()
-            if row and expires_after is not None and row[3] <= now - expires_after:
-                conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
-                row = None
+            if (
+                row
+                and expires_after is not None
+                and row[1] in {"completed", "committed_failure"}
+            ):
+                updated_at = row[3]
+                if (
+                    type(updated_at) not in {int, float}
+                    or not math.isfinite(updated_at)
+                    or updated_at < 0
+                ):
+                    raise OpError(
+                        "IDEMPOTENCY_IN_PROGRESS",
+                        "cached mutation state requires reconciliation",
+                        "Reconcile the local idempotency store before retrying this mutation.",
+                    )
+                if updated_at <= now - expires_after:
+                    conn.execute("DELETE FROM mutations WHERE key = ?", (key,))
+                    row = None
             if row:
                 if row[0] != digest:
                     raise OpError(
