@@ -42,10 +42,13 @@ const adoptionApi = {
   plan: (runId) => command("adoption_studio", {action: "plan", run_id: runId}),
   apply: (runId, planId) =>
     command("adoption_studio", {action: "apply", run_id: runId, plan_id: planId}),
-  retry: (runId, onlyPaths) =>
+  // apply always echoes plan_id (even on retry): the engine refuses a
+  // mismatched/missing plan_id with PLAN_STALE regardless of retry_failed.
+  retry: (runId, planId, onlyPaths) =>
     command("adoption_studio", {
       action: "apply",
       run_id: runId,
+      plan_id: planId,
       retry_failed: true,
       only_paths: onlyPaths && onlyPaths.length ? onlyPaths : null,
     }),
@@ -541,8 +544,10 @@ async function enterPreview() {
   setStatus("Working out exactly what will happen…");
   try {
     await persistSelection();
-    const plan = await adoptionApi.plan(run.run_id);
-    run = {...run, phase: "planned", plan};
+    // Every adoption_studio action returns the FULL presented run document
+    // (uniform shape) — replace `run` wholesale rather than nesting the
+    // response under a synthetic key.
+    run = await adoptionApi.plan(run.run_id);
     populatePreview();
   } catch (error) {
     if (isStale(error)) {
@@ -620,9 +625,15 @@ function showStaleBanner(error) {
   showScreen("preview");
   const banner = byId("adopt-stale");
   if (!banner) return;
-  const detail = (error instanceof ApiError && error.remediation) ? {} : (error && error.detail) || {};
+  // The REST 409 error envelope carries only {code, message, remediation} — no
+  // structured changed-file count — so the honest banner text is the server's
+  // own reason, never a fabricated number.
   const text = byId("adopt-stale-text");
-  if (text) text.textContent = staleNotice(detail);
+  if (text) {
+    text.textContent = error instanceof ApiError
+      ? `Your folder changed since we looked: ${error.message} Nothing has been copied yet.`
+      : staleNotice({});
+  }
   banner.hidden = false;
 }
 
@@ -677,7 +688,7 @@ function populateResult() {
       : `All set — ${copied.length} files are in ✓`;
   }
   const verify = byId("adopt-verify");
-  if (verify) verify.textContent = verificationLine(result);
+  if (verify) verify.textContent = verificationLine();
 
   const groups = failureGroups(failed);
   const failuresNode = byId("adopt-failures");
@@ -700,8 +711,12 @@ function populateResult() {
   }
 }
 
+// There is no `apply_result.copied`/`.failed` on the real run document — the
+// per-item detail lives ONLY in the `outcomes` map (keyed by original path).
+// `apply_result` (and top-level `verified_unchanged`/`verified_total`) carries
+// just the re-hash counts; always derive copied/failed from `outcomes`.
 function applyResult() {
-  return (run && (run.apply_result || run.result)) || outcomesToResult();
+  return outcomesToResult();
 }
 
 function outcomesToResult() {
@@ -715,10 +730,12 @@ function outcomesToResult() {
   return {copied, failed};
 }
 
-function verificationLine(result) {
-  const source = (run && run.finish) || result || {};
-  const unchanged = source.verified_unchanged ?? result.verified_unchanged;
-  const total = source.verified_total ?? result.verified_total;
+function verificationLine() {
+  // verified_unchanged/verified_total appear TOP-LEVEL on the run document
+  // once it has applied outcomes (the real post-apply re-hash counts) — never
+  // nested under apply_result/result/finish.
+  const unchanged = run && run.verified_unchanged;
+  const total = run && run.verified_total;
   if (typeof unchanged === "number" && typeof total === "number") {
     return `We double-checked your originals: ${unchanged} of ${total} are byte-for-byte unchanged (checksums match).`;
   }
@@ -730,7 +747,7 @@ async function doRetry(paths) {
   showScreen("applying");
   setStatus("Bringing the rest of your files in…");
   try {
-    run = await adoptionApi.retry(run.run_id, paths);
+    run = await adoptionApi.retry(run.run_id, run.plan && run.plan.plan_id, paths);
     if (isTransientPhase(run.phase)) await refreshStatus();
     render();
   } catch (error) {
@@ -748,29 +765,58 @@ async function populateHandoff() {
   let handoff = (run && run.handoff) || null;
   if (!handoff) {
     try {
-      const finished = await adoptionApi.finish(run.run_id);
-      run = {...run, ...finished, handoff: finished.handoff || (finished.finish && finished.finish.handoff)};
-      handoff = run.handoff;
+      // `status` is read-only and always surfaces `handoff` (per design, not
+      // only after `finish`) — prefer it so merely viewing this optional,
+      // skippable step never forces the run to phase "done".
+      run = await adoptionApi.status(run.run_id);
+      handoff = run.handoff || null;
     } catch (error) {
       showAdoptError(error);
+      return;
     }
   }
   const textarea = byId("adopt-prompt");
   if (textarea) textarea.value = (handoff && handoff.prompt_text) || "";
-  const links = (handoff && handoff.links) || [];
+  renderHandoffLinks((handoff && handoff.links) || {});
+}
+
+// `handoff.links` is a dict keyed by assistant name (e.g. {claude, codex,
+// gemini}), not an array of {label, url} — the engine mixes real `claude://`
+// URIs with plain CLI one-liner strings for codex/gemini (design.md Decision
+// 7). Render a URI as a link; render a shell one-liner as copyable text.
+function renderHandoffLinks(links) {
   const linksNode = byId("adopt-links");
-  if (linksNode) {
-    // Links are rendered ONLY from response data (never baked into assets).
-    replaceChildren(linksNode, links.map((link) => {
+  if (!linksNode) return;
+  const entries = Object.entries(links || {});
+  replaceChildren(linksNode, entries.map(([name, value]) => {
+    const text = String(value || "");
+    const isUri = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) && !text.includes(" ");
+    const label = name.charAt(0).toUpperCase() + name.slice(1);
+    if (isUri) {
       const anchor = document.createElement("a");
-      anchor.href = link.url;
-      anchor.textContent = link.label || "Continue in your assistant";
+      anchor.href = text;
+      anchor.textContent = `Continue in ${label}`;
       anchor.className = "secondary link-button";
       anchor.rel = "noopener";
       return anchor;
-    }));
-    linksNode.hidden = !links.length;
-  }
+    }
+    const block = el("div", "", "cli-oneliner");
+    block.append(el("span", `${label}: `, "fine-print"));
+    block.append(el("code", text));
+    const copy = el("button", "Copy", "link-button");
+    copy.type = "button";
+    copy.addEventListener("click", async () => {
+      try {
+        await navigator.clipboard.writeText(text);
+        setStatus("Copied ✓");
+      } catch (_error) {
+        setStatus("Select the text and copy it (Ctrl/Cmd+C).");
+      }
+    });
+    block.append(copy);
+    return block;
+  }));
+  linksNode.hidden = !entries.length;
 }
 
 async function copyPrompt() {

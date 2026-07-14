@@ -1,4 +1,4 @@
-"""Adoption Studio REST flow tests against the documented ``adoption_studio`` contract.
+"""Adoption Studio REST flow tests against the real ``adoption_studio`` contract.
 
 Backend contract source of truth: ``openspec/changes/add-adoption-studio/design.md``
 Decision 1 (single command ``adoption_studio`` with ten actions: start, status,
@@ -6,16 +6,31 @@ select, plan, apply, cancel, finish, work-item, propose, apply-proposal),
 Decision 3 (phase state machine + error vocabulary), Decision 4 (fingerprint
 model), Decision 5 (proposal contract).
 
-This is Lane C (UI); the engine (``adoption_run.py`` / ``adoption_studio``
-product command) is Lane A, landing in parallel. These tests are written
-against the documented contract now so they are ready the moment the command
-lands, but the whole module is skipped in THIS worktree because
-``commands.op_adoption_studio`` does not exist yet here. TestClient pattern of
+Verified against the merged Lane A engine (``adoption_run.py``): EVERY
+``adoption_studio`` action returns the full presented run document (a uniform
+shape via ``adoption_run._present``) — so ``plan_id`` lives at
+``plan["plan"]["plan_id"]`` (not top-level), plan items at
+``plan["plan"]["items"]``, skipped entries at ``plan["plan"]["skipped"]``, and
+per-item apply outcomes at ``outcomes`` (a map keyed by original path, each
+``{status, code?, reason?, target_path?, source_ref?, sha256?, at}``).
+``verified_unchanged``/``verified_total`` are real post-apply re-hash counts
+that appear TOP-LEVEL on the run document once it has applied outcomes. HTTP
+409 is real for ``ADOPTION_SOURCE_CHANGED`` (run-level: every requested source
+drifted/vanished with nothing yet applied), ``PLAN_STALE`` (plan_id/selection
+mismatch), and ``REVIEW_ITEM_CHANGED`` (proposal fingerprint drift), via
+``cli_ops``'s conflict-code mapping. TestClient pattern of
 ``tests/test_studio_governed_flows.py``.
+
+The proposals test additionally needs Lane B (``adoption_proposals.py``,
+``work-item``/``propose``/``apply-proposal``/``review_memory(mode="adoption")``);
+it carries its own ``importlib.util.find_spec`` guard so it auto-activates the
+moment that module lands, independent of this module's own guard (kept for
+portability to worktrees where Lane A itself is not yet merged).
 """
 
 from __future__ import annotations
 
+import importlib.util
 from pathlib import Path
 
 import pytest
@@ -117,10 +132,13 @@ def test_select_and_plan_mutate_nothing_and_return_per_item_actions(
             "include_junk": False,
         },
     )
-    assert selected.get("selected_count", 0) >= 2
+    # Selection state lives on the run document's `selection.paths`, not a
+    # bespoke `selected_count` field.
+    assert len(selected["selection"]["paths"]) >= 2
     assert _snapshot(vault) == before
 
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan = planned["plan"]
     assert plan["plan_id"]
     assert len(plan["items"]) >= 2
     for item in plan["items"]:
@@ -148,23 +166,28 @@ def test_apply_copies_with_provenance_and_originals_stay_byte_identical(
             "include_junk": False,
         },
     )
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan_id = planned["plan"]["plan_id"]
     originals_before = {p: (source_root / p).read_bytes() for p in ("a.md", "b.md")}
 
     applied = _ok(
         client,
         "adoption_studio",
-        {"action": "apply", "run_id": started["run_id"], "plan_id": plan["plan_id"]},
+        {"action": "apply", "run_id": started["run_id"], "plan_id": plan_id},
     )
 
     assert applied["phase"] in {"applied", "partial"}
-    apply_result = applied.get("apply_result", applied)
     for original, before_bytes in originals_before.items():
         assert (source_root / original).read_bytes() == before_bytes
-    assert apply_result.get("verified_total", 0) >= 1
-    for copied in apply_result.get("copied", []):
-        assert copied["original_sha256"]
-        target = vault / copied["target_path"]
+    # verified_unchanged/verified_total are real re-hash counts, top-level.
+    assert applied["verified_total"] >= 1
+    assert applied["verified_unchanged"] == applied["verified_total"]
+    # Per-item provenance lives in the `outcomes` map (keyed by original path).
+    copied = [o for o in applied["outcomes"].values() if o.get("status") in {"applied", "already-applied"}]
+    assert copied
+    for outcome in copied:
+        assert outcome["sha256"]
+        target = vault / outcome["target_path"]
         assert target.is_file()
 
 
@@ -177,6 +200,16 @@ def test_partial_apply_reports_coded_skips_while_others_succeed(
     started = _ok(
         client, "adoption_studio", {"action": "start", "path": "Old Notes", "include_hidden": False}
     )
+    # img.png's coded skip lives on the INVENTORY row (eligible=false + reason),
+    # not on `plan.skipped`: folder-rule `select` materializes only ELIGIBLE
+    # files, so an ineligible sibling under an included folder is silently
+    # excluded from the selection — it never reaches `plan` at all, and is
+    # therefore never "skipped" by plan either. This is the real coded-skip
+    # signal for an unsupported file type.
+    img_row = next(row for row in started["inventory"] if row["path"] == "Old Notes/img.png")
+    assert img_row["eligible"] is False
+    assert img_row["reason"] == "UNSUPPORTED_IMPORT_TYPE"
+
     _ok(
         client,
         "adoption_studio",
@@ -189,21 +222,29 @@ def test_partial_apply_reports_coded_skips_while_others_succeed(
             "include_junk": True,
         },
     )
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan = planned["plan"]
+    plan_id = plan["plan_id"]
+    # img.png was never selected (ineligible), so only a.md/b.md are planned.
+    assert {item["original_path"] for item in plan["items"]} == {
+        "Old Notes/a.md",
+        "Old Notes/b.md",
+    }
     # Delete one selected file after planning to force a per-item NOT_FOUND at apply.
     (source_root / "b.md").unlink()
 
     applied = _ok(
         client,
         "adoption_studio",
-        {"action": "apply", "run_id": started["run_id"], "plan_id": plan["plan_id"]},
+        {"action": "apply", "run_id": started["run_id"], "plan_id": plan_id},
     )
 
     assert applied["phase"] == "partial"
-    apply_result = applied.get("apply_result", applied)
-    failed_codes = {item["code"] for item in apply_result.get("failed", [])}
+    outcomes = applied["outcomes"]
+    failed_codes = {o["code"] for o in outcomes.values() if o.get("status") == "failed"}
     assert failed_codes & {"NOT_FOUND", "SOURCE_CHANGED"}
-    assert any(c["path"] == "img.png" for c in plan.get("skipped", []))
+    applied_paths = {p for p, o in outcomes.items() if o.get("status") in {"applied", "already-applied"}}
+    assert "Old Notes/a.md" in applied_paths
 
 
 def test_stale_source_returns_409_and_leaves_vault_byte_identical(
@@ -213,25 +254,32 @@ def test_stale_source_returns_409_and_leaves_vault_byte_identical(
     find.clear_cache()
     client = _client(vault, monkeypatch)
     started = _ok(client, "adoption_studio", {"action": "start", "path": "Old Notes"})
+    # Select ONLY a.md: the run-level ADOPTION_SOURCE_CHANGED refusal fires
+    # when write-time re-validation finds NOTHING left to commit on a run that
+    # has never applied anything. With a's.md the sole selected file, drifting
+    # it leaves the validated subset empty, which is exactly that case (a
+    # whole-folder selection with one of several files drifting instead
+    # produces a normal partial 200, not a 409).
     _ok(
         client,
         "adoption_studio",
         {
             "action": "select",
             "run_id": started["run_id"],
-            "include": ["Old Notes"],
+            "include": ["Old Notes/a.md"],
             "exclude": [],
             "overrides": [],
             "include_junk": False,
         },
     )
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan_id = planned["plan"]["plan_id"]
     before = _snapshot(vault)
     (source_root / "a.md").write_text("# A\n\nChanged after scan.\n", encoding="utf-8")
 
     response = client.post(
         "/api/adoption_studio",
-        json={"action": "apply", "run_id": started["run_id"], "plan_id": plan["plan_id"]},
+        json={"action": "apply", "run_id": started["run_id"], "plan_id": plan_id},
         headers={"Authorization": "Bearer adoption-studio-key"},
     )
 
@@ -279,32 +327,42 @@ def test_retry_with_retry_failed_true_only_retries_failures(
             "include_junk": False,
         },
     )
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan_id = planned["plan"]["plan_id"]
     (source_root / "b.md").unlink()
     applied = _ok(
         client,
         "adoption_studio",
-        {"action": "apply", "run_id": started["run_id"], "plan_id": plan["plan_id"]},
+        {"action": "apply", "run_id": started["run_id"], "plan_id": plan_id},
     )
     assert applied["phase"] == "partial"
     already_applied = {
-        c["original_path"] for c in applied.get("apply_result", applied).get("copied", [])
+        p for p, o in applied["outcomes"].items() if o.get("status") in {"applied", "already-applied"}
     }
+    assert already_applied
 
+    # apply always echoes plan_id, even for a retry_failed=true call — the
+    # engine refuses a mismatched/missing plan_id with PLAN_STALE regardless.
     retried = _ok(
         client,
         "adoption_studio",
-        {"action": "apply", "run_id": started["run_id"], "retry_failed": True},
+        {"action": "apply", "run_id": started["run_id"], "plan_id": plan_id, "retry_failed": True},
     )
 
-    retried_result = retried.get("apply_result", retried)
-    still_failed = {item["path"] for item in retried_result.get("failed", [])}
+    retried_outcomes = retried["outcomes"]
+    still_failed = {p for p, o in retried_outcomes.items() if o.get("status") == "failed"}
     assert "Old Notes/b.md" in still_failed
-    # The previously-applied item is not retried/duplicated.
+    # The previously-applied item stays applied, not duplicated/reprocessed.
     for path in already_applied:
-        assert path not in {item.get("original_path") for item in retried_result.get("copied", [])} or True
+        assert retried_outcomes[path]["status"] in {"applied", "already-applied"}
 
 
+@pytest.mark.skipif(
+    importlib.util.find_spec("exomem.adoption_proposals") is None,
+    reason="adoption_proposals lands via Lane B; this test auto-activates once "
+    "exomem.adoption_proposals exists (work-item/propose/apply-proposal + the "
+    "review_memory(mode='adoption') / triage_memory adoption-ref dispatch it needs).",
+)
 def test_proposals_arrive_reject_removes_approve_writes_log_and_drift_leaves_file_untouched(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -324,12 +382,16 @@ def test_proposals_arrive_reject_removes_approve_writes_log_and_drift_leaves_fil
             "include_junk": False,
         },
     )
-    plan = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
-    _ok(
+    planned = _ok(client, "adoption_studio", {"action": "plan", "run_id": started["run_id"]})
+    plan_id = planned["plan"]["plan_id"]
+    applied = _ok(
         client,
         "adoption_studio",
-        {"action": "apply", "run_id": started["run_id"], "plan_id": plan["plan_id"]},
+        {"action": "apply", "run_id": started["run_id"], "plan_id": plan_id},
     )
+    copied_paths = [
+        o["target_path"] for o in applied["outcomes"].values() if o.get("status") in {"applied", "already-applied"}
+    ]
     submitted = _ok(
         client,
         "adoption_studio",
@@ -341,11 +403,7 @@ def test_proposals_arrive_reject_removes_approve_writes_log_and_drift_leaves_fil
                     "kind": "compilation",
                     "why": "Imported notes look related",
                     "payload": {
-                        "sources": [c["target_path"] for c in _ok(
-                            client,
-                            "adoption_studio",
-                            {"action": "status", "run_id": started["run_id"]},
-                        ).get("apply_result", {}).get("copied", [])],
+                        "sources": copied_paths,
                         "title": "Imported notes summary",
                         "note_type": "insight",
                         "content": "# Imported notes summary\n\nCombined summary.\n",
