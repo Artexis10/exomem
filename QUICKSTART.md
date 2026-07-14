@@ -399,8 +399,8 @@ The skill *tells* Claude to capture at stepping-stones and to consult the KB
 before answering, but those instructions are passive — over a long conversation
 Claude tends to forget them, so auto-save quietly never fires (you'll know:
 `Knowledge Base/log.md` only shows saves you asked for) and prior notes don't get
-pulled in. This one command installs two small Claude Code hooks that fix both
-directions:
+pulled in. This command installs those two reliability nudges plus a local
+continuation checkpoint for compaction and resume:
 
 ```bash
 uv run python -m exomem install-hook
@@ -420,8 +420,27 @@ variant too, for example `--settings ~/.claude/settings.json##os.Msys`.
 - **Read** — a `UserPromptSubmit` hook that reminds Claude to run `ask_memory`
   first when your message touches something the KB might hold, so it actually
   behaves as your source of truth.
+- **Continue** — one shared, stdlib-only checkpoint core with thin Claude and
+  Codex adapters. It records bounded structural evidence before compaction and
+  reinjects it after compact/resume, even when MCP is disconnected, OAuth needs
+  repair, or no vault is configured. It never calls a model, MCP, REST, or the
+  Exomem CLI on the compaction path.
 
-Both are cheap: gated so they stay quiet on ordinary turns/prompts, plus a
+| Lifecycle event | Claude Code | Codex CLI 0.144.3 |
+| --- | --- | --- |
+| `PreCompact(manual|auto)` | write checkpoint | write checkpoint |
+| `SessionEnd` | write checkpoint | unsupported; not registered |
+| `SessionStart(compact|resume)` | validate and reinject | validate and reinject |
+
+The checkpoint is deliberately structural-only. It can contain repository and
+worktree identity, HEAD/dirty status, bounded file paths, artifact hashes and
+checkbox counts/line numbers, plus a bound hash of a transcript byte slice. It
+does **not** parse or store conversation messages, tool/system output,
+compaction summaries, secrets, or artifact/task text. Reinjected context points
+the agent at files to reopen and advises it to capture durable conclusions later;
+it never writes checkpoint or transcript data into Exomem automatically.
+
+The two nudge hooks are cheap: gated so they stay quiet on ordinary turns/prompts, plus a
 per-session cooldown. The read hook is still language-agnostic for substantive
 prompts, but it also suppresses obvious short control/status prompts such as
 `continue`, `thanks`, `are you done?`, `merge it`, and `restart the server` so
@@ -447,7 +466,28 @@ uv run python -m exomem install-hook --check
 That checks both Claude Code and Codex by default. Use `--client claude` or
 `--client codex` to narrow it. The report flags stale deployed hook copies,
 legacy `kb_*` hook entries, missing config, and the log/cache paths where hook
-activity should land.
+activity should land. Before the first lifecycle event, missing checkpoint state
+is a healthy warning. Continuation state and metadata-only event logs live under
+`~/.claude/.cache/exomem-continuation/` or
+`~/.codex/.cache/exomem-continuation/`; `CLAUDE_CONFIG_DIR`, `CODEX_HOME`, and
+the test/isolation override `EXOMEM_HOOK_HOME` move scripts, config, state, and
+logs together. Checkpoints are fresh for 30 days; expired non-current sessions
+are pruned without following symlinks or deleting a live writer's state.
+
+Set `EXOMEM_CONTINUATION_DISABLE=1` before launching the client to bypass all
+continuation writes and reinjection without deleting existing state. After
+installation or migration, restart/reload that client and approve/trust the
+hook if it asks. Re-running `install-hook` migrates only exact legacy
+`kb_continuation_checkpoint.py` / `kb-continuation-checkpoint.sh` entries,
+preserves unrelated hooks (including any user-owned Codex `SessionEnd`), backs
+up changed valid config, and is otherwise idempotent.
+
+There is intentionally no uninstall command. To roll back manually, remove only
+the Exomem continuation groups whose commands name
+`exomem_continuation_checkpoint.py` or
+`exomem-continuation-checkpoint.sh` and pass the matching explicit
+`--client`; remove those two deployed files if no group uses them, then reload
+the client. Existing checkpoint state is inert and may be deleted separately.
 
 Tune with `EXOMEM_CAPTURE_NUDGE_MIN_CHARS` / `EXOMEM_RETRIEVE_NUDGE_MIN_CHARS` (and the
 matching `_COOLDOWN_SEC`), `EXOMEM_RETRIEVE_NUDGE_CONTROL_MAX_CHARS` for the read
