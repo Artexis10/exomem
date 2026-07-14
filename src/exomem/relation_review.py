@@ -35,6 +35,43 @@ _MAX_REASON_BYTES = 8_192
 _MAX_CANDIDATES = 64
 _MAX_RAW_TARGET = 1_024
 MAX_DRAFT_TOKEN_ENCODED_BYTES = 16_384
+_LIFECYCLE_SCHEMA_VERSION = 1
+_LIFECYCLE_CONTRACT_VERSION = 1
+_LIFECYCLE_MAX_DECISIONS = 256
+_LIFECYCLE_OPERATIONS = frozenset(
+    {"edit", "tier2_overwrite", "tier2_append", "move", "recover"}
+)
+_LIFECYCLE_DECISION_KEYS = frozenset(
+    {
+        "schema_version",
+        "contract_version",
+        "kind",
+        "page_identity",
+        "after_fingerprint",
+        "decision_hash",
+        "reason",
+    }
+)
+_LIFECYCLE_PREPARED_KEYS = frozenset(
+    {
+        "schema_version",
+        "contract_version",
+        "kind",
+        "transition_id",
+        "operation",
+        "page_identity",
+        "before_path",
+        "before_source_hash",
+        "after_path",
+        "after_source_hash",
+        "after_fingerprint",
+        "decision_reference",
+        "decision_bytes_hash",
+        "transition_token_hash",
+        "auxiliary_hash",
+        "carried_from",
+    }
+)
 _SUPPORTS_REVIEW_DIR_FD = bool(
     os.open in getattr(os, "supports_dir_fd", set())
     and os.stat in getattr(os, "supports_dir_fd", set())
@@ -214,6 +251,88 @@ class RelationReviewRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class LifecycleDecision:
+    schema_version: int
+    contract_version: int
+    kind: Literal["reviewed_none"]
+    page_identity: str
+    after_fingerprint: str
+    decision_hash: str
+    reason: str
+    reference: str
+
+    def storage_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "contract_version": self.contract_version,
+            "kind": self.kind,
+            "page_identity": self.page_identity,
+            "after_fingerprint": self.after_fingerprint,
+            "decision_hash": self.decision_hash,
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePreparedTransition:
+    schema_version: int
+    contract_version: int
+    kind: Literal["prepared_transition"]
+    transition_id: str
+    operation: str
+    page_identity: str
+    before_path: str
+    before_source_hash: str
+    after_path: str
+    after_source_hash: str
+    after_fingerprint: str
+    decision_reference: str | None
+    decision_bytes_hash: str | None
+    transition_token_hash: str
+    auxiliary_hash: str
+    carried_from: str | None
+    reference: str
+
+    def storage_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": self.schema_version,
+            "contract_version": self.contract_version,
+            "kind": self.kind,
+            "transition_id": self.transition_id,
+            "operation": self.operation,
+            "page_identity": self.page_identity,
+            "before_path": self.before_path,
+            "before_source_hash": self.before_source_hash,
+            "after_path": self.after_path,
+            "after_source_hash": self.after_source_hash,
+            "after_fingerprint": self.after_fingerprint,
+            "decision_reference": self.decision_reference,
+            "decision_bytes_hash": self.decision_bytes_hash,
+            "transition_token_hash": self.transition_token_hash,
+            "auxiliary_hash": self.auxiliary_hash,
+            "carried_from": self.carried_from,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePrimaryBinding:
+    path: str
+    source_hash: str
+    review_fingerprint: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class LifecycleTransitionPlan:
+    state: Literal[
+        "new", "pending_retry", "replace_committed", "committed_replay"
+    ]
+    decision: LifecycleDecision | None
+    prepared: LifecyclePreparedTransition
+    writes: tuple[vault.PlannedWrite, ...]
+    required_guards: tuple[vault.PathGuard, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class _Attempt:
     source: str
     destination: str
@@ -351,6 +470,1005 @@ def draft_token_hash(value: object) -> str:
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     return Path(vault_root) / kb_dirname() / "_Schema" / "relation-reviews" / f"{identity}.json"
+
+
+def _lifecycle_reference(page_identity: str, name: str) -> str:
+    return (
+        f"{kb_dirname()}/_Schema/relation-reviews/lifecycle/"
+        f"{page_identity}/{name}"
+    )
+
+
+def _canonical_fingerprint(value: object) -> str:
+    if type(value) is not str or not _HASH.fullmatch(value):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_FINGERPRINT",
+            "review fingerprint must be a lowercase full SHA-256",
+        )
+    return value
+
+
+def lifecycle_decision_path(
+    vault_root: Path, page_identity: str, after_fingerprint: str
+) -> Path:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    fingerprint = _canonical_fingerprint(after_fingerprint)
+    return Path(vault_root) / _lifecycle_reference(identity, f"{fingerprint}.json")
+
+
+def lifecycle_prepared_path(vault_root: Path, page_identity: str) -> Path:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    return Path(vault_root) / _lifecycle_reference(identity, "prepared.json")
+
+
+def _lifecycle_decision_hash(
+    *, page_identity: str, after_fingerprint: str, reason: str
+) -> str:
+    return _canonical_hash(
+        {
+            "schema_version": _LIFECYCLE_SCHEMA_VERSION,
+            "contract_version": _LIFECYCLE_CONTRACT_VERSION,
+            "kind": "reviewed_none",
+            "page_identity": page_identity,
+            "after_fingerprint": after_fingerprint,
+            "reason": reason,
+        }
+    )
+
+
+def build_lifecycle_decision(
+    *, page_identity: str, after_fingerprint: str, reason: str
+) -> LifecycleDecision:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    fingerprint = _canonical_fingerprint(after_fingerprint)
+    normalized_reason = _review_reason(reason)
+    decision = LifecycleDecision(
+        _LIFECYCLE_SCHEMA_VERSION,
+        _LIFECYCLE_CONTRACT_VERSION,
+        "reviewed_none",
+        identity,
+        fingerprint,
+        _lifecycle_decision_hash(
+            page_identity=identity,
+            after_fingerprint=fingerprint,
+            reason=normalized_reason,
+        ),
+        normalized_reason,
+        _lifecycle_reference(identity, f"{fingerprint}.json"),
+    )
+    serialize_lifecycle_decision(decision)
+    return decision
+
+
+def _canonical_lifecycle_json(value: dict[str, Any]) -> str:
+    return json.dumps(value, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+
+
+def _bounded_lifecycle_text(value: dict[str, Any]) -> str:
+    text = _canonical_lifecycle_json(value)
+    if len(text.encode("utf-8")) > _MAX_ARTIFACT_BYTES:
+        raise RelationReviewError(
+            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
+        )
+    return text
+
+
+def serialize_lifecycle_decision(decision: LifecycleDecision) -> str:
+    _validate_lifecycle_decision(decision)
+    return _bounded_lifecycle_text(decision.storage_dict())
+
+
+def _decision_bytes_hash(decision: LifecycleDecision) -> str:
+    return hashlib.sha256(
+        serialize_lifecycle_decision(decision).encode("utf-8")
+    ).hexdigest()
+
+
+def _validate_lifecycle_reference(
+    value: object,
+    *,
+    page_identity: str,
+    fingerprint: str | None = None,
+) -> str:
+    if type(value) is not str:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    prefix = _lifecycle_reference(page_identity, "")
+    if not value.startswith(prefix):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    name = value.removeprefix(prefix)
+    if not re.fullmatch(r"[0-9a-f]{64}\.json", name):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    if fingerprint is not None and name != f"{fingerprint}.json":
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    return value
+
+
+def _validate_lifecycle_decision(decision: LifecycleDecision) -> None:
+    if not isinstance(decision, LifecycleDecision):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    reason = decision.reason
+    valid_reason = (
+        type(reason) is str
+        and reason == reason.strip()
+        and bool(reason)
+        and len(reason) <= _MAX_REASON_POINTS
+        and len(reason.encode("utf-8")) <= _MAX_REASON_BYTES
+    )
+    valid = (
+        type(decision.schema_version) is int
+        and decision.schema_version == _LIFECYCLE_SCHEMA_VERSION
+        and type(decision.contract_version) is int
+        and decision.contract_version == _LIFECYCLE_CONTRACT_VERSION
+        and decision.kind == "reviewed_none"
+        and normalize_id(decision.page_identity) == decision.page_identity
+        and bool(_HASH.fullmatch(decision.after_fingerprint))
+        and bool(_HASH.fullmatch(decision.decision_hash))
+        and valid_reason
+        and decision.decision_hash
+        == _lifecycle_decision_hash(
+            page_identity=decision.page_identity,
+            after_fingerprint=decision.after_fingerprint,
+            reason=reason,
+        )
+        and decision.reference
+        == _lifecycle_reference(
+            decision.page_identity, f"{decision.after_fingerprint}.json"
+        )
+    )
+    if not valid:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+
+
+def build_lifecycle_prepared_transition(
+    *,
+    transition_id: str,
+    operation: str,
+    page_identity: str,
+    before_path: str,
+    before_source_hash: str,
+    after_path: str,
+    after_source_hash: str,
+    after_fingerprint: str,
+    decision: LifecycleDecision | None,
+    transition_token: str,
+    auxiliary_hash: str,
+    carried_from: LifecycleDecision | None = None,
+) -> LifecyclePreparedTransition:
+    transition = _canonical_id(
+        transition_id, code="LIFECYCLE_TRANSITION_INVALID_ID"
+    )
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    fingerprint = _canonical_fingerprint(after_fingerprint)
+    if operation not in _LIFECYCLE_OPERATIONS:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_INVALID_OPERATION",
+            "lifecycle operation is unsupported",
+        )
+    if not _safe_record_path(before_path) or not _safe_record_path(after_path):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    if not _HASH.fullmatch(before_source_hash) or not _HASH.fullmatch(
+        after_source_hash
+    ):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    if not _HASH.fullmatch(auxiliary_hash):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    decision_reference: str | None = None
+    decision_bytes_hash: str | None = None
+    if decision is not None:
+        _validate_lifecycle_decision(decision)
+        if (
+            decision.page_identity != identity
+            or decision.after_fingerprint != fingerprint
+        ):
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_DECISION_MISMATCH",
+                "lifecycle decision does not match the resulting page",
+            )
+        decision_reference = decision.reference
+        decision_bytes_hash = _decision_bytes_hash(decision)
+    carried_reference: str | None = None
+    if carried_from is not None:
+        _validate_lifecycle_decision(carried_from)
+        if carried_from.page_identity != identity:
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_DECISION_MISMATCH",
+                "carried lifecycle decision has the wrong identity",
+            )
+        carried_reference = carried_from.reference
+    prepared = LifecyclePreparedTransition(
+        _LIFECYCLE_SCHEMA_VERSION,
+        _LIFECYCLE_CONTRACT_VERSION,
+        "prepared_transition",
+        transition,
+        operation,
+        identity,
+        before_path,
+        before_source_hash,
+        after_path,
+        after_source_hash,
+        fingerprint,
+        decision_reference,
+        decision_bytes_hash,
+        draft_token_hash(transition_token),
+        auxiliary_hash,
+        carried_reference,
+        _lifecycle_reference(identity, "prepared.json"),
+    )
+    serialize_lifecycle_prepared(prepared)
+    return prepared
+
+
+def _validate_lifecycle_prepared(prepared: LifecyclePreparedTransition) -> None:
+    if not isinstance(prepared, LifecyclePreparedTransition):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    decision_pair = (
+        prepared.decision_reference is not None,
+        prepared.decision_bytes_hash is not None,
+    )
+    valid = (
+        type(prepared.schema_version) is int
+        and prepared.schema_version == _LIFECYCLE_SCHEMA_VERSION
+        and type(prepared.contract_version) is int
+        and prepared.contract_version == _LIFECYCLE_CONTRACT_VERSION
+        and prepared.kind == "prepared_transition"
+        and normalize_id(prepared.transition_id) == prepared.transition_id
+        and prepared.operation in _LIFECYCLE_OPERATIONS
+        and normalize_id(prepared.page_identity) == prepared.page_identity
+        and _safe_record_path(prepared.before_path)
+        and bool(_HASH.fullmatch(prepared.before_source_hash))
+        and _safe_record_path(prepared.after_path)
+        and bool(_HASH.fullmatch(prepared.after_source_hash))
+        and bool(_HASH.fullmatch(prepared.after_fingerprint))
+        and decision_pair in {(False, False), (True, True)}
+        and bool(_HASH.fullmatch(prepared.transition_token_hash))
+        and bool(_HASH.fullmatch(prepared.auxiliary_hash))
+        and prepared.reference
+        == _lifecycle_reference(prepared.page_identity, "prepared.json")
+    )
+    if not valid:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+        )
+    if prepared.decision_reference is not None:
+        _validate_lifecycle_reference(
+            prepared.decision_reference,
+            page_identity=prepared.page_identity,
+            fingerprint=prepared.after_fingerprint,
+        )
+        if not _HASH.fullmatch(prepared.decision_bytes_hash or ""):
+            raise RelationReviewError(
+                "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+            )
+    if prepared.carried_from is not None:
+        _validate_lifecycle_reference(
+            prepared.carried_from, page_identity=prepared.page_identity
+        )
+
+
+def serialize_lifecycle_prepared(prepared: LifecyclePreparedTransition) -> str:
+    _validate_lifecycle_prepared(prepared)
+    return _bounded_lifecycle_text(prepared.storage_dict())
+
+
+def _safe_directory(path: Path, *, code: str) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise RelationReviewError(code, "review directory cannot be inspected") from error
+    if (
+        stat.S_ISLNK(info.st_mode)
+        or vault._is_reparse(info)
+        or not stat.S_ISDIR(info.st_mode)
+    ):
+        raise RelationReviewError(code, "review directory is unsafe")
+
+
+def _descend_lifecycle_directory(parent: Path, component: str) -> Path | None:
+    _safe_directory(parent, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
+    try:
+        names = os.listdir(parent)
+    except (OSError, UnicodeError) as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE",
+            "review directory cannot be enumerated",
+        ) from error
+    aliases = tuple(name for name in names if name.casefold() == component.casefold())
+    if any(name != component for name in aliases) or len(aliases) > 1:
+        raise RelationReviewError(
+            "RELATION_REVIEW_ALIAS", "review identity has a filename alias"
+        )
+    if component not in aliases:
+        return None
+    child = parent / component
+    _safe_directory(child, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
+    return child
+
+
+def _inspect_lifecycle_identity(
+    vault_root: Path, page_identity: str
+) -> tuple[Path, tuple[str, ...], tuple[vault.PathIdentity, ...]] | None:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    root = Path(vault_root).absolute()
+    _safe_directory(root, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
+    try:
+        root_info = root.lstat()
+    except OSError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE",
+            "review directory cannot be inspected",
+        ) from error
+    chain = [vault._identity(".", root_info)]
+    current = root
+    for component in (
+        kb_dirname(),
+        "_Schema",
+        "relation-reviews",
+        "lifecycle",
+        identity,
+    ):
+        descended = _descend_lifecycle_directory(current, component)
+        if descended is None:
+            _recheck_review_directory(root, tuple(chain))
+            return None
+        current = descended
+        try:
+            info = current.lstat()
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_DIRECTORY_UNSAFE",
+                "review directory cannot be inspected",
+            ) from error
+        chain.append(
+            vault._identity(current.relative_to(root).as_posix(), info)
+        )
+    try:
+        raw_names = tuple(sorted(os.listdir(current), key=lambda item: item.encode()))
+    except (OSError, UnicodeError) as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE",
+            "review directory cannot be enumerated",
+        ) from error
+    logical: set[str] = set()
+    decisions = 0
+    names: list[str] = []
+    for name in raw_names:
+        if name.endswith((".tmp", ".bak")):
+            continue
+        path = current / name
+        try:
+            info = path.lstat()
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
+            ) from error
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or vault._is_reparse(info)
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
+            )
+        canonical = name == "prepared.json" or bool(
+            re.fullmatch(r"[0-9a-f]{64}\.json", name)
+        )
+        if not canonical:
+            raise RelationReviewError(
+                "RELATION_REVIEW_ALIAS",
+                "lifecycle directory contains a filename alias",
+            )
+        alias = name.casefold()
+        if alias in logical:
+            raise RelationReviewError(
+                "RELATION_REVIEW_ALIAS",
+                "lifecycle directory contains a logical collision",
+            )
+        logical.add(alias)
+        if name != "prepared.json":
+            decisions += 1
+        names.append(name)
+    if decisions > _LIFECYCLE_MAX_DECISIONS:
+        raise RelationReviewError(
+            "RELATION_REVIEW_HISTORY_LIMIT",
+            "lifecycle review history exceeds 256 decisions; clean it up through "
+            "governed review tooling",
+        )
+    bound_chain = tuple(chain)
+    _recheck_review_directory(root, bound_chain)
+    return current, tuple(names), bound_chain
+
+
+def _read_lifecycle_bytes(
+    root: Path,
+    path: Path,
+    chain: tuple[vault.PathIdentity, ...],
+) -> tuple[bytes, vault.PathGuard]:
+    _recheck_review_directory(root, chain)
+    try:
+        relative = path.relative_to(root).as_posix()
+    except ValueError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_IO", "review artifact cannot be inspected"
+        ) from error
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        directory_descriptor = os.open(path.parent, directory_flags)
+    except OSError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE",
+            "review directory cannot be opened",
+        ) from error
+    try:
+        opened_directory = os.fstat(directory_descriptor)
+        if not stat.S_ISDIR(opened_directory.st_mode) or not vault._same_identity(
+            chain[-1], opened_directory
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            )
+        descriptor_relative = _SUPPORTS_REVIEW_DIR_FD
+        try:
+            before = (
+                os.stat(
+                    path.name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if descriptor_relative
+                else path.lstat()
+            )
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_IO", "review artifact cannot be inspected"
+            ) from error
+        if (
+            stat.S_ISLNK(before.st_mode)
+            or vault._is_reparse(before)
+            or not stat.S_ISREG(before.st_mode)
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            descriptor = (
+                os.open(path.name, flags, dir_fd=directory_descriptor)
+                if descriptor_relative
+                else os.open(path, flags)
+            )
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_IO", "review artifact cannot be opened"
+            ) from error
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or not vault._same_identity(
+                    vault._identity(relative, before), opened
+                )
+            ):
+                raise RelationReviewError(
+                    "RELATION_REVIEW_SWAPPED",
+                    "review artifact changed during read",
+                )
+            try:
+                raw = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1)
+            except OSError as error:
+                raise RelationReviewError(
+                    "RELATION_REVIEW_IO", "review artifact cannot be read"
+                ) from error
+        finally:
+            os.close(descriptor)
+        try:
+            after = (
+                os.stat(
+                    path.name,
+                    dir_fd=directory_descriptor,
+                    follow_symlinks=False,
+                )
+                if descriptor_relative
+                else path.lstat()
+            )
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
+            ) from error
+        if not vault._same_identity(vault._identity(relative, before), after):
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
+            )
+        _recheck_review_directory(root, chain)
+    finally:
+        os.close(directory_descriptor)
+    if len(raw) > _MAX_ARTIFACT_BYTES:
+        raise RelationReviewError(
+            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
+        )
+    digest = hashlib.sha256(raw).hexdigest()
+    try:
+        guard = vault.PathGuard.capture(
+            root,
+            relative,
+            leaf_policy="content",
+            expected_content_hash=digest,
+        )
+    except vault.PathGuardError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
+        ) from error
+    _recheck_review_directory(root, chain)
+    return raw, guard
+
+
+def _parse_lifecycle_json(raw: bytes) -> dict[str, Any]:
+    try:
+        text = raw.decode("utf-8", errors="strict")
+    except UnicodeDecodeError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_ENCODING", "review artifact is not strict UTF-8"
+        ) from error
+    try:
+        value = json.loads(text, object_pairs_hook=_object_no_duplicates)
+    except _DuplicateJsonKey as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DUPLICATE_KEY", "review artifact contains a duplicate key"
+        ) from error
+    except json.JSONDecodeError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_JSON", "review artifact is not valid JSON"
+        ) from error
+    if type(value) is not dict:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_JSON", "review artifact root is not an object"
+        )
+    return value
+
+
+def _versioned_lifecycle_fields(value: dict[str, Any]) -> None:
+    for key in ("schema_version", "contract_version"):
+        if key not in value or type(value[key]) is not int:
+            raise RelationReviewError(
+                "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+            )
+    if (
+        value["schema_version"] != _LIFECYCLE_SCHEMA_VERSION
+        or value["contract_version"] != _LIFECYCLE_CONTRACT_VERSION
+    ):
+        raise RelationReviewError(
+            "RELATION_REVIEW_UNSUPPORTED_VERSION",
+            "review artifact schema version is unsupported",
+        )
+
+
+def _parse_lifecycle_decision(
+    raw: bytes, *, page_identity: str, after_fingerprint: str
+) -> LifecycleDecision:
+    value = _parse_lifecycle_json(raw)
+    if set(value) != _LIFECYCLE_DECISION_KEYS:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
+        )
+    _versioned_lifecycle_fields(value)
+    if any(
+        type(value[key]) is not str
+        for key in (
+            "kind",
+            "page_identity",
+            "after_fingerprint",
+            "decision_hash",
+            "reason",
+        )
+    ):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid field types"
+        )
+    decision = LifecycleDecision(
+        value["schema_version"],
+        value["contract_version"],
+        value["kind"],
+        value["page_identity"],
+        value["after_fingerprint"],
+        value["decision_hash"],
+        value["reason"],
+        _lifecycle_reference(page_identity, f"{after_fingerprint}.json"),
+    )
+    _validate_lifecycle_decision(decision)
+    if (
+        decision.page_identity != page_identity
+        or decision.after_fingerprint != after_fingerprint
+    ):
+        raise RelationReviewError(
+            "RELATION_REVIEW_FILENAME_MISMATCH",
+            "review artifact filename does not match its identity",
+        )
+    if raw != serialize_lifecycle_decision(decision).encode("utf-8"):
+        raise RelationReviewError(
+            "RELATION_REVIEW_NONCANONICAL", "review artifact is not canonical"
+        )
+    return decision
+
+
+def _parse_lifecycle_prepared(
+    raw: bytes, *, page_identity: str
+) -> LifecyclePreparedTransition:
+    value = _parse_lifecycle_json(raw)
+    if set(value) != _LIFECYCLE_PREPARED_KEYS:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
+        )
+    _versioned_lifecycle_fields(value)
+    string_keys = (
+        "kind",
+        "transition_id",
+        "operation",
+        "page_identity",
+        "before_path",
+        "before_source_hash",
+        "after_path",
+        "after_source_hash",
+        "after_fingerprint",
+        "transition_token_hash",
+        "auxiliary_hash",
+    )
+    if any(type(value[key]) is not str for key in string_keys):
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid field types"
+        )
+    for key in ("decision_reference", "decision_bytes_hash", "carried_from"):
+        if value[key] is not None and type(value[key]) is not str:
+            raise RelationReviewError(
+                "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid field types"
+            )
+    prepared = LifecyclePreparedTransition(
+        value["schema_version"],
+        value["contract_version"],
+        value["kind"],
+        value["transition_id"],
+        value["operation"],
+        value["page_identity"],
+        value["before_path"],
+        value["before_source_hash"],
+        value["after_path"],
+        value["after_source_hash"],
+        value["after_fingerprint"],
+        value["decision_reference"],
+        value["decision_bytes_hash"],
+        value["transition_token_hash"],
+        value["auxiliary_hash"],
+        value["carried_from"],
+        _lifecycle_reference(page_identity, "prepared.json"),
+    )
+    _validate_lifecycle_prepared(prepared)
+    if prepared.page_identity != page_identity:
+        raise RelationReviewError(
+            "RELATION_REVIEW_FILENAME_MISMATCH",
+            "review artifact filename does not match its identity",
+        )
+    if raw != serialize_lifecycle_prepared(prepared).encode("utf-8"):
+        raise RelationReviewError(
+            "RELATION_REVIEW_NONCANONICAL", "review artifact is not canonical"
+        )
+    return prepared
+
+
+def _load_lifecycle_decision_bound(
+    vault_root: Path, page_identity: str, after_fingerprint: str
+) -> tuple[LifecycleDecision | None, vault.PathGuard | None]:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    fingerprint = _canonical_fingerprint(after_fingerprint)
+    root = Path(vault_root).absolute()
+    inspected = _inspect_lifecycle_identity(root, identity)
+    if inspected is None:
+        return None, None
+    directory, names, chain = inspected
+    name = f"{fingerprint}.json"
+    if name not in names:
+        return None, None
+    raw, guard = _read_lifecycle_bytes(root, directory / name, chain)
+    return (
+        _parse_lifecycle_decision(
+            raw, page_identity=identity, after_fingerprint=fingerprint
+        ),
+        guard,
+    )
+
+
+def load_lifecycle_decision(
+    vault_root: Path, page_identity: str, after_fingerprint: str
+) -> LifecycleDecision | None:
+    decision, _ = _load_lifecycle_decision_bound(
+        vault_root, page_identity, after_fingerprint
+    )
+    return decision
+
+
+def _load_lifecycle_prepared_bound(
+    vault_root: Path, page_identity: str
+) -> tuple[LifecyclePreparedTransition | None, vault.PathGuard | None]:
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    root = Path(vault_root).absolute()
+    inspected = _inspect_lifecycle_identity(root, identity)
+    if inspected is None:
+        return None, None
+    directory, names, chain = inspected
+    if "prepared.json" not in names:
+        return None, None
+    raw, guard = _read_lifecycle_bytes(
+        root, directory / "prepared.json", chain
+    )
+    return _parse_lifecycle_prepared(raw, page_identity=identity), guard
+
+
+def load_lifecycle_prepared(
+    vault_root: Path, page_identity: str
+) -> LifecyclePreparedTransition | None:
+    prepared, _ = _load_lifecycle_prepared_bound(vault_root, page_identity)
+    return prepared
+
+
+def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
+    """Return whether any exact lifecycle identity directory reserves the UUID."""
+    return _inspect_lifecycle_identity(vault_root, page_identity) is not None
+
+
+def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
+    inspected = _inspect_lifecycle_identity(root, page_identity)
+    if inspected is None:
+        return
+    _, names, _ = inspected
+    count = sum(name != "prepared.json" for name in names)
+    if count >= _LIFECYCLE_MAX_DECISIONS:
+        raise RelationReviewError(
+            "RELATION_REVIEW_HISTORY_LIMIT",
+            "lifecycle review history already contains 256 decisions; clean it up "
+            "through governed review tooling",
+        )
+
+
+def _plan_lifecycle_decision_install(
+    root: Path, decision: LifecycleDecision
+) -> vault.PlannedWrite:
+    _ensure_lifecycle_decision_capacity(root, decision.page_identity)
+    decision_path = lifecycle_decision_path(
+        root, decision.page_identity, decision.after_fingerprint
+    )
+    relative = decision_path.relative_to(root).as_posix()
+    return vault.PlannedWrite(
+        decision_path,
+        serialize_lifecycle_decision(decision),
+        create_only=True,
+        guard=vault.PathGuard.capture(root, relative, leaf_policy="absent"),
+    )
+
+
+def _validate_primary_binding(current: LifecyclePrimaryBinding) -> None:
+    if (
+        not isinstance(current, LifecyclePrimaryBinding)
+        or not _safe_record_path(current.path)
+        or not _HASH.fullmatch(current.source_hash)
+        or (
+            current.review_fingerprint is not None
+            and not _HASH.fullmatch(current.review_fingerprint)
+        )
+    ):
+        raise RelationReviewError(
+            "LIFECYCLE_PRIMARY_INVALID", "current primary binding is invalid"
+        )
+
+
+def lifecycle_prepared_state(
+    prepared: LifecyclePreparedTransition,
+    current: LifecyclePrimaryBinding,
+) -> Literal["pending", "committed", "stale"]:
+    """Classify one current primary against a prepared transition, purely."""
+    _validate_lifecycle_prepared(prepared)
+    _validate_primary_binding(current)
+    committed = (
+        current.path == prepared.after_path
+        and current.source_hash == prepared.after_source_hash
+        and current.review_fingerprint == prepared.after_fingerprint
+    )
+    if committed:
+        return "committed"
+    if (
+        current.path == prepared.before_path
+        and current.source_hash == prepared.before_source_hash
+    ):
+        return "pending"
+    return "stale"
+
+
+def _validate_prepared_decision_binding(
+    prepared: LifecyclePreparedTransition,
+    decision: LifecycleDecision | None,
+) -> None:
+    if decision is None:
+        if (
+            prepared.decision_reference is not None
+            or prepared.decision_bytes_hash is not None
+        ):
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_DECISION_MISMATCH",
+                "prepared transition decision binding is inconsistent",
+            )
+        return
+    _validate_lifecycle_decision(decision)
+    if (
+        decision.page_identity != prepared.page_identity
+        or decision.after_fingerprint != prepared.after_fingerprint
+        or decision.reference != prepared.decision_reference
+        or _decision_bytes_hash(decision) != prepared.decision_bytes_hash
+    ):
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_DECISION_MISMATCH",
+            "prepared transition decision binding is inconsistent",
+        )
+
+
+def _load_prepared_decision_guard(
+    root: Path, prepared: LifecyclePreparedTransition
+) -> vault.PathGuard | None:
+    """Validate the immutable decision referenced by an existing prepared slot."""
+    if prepared.decision_reference is None:
+        return None
+    fingerprint = prepared.decision_reference.rsplit("/", 1)[-1].removesuffix(".json")
+    decision, guard = _load_lifecycle_decision_bound(
+        root, prepared.page_identity, fingerprint
+    )
+    if (
+        decision is None
+        or guard is None
+        or _decision_bytes_hash(decision) != prepared.decision_bytes_hash
+    ):
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_DECISION_MISMATCH",
+            "prepared transition references a missing or changed immutable decision",
+        )
+    return guard
+
+
+def plan_lifecycle_transition(
+    vault_root: Path,
+    *,
+    decision: LifecycleDecision | None,
+    prepared: LifecyclePreparedTransition,
+    current: LifecyclePrimaryBinding,
+) -> LifecycleTransitionPlan:
+    """Plan decision/slot writes without mutating lifecycle or primary state."""
+    _validate_lifecycle_prepared(prepared)
+    _validate_primary_binding(current)
+    _validate_prepared_decision_binding(prepared, decision)
+    root = Path(vault_root).absolute()
+
+    writes: list[vault.PlannedWrite] = []
+    read_guards: list[vault.PathGuard] = []
+    existing_decision: LifecycleDecision | None = None
+    decision_guard: vault.PathGuard | None = None
+    if decision is not None:
+        existing_decision, decision_guard = _load_lifecycle_decision_bound(
+            root, decision.page_identity, decision.after_fingerprint
+        )
+        if existing_decision is not None and existing_decision != decision:
+            raise RelationReviewError(
+                "RELATION_REVIEW_DECISION_COLLISION",
+                "immutable lifecycle decision collides with existing bytes",
+            )
+        if existing_decision is not None and decision_guard is not None:
+            read_guards.append(decision_guard)
+
+    existing_prepared, prepared_guard = _load_lifecycle_prepared_bound(
+        root, prepared.page_identity
+    )
+    if existing_prepared is not None:
+        existing_decision_guard = _load_prepared_decision_guard(
+            root, existing_prepared
+        )
+        if existing_decision_guard is not None:
+            read_guards.append(existing_decision_guard)
+
+    if existing_prepared == prepared:
+        assert prepared_guard is not None
+        state = lifecycle_prepared_state(prepared, current)
+        if state == "stale":
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_STALE",
+                "prepared transition matches neither live side; reconcile lifecycle state",
+            )
+        read_guards.append(prepared_guard)
+        return LifecycleTransitionPlan(
+            "pending_retry" if state == "pending" else "committed_replay",
+            decision,
+            prepared,
+            (),
+            tuple(read_guards),
+        )
+
+    prepared_path = lifecycle_prepared_path(root, prepared.page_identity)
+    prepared_relative = prepared_path.relative_to(root).as_posix()
+    if existing_prepared is None:
+        if lifecycle_prepared_state(prepared, current) != "pending":
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_STALE",
+                "new transition does not bind the current primary",
+            )
+        if decision is not None and existing_decision is None:
+            writes.append(_plan_lifecycle_decision_install(root, decision))
+        writes.append(
+            vault.PlannedWrite(
+                prepared_path,
+                serialize_lifecycle_prepared(prepared),
+                create_only=True,
+                guard=vault.PathGuard.capture(
+                    root, prepared_relative, leaf_policy="absent"
+                ),
+            )
+        )
+        return LifecycleTransitionPlan(
+            "new", decision, prepared, tuple(writes), tuple(read_guards)
+        )
+
+    assert prepared_guard is not None
+    old_state = lifecycle_prepared_state(existing_prepared, current)
+    if old_state == "pending":
+        if existing_prepared.transition_id == prepared.transition_id:
+            code = "LIFECYCLE_TRANSITION_MISMATCH"
+            reason = "prepared transition bindings changed for the same transition"
+        else:
+            code = "LIFECYCLE_TRANSITION_PENDING"
+            reason = "retry the exact pending lifecycle transition before starting another"
+        raise RelationReviewError(code, reason)
+    if old_state == "stale":
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_STALE",
+            "prepared transition matches neither live side; reconcile lifecycle state",
+        )
+    if existing_prepared.transition_id == prepared.transition_id:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "prepared transition bindings changed for the same transition",
+        )
+    if lifecycle_prepared_state(prepared, current) != "pending":
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "next transition does not bind the committed primary",
+        )
+    if decision is not None and existing_decision is None:
+        writes.append(_plan_lifecycle_decision_install(root, decision))
+    writes.append(
+        vault.PlannedWrite(
+            prepared_path,
+            serialize_lifecycle_prepared(prepared),
+            guard=prepared_guard,
+        )
+    )
+    return LifecycleTransitionPlan(
+        "replace_committed", decision, prepared, tuple(writes), tuple(read_guards)
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -737,6 +1855,20 @@ def load_relation_review(
         paths = corpus.identity_census.paths_by_identity.get(page_state.identity)
         if paths != (page_state.path,):
             return None
+        if page_state.review_fingerprint is not None:
+            decision = load_lifecycle_decision(
+                vault_root,
+                page_state.identity,
+                page_state.review_fingerprint,
+            )
+            if decision is not None:
+                return semantic_contract.RelationReviewState(
+                    "reviewed_none",
+                    decision.page_identity,
+                    decision.after_fingerprint,
+                    reason=decision.reason,
+                    reference=decision.reference,
+                )
         record, _ = _load_one(Path(vault_root).absolute(), page_state.identity)
         if record is None or record.kind == "qualifying":
             return None
@@ -881,6 +2013,17 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_ID_IN_USE", "draft identity is already reserved"
         ) from error
+    if artifact is None:
+        try:
+            lifecycle_reserved = lifecycle_identity_reserved(root, identity)
+        except RelationReviewError as error:
+            raise RelationReviewError(
+                "DRAFT_ID_IN_USE", "draft identity is already reserved"
+            ) from error
+        if lifecycle_reserved:
+            raise RelationReviewError(
+                "DRAFT_ID_IN_USE", "draft identity is already reserved"
+            )
     destination_exists = os.path.lexists(destination_path)
     if destination_exists:
         try:

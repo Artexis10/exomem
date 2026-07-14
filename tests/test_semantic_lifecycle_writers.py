@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from pathlib import Path
 
@@ -422,6 +423,75 @@ def test_lifecycle_bounds_alias_symlink_and_history_limit_are_closed(
     with pytest.raises(relation_review.RelationReviewError) as overflow:
         relation_review.load_lifecycle_decision(tmp_path, _ID, f"{0:064x}")
     assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
+
+
+def test_planning_a_257th_lifecycle_decision_fails_closed(tmp_path: Path) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    for index in range(256):
+        fingerprint = f"{index:064x}"
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reviewed",
+        )
+        relation_review.lifecycle_decision_path(
+            tmp_path, _ID, fingerprint
+        ).write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+
+    source_a = _source("A")
+    source_b = _source("B")
+    decision_b = _decision(source_b)
+    prepared_ab = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision_b,
+    )
+    with pytest.raises(relation_review.RelationReviewError) as overflow:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=decision_b,
+            prepared=prepared_ab,
+            current=_binding(_PAGE, source_a),
+        )
+    assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
+
+
+def test_lifecycle_identity_directory_swap_is_detected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    decision = _decision(_source("B"))
+    artifact = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    directory = artifact.parent
+    displaced = directory.with_name(f"{directory.name}-displaced")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_artifact_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path).name == artifact.name:
+            swapped = True
+            directory.rename(displaced)
+            directory.mkdir()
+            os.link(displaced / artifact.name, directory / artifact.name)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(relation_review.os, "open", swap_before_artifact_open)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert exc.value.code == "RELATION_REVIEW_SWAPPED"
 
 
 def test_duplicate_key_prepared_alias_and_unsafe_identity_directory_are_rejected(
