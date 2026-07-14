@@ -24,13 +24,22 @@ class ProvisionerWorker:
         driver: ProvisionerDriver,
         *,
         worker_id: str,
+        include_checkpoints: frozenset[str] | None = None,
+        exclude_checkpoints: frozenset[str] = frozenset(),
     ) -> None:
         self._repository = repository
         self._driver = driver
         self._worker_id = worker_id
+        self._include_checkpoints = include_checkpoints
+        self._exclude_checkpoints = exclude_checkpoints
 
     async def run_once(self, *, now: datetime | None = None) -> bool:
-        operation = await self._repository.claim_next(self._worker_id, now=now)
+        operation = await self._repository.claim_next(
+            self._worker_id,
+            now=now,
+            include_checkpoints=self._include_checkpoints,
+            exclude_checkpoints=self._exclude_checkpoints,
+        )
         if operation is None:
             return False
         if operation.claim_token is None:
@@ -116,7 +125,7 @@ class ProvisionerWorker:
             await self._repository.mark_pending(
                 operation.id,
                 self._worker_id,
-                checkpoint="effect-prepared",
+                checkpoint=operation.checkpoint,
                 retry_after_seconds=2,
                 **claim,
             )

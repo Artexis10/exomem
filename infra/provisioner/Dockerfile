@@ -44,18 +44,28 @@ RUN python -m pip install --no-cache-dir uv==0.11.28 \
         --requirement /tmp/requirements.txt --wheel-dir /wheels \
     && python -m pip wheel --no-cache-dir --no-deps --wheel-dir /wheels .
 
-FROM docker.io/library/python:3.13-slim-bookworm@sha256:de89ed8283721548f7f9c8acfd19d638f435fa3870693a017890e94be5d37fc6
-COPY --from=helm /helm /opt/exomem/bin/helm
+FROM docker.io/library/python:3.13-slim-bookworm@sha256:de89ed8283721548f7f9c8acfd19d638f435fa3870693a017890e94be5d37fc6 AS python-runtime
 COPY --from=wheels /wheels /wheels
 RUN python -m pip install --no-cache-dir --no-index --find-links=/wheels exomem-provisioner \
-    && rm -rf /wheels \
+    && rm -rf /wheels
+
+FROM docker.io/library/postgres:17-bookworm@sha256:67870dc097790edf2bd6726658db995dcc830f799d41bb2b78ef07c9a2d5f010
+COPY --from=python-runtime /usr/local /usr/local
+COPY --from=helm /helm /opt/exomem/bin/helm
+COPY infra/helm/cell /opt/exomem/charts/cell
+RUN case "$(pg_dump --version)" in "pg_dump (PostgreSQL) 17."*) ;; *) exit 1;; esac \
+    && for tool in pg_dump pg_restore psql dropdb createdb; do test -x "/usr/bin/${tool}"; done \
+    && exomem-provisioner-api --help >/dev/null \
+    && exomem-provisioner-worker --help >/dev/null \
+    && exomem-volume-worker --help >/dev/null \
+    && exomem-provisioner-volume-rebind --help >/dev/null \
     && groupadd --gid 10001 exomem-provisioner \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent exomem-provisioner
-COPY infra/helm/cell /opt/exomem/charts/cell
 USER 10001:10001
 WORKDIR /nonexistent
 
 LABEL org.opencontainers.image.title="Exomem hosted provisioner"
 LABEL org.opencontainers.image.source="https://github.com/artexis10/exomem"
 
+ENTRYPOINT []
 CMD ["exomem-provisioner-api"]

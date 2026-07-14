@@ -25,6 +25,13 @@ from .lifecycle import (
     RecordedVolume,
     _digest,
 )
+from .provider_identity import (
+    ProviderIdentityConflict,
+    ProviderRecoveryIdentityVerifier,
+    ProviderReference,
+    chunk_hcloud_identity_envelope,
+    decode_hcloud_identity_envelope,
+)
 
 
 def _api_status(error: Exception) -> int | None:
@@ -67,11 +74,13 @@ class KubernetesVolumeAdapter:
         storage_class_name: str,
         encryption_secret_name: str,
         encryption_secret_namespace: str,
+        identity_verifier: ProviderRecoveryIdentityVerifier | None = None,
     ) -> None:
         self._core = core_v1
         self._storage_class_name = storage_class_name
         self._encryption_secret_name = encryption_secret_name
         self._encryption_secret_namespace = encryption_secret_namespace
+        self._identity_verifier = identity_verifier
 
     @classmethod
     def from_in_cluster(
@@ -106,7 +115,30 @@ class KubernetesVolumeAdapter:
             if _api_status(error) == 404:
                 return None
             raise
-        _require_annotations(getattr(pvc.metadata, "annotations", None), metadata)
+        pvc_annotations = dict(getattr(pvc.metadata, "annotations", None) or {})
+        _require_annotations(pvc_annotations, metadata)
+        pvc_envelope = str(pvc_annotations.get("exomem.io/recovery-envelope", ""))
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    pvc_envelope,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolumeClaim",
+                        namespace=namespace,
+                        name=claim_name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "PVC provider recovery identity did not authenticate"
+                ) from error
         pv_name = getattr(pvc.spec, "volume_name", None)
         if not isinstance(pv_name, str) or not pv_name:
             return None
@@ -126,7 +158,47 @@ class KubernetesVolumeAdapter:
                 pv_name,
                 {"metadata": {"annotations": metadata.kubernetes_annotations}},
             )
-        return RecordedVolume(handle, pv_name, location, metadata)
+        pv_envelope = str(annotations.get("exomem.io/recovery-envelope", ""))
+        if self._identity_verifier is not None and pv_envelope:
+            try:
+                self._identity_verifier.authenticate(
+                    pv_envelope,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolume",
+                        namespace="",
+                        name=pv_name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "PV provider recovery identity did not authenticate"
+                ) from error
+        return RecordedVolume(
+            handle,
+            pv_name,
+            location,
+            metadata,
+            pv_recovery_envelope=pv_envelope,
+            pvc_recovery_envelope=pvc_envelope,
+        )
+
+    async def label_bound_volume(self, recorded: RecordedVolume, recovery_envelope: str) -> None:
+        annotations = {
+            **recorded.metadata.kubernetes_annotations,
+            "exomem.io/recovery-envelope": recovery_envelope,
+        }
+        await asyncio.to_thread(
+            self._core.patch_persistent_volume,
+            recorded.pv_name,
+            {"metadata": {"annotations": annotations}},
+        )
 
     @staticmethod
     def _location(pv: Any) -> str:
@@ -152,7 +224,10 @@ class KubernetesVolumeAdapter:
             "kind": "PersistentVolume",
             "metadata": {
                 "name": recorded.pv_name,
-                "annotations": metadata.kubernetes_annotations,
+                "annotations": {
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": recorded.pv_recovery_envelope,
+                },
                 "labels": {"exomem.io/resource-name": metadata.resource_name},
             },
             "spec": {
@@ -197,7 +272,10 @@ class KubernetesVolumeAdapter:
             "metadata": {
                 "name": metadata.resource_name + "-data",
                 "namespace": namespace,
-                "annotations": metadata.kubernetes_annotations,
+                "annotations": {
+                    **metadata.kubernetes_annotations,
+                    "exomem.io/recovery-envelope": recorded.pvc_recovery_envelope,
+                },
                 "labels": {"exomem.io/resource-name": metadata.resource_name},
             },
             "spec": {
@@ -275,9 +353,55 @@ class KubernetesCellAdapter:
     _CREDENTIAL_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
     _CREDENTIAL = re.compile(r"^[A-Za-z0-9_-]{43}$")
 
-    def __init__(self, *, core_v1: Any, apps_v1: Any) -> None:
+    def __init__(
+        self,
+        *,
+        core_v1: Any,
+        apps_v1: Any,
+        identity_verifier: ProviderRecoveryIdentityVerifier | None = None,
+    ) -> None:
         self._core = core_v1
         self._apps = apps_v1
+        self._identity_verifier = identity_verifier
+
+    async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
+        namespace = metadata.resource_name
+        name = metadata.resource_name + "-data"
+        try:
+            pvc = await asyncio.to_thread(
+                self._core.read_namespaced_persistent_volume_claim,
+                name,
+                namespace,
+            )
+        except Exception as error:
+            if _api_status(error) == 404:
+                return False
+            raise
+        annotations = dict(getattr(pvc.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    str(annotations.get("exomem.io/recovery-envelope", "")),
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="PersistentVolumeClaim",
+                        namespace=namespace,
+                        name=name,
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "PVC provider recovery identity did not authenticate"
+                ) from error
+        volume_name = getattr(pvc.spec, "volume_name", None)
+        return isinstance(volume_name, str) and bool(volume_name)
 
     def __repr__(self) -> str:
         return "KubernetesCellAdapter()"
@@ -386,143 +510,6 @@ class KubernetesCellAdapter:
             metadata.resource_name,
             {"spec": {"replicas": replicas}},
         )
-
-
-ExecRunner = Callable[[str, str, tuple[str, ...], bytes], Awaitable[tuple[int, str, str]]]
-
-
-async def _kubernetes_exec_runner(
-    namespace: str,
-    pod_name: str,
-    command: tuple[str, ...],
-    payload: bytes,
-) -> tuple[int, str, str]:
-    """Run the frozen operator contract over Kubernetes exec stdin without a shell."""
-
-    def execute() -> tuple[int, str, str]:
-        from kubernetes import client
-        from kubernetes.stream import stream
-
-        response = stream(
-            client.CoreV1Api().connect_get_namespaced_pod_exec,
-            pod_name,
-            namespace,
-            command=list(command),
-            container="exomem",
-            stderr=True,
-            stdin=True,
-            stdout=True,
-            tty=False,
-            _preload_content=False,
-        )
-        response.write_stdin(payload.decode("utf-8"))
-        response.close_stdin()
-        stdout: list[str] = []
-        stderr: list[str] = []
-        while response.is_open():
-            response.update(timeout=1)
-            if response.peek_stdout():
-                stdout.append(response.read_stdout())
-            if response.peek_stderr():
-                stderr.append(response.read_stderr())
-        status = int(response.returncode or 0)
-        response.close()
-        return status, "".join(stdout), "".join(stderr)
-
-    return await asyncio.to_thread(execute)
-
-
-class KubernetesHostedOperatorAdapter:
-    """Frozen hosted-operator v1 over authenticated Kubernetes exec stdin."""
-
-    _COMMAND = {
-        "credential": (
-            "exomem",
-            "hosted",
-            "credential",
-            "--contract-version",
-            "1",
-            "--request-file",
-            "-",
-        ),
-        "probe": (
-            "exomem",
-            "hosted",
-            "probe",
-            "--contract-version",
-            "1",
-            "--request-file",
-            "-",
-        ),
-    }
-
-    def __init__(self, *, core_v1: Any, runner: ExecRunner = _kubernetes_exec_runner) -> None:
-        self._core = core_v1
-        self._runner = runner
-
-    async def _pod_name(self, metadata: OpaqueProviderMetadata) -> str:
-        pods = await asyncio.to_thread(
-            self._core.list_namespaced_pod,
-            metadata.resource_name,
-            label_selector=f"exomem.io/cell={metadata.resource_name}",
-        )
-        running = [
-            item
-            for item in getattr(pods, "items", ())
-            if getattr(getattr(item, "status", None), "phase", None) == "Running"
-        ]
-        if len(running) != 1:
-            raise MetadataConflict("cell operator requires exactly one running pod")
-        name = getattr(running[0].metadata, "name", None)
-        if not isinstance(name, str) or not name:
-            raise MetadataConflict("cell operator pod identity is invalid")
-        return name
-
-    async def execute(
-        self,
-        command: str,
-        metadata: OpaqueProviderMetadata,
-        request: dict[str, Any],
-    ) -> dict[str, Any]:
-        argv = self._COMMAND.get(command)
-        if argv is None:
-            raise MetadataConflict("unsupported hosted operator command")
-        payload = json.dumps(
-            request, sort_keys=True, separators=(",", ":"), ensure_ascii=False
-        ).encode("utf-8")
-        if len(payload) > 65_536:
-            raise MetadataConflict("hosted operator request exceeds its contract")
-        status, stdout, stderr = await self._runner(
-            metadata.resource_name,
-            await self._pod_name(metadata),
-            argv,
-            payload,
-        )
-        if status != 0 or stderr or len(stdout.encode("utf-8")) > 65_536:
-            raise MetadataConflict("hosted operator execution failed safely")
-        try:
-            envelope = json.loads(stdout)
-        except json.JSONDecodeError as error:
-            raise MetadataConflict("hosted operator response is invalid") from error
-        if (
-            not isinstance(envelope, dict)
-            or set(envelope)
-            != {
-                "contract_version",
-                "ok",
-                "command",
-                "request_id",
-                "code",
-                "data",
-            }
-            or envelope["contract_version"] != 1
-            or envelope["ok"] is not True
-            or envelope["command"] != command
-            or envelope["request_id"] != request.get("request_id")
-            or not isinstance(envelope["data"], dict)
-        ):
-            raise MetadataConflict("hosted operator response is invalid")
-        return dict(envelope["data"])
 
 
 class KubernetesMaintenanceLeaseAdapter:
@@ -842,6 +829,30 @@ class PrivateCellApiAdapter:
             body={"timeout_seconds": 30},
         )
 
+    async def operator(
+        self,
+        command: str,
+        metadata: OpaqueProviderMetadata,
+        request: dict[str, Any],
+        *,
+        credential: str,
+        protocol_version: str,
+    ) -> dict[str, Any]:
+        if command not in {"credential", "probe"}:
+            raise MetadataConflict("unsupported private cell operator command")
+        operation_id = request.get("operation_id")
+        if not isinstance(operation_id, str) or not operation_id:
+            raise MetadataConflict("private cell operator operation identity is absent")
+        return await self._call(
+            "POST",
+            metadata,
+            "operator/" + command,
+            credential=credential,
+            protocol_version=protocol_version,
+            operation_id=operation_id,
+            body=request,
+        )
+
     async def resume(
         self,
         metadata: OpaqueProviderMetadata,
@@ -917,10 +928,17 @@ class HCloudVolumeAdapter:
         "exomem_tenant_id_",
         "exomem_cell_id_",
         "exomem_operation_id_",
+        "exomem_identity_",
     )
 
-    def __init__(self, *, client: Any) -> None:
+    def __init__(
+        self,
+        *,
+        client: Any,
+        identity_verifier: ProviderRecoveryIdentityVerifier | None = None,
+    ) -> None:
         self._client = client
+        self._identity_verifier = identity_verifier
 
     def __repr__(self) -> str:
         return "HCloudVolumeAdapter()"
@@ -938,7 +956,12 @@ class HCloudVolumeAdapter:
             raise MetadataConflict("HCloud CSI volumeHandle must be numeric") from error
         return await asyncio.to_thread(self._client.volumes.get_by_id, volume_id)
 
-    async def label_volume(self, handle: str, metadata: OpaqueProviderMetadata) -> None:
+    async def label_volume(
+        self,
+        handle: str,
+        metadata: OpaqueProviderMetadata,
+        recovery_envelope: str | None = None,
+    ) -> None:
         volume = await self._get(handle)
         if volume is None:
             raise MetadataConflict("HCloud volume is absent")
@@ -948,7 +971,52 @@ class HCloudVolumeAdapter:
         )
         if identity_present:
             OpaqueProviderMetadata.from_hcloud_labels(labels).require_same(metadata)
+        reference = ProviderReference.hcloud(kind="volume", resource_id=handle)
+        existing_recovery_identity = any(
+            key.startswith("exomem_identity_") for key in labels
+        )
+        if existing_recovery_identity:
+            try:
+                existing_envelope = decode_hcloud_identity_envelope(labels)
+                if self._identity_verifier is None:
+                    raise ProviderIdentityConflict(
+                        "provider recovery verifier is required for existing identity"
+                    )
+                self._identity_verifier.authenticate(
+                    existing_envelope,
+                    provider="hcloud",
+                    provider_reference=reference,
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+                if recovery_envelope is not None and recovery_envelope != existing_envelope:
+                    raise ProviderIdentityConflict(
+                        "provider recovery identity is immutable"
+                    )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "HCloud provider recovery identity did not authenticate"
+                ) from error
+        if recovery_envelope is not None and self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    recovery_envelope,
+                    provider="hcloud",
+                    provider_reference=reference,
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "HCloud provider recovery identity did not authenticate"
+                ) from error
         labels.update(metadata.hcloud_labels)
+        if recovery_envelope is not None:
+            labels.update(chunk_hcloud_identity_envelope(recovery_envelope))
         await asyncio.to_thread(self._client.volumes.update, volume, labels=labels)
 
     async def verify_volume(
@@ -962,6 +1030,21 @@ class HCloudVolumeAdapter:
         if actual_location != location:
             return False
         OpaqueProviderMetadata.from_hcloud_labels(labels).require_same(metadata)
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    decode_hcloud_identity_envelope(labels),
+                    provider="hcloud",
+                    provider_reference=ProviderReference.hcloud(kind="volume", resource_id=handle),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "HCloud provider recovery identity did not authenticate"
+                ) from error
         return True
 
     async def delete_volume(self, handle: str) -> None:
@@ -992,6 +1075,23 @@ class HCloudVolumeAdapter:
             metadata = OpaqueProviderMetadata.from_hcloud_labels(labels)
             if metadata.tenant_id != tenant_id:
                 raise MetadataConflict("HCloud tenant selector returned another identity")
+            if self._identity_verifier is not None:
+                try:
+                    self._identity_verifier.authenticate(
+                        decode_hcloud_identity_envelope(labels),
+                        provider="hcloud",
+                        provider_reference=ProviderReference.hcloud(
+                            kind="volume", resource_id=volume.id
+                        ),
+                        tenant_id=metadata.tenant_id,
+                        cell_id=metadata.subject_id,
+                        operation_id=metadata.operation_id,
+                        fence_generation=metadata.fence_generation,
+                    )
+                except ProviderIdentityConflict as error:
+                    raise MetadataConflict(
+                        "HCloud provider recovery identity did not authenticate"
+                    ) from error
             observed = max(observed, metadata.fence_generation)
         return observed
 
@@ -1228,7 +1328,21 @@ class TraefikRoutingAdapter:
         *,
         unused_ticket: str,
         browser_origin: str,
+        control_credential: str,
+        protocol_version: str,
     ) -> bool:
+        control_url = (
+            f"https://{self._control_hostname}/cells/{metadata.subject_id}/private/exomem/v1/ready"
+        )
+        control_status = await self._probe(
+            "GET",
+            control_url,
+            {
+                "Authorization": f"Bearer {control_credential}",
+                "X-Exomem-Hosted-Cell": metadata.subject_id,
+                "X-Exomem-Hosted-Protocol": protocol_version,
+            },
+        )
         url = (
             f"https://{self._transfer_hostname}/cells/{metadata.subject_id}"
             "/public/exomem/v2/transfers/download"
@@ -1251,7 +1365,11 @@ class TraefikRoutingAdapter:
             },
         )
         rejected = {404, 503}
-        return preflight_status in rejected and transfer_status in rejected
+        return (
+            control_status in {401, 403, 404, 503}
+            and preflight_status in rejected
+            and transfer_status in rejected
+        )
 
     def _objects(self, metadata: OpaqueProviderMetadata) -> tuple[tuple[str, dict[str, Any]], ...]:
         annotations = metadata.kubernetes_annotations

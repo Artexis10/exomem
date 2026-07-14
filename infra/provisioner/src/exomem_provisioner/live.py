@@ -11,12 +11,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from .adapters import (
-    HCloudVolumeAdapter,
     HelmCliAdapter,
     KubernetesCellAdapter,
-    KubernetesHostedOperatorAdapter,
     KubernetesMaintenanceLeaseAdapter,
-    KubernetesVolumeAdapter,
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
     _api_status,
@@ -29,12 +26,18 @@ from .lifecycle import (
     LifecycleConfig,
     MetadataConflict,
     OpaqueProviderMetadata,
-    RecordedVolume,
     _deterministic_uuid4,
     _digest,
     _fixed_helm_values,
 )
 from .models import ResourceKind
+from .provider_identity import (
+    ProviderIdentityConflict,
+    ProviderRecoveryIdentityVerifier,
+    ProviderReference,
+    authenticate_cell_provider_recovery_envelopes,
+    provider_operation_resource_name,
+)
 from .repository import OperationRepository
 
 
@@ -49,7 +52,7 @@ class KubernetesProviderSnapshot:
     routes: tuple[bool, bool]
 
 
-class KubernetesHCloudCapacityGate:
+class KubernetesCapacityGate:
     """Live, fail-closed alpha capacity gate with no caller-authored receipt input."""
 
     ACTIVE_USER_CELL_LIMIT = 6
@@ -57,17 +60,17 @@ class KubernetesHCloudCapacityGate:
     PROVIDER_VOLUME_ATTACHMENT_LIMIT = 16
     MINIMUM_UNUSED_PROVIDER_HEADROOM = 8
 
-    def __init__(self, *, core_v1: Any, hcloud_client: Any) -> None:
+    def __init__(self, *, core_v1: Any, storage_v1: Any) -> None:
         self._core = core_v1
-        self._hcloud = hcloud_client
+        self._storage = storage_v1
 
     async def block_reason(self, metadata: OpaqueProviderMetadata) -> str | None:
-        namespaces, volumes = await asyncio.gather(
+        namespaces, attachments = await asyncio.gather(
             asyncio.to_thread(
                 self._core.list_namespace,
                 label_selector="exomem.io/tenant-cell=true",
             ),
-            asyncio.to_thread(self._hcloud.volumes.get_all),
+            asyncio.to_thread(self._storage.list_volume_attachment),
         )
         active_names = {
             str(item.metadata.name)
@@ -78,7 +81,10 @@ class KubernetesHCloudCapacityGate:
             return None
         if len(active_names) >= self.ACTIVE_USER_CELL_LIMIT:
             return "active-user-cell-capacity-exhausted"
-        attached_volumes = sum(getattr(volume, "server", None) is not None for volume in volumes)
+        attached_volumes = sum(
+            bool(getattr(getattr(item, "status", None), "attached", False))
+            for item in (getattr(attachments, "items", ()) or ())
+        )
         safe_limit = self.PROVIDER_VOLUME_ATTACHMENT_LIMIT - self.MINIMUM_UNUSED_PROVIDER_HEADROOM
         projected = attached_volumes + 1 + self.RESERVED_VOLUME_ATTACHMENTS
         if projected > safe_limit:
@@ -106,11 +112,37 @@ class KubernetesProviderRegistry:
         apps_v1: Any,
         batch_v1: Any,
         custom_objects: Any,
+        identity_verifier: ProviderRecoveryIdentityVerifier,
     ) -> None:
         self._core = core_v1
         self._apps = apps_v1
         self._batch = batch_v1
         self._custom = custom_objects
+        self._identity_verifier = identity_verifier
+
+    def _authenticate_annotations(
+        self,
+        annotations: dict[str, str] | None,
+        metadata: OpaqueProviderMetadata,
+        *,
+        provider: str,
+        provider_reference: str,
+    ) -> None:
+        values = annotations or {}
+        try:
+            self._identity_verifier.authenticate(
+                values.get("exomem.io/recovery-envelope", ""),
+                provider=provider,
+                provider_reference=provider_reference,
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                operation_id=metadata.operation_id,
+                fence_generation=metadata.fence_generation,
+            )
+        except ProviderIdentityConflict as error:
+            raise MetadataConflict(
+                "Kubernetes provider recovery identity did not authenticate"
+            ) from error
 
     @staticmethod
     def _cell_identity(
@@ -145,6 +177,18 @@ class KubernetesProviderRegistry:
             )
         self._cell_identity(getattr(namespace.metadata, "annotations", None), current)
         _require_annotations(getattr(namespace.metadata, "annotations", None), owned)
+        self._authenticate_annotations(
+            getattr(namespace.metadata, "annotations", None),
+            owned,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes",
+                api_version="v1",
+                kind="Namespace",
+                namespace="",
+                name=current.resource_name,
+            ),
+        )
 
         async def exists(call: Any, *arguments: str) -> Any | None:
             try:
@@ -161,6 +205,18 @@ class KubernetesProviderRegistry:
         )
         if pvc is not None:
             _require_annotations(getattr(pvc.metadata, "annotations", None), owned)
+            self._authenticate_annotations(
+                getattr(pvc.metadata, "annotations", None),
+                owned,
+                provider="kubernetes",
+                provider_reference=ProviderReference.kubernetes(
+                    provider="kubernetes",
+                    api_version="v1",
+                    kind="PersistentVolumeClaim",
+                    namespace=current.resource_name,
+                    name=current.resource_name + "-data",
+                ),
+            )
         helm_releases = await asyncio.to_thread(
             self._core.list_namespaced_config_map,
             current.resource_name,
@@ -201,6 +257,18 @@ class KubernetesProviderRegistry:
             )
             if route is not None:
                 _require_annotations(route.get("metadata", {}).get("annotations"), owned)
+                self._authenticate_annotations(
+                    route.get("metadata", {}).get("annotations"),
+                    owned,
+                    provider="traefik",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="traefik",
+                        api_version="traefik.io/v1alpha1",
+                        kind="IngressRoute",
+                        namespace=current.resource_name,
+                        name=current.resource_name + "-" + suffix,
+                    ),
+                )
             routes.append(route is not None)
         annotations = dict(getattr(namespace.metadata, "annotations", None) or {})
         return KubernetesProviderSnapshot(
@@ -213,7 +281,9 @@ class KubernetesProviderRegistry:
             (routes[0], routes[1]),
         )
 
-    async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None:
+    async def ensure_namespace(
+        self, metadata: OpaqueProviderMetadata, recovery_envelope: str
+    ) -> None:
         labels = dict(self._PSS_LABELS)
         labels.update(
             {
@@ -222,6 +292,7 @@ class KubernetesProviderRegistry:
             }
         )
         annotations = dict(metadata.kubernetes_annotations)
+        annotations["exomem.io/recovery-envelope"] = recovery_envelope
         annotations.update(
             {
                 "helm.sh/resource-policy": "keep",
@@ -250,15 +321,19 @@ class KubernetesProviderRegistry:
             existing = await asyncio.to_thread(self._core.read_namespace, metadata.resource_name)
             _require_annotations(getattr(existing.metadata, "annotations", None), metadata)
 
-    async def record_operation(self, metadata: OpaqueProviderMetadata) -> None:
-        name = "exo-op-" + _digest(metadata.operation_id, length=20)
+    async def record_operation(
+        self, metadata: OpaqueProviderMetadata, recovery_envelope: str
+    ) -> None:
+        name = provider_operation_resource_name(metadata.operation_id)
+        annotations = dict(metadata.kubernetes_annotations)
+        annotations["exomem.io/recovery-envelope"] = recovery_envelope
         body = {
             "apiVersion": "v1",
             "kind": "ConfigMap",
             "metadata": {
                 "name": name,
                 "namespace": metadata.resource_name,
-                "annotations": metadata.kubernetes_annotations,
+                "annotations": annotations,
                 "labels": {"exomem.io/provider-operation": "true"},
             },
             "immutable": True,
@@ -289,13 +364,28 @@ class KubernetesProviderRegistry:
 
     async def observed_fence(self, tenant_id: str) -> int:
         observed = 0
-        namespaces = await asyncio.to_thread(self._core.list_namespace)
+        namespaces = await asyncio.to_thread(
+            self._core.list_namespace,
+            label_selector="exomem.io/tenant-cell=true",
+        )
         selected: list[str] = []
         for item in getattr(namespaces, "items", ()):
             annotations = dict(getattr(item.metadata, "annotations", None) or {})
             recovered = OpaqueProviderMetadata.from_kubernetes_annotations(annotations)
             if recovered.tenant_id != tenant_id:
                 continue
+            self._authenticate_annotations(
+                annotations,
+                recovered,
+                provider="kubernetes",
+                provider_reference=ProviderReference.kubernetes(
+                    provider="kubernetes",
+                    api_version="v1",
+                    kind="Namespace",
+                    namespace="",
+                    name=str(item.metadata.name),
+                ),
+            )
             selected.append(str(item.metadata.name))
             observed = max(observed, recovered.fence_generation)
         if not selected:
@@ -310,12 +400,24 @@ class KubernetesProviderRegistry:
             annotations = dict(getattr(item.metadata, "annotations", None) or {})
             recovered = OpaqueProviderMetadata.from_kubernetes_annotations(annotations)
             if recovered.tenant_id == tenant_id:
+                self._authenticate_annotations(
+                    annotations,
+                    recovered,
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="ConfigMap",
+                        namespace=str(item.metadata.namespace),
+                        name=str(item.metadata.name),
+                    ),
+                )
                 observed = max(observed, recovered.fence_generation)
         return observed
 
 
 class LiveLifecyclePlane:
-    """Real Kubernetes/Helm/HCloud/runtime composition selected by the worker."""
+    """Routine Kubernetes/Helm/runtime composition with no HCloud or PV authority."""
 
     def __init__(
         self,
@@ -323,32 +425,29 @@ class LiveLifecyclePlane:
         repository: OperationRepository,
         registry: KubernetesProviderRegistry,
         cell: KubernetesCellAdapter,
-        kubernetes_volume: KubernetesVolumeAdapter,
-        hcloud_volume: HCloudVolumeAdapter,
         helm: HelmCliAdapter,
         runtime: PrivateCellApiAdapter,
         routes: TraefikRoutingAdapter,
         maintenance: KubernetesMaintenanceLeaseAdapter,
-        operator: KubernetesHostedOperatorAdapter,
-        capacity: KubernetesHCloudCapacityGate,
+        capacity: KubernetesCapacityGate,
+        identity_verifier: ProviderRecoveryIdentityVerifier,
         config: LifecycleConfig,
         now: Any = time.time,
     ) -> None:
         self._repository = repository
         self._registry = registry
         self._cell = cell
-        self._kubernetes_volume = kubernetes_volume
-        self._hcloud_volume = hcloud_volume
         self._helm = helm
         self._runtime = runtime
         self._routes = routes
         self._maintenance = maintenance
-        self._operator = operator
         self._capacity = capacity
+        self._identity_verifier = identity_verifier
         self._config = config
         self._now = now
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
+        self._recovery_envelopes: dict[str, dict[str, str]] = {}
 
     @staticmethod
     def _key(metadata: OpaqueProviderMetadata) -> str:
@@ -371,12 +470,9 @@ class LiveLifecyclePlane:
         return snapshot
 
     async def observed_fence(self, tenant_id: str) -> int:
-        return max(
-            await self._registry.observed_fence(tenant_id),
-            await self._hcloud_volume.observed_fence(tenant_id),
-        )
+        return await self._registry.observed_fence(tenant_id)
 
-    async def observe_operation(self, context: EffectContext) -> None:
+    async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None:
         if context.cell_id is None:
             return
         current = OpaqueProviderMetadata(
@@ -385,6 +481,20 @@ class LiveLifecyclePlane:
             operation_id=context.provider_operation_id,
             fence_generation=context.fence_generation,
         )
+        try:
+            recovery_envelopes = authenticate_cell_provider_recovery_envelopes(
+                self._identity_verifier,
+                request.get("_providerRecoveryEnvelopes"),
+                tenant_id=current.tenant_id,
+                cell_id=current.subject_id,
+                operation_id=current.operation_id,
+                fence_generation=current.fence_generation,
+                resource_name=current.resource_name,
+                operation_resource_name=provider_operation_resource_name(current.operation_id),
+            )
+        except ProviderIdentityConflict as error:
+            raise MetadataConflict("provider recovery envelope set did not authenticate") from error
+        self._recovery_envelopes[self._key(current)] = recovery_envelopes
         resources = await self._repository.list_resources(
             tenant_id=context.tenant_id,
             cell_id=context.cell_id,
@@ -402,7 +512,9 @@ class LiveLifecyclePlane:
         self._owned[self._key(current)] = owned
         snapshot = await self._refresh(current)
         if snapshot.namespace:
-            await self._registry.record_operation(current)
+            await self._registry.record_operation(
+                current, recovery_envelopes["providerOperationConfigMap"]
+            )
 
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).namespace
@@ -411,9 +523,10 @@ class LiveLifecyclePlane:
         return await self._capacity.block_reason(metadata)
 
     async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None:
-        await self._registry.ensure_namespace(metadata)
+        envelopes = self._recovery_envelopes[self._key(metadata)]
+        await self._registry.ensure_namespace(metadata, envelopes["namespace"])
         self._owned[self._key(metadata)] = metadata
-        await self._registry.record_operation(metadata)
+        await self._registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
         await self._refresh(metadata)
 
     def has_release(self, metadata: OpaqueProviderMetadata) -> bool:
@@ -433,23 +546,16 @@ class LiveLifecyclePlane:
                 "exomem.io/active-credential-version": "1",
                 "exomem.io/security-revision": "1",
                 "exomem.io/credential-phase": "stable",
+                "exomem.io/recovery-envelope": self._recovery_envelopes[self._key(metadata)][
+                    "credentialSecret"
+                ],
             },
         )
         await self._helm.ensure_release(owned, values)
         await self._refresh(metadata)
 
-    async def discover_bound_volume(
-        self, metadata: OpaqueProviderMetadata
-    ) -> RecordedVolume | None:
-        return await self._kubernetes_volume.discover_bound_volume(self._owner(metadata))
-
-    async def verify_volume(
-        self,
-        handle: str,
-        metadata: OpaqueProviderMetadata,
-        location: str,
-    ) -> bool:
-        return await self._hcloud_volume.verify_volume(handle, self._owner(metadata), location)
+    async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
+        return await self._cell.volume_claim_bound(self._owner(metadata))
 
     def is_initialized(self, metadata: OpaqueProviderMetadata) -> bool:
         return self._snapshot(metadata).serving
@@ -517,6 +623,8 @@ class LiveLifecyclePlane:
             self._owner(metadata),
             unused_ticket=ticket,
             browser_origin=self._config.browser_origin,
+            control_credential=credential,
+            protocol_version=self._config.protocol_version,
         )
 
     async def acquire_maintenance(
@@ -606,7 +714,17 @@ class LiveLifecyclePlane:
             credentials,
             lifecycle_annotations={**annotations, **prepared},
         )
-        result = await self._operator.execute("credential", metadata, request)
+        active = annotations.get("exomem.io/active-credential-version")
+        active_credential = credentials.get(str(active))
+        if not active_credential:
+            raise MetadataConflict("active provider credential is absent")
+        result = await self._runtime.operator(
+            "credential",
+            metadata,
+            request,
+            credential=active_credential,
+            protocol_version=self._config.protocol_version,
+        )
         revision = result.get("revision")
         if revision != expected + 1:
             raise MetadataConflict("hosted credential revision did not advance exactly once")
@@ -682,7 +800,13 @@ class LiveLifecyclePlane:
             "expected_revision": revision,
             "port": 8765,
         }
-        result = await self._operator.execute("probe", owned, operator_request)
+        result = await self._runtime.operator(
+            "probe",
+            owned,
+            operator_request,
+            credential=credential,
+            protocol_version=self._config.protocol_version,
+        )
         proved = (
             result.get("authenticated_credential_version") == pending
             and result.get("security_revision") == revision

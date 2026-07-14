@@ -18,9 +18,7 @@ spec:
         'system:serviceaccount:{{ .Release.Namespace }}:exomem-cell-provisioner'
   validations:
     - expression: >-
-        request.resource.resource == 'persistentvolumes'
-          ? true
-          : request.resource.resource == 'namespaces'
+        request.resource.resource == 'namespaces'
           ? (object != null
               ? object.metadata.name.startsWith('exo-')
               : oldObject.metadata.name.startsWith('exo-'))
@@ -53,10 +51,10 @@ spec:
         resources: ["persistentvolumes", "persistentvolumeclaims"]
         scope: "*"
   matchConditions:
-    - name: live-provider-worker-service-account
+    - name: volume-lifecycle-service-account
       expression: >-
         request.userInfo.username ==
-        'system:serviceaccount:{{ .Release.Namespace }}:exomem-cell-provisioner'
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-volume-lifecycle'
   variables:
     - name: newAnnotations
       expression: >-

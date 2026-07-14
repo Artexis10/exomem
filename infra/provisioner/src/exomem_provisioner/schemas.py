@@ -24,7 +24,7 @@ OpaqueId = Annotated[
     str,
     StringConstraints(
         min_length=1,
-        max_length=256,
+        max_length=64,
         pattern=r"^[A-Za-z0-9_.:/-]+$",
         strip_whitespace=False,
     ),
@@ -102,12 +102,9 @@ class ExportRequest(TargetRequest):
         if not _CANONICAL_RFC3339_UTC.fullmatch(value):
             raise ValueError("export expiry must be canonical RFC3339 UTC")
         try:
-            expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            datetime.fromisoformat(value.replace("Z", "+00:00"))
         except ValueError as error:
             raise ValueError("export expiry must be canonical RFC3339 UTC") from error
-        ttl = expires_at.astimezone(UTC) - datetime.now(UTC)
-        if ttl <= timedelta(0) or ttl > timedelta(days=30):
-            raise ValueError("export expiry must be future and no more than 30 days")
         return value
 
 

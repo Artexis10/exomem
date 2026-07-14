@@ -1,3 +1,4 @@
+{{- include "exomem-cell.validateProviderRecovery" . -}}
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -13,7 +14,7 @@ metadata:
     pod-security.kubernetes.io/warn-version: v1.35
   annotations:
     helm.sh/resource-policy: keep
-    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "namespace") | nindent 4 }}
     exomem.io/resource-name: {{ .Values.resourceName | quote }}
     exomem.io/pvc-name: {{ printf "%s-data" .Values.resourceName | quote }}
     exomem.io/credentials-secret-name: {{ .Values.credentialsSecretName | quote }}

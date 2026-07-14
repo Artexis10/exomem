@@ -39,9 +39,19 @@ Every recovery archive SHALL use envelope AES-256-GCM with a unique data key and
 ### Requirement: User exports remain opaque and short-lived
 User export SHALL use the same verified portable/encrypted provider path but SHALL retain its product-specific TTL. Substrate and the browser SHALL receive only opaque export/release references and a presigned HTTPS download URL valid for at most 15 minutes; they MUST NOT receive cell-local paths, B2 credentials, or unwrapped keys.
 
+An export `expiresAt` SHALL be canonical RFC3339 UTC, future, and no more than 30 days away when its idempotency key is first accepted. An exact replay of an already accepted key and canonical input SHALL continue or return its stored result after that time passes. A brand-new expired request SHALL be rejected before an operation or provider artifact is created.
+
 #### Scenario: Owner requests export download
 - **WHEN** an available owner-scoped export is downloaded
 - **THEN** the browser receives a short-lived provider URL and the local cell archive remains undisclosed
+
+#### Scenario: Export response is lost across product expiry
+- **WHEN** an export key and canonical request are accepted before `expiresAt`, and the exact request is replayed while pending or after completion once `expiresAt` has passed
+- **THEN** the provider continues the same durable operation or returns the same result without creating a second artifact
+
+#### Scenario: First export request is already expired
+- **WHEN** no accepted idempotency claim exists and a request arrives with `expiresAt` in the past
+- **THEN** the provider rejects it definitively without creating an operation or provider artifact
 
 ### Requirement: Restore publishes into a new candidate identity
 Restore SHALL stop the candidate runtime, fetch/decrypt the provider object, verify ciphertext, expected size/digests, manifest/schema/source identity, release compatibility, path safety, and absence of forbidden hosted state, and invoke the version-pinned offline restore helper. Publication SHALL be atomic into an empty candidate vault, SHALL recreate destination binding markers and credentials, and SHALL rebuild derived state before authenticated readiness.

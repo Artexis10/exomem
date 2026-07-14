@@ -13,11 +13,16 @@ from exomem_provisioner.config import (
 )
 from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
 from exomem_provisioner.live import (
-    KubernetesHCloudCapacityGate,
+    KubernetesCapacityGate,
     KubernetesProviderRegistry,
     LiveLifecyclePlane,
 )
 from exomem_provisioner.production import build_live_provider_components
+from exomem_provisioner.provider_identity import (
+    ProviderRecoveryIdentityCodec,
+    cell_provider_recovery_envelopes,
+    provider_operation_resource_name,
+)
 
 
 class _NotFound(Exception):
@@ -25,6 +30,7 @@ class _NotFound(Exception):
 
 
 RELEASE_FIXTURE = Path(__file__).parent / "fixtures/exomem-hosted-release-v1.json"
+IDENTITY_CODEC = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
 
 
 def _metadata() -> OpaqueProviderMetadata:
@@ -43,10 +49,8 @@ def _settings(**overrides: object) -> ProviderWorkerSettings:
         "browser_origin": "https://substratesystems.io",
         "location": "fsn1",
         "internal_origin": "http://{resource}.{namespace}.svc.cluster.local:8765",
-        "hcloud_token": "h" * 32,
-        "volume_encryption_secret_name": "exomem-volume-encryption",
-        "volume_encryption_secret_namespace": "exomem-platform",
         "worker_id": "worker-alpha",
+        "provider_recovery_public_key": IDENTITY_CODEC.public_key(),
     }
     values.update(overrides)
     return ProviderWorkerSettings(**values)  # type: ignore[arg-type]
@@ -105,10 +109,20 @@ def test_release_manifest_is_complete_strict_and_immutable(tmp_path: Path) -> No
 @pytest.mark.asyncio
 async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fence() -> None:
     metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
 
     class Core:
         namespace = None
         config_map = None
+        namespace_selectors: list[str] = []
 
         def create_namespace(self, body):
             self.namespace = SimpleNamespace(metadata=SimpleNamespace(**body["metadata"]))
@@ -124,8 +138,21 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
         def read_namespaced_config_map(self, name, namespace):
             return self.config_map
 
-        def list_namespace(self):
-            return SimpleNamespace(items=[self.namespace])
+        def list_namespace(self, *, label_selector):
+            self.namespace_selectors.append(label_selector)
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(
+                            name="default",
+                            annotations={"kubernetes.io/metadata.name": "default"},
+                        )
+                    ),
+                    self.namespace,
+                ]
+                if label_selector != "exomem.io/tenant-cell=true"
+                else [self.namespace]
+            )
 
         def list_config_map_for_all_namespaces(self, label_selector):
             assert label_selector == "exomem.io/provider-operation=true"
@@ -137,17 +164,22 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
         apps_v1=SimpleNamespace(),
         batch_v1=SimpleNamespace(),
         custom_objects=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
     )
 
-    await registry.ensure_namespace(metadata)
-    await registry.record_operation(metadata)
+    await registry.ensure_namespace(metadata, envelopes["namespace"])
+    await registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
 
     assert core.namespace.metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
     assert core.namespace.metadata.annotations["meta.helm.sh/release-name"] == (
         metadata.resource_name
     )
-    assert core.config_map.metadata.annotations == metadata.kubernetes_annotations
+    assert core.config_map.metadata.annotations == {
+        **metadata.kubernetes_annotations,
+        "exomem.io/recovery-envelope": envelopes["providerOperationConfigMap"],
+    }
     assert await registry.observed_fence("tenant-alpha") == 7
+    assert core.namespace_selectors == ["exomem.io/tenant-cell=true"]
 
 
 def test_production_factory_wires_the_live_plane_without_a_fake_selection_path() -> None:
@@ -164,8 +196,8 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path()
         apps_v1=SimpleNamespace(),
         batch_v1=SimpleNamespace(),
         coordination_v1=SimpleNamespace(),
+        storage_v1=SimpleNamespace(),
         custom_objects=SimpleNamespace(),
-        hcloud_client=SimpleNamespace(),
         requester=requester,
         external_probe=probe,
     )
@@ -177,7 +209,7 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path()
     assert components.driver._config.contract_digest == "b" * 64
     assert components.driver._config.operator_contract_digest == "c" * 64
     assert components.driver._plane is components.plane
-    assert components.driver._volumes is components.volume_worker
+    assert components.driver._volumes is None
 
 
 @pytest.mark.asyncio
@@ -196,26 +228,46 @@ async def test_registry_rejects_unowned_existing_namespace() -> None:
         apps_v1=SimpleNamespace(),
         batch_v1=SimpleNamespace(),
         custom_objects=SimpleNamespace(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
     )
     with pytest.raises(MetadataConflict):
-        await registry.ensure_namespace(metadata)
+        await registry.ensure_namespace(metadata, "forged")
 
 
 @pytest.mark.asyncio
 async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> None:
     metadata = _metadata()
+    envelopes = cell_provider_recovery_envelopes(
+        IDENTITY_CODEC,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
 
     class Core:
         releases: list[object] = []
 
         def read_namespace(self, name):
             return SimpleNamespace(
-                metadata=SimpleNamespace(annotations=metadata.kubernetes_annotations)
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["namespace"],
+                    }
+                )
             )
 
         def read_namespaced_persistent_volume_claim(self, name, namespace):
             return SimpleNamespace(
-                metadata=SimpleNamespace(annotations=metadata.kubernetes_annotations)
+                metadata=SimpleNamespace(
+                    annotations={
+                        **metadata.kubernetes_annotations,
+                        "exomem.io/recovery-envelope": envelopes["vaultPvc"],
+                    }
+                )
             )
 
         def list_namespaced_config_map(self, namespace, *, label_selector):
@@ -235,6 +287,7 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
         apps_v1=Missing(),
         batch_v1=Missing(),
         custom_objects=Missing(),
+        identity_verifier=IDENTITY_CODEC.verifier(),
     )
 
     snapshot = await registry.inspect(metadata, metadata)
@@ -245,7 +298,7 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
 
 
 @pytest.mark.asyncio
-async def test_live_capacity_gate_uses_kubernetes_and_hcloud_observations_only() -> None:
+async def test_live_capacity_gate_uses_kubernetes_attachment_observations_only() -> None:
     metadata = _metadata()
 
     class Core:
@@ -257,18 +310,29 @@ async def test_live_capacity_gate_uses_kubernetes_and_hcloud_observations_only()
                 items=[SimpleNamespace(metadata=SimpleNamespace(name=name)) for name in self.names]
             )
 
-    volumes = SimpleNamespace(get_all=lambda: [SimpleNamespace(server=object()) for _ in range(5)])
+    class Storage:
+        attached = 5
+
+        def list_volume_attachment(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(status=SimpleNamespace(attached=True))
+                    for _ in range(self.attached)
+                ]
+            )
+
     core = Core()
-    gate = KubernetesHCloudCapacityGate(
+    storage = Storage()
+    gate = KubernetesCapacityGate(
         core_v1=core,
-        hcloud_client=SimpleNamespace(volumes=volumes),
+        storage_v1=storage,
     )
 
     assert await gate.block_reason(metadata) is None
     core.names.append("exo-existing-six")
     assert await gate.block_reason(metadata) == "active-user-cell-capacity-exhausted"
     core.names = ["exo-existing-one"]
-    volumes.get_all = lambda: [SimpleNamespace(server=object()) for _ in range(6)]
+    storage.attached = 6
     assert await gate.block_reason(metadata) == ("safe-volume-attachment-headroom-exhausted")
     core.names = [metadata.resource_name]
     assert await gate.block_reason(metadata) is None

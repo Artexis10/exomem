@@ -5,6 +5,8 @@ metadata:
   name: {{ .Values.resourceName }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "service") | nindent 4 }}
 spec:
   type: ClusterIP
   selector:

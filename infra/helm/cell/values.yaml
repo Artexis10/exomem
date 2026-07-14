@@ -18,6 +18,23 @@ providerIdentity:
   subjectDigest: ""
   operationDigest: ""
   fence: ""
+providerRecoveryEnvelopes:
+  namespace: ""
+  vaultPvc: ""
+  credentialSecret: ""
+  serviceAccount: ""
+  initRequestConfigMap: ""
+  providerOperationConfigMap: ""
+  initJob: ""
+  defaultDenyNetworkPolicy: ""
+  traefikIngressNetworkPolicy: ""
+  resourceQuota: ""
+  limitRange: ""
+  service: ""
+  statefulSet: ""
+  stripCellMiddleware: ""
+  controlIngressRoute: ""
+  transferIngressRoute: ""
 storageLimitBytes: 5368709120
 uploadLimitBytes: 94371840
 workerLimit: 0

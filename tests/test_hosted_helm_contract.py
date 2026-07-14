@@ -311,6 +311,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/subject-digest": "b" * 64,
         "exomem.io/operation-digest": "c" * 64,
         "exomem.io/fence": "7",
+        "exomem.io/recovery-envelope": "a" * 64,
     }
     assert {
         key: pvc["metadata"]["annotations"][key]
@@ -395,6 +396,14 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert (len(service) == 1) == (expected_kind == "StatefulSet")
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
+    recovery_envelopes = [
+        document.get("metadata", {}).get("annotations", {}).get(
+            "exomem.io/recovery-envelope"
+        )
+        for document in documents
+    ]
+    assert all(recovery_envelopes)
+    assert len(set(recovery_envelopes)) == len(recovery_envelopes)
 
 
 def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
@@ -493,6 +502,41 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
     assert cloudflare.count(target) == 2
 
 
+def test_platform_exposes_only_exact_access_protected_provisioner_actions() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    route = _find(documents, "IngressRoute", "exomem-provisioner-control")
+    rule = route["spec"]["routes"][0]
+    actions = (
+        "provision",
+        "health",
+        "rotate-credential",
+        "quiesce",
+        "resume",
+        "stop",
+        "export",
+        "export-release",
+        "export-delete",
+        "restore",
+        "export-download",
+        "seal",
+        "discard",
+        "destroy",
+    )
+    assert rule["match"] == "Host(`control.example.test`) && (" + " || ".join(
+        f"Path(`/cells/{action}`)" for action in actions
+    ) + ")"
+    assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
+    assert route["spec"]["entryPoints"] == ["web"]
+    rendered = json.dumps(route)
+    assert "PathPrefix" not in rendered
+    assert "/health/" not in rendered
+
+
 def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
     documents = _render(
         PLATFORM,
@@ -503,13 +547,15 @@ def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
     routine = _find(documents, "ClusterRole", "exomem-cell-provisioner")
     routine_rules = json.dumps(routine["rules"], sort_keys=True)
 
-    assert '"persistentvolumes"' in routine_rules
-    pv_rule = next(
-        rule
-        for rule in routine["rules"]
-        if "persistentvolumes" in rule.get("resources", [])
-    )
-    assert pv_rule["verbs"] == ["create", "delete", "get", "list", "patch", "update", "watch"]
+    assert '"persistentvolumes"' not in routine_rules
+    assert '"pods/exec"' not in routine_rules
+    assert next(
+        rule for rule in routine["rules"] if "volumeattachments" in rule.get("resources", [])
+    ) == {
+        "apiGroups": ["storage.k8s.io"],
+        "resources": ["volumeattachments"],
+        "verbs": ["get", "list", "watch"],
+    }
     assert all(
         forbidden not in routine_rules
         for forbidden in (
@@ -520,10 +566,19 @@ def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
             '"validatingadmissionpolicies"',
         )
     )
-    assert not any(
-        document.get("metadata", {}).get("name") == "exomem-volume-lifecycle"
-        for document in documents
-    )
+    volume_role = _find(documents, "ClusterRole", "exomem-volume-lifecycle")
+    assert volume_role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["persistentvolumeclaims"],
+            "verbs": ["create", "delete", "get", "patch", "update"],
+        },
+        {
+            "apiGroups": [""],
+            "resources": ["persistentvolumes"],
+            "verbs": ["create", "delete", "get", "patch", "update"],
+        },
+    ]
     secret_rules = [
         rule for rule in routine["rules"] if "secrets" in rule.get("resources", [])
     ]
@@ -545,9 +600,6 @@ def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
         for rule in secret_rules
     )
     assert next(
-        rule for rule in routine["rules"] if "pods/exec" in rule.get("resources", [])
-    ) == {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]}
-    assert next(
         rule for rule in routine["rules"] if "leases" in rule.get("resources", [])
     ) == {
         "apiGroups": ["coordination.k8s.io"],
@@ -568,7 +620,13 @@ def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
             "namespace": "exomem-platform",
         }
     ]
-    assert "exomem-volume-lifecycle" not in bindings
+    assert bindings["exomem-volume-lifecycle"]["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "exomem-volume-lifecycle",
+            "namespace": "exomem-platform",
+        }
+    ]
 
     scope = _find(
         documents,
@@ -587,7 +645,7 @@ def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
         "exomem-volume-lifecycle-scope",
     )
     volume_scope_text = json.dumps(volume_scope, sort_keys=True)
-    assert "system:serviceaccount:exomem-platform:exomem-cell-provisioner" in (
+    assert "system:serviceaccount:exomem-platform:exomem-volume-lifecycle" in (
         volume_scope_text
     )
     assert "oldObject.spec == object.spec" in volume_scope_text
@@ -652,6 +710,10 @@ def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None
             "name": "exomem-provisioner-wrapping-key",
             "key": "key-material",
         },
+        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY": {
+            "name": "exomem-provider-recovery-signer",
+            "key": "private-key",
+        },
     }
     worker_secret_env = {
         item["name"]: item["valueFrom"]["secretKeyRef"]
@@ -659,66 +721,21 @@ def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None
         if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
     }
     assert worker_secret_env == {
-        **api_secret_env,
-        "EXOMEM_PROVISIONER_HCLOUD_TOKEN": {
-            "name": "exomem-provisioner-hcloud-token",
-            "key": "token",
+        "EXOMEM_PROVISIONER_BEARER": {
+            "name": "exomem-provisioner-auth",
+            "key": "credential",
         },
-        "EXOMEM_PROVISIONER_RECOVERY_UPLOAD_KEY_ID": {
-            "name": "exomem-recovery-upload-key-id",
-            "key": "application-key-id",
+        "EXOMEM_PROVISIONER_DATABASE_URL": {
+            "name": "exomem-provisioner-database",
+            "key": "url",
         },
-        "EXOMEM_PROVISIONER_RECOVERY_UPLOAD_KEY": {
-            "name": "exomem-recovery-upload-key",
-            "key": "application-key",
+        "EXOMEM_PROVISIONER_ENVELOPE_KEY": {
+            "name": "exomem-provisioner-wrapping-key",
+            "key": "key-material",
         },
-        "EXOMEM_PROVISIONER_RECOVERY_RESTORE_KEY_ID": {
-            "name": "exomem-recovery-restore-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_RECOVERY_RESTORE_KEY": {
-            "name": "exomem-recovery-restore-key",
-            "key": "application-key",
-        },
-        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID": {
-            "name": "exomem-recovery-delete-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY": {
-            "name": "exomem-recovery-delete-key",
-            "key": "application-key",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_UPLOAD_KEY_ID": {
-            "name": "exomem-user-export-upload-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_UPLOAD_KEY": {
-            "name": "exomem-user-export-upload-key",
-            "key": "application-key",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_RESTORE_KEY_ID": {
-            "name": "exomem-user-export-restore-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_RESTORE_KEY": {
-            "name": "exomem-user-export-restore-key",
-            "key": "application-key",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID": {
-            "name": "exomem-user-export-delete-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY": {
-            "name": "exomem-user-export-delete-key",
-            "key": "application-key",
-        },
-        "EXOMEM_PROVISIONER_DATABASE_BACKUP_KEY_ID": {
-            "name": "exomem-database-backup-key-id",
-            "key": "application-key-id",
-        },
-        "EXOMEM_PROVISIONER_DATABASE_BACKUP_KEY": {
-            "name": "exomem-database-backup-key",
-            "key": "application-key",
+        "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY": {
+            "name": "exomem-provider-recovery-verifier",
+            "key": "public-key",
         },
     }
     worker_config_env = {
@@ -726,20 +743,7 @@ def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None
         for item in container["env"]
         if "valueFrom" in item and "configMapKeyRef" in item["valueFrom"]
     }
-    assert worker_config_env == {
-        "EXOMEM_PROVISIONER_RECOVERY_BUCKET": {
-            "name": "exomem-durability-storage",
-            "key": "recovery-bucket",
-        },
-        "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET": {
-            "name": "exomem-durability-storage",
-            "key": "user-export-bucket",
-        },
-        "EXOMEM_PROVISIONER_DATABASE_BACKUP_BUCKET": {
-            "name": "exomem-durability-storage",
-            "key": "database-backup-bucket",
-        },
-    }
+    assert worker_config_env == {}
     rendered = json.dumps(container)
     assert "HighFidelity" not in rendered
     assert "EXOMEM_PROVISIONER_CELL_IMAGE" not in rendered
@@ -769,7 +773,9 @@ def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None
     assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
     assert release["gatewayContractSha256"] == "b" * 64
     assert release["operatorContractSha256"] == "c" * 64
-    assert "EXOMEM_PROVISIONER_HCLOUD_TOKEN" in rendered
+    assert "EXOMEM_PROVISIONER_HCLOUD_TOKEN" not in rendered
+    assert "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" not in rendered
+    assert "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY" in rendered
     assert "EXOMEM_PROVISIONER_ACCESS_CLIENT_SECRET" not in rendered
     assert "CF-Access-Client" not in rendered
 

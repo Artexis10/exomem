@@ -4,6 +4,8 @@ metadata:
   name: {{ .Values.resourceName }}-default-deny
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "defaultDenyNetworkPolicy") | nindent 4 }}
 spec:
   podSelector: {}
   policyTypes:
@@ -17,6 +19,8 @@ metadata:
   name: {{ .Values.resourceName }}-traefik-ingress
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "traefikIngressNetworkPolicy") | nindent 4 }}
 spec:
   podSelector:
     matchLabels:

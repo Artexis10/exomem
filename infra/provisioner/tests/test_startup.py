@@ -7,6 +7,8 @@ from pydantic import ValidationError
 
 from exomem_provisioner.logging import ContentFreeFormatter
 from exomem_provisioner.main import _create_app, create_app_from_env, run_api
+from exomem_provisioner.production import run_worker
+from exomem_provisioner.volume import run_volume_rebind, run_volume_worker
 
 
 def _set_production_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -19,6 +21,10 @@ def _set_production_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", "exomem_provisioner")
     monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", "exomem_provisioner_runtime")
     monkeypatch.setenv("EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS", "127.0.0.1")
+    monkeypatch.setenv(
+        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+        "cnJycnJycnJycnJycnJycnJycnJycnJycnJycnJycnI",
+    )
 
 
 def test_startup_loads_strict_environment_without_connecting(
@@ -44,6 +50,20 @@ def test_startup_loads_strict_environment_without_connecting(
     }
 
 
+def test_startup_loads_the_exact_handed_off_ed25519_seed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem_provisioner.config import ProvisionerSettings
+    from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
+
+    _set_production_environment(monkeypatch)
+    settings = ProvisionerSettings()  # type: ignore[call-arg]
+    app = _create_app(settings)
+
+    expected = ProviderRecoveryIdentityCodec(b"r" * 32).public_key()
+    assert app.state.provider_identity_public_key == expected
+
+
 def test_startup_fails_closed_when_required_environment_is_absent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -54,6 +74,7 @@ def test_startup_fails_closed_when_required_environment_is_absent(
         "EXOMEM_PROVISIONER_DATABASE_SCHEMA",
         "EXOMEM_PROVISIONER_DATABASE_ROLE",
         "EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS",
+        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
     ):
         monkeypatch.delenv(name, raising=False)
 
@@ -119,3 +140,27 @@ def test_directly_injected_settings_keep_sqlite_available_for_tests() -> None:
     app = _create_app(settings)
 
     assert app.state.database is not None
+
+
+@pytest.mark.parametrize(
+    ("program", "entrypoint"),
+    [
+        ("exomem-provisioner-api", run_api),
+        ("exomem-provisioner-worker", run_worker),
+        ("exomem-volume-worker", run_volume_worker),
+        ("exomem-provisioner-volume-rebind", run_volume_rebind),
+    ],
+)
+def test_container_entrypoints_expose_environment_free_help_smoke(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    program: str,
+    entrypoint: object,
+) -> None:
+    monkeypatch.setattr("sys.argv", [program, "--help"])
+
+    entrypoint()  # type: ignore[operator]
+
+    output = capsys.readouterr().out
+    assert output.startswith(program)
+    assert "environment" in output

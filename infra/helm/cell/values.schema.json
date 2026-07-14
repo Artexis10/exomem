@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
   "additionalProperties": false,
-  "required": ["resourceName", "cellId", "vaultId", "workloadMode", "image", "expectedRelease", "expectedProtocol", "workerPolicyDigest", "runtimeUid", "runtimeGid", "storageClassName", "pvcSize", "providerIdentity", "storageLimitBytes", "uploadLimitBytes", "workerLimit", "featureGrants", "browserOrigin", "transferHostname", "credentialsSecretName", "credentialsManagedExternally", "activeCredentialVersion", "initRequestId", "initOperationId", "routes"],
+  "required": ["resourceName", "cellId", "vaultId", "workloadMode", "image", "expectedRelease", "expectedProtocol", "workerPolicyDigest", "runtimeUid", "runtimeGid", "storageClassName", "pvcSize", "providerIdentity", "providerRecoveryEnvelopes", "storageLimitBytes", "uploadLimitBytes", "workerLimit", "featureGrants", "browserOrigin", "transferHostname", "credentialsSecretName", "credentialsManagedExternally", "activeCredentialVersion", "initRequestId", "initOperationId", "routes"],
   "properties": {
     "resourceName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
     "cellId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
@@ -28,6 +28,29 @@
         "subjectDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "operationDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "fence": {"type": "string", "pattern": "^[1-9][0-9]{0,18}$"}
+      }
+    },
+    "providerRecoveryEnvelopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "vaultPvc", "credentialSecret", "serviceAccount", "initRequestConfigMap", "providerOperationConfigMap", "initJob", "defaultDenyNetworkPolicy", "traefikIngressNetworkPolicy", "resourceQuota", "limitRange", "service", "statefulSet", "stripCellMiddleware", "controlIngressRoute", "transferIngressRoute"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "vaultPvc": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "credentialSecret": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "serviceAccount": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "initRequestConfigMap": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "providerOperationConfigMap": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "initJob": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "defaultDenyNetworkPolicy": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "traefikIngressNetworkPolicy": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "resourceQuota": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "limitRange": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "service": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "statefulSet": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "stripCellMiddleware": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "controlIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "transferIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"}
       }
     },
     "storageLimitBytes": {"type": "integer", "const": 5368709120},

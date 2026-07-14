@@ -28,8 +28,19 @@ from exomem_provisioner.lifecycle import (
     OpaqueProviderMetadata,
     RecordedVolume,
     VolumeLifecycleWorker,
+    VolumeRegistrationDriver,
 )
 from exomem_provisioner.models import OperationState
+from exomem_provisioner.provider_identity import (
+    ProviderIdentityConflict,
+    ProviderRecoveryIdentityCodec,
+    ProviderRecoveryIdentityVerifier,
+    ProviderReference,
+    cell_provider_recovery_envelopes,
+    chunk_hcloud_identity_envelope,
+    decode_hcloud_identity_envelope,
+    provider_operation_resource_name,
+)
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
 
@@ -48,6 +59,27 @@ def _request(**overrides: object) -> dict[str, object]:
         "providerRef": "cell-irrelevant-caller-ref",
     }
     value.update(overrides)
+    return value
+
+
+def _request_with_provider_identity(**overrides: object) -> dict[str, object]:
+    value = _request(**overrides)
+    metadata = _metadata(
+        tenant_id=str(value["tenantId"]),
+        subject_id=str(value["cellId"]),
+        operation_id=str(value["operationId"]),
+        fence_generation=int(value["fenceGeneration"]),
+    )
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    value["_providerRecoveryEnvelopes"] = cell_provider_recovery_envelopes(
+        codec,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+        resource_name=metadata.resource_name,
+        operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+    )
     return value
 
 
@@ -153,16 +185,32 @@ async def test_provision_worker_restarts_across_checkpoints_and_encrypts_provide
     )
     plane = HighFidelityProviderPlane(location="fsn1")
     plane.lose_acknowledgement_after_csi_bind_once()
-    driver = CellLifecycleDriver(
-        plane=plane,
-        volume_worker=VolumeLifecycleWorker(plane, plane),
-        config=_config(),
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
     )
-    operation = await repository.submit("provision", "durable-provision", _request())
+    operation = await repository.submit(
+        "provision", "durable-provision", _request_with_provider_identity()
+    )
     now = datetime(2030, 1, 1, tzinfo=UTC)
 
     for attempt in range(10):
-        worker = ProvisionerWorker(repository, driver, worker_id=f"worker-{attempt}")
+        current = await repository.get_by_id(operation.id)
+        assert current is not None
+        is_volume_checkpoint = current.checkpoint == "volume-registration-required"
+        worker = ProvisionerWorker(
+            repository,
+            volume_driver if is_volume_checkpoint else driver,
+            worker_id=f"worker-{attempt}",
+            include_checkpoints=(
+                frozenset({"volume-registration-required"}) if is_volume_checkpoint else None
+            ),
+            exclude_checkpoints=(
+                frozenset() if is_volume_checkpoint else frozenset({"volume-registration-required"})
+            ),
+        )
         await worker.run_once(now=now + timedelta(seconds=attempt * 3))
         current = await repository.get_by_id(operation.id)
         assert current is not None
@@ -210,6 +258,239 @@ def test_metadata_and_resource_names_are_deterministic_opaque_and_immutable() ->
 
     with pytest.raises(MetadataConflict):
         first.require_same(_metadata(operation_id="operation-other"))
+
+
+def test_provider_recovery_envelope_is_root_authenticated_and_resource_bound() -> None:
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    verifier = ProviderRecoveryIdentityVerifier.from_public_key(codec.public_key())
+    metadata = _metadata()
+    reference = ProviderReference.kubernetes(
+        provider="kubernetes",
+        api_version="v1",
+        kind="Namespace",
+        namespace="",
+        name="exo-cell",
+    )
+    envelope = codec.seal(
+        provider="kubernetes",
+        provider_reference=reference,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
+
+    verifier.authenticate(
+        envelope,
+        provider="kubernetes",
+        provider_reference=reference,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
+    with pytest.raises(ProviderIdentityConflict):
+        verifier.authenticate(
+            envelope,
+            provider="kubernetes",
+            provider_reference=ProviderReference.kubernetes(
+                provider="kubernetes",
+                api_version="v1",
+                kind="Namespace",
+                namespace="",
+                name="exo-copied",
+            ),
+            tenant_id=metadata.tenant_id,
+            cell_id=metadata.subject_id,
+            operation_id=metadata.operation_id,
+            fence_generation=metadata.fence_generation,
+        )
+
+    tampered = envelope[:-1] + ("A" if envelope[-1] != "A" else "B")
+    with pytest.raises(ProviderIdentityConflict):
+        verifier.authenticate(
+            tampered,
+            provider="kubernetes",
+            provider_reference=reference,
+            tenant_id=metadata.tenant_id,
+            cell_id=metadata.subject_id,
+            operation_id=metadata.operation_id,
+            fence_generation=metadata.fence_generation,
+        )
+
+
+def test_provider_reference_is_canonical_and_unambiguous_per_object() -> None:
+    namespace = ProviderReference.kubernetes(
+        provider="kubernetes",
+        api_version="v1",
+        kind="Namespace",
+        namespace="",
+        name="exo-cell",
+    )
+    pvc = ProviderReference.kubernetes(
+        provider="kubernetes",
+        api_version="v1",
+        kind="PersistentVolumeClaim",
+        namespace="exo-cell",
+        name="vault",
+    )
+    route = ProviderReference.kubernetes(
+        provider="traefik",
+        api_version="traefik.io/v1alpha1",
+        kind="IngressRoute",
+        namespace="exo-cell",
+        name="exo-cell-control",
+    )
+
+    assert len({namespace, pvc, route}) == 3
+    assert namespace.startswith("pr1_")
+    assert ProviderReference.parse(namespace) == {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "name": "exo-cell",
+        "namespace": "",
+        "provider": "kubernetes",
+        "version": 1,
+    }
+    assert ProviderReference.parse(ProviderReference.hcloud(kind="volume", resource_id=42)) == {
+        "id": "42",
+        "kind": "volume",
+        "provider": "hcloud",
+        "version": 1,
+    }
+    assert ProviderReference.parse(
+        ProviderReference.b2(bucket="recovery", key="tenant/cell.tar.zst")
+    ) == {
+        "bucket": "recovery",
+        "key": "tenant/cell.tar.zst",
+        "provider": "b2",
+        "version": 1,
+    }
+
+
+def test_public_verifier_exposes_only_authenticated_recovery_claims() -> None:
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    reference = ProviderReference.b2(bucket="recovery-alpha", key="tenant/object.enc")
+    envelope = codec.seal(
+        provider="b2",
+        provider_reference=reference,
+        tenant_id="tenant-alpha",
+        cell_id="cell-alpha",
+        operation_id="operation-alpha",
+        fence_generation=7,
+    )
+
+    assert codec.verifier().claims(envelope) == {
+        "provider": "b2",
+        "providerReference": reference,
+        "tenantId": "tenant-alpha",
+        "cellId": "cell-alpha",
+        "operationId": "operation-alpha",
+        "fenceGeneration": 7,
+    }
+    forged = envelope[:-1] + ("A" if envelope[-1] != "A" else "B")
+    with pytest.raises(ProviderIdentityConflict):
+        codec.verifier().claims(forged)
+
+
+def test_cell_provider_recovery_envelopes_are_unique_and_exact_per_object() -> None:
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    values = cell_provider_recovery_envelopes(
+        codec,
+        tenant_id="tenant-alpha",
+        cell_id="cell-alpha",
+        operation_id="operation-alpha",
+        fence_generation=7,
+        resource_name="exo-cell-alpha",
+        operation_resource_name="exo-op-operation-alpha",
+    )
+
+    assert len(values) == 16
+    assert len(set(values.values())) == len(values)
+    codec.verifier().authenticate(
+        values["controlIngressRoute"],
+        provider="traefik",
+        provider_reference=ProviderReference.kubernetes(
+            provider="traefik",
+            api_version="traefik.io/v1alpha1",
+            kind="IngressRoute",
+            namespace="exo-cell-alpha",
+            name="exo-cell-alpha-control",
+        ),
+        tenant_id="tenant-alpha",
+        cell_id="cell-alpha",
+        operation_id="operation-alpha",
+        fence_generation=7,
+    )
+    with pytest.raises(ProviderIdentityConflict):
+        codec.verifier().authenticate(
+            values["transferIngressRoute"],
+            provider="traefik",
+            provider_reference=ProviderReference.kubernetes(
+                provider="traefik",
+                api_version="traefik.io/v1alpha1",
+                kind="IngressRoute",
+                namespace="exo-cell-alpha",
+                name="exo-cell-alpha-control",
+            ),
+            tenant_id="tenant-alpha",
+            cell_id="cell-alpha",
+            operation_id="operation-alpha",
+            fence_generation=7,
+        )
+
+
+def test_hcloud_recovery_envelope_uses_exact_canonical_base32_chunks() -> None:
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    envelope = codec.seal(
+        provider="hcloud",
+        provider_reference=ProviderReference.hcloud(kind="volume", resource_id=42),
+        tenant_id="tenant-alpha",
+        cell_id="cell-alpha",
+        operation_id="operation-alpha",
+        fence_generation=7,
+    )
+    labels = chunk_hcloud_identity_envelope(envelope)
+
+    assert decode_hcloud_identity_envelope(labels) == envelope
+    assert labels["exomem_identity_n"].isdigit()
+    assert all(
+        len(value) <= 52
+        for key, value in labels.items()
+        if key.startswith("exomem_identity_") and key != "exomem_identity_n"
+    )
+    ambiguous = dict(labels)
+    ambiguous["exomem_identity_99"] = (
+        base64.b32encode(b"forged").decode("ascii").lower().rstrip("=")
+    )
+    with pytest.raises(ProviderIdentityConflict):
+        decode_hcloud_identity_envelope(ambiguous)
+
+
+def test_maximum_provider_ids_fit_hcloud_label_count_limit() -> None:
+    metadata = OpaqueProviderMetadata("t" * 64, "c" * 64, "o" * 64, 7)
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    envelope = codec.seal(
+        provider="hcloud",
+        provider_reference=ProviderReference.hcloud(kind="volume", resource_id=42),
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
+    labels = metadata.hcloud_labels | chunk_hcloud_identity_envelope(envelope)
+
+    assert len(labels) <= 50
+    assert decode_hcloud_identity_envelope(labels) == envelope
+    codec.verifier().authenticate(
+        envelope,
+        provider="hcloud",
+        provider_reference=ProviderReference.hcloud(kind="volume", resource_id=42),
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
 
 
 @pytest.mark.asyncio
@@ -307,17 +588,23 @@ async def test_orphan_discovery_quarantines_unknown_provider_volume() -> None:
 async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_route() -> None:
     plane = HighFidelityProviderPlane(location="fsn1")
     plane.lose_acknowledgement_after_csi_bind_once()
-    driver = CellLifecycleDriver(
-        plane=plane, volume_worker=VolumeLifecycleWorker(plane, plane), config=_config()
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
     )
-    request = _request()
+    request = _request_with_provider_identity()
     context = _context()
 
     checkpoints: list[str] = []
     final: DriverFinal | None = None
     for _ in range(12):
         try:
-            outcome = await driver.execute("provision", request, context)
+            selected = (
+                volume_driver if context.checkpoint == "volume-registration-required" else driver
+            )
+            outcome = await selected.execute("provision", request, context)
         except LostAcknowledgement:
             continue
         if isinstance(outcome, DriverPending):
@@ -331,6 +618,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
     assert checkpoints == [
         "namespace-ready",
         "release-applied",
+        "volume-registration-required",
         "volume-owned",
         "initialized",
         "runtime-admitted",
@@ -363,6 +651,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
             "subjectDigest": hashlib.sha256(b"cell-alpha").hexdigest(),
             "tenantDigest": hashlib.sha256(b"tenant-alpha").hexdigest(),
         },
+        "providerRecoveryEnvelopes": request["_providerRecoveryEnvelopes"],
         "resourceName": _metadata().resource_name,
         "routes": {"controlHostname": "control.example.invalid", "enabled": False},
         "runtimeGid": 10001,
@@ -381,16 +670,16 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
     assert _credential() not in repr(plane)
 
 
-def test_provider_metadata_long_opaque_ids_round_trip_without_recovery_registry() -> None:
+def test_provider_metadata_maximum_opaque_ids_round_trip_without_recovery_registry() -> None:
     metadata = OpaqueProviderMetadata(
-        tenant_id="t/" + "a" * 254,
-        subject_id="c:" + "b" * 254,
-        operation_id="o_" + "c" * 254,
+        tenant_id="t/" + "a" * 62,
+        subject_id="c:" + "b" * 62,
+        operation_id="o_" + "c" * 62,
         fence_generation=9_007_199_254_740_991,
     )
     labels = metadata.hcloud_labels
 
-    assert labels["exomem_tenant_id_n"] == "8"
+    assert labels["exomem_tenant_id_n"] == "2"
     assert all(
         len(value) <= 52
         for key, value in labels.items()
@@ -400,7 +689,7 @@ def test_provider_metadata_long_opaque_ids_round_trip_without_recovery_registry(
     assert len(labels) <= 31
 
     malformed = dict(labels)
-    malformed.pop("exomem_tenant_id_7")
+    malformed.pop("exomem_tenant_id_1")
     with pytest.raises(MetadataConflict):
         OpaqueProviderMetadata.from_hcloud_labels(malformed)
 
@@ -422,6 +711,26 @@ async def test_provision_capacity_block_stays_pending_without_allocating_namespa
 
     assert blocked == DriverPending("capacity-active-user-cell-capacity-exhausted", 300)
     assert plane.has_namespace(_metadata()) is False
+
+
+@pytest.mark.asyncio
+async def test_provision_rechecks_live_capacity_immediately_before_release_allocation() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    metadata = _metadata()
+    await plane.ensure_namespace(metadata)
+    plane.block_capacity("safe-volume-attachment-headroom-exhausted")
+    driver = CellLifecycleDriver(
+        plane=plane, volume_worker=VolumeLifecycleWorker(plane, plane), config=_config()
+    )
+
+    blocked = await driver.execute(
+        "provision",
+        _request(),
+        _context(checkpoint="namespace-ready"),
+    )
+
+    assert blocked == DriverPending("capacity-safe-volume-attachment-headroom-exhausted", 300)
+    assert plane.has_release(metadata) is False
 
 
 @pytest.mark.asyncio

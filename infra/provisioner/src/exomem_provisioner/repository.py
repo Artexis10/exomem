@@ -64,8 +64,13 @@ def _reference_digest(reference: str) -> str:
     return hashlib.sha256(reference.encode("utf-8")).hexdigest()
 
 
-def _claim_condition(claimed_at: datetime):
-    return or_(
+def _claim_condition(
+    claimed_at: datetime,
+    *,
+    include_checkpoints: frozenset[str] | None = None,
+    exclude_checkpoints: frozenset[str] = frozenset(),
+):
+    condition = or_(
         and_(
             Operation.state == OperationState.PENDING,
             Operation.available_at <= claimed_at,
@@ -80,21 +85,50 @@ def _claim_condition(claimed_at: datetime):
         .where(TenantFence.tenant_id == Operation.tenant_id)
         .scalar_subquery()
     )
+    if include_checkpoints is not None:
+        condition &= Operation.checkpoint.in_(include_checkpoints)
+    if exclude_checkpoints:
+        condition &= Operation.checkpoint.not_in(exclude_checkpoints)
+    return condition
 
 
-def _claim_candidate_statement(claimed_at: datetime):
+def _claim_candidate_statement(
+    claimed_at: datetime,
+    *,
+    include_checkpoints: frozenset[str] | None = None,
+    exclude_checkpoints: frozenset[str] = frozenset(),
+):
     return (
         select(Operation.id, Operation.tenant_id)
-        .where(_claim_condition(claimed_at))
+        .where(
+            _claim_condition(
+                claimed_at,
+                include_checkpoints=include_checkpoints,
+                exclude_checkpoints=exclude_checkpoints,
+            )
+        )
         .order_by(Operation.created_at, Operation.id)
         .limit(1)
     )
 
 
-def _claim_statement(operation_id: str, claimed_at: datetime):
+def _claim_statement(
+    operation_id: str,
+    claimed_at: datetime,
+    *,
+    include_checkpoints: frozenset[str] | None = None,
+    exclude_checkpoints: frozenset[str] = frozenset(),
+):
     return (
         select(Operation)
-        .where(Operation.id == operation_id, _claim_condition(claimed_at))
+        .where(
+            Operation.id == operation_id,
+            _claim_condition(
+                claimed_at,
+                include_checkpoints=include_checkpoints,
+                exclude_checkpoints=exclude_checkpoints,
+            ),
+        )
         .with_for_update(skip_locked=True)
     )
 
@@ -416,6 +450,8 @@ class OperationRepository:
         worker_id: str,
         *,
         now: datetime | None = None,
+        include_checkpoints: frozenset[str] | None = None,
+        exclude_checkpoints: frozenset[str] = frozenset(),
     ) -> OperationSnapshot | None:
         claim_token = secrets.token_urlsafe(32)
         async with self._sessions.begin() as session:
@@ -423,7 +459,13 @@ class OperationRepository:
             if session.get_bind().dialect.name == "sqlite":
                 candidate = (
                     select(Operation.id)
-                    .where(_claim_condition(claimed_at))
+                    .where(
+                        _claim_condition(
+                            claimed_at,
+                            include_checkpoints=include_checkpoints,
+                            exclude_checkpoints=exclude_checkpoints,
+                        )
+                    )
                     .order_by(Operation.created_at, Operation.id)
                     .limit(1)
                     .scalar_subquery()
@@ -454,12 +496,27 @@ class OperationRepository:
                 if fence is None or fence.fence_generation != operation.fence_generation:
                     raise StaleFence("active claim fence is stale")
                 return _operation_snapshot(operation)
-            candidate = (await session.execute(_claim_candidate_statement(claimed_at))).first()
+            candidate = (
+                await session.execute(
+                    _claim_candidate_statement(
+                        claimed_at,
+                        include_checkpoints=include_checkpoints,
+                        exclude_checkpoints=exclude_checkpoints,
+                    )
+                )
+            ).first()
             if candidate is None:
                 return None
             fence = await session.get(TenantFence, candidate.tenant_id, with_for_update=True)
             claimed_at = await _database_now(session, now)
-            operation = await session.scalar(_claim_statement(candidate.id, claimed_at))
+            operation = await session.scalar(
+                _claim_statement(
+                    candidate.id,
+                    claimed_at,
+                    include_checkpoints=include_checkpoints,
+                    exclude_checkpoints=exclude_checkpoints,
+                )
+            )
             if operation is None:
                 return None
             if fence is None or fence.fence_generation != operation.fence_generation:

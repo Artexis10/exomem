@@ -4,7 +4,7 @@ kind: Middleware
 metadata:
   name: {{ .Values.resourceName }}-strip-cell
   annotations:
-    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "stripCellMiddleware") | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:
@@ -17,7 +17,7 @@ kind: IngressRoute
 metadata:
   name: {{ .Values.resourceName }}-control
   annotations:
-    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "controlIngressRoute") | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:
@@ -36,7 +36,7 @@ kind: IngressRoute
 metadata:
   name: {{ .Values.resourceName }}-transfer
   annotations:
-    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "transferIngressRoute") | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:

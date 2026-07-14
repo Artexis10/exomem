@@ -10,11 +10,21 @@ cell provision/health/lifecycle, and maintenance gating. The high-fidelity
 provider also models discard and ordered tenant destruction for the dedicated
 durability/deletion implementation lane.
 
-The production worker composes only the official Kubernetes, HCloud, Helm,
-Traefik, internal-runtime, and hosted-operator adapters; it has no fake-provider
-selection path. B2 export/backup implementation remains a separate durability
-lane. Credential-dependent HCloud and Cloudflare drills remain release gates
-even when deterministic and exact-K3s suites pass.
+Production is split into capability-bounded processes. The API signs the fixed,
+complete recovery-envelope set before it accepts provider work. The routine worker
+can verify those identities and reconcile namespaced Kubernetes, Helm, Traefik,
+private-runtime, maintenance, and capacity state, but it has no signing key,
+HCloud credential, B2 credential, persistent-volume mutation, or pod-exec
+authority. `exomem-volume-worker` is the narrow privileged continuation for
+retained HCloud volume and static PV registration. Backup, export, and ordered
+deletion run as separate durability workloads. The deletion provider consumes
+only the authoritative durable destroy/discard claim: it never calls back into
+Substrate for admission, billing, or lifecycle state. No production process has
+a fake-provider selection path.
+
+Credential-dependent HCloud, B2 Object Lock, Cloudflare, and clean-cluster
+rebind drills remain release gates even when deterministic and exact-K3s suites
+pass.
 
 ## Reproducible development
 
@@ -26,11 +36,13 @@ RUN_POSTGRESQL17_TEST=1 uv run --frozen pytest -q tests/test_postgresql17.py
 ```
 
 The pinned production provider libraries are `kubernetes` 35.x for Kubernetes
-1.35 and the official Hetzner `hcloud` 2.x client. `HelmCliAdapter` additionally
-requires the repository-pinned Helm 3.19.4 binary and chart 0.1.0. Helm values
-carry only non-secret configuration; cell credentials are materialized through
-the Kubernetes Secret boundary and provider references remain encrypted in the
-operation store.
+1.35 and the official Hetzner `hcloud` 2.x client. The shared provisioner image
+contains PostgreSQL 17.10 client tools (`pg_dump`, `pg_restore`, `psql`,
+`dropdb`, and `createdb`) for the separately permissioned durability workloads.
+`HelmCliAdapter` additionally requires the repository-pinned Helm 3.19.4 binary
+and chart 0.1.0. Helm values carry only non-secret configuration; cell
+credentials are materialized through the Kubernetes Secret boundary and
+provider references remain encrypted in the operation store.
 
 SQLite is an injected test-only database. It can upgrade a disposable database
 with the same Alembic history, but both production entry points reject it:
@@ -63,6 +75,11 @@ content-free kind and immutable operation/fence identity remain queryable.
 Reconciliation adopts an exactly tagged partial attempt and rejects metadata,
 location, release, protocol, policy, or admission drift.
 
+User-export `expiresAt` is admitted only when a new idempotency key is future
+and no more than 30 days away. Once that exact key and canonical input have been
+accepted, pending and completed replays continue after expiry; a first-time
+expired request is rejected before an operation or provider artifact exists.
+
 One immutable hosted release manifest is the sole runtime deploy pin. The
 platform chart places `exomem-hosted-release-v1.json` in an immutable ConfigMap,
 mounts it read-only at `/etc/exomem/release`, and sets only
@@ -91,15 +108,27 @@ helm upgrade --install exomem-platform infra/helm/platform \
   public networks are rejected
 - `EXOMEM_PROVISIONER_MAX_FAILURE_ATTEMPTS`: bounded retryable-driver failure
   ceiling (default six); provider-pending observations do not consume it
+- `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`: URL-safe base64 Ed25519 seed confined
+  to signer-bearing processes. The API uses its governed seed to pre-seal the
+  bounded recovery-identity pool, and the volume worker uses that same governed
+  trust root for retained-volume identities. The routine and deletion workers
+  receive only the corresponding public verifier and must never receive the
+  seed.
 
-The worker additionally requires the release-manifest path, pinned Helm/chart
-details, internal/control/transfer origins, the HCloud credential,
-volume-encryption Secret identity, and a worker ID. The Helm chart
-supplies non-secret fields, mounts the release ConfigMap, and consumes each
-governed Secret by its exact key. The API receives only provisioner auth,
-database, and wrapping-key material. The worker receives those plus HCloud and
-capability-separated B2 credentials; Cloudflare Access credentials remain
-Vercel-only and are not copied into K3s.
+The routine worker additionally requires the release-manifest path, pinned
+Helm/chart details, internal/control/transfer origins, a worker ID, and
+`EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY`. The Helm chart supplies non-secret
+fields, mounts the release ConfigMap, and consumes each governed Secret by its
+exact key. Its RBAC is read-mostly cluster discovery plus admission-bounded
+namespaced lifecycle mutation; it has no `pods/exec` or persistent-volume write
+rule.
+
+The privileged volume worker receives only the common operation-store settings,
+an HCloud token, the volume-encryption Secret identity, location, worker ID, and
+its governed `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`. Its queue filter accepts
+only `volume-registration-required` continuations. B2 credentials are confined
+to the corresponding durability workloads, and Cloudflare Access credentials
+remain outside K3s.
 
 Run `exomem-provisioner-api` only after `alembic upgrade head`. Startup fails
 closed when configuration is missing or invalid. Readiness verifies the exact

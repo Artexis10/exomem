@@ -14,6 +14,7 @@ from exomem_provisioner.config import PROVISIONER_PROTOCOL, ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import FakeDriver
+from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
 
@@ -147,6 +148,101 @@ async def test_export_requires_canonical_bounded_expiry(
         assert rejected.status_code == 422
 
 
+@pytest.mark.asyncio
+async def test_accepted_export_continues_and_replays_after_expiry_but_new_expired_is_rejected(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "timed-api.sqlite"
+    settings = _settings(path)
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret(settings.envelope_key.get_secret_value()),
+        claim_seconds=settings.claim_seconds,
+    )
+    clock = [datetime(2026, 7, 14, 10, 0, tzinfo=UTC)]
+    app = create_app(
+        settings=settings,
+        readiness_probe=database.ready,
+        repository=repository,
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret(
+            "provider-recovery-root"
+        ),
+        clock=lambda: clock[0],
+    )
+    client = httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="https://provisioner.test",
+    )
+    expires_at = datetime(2026, 7, 14, 10, 1, tzinfo=UTC)
+    body = _target_body(expiresAt=expires_at.isoformat().replace("+00:00", "Z"))
+    result = {
+        "exportRef": "export-completed-before-ack",
+        "releaseRef": "release-completed-before-ack",
+        "archiveSha256": "a" * 64,
+        "manifestSha256": "b" * 64,
+        "archiveSize": 1024,
+        "encryptionScheme": "envelope-aes-256-gcm",
+        "integrityVerified": True,
+    }
+    try:
+        accepted = await client.post(
+            "/cells/export",
+            headers=_headers("lost-export-ack"),
+            json=body,
+        )
+        assert accepted.status_code == 202
+        operation = await repository.get("export", "lost-export-ack")
+        assert operation is not None
+
+        clock[0] = datetime(2026, 7, 14, 10, 2, tzinfo=UTC)
+        pending_replay = await client.post(
+            "/cells/export",
+            headers=_headers("lost-export-ack"),
+            json=body,
+        )
+        assert pending_replay.status_code == 202
+        pending_operation = await repository.get("export", "lost-export-ack")
+        assert pending_operation is not None and pending_operation.id == operation.id
+
+        changed_replay = await client.post(
+            "/cells/export",
+            headers=_headers("lost-export-ack"),
+            json={**body, "checkpoint": "changed-after-expiry"},
+        )
+        assert changed_replay.status_code == 409
+
+        await _complete_as_worker(
+            repository,
+            operation.id,
+            result,
+            worker_id="lost-export-ack-worker",
+        )
+
+        replayed = await client.post(
+            "/cells/export",
+            headers=_headers("lost-export-ack"),
+            json=body,
+        )
+        assert replayed.status_code == 200
+        assert replayed.json() == result
+        completed_operation = await repository.get("export", "lost-export-ack")
+        assert completed_operation is not None and completed_operation.id == operation.id
+
+        rejected = await client.post(
+            "/cells/export",
+            headers=_headers("new-expired-export"),
+            json={**body, "operationId": "new-expired-export-operation"},
+        )
+        assert rejected.status_code == 422
+        assert rejected.json() == {"code": "PROVISIONER_REJECTED", "retryable": False}
+        assert await repository.get("export", "new-expired-export") is None
+    finally:
+        await client.aclose()
+        await database.dispose()
+
+
 def _headers(idempotency_key: str = "idempotency-api-alpha") -> dict[str, str]:
     return {
         "Authorization": f"Bearer {_BEARER}",
@@ -171,6 +267,7 @@ async def api(tmp_path: Path) -> tuple[httpx.AsyncClient, OperationRepository, P
         settings=settings,
         readiness_probe=database.ready,
         repository=repository,
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root"),
     )
     client = httpx.AsyncClient(
         transport=httpx.ASGITransport(app=app),
@@ -247,6 +344,26 @@ async def test_api_exposes_exact_fourteen_post_paths_and_strict_pending_union(
             "checkpoint": "requested",
             "retryAfterSeconds": 2,
         }
+
+
+@pytest.mark.asyncio
+async def test_api_seals_distinct_provider_recovery_envelopes_before_queueing(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    response = await client.post(
+        "/cells/provision",
+        headers=_headers("provider-recovery-envelopes"),
+        json=_base_body(),
+    )
+    assert response.status_code == 202
+    operation = await repository.get("provision", "provider-recovery-envelopes")
+    assert operation is not None
+    queued = await repository.load_request(operation.id)
+    envelopes = queued["_providerRecoveryEnvelopes"]
+    assert len(envelopes) == 16
+    assert len(set(envelopes.values())) == 16
+    assert all(value.startswith("eyJ") for value in envelopes.values())
 
 
 @pytest.mark.asyncio
@@ -339,6 +456,22 @@ async def test_unknown_invalid_oversize_and_trailing_slash_requests_are_content_
         ("provision", "slash"),
     ):
         assert await repository.get(action, key) is None
+
+
+@pytest.mark.asyncio
+async def test_provider_identity_ids_fit_hcloud_recovery_labels(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    response = await client.post(
+        "/cells/provision",
+        headers=_headers("identifier-too-long"),
+        json=_base_body(cellId="c" * 65),
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"code": "PROVISIONER_REJECTED", "retryable": False}
+    assert await repository.get("provision", "identifier-too-long") is None
 
 
 @pytest.mark.asyncio

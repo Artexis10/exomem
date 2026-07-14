@@ -21,6 +21,12 @@ provisioner:
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"
+  providerRecoverySigningKeySecret:
+    name: exomem-provider-recovery-signer
+    key: private-key
+  providerRecoveryPublicKeySecret:
+    name: exomem-provider-recovery-verifier
+    key: public-key
 
 admission:
   namespaceContractOperatorUsernames:

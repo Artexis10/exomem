@@ -128,6 +128,7 @@ class ProvisionerSettings(BaseSettings):
         env_prefix="EXOMEM_PROVISIONER_",
         extra="forbid",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     bearer: SecretStr = Field(min_length=32, max_length=4096)
@@ -142,6 +143,12 @@ class ProvisionerSettings(BaseSettings):
     claim_seconds: int = Field(default=30, ge=5, le=300)
     retry_after_seconds: int = Field(default=2, ge=1, le=300)
     max_failure_attempts: int = Field(default=6, ge=1, le=100)
+    provider_recovery_signing_key: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        max_length=4096,
+        validation_alias="EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+    )
 
     @field_validator("database_schema", "database_role")
     @classmethod
@@ -203,12 +210,13 @@ class ProvisionerSettings(BaseSettings):
 
 
 class ProviderWorkerSettings(BaseSettings):
-    """Required live-provider settings; the production worker has no fake fallback."""
+    """Routine provider settings with public verification and no HCloud authority."""
 
     model_config = SettingsConfigDict(
         env_prefix="EXOMEM_PROVISIONER_",
         extra="forbid",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     release_manifest_path: str = Field(min_length=1, max_length=4096)
@@ -221,11 +229,14 @@ class ProviderWorkerSettings(BaseSettings):
     browser_origin: str = Field(min_length=1, max_length=255)
     location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
     internal_origin: str = Field(min_length=1, max_length=2048)
-    hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
-    volume_encryption_secret_name: str = Field(min_length=1, max_length=63)
-    volume_encryption_secret_namespace: str = Field(min_length=1, max_length=63)
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    provider_recovery_public_key: str = Field(
+        min_length=40,
+        max_length=128,
+        pattern=r"^[A-Za-z0-9_-]+$",
+        validation_alias="EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY",
+    )
 
     @field_validator("release_manifest_path")
     @classmethod
@@ -287,6 +298,30 @@ class ProviderWorkerSettings(BaseSettings):
         if any(os.environ.get(name) is not None for name in forbidden):
             raise ValueError("independent hosted release overrides are forbidden")
         return self
+
+
+class VolumeWorkerSettings(BaseSettings):
+    """Narrow PV/HCloud lane settings; no runtime, Helm, route, or B2 credentials."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="EXOMEM_PROVISIONER_",
+        extra="forbid",
+        case_sensitive=False,
+        populate_by_name=True,
+    )
+
+    hcloud_token: SecretStr = Field(min_length=32, max_length=4096)
+    provider_recovery_signing_key: SecretStr = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+        validation_alias="EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+    )
+    volume_encryption_secret_name: str = Field(min_length=1, max_length=63)
+    volume_encryption_secret_namespace: str = Field(min_length=1, max_length=63)
+    location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
+    worker_id: str = Field(min_length=1, max_length=128)
+    poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
 
 
 def secrets_equal(first: SecretStr, second: SecretStr) -> bool:

@@ -6,6 +6,7 @@ import json
 import re
 import secrets
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -15,10 +16,17 @@ from pydantic import ValidationError
 
 from .config import PROVISIONER_PROTOCOL, ProvisionerSettings
 from .models import OperationState
+from .provider_identity import (
+    ProviderRecoveryIdentityCodec,
+    cell_provider_recovery_envelopes,
+    cell_resource_name,
+    provider_operation_resource_name,
+)
 from .repository import IdempotencyConflict, OperationRepository, StaleFence
 from .schemas import FINAL_MODELS, REQUEST_MODELS, PendingResponse, request_plaintext
 
 ReadinessProbe = Callable[[], Awaitable[bool]]
+Clock = Callable[[], datetime]
 _IDEMPOTENCY_KEY = re.compile(r"^[A-Za-z0-9_.:/-]{1,256}$")
 
 
@@ -59,11 +67,22 @@ def _validated_final(
     return JSONResponse(status_code=200, content=value.model_dump(mode="json"))
 
 
+def _new_export_expiry_is_valid(value: object, *, now: datetime) -> bool:
+    if not isinstance(value, str):
+        return False
+    expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    checked_at = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+    ttl = expires_at.astimezone(UTC) - checked_at.astimezone(UTC)
+    return timedelta(0) < ttl <= timedelta(days=30)
+
+
 def create_app(
     *,
     settings: ProvisionerSettings,
     readiness_probe: ReadinessProbe,
     repository: OperationRepository | None = None,
+    provider_identity_codec: ProviderRecoveryIdentityCodec | None = None,
+    clock: Clock = lambda: datetime.now(UTC),
 ) -> FastAPI:
     """Build an application with no implicit environment or provider access."""
 
@@ -153,6 +172,28 @@ def create_app(
                 return _failure("PROVISIONER_REJECTED", 422)
             try:
                 request_data = request_plaintext(model)
+                if provider_identity_codec is not None and "cellId" in request_data:
+                    cell_id = str(request_data["cellId"])
+                    operation_id = str(request_data["operationId"])
+                    request_data["_providerRecoveryEnvelopes"] = cell_provider_recovery_envelopes(
+                        provider_identity_codec,
+                        tenant_id=str(request_data["tenantId"]),
+                        cell_id=cell_id,
+                        operation_id=operation_id,
+                        fence_generation=int(request_data["fenceGeneration"]),
+                        resource_name=cell_resource_name(cell_id),
+                        operation_resource_name=provider_operation_resource_name(operation_id),
+                    )
+                if action == "export" and not _new_export_expiry_is_valid(
+                    request_data.get("expiresAt"),
+                    now=clock(),
+                ):
+                    existing = await repository.get(
+                        action,
+                        request.headers["idempotency-key"],
+                    )
+                    if existing is None:
+                        return _failure("PROVISIONER_REJECTED", 422)
                 operation = await repository.submit(
                     action,
                     request.headers["idempotency-key"],

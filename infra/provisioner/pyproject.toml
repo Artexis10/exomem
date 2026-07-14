@@ -20,6 +20,8 @@ dependencies = [
 [project.scripts]
 exomem-provisioner-api = "exomem_provisioner.main:run_api"
 exomem-provisioner-worker = "exomem_provisioner.production:run_worker"
+exomem-volume-worker = "exomem_provisioner.volume:run_volume_worker"
+exomem-provisioner-volume-rebind = "exomem_provisioner.volume:run_volume_rebind"
 
 [dependency-groups]
 dev = [

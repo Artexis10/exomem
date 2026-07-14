@@ -27,6 +27,16 @@ from .driver import (
     LostAcknowledgement,
 )
 from .models import ResourceKind
+from .provider_identity import (
+    ProviderIdentityConflict,
+    ProviderRecoveryIdentityCodec,
+    ProviderRecoveryIdentityVerifier,
+    ProviderReference,
+    authenticate_cell_provider_recovery_envelopes,
+    chunk_hcloud_identity_envelope,
+    decode_hcloud_identity_envelope,
+    provider_operation_resource_name,
+)
 
 
 class MetadataConflict(RuntimeError):
@@ -37,7 +47,7 @@ def _digest(value: str, *, length: int = 24) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:length]
 
 
-_OPAQUE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,256}$")
+_OPAQUE_PROVIDER_ID = re.compile(r"^[A-Za-z0-9_.:/-]{1,64}$")
 _HCLOUD_IDENTITY_CHUNK = re.compile(r"^[a-z2-7]{1,52}$")
 
 
@@ -247,6 +257,75 @@ class RecordedVolume:
     pv_name: str
     location: str
     metadata: OpaqueProviderMetadata
+    hcloud_recovery_envelope: str = field(default="", repr=False)
+    pv_recovery_envelope: str = field(default="", repr=False)
+    pvc_recovery_envelope: str = field(default="", repr=False)
+
+    def recoverable_reference(self) -> str:
+        if (
+            not self.hcloud_recovery_envelope
+            or not self.pv_recovery_envelope
+            or not self.pvc_recovery_envelope
+        ):
+            raise MetadataConflict("recorded volume recovery envelopes are absent")
+        return json.dumps(
+            {
+                "hcloudRecoveryEnvelope": self.hcloud_recovery_envelope,
+                "location": self.location,
+                "pvName": self.pv_name,
+                "pvRecoveryEnvelope": self.pv_recovery_envelope,
+                "pvcRecoveryEnvelope": self.pvc_recovery_envelope,
+                "version": 1,
+                "volumeHandle": self.volume_handle,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    @classmethod
+    def from_recoverable_reference(
+        cls, reference: str, metadata: OpaqueProviderMetadata
+    ) -> RecordedVolume:
+        try:
+            value = json.loads(reference)
+            if (
+                not isinstance(value, dict)
+                or json.dumps(value, sort_keys=True, separators=(",", ":")) != reference
+                or set(value)
+                != {
+                    "hcloudRecoveryEnvelope",
+                    "location",
+                    "pvName",
+                    "pvRecoveryEnvelope",
+                    "pvcRecoveryEnvelope",
+                    "version",
+                    "volumeHandle",
+                }
+                or value["version"] != 1
+                or any(
+                    not isinstance(value[key], str) or not value[key]
+                    for key in (
+                        "hcloudRecoveryEnvelope",
+                        "location",
+                        "pvName",
+                        "pvRecoveryEnvelope",
+                        "pvcRecoveryEnvelope",
+                        "volumeHandle",
+                    )
+                )
+            ):
+                raise ValueError
+        except (ValueError, TypeError, json.JSONDecodeError) as error:
+            raise MetadataConflict("recorded volume recovery reference is invalid") from error
+        return cls(
+            volume_handle=value["volumeHandle"],
+            pv_name=value["pvName"],
+            location=value["location"],
+            metadata=metadata,
+            hcloud_recovery_envelope=value["hcloudRecoveryEnvelope"],
+            pv_recovery_envelope=value["pvRecoveryEnvelope"],
+            pvc_recovery_envelope=value["pvcRecoveryEnvelope"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,6 +339,10 @@ class KubernetesVolumeControl(Protocol):
         self, metadata: OpaqueProviderMetadata
     ) -> RecordedVolume | None: ...
 
+    async def label_bound_volume(
+        self, recorded: RecordedVolume, recovery_envelope: str
+    ) -> None: ...
+
     async def create_static_binding(self, recorded: RecordedVolume) -> None: ...
 
     async def delete_claim(self, recorded: RecordedVolume) -> None: ...
@@ -272,7 +355,12 @@ class KubernetesVolumeControl(Protocol):
 
 
 class HCloudVolumeControl(Protocol):
-    async def label_volume(self, handle: str, metadata: OpaqueProviderMetadata) -> None: ...
+    async def label_volume(
+        self,
+        handle: str,
+        metadata: OpaqueProviderMetadata,
+        recovery_envelope: str | None = None,
+    ) -> None: ...
 
     async def verify_volume(
         self, handle: str, metadata: OpaqueProviderMetadata, location: str
@@ -286,6 +374,8 @@ class HCloudVolumeControl(Protocol):
 
     async def quarantine_volume(self, handle: str) -> None: ...
 
+    async def observed_fence(self, tenant_id: str) -> int: ...
+
 
 class VolumeLifecycleWorker:
     """The only seam that needs PV mutation and an HCloud credential."""
@@ -295,6 +385,7 @@ class VolumeLifecycleWorker:
         kubernetes: KubernetesVolumeControl,
         hcloud: HCloudVolumeControl,
         *,
+        identity_codec: ProviderRecoveryIdentityCodec | None = None,
         absence_attempts: int = 20,
         absence_interval_seconds: float = 1.0,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
@@ -303,9 +394,13 @@ class VolumeLifecycleWorker:
             raise ValueError("absence polling bounds are invalid")
         self._kubernetes = kubernetes
         self._hcloud = hcloud
+        self._identity_codec = identity_codec
         self._absence_attempts = absence_attempts
         self._absence_interval_seconds = absence_interval_seconds
         self._sleep = sleep
+
+    async def observed_fence(self, tenant_id: str) -> int:
+        return await self._hcloud.observed_fence(tenant_id)
 
     async def _await_absence(self, check: Callable[[], Awaitable[bool]]) -> bool:
         for attempt in range(self._absence_attempts):
@@ -315,17 +410,55 @@ class VolumeLifecycleWorker:
                 await self._sleep(self._absence_interval_seconds)
         return False
 
-    async def register_bound_volume(self, metadata: OpaqueProviderMetadata) -> RecordedVolume:
+    async def register_bound_volume(
+        self,
+        metadata: OpaqueProviderMetadata,
+        *,
+        pvc_recovery_envelope: str = "",
+    ) -> RecordedVolume:
         recorded = await self._kubernetes.discover_bound_volume(metadata)
         if recorded is None:
             raise MetadataConflict("bound CSI volume is not yet discoverable")
         recorded.metadata.require_same(metadata)
-        await self._hcloud.label_volume(recorded.volume_handle, metadata)
+        hcloud_envelope = recorded.hcloud_recovery_envelope
+        pv_envelope = recorded.pv_recovery_envelope
+        if self._identity_codec is not None:
+            hcloud_envelope = self._identity_codec.seal(
+                provider="hcloud",
+                provider_reference=ProviderReference.hcloud(
+                    kind="volume", resource_id=recorded.volume_handle
+                ),
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                operation_id=metadata.operation_id,
+                fence_generation=metadata.fence_generation,
+            )
+            pv_envelope = self._identity_codec.seal(
+                provider="kubernetes",
+                provider_reference=ProviderReference.kubernetes(
+                    provider="kubernetes",
+                    api_version="v1",
+                    kind="PersistentVolume",
+                    namespace="",
+                    name=recorded.pv_name,
+                ),
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                operation_id=metadata.operation_id,
+                fence_generation=metadata.fence_generation,
+            )
+            await self._kubernetes.label_bound_volume(recorded, pv_envelope)
+        await self._hcloud.label_volume(recorded.volume_handle, metadata, hcloud_envelope or None)
         if not await self._hcloud.verify_volume(
             recorded.volume_handle, metadata, recorded.location
         ):
             raise MetadataConflict("HCloud volume identity or location differs")
-        return recorded
+        return replace(
+            recorded,
+            hcloud_recovery_envelope=hcloud_envelope,
+            pv_recovery_envelope=pv_envelope,
+            pvc_recovery_envelope=pvc_recovery_envelope,
+        )
 
     async def rebind_static(
         self,
@@ -375,11 +508,64 @@ class VolumeLifecycleWorker:
         return proof
 
 
+class VolumeRegistrationDriver:
+    """Privileged finite-lane driver for PV/HCloud ownership registration only."""
+
+    def __init__(
+        self,
+        worker: VolumeLifecycleWorker,
+        *,
+        identity_verifier: ProviderRecoveryIdentityVerifier,
+    ) -> None:
+        self._worker = worker
+        self._identity_verifier = identity_verifier
+
+    async def observed_fence(self, tenant_id: str) -> int:
+        return await self._worker.observed_fence(tenant_id)
+
+    async def execute(
+        self,
+        action: str,
+        request: dict[str, Any],
+        context: EffectContext,
+    ) -> DriverPending | DriverFinal:
+        if (
+            action != "provision"
+            or context.cell_id is None
+            or context.checkpoint != "volume-registration-required"
+        ):
+            raise DriverTerminal("PROVISIONER_VOLUME_WORK_NOT_APPLICABLE")
+        metadata = _metadata_from_context(context)
+        try:
+            envelopes = authenticate_cell_provider_recovery_envelopes(
+                self._identity_verifier,
+                request.get("_providerRecoveryEnvelopes"),
+                tenant_id=metadata.tenant_id,
+                cell_id=metadata.subject_id,
+                operation_id=metadata.operation_id,
+                fence_generation=metadata.fence_generation,
+                resource_name=metadata.resource_name,
+                operation_resource_name=provider_operation_resource_name(metadata.operation_id),
+            )
+            recorded = await self._worker.register_bound_volume(
+                metadata,
+                pvc_recovery_envelope=envelopes["vaultPvc"],
+            )
+            reference = recorded.recoverable_reference()
+        except (MetadataConflict, ProviderIdentityConflict) as error:
+            raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT") from error
+        return DriverPending(
+            "volume-owned",
+            1,
+            (DriverResource(ResourceKind.VOLUME, reference),),
+        )
+
+
 class LifecyclePlane(Protocol):
     """Provider composition required by the cell lifecycle reconciler."""
 
     async def observed_fence(self, tenant_id: str) -> int: ...
-    async def observe_operation(self, context: EffectContext) -> None: ...
+    async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None: ...
     def has_namespace(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def capacity_block_reason(self, metadata: OpaqueProviderMetadata) -> str | None: ...
     async def ensure_namespace(self, metadata: OpaqueProviderMetadata) -> None: ...
@@ -390,12 +576,7 @@ class LifecyclePlane(Protocol):
         request: dict[str, Any],
         values: dict[str, Any],
     ) -> None: ...
-    async def discover_bound_volume(
-        self, metadata: OpaqueProviderMetadata
-    ) -> RecordedVolume | None: ...
-    async def verify_volume(
-        self, handle: str, metadata: OpaqueProviderMetadata, location: str
-    ) -> bool: ...
+    async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool: ...
     def is_initialized(self, metadata: OpaqueProviderMetadata) -> bool: ...
     async def initialize(
         self,
@@ -505,6 +686,7 @@ class _Volume:
     location: str
     metadata: OpaqueProviderMetadata | None
     labels: dict[str, str]
+    pv_recovery_envelope: str = ""
     quarantined: bool = False
 
 
@@ -567,7 +749,8 @@ class HighFidelityProviderPlane:
                 observed = max(observed, volume.metadata.fence_generation)
         return observed
 
-    async def observe_operation(self, context: EffectContext) -> None:
+    async def observe_operation(self, context: EffectContext, request: dict[str, Any]) -> None:
+        del request
         current = self._tenant_fences.get(context.tenant_id, 0)
         if context.fence_generation < current:
             raise DriverTerminal("PROVISIONER_STALE_FENCE")
@@ -618,7 +801,10 @@ class HighFidelityProviderPlane:
             if cell.helm_values != values:
                 raise MetadataConflict("fixed Helm values drifted during adoption")
             return
-        handle = f"volume-{_digest(metadata.subject_id, length=20)}"
+        # The real CSI volumeHandle is the decimal HCloud volume ID. Keep the
+        # high-fidelity provider on that exact shape so recovery envelopes are
+        # byte-for-byte compatible with production provider references.
+        handle = str(int(_digest(metadata.subject_id, length=15), 16) or 1)
         pv_name = f"pv-{_digest(handle, length=20)}"
         cell.release = True
         cell.replicas = 1
@@ -969,7 +1155,30 @@ class HighFidelityProviderPlane:
         volume = self._volumes.get(cell.volume_handle)
         if volume is None:
             return None
-        return RecordedVolume(volume.handle, volume.pv_name, volume.location, metadata)
+        hcloud_envelope = (
+            decode_hcloud_identity_envelope(volume.labels)
+            if "exomem_identity_n" in volume.labels
+            else ""
+        )
+        return RecordedVolume(
+            volume.handle,
+            volume.pv_name,
+            volume.location,
+            metadata,
+            hcloud_envelope,
+            volume.pv_recovery_envelope,
+        )
+
+    async def volume_claim_bound(self, metadata: OpaqueProviderMetadata) -> bool:
+        return await self.discover_bound_volume(metadata) is not None
+
+    async def label_bound_volume(self, recorded: RecordedVolume, recovery_envelope: str) -> None:
+        volume = self._volumes.get(recorded.volume_handle)
+        if volume is None or volume.pv_name != recorded.pv_name:
+            raise MetadataConflict("bound PV identity differs")
+        if volume.pv_recovery_envelope and volume.pv_recovery_envelope != recovery_envelope:
+            raise MetadataConflict("bound PV recovery identity differs")
+        volume.pv_recovery_envelope = recovery_envelope
 
     async def create_static_binding(self, recorded: RecordedVolume) -> None:
         volume = self._volumes.get(recorded.volume_handle)
@@ -1006,7 +1215,12 @@ class HighFidelityProviderPlane:
     async def pv_absent(self, pv_name: str) -> bool:
         return pv_name not in self._pv_to_handle
 
-    async def label_volume(self, handle: str, metadata: OpaqueProviderMetadata) -> None:
+    async def label_volume(
+        self,
+        handle: str,
+        metadata: OpaqueProviderMetadata,
+        recovery_envelope: str | None = None,
+    ) -> None:
         volume = self._volumes.get(handle)
         if volume is None:
             raise MetadataConflict("HCloud volume is absent")
@@ -1014,6 +1228,8 @@ class HighFidelityProviderPlane:
             volume.metadata.require_same(metadata)
         volume.metadata = metadata
         volume.labels = dict(metadata.hcloud_labels)
+        if recovery_envelope is not None:
+            volume.labels.update(chunk_hcloud_identity_envelope(recovery_envelope))
         self._observe(metadata)
 
     async def verify_volume(
@@ -1189,7 +1405,7 @@ def _fixed_helm_values(
     worker_policy = json.dumps(
         request["workerPolicy"], sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
-    return {
+    values: dict[str, Any] = {
         "activeCredentialVersion": "1",
         "browserOrigin": config.browser_origin,
         "cellId": metadata.subject_id,
@@ -1224,6 +1440,12 @@ def _fixed_helm_values(
         "workerPolicyDigest": hashlib.sha256(worker_policy).hexdigest(),
         "workloadMode": "initialize",
     }
+    recovery_envelopes = request.get("_providerRecoveryEnvelopes")
+    if recovery_envelopes is not None:
+        if not isinstance(recovery_envelopes, dict):
+            raise MetadataConflict("provider recovery envelope set is invalid")
+        values["providerRecoveryEnvelopes"] = dict(recovery_envelopes)
+    return values
 
 
 def _deterministic_uuid4(value: str) -> str:
@@ -1244,7 +1466,7 @@ class CellLifecycleDriver:
         self,
         *,
         plane: LifecyclePlane,
-        volume_worker: VolumeLifecycleWorker,
+        volume_worker: VolumeLifecycleWorker | None,
         config: LifecycleConfig,
     ) -> None:
         self._plane = plane
@@ -1268,7 +1490,7 @@ class CellLifecycleDriver:
                 raise DriverTerminal("PROVISIONER_RELEASE_UNIT_MISMATCH")
             if await self.observed_fence(context.tenant_id) > context.fence_generation:
                 raise DriverTerminal("PROVISIONER_STALE_FENCE")
-            await self._plane.observe_operation(context)
+            await self._plane.observe_operation(context, request)
             if action == "provision":
                 return await self._provision(request, context)
             if action == "health":
@@ -1302,6 +1524,9 @@ class CellLifecycleDriver:
                 (DriverResource(ResourceKind.KUBERNETES_NAMESPACE, metadata.resource_name),),
             )
         if not self._plane.has_release(metadata):
+            capacity_reason = await self._plane.capacity_block_reason(metadata)
+            if capacity_reason is not None:
+                return DriverPending(f"capacity-{capacity_reason}", 300)
             await self._plane.install_release(
                 metadata, request, _fixed_helm_values(metadata, request, self._config)
             )
@@ -1315,6 +1540,7 @@ class CellLifecycleDriver:
             )
         if context.checkpoint not in {
             "release-applied",
+            "volume-registration-required",
             "volume-owned",
             "initializing",
             "initialized",
@@ -1329,16 +1555,16 @@ class CellLifecycleDriver:
                     DriverResource(ResourceKind.PVC, metadata.resource_name + "-data"),
                 ),
             )
-        recorded = await self._plane.discover_bound_volume(metadata)
-        if recorded is None:
+        if not await self._plane.volume_claim_bound(metadata):
             return DriverPending("csi-binding", 2)
-        if not await self._plane.verify_volume(recorded.volume_handle, metadata, recorded.location):
-            recorded = await self._volumes.register_bound_volume(metadata)
-            return DriverPending(
-                "volume-owned",
-                1,
-                (DriverResource(ResourceKind.VOLUME, recorded.volume_handle),),
-            )
+        if context.checkpoint not in {
+            "volume-owned",
+            "initializing",
+            "initialized",
+            "runtime-admitted",
+            "routes-open",
+        }:
+            return DriverPending("volume-registration-required", 1)
         if not self._plane.is_initialized(metadata):
             if not await self._plane.initialize(metadata, request, self._config):
                 return DriverPending("initializing", 2)
@@ -1411,10 +1637,16 @@ class CellLifecycleDriver:
                 return checkpoint
             if context.checkpoint == "maintenance-acquired":
                 await self._plane.disable_routes(metadata)
+                if self._plane.routes_enabled(metadata) != (False, False):
+                    raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
                 if not await self._plane.prove_external_rejection(metadata, request):
                     raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
                 return DriverPending("routes-closed", 1)
             if context.checkpoint == "routes-closed":
+                if self._plane.routes_enabled(metadata) != (False, False):
+                    raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
+                if not await self._plane.prove_external_rejection(metadata, request):
+                    raise DriverTerminal("PROVISIONER_ROUTE_CLOSURE_UNPROVEN")
                 await self._plane.quiesce(metadata, request, operation_id)
                 return DriverPending("runtime-drained", 1)
             if context.checkpoint == "runtime-drained" and action == "stop":

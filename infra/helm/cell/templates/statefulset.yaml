@@ -5,6 +5,8 @@ metadata:
   name: {{ .Values.resourceName }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "statefulSet") | nindent 4 }}
 spec:
   replicas: 1
   serviceName: {{ .Values.resourceName }}

@@ -13,7 +13,6 @@ from exomem_provisioner.adapters import (
     HCloudVolumeAdapter,
     HelmCliAdapter,
     KubernetesCellAdapter,
-    KubernetesHostedOperatorAdapter,
     KubernetesMaintenanceLeaseAdapter,
     KubernetesVolumeAdapter,
     PrivateCellApiAdapter,
@@ -25,6 +24,11 @@ from exomem_provisioner.lifecycle import (
     MetadataConflict,
     OpaqueProviderMetadata,
     RecordedVolume,
+)
+from exomem_provisioner.provider_identity import (
+    ProviderRecoveryIdentityCodec,
+    ProviderReference,
+    chunk_hcloud_identity_envelope,
 )
 
 
@@ -230,64 +234,6 @@ async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle(
 
 
 @pytest.mark.asyncio
-async def test_hosted_operator_uses_exact_exec_stdin_contract_and_validates_envelope() -> None:
-    metadata = _metadata()
-    calls: list[tuple[str, str, tuple[str, ...], bytes]] = []
-    request = {
-        "request_id": "123e4567-e89b-42d3-a456-426614174000",
-        "operation_id": "rotation-alpha:stage",
-        "cell_id": "cell-alpha",
-        "vault_id": "cell-alpha",
-        "state_root": "/var/lib/exomem/state",
-        "action": "stage",
-        "expected_revision": 1,
-        "pending_version": "2",
-    }
-
-    async def runner(namespace, pod, command, payload):
-        calls.append((namespace, pod, command, payload))
-        return (
-            0,
-            json.dumps(
-                {
-                    "contract_version": 1,
-                    "ok": True,
-                    "command": "credential",
-                    "request_id": request["request_id"],
-                    "code": "HOSTED_CREDENTIAL_STAGED",
-                    "data": {"revision": 2},
-                }
-            ),
-            "",
-        )
-
-    core = SimpleNamespace(
-        list_namespaced_pod=lambda namespace, label_selector: SimpleNamespace(
-            items=[
-                SimpleNamespace(
-                    metadata=SimpleNamespace(name="cell-pod-0"),
-                    status=SimpleNamespace(phase="Running"),
-                )
-            ]
-        )
-    )
-    adapter = KubernetesHostedOperatorAdapter(core_v1=core, runner=runner)
-
-    assert await adapter.execute("credential", metadata, request) == {"revision": 2}
-    assert calls[0][0:2] == (metadata.resource_name, "cell-pod-0")
-    assert calls[0][2] == (
-        "exomem",
-        "hosted",
-        "credential",
-        "--contract-version",
-        "1",
-        "--request-file",
-        "-",
-    )
-    assert json.loads(calls[0][3]) == request
-
-
-@pytest.mark.asyncio
 async def test_maintenance_lease_rejects_concurrent_owner_and_releases_with_precondition() -> None:
     metadata = _metadata()
     now = datetime(2030, 1, 1, tzinfo=UTC)
@@ -421,6 +367,47 @@ async def test_hcloud_adapter_applies_exact_immutable_labels_and_proves_absence(
 
 
 @pytest.mark.asyncio
+async def test_hcloud_adapter_rejects_replacing_an_unauthenticated_recovery_identity() -> None:
+    volumes = _HCloudVolumes()
+    metadata = _metadata()
+    trusted = ProviderRecoveryIdentityCodec.from_secret("trusted-provider-recovery-root")
+    forged = ProviderRecoveryIdentityCodec.from_secret("forged-provider-recovery-root")
+    reference = ProviderReference.hcloud(kind="volume", resource_id=42)
+    forged_envelope = forged.seal(
+        provider="hcloud",
+        provider_reference=reference,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
+    volumes.volume.labels = {
+        **metadata.hcloud_labels,
+        **chunk_hcloud_identity_envelope(forged_envelope),
+    }
+    adapter = HCloudVolumeAdapter(
+        client=SimpleNamespace(volumes=volumes),
+        identity_verifier=trusted.verifier(),
+    )
+    trusted_envelope = trusted.seal(
+        provider="hcloud",
+        provider_reference=reference,
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
+
+    with pytest.raises(MetadataConflict, match="recovery identity"):
+        await adapter.label_volume("42", metadata, trusted_envelope)
+
+    assert volumes.volume.labels == {
+        **metadata.hcloud_labels,
+        **chunk_hcloud_identity_envelope(forged_envelope),
+    }
+
+
+@pytest.mark.asyncio
 async def test_helm_cli_checks_pinned_version_and_uses_private_values_file(tmp_path: Path) -> None:
     calls: list[tuple[str, ...]] = []
     rendered_values: list[dict[str, object]] = []
@@ -519,22 +506,33 @@ async def test_traefik_adapter_closes_and_reopens_only_exact_routes() -> None:
             _metadata(),
             unused_ticket="ticket-unused",
             browser_origin="https://substratesystems.io",
+            control_credential="credential-current",
+            protocol_version="1",
         )
         is True
     )
-    assert len(probes) == 2
-    assert probes[0][0] == "OPTIONS"
-    assert probes[0][1].endswith("/public/exomem/v2/transfers/download")
-    assert probes[0][2] == {
+    assert len(probes) == 3
+    assert probes[0] == (
+        "GET",
+        "https://control.example.invalid/cells/cell-alpha/private/exomem/v1/ready",
+        {
+            "Authorization": "Bearer credential-current",
+            "X-Exomem-Hosted-Cell": "cell-alpha",
+            "X-Exomem-Hosted-Protocol": "1",
+        },
+    )
+    assert probes[1][0] == "OPTIONS"
+    assert probes[1][1].endswith("/public/exomem/v2/transfers/download")
+    assert probes[1][2] == {
         "Access-Control-Request-Headers": "X-Exomem-Transfer-Grant",
         "Access-Control-Request-Method": "GET",
         "Origin": "https://substratesystems.io",
     }
-    assert probes[1][0] == "GET"
-    assert probes[1][1] == probes[0][1]
-    assert "ticket-unused" in probes[1][2].values()
-    assert probes[1][2]["Origin"] == "https://substratesystems.io"
-    assert not any(key.startswith("CF-Access-") for key in probes[1][2])
+    assert probes[2][0] == "GET"
+    assert probes[2][1] == probes[1][1]
+    assert "ticket-unused" in probes[2][2].values()
+    assert probes[2][2]["Origin"] == "https://substratesystems.io"
+    assert not any(key.startswith("CF-Access-") for key in probes[2][2])
 
     await adapter.enable(_metadata())
     rendered = json.dumps(custom.applied, sort_keys=True)
@@ -562,6 +560,8 @@ async def test_traefik_rejection_proof_rejects_a_missing_target_on_an_open_route
             _metadata(),
             unused_ticket="ticket-unused",
             browser_origin="https://substratesystems.io",
+            control_credential="credential-current",
+            protocol_version="1",
         )
         is False
     )
@@ -584,6 +584,8 @@ async def test_traefik_rejection_proof_rejects_ticket_failures_on_an_open_route(
             _metadata(),
             unused_ticket="ticket-unused",
             browser_origin="https://substratesystems.io",
+            control_credential="credential-current",
+            protocol_version="1",
         )
         is False
     )
