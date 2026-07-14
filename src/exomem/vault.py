@@ -1513,6 +1513,70 @@ def _batch_residue_error(code: str) -> PathGuardError:
     return PathGuardError(code, reason)
 
 
+def _restore_batch_residue_timestamps(
+    parent: Path,
+    parent_descriptor: int,
+    name: str,
+    workspace_descriptor: int,
+    workspace_identity: PathIdentity,
+    atime_ns: int,
+    mtime_ns: int,
+) -> None:
+    try:
+        before = os.fstat(workspace_descriptor)
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            before_path = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - Windows fallback
+            before_path = (parent / name).lstat()
+        if (
+            not _same_identity(workspace_identity, before)
+            or not _same_identity(workspace_identity, before_path)
+            or not stat.S_ISDIR(before_path.st_mode)
+            or stat.S_ISLNK(before_path.st_mode)
+            or _is_reparse(before_path)
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if os.utime in getattr(os, "supports_fd", set()):
+            os.utime(workspace_descriptor, ns=(atime_ns, mtime_ns))
+        elif os.utime in getattr(os, "supports_dir_fd", set()):
+            kwargs: dict[str, Any] = {"dir_fd": parent_descriptor}
+            if os.utime in getattr(os, "supports_follow_symlinks", set()):
+                kwargs["follow_symlinks"] = False
+            os.utime(name, ns=(atime_ns, mtime_ns), **kwargs)
+        elif os.utime in getattr(os, "supports_follow_symlinks", set()):
+            os.utime(
+                parent / name,
+                ns=(atime_ns, mtime_ns),
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - platform has no exact timestamp operation
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        restored = os.fstat(workspace_descriptor)
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            restored_path = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - Windows fallback
+            restored_path = (parent / name).lstat()
+        if (
+            not _same_identity(workspace_identity, restored)
+            or not _same_identity(workspace_identity, restored_path)
+            or restored.st_atime_ns != atime_ns
+            or restored.st_mtime_ns != mtime_ns
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+    except PathGuardError:
+        raise
+    except (OSError, ValueError) as error:
+        raise _batch_residue_error("BATCH_RESIDUE_UNSAFE") from error
+
+
 def _classify_batch_residue(
     parent: Path,
     parent_descriptor: int,
@@ -1556,52 +1620,109 @@ def _classify_batch_residue(
             or _is_reparse(opened)
         ):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        try:
+            descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
+            iterator = os.scandir(
+                workspace_descriptor if descriptor_relative else workspace_path
+            )
+            child_names: list[str] = []
+            for child in iterator:
+                child_names.append(child.name)
+                if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
+                    raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
 
-        descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
-        iterator = os.scandir(
-            workspace_descriptor if descriptor_relative else workspace_path
-        )
-        child_names: list[str] = []
-        for child in iterator:
-            child_names.append(child.name)
-            if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
-                raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
+            validated_children: dict[str, PathIdentity] = {}
+            for child_name in sorted(child_names):
+                if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
+                    raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+                if os.stat in getattr(os, "supports_dir_fd", set()):
+                    child_info = os.stat(
+                        child_name,
+                        dir_fd=workspace_descriptor,
+                        follow_symlinks=False,
+                    )
+                else:  # pragma: no cover - Windows fallback
+                    child_info = (workspace_path / child_name).lstat()
+                if (
+                    not stat.S_ISREG(child_info.st_mode)
+                    or stat.S_ISLNK(child_info.st_mode)
+                    or _is_reparse(child_info)
+                ):
+                    raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+                validated_children[child_name] = _identity(child_name, child_info)
 
-        for child_name in sorted(child_names):
-            if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
+            iterator.close()
+            iterator = os.scandir(
+                workspace_descriptor if descriptor_relative else workspace_path
+            )
+            rechecked_names: set[str] = set()
+            for child in iterator:
+                child_name = child.name
+                rechecked_names.add(child_name)
+                if len(rechecked_names) > _BATCH_RESIDUE_CHILD_LIMIT:
+                    raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+                if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
+                    raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+                if os.stat in getattr(os, "supports_dir_fd", set()):
+                    child_info = os.stat(
+                        child_name,
+                        dir_fd=workspace_descriptor,
+                        follow_symlinks=False,
+                    )
+                else:  # pragma: no cover - Windows fallback
+                    child_info = (workspace_path / child_name).lstat()
+                expected_child = validated_children.get(child_name)
+                if (
+                    expected_child is None
+                    or not _same_identity(expected_child, child_info)
+                    or not stat.S_ISREG(child_info.st_mode)
+                    or stat.S_ISLNK(child_info.st_mode)
+                    or _is_reparse(child_info)
+                ):
+                    raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+            if rechecked_names != validated_children.keys():
                 raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+
+            final_descriptor_info = os.fstat(workspace_descriptor)
             if os.stat in getattr(os, "supports_dir_fd", set()):
-                child_info = os.stat(
-                    child_name,
-                    dir_fd=workspace_descriptor,
+                final_path_info = os.stat(
+                    name,
+                    dir_fd=parent_descriptor,
                     follow_symlinks=False,
                 )
             else:  # pragma: no cover - Windows fallback
-                child_info = (workspace_path / child_name).lstat()
+                final_path_info = workspace_path.lstat()
             if (
-                not stat.S_ISREG(child_info.st_mode)
-                or stat.S_ISLNK(child_info.st_mode)
-                or _is_reparse(child_info)
+                not _same_identity(workspace_identity, final_descriptor_info)
+                or not _same_identity(workspace_identity, final_path_info)
+                or not stat.S_ISDIR(final_path_info.st_mode)
+                or stat.S_ISLNK(final_path_info.st_mode)
+                or _is_reparse(final_path_info)
             ):
                 raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-
-        final_descriptor_info = os.fstat(workspace_descriptor)
-        if os.stat in getattr(os, "supports_dir_fd", set()):
-            final_path_info = os.stat(
-                name,
-                dir_fd=parent_descriptor,
-                follow_symlinks=False,
-            )
-        else:  # pragma: no cover - Windows fallback
-            final_path_info = workspace_path.lstat()
-        if (
-            not _same_identity(workspace_identity, final_descriptor_info)
-            or not _same_identity(workspace_identity, final_path_info)
-            or not stat.S_ISDIR(final_path_info.st_mode)
-            or stat.S_ISLNK(final_path_info.st_mode)
-            or _is_reparse(final_path_info)
-        ):
-            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        except BaseException as classifier_error:
+            try:
+                _restore_batch_residue_timestamps(
+                    parent,
+                    parent_descriptor,
+                    name,
+                    workspace_descriptor,
+                    workspace_identity,
+                    opened.st_atime_ns,
+                    opened.st_mtime_ns,
+                )
+            except BaseException as restore_error:
+                raise restore_error from classifier_error
+            raise
+        _restore_batch_residue_timestamps(
+            parent,
+            parent_descriptor,
+            name,
+            workspace_descriptor,
+            workspace_identity,
+            opened.st_atime_ns,
+            opened.st_mtime_ns,
+        )
     except PathGuardError:
         raise
     except (OSError, ValueError) as error:
@@ -1611,6 +1732,20 @@ def _classify_batch_residue(
             iterator.close()
         if workspace_descriptor is not None:
             os.close(workspace_descriptor)
+
+
+def _recheck_bounded_parent_path(path: Path, expected: PathIdentity) -> None:
+    try:
+        info = path.lstat()
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
+    if (
+        not _same_identity(expected, info)
+        or not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or _is_reparse(info)
+    ):
+        raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
 
 
 def _bounded_directory_entries(
@@ -1631,6 +1766,7 @@ def _bounded_directory_entries(
         opened = os.fstat(descriptor)
         if not stat.S_ISDIR(opened.st_mode) or not _same_identity(expected, opened):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+        _recheck_bounded_parent_path(path, expected)
         descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
         iterator = os.scandir(descriptor if descriptor_relative else path)
         residue_names: list[str] = []
@@ -1643,11 +1779,15 @@ def _bounded_directory_entries(
                 residue_names.append(name)
                 if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
                     raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
-            else:
+            elif len(ordinary_names) <= max_entries:
                 ordinary_names.append(name)
 
         for name in sorted(residue_names):
             _classify_batch_residue(path, descriptor, name)
+        if len(ordinary_names) > max_entries:
+            raise PathGuardError(
+                "PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit"
+            )
 
         entries: list[PathIdentity] = []
         for name in sorted(ordinary_names):
@@ -1679,6 +1819,7 @@ def _bounded_directory_entries(
             entries.append(_identity(entry_relative, info))
         if not _same_identity(expected, os.fstat(descriptor)):
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+        _recheck_bounded_parent_path(path, expected)
     finally:
         if iterator is not None:
             iterator.close()
@@ -2067,6 +2208,10 @@ def batch_atomic_write(
     for write in writes:
         deduped[write.path] = write
     writes = list(deduped.values())
+    for write in writes:
+        absolute_parts = Path(os.path.abspath(write.path)).parts
+        if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
     all_required_guards = tuple(required_guards)
     if any(
         not isinstance(guard, (PathGuard, DirectoryCensusGuard))

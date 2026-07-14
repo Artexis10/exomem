@@ -718,6 +718,11 @@ def test_directory_census_ignores_exact_valid_residue_without_touching_it(
             info.st_atime_ns,
             info.st_mtime_ns,
         )
+    workspace_times = (
+        1_701_111_111_123_456_789,
+        1_702_222_222_987_654_321,
+    )
+    os.utime(residue, ns=workspace_times)
 
     census = vault_module.DirectoryCensusGuard.capture(
         tmp_path,
@@ -727,6 +732,8 @@ def test_directory_census_ignores_exact_valid_residue_without_touching_it(
     census.recheck(tmp_path)
 
     assert census.entries == ()
+    residue_info = residue.stat()
+    assert (residue_info.st_atime_ns, residue_info.st_mtime_ns) == workspace_times
     actual: dict[str, tuple[bytes, int, int, int]] = {}
     for child in residue.iterdir():
         info = child.stat()
@@ -737,6 +744,62 @@ def test_directory_census_ignores_exact_valid_residue_without_touching_it(
             info.st_mtime_ns,
         )
     assert actual == expected
+
+
+def test_directory_census_restores_residue_times_on_classifier_failure(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(guarded, 1, children=("unexpected.tmp",))
+    workspace_times = (
+        1_701_111_111_123_456_789,
+        1_702_222_222_987_654_321,
+    )
+    os.utime(residue, ns=workspace_times)
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path,
+            "guarded",
+            max_entries=0,
+        )
+
+    residue_info = residue.stat()
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+    assert (residue_info.st_atime_ns, residue_info.st_mtime_ns) == workspace_times
+
+
+def test_directory_census_chains_classifier_failure_when_time_restore_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    _make_residue(guarded, 1, children=("unexpected.tmp",))
+    real_utime = os.utime
+
+    def fail_residue_time_restore(path, *args, **kwargs):
+        raise PermissionError("injected residue timestamp failure")
+
+    monkeypatch.setattr(vault_module.os, "utime", fail_residue_time_restore)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_fd",
+        real_utime,
+        fail_residue_time_restore,
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path,
+            "guarded",
+            max_entries=0,
+        )
+
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+    assert isinstance(unsafe.value.__cause__, vault_module.PathGuardError)
+    assert unsafe.value.__cause__.code == "BATCH_RESIDUE_UNSAFE"
 
 
 @pytest.mark.parametrize(
@@ -780,6 +843,8 @@ def test_directory_census_rejects_unsafe_reserved_residue(
         residue = _make_residue(guarded, 1)
         (residue / "restore-0.tmp").symlink_to(target)
     else:
+        if os.name != "posix":
+            pytest.skip("owner-only residue mode is a POSIX contract")
         residue = _make_residue(guarded, 1)
         os.chmod(residue, 0o755)
 
@@ -792,6 +857,58 @@ def test_directory_census_rejects_unsafe_reserved_residue(
 
     assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
     assert unsafe.value.reason == "private batch residue is unsafe"
+
+
+@pytest.mark.parametrize("mutation", ["add", "remove", "swap"])
+def test_directory_census_rechecks_residue_children_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mutation: str,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(guarded, 1, children=("stage-0.tmp",))
+    replacement = tmp_path / "replacement-child"
+    if mutation == "swap":
+        replacement.write_bytes(b"replacement identity")
+    real_stat = os.stat
+    mutated = False
+
+    def mutate_after_child_stat(path, *args, **kwargs):
+        nonlocal mutated
+        info = real_stat(path, *args, **kwargs)
+        if (
+            not mutated
+            and os.fspath(path) == "stage-0.tmp"
+            and kwargs.get("dir_fd") is not None
+        ):
+            mutated = True
+            child = residue / "stage-0.tmp"
+            if mutation == "add":
+                (residue / "stage-1.tmp").write_bytes(b"injected")
+            elif mutation == "remove":
+                child.unlink()
+            else:
+                os.replace(replacement, child)
+        return info
+
+    monkeypatch.setattr(vault_module.os, "stat", mutate_after_child_stat)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_dir_fd",
+        real_stat,
+        mutate_after_child_stat,
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path,
+            "guarded",
+            max_entries=0,
+        )
+
+    assert mutated is True
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
 
 
 def test_directory_census_enforces_residue_workspace_cap_before_validation(
@@ -880,6 +997,145 @@ def test_directory_census_ignores_valid_residue_lifecycle_but_fails_unsafe(
     assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
 
 
+def test_bounded_census_path_fallback_rejects_substituted_parent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    original_info = guarded.lstat()
+    expected = vault_module._identity("guarded", original_info)
+    displaced = tmp_path / "guarded-displaced"
+    real_scandir = os.scandir
+    substituted = False
+
+    def substitute_before_path_scan(path):
+        nonlocal substituted
+        if not substituted and os.path.abspath(path) == os.path.abspath(guarded):
+            substituted = True
+            guarded.rename(displaced)
+            guarded.mkdir()
+        return real_scandir(path)
+
+    monkeypatch.setattr(vault_module.os, "scandir", substitute_before_path_scan)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_fd",
+        real_scandir,
+        None,
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as changed:
+        vault_module._bounded_directory_entries(
+            guarded,
+            relative="guarded",
+            expected=expected,
+            max_entries=0,
+        )
+
+    assert substituted is True
+    assert changed.value.code == "PATH_GUARD_CHANGED"
+
+
+def test_directory_census_classifies_residue_through_path_fallbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(guarded, 1, children=("stage-0.tmp",))
+    workspace_times = (
+        1_701_111_111_123_456_789,
+        1_702_222_222_987_654_321,
+    )
+    os.utime(residue, ns=workspace_times)
+
+    _replace_capability_member(monkeypatch, "supports_dir_fd", os.open, None)
+    _replace_capability_member(monkeypatch, "supports_dir_fd", os.stat, None)
+    _replace_capability_member(monkeypatch, "supports_fd", os.scandir, None)
+    _replace_capability_member(monkeypatch, "supports_fd", os.utime, None)
+    _replace_capability_member(monkeypatch, "supports_dir_fd", os.utime, None)
+
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=0,
+    )
+    census.recheck(tmp_path)
+
+    residue_info = residue.stat()
+    assert census.entries == ()
+    assert (residue_info.st_atime_ns, residue_info.st_mtime_ns) == workspace_times
+    assert (residue / "stage-0.tmp").read_bytes() == b"residue:stage-0.tmp"
+
+
+def test_bounded_census_stops_retaining_ordinary_names_after_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    expected = vault_module._identity("guarded", guarded.lstat())
+    real_scandir = os.scandir
+
+    class TrackedName(str):
+        live = 0
+
+        def __new__(cls, value: str):
+            instance = super().__new__(cls, value)
+            cls.live += 1
+            return instance
+
+        def __del__(self) -> None:
+            type(self).live -= 1
+
+    class Entry:
+        def __init__(self, name: str) -> None:
+            self.name = name
+
+    class BoundedIterator:
+        def __init__(self) -> None:
+            self.index = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if TrackedName.live > 2:
+                raise AssertionError("ordinary entry names accumulated past the bound")
+            if self.index == 8:
+                raise StopIteration
+            name = TrackedName(f"ordinary-{self.index}")
+            self.index += 1
+            return Entry(name)
+
+        def close(self) -> None:
+            return None
+
+    def bounded_scandir(path):
+        if os.path.abspath(path) == os.path.abspath(guarded):
+            return BoundedIterator()
+        return real_scandir(path)
+
+    monkeypatch.setattr(vault_module.os, "scandir", bounded_scandir)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_fd",
+        real_scandir,
+        None,
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as limited:
+        vault_module._bounded_directory_entries(
+            guarded,
+            relative="guarded",
+            expected=expected,
+            max_entries=0,
+        )
+
+    assert limited.value.code == "PATH_GUARD_LIMIT"
+
+
 def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -929,6 +1185,41 @@ def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
     assert len(_workspaces(guarded)) == 64
     assert stale in _workspaces(guarded)
     assert (stale / "stage-0.tmp").read_bytes() == stale_bytes
+
+
+@pytest.mark.parametrize("nested", [False, True])
+def test_batch_atomic_write_rejects_reserved_logical_target_before_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    nested: bool,
+) -> None:
+    reserved = (
+        tmp_path / ".exomem-batch-user"
+        if nested
+        else tmp_path / _residue_name(99)
+    )
+    target = reserved / "target.md" if nested else reserved
+    create_calls: list[Path] = []
+
+    def reject_workspace_create(cls, parent: Path):
+        create_calls.append(parent)
+        raise AssertionError("workspace creation must not run")
+
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "create",
+        classmethod(reject_workspace_create),
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "must not write")]
+        )
+
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+    assert unsafe.value.reason == "private batch residue is unsafe"
+    assert create_calls == []
+    assert not os.path.lexists(reserved)
 
 
 def test_directory_census_keeps_user_backup_in_ordinary_capacity(
