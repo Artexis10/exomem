@@ -830,7 +830,7 @@ data:
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key-id", "key": "application-key-id"}}},
                 {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key", "key": "application-key"}}},
                 {"name": "EXOMEM_DELETION_BATCH_SIZE", "value": {{ $deletion.maxOperations | quote }}},
-                {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"}}},
                 {"name": "HOME", "value": "/tmp"}
               ],
               "resources": {"requests": {"cpu": "25m", "memory": "96Mi"}, "limits": {"cpu": "500m", "memory": "384Mi"}},

@@ -731,6 +731,10 @@ def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only(
     worker_pod = job["spec"]["template"]["spec"]
     assert worker_pod["serviceAccountName"] == "exomem-deletion-worker"
     assert worker_pod["containers"][0]["command"] == ["exomem-deletion-worker"]
+    worker_env = {item["name"]: item for item in worker_pod["containers"][0]["env"]}
+    assert worker_env["EXOMEM_PROVISIONER_WORKER_ID"]["valueFrom"]["fieldRef"] == {
+        "fieldPath": "metadata.labels['batch.kubernetes.io/job-name']"
+    }
     worker_secret_refs = {
         f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
         for item in worker_pod["containers"][0]["env"]
@@ -802,6 +806,7 @@ def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfa
     assert f"!has({container}.startupProbe)" in expressions
     assert f"!has({container}.securityContext.privileged)" in expressions
     assert f"!has({container}.securityContext.seccompProfile)" in expressions
+    assert "metadata.labels['batch.kubernetes.io/job-name']" in expressions
     assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
     assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
 

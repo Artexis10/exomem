@@ -139,7 +139,7 @@ spec:
       message: The deletion worker provider inputs must match the reviewed exact references.
     - expression: >-
         object.spec.template.spec.containers[0].env[14].value == '1' &&
-        object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.fieldPath == 'metadata.name' &&
+        object.spec.template.spec.containers[0].env[15].valueFrom.fieldRef.fieldPath == "metadata.labels['batch.kubernetes.io/job-name']" &&
         object.spec.template.spec.containers[0].env[16].value == '/tmp'
       message: The deletion worker batch and runtime identity must match the reviewed template.
     - expression: >-
