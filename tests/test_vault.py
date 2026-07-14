@@ -137,6 +137,42 @@ def test_path_guards_share_new_parent_chain_safely(tmp_path: Path) -> None:
     assert [path.read_text(encoding="utf-8") for path in paths] == ["one", "two"]
 
 
+def test_missing_parent_swap_cannot_redirect_nested_directory_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "safe/nested/page.md"
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    guard = vault.PathGuard.capture(tmp_path, "safe/nested/page.md", leaf_policy="absent")
+    real_mkdir = os.mkdir
+    swapped = False
+
+    def swap_created_parent(path, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if not swapped and Path(path).name == "nested":
+            swapped = True
+            (tmp_path / "safe").rename(tmp_path / "safe-displaced")
+            (tmp_path / "safe").symlink_to(outside, target_is_directory=True)
+        return real_mkdir(path, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(vault.os, "mkdir", swap_created_parent)
+
+    with pytest.raises(vault.PathGuardError):
+        vault.batch_atomic_write(
+            [
+                vault.PlannedWrite(
+                    target,
+                    "page",
+                    create_only=True,
+                    guard=guard,
+                )
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert not (outside / "nested").exists()
+
+
 def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -358,6 +358,21 @@ def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
                     "reason": None,
                 }
             ).encode(),
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": 2,
+                    "kind": "bootstrap",
+                    "page_identity": _ID_A,
+                    "page_path_at_review": _PAGE_A,
+                    "content_fingerprint": "a" * 64,
+                    "draft_hash": "b" * 64,
+                    "auxiliary_hash": "c" * 64,
+                    "reason": None,
+                }
+            ).encode(),
             "RELATION_REVIEW_UNSUPPORTED_VERSION",
         ),
     ],
@@ -743,3 +758,149 @@ def test_review_directory_parent_symlink_fails_closed(tmp_path: Path) -> None:
         relation_review.load_relation_reviews(tmp_path)
 
     assert exc.value.code == "RELATION_REVIEW_DIRECTORY_UNSAFE"
+
+
+def test_auxiliary_traversal_and_final_symlink_fail_before_activation(
+    tmp_path: Path,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    outside = tmp_path / "outside.txt"
+    outside.write_text("outside\n", encoding="utf-8")
+    symlink = tmp_path / "Knowledge Base/symlink.md"
+    symlink.symlink_to(outside)
+    cases = (
+        vault.PlannedWrite(tmp_path / "Knowledge Base/nested/../nav.md", "nav\n"),
+        vault.PlannedWrite(symlink, "changed\n"),
+    )
+
+    for auxiliary in cases:
+        with pytest.raises(relation_review.RelationReviewError) as exc:
+            relation_review.commit_creation_draft(
+                tmp_path,
+                path=_PAGE_B,
+                source=source,
+                draft_id=_ID_B,
+                operation="create",
+                relation_disposition="reviewed_none",
+                relation_review_hash=validation.draft_hash,
+                relation_review_reason="No honest typed relation yet",
+                auxiliary_writes=(auxiliary,),
+            )
+
+        assert exc.value.code == "INVALID_AUXILIARY_WRITE"
+        assert not activation_manifest.manifest_path(tmp_path).exists()
+        assert not (tmp_path / _PAGE_B).exists()
+    assert outside.read_text(encoding="utf-8") == "outside\n"
+
+
+def test_exact_replay_rejects_symlinked_auxiliary_without_following_it(
+    tmp_path: Path,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    auxiliary = vault.PlannedWrite(tmp_path / "Knowledge Base/nav.md", "nav\n")
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+        auxiliary_writes=(auxiliary,),
+    )
+    outside = tmp_path / "outside-nav.md"
+    outside.write_text("nav\n", encoding="utf-8")
+    auxiliary.path.unlink()
+    auxiliary.path.symlink_to(outside)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest typed relation yet",
+            auxiliary_writes=(auxiliary,),
+        )
+
+    assert exc.value.code == "INVALID_AUXILIARY_WRITE"
+    assert outside.read_text(encoding="utf-8") == "nav\n"
+
+
+def test_artifact_directory_swap_is_detected_even_when_file_inode_is_reused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path="Knowledge Base/Notes/Insights/first.md",
+        source=_source(_ID_A),
+        draft_id=_ID_A,
+        operation="create",
+    )
+    artifact = relation_review.review_artifact_path(tmp_path, _ID_A)
+    directory = artifact.parent
+    displaced = directory.with_name("relation-reviews-displaced")
+    real_open = os.open
+    swapped = False
+
+    def swap_before_artifact_open(path, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(path).name == artifact.name:
+            swapped = True
+            directory.rename(displaced)
+            directory.mkdir()
+            os.link(displaced / artifact.name, directory / artifact.name)
+        return real_open(path, flags, *args, **kwargs)
+
+    monkeypatch.setattr(relation_review.os, "open", swap_before_artifact_open)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.load_relation_reviews(tmp_path)
+
+    assert exc.value.code == "RELATION_REVIEW_SWAPPED"
+
+
+def test_prepared_bootstrap_invalidated_by_corpus_growth_reports_contract_failure(
+    tmp_path: Path,
+) -> None:
+    source = _source(_ID_B)
+    validation = relation_review.validate_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+    )
+    assert validation.relation_disposition == "bootstrap"
+    artifact = relation_review.review_artifact_path(tmp_path, _ID_B)
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text(
+        json.dumps(
+            _artifact_payload(validation, kind="bootstrap", reason=None),
+            ensure_ascii=False,
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    original_artifact = artifact.read_bytes()
+    _seed_existing(tmp_path)
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+        )
+
+    assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert artifact.read_bytes() == original_artifact
+    assert not (tmp_path / _PAGE_B).exists()
+    assert not activation_manifest.manifest_path(tmp_path).exists()

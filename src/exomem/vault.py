@@ -37,6 +37,11 @@ if os.name == "nt":  # pragma: no cover - imported only on Windows
 else:  # pragma: no cover - platform branch exercised on POSIX
     import fcntl
 
+_SUPPORTS_DIRECTORY_FD = bool(
+    os.open in getattr(os, "supports_dir_fd", set())
+    and os.mkdir in getattr(os, "supports_dir_fd", set())
+)
+
 log = logging.getLogger(__name__)
 
 
@@ -47,6 +52,7 @@ _H1_PATTERN = re.compile(r"^# (.+)$", re.MULTILINE)
 
 class InvalidSlugError(ValueError):
     """An explicit filename slug violated the portable ASCII contract."""
+
 
 # Legacy hardcoded curated-tree list — now EMPTY by default. Curated /
 # read-only protection is governed per-subtree by `Knowledge Base/_access.yaml`
@@ -68,9 +74,7 @@ APPEND_ONLY_KB_SUBPATHS: tuple[str, ...] = (
 # (trust is citations + link count), and knowledge does not expire on a schedule.
 # Governed write paths refuse them so the documented "no confidence floats / no
 # retention decay" stance is actually enforced, not just described.
-EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset(
-    {"confidence", "decay_at", "expires_at"}
-)
+EXCLUDED_FRONTMATTER_FIELDS: frozenset[str] = frozenset({"confidence", "decay_at", "expires_at"})
 
 
 def excluded_frontmatter_reason(field: str) -> str | None:
@@ -84,11 +88,20 @@ def excluded_frontmatter_reason(field: str) -> str | None:
         )
     return None
 
+
 # When scanning the full vault for inbound wikilinks, skip these.
-VAULT_SCAN_SKIP_DIRS = frozenset({
-    ".obsidian", ".git", ".trash", "_attachments", "_archive", "_trash",
-    "_Schema",
-})
+VAULT_SCAN_SKIP_DIRS = frozenset(
+    {
+        ".obsidian",
+        ".git",
+        ".trash",
+        "_attachments",
+        "_archive",
+        "_trash",
+        "_Schema",
+    }
+)
+
 
 def in_excluded_scan_dir(rel_path: str) -> bool:
     """True when any segment of `rel_path` is one of VAULT_SCAN_SKIP_DIRS.
@@ -102,10 +115,7 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
     `_trash/`) but not to the corpus-aware near-dup sweep, which reads the raw
     sidecar (observed 2026-07-04: dup warnings flagging trash entries).
     """
-    return any(
-        seg in VAULT_SCAN_SKIP_DIRS
-        for seg in rel_path.replace("\\", "/").split("/")
-    )
+    return any(seg in VAULT_SCAN_SKIP_DIRS for seg in rel_path.replace("\\", "/").split("/"))
 
 
 # `[[Target]]` or `[[Target|Alias]]`.
@@ -195,13 +205,10 @@ def resolve_filename_slug(title: str, slug: str | None = None) -> tuple[str, lis
     if slug is not None:
         if not isinstance(slug, str) or not _EXPLICIT_SLUG_PATTERN.fullmatch(slug):
             raise InvalidSlugError(
-                "slug must be lowercase ASCII kebab-case (letters, digits, and "
-                "single hyphens only)"
+                "slug must be lowercase ASCII kebab-case (letters, digits, and single hyphens only)"
             )
         if len(slug) > SLUG_MAX_LENGTH:
-            raise InvalidSlugError(
-                f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit"
-            )
+            raise InvalidSlugError(f"slug exceeds the {SLUG_MAX_LENGTH}-character filename limit")
         return slug, []
 
     resolved, truncation_warning = slugify_with_truncation_check(title)
@@ -552,17 +559,11 @@ class PathGuard:
     def prepare_and_bind_parents(self, vault_root: Path) -> PathGuard:
         self.recheck(vault_root)
         root = Path(vault_root)
-        for relative in self.missing_parents:
-            path = root / relative
-            try:
-                path.mkdir()
-            except FileExistsError as error:
-                raise PathGuardError(
-                    "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
-                ) from error
-            info = path.lstat()
-            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
-                raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
+        _create_missing_guard_parents(
+            root,
+            self.missing_parents,
+            expected_ancestors=self.ancestors,
+        )
         return PathGuard.capture(
             root,
             self.target,
@@ -628,16 +629,12 @@ def _safe_write_target(path: Path, vault_root: Path | None) -> str:
     if vault_root is None:
         return path.name
     try:
-        return Path(os.path.abspath(path)).relative_to(
-            Path(os.path.abspath(vault_root))
-        ).as_posix()
+        return Path(os.path.abspath(path)).relative_to(Path(os.path.abspath(vault_root))).as_posix()
     except ValueError:
         return path.name
 
 
-def _prepare_path_guards(
-    vault_root: Path, guards: Iterable[PathGuard]
-) -> tuple[PathGuard, ...]:
+def _prepare_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> tuple[PathGuard, ...]:
     original = tuple(guards)
     for guard in original:
         guard.recheck(vault_root)
@@ -645,21 +642,11 @@ def _prepare_path_guards(
         {relative for guard in original for relative in guard.missing_parents},
         key=lambda value: (len(Path(value).parts), value),
     )
-    for relative in missing:
-        path = vault_root / relative
-        try:
-            path.mkdir()
-        except FileExistsError as error:
-            raise PathGuardError(
-                "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
-            ) from error
-        info = path.lstat()
-        if (
-            not stat.S_ISDIR(info.st_mode)
-            or stat.S_ISLNK(info.st_mode)
-            or _is_reparse(info)
-        ):
-            raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
+    _create_missing_guard_parents(
+        vault_root,
+        missing,
+        expected_ancestors=tuple(identity for guard in original for identity in guard.ancestors),
+    )
     return tuple(
         PathGuard.capture(
             vault_root,
@@ -669,6 +656,109 @@ def _prepare_path_guards(
         )
         for guard in original
     )
+
+
+def _directory_flags() -> int:
+    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_directory_at(
+    parent_descriptor: int,
+    name: str,
+    *,
+    expected: PathIdentity | None = None,
+) -> int:
+    try:
+        descriptor = os.open(name, _directory_flags(), dir_fd=parent_descriptor)
+    except OSError as error:
+        raise PathGuardError(
+            "PATH_GUARD_CHANGED", "guard ancestor changed during creation"
+        ) from error
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISDIR(info.st_mode):
+            raise PathGuardError("PATH_GUARD_UNSAFE", "guard ancestor is unsafe")
+        if expected is not None and not _same_identity(expected, info):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed during creation")
+        return descriptor
+    except Exception:
+        os.close(descriptor)
+        raise
+
+
+def _create_missing_guard_parents(
+    vault_root: Path,
+    missing_parents: Iterable[str],
+    *,
+    expected_ancestors: Iterable[PathIdentity],
+) -> None:
+    missing = tuple(
+        sorted(
+            set(missing_parents),
+            key=lambda value: (len(Path(value).parts), value),
+        )
+    )
+    if not missing:
+        return
+    expected_by_path: dict[str, PathIdentity] = {}
+    for identity in expected_ancestors:
+        existing = expected_by_path.get(identity.relative_path)
+        if existing is not None and existing != identity:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestors disagree")
+        expected_by_path[identity.relative_path] = identity
+    if not _SUPPORTS_DIRECTORY_FD:  # pragma: no cover - Windows fallback
+        for relative in missing:
+            path = vault_root / relative
+            try:
+                path.mkdir()
+            except FileExistsError as error:
+                raise PathGuardError(
+                    "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
+                ) from error
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
+        return
+
+    try:
+        root_before = vault_root.lstat()
+        root_descriptor = os.open(vault_root, _directory_flags())
+    except OSError as error:
+        raise PathGuardError(
+            "PATH_GUARD_CHANGED", "vault root changed during parent creation"
+        ) from error
+    try:
+        expected_root = expected_by_path.get(".", _identity(".", root_before))
+        if not _same_identity(expected_root, os.fstat(root_descriptor)):
+            raise PathGuardError("PATH_GUARD_CHANGED", "vault root changed during parent creation")
+        for relative in missing:
+            parts = Path(relative).parts
+            parent_descriptor = os.dup(root_descriptor)
+            try:
+                for index, part in enumerate(parts[:-1]):
+                    traversed = "/".join(parts[: index + 1])
+                    next_descriptor = _open_directory_at(
+                        parent_descriptor,
+                        part,
+                        expected=expected_by_path.get(traversed),
+                    )
+                    os.close(parent_descriptor)
+                    parent_descriptor = next_descriptor
+                try:
+                    os.mkdir(parts[-1], dir_fd=parent_descriptor)
+                except FileExistsError as error:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
+                    ) from error
+                created_descriptor = _open_directory_at(parent_descriptor, parts[-1])
+                expected_by_path[relative] = _identity(relative, os.fstat(created_descriptor))
+                os.close(created_descriptor)
+            finally:
+                os.close(parent_descriptor)
+    finally:
+        os.close(root_descriptor)
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -712,9 +802,7 @@ def batch_atomic_write(
                 # Fail CLOSED: a staged write that resolves outside the vault must
                 # never proceed (callers resolve paths first, so this is a
                 # defense-in-depth backstop, not a normal path).
-                raise ValueError(
-                    f"WRITE_REFUSED: {w.path} resolves outside the vault root"
-                ) from e
+                raise ValueError(f"WRITE_REFUSED: {w.path} resolves outside the vault root") from e
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
@@ -739,9 +827,7 @@ def batch_atomic_write(
             write_guards.append(guard)
             bound_guards.append(None)
         prepared = _prepare_path_guards(root, (*write_guards, *read_only_guards))
-        for position, guard in zip(
-            guard_positions, prepared[: len(write_guards)], strict=True
-        ):
+        for position, guard in zip(guard_positions, prepared[: len(write_guards)], strict=True):
             bound_guards[position] = guard
         read_only_guards = prepared[len(write_guards) :]
         for guard in (*read_only_guards, *(item for item in bound_guards if item is not None)):
@@ -841,17 +927,21 @@ def batch_atomic_write(
         # their echo instead of re-embedding the same files a second time.
         try:
             from . import file_watcher
+
             file_watcher.register_self_write(vault_root, replaced)
         except Exception:  # noqa: BLE001 — suppression is best-effort
             import logging
+
             logging.getLogger(__name__).debug(
                 "self-write suppression registration failed", exc_info=True
             )
         try:
             from . import index_sync
+
             index_sync.upsert_after_write(vault_root, replaced)
         except Exception:  # noqa: BLE001 — embeddings are best-effort
             import logging
+
             logging.getLogger(__name__).exception(
                 "embedding upsert failed after batch_atomic_write; "
                 "sidecar may be stale until audit_fix(rebuild_embeddings=True)"
@@ -1100,9 +1190,7 @@ def yaml_safe_load(text: str):
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
 
 
-def parse_frontmatter(
-    text: str, *, strict: bool = False
-) -> tuple[dict[str, Any], str, str | None]:
+def parse_frontmatter(text: str, *, strict: bool = False) -> tuple[dict[str, Any], str, str | None]:
     """Split a markdown file into (frontmatter_dict, body, frontmatter_text).
 
     Returns ({}, text, None) when no frontmatter block is present.
@@ -1125,9 +1213,7 @@ def parse_frontmatter(
         fm = fm or {}
         if not isinstance(fm, dict):
             if strict:
-                raise FrontmatterError(
-                    "INVALID_FRONTMATTER", "frontmatter root must be a mapping"
-                )
+                raise FrontmatterError("INVALID_FRONTMATTER", "frontmatter root must be a mapping")
             fm = {}
     except _DuplicateYamlKey as error:
         if strict:
@@ -1207,6 +1293,7 @@ def walk_vault_md(vault_root: Path):
     Walks the FULL vault, not just Knowledge Base/. Used by Tier 2 inbound-
     wikilink scans and move/delete safety checks.
     """
+
     def walk(d: Path):
         try:
             children = list(d.iterdir())
@@ -1226,15 +1313,16 @@ def walk_vault_md(vault_root: Path):
                 # notes; indexing/scanning them pollutes search and wikilink
                 # resolution.
                 yield child
+
     yield from walk(vault_root)
 
 
 @dataclass
 class InboundLink:
-    path: str          # vault-relative POSIX of the file containing the link
-    line_number: int   # 1-based
-    context: str       # the line text (trimmed)
-    raw_target: str    # the exact text inside [[...]]
+    path: str  # vault-relative POSIX of the file containing the link
+    line_number: int  # 1-based
+    context: str  # the line text (trimmed)
+    raw_target: str  # the exact text inside [[...]]
 
     def as_dict(self) -> dict:
         return {
@@ -1256,8 +1344,8 @@ class InboundLink:
 
 @dataclass
 class _InboundEntry:
-    seq: int           # global scan order: (file walk order, line, match)
-    path: str          # vault-relative POSIX of the file containing the link
+    seq: int  # global scan order: (file walk order, line, match)
+    path: str  # vault-relative POSIX of the file containing the link
     line_number: int
     context: str
     raw_target: str
@@ -1266,11 +1354,11 @@ class _InboundEntry:
 @dataclass
 class _InboundIndexData:
     buckets: dict[str, list[_InboundEntry]]  # normalized target -> entries
-    stem_counts: dict[str, int]              # basename -> occurrences in walk
-    known_rels: set[str]                     # vault-relative POSIX paths already
-                                              # counted toward stem_counts — lets
-                                              # on_files_changed() tell a rename's
-                                              # "new" side from an in-place edit.
+    stem_counts: dict[str, int]  # basename -> occurrences in walk
+    known_rels: set[str]  # vault-relative POSIX paths already
+    # counted toward stem_counts — lets
+    # on_files_changed() tell a rename's
+    # "new" side from an in-place edit.
 
     def on_files_changed(
         self,
@@ -1357,13 +1445,15 @@ class _InboundIndexData:
                 continue
             for lineno, context, raw in _scan_wikilinks(text):
                 normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
-                self.buckets.setdefault(normalized, []).append(_InboundEntry(
-                    seq=next_seq,
-                    path=rel,
-                    line_number=lineno,
-                    context=context,
-                    raw_target=raw,
-                ))
+                self.buckets.setdefault(normalized, []).append(
+                    _InboundEntry(
+                        seq=next_seq,
+                        path=rel,
+                        line_number=lineno,
+                        context=context,
+                        raw_target=raw,
+                    )
+                )
                 next_seq += 1
 
 
@@ -1410,13 +1500,15 @@ def _build_inbound_index(vault_root: Path) -> _InboundIndexData:
             # Strip `#anchor` before comparison — anchors are intra-page
             # jumps, not part of the file path.
             normalized = raw.split("#", 1)[0].rstrip().removesuffix(".md")
-            buckets.setdefault(normalized, []).append(_InboundEntry(
-                seq=seq,
-                path=md_rel,
-                line_number=lineno,
-                context=context,
-                raw_target=raw,
-            ))
+            buckets.setdefault(normalized, []).append(
+                _InboundEntry(
+                    seq=seq,
+                    path=md_rel,
+                    line_number=lineno,
+                    context=context,
+                    raw_target=raw,
+                )
+            )
             seq += 1
     return _InboundIndexData(buckets=buckets, stem_counts=stem_counts, known_rels=known_rels)
 
@@ -1488,9 +1580,7 @@ def clear_inbound_index() -> None:
     _INBOUND_INDEX.clear()
 
 
-def find_inbound_wikilinks(
-    vault_root: Path, target_rel_path: str
-) -> list[InboundLink]:
+def find_inbound_wikilinks(vault_root: Path, target_rel_path: str) -> list[InboundLink]:
     """Return every wikilink in the vault that resolves to `target_rel_path`.
 
     `target_rel_path` is vault-relative POSIX, with or without `.md`. Matches
@@ -1702,6 +1792,7 @@ class WikilinkResolver:
         the tie: a rel whose file still exists is a change, not a delete —
         dropping it would silently remove a live file from the resolver.
         """
+
         def _norm(rels: Iterable[str]) -> set[str]:
             out: set[str] = set()
             for r in rels:
@@ -1734,9 +1825,7 @@ class WikilinkResolver:
         note's path) resolve before the file lands on disk.
         """
         no_ext = no_ext_path.removesuffix(".md").lstrip("/")
-        self._add_entry(
-            no_ext, title.strip().lower() if title and title.strip() else None
-        )
+        self._add_entry(no_ext, title.strip().lower() if title and title.strip() else None)
 
 
 def _strip_wikilink_brackets(s: str) -> str:
@@ -1827,10 +1916,7 @@ def normalize_wikilink(
     # Folder-hub link (e.g. `[[Knowledge Base/Notes/Patterns/]]`): we never
     # canonicalize beyond ensuring the Knowledge Base/ prefix.
     if cleaned.endswith("/"):
-        canonical = (
-            cleaned if cleaned.startswith(kb_prefix())
-            else kb_prefix() + cleaned
-        )
+        canonical = cleaned if cleaned.startswith(kb_prefix()) else kb_prefix() + cleaned
         return canonical + anchor, None
 
     # 1. Full vault-rooted (with or without explicit Knowledge Base/ prefix).
@@ -1893,9 +1979,7 @@ def normalize_wikilink(
         fallback = kb_prefix() + cleaned
     else:
         fallback = cleaned
-    return fallback + anchor, (
-        f"wikilink {target!r} does not resolve to any file in the vault"
-    )
+    return fallback + anchor, (f"wikilink {target!r} does not resolve to any file in the vault")
 
 
 def _mask_code_spans(text: str) -> str:
@@ -1985,10 +2069,8 @@ def normalize_body_wikilinks(
         rendered = render_wikilink_target(canonical, vault_root)
         if rendered == target_only:
             continue  # already canonical
-        replacement = (
-            f"[[{rendered}|{alias}]]" if alias is not None else f"[[{rendered}]]"
-        )
-        new_body = new_body[: m.start()] + replacement + new_body[m.end():]
+        replacement = f"[[{rendered}|{alias}]]" if alias is not None else f"[[{rendered}]]"
+        new_body = new_body[: m.start()] + replacement + new_body[m.end() :]
     return new_body, warnings
 
 
@@ -2027,7 +2109,7 @@ def prepend_log_entry(
     """
     title = rel_path_no_ext
     if title.startswith(kb_prefix()):
-        title = title[len(kb_prefix()):]
+        title = title[len(kb_prefix()) :]
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
     # Reuse the same separator the indexes module emits.
     separator = "\n---\n"
@@ -2106,10 +2188,12 @@ def rotate_log_if_needed(vault_root: Path) -> str | None:
             f"Rotated out of `{kb_prefix()}log.md` — {n_moved} entrie(s), newest "
             f"first, byte-exact.\n{sep}{tail}"
         )
-        batch_atomic_write([
-            PlannedWrite(path=archive_path, content=archive_text),
-            PlannedWrite(path=log_file, content=head + live_entries),
-        ])
+        batch_atomic_write(
+            [
+                PlannedWrite(path=archive_path, content=archive_text),
+                PlannedWrite(path=log_file, content=head + live_entries),
+            ]
+        )
         rel_archive = archive_path.resolve().relative_to(vault_root.resolve()).as_posix()
         log.info("log.md rotated: %d entrie(s) -> %s", n_moved, rel_archive)
         return f"log.md rotated: {n_moved} older entrie(s) → {rel_archive}"
@@ -2173,7 +2257,7 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
     if title.endswith(".md"):
         title = title[: -len(".md")]
     if title.startswith(kb_prefix()):
-        title = title[len(kb_prefix()):]
+        title = title[len(kb_prefix()) :]
 
     log_file = kb_root(vault_root) / "log.md"
     if not log_file.exists():
@@ -2187,9 +2271,11 @@ def read_log_entries(vault_root: Path, rel_path_no_ext: str) -> list[dict[str, s
             continue
         body_start = m.end()
         body_end = matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        entries.append({
-            "date": m.group(1),
-            "op": m.group(2),
-            "summary": text[body_start:body_end].strip(),
-        })
+        entries.append(
+            {
+                "date": m.group(1),
+                "op": m.group(2),
+                "summary": text[body_start:body_end].strip(),
+            }
+        )
     return entries

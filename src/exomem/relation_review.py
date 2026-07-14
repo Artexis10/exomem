@@ -8,6 +8,8 @@ import os
 import re
 import stat
 import unicodedata
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
@@ -32,6 +34,10 @@ _MAX_REASON_POINTS = 2_000
 _MAX_REASON_BYTES = 8_192
 _MAX_CANDIDATES = 64
 _MAX_RAW_TARGET = 1_024
+_SUPPORTS_REVIEW_DIR_FD = bool(
+    os.open in getattr(os, "supports_dir_fd", set())
+    and os.stat in getattr(os, "supports_dir_fd", set())
+)
 _RECORD_KEYS = frozenset(
     {
         "schema_version",
@@ -304,17 +310,29 @@ def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
     return Path(vault_root) / kb_dirname() / "_Schema" / "relation-reviews" / f"{identity}.json"
 
 
-def _review_directory(root: Path) -> Path:
+@dataclass(frozen=True, slots=True)
+class _OpenReviewDirectory:
+    path: Path
+    descriptor: int
+    names: tuple[str, ...]
+    chain: tuple[vault.PathIdentity, ...]
+    descriptor_relative: bool
+
+
+def _capture_review_directory(
+    root: Path,
+) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
     directory = root / kb_dirname() / "_Schema" / "relation-reviews"
     current = root
     components = (kb_dirname(), "_Schema", "relation-reviews")
+    identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:
             current /= component
         try:
             info = current.lstat()
         except FileNotFoundError:
-            return directory
+            return directory, None
         except OSError as error:
             raise RelationReviewError(
                 "RELATION_REVIEW_DIRECTORY_UNSAFE",
@@ -324,35 +342,92 @@ def _review_directory(root: Path) -> Path:
             raise RelationReviewError(
                 "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory is unsafe"
             )
-    return directory
+        relative = "." if component is None else current.relative_to(root).as_posix()
+        identities.append(vault._identity(relative, info))
+    return directory, tuple(identities)
 
 
-def _directory_children(root: Path) -> tuple[Path, ...]:
-    directory = _review_directory(root)
-    if not os.path.lexists(directory):
-        return ()
+def _recheck_review_directory(root: Path, chain: tuple[vault.PathIdentity, ...]) -> None:
+    for expected in chain:
+        path = root if expected.relative_path == "." else root / expected.relative_path
+        try:
+            current = path.lstat()
+        except OSError as error:
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            ) from error
+        if (
+            not vault._same_identity(expected, current)
+            or stat.S_ISLNK(current.st_mode)
+            or vault._is_reparse(current)
+            or not stat.S_ISDIR(current.st_mode)
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            )
+
+
+@contextmanager
+def _open_review_directory(root: Path) -> Iterator[_OpenReviewDirectory | None]:
+    directory, chain = _capture_review_directory(root)
+    if chain is None:
+        yield None
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
     try:
-        return tuple(
-            Path(entry.path)
-            for entry in sorted(os.scandir(directory), key=lambda item: item.name.encode("utf-8"))
-        )
-    except (OSError, UnicodeEncodeError) as error:
+        descriptor = os.open(directory, flags)
+    except OSError as error:
         raise RelationReviewError(
-            "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory cannot be enumerated"
+            "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory cannot be opened"
         ) from error
+    try:
+        opened_info = os.fstat(descriptor)
+        if not vault._same_identity(chain[-1], opened_info) or not stat.S_ISDIR(
+            opened_info.st_mode
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            )
+        descriptor_relative = _SUPPORTS_REVIEW_DIR_FD
+        try:
+            raw_names = os.listdir(descriptor)
+        except (TypeError, NotImplementedError):  # pragma: no cover - platform fallback
+            raw_names = [entry.name for entry in os.scandir(directory)]
+            descriptor_relative = False
+        names = tuple(sorted(raw_names, key=lambda name: name.encode("utf-8")))
+        _recheck_review_directory(root, chain)
+        yield _OpenReviewDirectory(directory, descriptor, names, chain, descriptor_relative)
+    except UnicodeEncodeError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory name is invalid"
+        ) from error
+    except OSError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_UNSAFE",
+            "review directory cannot be enumerated",
+        ) from error
+    finally:
+        os.close(descriptor)
 
 
-def _artifact_children_for(root: Path, identity: str) -> tuple[Path, ...]:
+def _artifact_children_for(opened: _OpenReviewDirectory | None, identity: str) -> tuple[str, ...]:
+    if opened is None:
+        return ()
     expected = f"{identity}.json"
-    matches = tuple(path for path in _directory_children(root) if path.name.casefold() == expected)
-    if any(path.name != expected for path in matches) or len(matches) > 1:
+    matches = tuple(name for name in opened.names if name.casefold() == expected)
+    if any(name != expected for name in matches) or len(matches) > 1:
         raise RelationReviewError("RELATION_REVIEW_ALIAS", "review identity has a filename alias")
     return matches
 
 
-def _read_artifact_bytes(path: Path) -> bytes:
+def _read_artifact_bytes(opened: _OpenReviewDirectory, name: str) -> bytes:
+    path = opened.path / name
     try:
-        before = path.lstat()
+        before = (
+            os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
+            if opened.descriptor_relative
+            else path.lstat()
+        )
     except OSError as error:
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be inspected"
@@ -365,16 +440,20 @@ def _read_artifact_bytes(path: Path) -> bytes:
         raise RelationReviewError("RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe")
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     try:
-        descriptor = os.open(path, flags)
+        descriptor = (
+            os.open(name, flags, dir_fd=opened.descriptor)
+            if opened.descriptor_relative
+            else os.open(path, flags)
+        )
     except OSError as error:
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "review artifact cannot be opened"
         ) from error
     try:
-        opened = os.fstat(descriptor)
-        if not stat.S_ISREG(opened.st_mode):
+        opened_info = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_info.st_mode):
             raise RelationReviewError("RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe")
-        if not vault._same_identity(vault._identity(path.name, before), opened):
+        if not vault._same_identity(vault._identity(name, before), opened_info):
             raise RelationReviewError(
                 "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
             )
@@ -384,13 +463,18 @@ def _read_artifact_bytes(path: Path) -> bytes:
     finally:
         os.close(descriptor)
     try:
-        after = path.lstat()
+        after = (
+            os.stat(name, dir_fd=opened.descriptor, follow_symlinks=False)
+            if opened.descriptor_relative
+            else path.lstat()
+        )
     except OSError as error:
         raise RelationReviewError(
             "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
         ) from error
-    if not vault._same_identity(vault._identity(path.name, before), after):
+    if not vault._same_identity(vault._identity(name, before), after):
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
+    _recheck_review_directory(opened.path.parents[2], opened.chain)
     if len(raw) > _MAX_ARTIFACT_BYTES:
         raise RelationReviewError(
             "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
@@ -422,8 +506,10 @@ def _safe_record_path(value: str) -> bool:
     )
 
 
-def _parse_record(path: Path, reference: str) -> tuple[RelationReviewRecord, str]:
-    raw = _read_artifact_bytes(path)
+def _parse_record(
+    opened: _OpenReviewDirectory, name: str, reference: str
+) -> tuple[RelationReviewRecord, str]:
+    raw = _read_artifact_bytes(opened, name)
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -449,7 +535,12 @@ def _parse_record(path: Path, reference: str) -> tuple[RelationReviewRecord, str
             "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
         )
     version = value["schema_version"]
-    if type(version) is not int or version != _SCHEMA_VERSION:
+    if type(version) is not int:
+        raise RelationReviewError(
+            "RELATION_REVIEW_INVALID_SCHEMA",
+            "review artifact schema version must be an integer",
+        )
+    if version != _SCHEMA_VERSION:
         raise RelationReviewError(
             "RELATION_REVIEW_UNSUPPORTED_VERSION", "review artifact schema version is unsupported"
         )
@@ -494,7 +585,7 @@ def _parse_record(path: Path, reference: str) -> tuple[RelationReviewRecord, str
         raise RelationReviewError(
             "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
         )
-    if path.stem != identity:
+    if PurePosixPath(name).stem != identity:
         raise RelationReviewError(
             "RELATION_REVIEW_FILENAME_MISMATCH",
             "review artifact filename does not match its identity",
@@ -514,36 +605,43 @@ def _parse_record(path: Path, reference: str) -> tuple[RelationReviewRecord, str
 
 
 def _load_one(root: Path, identity: str) -> tuple[RelationReviewRecord | None, str | None]:
-    matches = _artifact_children_for(root, identity)
-    if not matches:
-        return None, None
-    path = matches[0]
-    reference = path.relative_to(root).as_posix()
-    return _parse_record(path, reference)
+    with _open_review_directory(root) as opened:
+        matches = _artifact_children_for(opened, identity)
+        if not matches or opened is None:
+            return None, None
+        name = matches[0]
+        reference = (opened.path / name).relative_to(root).as_posix()
+        return _parse_record(opened, name, reference)
 
 
 def load_relation_reviews(vault_root: Path) -> tuple[RelationReviewRecord, ...]:
-    root = Path(vault_root)
+    root = Path(vault_root).absolute()
     try:
         records: list[RelationReviewRecord] = []
         logical: set[str] = set()
-        for path in _directory_children(root):
-            if path.name.endswith((".tmp", ".bak")):
-                continue
-            if path.suffix.casefold() != ".json":
-                continue
-            identity = path.stem
-            if path.name != f"{identity}.json" or normalize_id(identity) != identity:
-                raise RelationReviewError(
-                    "RELATION_REVIEW_ALIAS", "review directory contains a filename alias"
-                )
-            if identity.casefold() in logical:
-                raise RelationReviewError(
-                    "RELATION_REVIEW_ALIAS", "review directory contains a logical collision"
-                )
-            logical.add(identity.casefold())
-            record, _ = _parse_record(path, path.relative_to(root).as_posix())
-            records.append(record)
+        with _open_review_directory(root) as opened:
+            if opened is not None:
+                for name in opened.names:
+                    path = PurePosixPath(name)
+                    if name.endswith((".tmp", ".bak")):
+                        continue
+                    if path.suffix.casefold() != ".json":
+                        continue
+                    identity = path.stem
+                    if name != f"{identity}.json" or normalize_id(identity) != identity:
+                        raise RelationReviewError(
+                            "RELATION_REVIEW_ALIAS",
+                            "review directory contains a filename alias",
+                        )
+                    if identity.casefold() in logical:
+                        raise RelationReviewError(
+                            "RELATION_REVIEW_ALIAS",
+                            "review directory contains a logical collision",
+                        )
+                    logical.add(identity.casefold())
+                    reference = (opened.path / name).relative_to(root).as_posix()
+                    record, _ = _parse_record(opened, name, reference)
+                    records.append(record)
         return tuple(sorted(records, key=lambda item: (item.page_identity, item.reference)))
     except RelationReviewError:
         raise
@@ -565,7 +663,7 @@ def load_relation_review(
         paths = corpus.identity_census.paths_by_identity.get(page_state.identity)
         if paths != (page_state.path,):
             return None
-        record, _ = _load_one(Path(vault_root), page_state.identity)
+        record, _ = _load_one(Path(vault_root).absolute(), page_state.identity)
         if record is None:
             return None
         return semantic_contract.RelationReviewState(
@@ -798,7 +896,7 @@ def _attempt(
                 )
             else:
                 exact_replay = commit_disposition is None
-            exact_replay = exact_replay and _all_auxiliaries_match(commit_auxiliaries)
+            exact_replay = exact_replay and _all_auxiliaries_match(commit_auxiliaries, root)
         if exact_replay:
             raise RelationReviewError("DRAFT_ALREADY_COMMITTED", "draft is already committed")
         raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already in use")
@@ -839,7 +937,7 @@ def validate_creation_draft(
 ) -> CreationDraftValidation:
     try:
         attempt = _attempt(
-            Path(vault_root),
+            Path(vault_root).absolute(),
             path=path,
             source=source,
             draft_id=draft_id,
@@ -855,18 +953,25 @@ def validate_creation_draft(
 
 
 def _normalize_auxiliary_path(root: Path, path: Path) -> tuple[Path, str]:
+    if not isinstance(path, Path):
+        raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary target must be a path")
     raw = str(path)
-    candidate = path if path.is_absolute() else root / path
+    if "\0" in raw or (os.name != "nt" and "\\" in raw):
+        raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe")
+    if any(part in {"", ".", ".."} for part in path.parts):
+        raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe")
+    root_absolute = Path(os.path.abspath(root))
     try:
-        relative = candidate.absolute().relative_to(root.absolute()).as_posix()
+        relative_path = path.relative_to(root_absolute) if path.is_absolute() else path
     except ValueError as error:
         raise RelationReviewError(
             "INVALID_AUXILIARY_WRITE", "auxiliary target is outside the vault"
         ) from error
+    relative = relative_path.as_posix()
     posix = PurePosixPath(relative)
-    if not relative or "\0" in raw or any(part in {"", ".", ".."} for part in posix.parts):
+    if not relative or posix.is_absolute() or any(part in {"", ".", ".."} for part in posix.parts):
         raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe")
-    return root / relative, relative
+    return root_absolute / relative, relative
 
 
 def _portable_alias(value: str) -> str:
@@ -905,6 +1010,13 @@ def _detach_auxiliaries(
         alias = _portable_alias(relative)
         if alias in seen:
             raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary targets collide")
+        leaf_policy = "stable" if os.path.lexists(absolute) else "absent"
+        try:
+            vault.PathGuard.capture(root, relative, leaf_policy=leaf_policy)
+        except vault.PathGuardError as error:
+            raise RelationReviewError(
+                "INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe"
+            ) from error
         seen.add(alias)
         detached.append(vault.PlannedWrite(absolute, value.content))
     return tuple(detached)
@@ -929,13 +1041,25 @@ def _serialize_record(record: RelationReviewRecord) -> str:
     return json.dumps(record.storage_dict(), ensure_ascii=False, sort_keys=True, indent=2) + "\n"
 
 
-def _all_auxiliaries_match(writes: tuple[vault.PlannedWrite, ...]) -> bool:
+def _all_auxiliaries_match(writes: tuple[vault.PlannedWrite, ...], root: Path) -> bool:
     for write in writes:
-        try:
-            if write.path.read_text(encoding="utf-8") != write.content:
-                return False
-        except (OSError, UnicodeDecodeError):
+        if not os.path.lexists(write.path):
             return False
+        relative = write.path.relative_to(root).as_posix()
+        expected_hash = hashlib.sha256(write.content.encode("utf-8")).hexdigest()
+        try:
+            vault.PathGuard.capture(
+                root,
+                relative,
+                leaf_policy="content",
+                expected_content_hash=expected_hash,
+            )
+        except vault.PathGuardError as error:
+            if error.code == "PATH_GUARD_CONTENT":
+                return False
+            raise RelationReviewError(
+                "INVALID_AUXILIARY_WRITE", "auxiliary replay target is unsafe"
+            ) from error
     return True
 
 
@@ -1012,12 +1136,12 @@ def _commit_plan(
         )
     elif result.relation_disposition.kind == "qualifying_relation":
         record = None
-    elif attempt.artifact is not None:
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
     elif result.should_block:
         raise RelationReviewError(
             "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
         )
+    elif attempt.artifact is not None:
+        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
     else:
         raise RelationReviewError("INVALID_RELATION_REVIEW", "reviewed-none approval is required")
     if attempt.artifact is not None and (
@@ -1039,7 +1163,7 @@ def commit_creation_draft(
     relation_review_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
 ) -> CreationDraftCommit:
-    root = Path(vault_root)
+    root = Path(vault_root).absolute()
     try:
         identity = _canonical_id(draft_id)
         _, destination = _normalize_destination(root, path)
