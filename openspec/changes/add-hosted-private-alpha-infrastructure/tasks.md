@@ -75,11 +75,11 @@
 
 ## 9. Implement the durable provisioner core
 
-- [ ] 9.1 Add a standalone provisioner package, migrations, configuration validation, redacting logs, health endpoints, and unit-test harness.
-- [ ] 9.2 Add failing model/repository tests for canonical request hashes, idempotency conflicts, monotonic fences, pending/final states, resources, credentials, exports, backups, immutable provider operation/fence metadata, and restart recovery.
-- [ ] 9.3 Implement SQLAlchemy 2 models/repositories and Alembic migrations in a dedicated Neon role/schema.
-- [ ] 9.4 Add failing API contract tests for bearer/protocol/content type, exact 14 paths, field/identifier bounds, no redirects, body limits, retry status, pending/final unions, and redaction.
-- [ ] 9.5 Implement the FastAPI v1 surface and a database-backed worker that resumes claimed operations after restart.
+- [x] 9.1 Add a standalone provisioner package, migrations, configuration validation, redacting logs, health endpoints, and unit-test harness.
+- [x] 9.2 Add failing model/repository tests for canonical request hashes, idempotency conflicts, monotonic fences, pending/final states, resources, credentials, exports, backups, immutable provider operation/fence metadata, and restart recovery.
+- [x] 9.3 Implement SQLAlchemy 2 models/repositories and Alembic migrations in a dedicated Neon role/schema.
+- [x] 9.4 Add failing API contract tests for bearer/protocol/content type, exact 14 paths, field/identifier bounds, no redirects, body limits, retry status, pending/final unions, and redaction.
+- [x] 9.5 Implement the FastAPI v1 surface and a database-backed worker that resumes claimed operations after restart.
 - [ ] 9.6 Add cross-language contract fixtures/tests against Substrate's real TypeScript parser for every request, pending response, final proof, and error class.
 
 ## 10. Implement HCloud retained-volume ownership and recovery

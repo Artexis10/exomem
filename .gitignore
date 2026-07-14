@@ -55,3 +55,4 @@ infra/secrets/*.agekey
 infra/provisioner/.mypy_cache/
 infra/provisioner/.ruff_cache/
 infra/provisioner/.pytest_cache/
+infra/provisioner/*.sqlite*
