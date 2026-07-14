@@ -41,10 +41,10 @@
 
 ## 5. Scaffold and statically validate the IaC surfaces
 
-- [ ] 5.1 Create `infra/terraform/{foundation,durability}`, `infra/ansible`, `infra/helm/{platform,cell}`, `infra/provisioner`, `infra/scripts`, and `docs/runbooks/hosted` with ownership documentation.
-- [ ] 5.2 Add pinned tool/provider/chart versions, committed Terraform lock files, `.gitignore` rules for state/plans/plaintext, and reproducible local validation commands.
+- [x] 5.1 Create `infra/terraform/{foundation,durability}`, `infra/ansible`, `infra/helm/{platform,cell}`, `infra/provisioner`, `infra/scripts`, and `docs/runbooks/hosted` with ownership documentation.
+- [x] 5.2 Add pinned tool/provider/chart versions, committed Terraform lock files, `.gitignore` rules for state/plans/plaintext, and reproducible local validation commands.
 - [ ] 5.3 Add CI/static tests for `terraform fmt/validate`, TFLint/security policy, Ansible lint/syntax, Helm lint/template/schema, Kubernetes policy, SOPS ciphertext, Ruff/type/test, and secret scanning.
-- [ ] 5.4 Add a plan-inspection test that rejects unapproved destroy/replacement and sensitive output in logs.
+- [x] 5.4 Add a plan-inspection test that rejects unapproved destroy/replacement and sensitive output in logs.
 
 ## 6. Implement split-state Terraform
 

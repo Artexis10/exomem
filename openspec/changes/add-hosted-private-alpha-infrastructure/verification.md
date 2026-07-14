@@ -33,3 +33,11 @@ Evidence is appended as implementation gates close. A checked task means the res
 - Exomem PR #227 head `b38bea8` adds `complete-hosted-runtime-deployment-contract`, including normative operator v1 and direct-transfer v2 JSON artifacts.
 - The contract fixes exact init/restore delivery, binding v2 identity, offline crash-safe candidate restore, Secret-backed active/pending credential rotation with abort/finalize, fresh literal-loopback authenticated probe, durable one-time JTI consumption, direct raw browser transfer, route-specific CORS, response/error tuples, temp quotas, and real-K3s image/mount gates.
 - Strict OpenSpec validation and JSON/structural assertions passed. Final independent adversarial review approved the frozen artifact hashes with P0 0, P1 0, P2 0.
+
+## 2026-07-14 — IaC scaffold and saved-plan guard
+
+- Added explicit ownership boundaries for split Terraform foundation/durability/bootstrap roots, Ansible, platform/cell Helm charts, the provisioner, scripts, and hosted runbooks.
+- Pinned Terraform 1.15.8, HCloud 1.66.0, Cloudflare 5.22.0, B2 0.12.1, K3s `v1.35.6+k3s1`, Hetzner CSI 2.21.1, and every validation tool. Provider locks include Linux amd64/arm64 checksums.
+- Git ignores state, saved plans/JSON, tfvars, generated inventory, decrypted SOPS material, and age keys. Reproducible validation/plan/apply commands are documented.
+- The non-printing JSON plan inspector rejects unapproved delete/replacement, unknown plan actions, duplicate approval, and secret-like output lacking Terraform sensitivity. Six focused tests pass; ShellCheck, Terraform formatting, Ruff, and diff checks pass.
+- Apply accepts only a mode-0600 saved plan, re-inspects that exact plan, and never recomputes it. Destructive approval is per exact Terraform address.

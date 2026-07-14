@@ -33,3 +33,21 @@ scripts/generic/substitutions.txt
 # worktrees/ (machine paths) stay ignored.
 .claude/*
 !.claude/commands/
+
+# Hosted IaC: state, plans, generated inventory, and plaintext secret material.
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+*.tfplan
+*.plan.json
+*.auto.tfvars
+*.tfvars
+!*.tfvars.example
+infra/ansible/inventory.yml
+infra/secrets/*.dec.yaml
+infra/secrets/*.plain.yaml
+infra/secrets/age.key
+infra/secrets/*.agekey
+infra/provisioner/.mypy_cache/
+infra/provisioner/.ruff_cache/
+infra/provisioner/.pytest_cache/
