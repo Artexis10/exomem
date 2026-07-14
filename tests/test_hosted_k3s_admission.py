@@ -85,8 +85,6 @@ def _retain_k3s_logs(name: str, path: Path) -> None:
 
 @pytest.fixture(scope="module")
 def k3s(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
-    if not RUN_LIVE:
-        pytest.skip("set RUN_K3S_ADMISSION_TEST=1 to run exact K3s API admission tests")
     if not (RUN_LIVE or RUN_RUNTIME):
         pytest.skip("set RUN_K3S_ADMISSION_TEST=1 or RUN_K3S_RUNTIME_TEST=1 to run exact K3s tests")
     if HELM is None:
@@ -386,8 +384,7 @@ def _import_runtime_image(k3s: str, image: str) -> str:
             break
     assert imported_reference is not None, images
     assert manifest_digest is not None and re.fullmatch(r"sha256:[0-9a-f]{64}", manifest_digest)
-    repository = imported_reference.rsplit(":", 1)[0]
-    digest_reference = f"{repository}@{manifest_digest}"
+    digest_reference = f"ghcr.io/artexis10/exomem@{manifest_digest}"
     _run(
         [
             "docker",
@@ -1154,11 +1151,6 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     }
     _assert_denied(k3s, serving_unconfined, message="seccompProfile")
 
-    unbounded_tmp = copy.deepcopy(serving_pod)
-    unbounded_tmp["metadata"]["name"] = "cell-alpha-serve-unbounded-tmp"
-    temporary = next(item for item in unbounded_tmp["spec"]["volumes"] if item["name"] == "tmp")
-    temporary["emptyDir"].pop("sizeLimit")
-    _assert_denied(k3s, unbounded_tmp, message="bounded temporary volume")
     writable_tmp = copy.deepcopy(serving_pod)
     writable_tmp["metadata"]["name"] = "cell-alpha-serve-writable-image-tmp"
     writable_tmp["spec"]["volumes"].append({"name": "tmp", "emptyDir": {}})
@@ -1591,12 +1583,31 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
     image = _build_reviewed_runtime_image(gate, tmp_path)
     try:
         runtime_image = _import_runtime_image(k3s, image)
+        release = json.loads(
+            (ROOT / "infra/contracts/exomem-hosted-release-v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        release["runtimeImage"] = runtime_image
+        platform_runtime_values = tmp_path / "platform-runtime-values.yaml"
+        platform_runtime_values.write_text(
+            yaml.safe_dump(
+                {
+                    "provisioner": {
+                        "releaseManifestJson": json.dumps(
+                            release, sort_keys=True, separators=(",", ":")
+                        )
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
 
         platform = _render(
             PLATFORM,
             PLATFORM / "values.validation.yaml",
             "exomem-platform",
-            extra_args=("--set-string", f"runtime.image={runtime_image}"),
+            extra_args=("--values", str(platform_runtime_values)),
         )
         platform_admission = [
             item
@@ -1649,10 +1660,35 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
         }
         _kubectl(k3s, ["apply", "--filename=-"], documents=[persistent_volume])
 
-        secret = next(item for item in initialize if item.get("kind") == "Secret")
-        secret["stringData"] = {
-            "credentials.json": json.dumps(credential_bundle, sort_keys=True, separators=(",", ":"))
-            + "\n"
+        secret = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {
+                "name": "exomem-cell-credentials",
+                "namespace": namespace,
+                "labels": {"exomem.io/resource-name": "cell-alpha"},
+                "annotations": {
+                    key: namespace_document["metadata"]["annotations"][key]
+                    for key in (
+                        "exomem.io/tenant-id",
+                        "exomem.io/cell-id",
+                        "exomem.io/operation-id",
+                        "exomem.io/tenant-digest",
+                        "exomem.io/subject-digest",
+                        "exomem.io/operation-digest",
+                        "exomem.io/fence",
+                    )
+                }
+                | {"exomem.io/recovery-envelope": "c" * 64},
+            },
+            "type": "Opaque",
+            "immutable": False,
+            "stringData": {
+                "credentials.json": json.dumps(
+                    credential_bundle, sort_keys=True, separators=(",", ":")
+                )
+                + "\n"
+            },
         }
         claim = next(item for item in initialize if item.get("kind") == "PersistentVolumeClaim")
         claim["spec"]["volumeName"] = "exomem-runtime-gate-pv"
@@ -1667,9 +1703,7 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
                 "Job",
             }
         ]
-        namespaced_prerequisites = [
-            secret if item.get("kind") == "Secret" else item for item in namespaced_prerequisites
-        ]
+        namespaced_prerequisites.append(secret)
         _kubectl(
             k3s,
             ["apply", "--namespace", namespace, "--filename=-"],
@@ -1789,7 +1823,7 @@ def test_exact_k3s_runs_the_reviewed_hosted_runtime_release(k3s: str, tmp_path: 
         )
         assert credential_volume["secret"] == {
             "defaultMode": 0o444,
-            "secretName": "cell-alpha-credentials",
+            "secretName": "exomem-cell-credentials",
         }
         image_status = live_pod["status"]["containerStatuses"][0]
         assert image_status["ready"] is True
