@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -36,32 +37,59 @@ def _page_cache_size() -> int:
 
 @dataclass
 class FrontmatterCache:
-    """Per-process cache of parsed pages, invalidated by metadata signature."""
+    """Per-process cache invalidated by file identity or content changes."""
 
     entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
-    signatures: dict[Path, tuple[int, int, int]] = field(default_factory=dict)
+    _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
+        default_factory=dict, repr=False
+    )
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self._signatures.clear()
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         try:
-            file_stat = path.stat()
+            stat = path.stat()
         except FileNotFoundError:
             self.entries.pop(path, None)
-            self.signatures.pop(path, None)
+            self._signatures.pop(path, None)
             return None
-        mtime = file_stat.st_mtime
-        signature = freshness.signature_from_stat(file_stat)
+        if len(self._signatures) != len(self.entries):
+            self._signatures = {
+                cached_path: self._signatures[cached_path]
+                for cached_path in self.entries
+                if cached_path in self._signatures
+            }
+        content = _read_page_bytes(path)
+        if content is None:
+            self.entries.pop(path, None)
+            self._signatures.pop(path, None)
+            return None
+        # Stat metadata is not content identity: on native Windows ctime is
+        # creation time, so a same-size rewrite can preserve this whole tuple.
+        # Hash the bytes already needed on a miss and reuse those exact bytes
+        # for parsing, keeping the fingerprint and ParsedPage consistent.
+        signature = (
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+            stat.st_size,
+            stat.st_dev,
+            stat.st_ino,
+            hashlib.blake2b(content, digest_size=16).digest(),
+        )
         cached = self.entries.get(path)
-        if cached and self.signatures.get(path) == signature:
+        if cached and self._signatures.get(path) == signature:
             self.entries.move_to_end(path)
             return cached
-        parsed = parse_page(path, mtime, vault_root)
+        parsed = parse_page(path, stat.st_mtime, vault_root, content=content)
         if parsed is not None:
             self.entries[path] = parsed
-            self.signatures[path] = signature
+            self._signatures[path] = signature
             self.entries.move_to_end(path)
             while len(self.entries) > _page_cache_size():
-                evicted, _page = self.entries.popitem(last=False)
-                self.signatures.pop(evicted, None)
+                evicted_path, _ = self.entries.popitem(last=False)
+                self._signatures.pop(evicted_path, None)
         return parsed
 
 
@@ -105,10 +133,31 @@ def walk_md(root: Path):
             yield child
 
 
-def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
+def _read_page_bytes(path: Path) -> bytes | None:
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
+        return path.read_bytes()
+    except OSError as e:
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
+        return None
+
+
+def parse_page(
+    path: Path,
+    mtime: float,
+    vault_root: Path,
+    *,
+    content: bytes | None = None,
+) -> ParsedPage | None:
+    if content is None:
+        content = _read_page_bytes(path)
+        if content is None:
+            return None
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as e:
         if privacy_log.content_private_logging_enabled():
             log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
         else:

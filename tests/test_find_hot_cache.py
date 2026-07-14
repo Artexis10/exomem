@@ -161,12 +161,14 @@ def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
     status = find_module.cache_status()
     assert status["pages"]["entries"] > 0
     assert status["hot_find"]["entries"] > 0
+    assert find_module._CACHE._signatures
 
     unloaded = find_module.unload_ram_caches()
     assert unloaded["pages"] > 0
     assert unloaded["hot_find"] > 0
     assert find_module.cache_status()["pages"]["entries"] == 0
     assert find_module.cache_status()["hot_find"]["entries"] == 0
+    assert not find_module._CACHE._signatures
     assert freshness.triple(vault, "kb") == before_freshness
 
     assert find_module.find(vault, query="metabolism")

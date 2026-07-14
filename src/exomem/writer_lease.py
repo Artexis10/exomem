@@ -21,6 +21,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
+from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -34,6 +35,9 @@ _COORDINATOR_USER_AGENT = (
 )
 _IMPLICIT_RETRY_TTL_SECONDS = 60.0
 logger = logging.getLogger(__name__)
+_ACTIVE_WRITE_FENCE: ContextVar[tuple[Any, int] | None] = ContextVar(
+    "exomem_active_write_fence", default=None
+)
 
 
 @dataclass(frozen=True)
@@ -326,10 +330,10 @@ class LeaseManager:
             return record
 
     @contextmanager
-    def mutation_guard(
+    def consistency_guard(
         self, vault_root: os.PathLike[str] | str
     ) -> Iterator[VaultMutationCoordinator]:
-        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        """Serialize hosted reads with mutations without requiring writer authority."""
         mutation = VaultMutationCoordinator(
             self.config.state_dir,
             vault_root,
@@ -337,9 +341,23 @@ class LeaseManager:
             poll_interval_seconds=self._mutation_poll_interval_seconds,
         )
         with mutation.hold():
-            if self.config.enabled:
-                self.ensure_writer()
             yield mutation
+
+    @contextmanager
+    def mutation_guard(
+        self, vault_root: os.PathLike[str] | str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        with self.consistency_guard(vault_root) as mutation:
+            fence_context: Token[tuple[Any, int] | None] | None = None
+            if self.config.enabled:
+                lease = self.ensure_writer()
+                fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+            try:
+                yield mutation
+            finally:
+                if fence_context is not None:
+                    _ACTIVE_WRITE_FENCE.reset(fence_context)
 
     def invoke(
         self,
@@ -347,12 +365,14 @@ class LeaseManager:
         injected: tuple[Any, ...],
         kwargs: dict[str, Any],
         *,
+        read_only: bool | None = None,
         idempotency_key: str | None = None,
         implicit_idempotency_scope: str | None = None,
     ) -> Any:
-        if command.read_only:
+        invocation_read_only = command.read_only if read_only is None else read_only
+        if invocation_read_only:
             if content_private_logging_enabled():
-                with self.mutation_guard(self._mutation_subject(injected)):
+                with self.consistency_guard(self._mutation_subject(injected)):
                     return command.leaf(*injected, **kwargs)
             return command.leaf(*injected, **kwargs)
         mutation_subject = self._mutation_subject(injected)
@@ -408,6 +428,34 @@ class LeaseManager:
             return self.config.vault_id
         return "standalone"
 
+    def validate_fencing_token(self, fencing_token: int) -> None:
+        """Fail closed unless the command's token is still locally and remotely current."""
+        with self._lock:
+            if self._fencing_token != fencing_token:
+                self._raise_fenced(fencing_token)
+        assert self.client is not None
+        record = self.client.status()
+        with self._lock:
+            still_current = self._fencing_token == fencing_token
+            coordinator_current = (
+                record.holder == self.config.replica_id
+                and record.fencing_token == fencing_token
+            )
+            if still_current and coordinator_current:
+                return
+            if self._fencing_token == fencing_token:
+                self._fencing_token = None
+                self._expires_at = None
+        self._raise_fenced(fencing_token)
+
+    @staticmethod
+    def _raise_fenced(fencing_token: int) -> None:
+        raise OpError(
+            "WRITER_FENCED",
+            f"writer lease fencing token {fencing_token} is no longer current",
+            "Retry the mutation on the current writer.",
+        )
+
     def status(self) -> dict[str, Any]:
         base = {
             "enabled": self.config.enabled,
@@ -453,6 +501,8 @@ class LeaseManager:
             try:
                 record = self.client.renew(token)
                 with self._lock:
+                    if self._fencing_token != token:
+                        continue
                     if record.granted and record.holder == self.config.replica_id:
                         self._expires_at = record.expires_at
                     else:
@@ -472,6 +522,15 @@ class LeaseManager:
                 self.client.release(token)
             except OpError:
                 pass
+
+
+def validate_active_write_fence() -> None:
+    """Revalidate the active command's lease token at a vault commit boundary."""
+    active = _ACTIVE_WRITE_FENCE.get()
+    if active is None:
+        return
+    manager, fencing_token = active
+    manager.validate_fencing_token(fencing_token)
 
 
 _MANAGERS: dict[LeaseConfig, LeaseManager] = {}
@@ -495,10 +554,13 @@ def invoke_command(
     implicit_idempotency_scope: str | None = None,
     **kwargs: Any,
 ) -> Any:
+    from .commands import invocation_is_read_only
+
     return get_manager().invoke(
         command,
         injected,
         kwargs,
+        read_only=invocation_is_read_only(command, kwargs),
         idempotency_key=idempotency_key,
         implicit_idempotency_scope=implicit_idempotency_scope,
     )
