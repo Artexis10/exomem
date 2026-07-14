@@ -21,6 +21,24 @@ spec:
         namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true'
     - name: inScope
       expression: variables.storageInit || variables.tenantNamespace
+    - name: controllerUpdate
+      expression: >-
+        request.operation == 'UPDATE' &&
+        request.userInfo.username == 'system:serviceaccount:kube-system:job-controller' &&
+        variables.storageInit &&
+        has(oldObject.spec.nodeName) &&
+        has(object.spec.nodeName) &&
+        object.spec.nodeName == oldObject.spec.nodeName
+    - name: controllerJobFinalizerRemoval
+      expression: >-
+        has(oldObject.metadata.finalizers) &&
+        size(oldObject.metadata.finalizers) == 1 &&
+        oldObject.metadata.finalizers[0] == 'batch.kubernetes.io/job-tracking' &&
+        (!has(object.metadata.finalizers) || size(object.metadata.finalizers) == 0)
+    - name: controllerJobFinalizerTransition
+      expression: >-
+        variables.controllerUpdate &&
+        variables.controllerJobFinalizerRemoval
   validations:
     - expression: >-
         !variables.inScope ||
@@ -44,11 +62,9 @@ spec:
         (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
         (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
         (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
-        (!has(object.spec.nodeName) ||
-          (request.operation == 'UPDATE' && has(oldObject.spec.nodeName) &&
-            object.spec.nodeName == oldObject.spec.nodeName)) &&
+        (!has(object.spec.nodeName) || variables.controllerJobFinalizerTransition) &&
         !has(object.spec.hostAliases))
-      message: Tenant pods cannot use host access or node selection.
+      message: Tenant pods cannot use host access or node selection; only the controller-owned Job finalizer transition may preserve an assigned node.
     - expression: >-
         !variables.inScope ||
         (
@@ -67,7 +83,7 @@ spec:
         ((has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init' &&
           object.spec.restartPolicy == 'Never') ||
           ((!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') &&
-            (!has(object.spec.restartPolicy) || object.spec.restartPolicy == 'Always')))
+            object.spec.restartPolicy == 'Always'))
       message: Tenant pod restart policy must match its lifecycle mode.
     - expression: >-
         !variables.inScope ||
@@ -169,6 +185,118 @@ spec:
           mount.name == 'init-request' && mount.mountPath == '/run/exomem/operator-requests/init.json' &&
           mount.readOnly == true && mount.subPath == 'init.json'))
       message: Storage initialization mounts must match the exact tenant paths.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (
+        !has(object.spec.containers[0].command) &&
+        object.spec.containers[0].args == ['--transport', 'http', '--port', '8765'] &&
+        size(object.spec.containers[0].env) == 19 &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_CELL' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_CELL_ID' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/cell-id'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_VAULT_ID' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/vault-id'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_RUNTIME_UID' && has(env.value) && env.value == '10001' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_RUNTIME_GID' && has(env.value) && env.value == '10001' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_VAULT_PATH' && has(env.value) && env.value == '/var/lib/exomem/vault' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_STATE_ROOT' && has(env.value) && env.value == '/var/lib/exomem/state' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_LOG_DIR' && has(env.value) && env.value == '/var/lib/exomem/logs' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'TMPDIR' && has(env.value) && env.value == '/var/lib/exomem/state/tmp/runtime' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'HOME' && has(env.value) && env.value == '/var/lib/exomem/state/home' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_PROTOCOL_VERSION' && has(env.value) && env.value == '1' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_EXPECTED_RELEASE' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/expected-release'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_WORKER_POLICY_DIGEST' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/worker-policy-digest'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_STORAGE_LIMIT_BYTES' && has(env.value) && env.value == '5368709120' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES' && has(env.value) && env.value == '94371840' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_WORKER_LIMIT' && has(env.value) && env.value == '0' && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_FEATURE_GRANTS' &&
+          (!has(env.value) || env.value == '') && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/browser-origin'] && !has(env.valueFrom)) &&
+        object.spec.containers[0].env.exists(env,
+          env.name == 'EXOMEM_HOSTED_TRANSFER_HOST' && has(env.value) &&
+          env.value == namespaceObject.metadata.annotations['exomem.io/transfer-hostname'] && !has(env.valueFrom)))
+      message: Serving pods must use the exact approved serving command and environment.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (
+        !has(object.spec.containers[0].lifecycle) &&
+        size(object.spec.containers[0].ports) == 1 &&
+        object.spec.containers[0].ports[0].name == 'http' &&
+        object.spec.containers[0].ports[0].containerPort == 8765 &&
+        object.spec.containers[0].ports[0].protocol == 'TCP' &&
+        !has(object.spec.containers[0].ports[0].hostIP) &&
+        !has(object.spec.containers[0].ports[0].hostPort) &&
+        has(object.spec.containers[0].startupProbe) &&
+        has(object.spec.containers[0].startupProbe.tcpSocket) &&
+        string(dyn(object.spec.containers[0].startupProbe.tcpSocket.port)) == 'http' &&
+        !has(object.spec.containers[0].startupProbe.exec) &&
+        !has(object.spec.containers[0].startupProbe.httpGet) &&
+        !has(object.spec.containers[0].startupProbe.grpc) &&
+        (!has(object.spec.containers[0].startupProbe.initialDelaySeconds) ||
+          object.spec.containers[0].startupProbe.initialDelaySeconds == 0) &&
+        object.spec.containers[0].startupProbe.periodSeconds == 2 &&
+        object.spec.containers[0].startupProbe.timeoutSeconds == 1 &&
+        object.spec.containers[0].startupProbe.successThreshold == 1 &&
+        object.spec.containers[0].startupProbe.failureThreshold == 30 &&
+        !has(object.spec.containers[0].startupProbe.terminationGracePeriodSeconds) &&
+        has(object.spec.containers[0].livenessProbe) &&
+        has(object.spec.containers[0].livenessProbe.tcpSocket) &&
+        string(dyn(object.spec.containers[0].livenessProbe.tcpSocket.port)) == 'http' &&
+        !has(object.spec.containers[0].livenessProbe.exec) &&
+        !has(object.spec.containers[0].livenessProbe.httpGet) &&
+        !has(object.spec.containers[0].livenessProbe.grpc) &&
+        (!has(object.spec.containers[0].livenessProbe.initialDelaySeconds) ||
+          object.spec.containers[0].livenessProbe.initialDelaySeconds == 0) &&
+        object.spec.containers[0].livenessProbe.periodSeconds == 10 &&
+        object.spec.containers[0].livenessProbe.timeoutSeconds == 1 &&
+        object.spec.containers[0].livenessProbe.successThreshold == 1 &&
+        object.spec.containers[0].livenessProbe.failureThreshold == 3 &&
+        !has(object.spec.containers[0].livenessProbe.terminationGracePeriodSeconds) &&
+        has(object.spec.containers[0].readinessProbe) &&
+        has(object.spec.containers[0].readinessProbe.tcpSocket) &&
+        string(dyn(object.spec.containers[0].readinessProbe.tcpSocket.port)) == 'http' &&
+        !has(object.spec.containers[0].readinessProbe.exec) &&
+        !has(object.spec.containers[0].readinessProbe.httpGet) &&
+        !has(object.spec.containers[0].readinessProbe.grpc) &&
+        (!has(object.spec.containers[0].readinessProbe.initialDelaySeconds) ||
+          object.spec.containers[0].readinessProbe.initialDelaySeconds == 0) &&
+        object.spec.containers[0].readinessProbe.periodSeconds == 5 &&
+        object.spec.containers[0].readinessProbe.timeoutSeconds == 1 &&
+        object.spec.containers[0].readinessProbe.successThreshold == 1 &&
+        object.spec.containers[0].readinessProbe.failureThreshold == 2 &&
+        !has(object.spec.containers[0].readinessProbe.terminationGracePeriodSeconds) &&
+        (!has(object.spec.containers[0].envFrom) || size(object.spec.containers[0].envFrom) == 0) &&
+        (!has(object.spec.containers[0].volumeDevices) || size(object.spec.containers[0].volumeDevices) == 0) &&
+        (!has(object.spec.containers[0].resizePolicy) || size(object.spec.containers[0].resizePolicy) == 0) &&
+        (!has(object.spec.containers[0].workingDir) || object.spec.containers[0].workingDir == '') &&
+        (!has(object.spec.containers[0].stdin) || object.spec.containers[0].stdin == false) &&
+        (!has(object.spec.containers[0].stdinOnce) || object.spec.containers[0].stdinOnce == false) &&
+        (!has(object.spec.containers[0].tty) || object.spec.containers[0].tty == false) &&
+        !has(object.spec.containers[0].restartPolicy))
+      message: Serving pods must use the exact approved serving ports, probes, and interactive surface.
     - expression: >-
         !variables.inScope ||
         (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||

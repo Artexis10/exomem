@@ -94,6 +94,10 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
     assert gate == {
         "artifact": "exomem-hosted-runtime-k3s-gate",
         "schemaVersion": 1,
+        "k3sImage": (
+            "rancher/k3s@sha256:"
+            "9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c"
+        ),
         "sourceRepository": "https://github.com/Artexis10/exomem",
         "sourceCommit": "c255ffb2dfcd7bc470372d4efa0e8a11b00f0640",
         "release": "0.22.0",
@@ -130,6 +134,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "storageInit",
         "tenantNamespace",
         "inScope",
+        "controllerUpdate",
+        "controllerJobFinalizerRemoval",
+        "controllerJobFinalizerTransition",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
     assert "exomem.io/tenant-cell" in variables[1]["expression"]
@@ -159,6 +166,13 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "securityContext.seccompProfile" in admission_text
     assert "terminationMessagePath == '/dev/termination-log'" in admission_text
     assert "terminationMessagePolicy == 'File'" in admission_text
+    assert (
+        "request.userInfo.username == 'system:serviceaccount:kube-system:job-controller'"
+        in admission_text
+    )
+    assert "batch.kubernetes.io/job-tracking" in admission_text
+    assert "exact approved serving command and environment" in admission_text
+    assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
         "lifecycle",
         "livenessProbe",
@@ -203,6 +217,12 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "exomem.io/init-request-configmap-name",
         "exomem.io/tenant-cell",
         "exomem.io/cell-resource",
+        "exomem.io/cell-id",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
     ):
         assert protected_field in namespace_policy_text
 
@@ -323,6 +343,12 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "exomem.io/pvc-name": "cell-alpha-data",
         "exomem.io/credentials-secret-name": "cell-alpha-credentials",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
+        "exomem.io/cell-id": "alpha-test-original",
+        "exomem.io/vault-id": "vault-alpha-original",
+        "exomem.io/expected-release": "0.1.0-alpha",
+        "exomem.io/worker-policy-digest": "b" * 64,
+        "exomem.io/browser-origin": "https://substratesystems.io",
+        "exomem.io/transfer-hostname": "transfer.example.test",
     }
     if expected_kind == "Job":
         pod = workload["spec"]["template"]["spec"]

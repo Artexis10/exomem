@@ -30,7 +30,8 @@ uv run --frozen pytest -q \
 ```
 
 The gate checks out the exact source commit in a temporary clone, builds the
-hosted target, loads its computed digest into exact K3s `v1.35.6+k3s1`, and
+hosted target, loads its computed digest into K3s `v1.35.6+k3s1` pinned by OCI
+digest in the runtime-gate manifest, and
 proves real PVC mounts, init ownership, kubelet Secret AtomicWriter projection,
 non-root/read-only serving, authenticated readiness/contract, and restart temp
 cleanup. It removes the temporary Docker image and K3s container afterward.

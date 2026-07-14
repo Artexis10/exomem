@@ -26,7 +26,7 @@ HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
 RUN_LIVE = os.environ.get("RUN_K3S_ADMISSION_TEST") == "1"
 RUN_RUNTIME = os.environ.get("RUN_K3S_RUNTIME_TEST") == "1"
 RUNTIME_REPOSITORY = Path(os.environ.get("EXOMEM_RUNTIME_REPO", ROOT))
-K3S_IMAGE = "rancher/k3s:v1.35.6-k3s1"
+K3S_IMAGE = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))["k3sImage"]
 
 
 def _run(
@@ -752,6 +752,266 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     serving_pod = _pod(stateful_set, name="cell-alpha-serve-positive", namespace=namespace)
     assert "initContainers" not in serving_pod["spec"]
     assert _server_dry_run(k3s, serving_pod).returncode == 0
+
+    serving_command_escape = copy.deepcopy(serving_pod)
+    serving_command_escape["metadata"]["name"] = "cell-alpha-serve-command-escape"
+    serving_command_escape["spec"]["containers"][0]["command"] = [
+        "/app/.venv/bin/python"
+    ]
+    serving_command_escape["spec"]["containers"][0]["args"] = [
+        "-c",
+        "from pathlib import Path; print(Path('/run/exomem/credentials/credentials.json').read_text())",
+    ]
+    _assert_denied(k3s, serving_command_escape, message="exact approved serving command")
+
+    serving_surface_mutations = (
+        (
+            "args",
+            ["--transport", "stdio"],
+            "exact approved serving command and environment",
+        ),
+        (
+            "env",
+            serving_pod["spec"]["containers"][0]["env"]
+            + [{"name": "UNTRUSTED", "value": "1"}],
+            "exact approved serving command and environment",
+        ),
+        (
+            "env",
+            [
+                {**item, "value": "foreign-cell"}
+                if item["name"] == "EXOMEM_HOSTED_CELL_ID"
+                else item
+                for item in serving_pod["spec"]["containers"][0]["env"]
+            ],
+            "exact approved serving command and environment",
+        ),
+        (
+            "ports",
+            [{"name": "http", "containerPort": 8765, "protocol": "UDP"}],
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "startupProbe",
+            {"exec": {"command": ["/bin/true"]}},
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "livenessProbe",
+            {"tcpSocket": {"port": "http"}, "periodSeconds": 1},
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "readinessProbe",
+            {"httpGet": {"path": "/", "port": "http"}},
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "lifecycle",
+            {"postStart": {"exec": {"command": ["/bin/true"]}}},
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "stdin",
+            True,
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "tty",
+            True,
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "workingDir",
+            "/run/exomem/credentials",
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+        (
+            "restartPolicy",
+            "Always",
+            "exact approved serving ports, probes, and interactive surface",
+        ),
+    )
+    for index, (field, value, message) in enumerate(serving_surface_mutations):
+        serving_shape_drift = copy.deepcopy(serving_pod)
+        serving_shape_drift["metadata"]["name"] = f"cell-alpha-serve-surface-{index}"
+        serving_shape_drift["spec"]["containers"][0][field] = value
+        _assert_denied(k3s, serving_shape_drift, message=message)
+
+    serving_restart_drift = copy.deepcopy(serving_pod)
+    serving_restart_drift["metadata"]["name"] = "cell-alpha-serve-restart-never"
+    serving_restart_drift["spec"]["restartPolicy"] = "Never"
+    _assert_denied(k3s, serving_restart_drift, message="restart policy")
+
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolume",
+                "metadata": {"name": "admission-test-cell-alpha-data"},
+                "spec": {
+                    "capacity": {"storage": "10Gi"},
+                    "accessModes": ["ReadWriteOnce"],
+                    "persistentVolumeReclaimPolicy": "Retain",
+                    "storageClassName": "",
+                    "hostPath": {"path": "/var/lib/exomem-admission-test"},
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "PersistentVolumeClaim",
+                "metadata": {"name": "cell-alpha-data", "namespace": namespace},
+                "spec": {
+                    "accessModes": ["ReadWriteOnce"],
+                    "resources": {"requests": {"storage": "10Gi"}},
+                    "storageClassName": "",
+                    "volumeName": "admission-test-cell-alpha-data",
+                },
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "Role",
+                "metadata": {"name": "admission-test-pod-editor", "namespace": namespace},
+                "rules": [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["pods"],
+                        "verbs": ["get", "patch", "update"],
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "RoleBinding",
+                "metadata": {"name": "admission-test-pod-editor", "namespace": namespace},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "Role",
+                    "name": "admission-test-pod-editor",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "routine-provisioner",
+                        "namespace": "exomem-platform",
+                    }
+                ],
+            },
+        ],
+    )
+    scheduled_serving = copy.deepcopy(serving_pod)
+    scheduled_serving["metadata"]["name"] = "cell-alpha-serve-scheduled"
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[scheduled_serving])
+    for _ in range(30):
+        scheduled_result = _kubectl(
+            k3s,
+            ["get", "pod", "--namespace", namespace, "cell-alpha-serve-scheduled", "-o=json"],
+        )
+        scheduled_document = json.loads(scheduled_result.stdout)
+        if scheduled_document["spec"].get("nodeName"):
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("K3s did not schedule the admission adversary pod")
+    finalizer_escape = _kubectl(
+        k3s,
+        [
+            "patch",
+            "pod",
+            "--namespace",
+            namespace,
+            "cell-alpha-serve-scheduled",
+            "--type=json",
+            "--patch",
+            '[{"op":"add","path":"/metadata/finalizers",'
+            '"value":["attacker.example/finalizer"]}]',
+            "--dry-run=server",
+            f"--as={routine_username}",
+        ],
+        check=False,
+    )
+    assert finalizer_escape.returncode != 0
+    assert "controller-owned Job finalizer transition" in finalizer_escape.stderr
+
+    scheduled_init = copy.deepcopy(init_pod)
+    scheduled_init["metadata"]["name"] = "cell-alpha-init-scheduled"
+    scheduled_init["metadata"]["finalizers"] = ["batch.kubernetes.io/job-tracking"]
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[scheduled_init])
+    for _ in range(30):
+        scheduled_init_result = _kubectl(
+            k3s,
+            ["get", "pod", "--namespace", namespace, "cell-alpha-init-scheduled", "-o=json"],
+        )
+        scheduled_init_document = json.loads(scheduled_init_result.stdout)
+        if scheduled_init_document["spec"].get("nodeName"):
+            break
+        time.sleep(1)
+    else:
+        raise AssertionError("K3s did not schedule the Job finalizer control pod")
+    controller_command_escape = copy.deepcopy(scheduled_init)
+    controller_command_escape["metadata"].pop("finalizers")
+    controller_command_escape["spec"]["containers"][0]["command"] = ["/bin/sh"]
+    controller_command_result = _kubectl(
+        k3s,
+        [
+            "apply",
+            "--dry-run=server",
+            "--filename=-",
+            "--as=system:serviceaccount:kube-system:job-controller",
+            "--as-group=system:masters",
+        ],
+        documents=[controller_command_escape],
+        check=False,
+    )
+    assert controller_command_result.returncode != 0
+    assert any(
+        message in controller_command_result.stderr
+        for message in (
+            "pod updates may not change fields",
+            "controller-owned Job finalizer transition",
+        )
+    )
+    controller_finalizer_removed = False
+    controller_finalizer_update = None
+    for _ in range(5):
+        scheduled_init_result = _kubectl(
+            k3s,
+            [
+                "get",
+                "pod",
+                "--namespace",
+                namespace,
+                "cell-alpha-init-scheduled",
+                "-o=json",
+            ],
+        )
+        controller_finalizer_document = json.loads(scheduled_init_result.stdout)
+        if not controller_finalizer_document["metadata"].get("finalizers"):
+            controller_finalizer_removed = True
+            break
+        controller_finalizer_document["metadata"].pop("finalizers")
+        controller_finalizer_update = _kubectl(
+            k3s,
+            [
+                "replace",
+                "--dry-run=server",
+                "--filename=-",
+                "--as=system:serviceaccount:kube-system:job-controller",
+                "--as-group=system:masters",
+            ],
+            documents=[controller_finalizer_document],
+            check=False,
+        )
+        if controller_finalizer_update.returncode == 0:
+            controller_finalizer_removed = True
+            break
+        if "the object has been modified" not in controller_finalizer_update.stderr:
+            break
+    assert controller_finalizer_removed, (
+        controller_finalizer_update.stderr if controller_finalizer_update else ""
+    )
 
     serving_unconfined = copy.deepcopy(serving_pod)
     serving_unconfined["metadata"]["name"] = "cell-alpha-serve-unconfined"
