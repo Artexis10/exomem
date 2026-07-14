@@ -2,6 +2,8 @@ cloudflared:
   replicas: 1
 provisioner:
   image: ghcr.io/artexis10/exomem-provisioner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  controlHostname: control.example.test
+  transferHostname: transfer.example.test
   releaseManifestJson: |-
     {
       "artifact": "exomem-hosted-release",
@@ -41,3 +43,12 @@ provisioner:
     }
 scheduler:
   contractVersion: 1
+durability:
+  b2Endpoint: https://s3.eu-central-003.backblazeb2.com
+  b2Region: eu-central-003
+  recoveryBucket: recovery-example
+  userExportBucket: user-export-example
+  databaseBackupBucket: database-backup-example
+  databaseBackup:
+    proofTenantId: tenant-owner-proof
+    proofCellId: cell-owner-proof

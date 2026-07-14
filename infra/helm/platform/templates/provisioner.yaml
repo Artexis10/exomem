@@ -1,0 +1,248 @@
+{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-provisioner-api
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-provisioner
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-provisioner-api
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: exomem-provisioner-api
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-provisioner-api
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-provisioner-api
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  replicas: {{ .Values.provisioner.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-provisioner-api
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-provisioner-api
+        app.kubernetes.io/part-of: exomem-hosted
+    spec:
+      serviceAccountName: exomem-provisioner-api
+      automountServiceAccountToken: false
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["exomem-provisioner-api"]
+          env:
+            - name: EXOMEM_PROVISIONER_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-auth
+                  key: credential
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-database
+                  key: url
+            - name: EXOMEM_PROVISIONER_ENVELOPE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-wrapping-key
+                  key: key-material
+            - name: EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
+                  key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+              value: {{ .Values.provisioner.databaseSchema | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+              value: {{ .Values.provisioner.databaseRole | quote }}
+            - name: EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS
+              value: {{ .Values.provisioner.trustedProxyIps | quote }}
+            - name: HOME
+              value: /tmp
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 2
+          resources:
+            requests:
+              cpu: 25m
+              memory: 96Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: temporary
+              mountPath: /tmp
+      volumes:
+        - name: temporary
+          emptyDir:
+            sizeLimit: 16Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-provisioner-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-provisioner-worker
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-provisioner-worker
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-provisioner-worker
+        app.kubernetes.io/part-of: exomem-hosted
+      annotations:
+        exomem.io/release-manifest-sha256: {{ $releaseJson | sha256sum | quote }}
+    spec:
+      serviceAccountName: exomem-cell-provisioner
+      automountServiceAccountToken: true
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: worker
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: IfNotPresent
+          command: ["exomem-provisioner-worker"]
+          env:
+            - name: EXOMEM_PROVISIONER_BEARER
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-auth
+                  key: credential
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-database
+                  key: url
+            - name: EXOMEM_PROVISIONER_ENVELOPE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-wrapping-key
+                  key: key-material
+            - name: EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.providerRecoveryPublicKeySecret.name }}
+                  key: {{ .Values.provisioner.providerRecoveryPublicKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+              value: {{ .Values.provisioner.databaseSchema | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+              value: {{ .Values.provisioner.databaseRole | quote }}
+            - name: EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS
+              value: {{ .Values.provisioner.trustedProxyIps | quote }}
+            - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
+              value: /etc/exomem/release/exomem-hosted-release-v1.json
+            - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
+              value: {{ .Values.provisioner.cellChartPath | quote }}
+            - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
+              value: {{ .Values.provisioner.cellChartVersion | quote }}
+            - name: EXOMEM_PROVISIONER_HELM_BINARY
+              value: {{ .Values.provisioner.helmBinary | quote }}
+            - name: EXOMEM_PROVISIONER_HELM_VERSION
+              value: {{ .Values.provisioner.helmVersion | quote }}
+            - name: EXOMEM_PROVISIONER_CONTROL_HOSTNAME
+              value: {{ .Values.provisioner.controlHostname | quote }}
+            - name: EXOMEM_PROVISIONER_TRANSFER_HOSTNAME
+              value: {{ .Values.provisioner.transferHostname | quote }}
+            - name: EXOMEM_PROVISIONER_BROWSER_ORIGIN
+              value: {{ .Values.provisioner.browserOrigin | quote }}
+            - name: EXOMEM_PROVISIONER_LOCATION
+              value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_INTERNAL_ORIGIN
+              value: {{ .Values.provisioner.internalOrigin | quote }}
+            - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
+              value: {{ .Values.storage.encryptionSecretName | quote }}
+            - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE
+              value: {{ .Values.storage.encryptionSecretNamespace | quote }}
+            - name: EXOMEM_PROVISIONER_WORKER_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: EXOMEM_PROVISIONER_POLL_SECONDS
+              value: {{ .Values.provisioner.pollSeconds | quote }}
+            - name: HOME
+              value: /tmp
+            - name: HELM_CACHE_HOME
+              value: /tmp/helm/cache
+            - name: HELM_CONFIG_HOME
+              value: /tmp/helm/config
+            - name: HELM_DATA_HOME
+              value: /tmp/helm/data
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: temporary
+              mountPath: /tmp
+            - name: hosted-release
+              mountPath: /etc/exomem/release
+              readOnly: true
+      volumes:
+        - name: temporary
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: hosted-release
+          configMap:
+            name: exomem-hosted-release-v1
+            items:
+              - key: exomem-hosted-release-v1.json
+                path: exomem-hosted-release-v1.json

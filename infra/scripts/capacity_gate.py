@@ -4,15 +4,28 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import binascii
+import fcntl
 import hashlib
-import hmac
 import json
+import os
+import re
 import stat
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
+
+_CAPACITY_DOMAIN = b"exomem.capacity-live-receipt.v1\0"
+_ECONOMICS_DOMAIN = b"exomem.capacity-economics-receipt.v1\0"
+_RECEIPT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 
 
 class CapacityGateError(RuntimeError):
@@ -33,18 +46,6 @@ def contract_digest(contract: dict[str, Any]) -> str:
     return hashlib.sha256(_canonical(contract)).hexdigest()
 
 
-def sign_receipt(receipt: dict[str, Any], key: bytes) -> dict[str, Any]:
-    if len(key) < 32 or "authentication" in receipt:
-        raise CapacityGateError("capacity receipt signing input is invalid")
-    signed = dict(receipt)
-    signed["authentication"] = {
-        "algorithm": "hmac-sha256",
-        "key_id": hashlib.sha256(key).hexdigest(),
-        "mac": hmac.new(key, _canonical(receipt), hashlib.sha256).hexdigest(),
-    }
-    return signed
-
-
 def _timestamp(value: Any) -> datetime | None:
     if not isinstance(value, str) or not value.endswith("Z"):
         return None
@@ -55,16 +56,54 @@ def _timestamp(value: Any) -> datetime | None:
     return parsed if parsed.tzinfo == UTC else None
 
 
-def _load_key(path: Path) -> bytes:
-    if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
-        raise CapacityGateError("capacity receipt key must be a mode-0600 regular file")
-    key = path.read_bytes()
-    if len(key) < 32 or len(key) > 256:
-        raise CapacityGateError("capacity receipt key is invalid")
+def _load_public_key(path: Path) -> Ed25519PublicKey:
+    if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) & 0o022:
+        raise CapacityGateError("capacity receipt public key must be a non-writable regular file")
+    try:
+        raw = path.read_bytes()
+        try:
+            key = serialization.load_pem_public_key(raw)
+        except ValueError:
+            encoded = raw.decode("ascii").strip()
+            if "=" in encoded or not re.fullmatch(r"[A-Za-z0-9_-]+", encoded):
+                raise ValueError("invalid raw public key") from None
+            padded = encoded + "=" * ((4 - len(encoded) % 4) % 4)
+            key = Ed25519PublicKey.from_public_bytes(
+                base64.b64decode(padded, altchars=b"-_", validate=True)
+            )
+    except (OSError, UnicodeDecodeError, ValueError, binascii.Error) as exc:
+        raise CapacityGateError("capacity receipt public key is invalid") from exc
+    if not isinstance(key, Ed25519PublicKey):
+        raise CapacityGateError("capacity receipt public key is invalid")
     return key
 
 
-def _authenticated_receipt(path: Path, key: bytes) -> dict[str, Any]:
+def _public_key_id(public_key: Ed25519PublicKey) -> str:
+    raw = public_key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return hashlib.sha256(raw).hexdigest()
+
+
+def _require_trusted_public_keys(
+    contract: dict[str, Any],
+    capacity_public_key: Ed25519PublicKey,
+    economics_public_key: Ed25519PublicKey,
+) -> None:
+    authentication = contract.get("receipt_authentication")
+    if (
+        not isinstance(authentication, dict)
+        or authentication.get("algorithm") != "ed25519"
+        or authentication.get("capacity_public_key_id") != _public_key_id(capacity_public_key)
+        or authentication.get("economics_public_key_id") != _public_key_id(economics_public_key)
+    ):
+        raise CapacityGateError("capacity receipt public key is not trusted by the contract")
+
+
+def _authenticated_receipt(
+    path: Path, public_key: Ed25519PublicKey, *, domain: bytes
+) -> dict[str, Any]:
     if path.is_symlink() or not path.is_file() or stat.S_IMODE(path.stat().st_mode) != 0o600:
         raise CapacityGateError("capacity receipt must be a mode-0600 regular file")
     try:
@@ -78,17 +117,21 @@ def _authenticated_receipt(path: Path, key: bytes) -> dict[str, Any]:
     if not isinstance(authentication, dict) or set(authentication) != {
         "algorithm",
         "key_id",
-        "mac",
+        "signature",
     }:
         raise CapacityGateError("capacity receipt is unauthenticated")
-    expected = hmac.new(key, _canonical(unsigned), hashlib.sha256).hexdigest()
+    signature_hex = authentication.get("signature")
     if (
-        authentication.get("algorithm") != "hmac-sha256"
-        or authentication.get("key_id") != hashlib.sha256(key).hexdigest()
-        or not isinstance(authentication.get("mac"), str)
-        or not hmac.compare_digest(authentication["mac"], expected)
+        authentication.get("algorithm") != "ed25519"
+        or authentication.get("key_id") != _public_key_id(public_key)
+        or not isinstance(signature_hex, str)
     ):
         raise CapacityGateError("capacity receipt is unauthenticated")
+    try:
+        signature = bytes.fromhex(signature_hex)
+        public_key.verify(signature, domain + _canonical(unsigned))
+    except (ValueError, InvalidSignature) as exc:
+        raise CapacityGateError("capacity receipt is unauthenticated") from exc
     return unsigned
 
 
@@ -96,16 +139,27 @@ def _valid_economics(
     contract: dict[str, Any], economics: dict[str, Any], capacity_time: datetime
 ) -> bool:
     observed_at = _timestamp(economics.get("observed_at"))
+    expires_at = _timestamp(economics.get("expires_at"))
     costs = economics.get("monthly_costs_eur_ex_vat")
     paddle = economics.get("paddle")
     contract_costs = contract.get("monthly_costs_eur_ex_vat")
+    contract_paddle = contract.get("paddle")
+    contract_evidence = contract.get("evidence")
+    evidence_recorded_at = (
+        _timestamp(contract_evidence.get("recorded_at"))
+        if isinstance(contract_evidence, dict)
+        else None
+    )
     return bool(
         set(economics)
         == {
             "schema_version",
             "issuer",
             "contract_sha256",
+            "receipt_id",
+            "sequence",
             "observed_at",
+            "expires_at",
             "monthly_costs_eur_ex_vat",
             "paddle",
             "provider_invoice_sha256",
@@ -114,8 +168,17 @@ def _valid_economics(
         and economics.get("schema_version") == 1
         and economics.get("issuer") == "exomem-live-provider-paddle-v1"
         and economics.get("contract_sha256") == contract_digest(contract)
+        and contract.get("live_costs_verified") is True
+        and isinstance(economics.get("receipt_id"), str)
+        and _RECEIPT_ID.fullmatch(economics["receipt_id"]) is not None
+        and isinstance(economics.get("sequence"), int)
+        and not isinstance(economics.get("sequence"), bool)
+        and economics["sequence"] > 0
         and observed_at is not None
+        and expires_at is not None
         and observed_at <= capacity_time
+        and capacity_time <= expires_at
+        and 0 < (expires_at - observed_at).total_seconds() <= 31 * 86400
         and (capacity_time - observed_at).total_seconds() <= 31 * 86400
         and isinstance(costs, dict)
         and isinstance(contract_costs, dict)
@@ -124,6 +187,7 @@ def _valid_economics(
             isinstance(value, (int, float)) and not isinstance(value, bool) and value >= 0
             for value in costs.values()
         )
+        and costs == contract_costs
         and isinstance(paddle, dict)
         and set(paddle)
         == {
@@ -140,6 +204,39 @@ def _valid_economics(
         and isinstance(paddle.get("net_receipt_eur_for_friend_price"), (int, float))
         and not isinstance(paddle.get("net_receipt_eur_for_friend_price"), bool)
         and paddle["net_receipt_eur_for_friend_price"] >= 0
+        and isinstance(contract_paddle, dict)
+        and set(contract_paddle)
+        == {
+            "actual_fee_tax_verified",
+            "fee_model",
+            "tax_treatment",
+            "net_receipt_eur_for_friend_price",
+            "evidence_recorded_at",
+        }
+        and contract_paddle.get("actual_fee_tax_verified") is True
+        and all(
+            paddle.get(field) == contract_paddle.get(field)
+            for field in (
+                "actual_fee_tax_verified",
+                "fee_model",
+                "tax_treatment",
+                "net_receipt_eur_for_friend_price",
+            )
+        )
+        and isinstance(contract_evidence, dict)
+        and set(contract_evidence)
+        == {
+            "provider_invoice_reference",
+            "paddle_statement_reference",
+            "recorded_at",
+        }
+        and evidence_recorded_at is not None
+        and evidence_recorded_at <= observed_at
+        and contract_paddle.get("evidence_recorded_at") == contract_evidence.get("recorded_at")
+        and economics.get("provider_invoice_sha256")
+        == contract_evidence.get("provider_invoice_reference")
+        and economics.get("paddle_statement_sha256")
+        == contract_evidence.get("paddle_statement_reference")
         and all(
             isinstance(economics.get(name), str)
             and len(economics[name]) == 64
@@ -160,13 +257,23 @@ def evaluate_authenticated(
         != {
             "schema_version",
             "issuer",
+            "contract_sha256",
+            "receipt_id",
+            "sequence",
             "cluster_uid",
             "observed_at",
+            "expires_at",
             "active_user_cells",
             "attached_volumes",
         }
         or capacity.get("schema_version") != 1
         or capacity.get("issuer") != "exomem-live-kubernetes-hcloud-v1"
+        or capacity.get("contract_sha256") != contract_digest(contract)
+        or not isinstance(capacity.get("receipt_id"), str)
+        or _RECEIPT_ID.fullmatch(capacity["receipt_id"]) is None
+        or not isinstance(capacity.get("sequence"), int)
+        or isinstance(capacity.get("sequence"), bool)
+        or capacity["sequence"] <= 0
         or not isinstance(capacity.get("cluster_uid"), str)
         or len(capacity["cluster_uid"]) < 8
         or observed_at is None
@@ -205,19 +312,153 @@ def evaluate_authenticated(
     return CapacityDecision(True, "capacity-available")
 
 
+def _consume_capacity_receipt(
+    state_path: Path,
+    capacity: dict[str, Any],
+    capacity_public_key: Ed25519PublicKey,
+) -> None:
+    parent = state_path.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise CapacityGateError("capacity replay state directory is unsafe")
+    lock_path = state_path.with_name(f".{state_path.name}.lock")
+    flags = os.O_RDWR | os.O_CREAT
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        raise CapacityGateError("capacity replay state lock is unsafe") from exc
+    temporary: Path | None = None
+    try:
+        os.fchmod(descriptor, 0o600)
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        previous: dict[str, Any] | None = None
+        if state_path.exists() or state_path.is_symlink():
+            if (
+                state_path.is_symlink()
+                or not state_path.is_file()
+                or stat.S_IMODE(state_path.stat().st_mode) != 0o600
+            ):
+                raise CapacityGateError("capacity replay state is unsafe")
+            try:
+                loaded = json.loads(state_path.read_text(encoding="utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise CapacityGateError("capacity replay state is invalid") from exc
+            if not isinstance(loaded, dict):
+                raise CapacityGateError("capacity replay state is invalid")
+            previous = loaded
+        key_id = _public_key_id(capacity_public_key)
+        sequence = capacity["sequence"]
+        receipt_id = capacity["receipt_id"]
+        cluster_uid = capacity["cluster_uid"]
+        if previous is not None:
+            if set(previous) != {
+                "schema_version",
+                "capacity_key_id",
+                "cluster_uid",
+                "last_sequence",
+                "last_receipt_id",
+            }:
+                raise CapacityGateError("capacity replay state is invalid")
+            if (
+                previous.get("schema_version") != 1
+                or previous.get("capacity_key_id") != key_id
+                or previous.get("cluster_uid") != cluster_uid
+            ):
+                raise CapacityGateError("capacity replay state identity changed")
+            prior_sequence = previous.get("last_sequence")
+            if (
+                not isinstance(prior_sequence, int)
+                or isinstance(prior_sequence, bool)
+                or sequence <= prior_sequence
+                or receipt_id == previous.get("last_receipt_id")
+            ):
+                raise CapacityGateError("capacity receipt was replayed")
+        document = {
+            "schema_version": 1,
+            "capacity_key_id": key_id,
+            "cluster_uid": cluster_uid,
+            "last_sequence": sequence,
+            "last_receipt_id": receipt_id,
+        }
+        temporary_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{state_path.name}.", dir=parent
+        )
+        temporary = Path(temporary_name)
+        try:
+            os.fchmod(temporary_descriptor, 0o600)
+            with os.fdopen(temporary_descriptor, "w", encoding="utf-8") as stream:
+                json.dump(document, stream, separators=(",", ":"), sort_keys=True)
+                stream.write("\n")
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, state_path)
+            temporary = None
+        finally:
+            if temporary is not None:
+                temporary.unlink(missing_ok=True)
+    finally:
+        os.close(descriptor)
+
+
 def evaluate_files(
     contract: dict[str, Any],
     *,
     capacity_receipt: Path,
     economics_receipt: Path,
-    capacity_key: bytes,
-    economics_key: bytes,
+    capacity_public_key: Ed25519PublicKey,
+    economics_public_key: Ed25519PublicKey,
+    replay_state_path: Path | None = None,
+    now: datetime | None = None,
 ) -> CapacityDecision:
-    return evaluate_authenticated(
-        contract,
-        _authenticated_receipt(capacity_receipt, capacity_key),
-        _authenticated_receipt(economics_receipt, economics_key),
+    _require_trusted_public_keys(contract, capacity_public_key, economics_public_key)
+    authentication = contract.get("receipt_authentication")
+    if (
+        not isinstance(authentication, dict)
+        or authentication.get("capacity_domain") != _CAPACITY_DOMAIN[:-1].decode()
+        or authentication.get("economics_domain") != _ECONOMICS_DOMAIN[:-1].decode()
+        or authentication.get("capacity_ttl_seconds") != 300
+        or authentication.get("economics_ttl_seconds") != 31 * 86400
+    ):
+        raise CapacityGateError("capacity receipt authentication contract is invalid")
+    observed_now = now or datetime.now(UTC)
+    if observed_now.tzinfo != UTC:
+        raise CapacityGateError("capacity gate clock is invalid")
+    capacity = _authenticated_receipt(
+        capacity_receipt,
+        capacity_public_key,
+        domain=_CAPACITY_DOMAIN,
     )
+    economics = _authenticated_receipt(
+        economics_receipt,
+        economics_public_key,
+        domain=_ECONOMICS_DOMAIN,
+    )
+    capacity_observed_at = _timestamp(capacity.get("observed_at"))
+    capacity_expires_at = _timestamp(capacity.get("expires_at"))
+    economics_observed_at = _timestamp(economics.get("observed_at"))
+    economics_expires_at = _timestamp(economics.get("expires_at"))
+    if (
+        capacity_observed_at is None
+        or capacity_expires_at is None
+        or capacity_observed_at > observed_now
+        or observed_now > capacity_expires_at
+        or (capacity_expires_at - capacity_observed_at).total_seconds() != 300
+        or economics_observed_at is None
+        or economics_expires_at is None
+        or economics_observed_at > observed_now
+        or observed_now > economics_expires_at
+        or not 0 < (economics_expires_at - economics_observed_at).total_seconds() <= 31 * 86400
+    ):
+        raise CapacityGateError("capacity or economics receipt is expired or not yet valid")
+    decision = evaluate_authenticated(
+        contract,
+        capacity,
+        economics,
+    )
+    if decision.allowed and replay_state_path is not None:
+        _consume_capacity_receipt(replay_state_path, capacity, capacity_public_key)
+    return decision
 
 
 def main() -> int:
@@ -225,8 +466,9 @@ def main() -> int:
     parser.add_argument("--contract", type=Path, required=True)
     parser.add_argument("--capacity-receipt", type=Path, required=True)
     parser.add_argument("--economics-receipt", type=Path, required=True)
-    parser.add_argument("--capacity-key-file", type=Path, required=True)
-    parser.add_argument("--economics-key-file", type=Path, required=True)
+    parser.add_argument("--capacity-public-key-file", type=Path, required=True)
+    parser.add_argument("--economics-public-key-file", type=Path, required=True)
+    parser.add_argument("--replay-state", type=Path, required=True)
     args = parser.parse_args()
     try:
         contract = json.loads(args.contract.read_text(encoding="utf-8"))
@@ -234,8 +476,9 @@ def main() -> int:
             contract,
             capacity_receipt=args.capacity_receipt,
             economics_receipt=args.economics_receipt,
-            capacity_key=_load_key(args.capacity_key_file),
-            economics_key=_load_key(args.economics_key_file),
+            capacity_public_key=_load_public_key(args.capacity_public_key_file),
+            economics_public_key=_load_public_key(args.economics_public_key_file),
+            replay_state_path=args.replay_state,
         )
     except (OSError, UnicodeDecodeError, json.JSONDecodeError, CapacityGateError) as exc:
         print(str(exc), file=sys.stderr)

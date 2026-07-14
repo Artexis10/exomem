@@ -1,4 +1,4 @@
-{{- define "exomem.hostedRuntimeImage" -}}
+{{- define "exomem.hostedReleaseJson" -}}
 {{- $raw := required "provisioner.releaseManifestJson is required" .Values.provisioner.releaseManifestJson -}}
 {{- $release := mustFromJson $raw -}}
 {{- if not (kindIs "map" $release) -}}
@@ -16,7 +16,7 @@
 {{- if ne $release.artifact "exomem-hosted-release" -}}
 {{- fail "hosted release manifest artifact is unsupported" -}}
 {{- end -}}
-{{- if ne (int $release.schemaVersion) 1 -}}
+{{- if ne (toJson $release.schemaVersion) "1" -}}
 {{- fail "hosted release manifest schema is unsupported" -}}
 {{- end -}}
 {{- if ne $release.sourceRepository "https://github.com/Artexis10/exomem" -}}
@@ -24,6 +24,19 @@
 {{- end -}}
 {{- if not (regexMatch "^[0-9a-f]{40}$" $release.sourceCommit) -}}
 {{- fail "hosted release source commit is not exact" -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $release.release)) (not (regexMatch "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$" $release.release)) -}}
+{{- fail "hosted release version is invalid" -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $release.hostedProtocol)) (ne $release.hostedProtocol "1") -}}
+{{- fail "hosted release protocol is unsupported" -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $release.releaseBuildTime)) (not (regexMatch "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$" $release.releaseBuildTime)) -}}
+{{- fail "hosted release build time is invalid" -}}
+{{- end -}}
+{{- $buildTime := toDate "2006-01-02T15:04:05Z07:00" $release.releaseBuildTime -}}
+{{- if ne (dateInZone "2006-01-02T15:04:05Z" $buildTime "UTC") $release.releaseBuildTime -}}
+{{- fail "hosted release build time is invalid" -}}
 {{- end -}}
 {{- if not (regexMatch "^ghcr\\.io/artexis10/exomem@sha256:[0-9a-f]{64}$" $release.runtimeImage) -}}
 {{- fail "hosted release runtime image is not immutable" -}}
@@ -36,8 +49,14 @@
 {{- fail "hosted release contract digest is invalid" -}}
 {{- end -}}
 {{- end -}}
-{{- if or (not (kindIs "slice" $release.commandRegistry)) (ne (len $release.commandRegistry) 21) -}}
-{{- fail "hosted release command registry is incomplete" -}}
+{{- $canonicalRegistry := .Files.Get "files/canonical-command-registry-v1.json" | mustFromJson -}}
+{{- if not (deepEqual $release.commandRegistry $canonicalRegistry) -}}
+{{- fail "hosted release command registry is not canonical" -}}
 {{- end -}}
+{{- $release | toJson -}}
+{{- end -}}
+
+{{- define "exomem.hostedRuntimeImage" -}}
+{{- $release := include "exomem.hostedReleaseJson" . | mustFromJson -}}
 {{- $release.runtimeImage -}}
 {{- end -}}

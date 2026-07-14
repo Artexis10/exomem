@@ -153,6 +153,21 @@ def _kubectl(
     )
 
 
+def _wait_for_policy_typecheck(k3s: str, policy_name: str) -> None:
+    for _ in range(30):
+        policy = _kubectl(
+            k3s,
+            ["get", "validatingadmissionpolicy", policy_name, "--output=json"],
+        )
+        policy_document = json.loads(policy.stdout)
+        status = policy_document.get("status", {})
+        if status.get("observedGeneration") == policy_document["metadata"]["generation"]:
+            assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
+            return
+        time.sleep(1)
+    raise AssertionError(f"K3s did not type-check {policy_name}")
+
+
 def _pod(workload: dict[str, Any], *, name: str, namespace: str) -> dict[str, Any]:
     template = workload["spec"]["template"]
     return {
@@ -279,19 +294,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         "exomem-tenant-boundary",
         "exomem-tenant-namespace-contract",
     ):
-        for _ in range(30):
-            policy = _kubectl(
-                k3s,
-                ["get", "validatingadmissionpolicy", policy_name, "--output=json"],
-            )
-            policy_document = json.loads(policy.stdout)
-            status = policy_document.get("status", {})
-            if status.get("observedGeneration") == policy_document["metadata"]["generation"]:
-                assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
-                break
-            time.sleep(1)
-        else:
-            raise AssertionError(f"K3s did not type-check {policy_name}")
+        _wait_for_policy_typecheck(k3s, policy_name)
 
     insecure_namespace = {
         "apiVersion": "v1",
@@ -599,3 +602,399 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
     _assert_denied(k3s, side_init, message="sidecars or init containers")
+
+
+def test_exact_k3s_scopes_privileged_volume_and_deletion_mutations(k3s: str) -> None:
+    platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", "exomem-platform")
+    admission = [
+        item
+        for item in platform
+        if item.get("kind") in {"ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
+    ]
+    ingressroute_crds = [
+        item
+        for item in platform
+        if item.get("kind") == "CustomResourceDefinition"
+        and item.get("metadata", {}).get("name") == "ingressroutes.traefik.io"
+    ]
+    assert len(ingressroute_crds) == 1
+    _kubectl(k3s, ["apply", "--filename=-"], documents=ingressroute_crds)
+    _kubectl(k3s, ["apply", "--filename=-"], documents=admission)
+    for policy_name in ("exomem-deletion-worker-scope", "exomem-volume-worker-scope"):
+        _wait_for_policy_typecheck(k3s, policy_name)
+
+    namespace = "exo-privileged-scope"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {"name": "exomem-platform"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "Namespace",
+                "metadata": {
+                    "name": namespace,
+                    "annotations": {"exomem.io/credentials-secret-name": "exomem-cell-credentials"},
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": "exomem-volume-worker", "namespace": "exomem-platform"},
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": "exomem-deletion-worker",
+                    "namespace": "exomem-platform",
+                },
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {"name": "admission-test-privileged-workers"},
+                "rules": [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["persistentvolumes", "persistentvolumeclaims"],
+                        "verbs": ["create", "delete", "get", "patch", "update"],
+                    },
+                    {
+                        "apiGroups": [""],
+                        "resources": ["namespaces"],
+                        "verbs": ["get", "patch", "update"],
+                    },
+                    {
+                        "apiGroups": ["apps"],
+                        "resources": ["statefulsets"],
+                        "verbs": ["create", "get", "patch", "update"],
+                    },
+                    {
+                        "apiGroups": ["traefik.io"],
+                        "resources": ["ingressroutes"],
+                        "verbs": ["create", "get", "patch", "update"],
+                    },
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": "admission-test-volume-worker"},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "admission-test-privileged-workers",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "exomem-volume-worker",
+                        "namespace": "exomem-platform",
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": "admission-test-deletion-worker"},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "admission-test-privileged-workers",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "exomem-deletion-worker",
+                        "namespace": "exomem-platform",
+                    }
+                ],
+            },
+        ],
+    )
+
+    identity = {
+        "exomem.io/recovery-envelope": "A" * 64,
+        "exomem.io/tenant-id": "tenant-scope",
+        "exomem.io/cell-id": "cell-scope",
+        "exomem.io/operation-id": "operation-scope",
+        "exomem.io/tenant-digest": "a" * 64,
+        "exomem.io/subject-digest": "b" * 64,
+        "exomem.io/operation-digest": "c" * 64,
+        "exomem.io/fence": "1",
+    }
+    pvc = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": namespace + "-data",
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": {"exomem.io/resource-name": namespace},
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "resources": {"requests": {"storage": "10Gi"}},
+            "storageClassName": "exomem-hcloud-encrypted-retain",
+            "volumeMode": "Filesystem",
+            "volumeName": "pvc-1234",
+        },
+    }
+    volume_user = "system:serviceaccount:exomem-platform:exomem-volume-worker"
+    valid_pvc = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={volume_user}"],
+        documents=[pvc],
+        check=False,
+    )
+    assert valid_pvc.returncode == 0, valid_pvc.stderr
+    oversized_pvc = copy.deepcopy(pvc)
+    oversized_pvc["spec"]["resources"]["requests"]["storage"] = "20Gi"
+    denied_pvc = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={volume_user}"],
+        documents=[oversized_pvc],
+        check=False,
+    )
+    assert denied_pvc.returncode != 0
+    assert "exactly 10 GiB of requested storage" in denied_pvc.stderr
+
+    pv = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {
+            "name": "pvc-1234",
+            "annotations": identity,
+            "labels": {"exomem.io/resource-name": namespace},
+        },
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "capacity": {"storage": "10Gi"},
+            "csi": {
+                "driver": "csi.hetzner.cloud",
+                "fsType": "ext4",
+                "nodePublishSecretRef": {
+                    "name": "exomem-volume-encryption",
+                    "namespace": "exomem-platform",
+                },
+                "volumeHandle": "1234",
+            },
+            "claimRef": {"name": namespace + "-data", "namespace": namespace},
+            "persistentVolumeReclaimPolicy": "Retain",
+            "storageClassName": "exomem-hcloud-encrypted-retain",
+            "volumeMode": "Filesystem",
+        },
+    }
+    valid_pv = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={volume_user}"],
+        documents=[pv],
+        check=False,
+    )
+    assert valid_pv.returncode == 0, valid_pv.stderr
+    wrong_secret_pv = copy.deepcopy(pv)
+    wrong_secret_pv["spec"]["csi"]["nodePublishSecretRef"]["name"] = "foreign-key"
+    denied_pv = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={volume_user}"],
+        documents=[wrong_secret_pv],
+        check=False,
+    )
+    assert denied_pv.returncode != 0
+    assert "exact encrypted 10 GiB Retain HCloud" in denied_pv.stderr
+
+    deletion_user = "system:serviceaccount:exomem-platform:exomem-deletion-worker"
+    stateful_set = {
+        "apiVersion": "apps/v1",
+        "kind": "StatefulSet",
+        "metadata": {
+            "name": namespace,
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": {"exomem.io/resource-name": namespace},
+        },
+        "spec": {
+            "replicas": 1,
+            "selector": {"matchLabels": {"app": namespace}},
+            "serviceName": namespace,
+            "template": {
+                "metadata": {"labels": {"app": namespace}},
+                "spec": {
+                    "containers": [
+                        {
+                            "name": "runtime",
+                            "image": "busybox:1.37.0",
+                            "command": ["sleep", "3600"],
+                        }
+                    ]
+                },
+            },
+        },
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[stateful_set])
+    valid_scale_down = _kubectl(
+        k3s,
+        [
+            "patch",
+            "statefulset",
+            namespace,
+            "--namespace",
+            namespace,
+            "--type=merge",
+            "--patch",
+            json.dumps({"spec": {"replicas": 0}}),
+            "--dry-run=server",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert valid_scale_down.returncode != 0
+    assert "update only the namespace deletion receipt" in valid_scale_down.stderr
+    invalid_scale_down = _kubectl(
+        k3s,
+        [
+            "patch",
+            "statefulset",
+            namespace,
+            "--namespace",
+            namespace,
+            "--type=merge",
+            "--patch",
+            json.dumps(
+                {
+                    "spec": {
+                        "replicas": 0,
+                        "template": {
+                            "spec": {"containers": [{"name": "runtime", "image": "busybox:latest"}]}
+                        },
+                    }
+                }
+            ),
+            "--dry-run=server",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert invalid_scale_down.returncode != 0
+    assert "update only the namespace deletion receipt" in invalid_scale_down.stderr
+
+    ingress_route = {
+        "apiVersion": "traefik.io/v1alpha1",
+        "kind": "IngressRoute",
+        "metadata": {
+            "name": namespace + "-control",
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": {
+                "exomem.io/resource-name": namespace,
+                "exomem.io/tenant-route": "true",
+            },
+        },
+        "spec": {
+            "entryPoints": ["web"],
+            "routes": [
+                {
+                    "kind": "Rule",
+                    "match": "Host(`cell.example.test`)",
+                    "services": [{"name": namespace, "port": 8765}],
+                }
+            ],
+        },
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[ingress_route])
+    valid_route_close = _kubectl(
+        k3s,
+        [
+            "patch",
+            "ingressroute",
+            namespace + "-control",
+            "--namespace",
+            namespace,
+            "--type=merge",
+            "--patch",
+            json.dumps({"spec": {"routes": []}}),
+            "--dry-run=server",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert valid_route_close.returncode != 0
+    assert "update only the namespace deletion receipt" in valid_route_close.stderr
+    invalid_route_close = _kubectl(
+        k3s,
+        [
+            "patch",
+            "ingressroute",
+            namespace + "-control",
+            "--namespace",
+            namespace,
+            "--type=merge",
+            "--patch",
+            json.dumps({"spec": {"entryPoints": ["websecure"], "routes": []}}),
+            "--dry-run=server",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert invalid_route_close.returncode != 0
+    assert "update only the namespace deletion receipt" in invalid_route_close.stderr
+
+    first_receipt = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/credential-deletion-operation-digest=" + "d" * 64,
+            "exomem.io/credential-deletion-fence=1",
+            "--overwrite",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert first_receipt.returncode == 0, first_receipt.stderr
+    same_fence_drift = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/credential-deletion-operation-digest=" + "e" * 64,
+            "--overwrite",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert same_fence_drift.returncode != 0
+    unrelated_drift = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/unrelated=forbidden",
+            "--overwrite",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert unrelated_drift.returncode != 0
+    higher_fence = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "namespace",
+            namespace,
+            "exomem.io/credential-deletion-operation-digest=" + "e" * 64,
+            "exomem.io/credential-deletion-fence=2",
+            "--overwrite",
+            f"--as={deletion_user}",
+        ],
+        check=False,
+    )
+    assert higher_fence.returncode == 0, higher_fence.stderr

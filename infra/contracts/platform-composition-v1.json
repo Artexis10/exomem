@@ -83,5 +83,34 @@
     "public_endpoint": null,
     "invoked_by": ["restore", "node-recovery"],
     "worker_primitive": "VolumeLifecycleWorker.rebind_static"
+  },
+  "provider_recovery_identity": {
+    "algorithm": "ed25519",
+    "version": 1,
+    "annotation": "exomem.io/recovery-envelope",
+    "cell_values": "providerRecoveryEnvelopes",
+    "identity_issuer_environment": "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+    "routine_worker_environment": "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY",
+    "routine_worker_material": "public-key-only",
+    "signing_seed_mounts": [
+      "exomem-provisioner-api",
+      "exomem-durability-backup",
+      "exomem-database-backup",
+      "exomem-volume-worker"
+    ]
+  },
+  "durability": {
+    "workload_contract": "infra/contracts/durability-workloads-v1.json",
+    "storage_contract": "infra/contracts/durability-storage-v1.json",
+    "storage_config_map": "exomem-durability-storage",
+    "workloads": {
+      "delivery_gc": "exomem-export-gc",
+      "vault_backup": "exomem-durability-backup",
+      "database_backup": "exomem-database-backup",
+      "deletion": "exomem-deletion-worker",
+      "volume_lifecycle": "exomem-volume-worker"
+    },
+    "private_signers": ["exomem-provider-recovery-signer/private-key"],
+    "public_verifier": "exomem-provider-recovery-verifier/public-key"
   }
 }

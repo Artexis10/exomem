@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import hashlib
 import importlib.util
 import json
@@ -7,10 +8,15 @@ import os
 import stat
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from types import ModuleType
 
 import pytest
+import yaml
+from cryptography.exceptions import InvalidSignature
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
 ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
@@ -29,6 +35,24 @@ def _load(relative: str, name: str) -> ModuleType:
 def _write_executable(path: Path, body: str) -> None:
     path.write_text(body, encoding="utf-8")
     path.chmod(0o700)
+
+
+def _signed_receipt(
+    receipt: dict[str, object], private_key: Ed25519PrivateKey, *, domain: bytes = b""
+) -> dict[str, object]:
+    canonical = json.dumps(receipt, separators=(",", ":"), sort_keys=True).encode()
+    public_key = private_key.public_key().public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    return {
+        **receipt,
+        "authentication": {
+            "algorithm": "ed25519",
+            "key_id": hashlib.sha256(public_key).hexdigest(),
+            "signature": private_key.sign(domain + canonical).hex(),
+        },
+    }
 
 
 def test_hosted_ci_wires_every_static_security_gate() -> None:
@@ -59,6 +83,9 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
+    assert (
+        '"${helm_bin}" lint "${infra_dir}/helm/platform" --strict \\\n  --namespace exomem-platform'
+    ) in validator
     assert '--skip-dirs charts "${repo_root}"' in validator
     for action_line in (
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
@@ -297,28 +324,51 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
         "hosted-scheduler",
         "provisioner-wrapping-key",
     }
-    receipt_key = b"rotation-receipt-authentication-key-32-bytes-minimum"
+    assert contract["receipt_authentication"] == {
+        "algorithm": "ed25519",
+        "domain": "exomem.rotation-drill-receipt.v1",
+        "ttl_seconds": 86400,
+        "private_key_custody": "drill-collector-only",
+        "public_key_id": None,
+        "verifier_material": "public-key-only",
+    }
+    receipt_private_key = Ed25519PrivateKey.generate()
+    receipt_public_key = receipt_private_key.public_key()
+    receipt_public_bytes = receipt_public_key.public_bytes(
+        serialization.Encoding.Raw,
+        serialization.PublicFormat.Raw,
+    )
+    contract["receipt_authentication"]["public_key_id"] = hashlib.sha256(
+        receipt_public_bytes
+    ).hexdigest()
+    assert not hasattr(module, "sign_receipt")
     for rotation_index, (name, rotation) in enumerate(contract["rotations"].items()):
         recorded_at = "2026-07-14T12:00:00Z"
         receipt_root = tmp_path / name
         receipt_root.mkdir()
         observations = {}
+        unsigned_receipts: dict[Path, dict[str, object]] = {}
         for index, requirement in enumerate(rotation["retirement_requires"], start=1):
-            receipt = module.sign_receipt(
-                {
-                    "schema_version": 1,
-                    "issuer": "exomem-rotation-drill-v1",
-                    "drill_id": "123e4567-e89b-42d3-a456-426614174000",
-                    "rotation": name,
-                    "requirement": requirement,
-                    "old_version": "v1",
-                    "new_version": "v2",
-                    "observed_at": recorded_at,
-                    "passed": True,
-                },
-                receipt_key,
+            unsigned_receipt = {
+                "schema_version": 1,
+                "issuer": "exomem-rotation-drill-v1",
+                "receipt_id": f"123e4567-e89b-42d3-a456-{index:012d}",
+                "drill_id": "123e4567-e89b-42d3-a456-426614174000",
+                "rotation": name,
+                "requirement": requirement,
+                "old_version": "v1",
+                "new_version": "v2",
+                "observed_at": recorded_at,
+                "expires_at": "2026-07-15T12:00:00Z",
+                "passed": True,
+            }
+            receipt = _signed_receipt(
+                unsigned_receipt,
+                receipt_private_key,
+                domain=b"exomem.rotation-drill-receipt.v1\0",
             )
             receipt_path = receipt_root / f"receipt-{index:02d}.json"
+            unsigned_receipts[receipt_path] = unsigned_receipt
             raw = (json.dumps(receipt, separators=(",", ":"), sort_keys=True) + "\n").encode()
             receipt_path.write_bytes(raw)
             receipt_path.chmod(0o600)
@@ -337,10 +387,57 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
             "observations": observations,
         }
         result = module.verify_evidence(
-            contract, evidence, receipt_root=receipt_root, receipt_key=receipt_key
+            contract,
+            evidence,
+            receipt_root=receipt_root,
+            receipt_public_key=receipt_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
         )
         assert result.rotation == name
         assert result.new_version == "v2"
+
+        if rotation_index == 0:
+            substituted_private_key = Ed25519PrivateKey.generate()
+            for _requirement, reference in observations.items():
+                receipt_path = receipt_root / reference["receipt_path"]
+                raw = (
+                    json.dumps(
+                        _signed_receipt(
+                            unsigned_receipts[receipt_path],
+                            substituted_private_key,
+                            domain=b"exomem.rotation-drill-receipt.v1\0",
+                        ),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+                receipt_path.write_bytes(raw)
+                reference["sha256"] = hashlib.sha256(raw).hexdigest()
+            with pytest.raises(module.RotationGateError, match="not trusted"):
+                module.verify_evidence(
+                    contract,
+                    evidence,
+                    receipt_root=receipt_root,
+                    receipt_public_key=substituted_private_key.public_key(),
+                    now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+                )
+            for _requirement, reference in observations.items():
+                receipt_path = receipt_root / reference["receipt_path"]
+                raw = (
+                    json.dumps(
+                        _signed_receipt(
+                            unsigned_receipts[receipt_path],
+                            receipt_private_key,
+                            domain=b"exomem.rotation-drill-receipt.v1\0",
+                        ),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    )
+                    + "\n"
+                ).encode()
+                receipt_path.write_bytes(raw)
+                reference["sha256"] = hashlib.sha256(raw).hexdigest()
 
         missing = json.loads(json.dumps(evidence))
         missing["observations"].pop(rotation["retirement_requires"][0])
@@ -349,7 +446,8 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                 contract,
                 missing,
                 receipt_root=receipt_root,
-                receipt_key=receipt_key,
+                receipt_public_key=receipt_public_key,
+                now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
             )
 
         if rotation_index == 0:
@@ -365,7 +463,8 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                     contract,
                     unsafe,
                     receipt_root=receipt_root,
-                    receipt_key=receipt_key,
+                    receipt_public_key=receipt_public_key,
+                    now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
                 )
             tampered = json.loads(tampered_path.read_text(encoding="utf-8"))
             tampered["passed"] = False
@@ -377,7 +476,27 @@ def test_rotation_retirement_gate_covers_every_independent_rotation(
                     contract,
                     evidence,
                     receipt_root=receipt_root,
-                    receipt_key=receipt_key,
+                    receipt_public_key=receipt_public_key,
+                    now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+                )
+
+            write_expired = json.loads(tampered_path.read_text(encoding="utf-8"))
+            write_expired["passed"] = True
+            write_expired = _signed_receipt(
+                {key: value for key, value in write_expired.items() if key != "authentication"},
+                receipt_private_key,
+                domain=b"exomem.rotation-drill-receipt.v1\0",
+            )
+            raw = (json.dumps(write_expired, separators=(",", ":"), sort_keys=True) + "\n").encode()
+            tampered_path.write_bytes(raw)
+            first_reference["sha256"] = hashlib.sha256(raw).hexdigest()
+            with pytest.raises(module.RotationGateError, match="expired"):
+                module.verify_evidence(
+                    contract,
+                    evidence,
+                    receipt_root=receipt_root,
+                    receipt_public_key=receipt_public_key,
+                    now=datetime(2026, 7, 15, 12, 0, 1, tzinfo=UTC),
                 )
 
 
@@ -393,13 +512,82 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     assert contract["pricing"]["friend_price_eur_gross"] == 5
     assert contract["pricing"]["public_price_eur_gross_range"] == [10, 15]
     assert contract["live_costs_verified"] is False
-    capacity_key = b"capacity-receipt-authentication-key-32-bytes-minimum"
-    economics_key = b"economics-receipt-authentication-key-32-bytes-minimum"
+    assert contract["receipt_authentication"] == {
+        "algorithm": "ed25519",
+        "capacity_domain": "exomem.capacity-live-receipt.v1",
+        "economics_domain": "exomem.capacity-economics-receipt.v1",
+        "capacity_ttl_seconds": 300,
+        "economics_ttl_seconds": 2678400,
+        "capacity_private_key_custody": "kubernetes-hcloud-collector-only",
+        "capacity_public_key_id": None,
+        "economics_private_key_custody": "provider-paddle-collector-only",
+        "economics_public_key_id": None,
+        "gate_material": "public-keys-only",
+    }
+    contract["live_costs_verified"] = True
+    contract["monthly_costs_eur_ex_vat"] = {
+        key: 1.0 for key in contract["monthly_costs_eur_ex_vat"]
+    }
+    contract["paddle"] = {
+        "actual_fee_tax_verified": True,
+        "fee_model": "verified-live-statement",
+        "tax_treatment": "merchant-of-record",
+        "net_receipt_eur_for_friend_price": 4.1,
+        "evidence_recorded_at": "2026-07-14T11:00:00Z",
+    }
+    contract["evidence"] = {
+        "provider_invoice_reference": "a" * 64,
+        "paddle_statement_reference": "b" * 64,
+        "recorded_at": "2026-07-14T11:00:00Z",
+    }
+    capacity_private_key = Ed25519PrivateKey.generate()
+    economics_private_key = Ed25519PrivateKey.generate()
+    capacity_public_key = capacity_private_key.public_key()
+    economics_public_key = economics_private_key.public_key()
+    raw_public_path = tmp_path / "capacity-public-key"
+    raw_public_path.write_text(
+        base64.urlsafe_b64encode(
+            capacity_public_key.public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        )
+        .decode("ascii")
+        .rstrip("="),
+        encoding="ascii",
+    )
+    raw_public_path.chmod(0o600)
+    assert (
+        module._public_key_id(module._load_public_key(raw_public_path))
+        == hashlib.sha256(
+            capacity_public_key.public_bytes(
+                serialization.Encoding.Raw,
+                serialization.PublicFormat.Raw,
+            )
+        ).hexdigest()
+    )
+    contract["receipt_authentication"]["capacity_public_key_id"] = hashlib.sha256(
+        capacity_public_key.public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    contract["receipt_authentication"]["economics_public_key_id"] = hashlib.sha256(
+        economics_public_key.public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    assert not hasattr(module, "sign_receipt")
     capacity = {
         "schema_version": 1,
         "issuer": "exomem-live-kubernetes-hcloud-v1",
+        "contract_sha256": module.contract_digest(contract),
+        "receipt_id": "123e4567-e89b-42d3-a456-426614174001",
+        "sequence": 41,
         "cluster_uid": "cluster-uid-1234",
         "observed_at": "2026-07-14T12:00:00Z",
+        "expires_at": "2026-07-14T12:05:00Z",
         "active_user_cells": 5,
         "attached_volumes": 5,
     }
@@ -407,8 +595,11 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "schema_version": 1,
         "issuer": "exomem-live-provider-paddle-v1",
         "contract_sha256": module.contract_digest(contract),
+        "receipt_id": "123e4567-e89b-42d3-a456-426614174002",
+        "sequence": 7,
         "observed_at": "2026-07-14T11:00:00Z",
-        "monthly_costs_eur_ex_vat": {key: 1.0 for key in contract["monthly_costs_eur_ex_vat"]},
+        "expires_at": "2026-08-13T11:00:00Z",
+        "monthly_costs_eur_ex_vat": contract["monthly_costs_eur_ex_vat"],
         "paddle": {
             "actual_fee_tax_verified": True,
             "fee_model": "verified-live-statement",
@@ -421,43 +612,88 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     capacity_path = tmp_path / "capacity.json"
     economics_path = tmp_path / "economics.json"
 
-    def write_receipt(path: Path, receipt: dict[str, object], key: bytes) -> None:
+    def write_receipt(
+        path: Path, receipt: dict[str, object], private_key: Ed25519PrivateKey
+    ) -> None:
+        domain = (
+            b"exomem.capacity-live-receipt.v1\0"
+            if receipt["issuer"] == "exomem-live-kubernetes-hcloud-v1"
+            else b"exomem.capacity-economics-receipt.v1\0"
+        )
         path.write_text(
-            json.dumps(module.sign_receipt(receipt, key), sort_keys=True),
+            json.dumps(_signed_receipt(receipt, private_key, domain=domain), sort_keys=True),
             encoding="utf-8",
         )
         path.chmod(0o600)
 
-    write_receipt(capacity_path, capacity, capacity_key)
-    write_receipt(economics_path, economics, economics_key)
+    write_receipt(capacity_path, capacity, capacity_private_key)
+    write_receipt(economics_path, economics, economics_private_key)
     decision = module.evaluate_files(
         contract,
         capacity_receipt=capacity_path,
         economics_receipt=economics_path,
-        capacity_key=capacity_key,
-        economics_key=economics_key,
+        capacity_public_key=capacity_public_key,
+        economics_public_key=economics_public_key,
+        now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
     )
     assert decision.allowed is True
 
-    write_receipt(economics_path, economics, capacity_key)
+    replay_state = tmp_path / "capacity-gate-state.json"
+    assert module.evaluate_files(
+        contract,
+        capacity_receipt=capacity_path,
+        economics_receipt=economics_path,
+        capacity_public_key=capacity_public_key,
+        economics_public_key=economics_public_key,
+        replay_state_path=replay_state,
+        now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+    ).allowed
+    assert stat.S_IMODE(replay_state.stat().st_mode) == 0o600
+    with pytest.raises(module.CapacityGateError, match="replayed"):
+        module.evaluate_files(
+            contract,
+            capacity_receipt=capacity_path,
+            economics_receipt=economics_path,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            replay_state_path=replay_state,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+        )
+
+    substituted_capacity_key = Ed25519PrivateKey.generate()
+    write_receipt(capacity_path, capacity, substituted_capacity_key)
+    with pytest.raises(module.CapacityGateError, match="not trusted"):
+        module.evaluate_files(
+            contract,
+            capacity_receipt=capacity_path,
+            economics_receipt=economics_path,
+            capacity_public_key=substituted_capacity_key.public_key(),
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+        )
+    write_receipt(capacity_path, capacity, capacity_private_key)
+
+    write_receipt(economics_path, economics, capacity_private_key)
     with pytest.raises(module.CapacityGateError, match="unauthenticated"):
         module.evaluate_files(
             contract,
             capacity_receipt=capacity_path,
             economics_receipt=economics_path,
-            capacity_key=capacity_key,
-            economics_key=economics_key,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
         )
-    write_receipt(economics_path, economics, economics_key)
+    write_receipt(economics_path, economics, economics_private_key)
 
     blocked_capacity = {**capacity, "active_user_cells": 6, "attached_volumes": 6}
-    write_receipt(capacity_path, blocked_capacity, capacity_key)
+    write_receipt(capacity_path, blocked_capacity, capacity_private_key)
     blocked = module.evaluate_files(
         contract,
         capacity_receipt=capacity_path,
         economics_receipt=economics_path,
-        capacity_key=capacity_key,
-        economics_key=economics_key,
+        capacity_public_key=capacity_public_key,
+        economics_public_key=economics_public_key,
+        now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
     )
     assert blocked.allowed is False
     assert blocked.reason == "active-user-cell-capacity-exhausted"
@@ -470,8 +706,386 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
             contract,
             capacity_receipt=capacity_path,
             economics_receipt=economics_path,
-            capacity_key=capacity_key,
-            economics_key=economics_key,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+        )
+
+    write_receipt(capacity_path, capacity, capacity_private_key)
+    with pytest.raises(module.CapacityGateError, match="expired"):
+        module.evaluate_files(
+            contract,
+            capacity_receipt=capacity_path,
+            economics_receipt=economics_path,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 6, tzinfo=UTC),
+        )
+
+    cross_domain = _signed_receipt(
+        capacity,
+        capacity_private_key,
+        domain=b"exomem.capacity-economics-receipt.v1\0",
+    )
+    capacity_path.write_text(json.dumps(cross_domain), encoding="utf-8")
+    with pytest.raises(module.CapacityGateError, match="unauthenticated"):
+        module.evaluate_files(
+            contract,
+            capacity_receipt=capacity_path,
+            economics_receipt=economics_path,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+        )
+
+
+def test_active_secret_registry_is_signed_complete_and_explicit(tmp_path: Path) -> None:
+    module = _load("infra/scripts/apply_active_sops_secrets.py", "apply_active_sops_secrets_test")
+    matrix_path = tmp_path / "matrix.json"
+    artifact_v1 = tmp_path / "secret.v1.sops.json"
+    artifact_v2 = tmp_path / "secret.v2.sops.json"
+    artifact_v1.write_text('{"sops": {}}', encoding="utf-8")
+    artifact_v2.write_text('{"sops": {}}', encoding="utf-8")
+    matrix = {
+        "schema_version": 1,
+        "secrets": {
+            "example": {
+                "destinations": {
+                    "k3s.example.active": {
+                        "kind": "sops_k8s_secret",
+                        "slot": "active",
+                        "target": str(tmp_path / "secret.{version}.sops.json"),
+                        "namespace": "exomem-platform",
+                        "kubernetes_secret": "example",
+                        "key": "value",
+                    }
+                }
+            }
+        },
+    }
+    matrix_path.write_text(json.dumps(matrix), encoding="utf-8")
+    private_key = Ed25519PrivateKey.generate()
+    public_key_path = tmp_path / "registry-public.pem"
+    public_key_path.write_bytes(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    public_key_path.chmod(0o644)
+    public_key_id = hashlib.sha256(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    trust_contract_path = tmp_path / "active-secret-registry-trust.json"
+    trust_contract_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "algorithm": "ed25519",
+                "public_key_id": public_key_id,
+                "private_key_custody": "secret-release-custodian-only",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def write_registry(version: str, artifact: Path) -> Path:
+        unsigned = {
+            "schema_version": 1,
+            "matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+            "destinations": {
+                "k3s.example.active": {
+                    "secret": "example",
+                    "version": version,
+                    "artifact_sha256": hashlib.sha256(artifact.read_bytes()).hexdigest(),
+                }
+            },
+        }
+        registry = _signed_receipt(unsigned, private_key)
+        path = tmp_path / "active-secret-registry.json"
+        path.write_text(json.dumps(registry), encoding="utf-8")
+        path.chmod(0o644)
+        return path
+
+    registry_path = write_registry("v2", artifact_v2)
+    entries = module.load_registry(
+        matrix_path=matrix_path,
+        registry_path=registry_path,
+        public_key_path=public_key_path,
+        trust_contract_path=trust_contract_path,
+    )
+    assert [(item.destination, item.version, item.artifact) for item in entries] == [
+        ("k3s.example.active", "v2", artifact_v2)
+    ]
+
+    tampered = json.loads(registry_path.read_text(encoding="utf-8"))
+    tampered["destinations"]["k3s.example.active"]["version"] = "v1"
+    registry_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(module.ActiveSecretRegistryError, match="signature"):
+        module.load_registry(
+            matrix_path=matrix_path,
+            registry_path=registry_path,
+            public_key_path=public_key_path,
+            trust_contract_path=trust_contract_path,
+        )
+
+    incomplete = _signed_receipt(
+        {
+            "schema_version": 1,
+            "matrix_sha256": hashlib.sha256(matrix_path.read_bytes()).hexdigest(),
+            "destinations": {},
+        },
+        private_key,
+    )
+    registry_path.write_text(json.dumps(incomplete), encoding="utf-8")
+    with pytest.raises(module.ActiveSecretRegistryError, match="exact active destination set"):
+        module.load_registry(
+            matrix_path=matrix_path,
+            registry_path=registry_path,
+            public_key_path=public_key_path,
+            trust_contract_path=trust_contract_path,
+        )
+
+    substituted_private_key = Ed25519PrivateKey.generate()
+    public_key_path.write_bytes(
+        substituted_private_key.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+    )
+    with pytest.raises(module.ActiveSecretRegistryError, match="not trusted"):
+        module.load_registry(
+            matrix_path=matrix_path,
+            registry_path=write_registry("v2", artifact_v2),
+            public_key_path=public_key_path,
+            trust_contract_path=trust_contract_path,
+        )
+
+
+def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
+    tmp_path: Path,
+) -> None:
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_collector_test",
+    )
+    contract = json.loads((INFRA / "operations/private-alpha-capacity-v1.json").read_text())
+    contract["live_costs_verified"] = True
+    contract["monthly_costs_eur_ex_vat"] = {
+        key: 1.0 for key in contract["monthly_costs_eur_ex_vat"]
+    }
+    contract["paddle"] = {
+        "actual_fee_tax_verified": True,
+        "fee_model": "verified-live-statement",
+        "tax_treatment": "merchant-of-record",
+        "net_receipt_eur_for_friend_price": 4.1,
+        "evidence_recorded_at": "2026-07-14T12:00:00Z",
+    }
+    contract["evidence"] = {
+        "provider_invoice_reference": hashlib.sha256(b"reviewed provider invoice").hexdigest(),
+        "paddle_statement_reference": hashlib.sha256(b"reviewed Paddle statement").hexdigest(),
+        "recorded_at": "2026-07-14T12:00:00Z",
+    }
+    capacity_private_key = Ed25519PrivateKey.generate()
+    economics_private_key = Ed25519PrivateKey.generate()
+    capacity_public_key = capacity_private_key.public_key()
+    economics_public_key = economics_private_key.public_key()
+    contract["receipt_authentication"]["capacity_public_key_id"] = hashlib.sha256(
+        capacity_public_key.public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    contract["receipt_authentication"]["economics_public_key_id"] = hashlib.sha256(
+        economics_public_key.public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    snapshot = module.capacity_snapshot_from_documents(
+        tenant_namespaces={
+            "kind": "NamespaceList",
+            "items": [{"metadata": {"name": "must-not-leak"}} for _ in range(4)],
+        },
+        cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+        hcloud_pages=[
+            {
+                "volumes": [
+                    {"id": 11, "server": 101},
+                    {"id": 12, "server": None},
+                    {"id": 13, "server": 102},
+                ],
+                "meta": {"pagination": {"next_page": None}},
+            }
+        ],
+    )
+    observed_at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
+    capacity = module.build_capacity_receipt(
+        contract=contract,
+        snapshot=snapshot,
+        sequence=42,
+        observed_at=observed_at,
+        private_key=capacity_private_key,
+        receipt_id="123e4567-e89b-42d3-a456-426614174001",
+    )
+    assert capacity["active_user_cells"] == 4
+    assert capacity["attached_volumes"] == 2
+    assert capacity["expires_at"] == "2026-07-14T12:05:00Z"
+    assert "must-not-leak" not in json.dumps(capacity)
+
+    provider_invoice = tmp_path / "provider-invoice.pdf"
+    paddle_statement = tmp_path / "paddle-statement.csv"
+    provider_invoice.write_bytes(b"reviewed provider invoice")
+    paddle_statement.write_bytes(b"reviewed Paddle statement")
+    economics = module.build_economics_receipt(
+        contract=contract,
+        evidence={
+            "monthly_costs_eur_ex_vat": {key: 1.0 for key in contract["monthly_costs_eur_ex_vat"]},
+            "paddle": {
+                "actual_fee_tax_verified": True,
+                "fee_model": "verified-live-statement",
+                "tax_treatment": "merchant-of-record",
+                "net_receipt_eur_for_friend_price": 4.1,
+            },
+        },
+        provider_invoice=provider_invoice,
+        paddle_statement=paddle_statement,
+        sequence=7,
+        observed_at=observed_at,
+        private_key=economics_private_key,
+        receipt_id="123e4567-e89b-42d3-a456-426614174002",
+    )
+    assert (
+        economics["provider_invoice_sha256"]
+        == hashlib.sha256(provider_invoice.read_bytes()).hexdigest()
+    )
+    assert (
+        economics["paddle_statement_sha256"]
+        == hashlib.sha256(paddle_statement.read_bytes()).hexdigest()
+    )
+
+    for receipt, public_key, domain in (
+        (capacity, capacity_public_key, b"exomem.capacity-live-receipt.v1\0"),
+        (economics, economics_public_key, b"exomem.capacity-economics-receipt.v1\0"),
+    ):
+        authentication = receipt["authentication"]
+        unsigned = {key: value for key, value in receipt.items() if key != "authentication"}
+        canonical = json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode()
+        public_key.verify(bytes.fromhex(authentication["signature"]), domain + canonical)
+        with pytest.raises(InvalidSignature):
+            public_key.verify(bytes.fromhex(authentication["signature"]), canonical)
+
+
+def test_rotation_collector_rejects_uncontracted_or_failed_observations(tmp_path: Path) -> None:
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_rotation_collector_test",
+    )
+    contract = json.loads((INFRA / "contracts/rotation-drills-v1.json").read_text())
+    private_key = Ed25519PrivateKey.generate()
+    contract["receipt_authentication"]["public_key_id"] = hashlib.sha256(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).hexdigest()
+    observation = {
+        "drill_id": "123e4567-e89b-42d3-a456-426614174000",
+        "rotation": "cloudflare-tunnel",
+        "requirement": "cloudflared_rollout_ready",
+        "old_version": "v1",
+        "new_version": "v2",
+        "passed": True,
+    }
+    receipt = module.build_rotation_receipt(
+        contract=contract,
+        observation=observation,
+        observed_at=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
+        private_key=private_key,
+        receipt_id="123e4567-e89b-42d3-a456-426614174003",
+    )
+    assert receipt["expires_at"] == "2026-07-15T12:00:00Z"
+    unsigned = {key: value for key, value in receipt.items() if key != "authentication"}
+    private_key.public_key().verify(
+        bytes.fromhex(receipt["authentication"]["signature"]),
+        b"exomem.rotation-drill-receipt.v1\0"
+        + json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode(),
+    )
+    with pytest.raises(module.ReceiptCollectorError, match="not contracted"):
+        module.build_rotation_receipt(
+            contract=contract,
+            observation={**observation, "requirement": "operator_says_it_is_fine"},
+            observed_at=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
+            private_key=private_key,
+            receipt_id="123e4567-e89b-42d3-a456-426614174004",
+        )
+    with pytest.raises(module.ReceiptCollectorError, match="did not pass"):
+        module.build_rotation_receipt(
+            contract=contract,
+            observation={**observation, "passed": False},
+            observed_at=datetime(2026, 7, 14, 12, 0, tzinfo=UTC),
+            private_key=private_key,
+            receipt_id="123e4567-e89b-42d3-a456-426614174005",
+        )
+
+
+def test_operational_collector_alerts_are_exact_https_and_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_alert_test",
+    )
+    target = "https://alerts.example.invalid/hooks/opaque"
+
+    class Response:
+        status = 204
+
+        def __init__(self, final_url: str) -> None:
+            self.final_url = final_url
+
+        def geturl(self) -> str:
+            return self.final_url
+
+        def __enter__(self) -> Response:
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class Opener:
+        final_url = target
+
+        def open(self, request: object, timeout: int) -> Response:
+            assert timeout == 10
+            headers = dict(request.header_items())
+            assert headers["X-exomem-alert-transition"] == ("capacity-receipt-collection-failed")
+            payload = json.loads(request.data)
+            assert payload == {
+                "schema_version": 1,
+                "source": {"component": "capacity-receipt-collector"},
+                "transition": {"active": True, "code": "collection-failed"},
+            }
+            return Response(self.final_url)
+
+    opener = Opener()
+    monkeypatch.setattr(module.urllib.request, "build_opener", lambda *_args: opener)
+    module.deliver_alert(
+        webhook_url=target,
+        component="capacity-receipt-collector",
+        code="collection-failed",
+        transition_id="capacity-receipt-collection-failed",
+    )
+    opener.final_url = "https://alerts.example.invalid/redirected"
+    with pytest.raises(module.ReceiptCollectorError, match="delivery failed"):
+        module.deliver_alert(
+            webhook_url=target,
+            component="capacity-receipt-collector",
+            code="collection-failed",
+            transition_id="capacity-receipt-collection-failed",
         )
 
 
@@ -547,6 +1161,35 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
     }
     assert contract["volume_rebind"]["public_endpoint"] is None
     assert contract["volume_rebind"]["worker_primitive"] == ("VolumeLifecycleWorker.rebind_static")
+    assert contract["provider_recovery_identity"] == {
+        "algorithm": "ed25519",
+        "version": 1,
+        "annotation": "exomem.io/recovery-envelope",
+        "cell_values": "providerRecoveryEnvelopes",
+        "identity_issuer_environment": "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+        "routine_worker_environment": "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY",
+        "routine_worker_material": "public-key-only",
+        "signing_seed_mounts": [
+            "exomem-provisioner-api",
+            "exomem-durability-backup",
+            "exomem-database-backup",
+            "exomem-volume-worker",
+        ],
+    }
+    assert contract["durability"] == {
+        "workload_contract": "infra/contracts/durability-workloads-v1.json",
+        "storage_contract": "infra/contracts/durability-storage-v1.json",
+        "storage_config_map": "exomem-durability-storage",
+        "workloads": {
+            "delivery_gc": "exomem-export-gc",
+            "vault_backup": "exomem-durability-backup",
+            "database_backup": "exomem-database-backup",
+            "deletion": "exomem-deletion-worker",
+            "volume_lifecycle": "exomem-volume-worker",
+        },
+        "private_signers": ["exomem-provider-recovery-signer/private-key"],
+        "public_verifier": "exomem-provider-recovery-verifier/public-key",
+    }
     secret_contract = json.loads(
         (INFRA / "contracts/secret-destinations-v1.json").read_text(encoding="utf-8")
     )["secrets"]
@@ -566,6 +1209,11 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-hosted-release-v1",
             "exomem-provisioner-api",
             "exomem-provisioner-worker",
+            "verify_provisioner_image.py",
+            "durability-values.json",
+            "recovery_bucket_name",
+            "user_export_bucket_name",
+            "database_backup_bucket_name",
         ],
         "cell.md": ["/cells/health", "X-Exomem-Provisioner-Protocol"],
         "maintenance.md": [
@@ -573,8 +1221,19 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "/cells/resume",
             "X-Exomem-Provisioner-Protocol",
         ],
-        "backup-restore.md": ["/cells/restore", "X-Exomem-Provisioner-Protocol"],
-        "deletion.md": ["/cells/destroy", "X-Exomem-Provisioner-Protocol"],
+        "backup-restore.md": [
+            "/cells/restore",
+            "X-Exomem-Provisioner-Protocol",
+            "exomem-durability-backup",
+            "exomem-database-backup",
+            "exomem-export-gc",
+            "exomem-durability-storage",
+        ],
+        "deletion.md": [
+            "/cells/destroy",
+            "X-Exomem-Provisioner-Protocol",
+            "exomem-deletion-worker",
+        ],
         "volume-rebind.md": [
             "/cells/restore",
             "VolumeLifecycleWorker.rebind_static",
@@ -586,17 +1245,165 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             assert marker in text, (filename, marker)
 
 
+def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> None:
+    matrix = json.loads(
+        (INFRA / "contracts/secret-destinations-v1.json").read_text(encoding="utf-8")
+    )
+    materialized = {
+        f"{destination['kubernetes_secret']}/{destination['key']}"
+        for secret in matrix["secrets"].values()
+        for destination in secret["destinations"].values()
+        if destination["kind"] == "sops_k8s_secret"
+    }
+    required = {
+        "exomem-provisioner-auth/credential",
+        "exomem-provisioner-database/url",
+        "exomem-provisioner-wrapping-key/key-material",
+        "exomem-provider-recovery-signer/private-key",
+        "exomem-provider-recovery-verifier/public-key",
+        "exomem-capacity-receipt-signer/private-key",
+        "exomem-hcloud-capacity-reader/token",
+        "exomem-provisioner-hcloud-token/token",
+        "exomem-recovery-upload-key-id/application-key-id",
+        "exomem-recovery-upload-key/application-key",
+        "exomem-recovery-delete-key-id/application-key-id",
+        "exomem-recovery-delete-key/application-key",
+        "exomem-user-export-delete-key-id/application-key-id",
+        "exomem-user-export-delete-key/application-key",
+        "exomem-database-backup-upload-key-id/application-key-id",
+        "exomem-database-backup-upload-key/application-key",
+        "exomem-database-backup-delete-key-id/application-key-id",
+        "exomem-database-backup-delete-key/application-key",
+        "exomem-database-backup-pg-service/pg_service.conf",
+        "exomem-database-backup-pgpass/pgpass",
+    }
+    assert required <= materialized
+    assert "exomem-provider-recovery-volume-signer/private-key" not in materialized
+
+    terraform_outputs = {
+        source["output"]
+        for secret in matrix["secrets"].values()
+        for source in secret["sources"]
+        if source["kind"] == "terraform" and source["root"] == "durability"
+    }
+    assert {
+        "user_export_upload_application_key_id",
+        "user_export_upload_application_key",
+        "user_export_restore_application_key_id",
+        "user_export_restore_application_key",
+        "user_export_delivery_application_key_id",
+        "user_export_delivery_application_key",
+        "database_backup_restore_application_key_id",
+        "database_backup_restore_application_key",
+        "etcd_snapshot_upload_application_key_id",
+        "etcd_snapshot_upload_application_key",
+        "etcd_snapshot_restore_application_key_id",
+        "etcd_snapshot_restore_application_key",
+    } <= terraform_outputs
+    assert "database_backup_application_key_id" not in terraform_outputs
+    assert "database_backup_application_key" not in terraform_outputs
+
+
+def test_receipt_keypairs_have_atomic_generated_trust_roots() -> None:
+    matrix_path = INFRA / "contracts/secret-destinations-v1.json"
+    matrix_document = json.loads(matrix_path.read_text(encoding="utf-8"))
+    secrets = matrix_document["secrets"]
+    for pair_name in (
+        "provider_recovery",
+        "capacity_receipt",
+        "economics_receipt",
+        "rotation_receipt",
+    ):
+        assert secrets[f"{pair_name}_signing_key"]["sources"] == [
+            {"kind": "generated-ed25519-private"}
+        ]
+        assert secrets[f"{pair_name}_public_key"]["sources"] == [{"kind": "derived-ed25519-public"}]
+    assert (
+        "escrow.provider-recovery-signer.active"
+        in secrets["provider_recovery_signing_key"]["destinations"]
+    )
+    handoff = _load("infra/scripts/secret_handoff.py", "atomic_secret_handoff_test")
+    loaded = handoff.load_matrix(matrix_path)
+    assert loaded.secrets["provider_recovery_signing_key"].sources[0].kind == (
+        "generated-ed25519-private"
+    )
+    assert (INFRA / "scripts/provider_recovery_keypair_handoff.py").is_file()
+
+
+@pytest.mark.parametrize(
+    ("pair_name", "expected_destination_kinds"),
+    [
+        ("provider_recovery", ["sops_k8s_secret", "sops_escrow", "sops_k8s_secret"]),
+        ("capacity_receipt", ["sops_k8s_secret", "sops_escrow"]),
+        ("economics_receipt", ["sops_escrow", "sops_escrow"]),
+        ("rotation_receipt", ["sops_escrow", "sops_escrow"]),
+    ],
+)
+def test_atomic_receipt_keypair_handoff_routes_matching_halves(
+    pair_name: str,
+    expected_destination_kinds: list[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    handoff = _load("infra/scripts/secret_handoff.py", f"secret_handoff_{pair_name}")
+    keypair = _load(
+        "infra/scripts/provider_recovery_keypair_handoff.py",
+        f"keypair_handoff_{pair_name}",
+    )
+    monkeypatch.setattr(keypair, "_load_handoff", lambda: handoff)
+    sealed: list[tuple[str, bytes]] = []
+
+    def seal(*, destination, secret, version, repository_root, **_kwargs) -> None:
+        target = repository_root / destination.fields["target"].format(version=version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sops-ciphertext")
+        sealed.append((destination.kind, secret))
+
+    monkeypatch.setattr(handoff, "_seal_k8s_secret", seal)
+    monkeypatch.setattr(handoff, "_seal_named_document", seal)
+    keypair.execute_keypair_handoff(
+        matrix_path=INFRA / "contracts/secret-destinations-v1.json",
+        repository_root=tmp_path,
+        version="v1",
+        sops_bin="sops",
+        pair_name=pair_name,
+    )
+
+    assert [kind for kind, _ in sealed] == expected_destination_kinds
+    matrix = handoff.load_matrix(INFRA / "contracts/secret-destinations-v1.json")
+    private_count = len(matrix.secrets[f"{pair_name}_signing_key"].destinations)
+    private_values = [value for _, value in sealed[:private_count]]
+    public_value = sealed[private_count][1]
+    assert len(set(private_values)) == 1
+    private_raw = base64.urlsafe_b64decode(private_values[0] + b"==")
+    expected_public = (
+        Ed25519PrivateKey.from_private_bytes(private_raw)
+        .public_key()
+        .public_bytes(
+            encoding=serialization.Encoding.Raw,
+            format=serialization.PublicFormat.Raw,
+        )
+    )
+    if pair_name in {"economics_receipt", "rotation_receipt"}:
+        public_key = serialization.load_pem_public_key(public_value)
+        assert (
+            public_key.public_bytes(
+                encoding=serialization.Encoding.Raw,
+                format=serialization.PublicFormat.Raw,
+            )
+            == expected_public
+        )
+    else:
+        assert base64.urlsafe_b64decode(public_value + b"==") == expected_public
+
+
 def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> None:
     module = _load("infra/scripts/prepare_hosted_release.py", "prepare_hosted_release_test")
-    registry = [
-        {
-            "name": f"command_{index:02d}",
-            "readOnly": index % 2 == 0,
-            "mode": "read" if index % 2 == 0 else "write",
-            "tier": 1,
-            "capability": "core",
-        }
-        for index in range(21)
+    validation_values = yaml.safe_load(
+        (INFRA / "helm/platform/values.validation.yaml").read_text(encoding="utf-8")
+    )
+    registry = json.loads(validation_values["provisioner"]["releaseManifestJson"])[
+        "commandRegistry"
     ]
     manifest = {
         "artifact": "exomem-hosted-release",
@@ -656,6 +1463,87 @@ def test_release_manifest_is_one_fail_closed_deployment_unit(tmp_path: Path) -> 
             control_hostname="memory.example.test",
             transfer_hostname="transfer.example.test",
         )
+
+    noncanonical = json.loads(json.dumps(manifest))
+    noncanonical["commandRegistry"][0]["name"] = "forged_command"
+    manifest_path.write_text(json.dumps(noncanonical), encoding="utf-8")
+    with pytest.raises(module.ReleaseManifestError, match="canonical"):
+        module.prepare(
+            manifest_path=manifest_path,
+            values_path=values_path,
+            provisioner_image="ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64,
+            control_hostname="memory.example.test",
+            transfer_hostname="transfer.example.test",
+        )
+
+    boolean_schema_version = {**manifest, "schemaVersion": True}
+    manifest_path.write_text(json.dumps(boolean_schema_version), encoding="utf-8")
+    with pytest.raises(module.ReleaseManifestError, match="identity"):
+        module.prepare(
+            manifest_path=manifest_path,
+            values_path=values_path,
+            provisioner_image="ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64,
+            control_hostname="memory.example.test",
+            transfer_hostname="transfer.example.test",
+        )
+
+
+def test_provisioner_image_smoke_checks_every_deployed_entrypoint_without_network() -> None:
+    module = _load("infra/scripts/verify_provisioner_image.py", "verify_provisioner_image_test")
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
+
+    image = "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64
+    module.verify(image=image, container_binary="docker", run=run)
+    assert len(calls) == 1
+    argv = calls[0]
+    assert argv[:7] == [
+        "docker",
+        "run",
+        "--rm",
+        "--network=none",
+        "--entrypoint",
+        "python",
+        image,
+    ]
+    probe = argv[-1]
+    for command in (
+        "exomem-provisioner-api",
+        "exomem-provisioner-worker",
+        "exomem-export-gc",
+        "exomem-durability-backup-worker",
+        "exomem-database-backup-worker",
+        "exomem-deletion-worker",
+        "exomem-volume-worker",
+    ):
+        assert command in probe
+    assert "entry.load()" in probe
+    assert "/usr/bin/pg_dump" in probe
+
+    with pytest.raises(module.ProvisionerImageVerificationError, match="immutable"):
+        module.verify(
+            image="ghcr.io/artexis10/exomem-provisioner:latest",
+            container_binary="docker",
+            run=run,
+        )
+
+    def fail(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(argv, 1, stdout="secret output", stderr="more secret")
+
+    with pytest.raises(module.ProvisionerImageVerificationError, match="smoke failed") as caught:
+        module.verify(image=image, container_binary="docker", run=fail)
+    assert "secret output" not in str(caught.value)
+
+
+def test_full_validation_runs_published_provisioner_image_smoke_when_selected() -> None:
+    validation = (INFRA / "scripts/validate.sh").read_text(encoding="utf-8")
+    assert 'if [[ -n "${PROVISIONER_IMAGE:-}" ]]' in validation
+    assert '"${script_dir}/verify_provisioner_image.py"' in validation
+    assert '--image "${PROVISIONER_IMAGE}"' in validation
 
 
 def test_network_probe_plan_contains_every_denied_boundary() -> None:
@@ -915,6 +1803,7 @@ def test_new_operator_scripts_are_executable() -> None:
         "capacity_gate.py",
         "network_policy_probes.py",
         "prepare_hosted_release.py",
+        "verify_provisioner_image.py",
         "external_blackbox.py",
     ):
         mode = (INFRA / "scripts" / name).stat().st_mode

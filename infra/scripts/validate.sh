@@ -49,6 +49,7 @@ done
   --repository-config "${helm_repository_config}" \
   --repository-cache "${helm_repository_cache}"
 "${helm_bin}" lint "${infra_dir}/helm/platform" --strict \
+  --namespace exomem-platform \
   --values "${infra_dir}/helm/platform/values.validation.yaml"
 "${helm_bin}" template exomem-platform "${infra_dir}/helm/platform" \
   --namespace exomem-platform \
@@ -78,7 +79,7 @@ HELM_BIN="${helm_bin}" \
 uv run --frozen pytest -q "${repo_root}"/tests/test_hosted_*.py
 uvx --from "ruff==${RUFF_VERSION}" ruff check \
   "${repo_root}"/tests/test_hosted_*.py "${infra_dir}"/scripts/*.py \
-  "${infra_dir}/helm/platform/files/scheduler_runtime.py"
+  "${infra_dir}"/helm/platform/files/*.py
 uvx --from "mypy==${MYPY_VERSION}" mypy \
   --follow-imports skip --ignore-missing-imports --check-untyped-defs \
   "${infra_dir}"/scripts/*.py
@@ -86,6 +87,11 @@ uv run --project "${infra_dir}/provisioner" --frozen pytest -q \
   --confcutdir="${infra_dir}/provisioner" "${infra_dir}/provisioner/tests"
 uv run --project "${infra_dir}/provisioner" --frozen ruff check \
   "${infra_dir}/provisioner/src" "${infra_dir}/provisioner/tests"
+if [[ -n "${PROVISIONER_IMAGE:-}" ]]; then
+  "${script_dir}/verify_provisioner_image.py" \
+    --image "${PROVISIONER_IMAGE}" \
+    --container-binary "${CONTAINER_BIN:-docker}"
+fi
 shellcheck "${script_dir}"/*.sh
 "${trivy_bin}" fs --scanners secret --exit-code 1 --no-progress \
   --skip-dirs .git --skip-dirs .venv --skip-dirs .venv-hosted-ci \

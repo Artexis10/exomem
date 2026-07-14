@@ -1,0 +1,699 @@
+{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+{{- $workloadsRaw := .Files.Get "files/durability-workloads-v1.json" -}}
+{{- $storageRaw := .Files.Get "files/durability-storage-v1.json" -}}
+{{- if ne .Values.durability.contractSha256 ($workloadsRaw | sha256sum) -}}
+{{- fail "durability workload contract SHA-256 mismatch" -}}
+{{- end -}}
+{{- if ne .Values.durability.storageContractSha256 ($storageRaw | sha256sum) -}}
+{{- fail "durability storage contract SHA-256 mismatch" -}}
+{{- end -}}
+{{- $workloads := $workloadsRaw | mustFromJson -}}
+{{- if or (ne (toJson $workloads.schemaVersion) "1") (ne $workloads.namespace .Release.Namespace) -}}
+{{- fail "durability workload contract does not target this release" -}}
+{{- end -}}
+{{- $delivery := $workloads.workloads.deliveryGc -}}
+{{- $backup := $workloads.workloads.vaultBackup -}}
+{{- $database := $workloads.workloads.databaseBackup -}}
+{{- $deletion := $workloads.workloads.deletion -}}
+{{- $volume := $workloads.workloads.volumeLifecycle -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-durability-storage
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-durability
+  annotations:
+    exomem.io/storage-contract-sha256: {{ $storageRaw | sha256sum | quote }}
+data:
+  s3-endpoint: {{ .Values.durability.b2Endpoint | quote }}
+  s3-region: {{ .Values.durability.b2Region | quote }}
+  recovery-bucket: {{ .Values.durability.recoveryBucket | quote }}
+  user-export-bucket: {{ .Values.durability.userExportBucket | quote }}
+  database-backup-bucket: {{ .Values.durability.databaseBackupBucket | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-durability-workload-contract
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-durability
+  annotations:
+    exomem.io/durability-contract-sha256: {{ $workloadsRaw | sha256sum | quote }}
+data:
+  durability-workloads-v1.json: |-
+{{ $workloadsRaw | indent 4 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $delivery.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $backup.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $database.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $deletion.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $volume.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-durability-backup
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "delete", "get", "patch", "update"]
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes"]
+    verbs: ["get", "list", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-durability-backup
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-durability-backup
+subjects:
+  - kind: ServiceAccount
+    name: {{ $backup.serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-deletion-worker
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["delete", "get", "list", "patch", "watch"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["delete"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["delete", "get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets"]
+    verbs: ["get"]
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes"]
+    verbs: ["delete", "get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-deletion-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-deletion-worker
+subjects:
+  - kind: ServiceAccount
+    name: {{ $deletion.serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-volume-worker
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["persistentvolumes"]
+    verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "delete", "get", "patch", "update"]
+  - apiGroups: ["storage.k8s.io"]
+    resources: ["storageclasses"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-volume-worker
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-volume-worker
+subjects:
+  - kind: ServiceAccount
+    name: {{ $volume.serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: exomem-export-gc
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-export-gc
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  schedule: {{ $delivery.schedule | quote }}
+  concurrencyPolicy: {{ $delivery.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $delivery.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $delivery.activeDeadlineSeconds }}
+      backoffLimit: {{ $delivery.backoffLimit }}
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: exomem-export-gc
+            app.kubernetes.io/part-of: exomem-hosted-durability
+        spec:
+          serviceAccountName: {{ $delivery.serviceAccount }}
+          automountServiceAccountToken: {{ $delivery.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: export-gc
+              image: {{ .Values.provisioner.image }}
+              imagePullPolicy: IfNotPresent
+              command: {{ $delivery.command | toJson }}
+              env:
+                - name: EXOMEM_DURABILITY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-database, key: url}
+                - name: EXOMEM_DURABILITY_DATABASE_SCHEMA
+                  value: {{ .Values.provisioner.databaseSchema | quote }}
+                - name: EXOMEM_DURABILITY_DATABASE_ROLE
+                  value: {{ .Values.provisioner.databaseRole | quote }}
+                - name: EXOMEM_DURABILITY_ENVELOPE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+                - name: EXOMEM_DURABILITY_B2_ENDPOINT_URL
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
+                - name: EXOMEM_DURABILITY_B2_REGION
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_BUCKET
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: user-export-bucket}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELETE_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delete-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELETE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delete-key, key: application-key}
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: {cpu: 10m, memory: 48Mi}
+                limits: {cpu: 250m, memory: 192Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: temporary, mountPath: /tmp}
+          volumes:
+            - name: temporary
+              emptyDir: {sizeLimit: 32Mi}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: exomem-durability-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-durability-backup
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  schedule: {{ $backup.schedule | quote }}
+  concurrencyPolicy: {{ $backup.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $backup.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $backup.activeDeadlineSeconds }}
+      backoffLimit: {{ $backup.backoffLimit }}
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: exomem-durability-backup
+            app.kubernetes.io/part-of: exomem-hosted-durability
+        spec:
+          serviceAccountName: {{ $backup.serviceAccount }}
+          automountServiceAccountToken: {{ $backup.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: vault-backup
+              image: {{ .Values.provisioner.image }}
+              imagePullPolicy: IfNotPresent
+              command: {{ $backup.command | toJson }}
+              env:
+                - name: EXOMEM_DURABILITY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-database, key: url}
+                - name: EXOMEM_DURABILITY_DATABASE_SCHEMA
+                  value: {{ .Values.provisioner.databaseSchema | quote }}
+                - name: EXOMEM_DURABILITY_DATABASE_ROLE
+                  value: {{ .Values.provisioner.databaseRole | quote }}
+                - name: EXOMEM_DURABILITY_ENVELOPE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+                - name: EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
+                      key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+                - name: EXOMEM_DURABILITY_B2_ENDPOINT_URL
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
+                - name: EXOMEM_DURABILITY_B2_REGION
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
+                - name: EXOMEM_DURABILITY_RECOVERY_BUCKET
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: recovery-bucket}
+                - name: EXOMEM_DURABILITY_RECOVERY_UPLOAD_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-recovery-upload-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_RECOVERY_UPLOAD_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-recovery-upload-key, key: application-key}
+                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
+                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_DURABILITY_MAX_CONCURRENCY
+                  value: {{ $backup.maxConcurrency | quote }}
+                - name: EXOMEM_DURABILITY_WORKER_ID
+                  valueFrom: {fieldRef: {fieldPath: metadata.name}}
+                - name: EXOMEM_DURABILITY_SCRATCH_ROOT
+                  value: /var/lib/exomem-scratch
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 1, memory: 768Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: scratch, mountPath: /var/lib/exomem-scratch}
+                - {name: temporary, mountPath: /tmp}
+                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+          volumes:
+            - name: scratch
+              emptyDir: {sizeLimit: 6Gi}
+            - name: temporary
+              emptyDir: {sizeLimit: 64Mi}
+            - name: hosted-release
+              configMap:
+                name: exomem-hosted-release-v1
+                items:
+                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: exomem-database-backup
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-database-backup
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  schedule: {{ $database.schedule | quote }}
+  concurrencyPolicy: {{ $database.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $database.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $database.activeDeadlineSeconds }}
+      backoffLimit: {{ $database.backoffLimit }}
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: exomem-database-backup
+            app.kubernetes.io/part-of: exomem-hosted-durability
+        spec:
+          serviceAccountName: {{ $database.serviceAccount }}
+          automountServiceAccountToken: {{ $database.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: {type: RuntimeDefault}
+          initContainers:
+            - name: prepare-pg-files
+              image: {{ .Values.provisioner.image }}
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ec"]
+              args:
+                - >-
+                  umask 077;
+                  cp /source/pg_service.conf /run/secrets/exomem/database-backup/pg_service.conf;
+                  cp /source/pgpass /run/secrets/exomem/database-backup/.pgpass;
+                  chmod 0600 /run/secrets/exomem/database-backup/pg_service.conf
+                  /run/secrets/exomem/database-backup/.pgpass
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: pg-source, mountPath: /source, readOnly: true}
+                - {name: pg-runtime, mountPath: /run/secrets/exomem/database-backup}
+          containers:
+            - name: database-backup
+              image: {{ .Values.provisioner.image }}
+              imagePullPolicy: IfNotPresent
+              command: {{ $database.command | toJson }}
+              env:
+                - name: EXOMEM_DURABILITY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-database, key: url}
+                - name: EXOMEM_DURABILITY_DATABASE_SCHEMA
+                  value: {{ .Values.provisioner.databaseSchema | quote }}
+                - name: EXOMEM_DURABILITY_DATABASE_ROLE
+                  value: {{ .Values.provisioner.databaseRole | quote }}
+                - name: EXOMEM_DURABILITY_ENVELOPE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+                - name: EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
+                      key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+                - name: EXOMEM_DURABILITY_B2_ENDPOINT_URL
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
+                - name: EXOMEM_DURABILITY_B2_REGION
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
+                - name: EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: database-backup-bucket}
+                - name: EXOMEM_DURABILITY_DATABASE_BACKUP_UPLOAD_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-database-backup-upload-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_DATABASE_BACKUP_UPLOAD_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-database-backup-upload-key, key: application-key}
+                - name: EXOMEM_DATABASE_BACKUP_PG_DUMP
+                  value: /usr/bin/pg_dump
+                - name: EXOMEM_DATABASE_BACKUP_PG_RESTORE
+                  value: /usr/bin/pg_restore
+                - name: EXOMEM_DATABASE_BACKUP_PSQL
+                  value: /usr/bin/psql
+                - name: EXOMEM_DATABASE_BACKUP_DROPDB
+                  value: /usr/bin/dropdb
+                - name: EXOMEM_DATABASE_BACKUP_CREATEDB
+                  value: /usr/bin/createdb
+                - name: EXOMEM_DATABASE_BACKUP_PG_SERVICE_FILE
+                  value: /run/secrets/exomem/database-backup/pg_service.conf
+                - name: EXOMEM_DATABASE_BACKUP_PGPASS_FILE
+                  value: /run/secrets/exomem/database-backup/.pgpass
+                - name: EXOMEM_DATABASE_BACKUP_PROOF_TENANT_ID
+                  value: {{ .Values.durability.databaseBackup.proofTenantId | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_PROOF_CELL_ID
+                  value: {{ .Values.durability.databaseBackup.proofCellId | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_SOURCE_SERVICE
+                  value: {{ .Values.durability.databaseBackup.sourceService | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_MAINTENANCE_SERVICE
+                  value: {{ .Values.durability.databaseBackup.maintenanceService | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_SCRATCH_SERVICE
+                  value: {{ .Values.durability.databaseBackup.scratchService | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_SCRATCH_DATABASE
+                  value: {{ .Values.durability.databaseBackup.scratchDatabase | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_EXPECTED_RESTORE_OWNER
+                  value: {{ .Values.durability.databaseBackup.expectedRestoreOwner | quote }}
+                - name: EXOMEM_DATABASE_BACKUP_VERIFICATION_SQL
+                  value: {{ .Values.durability.databaseBackup.verificationSql | quote }}
+                - name: EXOMEM_DURABILITY_SCRATCH_ROOT
+                  value: /var/lib/exomem-scratch
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 1, memory: 768Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: pg-runtime, mountPath: /run/secrets/exomem/database-backup, readOnly: true}
+                - {name: scratch, mountPath: /var/lib/exomem-scratch}
+                - {name: temporary, mountPath: /tmp}
+          volumes:
+            - name: pg-source
+              projected:
+                defaultMode: 0400
+                sources:
+                  - secret:
+                      name: exomem-database-backup-pg-service
+                      items:
+                        - {key: pg_service.conf, path: pg_service.conf}
+                  - secret:
+                      name: exomem-database-backup-pgpass
+                      items:
+                        - {key: pgpass, path: pgpass}
+            - name: pg-runtime
+              emptyDir: {sizeLimit: 1Mi}
+            - name: scratch
+              emptyDir: {sizeLimit: 2Gi}
+            - name: temporary
+              emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-deletion-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-deletion-worker
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  replicas: {{ $deletion.replicas }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: exomem-deletion-worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-deletion-worker
+        app.kubernetes.io/part-of: exomem-hosted-durability
+    spec:
+      serviceAccountName: {{ $deletion.serviceAccount }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: deletion-worker
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: IfNotPresent
+          command: {{ $deletion.command | toJson }}
+          env:
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-database, key: url}
+            - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+              value: {{ .Values.provisioner.databaseSchema | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+              value: {{ .Values.provisioner.databaseRole | quote }}
+            - name: EXOMEM_PROVISIONER_ENVELOPE_KEY
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+            - name: EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.providerRecoveryPublicKeySecret.name }}
+                  key: {{ .Values.provisioner.providerRecoveryPublicKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
+            - name: EXOMEM_PROVISIONER_B2_ENDPOINT_URL
+              valueFrom:
+                configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
+            - name: EXOMEM_PROVISIONER_B2_REGION
+              valueFrom:
+                configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
+            - name: EXOMEM_PROVISIONER_RECOVERY_BUCKET
+              valueFrom:
+                configMapKeyRef: {name: exomem-durability-storage, key: recovery-bucket}
+            - name: EXOMEM_PROVISIONER_USER_EXPORT_BUCKET
+              valueFrom:
+                configMapKeyRef: {name: exomem-durability-storage, key: user-export-bucket}
+            - name: EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: exomem-recovery-delete-key-id, key: application-key-id}
+            - name: EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY
+              valueFrom:
+                secretKeyRef: {name: exomem-recovery-delete-key, key: application-key}
+            - name: EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID
+              valueFrom:
+                secretKeyRef: {name: exomem-user-export-delete-key-id, key: application-key-id}
+            - name: EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY
+              valueFrom:
+                secretKeyRef: {name: exomem-user-export-delete-key, key: application-key}
+            - name: EXOMEM_PROVISIONER_WORKER_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: {cpu: 25m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: temporary
+          emptyDir: {sizeLimit: 64Mi}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-volume-worker
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-volume-worker
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  replicas: {{ $volume.replicas }}
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app.kubernetes.io/name: exomem-volume-worker}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-volume-worker
+        app.kubernetes.io/part-of: exomem-hosted-durability
+    spec:
+      serviceAccountName: {{ $volume.serviceAccount }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: volume-worker
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: IfNotPresent
+          command: {{ $volume.command | toJson }}
+          env:
+            - name: EXOMEM_PROVISIONER_BEARER
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-auth, key: credential}
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-database, key: url}
+            - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+              value: {{ .Values.provisioner.databaseSchema | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+              value: {{ .Values.provisioner.databaseRole | quote }}
+            - name: EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS
+              value: {{ .Values.provisioner.trustedProxyIps | quote }}
+            - name: EXOMEM_PROVISIONER_ENVELOPE_KEY
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+            - name: EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
+                  key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_HCLOUD_TOKEN
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
+            - name: EXOMEM_PROVISIONER_LOCATION
+              value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
+              value: {{ .Values.storage.encryptionSecretName | quote }}
+            - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE
+              value: {{ .Values.storage.encryptionSecretNamespace | quote }}
+            - name: EXOMEM_PROVISIONER_WORKER_ID
+              valueFrom: {fieldRef: {fieldPath: metadata.name}}
+            - name: HOME
+              value: /tmp
+          resources:
+            requests: {cpu: 25m, memory: 96Mi}
+            limits: {cpu: 500m, memory: 384Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: [ALL]}
+          volumeMounts:
+            - {name: temporary, mountPath: /tmp}
+      volumes:
+        - name: temporary
+          emptyDir: {sizeLimit: 64Mi}

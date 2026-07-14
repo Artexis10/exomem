@@ -37,6 +37,10 @@ _IMAGE = re.compile(r"ghcr\.io/artexis10/exomem@sha256:[a-f0-9]{64}\Z")
 _PROVISIONER_IMAGE = re.compile(r"ghcr\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}\Z")
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,62}\Z")
 _HOSTNAME = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,62}\.)+[a-z]{2,63}\Z")
+_CANONICAL_REGISTRY_PATH = (
+    Path(__file__).resolve().parents[1] / "helm/platform/files/canonical-command-registry-v1.json"
+)
+_CANONICAL_REGISTRY = json.loads(_CANONICAL_REGISTRY_PATH.read_text(encoding="utf-8"))
 
 
 class ReleaseManifestError(RuntimeError):
@@ -56,7 +60,11 @@ def _timestamp(value: Any) -> bool:
 def _validate_manifest(manifest: Any) -> dict[str, Any]:
     if not isinstance(manifest, dict) or set(manifest) != _FIELDS:
         raise ReleaseManifestError("release manifest must use the exact field set")
-    if manifest.get("artifact") != "exomem-hosted-release" or manifest.get("schemaVersion") != 1:
+    if (
+        manifest.get("artifact") != "exomem-hosted-release"
+        or type(manifest.get("schemaVersion")) is not int
+        or manifest.get("schemaVersion") != 1
+    ):
         raise ReleaseManifestError("release manifest identity is invalid")
     repository = manifest.get("sourceRepository")
     parsed_repository = urlsplit(repository) if isinstance(repository, str) else None
@@ -121,6 +129,8 @@ def _validate_manifest(manifest: Any) -> dict[str, Any]:
         names.append(name)
     if len(set(names)) != len(names):
         raise ReleaseManifestError("release command registry contains duplicates")
+    if registry != _CANONICAL_REGISTRY:
+        raise ReleaseManifestError("release command registry is not canonical")
     return manifest
 
 

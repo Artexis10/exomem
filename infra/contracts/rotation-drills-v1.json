@@ -1,5 +1,13 @@
 {
   "schema_version": 1,
+  "receipt_authentication": {
+    "algorithm": "ed25519",
+    "domain": "exomem.rotation-drill-receipt.v1",
+    "ttl_seconds": 86400,
+    "private_key_custody": "drill-collector-only",
+    "public_key_id": null,
+    "verifier_material": "public-key-only"
+  },
   "rotations": {
     "cloudflare-access": {
       "retirement_requires": [

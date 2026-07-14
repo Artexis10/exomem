@@ -23,6 +23,17 @@ Use the product destroy action. It immediately revokes service, stops billing,
 removes online resources, and remains pending while Object Lock protects recovery
 data. Never force-delete finalizers or buckets.
 
+The continuously reconciled `exomem-deletion-worker` is the only workload that
+receives HCloud write plus the tenant-recovery and user-export delete
+credentials. Complete database backups are system-scoped and are never exposed
+to tenant deletion; their aggregate retention cleanup is part of database
+durability. The deletion worker receives the provider-recovery public verifier,
+never the signing key. Its
+admission policy permits mutation only in opaque `exo-*` tenant namespaces or
+against a PV carrying an authenticated recovery envelope; its Secret RBAC is
+delete-only. The separate `exomem-volume-worker` owns authenticated PV/PVC and
+HCloud lifecycle work with the same governed provider-identity signing seed.
+
 ```bash
 kubectl -n exomem-platform port-forward service/exomem-provisioner 18080:8080
 ```
@@ -47,6 +58,7 @@ curl --fail-with-body --silent --show-error --max-redirs 0 --max-time 30 \
 ```bash
 kubectl get all,pvc,secret,ingressroute -A -l "exomem.io/tenant=$tenant_id"
 kubectl get pv -o jsonpath='{range .items[*]}{.metadata.labels.exomem\.io/tenant}{"\n"}{end}'
+kubectl -n exomem-platform rollout status deployment/exomem-deletion-worker --timeout=120s
 ```
 
 Final `deleted` requires independently true compute, storage, key, and all-tenant-

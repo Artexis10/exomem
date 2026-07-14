@@ -169,11 +169,10 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
         "sops_k8s_secret",
     }
 
-    database_backup = secrets["database_backup_key"]["destinations"]
-    assert set(database_backup) == {
-        "ansible.hosted-node.etcd-s3-secret-key.active",
-        "k3s.provisioner.database-backup-key.active",
-    }
+    etcd_snapshot_upload = secrets["etcd_snapshot_upload_key"]["destinations"]
+    assert set(etcd_snapshot_upload) == {"ansible.hosted-node.etcd-s3-secret-key.active"}
+    database_backup_upload = secrets["database_backup_upload_key"]["destinations"]
+    assert set(database_backup_upload) == {"k3s.provisioner.database-backup-upload-key.active"}
 
     assert "cell_credential" not in secrets
 

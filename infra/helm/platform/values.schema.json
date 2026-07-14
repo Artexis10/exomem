@@ -1,18 +1,51 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
-  "required": ["provisioner", "admission", "scheduler", "observability"],
+  "required": ["provisioner", "admission", "scheduler", "observability", "capacityCollector", "durability"],
   "properties": {
     "runtime": false,
     "provisioner": {
       "type": "object",
-      "required": ["image", "releaseManifestJson"],
+      "additionalProperties": false,
+      "required": ["image", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "releaseManifestJson", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret"],
       "properties": {
         "image": {
           "type": "string",
-          "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"
+          "pattern": "^ghcr\\.io/artexis10/exomem-provisioner@sha256:[a-f0-9]{64}$"
         },
-        "releaseManifestJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"}
+        "replicas": {"type": "integer", "minimum": 1, "maximum": 2},
+        "databaseSchema": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},
+        "databaseRole": {"type": "string", "pattern": "^[a-z][a-z0-9_]{2,62}$"},
+        "trustedProxyIps": {"type": "string", "minLength": 1},
+        "cellChartPath": {"type": "string", "pattern": "^/[^\\s]+$"},
+        "cellChartVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+        "helmBinary": {"type": "string", "pattern": "^/[^\\s]+$"},
+        "helmVersion": {"type": "string", "minLength": 1, "maxLength": 64},
+        "controlHostname": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "transferHostname": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+        "browserOrigin": {"type": "string", "pattern": "^https://[^/]+$"},
+        "releaseManifestJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"},
+        "location": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{1,31}$"},
+        "internalOrigin": {"type": "string", "pattern": "^https?://\\{resource\\}\\.\\{namespace\\}\\.svc\\.cluster\\.local:[0-9]{2,5}$"},
+        "pollSeconds": {"type": "string", "pattern": "^[1-9][0-9]*$"},
+        "providerRecoveryPublicKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+            "key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+          }
+        },
+        "providerRecoverySigningKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+            "key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+          }
+        }
       }
     },
     "admission": {
@@ -44,6 +77,63 @@
         "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
         "alertDeliverySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
         "alertDeliverySecretKey": {"type": "string", "minLength": 1}
+      }
+    },
+    "capacityCollector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schedule", "contractSha256", "stateConfigMap", "privateKeySecret", "hcloudTokenSecret"],
+      "properties": {
+        "schedule": {"const": "* * * * *"},
+        "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "stateConfigMap": {"const": "exomem-capacity-receipt"},
+        "privateKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"const": "exomem-capacity-receipt-signer"},
+            "key": {"const": "private-key"}
+          }
+        },
+        "hcloudTokenSecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"const": "exomem-hcloud-capacity-reader"},
+            "key": {"const": "token"}
+          }
+        }
+      }
+    },
+    "durability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["contractSha256", "storageContractSha256", "b2Endpoint", "b2Region", "recoveryBucket", "userExportBucket", "databaseBackupBucket", "databaseBackup"],
+      "properties": {
+        "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "storageContractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "b2Endpoint": {"type": "string", "pattern": "^https://[^/]+$"},
+        "b2Region": {"type": "string", "pattern": "^[a-z0-9-]{2,64}$"},
+        "recoveryBucket": {"type": "string", "pattern": "^[a-z0-9-]{6,63}$"},
+        "userExportBucket": {"type": "string", "pattern": "^[a-z0-9-]{6,63}$"},
+        "databaseBackupBucket": {"type": "string", "pattern": "^[a-z0-9-]{6,63}$"},
+        "databaseBackup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["proofTenantId", "proofCellId", "sourceService", "maintenanceService", "scratchService", "scratchDatabase", "expectedRestoreOwner", "verificationSql"],
+          "properties": {
+            "proofTenantId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,256}$"},
+            "proofCellId": {"type": "string", "pattern": "^[A-Za-z0-9_.:-]{1,256}$"},
+            "sourceService": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
+            "maintenanceService": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
+            "scratchService": {"type": "string", "pattern": "^[a-zA-Z0-9_-]{1,64}$"},
+            "scratchDatabase": {"type": "string", "pattern": "^[a-zA-Z0-9_]{1,63}$"},
+            "expectedRestoreOwner": {"type": "string", "pattern": "^[a-zA-Z0-9_]{1,63}$"},
+            "verificationSql": {"type": "string", "minLength": 1, "maxLength": 4096}
+          }
+        }
       }
     }
   }

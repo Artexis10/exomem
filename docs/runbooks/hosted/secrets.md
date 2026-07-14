@@ -274,25 +274,42 @@ time, and the content-free verification result.
 
 ## Verify
 
-Validate retirement proof without placing a secret in arguments or evidence:
+The isolated drill collector turns one completed, mode-`0600` observation into
+one 24-hour domain-separated receipt. The observation must name one exact
+contracted requirement and use `passed: true`; unknown or failed observations
+are refused. Repeat for every requirement, keeping the collector private key
+outside the operator, provisioner, and K3s environments:
+
+```bash
+infra/helm/platform/files/operational_receipt_collector.py rotation \
+  --contract infra/contracts/rotation-drills-v1.json \
+  --observation /secure/collector/rotation-observation.json \
+  --private-key-file /secure/collector/rotation-receipt.private \
+  --output /secure/collector/receipt-01.json
+```
+
+Validate retirement proof before those receipts expire, without placing a
+secret in arguments or evidence:
 
 ```bash
 receipt_root=/secure/operator/rotation-receipts/drill-opaque-id
-receipt_key=/secure/operator/rotation-receipt-authentication.key
-test "$(stat -c %a "$receipt_key")" = 600
+receipt_public_key=/secure/operator/rotation-receipt-collector.public.pem
+test -f "$receipt_public_key" && test ! -L "$receipt_public_key"
 find "$receipt_root" -type f \
   -exec sh -c 'test "$(stat -c %a "$1")" = 600' _ {} \;
 infra/scripts/rotation_gate.py \
   --contract infra/contracts/rotation-drills-v1.json \
   --evidence /secure/operator/content-free-rotation-evidence.json \
   --receipt-root "$receipt_root" \
-  --receipt-key-file "$receipt_key"
+  --receipt-public-key-file "$receipt_public_key"
 ```
 
 Each required condition resolves to a distinct receipt file below
 `receipt_root`. The drill collector signs the exact drill UUID, rotation,
 requirement, old/new versions, observation time, and pass result with the
-protected receipt key. The evidence file carries only the relative path and
+collector-held Ed25519 private key. The operator and retirement gate receive
+only its public key; the private key is never present on the operator
+workstation, K3s node, or provisioner. The evidence file carries only the relative path and
 SHA-256 for each receipt. The gate rejects missing, reused, escaping, changed,
 stale, mismatched, or unauthenticated receipts; an operator-authored boolean or
 reference string cannot authorize retirement.
