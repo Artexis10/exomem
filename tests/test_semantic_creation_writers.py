@@ -849,6 +849,46 @@ def test_note_draft_hash_binds_registration_intent(vault: Path) -> None:
     assert not (vault / validation.destination).exists()
 
 
+def test_note_exact_reviewed_none_retry_survives_later_inbound_relation(
+    vault: Path,
+) -> None:
+    kwargs = {
+        "content": "# Stable reviewed retry\n\nThe original disconnected conclusion.\n",
+        "note_type": "insight",
+        "title": "Stable reviewed retry",
+        "today": TODAY,
+    }
+    validation = note.note(vault, validate_only=True, **kwargs)
+    commit_fields = {
+        "draft_id": validation.draft_id,
+        "draft_hash": validation.draft_hash,
+        "draft_token": validation.draft_token,
+        "relation_disposition": "reviewed_none",
+        "relation_review_hash": validation.draft_hash,
+        "relation_review_reason": "No honest relation exists in the fixture corpus.",
+    }
+    note.note(vault, **commit_fields, **kwargs)
+    inbound = vault / "Knowledge Base" / "Notes" / "Insights" / "later-inbound.md"
+    inbound.write_text(
+        "---\n"
+        "type: insight\n"
+        "status: active\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000097\n"
+        "---\n"
+        "# Later inbound\n\n"
+        "## Relations\n"
+        f"- supports [[{validation.destination.removesuffix('.md')}]]\n",
+        encoding="utf-8",
+    )
+    before_retry = _tree_bytes(vault)
+
+    with pytest.raises(note.NoteError) as replay:
+        note.note(vault, **commit_fields, **kwargs)
+
+    assert replay.value.code == "DRAFT_ALREADY_COMMITTED"
+    assert _tree_bytes(vault) == before_retry
+
+
 def test_draft_token_rejects_cross_writer_and_duplicate_json_keys(vault: Path) -> None:
     kwargs = {
         "content": "# Token context\n\nReject a token from another writer.\n",

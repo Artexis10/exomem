@@ -1091,6 +1091,7 @@ def revalidate_prepared_creation_draft(
     draft_id: str,
     operation: str,
     draft_token: str,
+    requested_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
 ) -> CreationDraftValidation:
@@ -1101,6 +1102,10 @@ def revalidate_prepared_creation_draft(
     reconstruct that exact ordered batch.
     """
     try:
+        if requested_disposition not in {None, "reviewed_none"}:
+            raise RelationReviewError(
+                "INVALID_RELATION_REVIEW", "relation disposition is invalid"
+            )
         token_hash = draft_token_hash(draft_token)
         attempt = _attempt(
             Path(vault_root).absolute(),
@@ -1108,6 +1113,7 @@ def revalidate_prepared_creation_draft(
             source=source,
             draft_id=draft_id,
             operation=operation,
+            commit_disposition=requested_disposition,
             draft_token_hash=token_hash,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
@@ -1121,6 +1127,8 @@ def revalidate_prepared_creation_draft(
             if validation.relation_disposition == "qualifying_relation"
             else validation.relation_disposition
         )
+        if requested_disposition == "reviewed_none":
+            expected_kind = "reviewed_none"
         matches = bool(
             record.page_identity == validation.draft_id
             and record.page_path_at_review == validation.destination

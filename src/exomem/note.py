@@ -1353,6 +1353,7 @@ def note(
             draft_id=identity,
             draft_token=encoded_token,
             registrations=registrations,
+            relation_disposition=relation_disposition,
             predecessor_path=_predecessor_path,
             predecessor_content_hash=_predecessor_content_hash,
         )

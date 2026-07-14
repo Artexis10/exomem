@@ -280,10 +280,15 @@ def preflight_creation(
     draft_id: str | None,
     draft_token: str,
     registrations: tuple[DraftRegistration, ...] = (),
+    relation_disposition: str | None = None,
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
 ) -> CreationPreflight:
     root = Path(vault_root)
+    if relation_disposition not in {None, "reviewed_none"}:
+        raise SemanticWriteError(
+            "INVALID_RELATION_REVIEW", "relation disposition is invalid"
+        )
     token = DraftToken.decode(draft_token)
     if (
         token.writer != writer
@@ -322,6 +327,7 @@ def preflight_creation(
             draft_id=draft_id,
             operation=operation,
             draft_token=draft_token,
+            requested_disposition=relation_disposition,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
         )
