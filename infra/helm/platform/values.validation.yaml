@@ -1,0 +1,4 @@
+cloudflared:
+  replicas: 1
+scheduler:
+  contractVersion: 1

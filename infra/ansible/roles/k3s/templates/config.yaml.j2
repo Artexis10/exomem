@@ -12,6 +12,7 @@ disable:
   - servicelb
   - local-storage
 kube-apiserver-arg:
+  - admission-control-config-file=/etc/rancher/k3s/admission-config.yaml
   - service-account-extend-token-expiration=false
   - service-account-max-token-expiration=24h
   - audit-policy-file=/etc/rancher/k3s/audit-policy.yaml

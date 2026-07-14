@@ -1,0 +1,11 @@
+{{- if eq .Values.workloadMode "initialize" }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.resourceName }}-init-request
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+data:
+  init.json: |-
+    {{ dict "request_id" .Values.initRequestId "operation_id" .Values.initOperationId "cell_id" .Values.cellId "vault_id" .Values.vaultId "vault_root" "/var/lib/exomem/vault" "state_root" "/var/lib/exomem/state" "log_root" "/var/lib/exomem/logs" "expected_release" .Values.expectedRelease "expected_protocol" .Values.expectedProtocol "runtime_uid" .Values.runtimeUid "runtime_gid" .Values.runtimeGid "active_credential_version" .Values.activeCredentialVersion | toJson }}
+{{- end }}

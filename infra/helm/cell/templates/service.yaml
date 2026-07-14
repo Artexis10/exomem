@@ -1,0 +1,17 @@
+{{- if eq .Values.workloadMode "serve" }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ .Values.resourceName }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "exomem-cell.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: 8765
+      targetPort: http
+      protocol: TCP
+{{- end }}

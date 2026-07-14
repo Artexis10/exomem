@@ -66,7 +66,7 @@
 
 ## 8. Implement platform and cell Helm releases
 
-- [ ] 8.1 Pin and validate the exact Hetzner CSI chart/image compatible with K3s 1.35 and prove its supported LUKS key behavior.
+- [x] 8.1 Pin and validate the exact Hetzner CSI chart/image compatible with K3s 1.35 and prove its supported LUKS key behavior.
 - [ ] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
 - [ ] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
 - [ ] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
@@ -100,8 +100,8 @@
 
 ## 12. Implement control, transfer, and maintenance routing
 
-- [ ] 12.1 Add rendered-route tests for the Access-protected control hostname, public transfer hostname, exact allowed paths, prefix stripping, and rejection of personal routes/upstream selectors.
-- [ ] 12.2 Implement per-cell Traefik routes and Cloudflare configuration with no direct public cell Service.
+- [x] 12.1 Add rendered-route tests for the Access-protected control hostname, public transfer hostname, exact allowed paths, prefix stripping, and rejection of personal routes/upstream selectors.
+- [x] 12.2 Implement per-cell Traefik routes and Cloudflare configuration with no direct public cell Service.
 - [ ] 12.3 Add real-browser/preflight tests for canonical CORS, exact headers/methods, 90 MiB streaming, large download, abort/new-ticket, replay, path/operation alteration, and hostile origin.
 - [ ] 12.4 Add failing maintenance tests that close both routes, externally verify rejection of an unused ticket, drain in-flight work, serialize actions, and reopen only after release/resume.
 - [ ] 12.5 Implement the durable maintenance gate and prove control/transfer behavior through the real Cloudflare Tunnel.

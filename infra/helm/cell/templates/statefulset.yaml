@@ -1,0 +1,133 @@
+{{- if eq .Values.workloadMode "serve" }}
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: {{ .Values.resourceName }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+spec:
+  replicas: 1
+  serviceName: {{ .Values.resourceName }}
+  podManagementPolicy: OrderedReady
+  updateStrategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      {{- include "exomem-cell.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "exomem-cell.selectorLabels" . | nindent 8 }}
+    spec:
+      serviceAccountName: {{ .Values.resourceName }}
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exomem
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          args:
+            - --transport
+            - http
+            - --port
+            - "8765"
+          ports:
+            - name: http
+              containerPort: 8765
+              protocol: TCP
+          env:
+            - name: EXOMEM_HOSTED_CELL
+              value: "1"
+            - name: EXOMEM_HOSTED_CELL_ID
+              value: {{ .Values.cellId | quote }}
+            - name: EXOMEM_VAULT_PATH
+              value: /var/lib/exomem/vault
+            - name: EXOMEM_HOSTED_STATE_ROOT
+              value: /var/lib/exomem/state
+            - name: EXOMEM_LOG_DIR
+              value: /var/lib/exomem/logs
+            - name: TMPDIR
+              value: /tmp/runtime
+            - name: HOME
+              value: /var/lib/exomem/state/home
+            - name: EXOMEM_HOSTED_PROTOCOL_VERSION
+              value: {{ .Values.expectedProtocol | quote }}
+            - name: EXOMEM_HOSTED_EXPECTED_RELEASE
+              value: {{ .Values.expectedRelease | quote }}
+            - name: EXOMEM_HOSTED_WORKER_POLICY_DIGEST
+              value: {{ .Values.workerPolicyDigest | quote }}
+            - name: EXOMEM_HOSTED_STORAGE_LIMIT_BYTES
+              value: {{ printf "%.0f" .Values.storageLimitBytes | quote }}
+            - name: EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES
+              value: {{ printf "%.0f" .Values.uploadLimitBytes | quote }}
+            - name: EXOMEM_HOSTED_WORKER_LIMIT
+              value: {{ printf "%.0f" .Values.workerLimit | quote }}
+            - name: EXOMEM_HOSTED_FEATURE_GRANTS
+              value: {{ .Values.featureGrants | quote }}
+            - name: EXOMEM_HOSTED_BROWSER_ORIGIN
+              value: {{ .Values.browserOrigin | quote }}
+            - name: EXOMEM_HOSTED_TRANSFER_HOST
+              value: {{ .Values.transferHostname | quote }}
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+              ephemeral-storage: 512Mi
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: {{ .Values.runtimeUid }}
+            runAsGroup: {{ .Values.runtimeGid }}
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          startupProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            tcpSocket:
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 1
+            failureThreshold: 2
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/exomem/vault
+              subPath: vault
+            - name: data
+              mountPath: /var/lib/exomem/state
+              subPath: state
+            - name: data
+              mountPath: /var/lib/exomem/logs
+              subPath: logs
+            - name: credentials
+              mountPath: /run/exomem/credentials
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.resourceName }}-data
+        - name: credentials
+          secret:
+            secretName: {{ .Values.credentialsSecretName }}
+            defaultMode: 0444
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+{{- end }}

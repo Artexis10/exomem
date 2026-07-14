@@ -1,0 +1,26 @@
+resourceName: ""
+cellId: ""
+vaultId: ""
+workloadMode: serve
+image: ""
+expectedRelease: ""
+expectedProtocol: "1"
+workerPolicyDigest: ""
+runtimeUid: 10001
+runtimeGid: 10001
+storageClassName: exomem-hcloud-encrypted-retain
+pvcSize: 10Gi
+storageLimitBytes: 5368709120
+uploadLimitBytes: 94371840
+workerLimit: 0
+featureGrants: ""
+browserOrigin: https://substratesystems.io
+transferHostname: ""
+credentialsSecretName: ""
+activeCredentialVersion: ""
+initRequestId: ""
+initOperationId: ""
+routes:
+  enabled: false
+  controlHostname: ""
+  transferHostname: ""

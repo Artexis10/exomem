@@ -57,6 +57,15 @@
     mode: "0600"
   notify: Restart K3s
 
+- name: Install the Pod Security admission configuration
+  ansible.builtin.copy:
+    src: admission-config.yaml
+    dest: /etc/rancher/k3s/admission-config.yaml
+    owner: root
+    group: root
+    mode: "0600"
+  notify: Restart K3s
+
 - name: Install the K3s server configuration
   ansible.builtin.template:
     src: config.yaml.j2

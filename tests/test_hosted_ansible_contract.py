@@ -62,6 +62,7 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     config = _read("roles/k3s/templates/config.yaml.j2")
     service = _read("roles/k3s/templates/k3s.service.j2")
     audit = _read("roles/k3s/files/audit-policy.yaml")
+    admission = _read("roles/k3s/files/admission-config.yaml")
 
     assert 'k3s_version: "v1.35.6+k3s1"' in defaults
     assert "2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432" in defaults
@@ -75,11 +76,18 @@ def test_k3s_role_pins_binary_and_hardens_single_server_configuration() -> None:
     assert "image-gc-high-threshold=75" in config
     assert "container-log-max-size=10Mi" in config
     assert "audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log" in config
+    assert "admission-control-config-file=/etc/rancher/k3s/admission-config.yaml" in config
     assert "etcd-snapshot-schedule-cron: \"*/30 * * * *\"" in config
     assert "etcd-s3: true" in config
     assert "etcd-s3-secret-key:" in config
     assert "ExecStart=/usr/local/bin/k3s server" in service
     assert "omitStages:" in audit
+    assert "kind: PodSecurityConfiguration" in admission
+    assert "enforce: baseline" in admission
+    assert "audit: restricted" in admission
+    assert "warn: restricted" in admission
+    assert "- exomem-storage-init" in admission
+    assert "- exomem-platform" in admission
 
 
 def test_inventory_generator_emits_only_non_sensitive_host_coordinates(tmp_path: Path) -> None:

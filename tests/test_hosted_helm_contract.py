@@ -1,0 +1,258 @@
+from __future__ import annotations
+
+import json
+import os
+import subprocess
+from pathlib import Path
+
+import pytest
+import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+PLATFORM = ROOT / "infra/helm/platform"
+CELL = ROOT / "infra/helm/cell"
+CONTRACT = ROOT / "infra/contracts/exomem-hosted-schedules-v1.json"
+HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
+
+
+def _documents(rendered: str) -> list[dict]:
+    return [document for document in yaml.safe_load_all(rendered) if isinstance(document, dict)]
+
+
+def _render(
+    chart: Path,
+    values: Path,
+    *,
+    namespace: str,
+    extra_args: tuple[str, ...] = (),
+) -> list[dict]:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(chart),
+            "--namespace",
+            namespace,
+            "--values",
+            str(values),
+            "--include-crds",
+            *extra_args,
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    return _documents(result.stdout)
+
+
+def _find(documents: list[dict], kind: str, name: str) -> dict:
+    for document in documents:
+        if document.get("kind") == kind and document.get("metadata", {}).get("name") == name:
+            return document
+    raise AssertionError(f"missing {kind}/{name}")
+
+
+def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
+    chart = yaml.safe_load((PLATFORM / "Chart.yaml").read_text(encoding="utf-8"))
+    dependencies = {item["name"]: item for item in chart["dependencies"]}
+    assert dependencies["hcloud-csi"]["version"] == "2.21.1"
+    assert dependencies["traefik"]["version"] == "41.0.2"
+
+    values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
+    assert values["cloudflared"]["image"].endswith(
+        "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
+    )
+    assert values["scheduler"]["image"].endswith(
+        "@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17"
+    )
+    assert "@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f" in json.dumps(
+        values["hcloud-csi"]
+    )
+    provenance = (PLATFORM / "HCLOUD_CSI_PROVENANCE.md").read_text(encoding="utf-8")
+    assert "1dd5776c2810f80f038454c9333a3814a2319b1b" in provenance
+    assert "encryption-passphrase" in provenance
+    assert "crypto_LUKS" in provenance
+
+
+def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    storage = _find(documents, "StorageClass", "exomem-hcloud-encrypted-retain")
+    assert storage["provisioner"] == "csi.hetzner.cloud"
+    assert storage["reclaimPolicy"] == "Retain"
+    assert storage["volumeBindingMode"] == "WaitForFirstConsumer"
+    assert storage["parameters"] == {
+        "csi.storage.k8s.io/fstype": "ext4",
+        "csi.storage.k8s.io/node-publish-secret-name": "exomem-volume-encryption",
+        "csi.storage.k8s.io/node-publish-secret-namespace": "exomem-platform",
+    }
+
+    runtime_class = _find(documents, "RuntimeClass", "exomem-storage-init")
+    assert runtime_class["handler"] == "runc"
+    assert _find(documents, "ValidatingAdmissionPolicy", "exomem-storage-init-boundary")
+    tenant_admission = _find(
+        documents, "ValidatingAdmissionPolicy", "exomem-tenant-cell-boundary"
+    )
+    namespace_selector = tenant_admission["spec"]["matchConstraints"]["namespaceSelector"]
+    assert namespace_selector["matchLabels"] == {"exomem.io/tenant-cell": "true"}
+    admission_text = json.dumps(tenant_admission)
+    assert "@sha256:" in admission_text
+    assert "runAsUser == 10001" in admission_text
+    assert "persistentVolumeClaim.claimName" in admission_text
+    assert "secret.secretName" in admission_text
+
+    contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
+    cronjobs = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document.get("kind") == "CronJob"
+    }
+    assert set(cronjobs) == {job["name"] for job in contract["jobs"]}
+    for job in contract["jobs"]:
+        rendered = cronjobs[job["name"]]
+        spec = rendered["spec"]
+        job_spec = spec["jobTemplate"]["spec"]
+        pod = job_spec["template"]["spec"]
+        container = pod["containers"][0]
+        assert spec["schedule"] == job["schedule"]
+        assert spec["concurrencyPolicy"] == "Forbid"
+        assert spec["startingDeadlineSeconds"] == 45
+        assert spec["successfulJobsHistoryLimit"] == 1
+        assert spec["failedJobsHistoryLimit"] == 3
+        assert job_spec["activeDeadlineSeconds"] == 30
+        assert job_spec["backoffLimit"] == 1
+        assert job_spec["ttlSecondsAfterFinished"] == 300
+        assert pod["restartPolicy"] == "Never"
+        assert container["env"][0]["name"] == "EXOMEM_HOSTED_SCHEDULER_SECRET"
+        command = " ".join(container["args"])
+        assert contract["origin"] + job["path"] in command
+        assert "--connect-timeout 5" in command
+        assert "--max-time 20" in command
+        assert 'test "${status}" = "200"' in command
+        assert "CRON_SECRET" not in json.dumps(rendered)
+
+    policy = _find(documents, "ConfigMap", "exomem-hosted-scheduler-contract")
+    rendered_contract = json.loads(policy["data"]["contract.json"])
+    assert rendered_contract == contract
+    assert rendered_contract["observability"] == {
+        "contentFree": True,
+        "attemptCounterMetric": "exomem_hosted_scheduler_attempts_total",
+        "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
+        "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
+        "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
+        "missedRunAlertAfterSeconds": 180,
+        "consecutiveFailureAlertThreshold": 2,
+    }
+
+
+@pytest.mark.parametrize(
+    ("values_name", "expected_kind"),
+    (("values.initialize.yaml", "Job"), ("values.validation.yaml", "StatefulSet")),
+)
+def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_modes(
+    values_name: str, expected_kind: str
+) -> None:
+    documents = _render(CELL, CELL / values_name, namespace="cell-alpha-test")
+    assert _find(documents, "PersistentVolumeClaim", "cell-alpha-data")
+    quota = _find(documents, "ResourceQuota", "cell-alpha-quota")
+    assert quota["spec"]["hard"]["persistentvolumeclaims"] == "1"
+    assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
+
+    workload = _find(documents, expected_kind, "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init")
+    if expected_kind == "Job":
+        pod = workload["spec"]["template"]["spec"]
+        assert pod["runtimeClassName"] == "exomem-storage-init"
+        container = pod["containers"][0]
+        assert container["name"] == "exomem"
+        assert container["securityContext"]["runAsUser"] == 0
+        assert container["args"] == [
+            "hosted",
+            "init",
+            "--request-file",
+            "/run/exomem/operator-requests/init.json",
+        ]
+    else:
+        pod = workload["spec"]["template"]["spec"]
+        assert "runtimeClassName" not in pod
+        assert "fsGroup" not in pod.get("securityContext", {})
+        assert len(pod.get("initContainers", [])) == 0
+        container = pod["containers"][0]
+        security = container["securityContext"]
+        assert security["runAsNonRoot"] is True
+        assert security["runAsUser"] == 10001
+        assert security["readOnlyRootFilesystem"] is True
+        assert security["allowPrivilegeEscalation"] is False
+        assert security["capabilities"]["drop"] == ["ALL"]
+        env = {item["name"]: item.get("value") for item in container["env"]}
+        assert env["EXOMEM_HOSTED_CELL_ID"] == "alpha-test-original"
+        assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
+        assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
+        assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
+        assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == ""
+        assert env["TMPDIR"] == "/tmp/runtime"
+
+        temporary = next(volume for volume in pod["volumes"] if volume["name"] == "tmp")
+        assert temporary["emptyDir"]["sizeLimit"] == "256Mi"
+        assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
+
+        credentials = next(
+            volume for volume in pod["volumes"] if volume["name"] == "credentials"
+        )
+        assert credentials["secret"]["defaultMode"] == 0o444
+        assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
+
+    network_policies = [item for item in documents if item.get("kind") == "NetworkPolicy"]
+    assert len(network_policies) >= (2 if expected_kind == "StatefulSet" else 1)
+    assert all(item["spec"].get("policyTypes") for item in network_policies)
+    service = [item for item in documents if item.get("kind") == "Service"]
+    assert (len(service) == 1) == (expected_kind == "StatefulSet")
+    if service:
+        assert service[0]["spec"]["type"] == "ClusterIP"
+
+
+def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
+    schema = json.loads((CELL / "values.schema.json").read_text(encoding="utf-8"))
+    text = json.dumps(schema)
+    assert "@sha256:" in text
+    assert '"const": 5368709120' in text
+    assert '"const": 94371840' in text
+    assert '"const": 0' in text
+    assert '"const": "10Gi"' in text
+
+
+def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
+    documents = _render(
+        CELL,
+        CELL / "values.validation.yaml",
+        namespace="cell-alpha-test",
+        extra_args=("--set", "routes.enabled=true"),
+    )
+    middleware = _find(documents, "Middleware", "cell-alpha-strip-cell")
+    assert middleware["spec"]["stripPrefix"]["prefixes"] == [
+        "/cells/alpha-test-original"
+    ]
+
+    control = _find(documents, "IngressRoute", "cell-alpha-control")
+    transfer = _find(documents, "IngressRoute", "cell-alpha-transfer")
+    assert control["spec"]["routes"][0]["match"] == (
+        "Host(`control.example.test`) && "
+        "PathPrefix(`/cells/alpha-test-original/private/exomem/v1`)"
+    )
+    assert transfer["spec"]["routes"][0]["match"] == (
+        "Host(`transfer.example.test`) && "
+        "(Path(`/cells/alpha-test-original/public/exomem/v2/transfers/upload`) || "
+        "Path(`/cells/alpha-test-original/public/exomem/v2/transfers/download`))"
+    )
+    for route in (control, transfer):
+        upstream = route["spec"]["routes"][0]["services"]
+        assert upstream == [{"name": "cell-alpha", "port": 8765}]
+
+    services = [document for document in documents if document.get("kind") == "Service"]
+    assert services and all(service["spec"]["type"] == "ClusterIP" for service in services)
+    rendered_text = json.dumps(documents).lower()
+    assert "email" not in rendered_text
+    assert "owner-name" not in rendered_text
