@@ -47,6 +47,10 @@ _FEEDBACK_NESTED_ITEM_LIMIT = 8
 _FEEDBACK_BYTE_BUDGET = 120 * 1024
 _RECOVERY_REVIEW_LIMIT = 256
 _RECOVERY_FEEDBACK_ENTRY_LIMIT = 32
+_POSTHOC_FINDING_LIMIT = 256
+_POSTHOC_PATH_LIMIT = 64
+_POSTHOC_SUMMARY_LIMIT = 64
+_POSTHOC_BYTE_BUDGET = 120 * 1024
 _MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
 
@@ -293,6 +297,228 @@ class SemanticWriteError(ValueError):
 
     def __post_init__(self) -> None:
         ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class PosthocPageEvaluation:
+    """One governed Markdown page evaluated against a shared current corpus."""
+
+    path: str
+    contract_result: semantic_contract.SemanticContractResult
+    grandfathered: bool
+    activation: Literal["current", "prospective"]
+
+
+@dataclass(frozen=True, slots=True)
+class PosthocBatch:
+    """Bounded non-content projection shared by watcher, audit, and reconcile."""
+
+    operation: Literal["watcher", "audit", "reconcile"]
+    activation: Literal["current", "prospective"]
+    evaluations: tuple[PosthocPageEvaluation, ...]
+
+    def as_dict(self) -> dict[str, Any]:
+        findings: list[dict[str, Any]] = []
+        summary: dict[str, int] = {}
+        bounded = {
+            "strings_truncated": 0,
+            "string_bytes_omitted": 0,
+            "nested_items_omitted": 0,
+        }
+        for evaluation in self.evaluations:
+            disposition = evaluation.contract_result.relation_disposition
+            disposition_value = (
+                {
+                    "kind": disposition.kind,
+                    "satisfied": disposition.satisfied,
+                    "current": disposition.current,
+                }
+                if disposition is not None
+                else None
+            )
+            for finding in evaluation.contract_result.findings:
+                summary[finding.code] = summary.get(finding.code, 0) + 1
+                findings.append(
+                    _bounded_feedback_value(
+                        {
+                            "path": evaluation.path,
+                            "code": finding.code,
+                            "severity": finding.severity,
+                            "governed_element_identity": list(
+                                finding.governed_element_identity
+                            ),
+                            "resolved_rule": list(finding.resolved_rule),
+                            "relation_disposition": disposition_value,
+                            "actions": list(evaluation.contract_result.actions),
+                            "activation": evaluation.activation,
+                            "grandfathered": evaluation.grandfathered,
+                        },
+                        bounded,
+                    )
+                )
+        total = len(findings)
+        findings = findings[:_POSTHOC_FINDING_LIMIT]
+        omitted = total - len(findings)
+        evaluated_paths = [
+            _bounded_feedback_text(item.path, bounded)
+            for item in self.evaluations[:_POSTHOC_PATH_LIMIT]
+        ]
+        summary_items = sorted(summary.items())
+        retained_summary = dict(summary_items[:_POSTHOC_SUMMARY_LIMIT])
+        value: dict[str, Any] = {
+            "operation": self.operation,
+            "activation": self.activation,
+            "evaluated_paths": evaluated_paths,
+            "semantic_contract_findings": findings,
+            "semantic_contract_summary": retained_summary,
+            "omitted_counts": {
+                "evaluated_paths": len(self.evaluations) - len(evaluated_paths),
+                "semantic_contract_findings": omitted,
+                "semantic_contract_summary": len(summary_items) - len(retained_summary),
+            },
+            "truncation": {
+                "byte_budget": _POSTHOC_BYTE_BUDGET,
+                "finding_limit": _POSTHOC_FINDING_LIMIT,
+                "path_limit": _POSTHOC_PATH_LIMIT,
+                "summary_limit": _POSTHOC_SUMMARY_LIMIT,
+                **bounded,
+                "budget_items_omitted": 0,
+            },
+        }
+        variable_collections = (
+            ("semantic_contract_findings", findings),
+            ("evaluated_paths", evaluated_paths),
+            ("semantic_contract_summary", retained_summary),
+        )
+        while _feedback_serialized_size(value) >= _POSTHOC_BYTE_BUDGET:
+            removed_total = 0
+            for name, collection in variable_collections:
+                if not collection:
+                    continue
+                keep = len(collection) // 2
+                if isinstance(collection, dict):
+                    retained_keys = list(collection)[:keep]
+                    removed = len(collection) - len(retained_keys)
+                    retained_values = {key: collection[key] for key in retained_keys}
+                    collection.clear()
+                    collection.update(retained_values)
+                else:
+                    removed = len(collection) - keep
+                    del collection[keep:]
+                value["omitted_counts"][name] += removed
+                removed_total += removed
+            value["truncation"]["budget_items_omitted"] += removed_total
+            if removed_total == 0:
+                break
+        return value
+
+
+def _posthoc_relative_path(root: Path, path: Path | str) -> str | None:
+    candidate = Path(path)
+    if candidate.is_absolute():
+        try:
+            return candidate.resolve().relative_to(root.resolve()).as_posix()
+        except (OSError, ValueError):
+            return None
+    value = str(path).replace("\\", "/").lstrip("/")
+    return value or None
+
+
+def evaluate_posthoc_batch(
+    vault_root: Path,
+    *,
+    paths: list[Path | str] | tuple[Path | str, ...] | None = None,
+    operation: Literal["watcher", "audit", "reconcile"],
+) -> PosthocBatch:
+    """Evaluate current governed Markdown once without writing or repairing it."""
+    if operation not in {"watcher", "audit", "reconcile"}:
+        raise SemanticWriteError(
+            "SEMANTIC_POSTHOC_INVALID_OPERATION",
+            "posthoc semantic operation is unsupported",
+        )
+    root = Path(vault_root)
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    saved_contracts = memory_schema.load_saved_contracts(root)
+    corpus = semantic_contract.build_corpus_context(
+        root,
+        registry=registry,
+        language_registry=language,
+    )
+    manifest = activation_manifest.load_manifest(root)
+    activation_status: Literal["current", "prospective"] = (
+        "current" if manifest is not None else "prospective"
+    )
+    if paths is None:
+        selected = sorted(corpus.pages)
+    else:
+        selected = sorted(
+            {
+                rel
+                for path in paths
+                if (rel := _posthoc_relative_path(root, path)) is not None
+            }
+        )
+
+    contracts_by_scope: dict[
+        tuple[tuple[str, ...], str | None], memory_schema.ResolvedMemoryContracts
+    ] = {}
+    evaluations: list[PosthocPageEvaluation] = []
+    for rel_path in selected:
+        state = corpus.pages.get(rel_path)
+        if state is None or not state.eligible_governed:
+            continue
+        scope = (state.projects, state.page_type)
+        contracts = contracts_by_scope.get(scope)
+        if contracts is None:
+            contracts = memory_schema.resolve_contracts(
+                saved_contracts,
+                projects=state.projects,
+                page_type=state.page_type,
+                language_registry=language,
+            )
+            contracts_by_scope[scope] = contracts
+        review = (
+            relation_review.load_relation_review(root, state, corpus=corpus)
+            if state.eligible_compiled
+            else None
+        )
+        grandfathered = bool(
+            manifest is not None
+            and activation_manifest.is_grandfathered(
+                root,
+                state.path,
+                source_hash=state.source_hash,
+                exomem_id=(
+                    state.identity if state.identity_kind == "exomem_id" else None
+                ),
+                manifest=manifest,
+                census=corpus.activation_census,
+            )
+        )
+        result = semantic_contract.evaluate(
+            before=None,
+            after=state,
+            operation=operation,
+            mode="posthoc",
+            before_contracts=contracts,
+            after_contracts=contracts,
+            before_corpus=corpus,
+            after_corpus=corpus,
+            before_review=None,
+            after_review=review,
+            grandfathered=False,
+            include_relation_disposition=state.eligible_compiled,
+        )
+        evaluations.append(
+            PosthocPageEvaluation(
+                state.path,
+                result,
+                grandfathered,
+                activation_status,
+            )
+        )
+    return PosthocBatch(operation, activation_status, tuple(evaluations))
 
 
 @dataclass(frozen=True, slots=True)
