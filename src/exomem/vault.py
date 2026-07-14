@@ -798,6 +798,7 @@ class _WorkspaceArtifact:
     descriptor: int
     identity: PathIdentity
     content_hash: str
+    content_bound: bool = False
     closed: bool = False
 
     @property
@@ -837,6 +838,14 @@ class _WorkspaceArtifact:
             raise PathGuardError("PATH_GUARD_CHANGED", "batch stage changed")
         self.identity = refreshed
         self.recheck(verify_content=False)
+
+    def bind_initializing_content(self) -> None:
+        if self.content_bound:
+            return
+        self.recheck(verify_content=False)
+        self.content_hash = _descriptor_hash(self.descriptor, self.identity)
+        self.content_bound = True
+        self.recheck()
 
     def close(self) -> None:
         if not self.closed:
@@ -972,7 +981,7 @@ class _BatchWorkspace:
             )
             if hasattr(os, "fchmod"):
                 os.fchmod(workspace_descriptor, 0o700)
-            workspace.recheck()
+            workspace.refresh_identity()
             return workspace
         except BaseException as init_error:
             if workspace is not None:
@@ -988,6 +997,11 @@ class _BatchWorkspace:
                     workspace_identity,
                 )
                 os.close(parent_descriptor)
+            elif not created:
+                if workspace_descriptor is not None:  # pragma: no cover - defensive
+                    os.close(workspace_descriptor)
+                os.close(parent_descriptor)
+                raise
             else:
                 if workspace_descriptor is not None:
                     os.close(workspace_descriptor)
@@ -1025,6 +1039,34 @@ class _BatchWorkspace:
             or _is_reparse(workspace_path_info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "batch workspace changed")
+
+    def refresh_identity(self) -> None:
+        if self.closed:
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch workspace handle is closed")
+        try:
+            parent_descriptor_info = os.fstat(self.parent_descriptor)
+            workspace_descriptor_info = os.fstat(self.descriptor)
+            parent_path_info = self.parent.lstat()
+            workspace_path_info = self.path.lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch workspace changed") from error
+        refreshed = _identity(self.name, workspace_descriptor_info)
+        if (
+            not _same_identity(self.parent_identity, parent_descriptor_info)
+            or not _same_identity(self.parent_identity, parent_path_info)
+            or not stat.S_ISDIR(parent_path_info.st_mode)
+            or stat.S_ISLNK(parent_path_info.st_mode)
+            or _is_reparse(parent_path_info)
+            or not _same_file_object(self.identity, refreshed)
+            or not _same_identity(refreshed, workspace_path_info)
+            or not stat.S_ISDIR(workspace_descriptor_info.st_mode)
+            or _is_reparse(workspace_descriptor_info)
+            or stat.S_ISLNK(workspace_path_info.st_mode)
+            or _is_reparse(workspace_path_info)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch workspace changed")
+        self.identity = refreshed
+        self.recheck()
 
     def recheck(self) -> None:
         self.recheck_identity()
@@ -1078,6 +1120,7 @@ class _BatchWorkspace:
             _write_all(descriptor, content)
             if _descriptor_hash(descriptor, identity) != digest:
                 raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
+            artifact.content_bound = True
             artifact.recheck()
             self.recheck()
             return artifact
@@ -1138,7 +1181,8 @@ class _BatchWorkspace:
     def remove_artifact(self, artifact: _WorkspaceArtifact) -> bool:
         try:
             self.recheck()
-            artifact.recheck(verify_content=False)
+            artifact.bind_initializing_content()
+            artifact.recheck()
             if os.unlink in getattr(os, "supports_dir_fd", set()):
                 os.unlink(artifact.name, dir_fd=self.descriptor)
             else:  # pragma: no cover - Windows fallback

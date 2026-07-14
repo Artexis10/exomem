@@ -464,6 +464,43 @@ def test_batch_atomic_write_cleans_owned_workspace_when_fchmod_fails(
     assert _workspaces(tmp_path) == []
 
 
+def test_batch_atomic_write_preserves_mkdir_failure_before_workspace_creation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_mkdir = os.mkdir
+
+    def fail_workspace_mkdir(path, mode=0o777, *args, **kwargs):
+        if _WORKSPACE_RE.fullmatch(_leaf(path)):
+            raise PermissionError("workspace mkdir denied")
+        return real_mkdir(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "mkdir", fail_workspace_mkdir)
+
+    with pytest.raises(PermissionError, match="workspace mkdir denied"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(tmp_path / "target.md", "new")]
+        )
+
+    assert _workspaces(tmp_path) == []
+
+
+def test_batch_atomic_write_refreshes_workspace_identity_after_mode_hardening(
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target.md"
+    previous_umask = os.umask(0o200)
+    try:
+        replaced = vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "new exact content")]
+        )
+    finally:
+        os.umask(previous_umask)
+
+    assert replaced == [target]
+    assert target.read_text(encoding="utf-8") == "new exact content"
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_atomic_write_cleans_partially_initialized_stage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -492,6 +529,37 @@ def test_batch_atomic_write_cleans_partially_initialized_stage(
 
     assert stage_writes == 2
     assert _workspaces(tmp_path) == []
+
+
+def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target.md"
+    target.write_bytes(b"old")
+    drifted = b"same-owner drift must not be deleted"
+
+    def drift_stage_then_fail(_path: Path):
+        workspace = _workspaces(tmp_path)[0]
+        stage = next(workspace.glob("stage-*.tmp"))
+        stage.write_bytes(drifted)
+        raise PermissionError("snapshot failed after stage drift")
+
+    monkeypatch.setattr(
+        vault_module,
+        "_capture_batch_snapshot",
+        drift_stage_then_fail,
+    )
+
+    with pytest.raises(RuntimeError, match="cleanup retained changed artifacts") as retained:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "new exact content")]
+        )
+
+    assert isinstance(retained.value.__cause__, PermissionError)
+    workspace = _workspaces(tmp_path)[0]
+    stage = next(workspace.glob("stage-*.tmp"))
+    assert stage.read_bytes() == drifted
+    assert target.read_bytes() == b"old"
 
 
 def test_batch_atomic_write_never_uses_preexisting_user_backup(
