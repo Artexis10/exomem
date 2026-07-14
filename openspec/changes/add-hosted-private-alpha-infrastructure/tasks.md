@@ -6,7 +6,7 @@
 
 ## 2. Complete the Exomem hosted runtime deployment contract
 
-- [ ] 2.1 Add an OpenSpec delta on the PR #227 branch for supported init/restore, active-pending credential rotation, authenticated probe, and direct-transfer grant behavior.
+- [x] 2.1 Add an OpenSpec delta on the PR #227 branch for supported init/restore, active-pending credential rotation, authenticated probe, and direct-transfer grant behavior.
 - [ ] 2.2 Add failing pure tests for a supported idempotent hosted cell initializer using the exact cell/root/UID binding inputs.
 - [ ] 2.3 Implement the versioned init CLI/helper in the hosted image and pass binding/idempotency tests.
 - [ ] 2.4 Add failing tests for offline candidate restore that rejects source binding state and atomically publishes under a new candidate identity.

@@ -20,10 +20,16 @@ Evidence is appended as implementation gates close. A checked task means the res
 
 ### Substrate PR #32
 
-- Refreshed branch head: `21bb0f1` (`feat/exomem-hosted-service`), mergeable and pushed.
+- Refreshed branch head: `ffc499c` (`feat/exomem-hosted-service`), mergeable and pushed.
 - Reproduced failed Vercel deployment: three minute/hour Exomem jobs in `vercel.json` violated the Vercel Hobby once-per-day cron limit.
 - Fixed by keeping the authenticated handlers on Vercel while moving cadence ownership to the versioned K3s schedule contract. The contract pins origin, paths/cadence, dedicated least-privilege bearer and two-version receiver overlap, redirect denial, timeouts/deadlines, non-overlap, retries/history/TTL, content-free metrics, and alerts. Global `CRON_SECRET` is not exposed to K3s.
-- Fresh unit/contract suite: 451 passed across 102 suites; TypeScript (`npx tsc --noEmit`), Prettier, strict OpenSpec (16 items), production Next build, and diff checks passed. Independent code and cross-repository artifact reviews approved the head.
+- Fresh unit/contract suite: 451 passed across 102 suites; TypeScript (`npx tsc --noEmit`), changed-file Prettier, strict OpenSpec (16 items), production Next build, and diff checks passed. Independent code and cross-repository artifact reviews approved the hosted implementation.
 - Replacement Vercel deployment check passed on `21bb0f1`, proving the original deployment failure is closed.
 - Real PostgreSQL integration/migration baseline inherited unchanged from reviewed `52dabed`: 22 tests across five suites through migration 0021. This session had no `DATABASE_URL`, so the local production-only migration launcher correctly skipped; static migration serialization/transaction tests and the production build passed.
-- Lint baseline is explicitly red: `npm run lint` invokes removed Next 16 `next lint` behavior and exits with `Invalid project directory .../lint`; the repository currently has no ESLint dependency/config. This is not hidden as success and must be repaired before Substrate task 3.10 is checked.
+- Next 16 lint baseline repaired at `ffc499c`: `npm run lint` now uses ESLint 9 flat config and exits with 0 errors plus 23 visible pre-existing warnings. The new Hooks rule remains error-level for new/hosted code and is disabled only for eight exact legacy files. A clean scratch `npm ci --ignore-scripts`, lint, changed-code zero-warning lint, TypeScript, focused 14-test suite, build, and independent review all passed.
+
+## 2026-07-14 — Exomem runtime deployment contract frozen
+
+- Exomem PR #227 head `b38bea8` adds `complete-hosted-runtime-deployment-contract`, including normative operator v1 and direct-transfer v2 JSON artifacts.
+- The contract fixes exact init/restore delivery, binding v2 identity, offline crash-safe candidate restore, Secret-backed active/pending credential rotation with abort/finalize, fresh literal-loopback authenticated probe, durable one-time JTI consumption, direct raw browser transfer, route-specific CORS, response/error tuples, temp quotas, and real-K3s image/mount gates.
+- Strict OpenSpec validation and JSON/structural assertions passed. Final independent adversarial review approved the frozen artifact hashes with P0 0, P1 0, P2 0.
