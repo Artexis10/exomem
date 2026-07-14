@@ -203,7 +203,7 @@ async def _request(app: Any, method: str, path: str, **kwargs: Any) -> httpx.Res
 def test_checked_in_transfer_contract_is_complete_golden() -> None:
     path = (
         Path(__file__).parents[1]
-        / "openspec/changes/complete-hosted-runtime-deployment-contract/contracts"
+        / "openspec/changes/archive/2026-07-14-complete-hosted-runtime-deployment-contract/contracts"
         / "hosted-transfer-v2.json"
     )
     raw = path.read_bytes()
@@ -217,7 +217,7 @@ def test_checked_in_transfer_contract_is_complete_golden() -> None:
 def test_implemented_public_error_catalog_exactly_matches_normative_artifact() -> None:
     path = (
         Path(__file__).parents[1]
-        / "openspec/changes/complete-hosted-runtime-deployment-contract/contracts"
+        / "openspec/changes/archive/2026-07-14-complete-hosted-runtime-deployment-contract/contracts"
         / "hosted-transfer-v2.json"
     )
     catalog = hosted_transfer.load_transfer_contract(path)["responses"]["error"]["catalog"]

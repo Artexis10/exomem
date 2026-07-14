@@ -14,7 +14,7 @@ from exomem import hosted_operator
 
 CONTRACT_PATH = (
     Path(__file__).resolve().parents[1]
-    / "openspec/changes/complete-hosted-runtime-deployment-contract/contracts/hosted-operator-v1.json"
+    / "openspec/changes/archive/2026-07-14-complete-hosted-runtime-deployment-contract/contracts/hosted-operator-v1.json"
 )
 
 
