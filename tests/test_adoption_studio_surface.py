@@ -127,6 +127,66 @@ def test_rest_facade_round_trip(vault: Path, monkeypatch: pytest.MonkeyPatch) ->
     listed = _post(client, "adoption_studio", {"action": "status"})
     assert any(row["run_id"] == run_id for row in listed["runs"])
 
+    # --- propose -> review -> apply-proposal (Lane B agent contract) ---
+    imported_path = [
+        o["target_path"] for o in applied["outcomes"].values() if o.get("status") == "applied"
+    ][0]
+    submitted = _post(
+        client,
+        "adoption_studio",
+        {
+            "action": "propose",
+            "run_id": run_id,
+            "proposals": [
+                {
+                    "kind": "compilation",
+                    "why": "Imported note looks worth summarizing",
+                    "payload": {
+                        "sources": [imported_path],
+                        "title": "Quarterly planning summary",
+                        "note_type": "insight",
+                        "content": "# Quarterly planning summary\n\nShip the studio.\n",
+                    },
+                    "bindings": {"run_fingerprint": started.get("inventory_fingerprint", "")},
+                }
+            ],
+        },
+    )
+    assert submitted["proposals"][0]["status"] == "proposed"
+    proposal_ref = submitted["proposals"][0]["ref"]
+    proposal_fp = submitted["proposals"][0]["fingerprint"]
+    assert proposal_ref.startswith("exomem://review/adoption/")
+
+    queue = _post(client, "review_memory", {"mode": "adoption", "limit": 50})
+    open_refs = {i["ref"] for group in queue["runs"] for i in group["items"]}
+    assert proposal_ref in open_refs
+
+    approved = _post(
+        client,
+        "adoption_studio",
+        {
+            "action": "apply-proposal",
+            "ref": proposal_ref,
+            "expected_fingerprint": proposal_fp,
+            "why": "Looks correct, approving",
+        },
+    )
+    assert approved["applied"] is True
+    assert (vault / approved["result_path"]).is_file()
+
+    # A resubmitted apply-proposal is now applied (idempotent), not re-applied.
+    replayed = _post(
+        client,
+        "adoption_studio",
+        {
+            "action": "apply-proposal",
+            "ref": proposal_ref,
+            "expected_fingerprint": proposal_fp,
+            "why": "Looks correct, approving",
+        },
+    )
+    assert replayed.get("already_applied") is True
+
 
 # --- 28 ---
 def test_mutation_replay_is_idempotent(vault: Path, monkeypatch: pytest.MonkeyPatch) -> None:

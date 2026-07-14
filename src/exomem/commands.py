@@ -33,6 +33,7 @@ from typing_extensions import TypedDict
 
 from . import add as add_module
 from . import adopt as adopt_module
+from . import adoption_proposals as adoption_proposals_module
 from . import adoption_run as adoption_run_module
 from . import append_to_file as append_to_file_module
 from . import attention as attention_module
@@ -3400,11 +3401,15 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, provenance, evolution,
             compilation, stale, contradiction, unprocessed-sources, relation-debt,
-            or relation-queue. `relation-queue` returns the read-only, batched
-            relation-acceptance queue (deterministic suggestion candidates
+            relation-queue, or adoption. `relation-queue` returns the read-only,
+            batched relation-acceptance queue (deterministic suggestion candidates
             grouped by source page, with signal fingerprints and coverage
             counters); accept a candidate via
             `connect_memory(operation="accept-relation")` or reject via
+            `triage_memory`. `adoption` returns the read-only Adoption Studio
+            proposal queue grouped per run (structured agent proposals with signal
+            fingerprints); approve a proposal via
+            `adoption_studio(action="apply-proposal")` or dismiss via
             `triage_memory`.
         categories: Optional category filter for attention/activation/audit.
         limit: Attention/activation/evolution result cap.
@@ -3459,6 +3464,13 @@ def op_review_memory(
         )
     if mode == "relation-queue":
         return relation_queue_module.build_queue(vault_root, limit_pages=limit)
+    if mode == "adoption":
+        adoption_run_id: str | None = None
+        if ref and ref.startswith("exomem://adoption/run/"):
+            adoption_run_id = ref.rsplit("/", 1)[-1] or None
+        return adoption_proposals_module.build_queue(
+            vault_root, run_id=adoption_run_id, state=state, limit=limit
+        )
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
     if mode == "evolution":
@@ -3470,7 +3482,7 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, or relation-queue"
+        "unprocessed-sources, relation-debt, relation-queue, or adoption"
     )
 
 
@@ -3493,7 +3505,10 @@ def op_review_item_context(
     assembly: it runs no model, makes no epistemic judgment, and never writes.
 
     Args:
-        ref: Stable `exomem://review/<id>` reference.
+        ref: Stable `exomem://review/<id>` reference. An
+            `exomem://review/adoption/<id>` ref returns the bounded Adoption
+            Studio proposal context (proposal record, live binding check, and
+            target-page summary) instead.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch asks the
             caller to refresh instead of presenting stale context.
         max_body_chars: Maximum target body characters.
@@ -3503,6 +3518,14 @@ def op_review_item_context(
         max_history: Maximum recorded history entries.
         max_evolution_versions: Maximum recorded supersession versions.
     """
+    if adoption_proposals_module.is_adoption_ref(ref):
+        return adoption_proposals_module.assemble_context(
+            vault_root,
+            ref=ref,
+            expected_fingerprint=expected_fingerprint,
+            max_body_chars=max_body_chars,
+            max_related_pages=max_related_pages,
+        )
     return review_context_module.assemble(
         vault_root,
         ref=ref,
@@ -3531,13 +3554,24 @@ def op_triage_memory(
     resurfaces automatically.
 
     Args:
-        ref: Stable `exomem://review/<id>` reference from review_memory.
+        ref: Stable `exomem://review/<id>` reference from review_memory. An
+            `exomem://review/adoption/<id>` ref triages an Adoption Studio
+            proposal instead, keyed the same way (`review_id:fingerprint`).
         action: dismiss, snooze, or reopen.
         until: Snooze-through date as YYYY-MM-DD; required only for snooze.
         why: Optional short rationale stored with the review decision.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
     """
+    if adoption_proposals_module.is_adoption_ref(ref):
+        return adoption_proposals_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if relation_queue_module.is_relation_ref(ref):
         return relation_queue_module.triage(
             vault_root,
