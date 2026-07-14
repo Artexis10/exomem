@@ -40,6 +40,8 @@ MAX_ARTIFACT_METADATA_CANDIDATES = 512
 MAX_DIRTY_ARTIFACT_CANDIDATES = MAX_ARTIFACTS
 MAX_PRUNE_CANDIDATES = 16
 MAX_PRUNE_LOCK_SECONDS = 0.05
+MAX_PRUNE_ENUM_ENTRIES = 16
+MAX_STATE_ENUM_ENTRIES = 32
 MAX_METADATA_LOG_BYTES = 1024 * 1024
 MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
@@ -1686,7 +1688,8 @@ def _valid_session_manifest(
         return False
     session_id = value.get("session_id")
     return (
-        value.get("schema_version") == SCHEMA_VERSION
+        type(value.get("schema_version")) is int
+        and value.get("schema_version") == SCHEMA_VERSION
         and value.get("kind") == "session"
         and value.get("client") == client
         and _bounded_safe_text(session_id)
@@ -1701,6 +1704,95 @@ def _valid_session_manifest(
 def _pending_session_name(state_name: str) -> str:
     _validate_child_name(state_name)
     return f".pending-{state_name}.json"
+
+
+_STATE_NAME_TOKEN = r"[A-Za-z0-9._-]{1,80}-[0-9a-f]{20}"
+_PENDING_CANONICAL = re.compile(rf"^\.pending-(?P<state>{_STATE_NAME_TOKEN})\.json$")
+_PENDING_TEMP = re.compile(
+    rf"^\.pending-(?P<state>{_STATE_NAME_TOKEN})\.tmp-[0-9]+-[0-9a-f]{{16}}$"
+)
+
+
+def _regular_file_info_at(directory: _SecureDirectory, name: str) -> os.stat_result | None:
+    try:
+        fd = _open_secure_file_at(directory, name, os.O_RDONLY, 0o600)
+        try:
+            info = os.fstat(fd)
+            return info if stat.S_ISREG(info.st_mode) else None
+        finally:
+            os.close(fd)
+    except OSError:
+        return None
+
+
+def _cleanup_pending_root_entry(
+    root: _SecureDirectory,
+    home: Path,
+    client: str,
+    name: str,
+    now_ns: int,
+    *,
+    target_state_name: str | None = None,
+) -> None:
+    temporary = _PENDING_TEMP.fullmatch(name)
+    if temporary is not None:
+        info = _regular_file_info_at(root, name)
+        if info is None:
+            return
+        target_match = temporary.group("state") == target_state_name
+        expired = now_ns - int(info.st_mtime_ns) > RETENTION_NS
+        if target_match or expired:
+            try:
+                _unlink_at(root, name)
+            except OSError:
+                pass
+        return
+    canonical = _PENDING_CANONICAL.fullmatch(name)
+    if canonical is None or target_state_name is not None:
+        return
+    state_name = canonical.group("state")
+    if _existing_kind(root, state_name) is not None:
+        return
+    pending, status_value = _load_pending_session_at(root, home, client, state_name)
+    if (
+        status_value == "valid"
+        and pending is not None
+        and now_ns - int(pending["created_at_ns"]) > RETENTION_NS
+    ):
+        try:
+            _unlink_at(root, name)
+        except OSError:
+            pass
+
+
+def _cleanup_pending_temporaries_for_state(
+    root: _SecureDirectory,
+    home: Path,
+    client: str,
+    state_name: str,
+) -> None:
+    deadline = time.monotonic() + MAX_PRUNE_LOCK_SECONDS
+    try:
+        names, _cursor, _exhausted, _inspected = _directory_window(
+            root,
+            cursor=0,
+            limit=MAX_STATE_ENUM_ENTRIES,
+            deadline=deadline,
+        )
+    except OSError:
+        return
+    now_ns = time.time_ns()
+    for name in names:
+        if time.monotonic() >= deadline:
+            return
+        _cleanup_pending_root_entry(
+            root,
+            home,
+            client,
+            name,
+            now_ns,
+            target_state_name=state_name,
+        )
 
 
 def _load_pending_session_at(
@@ -1742,6 +1834,7 @@ def _ensure_pending_session_at(
     created_at_ns: int,
 ) -> dict[str, Any]:
     state_name = session_state_dir(home, client, session_id).name
+    _cleanup_pending_temporaries_for_state(root, home, client, state_name)
     existing, status_value = _load_pending_session_at(root, home, client, state_name)
     if status_value == "valid" and existing is not None:
         return existing
@@ -2064,7 +2157,8 @@ def _valid_structural_contract(value: object) -> bool:
     client = value["client"]
     event = value["event"]
     if (
-        value["schema_version"] != SCHEMA_VERSION
+        type(value["schema_version"]) is not int
+        or value["schema_version"] != SCHEMA_VERSION
         or not isinstance(client, str)
         or client not in _CLIENT_EVENTS
     ):
@@ -2131,6 +2225,7 @@ def _decode_checkpoint(raw: bytes) -> dict[str, Any] | None:
             "event_order",
             "structural",
         }
+        or type(loaded.get("schema_version")) is not int
         or loaded.get("schema_version") != SCHEMA_VERSION
         or not isinstance(loaded.get("checkpoint_id"), str)
         or _HEX_64.fullmatch(loaded["checkpoint_id"]) is None
@@ -2234,12 +2329,106 @@ def _list_directory_bounded(
     return sorted(names), False
 
 
-def _cleanup_temporaries(state: _SecureDirectory) -> None:
+def _linux_directory_window(
+    directory: _SecureDirectory,
+    cursor: int,
+    limit: int,
+    deadline: float,
+) -> tuple[list[str], int, bool, int]:
+    """Read a bounded Linux getdents window with a restartable directory cookie."""
+    import ctypes
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    scan_fd = os.open(".", flags, dir_fd=directory.fd)
     try:
-        names = _list_directory(state)
+        if cursor:
+            os.lseek(scan_fd, cursor, os.SEEK_SET)
+        libc = ctypes.CDLL(None, use_errno=True)
+        getdents64 = libc.getdents64
+        getdents64.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t]
+        getdents64.restype = ctypes.c_ssize_t
+        buffer = ctypes.create_string_buffer(4096)
+        names: list[str] = []
+        inspected = 0
+        next_cursor = cursor
+        while len(names) < limit and time.monotonic() < deadline:
+            count = int(getdents64(scan_fd, ctypes.addressof(buffer), len(buffer)))
+            if count < 0:
+                error = ctypes.get_errno()
+                raise OSError(error, os.strerror(error))
+            if count == 0:
+                return names, 0, True, inspected
+            offset = 0
+            raw = buffer.raw
+            while offset < count:
+                if time.monotonic() >= deadline:
+                    return names, next_cursor, False, inspected
+                record_length = int.from_bytes(raw[offset + 16 : offset + 18], "little")
+                if record_length < 20 or offset + record_length > count:
+                    raise OSError(errno.EIO, "invalid directory record")
+                next_cursor = max(
+                    0,
+                    int.from_bytes(raw[offset + 8 : offset + 16], "little", signed=True),
+                )
+                name_raw = raw[offset + 19 : offset + record_length].split(b"\0", 1)[0]
+                offset += record_length
+                name = os.fsdecode(name_raw)
+                if name in {".", ".."}:
+                    continue
+                inspected += 1
+                names.append(name)
+                if len(names) >= limit:
+                    return names, next_cursor, False, inspected
+        return names, next_cursor, False, inspected
+    finally:
+        os.close(scan_fd)
+
+
+def _directory_window(
+    directory: _SecureDirectory,
+    *,
+    cursor: int,
+    limit: int,
+    deadline: float,
+) -> tuple[list[str], int, bool, int]:
+    if sys.platform.startswith("linux") and os.name != "nt":
+        return _linux_directory_window(directory, cursor, limit, deadline)
+    target: object = directory.path if os.name == "nt" else directory.fd
+    names: list[str] = []
+    inspected = 0
+    position = 0
+    with os.scandir(target) as entries:
+        for entry in entries:
+            if time.monotonic() >= deadline:
+                return names, position, False, inspected
+            inspected += 1
+            position += 1
+            if position <= cursor:
+                continue
+            names.append(entry.name)
+            if len(names) >= limit:
+                return names, position, False, inspected
+    return names, 0, True, inspected
+
+
+def _cleanup_temporaries(
+    state: _SecureDirectory,
+    *,
+    deadline: float | None = None,
+) -> None:
+    scan_deadline = time.monotonic() + MAX_PRUNE_LOCK_SECONDS if deadline is None else deadline
+    try:
+        names, _cursor, _exhausted, _inspected = _directory_window(
+            state,
+            cursor=0,
+            limit=MAX_STATE_ENUM_ENTRIES,
+            deadline=scan_deadline,
+        )
     except OSError:
         return
     for name in names:
+        if time.monotonic() >= scan_deadline:
+            return
         if not name.startswith("current.json.tmp-"):
             continue
         try:
@@ -2257,12 +2446,26 @@ def _recognized_state_name(name: str) -> bool:
     )
 
 
-def _recognized_state_directory(state: _SecureDirectory) -> bool:
+def _recognized_state_directory(
+    state: _SecureDirectory,
+    *,
+    deadline: float | None = None,
+) -> bool:
+    scan_deadline = time.monotonic() + MAX_PRUNE_LOCK_SECONDS if deadline is None else deadline
     try:
-        names = _list_directory(state)
+        names, _cursor, exhausted, _inspected = _directory_window(
+            state,
+            cursor=0,
+            limit=MAX_STATE_ENUM_ENTRIES,
+            deadline=scan_deadline,
+        )
     except OSError:
         return False
+    if not exhausted:
+        return False
     for name in names:
+        if time.monotonic() >= scan_deadline:
+            return False
         if not _recognized_state_name(name):
             return False
         mode = _existing_kind(state, name)
@@ -2290,6 +2493,21 @@ def _prune_candidate_authorized(
     )
 
 
+def _replace_current_with_candidate(
+    state: _SecureDirectory,
+    candidate: Mapping[str, Any],
+) -> None:
+    temporary = _write_temp(state, candidate)
+    try:
+        _replace_at(state, temporary, "current.json")
+    except BaseException:
+        try:
+            _unlink_at(state, temporary)
+        except OSError:
+            pass
+        raise
+
+
 def write_checkpoint(
     event: Mapping[str, Any],
     home: Path,
@@ -2307,21 +2525,34 @@ def write_checkpoint(
         created_at_ns=observed,
     ) as state:
         _cleanup_temporaries(state)
-        current = load_checkpoint_at(state, "current.json")
+        current, current_status = load_checkpoint_status_at(state, "current.json")
         if current is not None and current["checkpoint_id"] == candidate["checkpoint_id"]:
             if tuple(candidate["event_order"]) > tuple(current["event_order"]):
-                temporary = _write_temp(state, candidate)
-                try:
-                    _replace_at(state, temporary, "current.json")
-                except BaseException:
-                    try:
-                        _unlink_at(state, temporary)
-                    except OSError:
-                        pass
-                    raise
+                _replace_current_with_candidate(state, candidate)
+            previous = load_checkpoint_at(state, "previous.json")
+            if previous is not None and previous["checkpoint_id"] == candidate["checkpoint_id"]:
+                _unlink_at(state, "previous.json")
             return {"status": "idempotent", "checkpoint_id": candidate["checkpoint_id"]}
         if current is not None and tuple(current["event_order"]) > tuple(candidate["event_order"]):
             return {"status": "stale", "checkpoint_id": candidate["checkpoint_id"]}
+        if current_status in {"missing", "corrupt"}:
+            previous, previous_status = load_checkpoint_status_at(state, "previous.json")
+            if previous_status == "valid" and previous is not None:
+                if previous["checkpoint_id"] == candidate["checkpoint_id"]:
+                    if tuple(candidate["event_order"]) > tuple(previous["event_order"]):
+                        _replace_current_with_candidate(state, candidate)
+                        _unlink_at(state, "previous.json")
+                    else:
+                        _replace_at(state, "previous.json", "current.json")
+                    return {
+                        "status": "idempotent",
+                        "checkpoint_id": candidate["checkpoint_id"],
+                    }
+                if tuple(previous["event_order"]) > tuple(candidate["event_order"]):
+                    _replace_at(state, "previous.json", "current.json")
+                    return {"status": "stale", "checkpoint_id": candidate["checkpoint_id"]}
+            elif previous_status == "corrupt":
+                _unlink_at(state, "previous.json")
         temporary = _write_temp(state, candidate)
         try:
             if current is not None:
@@ -2450,6 +2681,8 @@ def _delete_tombstone_at(
     root: _SecureDirectory,
     name: str,
     expected_identity: tuple[object, ...] | None = None,
+    *,
+    deadline: float | None = None,
 ) -> bool:
     if not name.startswith(".tombstone-"):
         return False
@@ -2466,7 +2699,15 @@ def _delete_tombstone_at(
     try:
         if expected_identity is not None and _directory_identity(tombstone) != expected_identity:
             return False
-        children = _list_directory(tombstone)
+        scan_deadline = time.monotonic() + MAX_PRUNE_LOCK_SECONDS if deadline is None else deadline
+        children, _cursor, exhausted, _inspected = _directory_window(
+            tombstone,
+            cursor=0,
+            limit=MAX_STATE_ENUM_ENTRIES,
+            deadline=scan_deadline,
+        )
+        if not exhausted:
+            return False
         if any(
             not _recognized_state_name(child)
             or not stat.S_ISREG(_existing_kind(tombstone, child) or 0)
@@ -2474,6 +2715,8 @@ def _delete_tombstone_at(
         ):
             return False
         for child in children:
+            if time.monotonic() >= scan_deadline:
+                return False
             _unlink_at(tombstone, child)
         if os.name == "nt":
             _windows_delete_directory_handle(tombstone.windows_handle)
@@ -2496,6 +2739,7 @@ def _tombstone_expired_candidate(
     now: int,
     *,
     force_fallback: bool,
+    deadline: float | None = None,
 ) -> tuple[str, tuple[object, ...]] | None:
     state_context = None
     state_open = False
@@ -2512,7 +2756,7 @@ def _tombstone_expired_candidate(
         return None
     locked = True
     try:
-        if not _recognized_state_directory(state_handle):
+        if not _recognized_state_directory(state_handle, deadline=deadline):
             return None
         current = load_checkpoint_at(state_handle, "current.json")
         previous = load_checkpoint_at(state_handle, "previous.json")
@@ -2628,6 +2872,8 @@ def _authorize_recovery_tombstone(
     client: str,
     tombstone_name: str,
     now: int,
+    *,
+    deadline: float | None = None,
 ) -> tuple[str, tuple[object, ...]] | None:
     match = _TOMBSTONE.fullmatch(tombstone_name)
     if match is None:
@@ -2650,7 +2896,7 @@ def _authorize_recovery_tombstone(
             context.__exit__(*sys.exc_info())
         return None
     try:
-        if not _recognized_state_directory(state):
+        if not _recognized_state_directory(state, deadline=deadline):
             return None
         candidates = (
             load_checkpoint_at(state, "current.json"),
@@ -2689,6 +2935,8 @@ def _clean_expired_previous_for_current(
     client: str,
     state_name: str,
     now: int,
+    *,
+    deadline: float | None = None,
 ) -> None:
     context = None
     state_open = False
@@ -2707,7 +2955,7 @@ def _clean_expired_previous_for_current(
             context.__exit__(*sys.exc_info())
         return
     try:
-        if not _recognized_state_directory(state):
+        if not _recognized_state_directory(state, deadline=deadline):
             return
         current = load_checkpoint_at(state, "current.json")
         previous = load_checkpoint_at(state, "previous.json")
@@ -2760,44 +3008,43 @@ def prune_expired(
                         client,
                         current_name,
                         now,
+                        deadline=lock_deadline,
                     )
-                all_entries = [
+                scan_cursor = _read_prune_sequence(root_lock, offset=17)
+                scanned_names, next_cursor, _exhausted, _inspected = _directory_window(
+                    root_handle,
+                    cursor=scan_cursor,
+                    limit=MAX_PRUNE_ENUM_ENTRIES,
+                    deadline=lock_deadline,
+                )
+                _write_prune_sequence(root_lock, next_cursor, offset=17)
+                entries = [
                     name
-                    for name in sorted(_list_directory(root_handle))
+                    for name in scanned_names
                     if name != current_name and not name.startswith(".")
                 ]
-                if all_entries:
-                    sequence = _read_prune_sequence(root_lock)
-                    start = sequence % len(all_entries)
-                    rotated = all_entries[start:] + all_entries[:start]
-                    entries = rotated[:MAX_PRUNE_CANDIDATES]
-                    _write_prune_sequence(root_lock, sequence + len(entries))
-                else:
-                    entries = []
-                all_recovery_names = [
-                    name
-                    for name in sorted(_list_directory(root_handle))
-                    if name.startswith(".tombstone-")
-                ]
-                if all_recovery_names:
-                    recovery_sequence = _read_prune_sequence(root_lock, offset=9)
-                    recovery_start = recovery_sequence % len(all_recovery_names)
-                    rotated_recovery = (
-                        all_recovery_names[recovery_start:] + all_recovery_names[:recovery_start]
-                    )
-                    recovery_names = rotated_recovery[:MAX_PRUNE_CANDIDATES]
-                    _write_prune_sequence(
-                        root_lock,
-                        recovery_sequence + len(recovery_names),
-                        offset=9,
-                    )
-                else:
-                    recovery_names = []
+                recovery_names = [name for name in scanned_names if name.startswith(".tombstone-")]
+                for scanned_name in scanned_names:
+                    if time.monotonic() >= lock_deadline:
+                        break
+                    if scanned_name.startswith(".pending-"):
+                        _cleanup_pending_root_entry(
+                            root_handle,
+                            home,
+                            client,
+                            scanned_name,
+                            now,
+                        )
                 for recovery_name in recovery_names:
                     if time.monotonic() >= lock_deadline:
                         break
                     recovered = _authorize_recovery_tombstone(
-                        root_handle, home, client, recovery_name, now
+                        root_handle,
+                        home,
+                        client,
+                        recovery_name,
+                        now,
+                        deadline=lock_deadline,
                     )
                     if recovered is not None:
                         tombstones.append(recovered)
@@ -2816,6 +3063,7 @@ def prune_expired(
                         name,
                         now,
                         force_fallback=force_fallback,
+                        deadline=lock_deadline,
                     )
                     if tombstone is not None:
                         tombstones.append(tombstone)
@@ -2824,9 +3072,19 @@ def prune_expired(
             if time.monotonic() >= lock_deadline:
                 break
             time.sleep(0.001)
-        return sum(
-            _delete_tombstone_at(root_handle, item, identity) for item, identity in tombstones
-        )
+        removed = 0
+        for item, identity in tombstones:
+            if time.monotonic() >= lock_deadline:
+                break
+            removed += int(
+                _delete_tombstone_at(
+                    root_handle,
+                    item,
+                    identity,
+                    deadline=lock_deadline,
+                )
+            )
+        return removed
     finally:
         root_context.__exit__(None, None, None)
 
@@ -2999,7 +3257,8 @@ def _emit_continuation_output(value: Mapping[str, Any] | None) -> dict[str, Any]
     if value is None:
         return None
     if (
-        value.get("contract_version") != OUTPUT_CONTRACT_VERSION
+        type(value.get("contract_version")) is not int
+        or value.get("contract_version") != OUTPUT_CONTRACT_VERSION
         or value.get("kind") != "continuation"
         or value.get("event") != "SessionStart"
         or not isinstance(value.get("additional_context"), str)
@@ -3048,7 +3307,8 @@ def _valid_normalized_event(
     client = event.get("client")
     event_name = event.get("event")
     if (
-        event.get("contract_version") != EVENT_CONTRACT_VERSION
+        type(event.get("contract_version")) is not int
+        or event.get("contract_version") != EVENT_CONTRACT_VERSION
         or client != expected_client
         or client not in _CLIENT_EVENTS
         or not isinstance(event_name, str)

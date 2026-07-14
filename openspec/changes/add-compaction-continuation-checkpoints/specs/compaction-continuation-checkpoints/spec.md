@@ -51,7 +51,7 @@ The versioned checkpoint SHALL contain bounded event, transcript-binding, git/wo
 
 ### Requirement: Lifecycle adapters normalize clients before state access
 
-The implementation SHALL expose one versioned internal event/output contract and one shared checkpoint, storage, validation, artifact, and rendering core. Claude Code and Codex CLI adapters SHALL map pinned documented raw command-hook fields and output envelopes to that contract, pass an explicit client identity, reject unknown/ambiguous event shapes before state access, ignore every non-allowlisted content-bearing field, and never fork core recovery logic. A new client SHALL NOT be advertised as supported until its envelope, lifecycle configuration, and output adapter have contract tests.
+The implementation SHALL expose one versioned internal event/output contract and one shared checkpoint, storage, validation, artifact, and rendering core. Every event, output, checkpoint, and session/pending-manifest version field SHALL be the exact expected integer type; boolean lookalikes SHALL be rejected. Claude Code and Codex CLI adapters SHALL map pinned documented raw command-hook fields and output envelopes to that contract, pass an explicit client identity, reject unknown/ambiguous event shapes before state access, ignore every non-allowlisted content-bearing field, and never fork core recovery logic. A new client SHALL NOT be advertised as supported until its envelope, lifecycle configuration, and output adapter have contract tests.
 
 #### Scenario: Equivalent client events normalize identically
 
@@ -120,6 +120,8 @@ Each client session SHALL use a bounded OS advisory lock on a mode-restricted re
 - **WHEN** interruption leaves no valid current after a prior current was rotated
 - **THEN** no partial temporary file is accepted
 - **AND** the loader can recover the validated previous generation as an explicitly labeled rollback
+- **AND** a later same-ID delivery restores one refreshed current generation without duplicate history
+- **AND** an older different-ID delivery cannot replace the validated previous ordering floor
 
 ### Requirement: Artifact discovery is closed, bounded, and content-free
 
@@ -248,7 +250,7 @@ Release acceptance SHALL pin official envelope fixtures to named Claude Code/Cod
 
 ### Requirement: Diagnostics, retention, and rollback preserve state safety
 
-`install-hook --check` SHALL validate exact client-supported registrations/matchers, deployed hashes, legacy entries, and runtime permissions/age/status; no runtime state before the first write event SHALL be a warning. Metadata-only logs SHALL exclude content, environment values, and absolute paths. Retention SHALL default to 30 days. An expired non-current session SHALL be atomically renamed while writers are excluded to a unique tombstone under the same state root; deletion SHALL target only the validated tombstone, allowing canonical-path writers to create fresh state safely. A platform fallback that must close the session handle before rename SHALL require all writers/pruners to follow fixed `root -> session` coordination, with writers releasing root after safe session-handle acquisition and pruners holding it through tombstone rename. Disablement SHALL bypass `PreCompact`, Claude `SessionEnd`, and `SessionStart` without deleting state. Rollback SHALL be documented as manual removal because no uninstall CLI is added.
+`install-hook --check` SHALL validate exact client-supported registrations/matchers, deployed hashes, legacy entries, and runtime permissions/age/status; no runtime state before the first write event SHALL be a warning. Metadata-only logs SHALL exclude content, environment values, and absolute paths. Retention SHALL default to 30 days. Root, tombstone, and temporary-file enumeration SHALL be entry-bounded and deadline-checked; root pruning SHALL persist a cursor so repeated runs eventually inspect every entry without sorting or materializing the full directory. An expired non-current session SHALL be atomically renamed while writers are excluded to a unique tombstone under the same state root; deletion SHALL target only the bounded, fully validated tombstone, allowing canonical-path writers to create fresh state safely. Expired recognized pending manifests and abandoned pending temporaries SHALL be cleaned without using temporary contents as session authorization. A platform fallback that must close the session handle before rename SHALL require all writers/pruners to follow fixed `root -> session` coordination, with writers releasing root after safe session-handle acquisition and pruners holding it through tombstone rename. Disablement SHALL bypass `PreCompact`, Claude `SessionEnd`, and `SessionStart` without deleting state. Rollback SHALL be documented as manual removal because no uninstall CLI is added.
 
 #### Scenario: Health check runs before first checkpoint
 

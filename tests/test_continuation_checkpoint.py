@@ -229,6 +229,7 @@ def test_structural_digest_controls_identity_and_observation_time_does_not() -> 
     "case",
     [
         "inner_schema",
+        "inner_schema_bool",
         "client_event",
         "client_type",
         "trigger_type",
@@ -269,6 +270,8 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
     }
     if case == "inner_schema":
         structural["schema_version"] = 999
+    elif case == "inner_schema_bool":
+        structural["schema_version"] = True
     elif case == "client_event":
         structural["event"] = "SessionEnd"
     elif case == "client_type":
@@ -361,6 +364,17 @@ def test_decoder_rejects_hostile_self_consistent_structural_contract(case: str) 
             "dirty_paths": [],
         }
     candidate = checkpoint.finalize_checkpoint(structural, observed_at_ns=100)
+
+    assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(candidate)) is None
+
+
+def test_decoder_rejects_boolean_outer_schema_version(tmp_path: Path) -> None:
+    candidate = checkpoint.build_checkpoint(
+        _event(client="codex"),
+        tmp_path,
+        observed_at_ns=100,
+    )
+    candidate["schema_version"] = True
 
     assert checkpoint._decode_checkpoint(checkpoint.encode_checkpoint(candidate)) is None
 
@@ -983,6 +997,7 @@ def test_shared_core_rejects_unknown_event_contract_before_state_access(
         {"source": "resume"},
         {"session_id": ["not", "text"]},
         {"normalization": {"degradation": [["not", "text"]], "truncation": {}}},
+        {"contract_version": True},
     ],
 )
 def test_shared_core_rejects_malformed_v1_normalized_event_before_state_access(
@@ -1027,6 +1042,20 @@ def test_shared_core_rejects_malformed_v1_normalized_event_before_state_access(
     assert calls == []
     assert not checkpoint.client_state_root(tmp_path, "codex").exists()
     assert not checkpoint.client_state_root(tmp_path, "claude").exists()
+
+
+def test_output_adapter_rejects_boolean_contract_version() -> None:
+    assert (
+        checkpoint._emit_continuation_output(
+            {
+                "contract_version": True,
+                "kind": "continuation",
+                "event": "SessionStart",
+                "additional_context": "bounded context",
+            }
+        )
+        is None
+    )
 
 
 def test_subprocess_unknown_event_soft_fails_without_output_or_state(tmp_path: Path) -> None:
@@ -1358,6 +1387,74 @@ def test_idempotent_redelivery_refreshes_retention_without_rotating_history(
     assert current["observed_at_ns"] == refresh_observed
     assert current["event_order"][-2] == refresh_observed
     assert not (state / "previous.json").exists()
+
+
+@pytest.mark.parametrize("corrupt_current", [False, True])
+def test_same_id_retry_recovers_interrupted_rotation_as_one_fresh_generation(
+    tmp_path: Path,
+    corrupt_current: bool,
+) -> None:
+    home = tmp_path / "home"
+    event = _event(client="codex", session_id="same-id-recovery")
+    first = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    state_path = checkpoint.session_state_dir(home, "codex", "same-id-recovery")
+    with checkpoint._session_lock(
+        home,
+        "codex",
+        "same-id-recovery",
+        create=False,
+    ) as state:
+        checkpoint._replace_at(state, "current.json", "previous.json")
+        if corrupt_current:
+            fd = checkpoint._open_secure_file_at(
+                state,
+                "current.json",
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+            try:
+                os.write(fd, b"corrupt")
+            finally:
+                os.close(fd)
+
+    repeated = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+    start = _event(
+        client="codex",
+        event="SessionStart",
+        session_id="same-id-recovery",
+        trigger=None,
+        source="resume",
+    )
+    selected = checkpoint.select_checkpoint(start, home, now_ns=201)
+    current = checkpoint.load_checkpoint(state_path / "current.json")
+
+    assert repeated == {"status": "idempotent", "checkpoint_id": first["checkpoint_id"]}
+    assert current is not None and current["observed_at_ns"] == 200
+    assert selected is not None and selected[1] == "current"
+    assert not (state_path / "previous.json").exists()
+
+
+def test_interrupted_rotation_previous_is_ordering_floor_for_older_different_id(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "rotation-order-floor"
+    newer_event = _event(client="codex", session_id=session, trigger="auto")
+    newer = checkpoint.write_checkpoint(newer_event, home, observed_at_ns=200)
+    state_path = checkpoint.session_state_dir(home, "codex", session)
+    with checkpoint._session_lock(home, "codex", session, create=False) as state:
+        checkpoint._replace_at(state, "current.json", "previous.json")
+
+    stale = checkpoint.write_checkpoint(
+        {**newer_event, "trigger": "manual"},
+        home,
+        observed_at_ns=100,
+    )
+    current = checkpoint.load_checkpoint(state_path / "current.json")
+
+    assert stale["status"] == "stale"
+    assert current is not None and current["checkpoint_id"] == newer["checkpoint_id"]
+    assert not (state_path / "previous.json").exists()
 
 
 def stat_mode(path: Path) -> int:
@@ -1837,6 +1934,40 @@ def test_tombstone_expected_identity_rejects_replacement_before_open(tmp_path: P
     assert removed is False
     assert replacement.read_text(encoding="utf-8") == "replacement"
     assert (moved / "current.json").read_text(encoding="utf-8") == "original"
+
+
+def test_tombstone_and_temporary_cleanup_never_materialize_unbounded_children(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root_path = tmp_path / "root"
+    tombstone_path = root_path / ".tombstone-session-0000000000000000"
+    state_path = root_path / "state"
+    tombstone_path.mkdir(parents=True)
+    state_path.mkdir()
+    (tombstone_path / "foreign.txt").write_text("preserve", encoding="utf-8")
+    precomputed = [f"current.json.tmp-1-{number:016x}" for number in range(300_000)]
+    inspected = 0
+    real_list = checkpoint._list_directory
+
+    def huge_listing(directory) -> list[str]:
+        nonlocal inspected
+        if directory.path in {tombstone_path, state_path}:
+            inspected += len(precomputed)
+            return precomputed
+        return real_list(directory)
+
+    monkeypatch.setattr(checkpoint, "_list_directory", huge_listing)
+    started = time.monotonic()
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        assert checkpoint._delete_tombstone_at(root, tombstone_path.name) is False
+        with checkpoint._open_secure_child_directory(root, state_path.name, create=False) as state:
+            checkpoint._cleanup_temporaries(state)
+    elapsed = time.monotonic() - started
+
+    assert inspected <= 32
+    assert elapsed < 0.1
+    assert (tombstone_path / "foreign.txt").is_file()
 
 
 @pytest.mark.skipif(os.name == "nt", reason="mkfifo is POSIX-specific")
@@ -2390,6 +2521,56 @@ def test_killed_temporary_writer_is_cleaned_by_next_delivery(tmp_path: Path) -> 
             child.kill()
 
 
+def test_true_kill_after_rotation_then_same_id_retry_restores_reinjection(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "killed-same-id-rotation"
+    event = _event(client="codex", session_id=session)
+    first = checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    code = (
+        "import sys,time; from pathlib import Path; "
+        "from exomem._hooks import exomem_continuation_checkpoint as c; "
+        "h=Path(sys.argv[1]); x=c._session_lock(h,'codex',sys.argv[2],create=False); "
+        "s=x.__enter__(); c._replace_at(s,'current.json','previous.json'); "
+        "print('rotated',flush=True); time.sleep(60)"
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), session],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "rotated"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    state = checkpoint.session_state_dir(home, "codex", session)
+    assert not (state / "current.json").exists()
+    assert (state / "previous.json").is_file()
+
+    repeated = checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+    selected = checkpoint.select_checkpoint(
+        _event(
+            client="codex",
+            event="SessionStart",
+            session_id=session,
+            trigger=None,
+            source="resume",
+        ),
+        home,
+        now_ns=201,
+    )
+
+    assert repeated == {"status": "idempotent", "checkpoint_id": first["checkpoint_id"]}
+    assert selected is not None and selected[1] == "current"
+    assert selected[0]["observed_at_ns"] == 200
+    assert not (state / "previous.json").exists()
+
+
 @pytest.mark.parametrize(
     "stage",
     [
@@ -2628,6 +2809,72 @@ def test_prune_respects_total_budget_when_root_lock_is_held(tmp_path: Path) -> N
         child.wait(timeout=5)
 
 
+def test_prune_bounds_root_enumeration_before_candidate_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    root = checkpoint.client_state_root(home, "codex")
+    root.mkdir(parents=True)
+    root.chmod(0o700)
+    precomputed = [f"foreign-{number:06d}" for number in range(300_000)]
+    inspected = 0
+    real_list = checkpoint._list_directory
+
+    def huge_root_listing(directory) -> list[str]:
+        nonlocal inspected
+        if directory.path == root:
+            inspected += len(precomputed)
+            return precomputed
+        return real_list(directory)
+
+    monkeypatch.setattr(checkpoint, "_list_directory", huge_root_listing)
+    started = time.monotonic()
+    removed = checkpoint.prune_expired(
+        home,
+        "codex",
+        current_session="current",
+        now_ns=checkpoint.RETENTION_NS + 1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert removed == 0
+    assert inspected <= 32
+    assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.1
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="uses Linux directory cookies")
+def test_directory_window_cursor_is_bounded_and_eventually_visits_every_entry(
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "root"
+    root_path.mkdir(mode=0o700)
+    expected = {f"entry-{number:04d}" for number in range(257)}
+    for name in expected:
+        (root_path / name).touch()
+    cursor = 0
+    seen: set[str] = set()
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        for _ in range(40):
+            started = time.monotonic()
+            names, cursor, exhausted, inspected = checkpoint._directory_window(
+                root,
+                cursor=cursor,
+                limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
+                deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
+            )
+            elapsed = time.monotonic() - started
+            assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
+            assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.05
+            seen.update(names)
+            if exhausted:
+                break
+
+    assert seen == expected
+    assert exhausted is True and cursor == 0
+
+
 def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -> None:
     home = tmp_path / "home"
     now = checkpoint.RETENTION_NS + 1_000
@@ -2654,7 +2901,6 @@ def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -
         for _ in range(20)
     ]
 
-    assert removals[0] == 0
     assert sum(removals) == 1
     assert not checkpoint.session_state_dir(home, "codex", expired_session).exists()
 
@@ -2902,3 +3148,153 @@ def test_true_kill_between_session_directory_creation_and_manifest_is_prunable(
 
     assert removed == 1
     assert not state.exists()
+
+
+@pytest.mark.parametrize("cleanup", ["retry", "prune"])
+def test_true_kill_after_pending_temp_fsync_is_cleaned_boundedly(
+    tmp_path: Path,
+    cleanup: str,
+) -> None:
+    home = tmp_path / "home"
+    session = "pending-temp-kill"
+    code = "\n".join(
+        [
+            "import sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "h=Path(sys.argv[1])",
+            "real=c._replace_at",
+            "def stop(d,s,t):",
+            "    if s.startswith('.pending-') and '.tmp-' in s and t.startswith('.pending-'):",
+            "        print('pending-temp',flush=True)",
+            "        time.sleep(60)",
+            "    return real(d,s,t)",
+            "c._replace_at=stop",
+            "x=c._session_lock(h,'codex',sys.argv[2],create=True,created_at_ns=100)",
+            "x.__enter__()",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), session],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "pending-temp"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    root = checkpoint.client_state_root(home, "codex")
+    assert list(root.glob(".pending-*.tmp-*"))
+
+    if cleanup == "retry":
+        checkpoint.write_checkpoint(
+            _event(client="codex", session_id=session),
+            home,
+            observed_at_ns=200,
+        )
+    else:
+        for _ in range(20):
+            checkpoint.prune_expired(
+                home,
+                "codex",
+                current_session="other",
+                now_ns=time.time_ns() + checkpoint.RETENTION_NS + 1,
+            )
+
+    assert not list(root.glob(".pending-*.tmp-*"))
+
+
+def test_true_kill_after_pending_publish_before_directory_is_pruned(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "pending-published-kill"
+    code = "\n".join(
+        [
+            "import sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "h=Path(sys.argv[1])",
+            "state=c.session_state_dir(h,'codex',sys.argv[2])",
+            "real=c._open_secure_child_directory",
+            "def stop(d,n,**kw):",
+            "    if kw.get('create') and n==state.name:",
+            "        print('pending-published',flush=True)",
+            "        time.sleep(60)",
+            "    return real(d,n,**kw)",
+            "c._open_secure_child_directory=stop",
+            "x=c._session_lock(h,'codex',sys.argv[2],create=True,created_at_ns=100)",
+            "x.__enter__()",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), session],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "pending-published"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    root = checkpoint.client_state_root(home, "codex")
+    state = checkpoint.session_state_dir(home, "codex", session)
+    pending = root / checkpoint._pending_session_name(state.name)
+    assert pending.is_file() and not state.exists()
+
+    for _ in range(20):
+        checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+        )
+
+    assert not pending.exists()
+
+
+def test_boolean_session_and_pending_manifest_versions_are_rejected(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "bool-manifest"
+    state_path = checkpoint.session_state_dir(home, client, session)
+    root_path = checkpoint.client_state_root(home, client)
+    root_path.mkdir(parents=True)
+    root_path.chmod(0o700)
+    state_path.mkdir(mode=0o700)
+    manifest = checkpoint._session_manifest(home, client, session, 100)
+    manifest["schema_version"] = True
+    encoded = json.dumps(manifest).encode("utf-8")
+    session_manifest = state_path / ".lock"
+    session_manifest.write_bytes(b"\0" + encoded)
+    session_manifest.chmod(0o600)
+    pending_path = root_path / checkpoint._pending_session_name(state_path.name)
+    pending_path.write_bytes(encoded)
+    pending_path.chmod(0o600)
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._open_secure_child_directory(root, state_path.name, create=False) as state:
+            loaded_session = checkpoint.load_session_manifest_at(
+                state,
+                home,
+                client,
+                state_path.name,
+            )
+        loaded_pending = checkpoint._load_pending_session_at(
+            root,
+            home,
+            client,
+            state_path.name,
+        )
+
+    assert loaded_session == (None, "corrupt")
+    assert loaded_pending == (None, "corrupt")
