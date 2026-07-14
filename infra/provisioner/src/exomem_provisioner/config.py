@@ -13,6 +13,16 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 PROVISIONER_PROTOCOL = "exomem-cell-provisioner.v1"
 _DATABASE_IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
 _DISALLOWED_ROLES = {"postgres", "public", "neondb_owner"}
+_TRUSTED_IPV4_RANGES = tuple(
+    ipaddress.ip_network(value)
+    for value in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8")
+)
+_TRUSTED_IPV6_RANGES = tuple(ipaddress.ip_network(value) for value in ("fc00::/7", "::1/128"))
+
+
+def _is_trusted_proxy_network(network: ipaddress.IPv4Network | ipaddress.IPv6Network) -> bool:
+    allowed = _TRUSTED_IPV4_RANGES if network.version == 4 else _TRUSTED_IPV6_RANGES
+    return any(network.subnet_of(candidate) for candidate in allowed)
 
 
 class ProvisionerSettings(BaseSettings):
@@ -76,11 +86,7 @@ class ProvisionerSettings(BaseSettings):
                 raise ValueError(
                     "trusted proxies must be explicit private or loopback networks"
                 ) from error
-            if (
-                not (network.is_private or network.is_loopback)
-                or network.is_unspecified
-                or network.is_multicast
-            ):
+            if not _is_trusted_proxy_network(network):
                 raise ValueError("trusted proxies must be private or loopback networks")
             canonical = str(network)
             if canonical not in seen:

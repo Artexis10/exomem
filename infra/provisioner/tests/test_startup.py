@@ -67,7 +67,7 @@ def test_uvicorn_trusts_only_configured_proxy_metadata(
     _set_production_environment(monkeypatch)
     monkeypatch.setenv(
         "EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS",
-        "127.0.0.1,10.42.7.9/16",
+        "127.0.0.1,10.42.7.9/16,fd42::7/64",
     )
     captured: dict[str, object] = {}
 
@@ -84,7 +84,7 @@ def test_uvicorn_trusts_only_configured_proxy_metadata(
         root.handlers[:] = original_handlers
 
     assert captured["proxy_headers"] is True
-    assert captured["forwarded_allow_ips"] == "127.0.0.1/32,10.42.0.0/16"
+    assert captured["forwarded_allow_ips"] == "127.0.0.1/32,10.42.0.0/16,fd42::/64"
     assert captured["log_config"] is None
 
 
