@@ -126,7 +126,7 @@
 
 ## 15. Add secret handoff, observability, and runbooks
 
-- [ ] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
+- [x] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
 - [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
 - [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
 - [ ] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks.

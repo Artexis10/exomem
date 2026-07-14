@@ -13,9 +13,11 @@ arguments or successful output; provider CLI output is captured and discarded.
 - Set `SOPS_AGE_RECIPIENTS` to the off-node operator/escrow recipients. Age
   recipients are public; private keys remain offline.
 - Link the Substrate checkout to the correct Vercel project before a Vercel
-  destination is used.
-- Use a monotonically increasing `vN` for every rotation. Never reuse a version
-  after a partial or failed handoff.
+  destination is used. The handoff reads `.vercel/project.json` and requires
+  the exact organization, project ID, and project name recorded in the matrix
+  before it reads the secret source.
+- Use a monotonically increasing `vN` at each destination. Never reuse a
+  destination version after a partial or failed handoff.
 
 Set local paths once:
 
@@ -75,6 +77,23 @@ infra/scripts/secret_handoff.py \
   --vercel-project "$substrate_root"
 ```
 
+Every Vercel attempt first creates an immutable content-free reservation under
+`infra/secrets/receipts/vercel/`. A successful CLI write replaces that evidence
+with a `.receipt.json` whose fields bind the secret name/version, destination,
+slot, variable, environment, and exact Vercel project identity. A
+`.receipt.pending.json` means the write was not confirmed. Receipts contain no
+secret value or secret digest. Retain them with release evidence; they are one
+input to later retirement proof, alongside live acceptance/rejection checks.
+The command rejects an existing or lower version for that destination and
+holds a per-destination lock through the provider write and receipt finalization,
+so concurrent processes cannot regress the mutable Vercel value.
+
+Version numbers are destination-scoped; they do not claim that equal numbers at
+different destinations contain equal plaintext. Step 1 of scheduler rotation
+may therefore write the K3s `v1` value to a previously unused Vercel-previous
+`v1` slot, but only through the shown direct pipe. A single multi-destination
+handoff reads once and therefore does guarantee the same value for that command.
+
 Use the matrix's exact durability output/destination pair for each B2 key. The
 upload, restore, delete, and database-backup identities are separate on purpose;
 never combine or substitute them.
@@ -89,11 +108,17 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
   --repository-root "$repo_root" \
   --secret hosted_scheduler_secret \
   --version v1 \
-  --destination vercel.substrate.production.scheduler.active \
   --destination k3s.scheduler.active \
+  --destination vercel.substrate.production.scheduler.active \
   --source stdin \
   --vercel-project "$substrate_root"
 ```
+
+Caller order does not control mutation order: the command reserves all remote
+receipts, encrypts, decrypt-verifies, and durably publishes every local SOPS
+target first, then performs Vercel writes. Existing `vN` SOPS targets are never
+overwritten, and every ciphertext is checked for the expected destination shape
+and exact in-memory round trip before publication.
 
 Generate the provisioner bearer the same way, using
 `vercel.substrate.production.provisioner.active` and
@@ -119,6 +144,29 @@ The provisioner database URL and its separately scoped HCloud token have only
 provisioner-workload destinations. K3s bootstrap material is different again:
 `k3s_server_token` and the database-backup B2 key have exact SOPS Ansible-var
 destinations and are never installed as general cluster Secrets.
+
+## Run Ansible with SOPS vars on tmpfs
+
+Keep the non-secret generated host variables in the normal ignored
+`group_vars/hosted_nodes.yml`. Pass the three encrypted bootstrap values through
+the executable wrapper; it refuses a non-tmpfs workspace, writes mode `0600`
+plaintext only inside a private tmpfs directory, and removes it on exit:
+
+```bash
+export EXOMEM_SECRET_TMPFS_DIR="${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}"
+export SOPS_AGE_KEY_FILE=/secure/operator/exomem-hosted.agekey
+
+infra/scripts/ansible_with_sops.sh \
+  --inventory infra/ansible/inventory.yml \
+  --vars infra/secrets/ansible/k3s-server-token.v1.sops.json \
+  --vars infra/secrets/ansible/etcd-s3-access-key.v1.sops.json \
+  --vars infra/secrets/ansible/etcd-s3-secret-key.v1.sops.json
+```
+
+The wrapper validates `tmpfs`/`ramfs` with `findmnt`, suppresses SOPS output,
+and supplies each decrypted document as an Ansible extra-vars file. The K3s
+role's secret assertions and configuration render use `no_log: true`. Do not
+replace the wrapper with a regular `/tmp` decryption.
 
 ## Apply one SOPS artifact
 
@@ -161,8 +209,8 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
   --repository-root "$repo_root" \
   --secret hosted_scheduler_secret \
   --version v2 \
-  --destination vercel.substrate.production.scheduler.active \
   --destination k3s.scheduler.active \
+  --destination vercel.substrate.production.scheduler.active \
   --source stdin \
   --vercel-project "$substrate_root"
 ```
@@ -183,9 +231,22 @@ sops decrypt \
       --vercel-project "$substrate_root"
 ```
 
-If any destination fails, keep the last working receiver/sender pair, record
-the partial version, and retry idempotently. Never retire an old value until
-acceptance, cross-route denial, and cadence health are all proven.
+## Partial-handoff recovery
+
+The workflow is deliberately non-transactional across SOPS files and Vercel.
+If any destination fails, keep the last proven receiver/sender pair and inspect
+only ciphertext paths plus content-free receipts. A final receipt confirms that
+the Vercel CLI accepted the write; a pending receipt is uncertain. Local SOPS
+artifacts may already exist even when no Vercel call ran.
+
+Never retry or overwrite an affected destination's partial `vN`. Preserve its
+artifacts as evidence and choose a higher destination version. For a coordinated
+recovery across several peers, use a number higher than every selected peer's
+current version, generate or read the intended value again, and hand it to every
+destination required for the recovered state. An unaffected destination keeps
+its independent version sequence. Then redeploy and repeat acceptance,
+old-version rejection, cross-route denial, and cadence checks. Never retire an
+old value on receipt evidence alone.
 
 ## Break glass
 

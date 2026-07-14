@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import fcntl
 import getpass
 import json
 import os
@@ -11,7 +12,10 @@ import re
 import subprocess
 import sys
 import tempfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -47,9 +51,31 @@ class SecretSpec:
 
 
 @dataclass(frozen=True)
+class VercelReceiptPolicy:
+    target: str
+
+
+@dataclass(frozen=True)
+class VercelProjectSpec:
+    project_key: str
+    org_id: str
+    project_id: str
+    project_name: str
+    receipt_policy: VercelReceiptPolicy
+
+
+@dataclass(frozen=True)
 class HandoffMatrix:
     schema_version: int
+    vercel_projects: dict[str, VercelProjectSpec]
     secrets: dict[str, SecretSpec]
+
+
+@dataclass(frozen=True)
+class VercelReceiptReservation:
+    final_path: Path
+    pending_path: Path
+    document: dict[str, Any]
 
 
 def _require_string(value: Any, label: str) -> str:
@@ -65,9 +91,66 @@ def load_matrix(path: Path) -> HandoffMatrix:
         raise HandoffError("secret matrix is unreadable or invalid") from exc
     if not isinstance(document, dict) or document.get("schema_version") != 1:
         raise HandoffError("secret matrix version is unsupported")
+    raw_vercel_projects = document.get("vercel_projects")
     raw_secrets = document.get("secrets")
+    if not isinstance(raw_vercel_projects, dict) or not raw_vercel_projects:
+        raise HandoffError("secret matrix has no Vercel project identities")
     if not isinstance(raw_secrets, dict) or not raw_secrets:
         raise HandoffError("secret matrix has no secrets")
+
+    vercel_projects: dict[str, VercelProjectSpec] = {}
+    receipt_targets: set[str] = set()
+    for raw_key, raw_project in raw_vercel_projects.items():
+        project_key = _require_string(raw_key, "Vercel project key")
+        if not isinstance(raw_project, dict) or set(raw_project) != {
+            "org_id",
+            "project_id",
+            "project_name",
+            "receipt_policy",
+        }:
+            raise HandoffError("secret matrix has invalid Vercel project identity")
+        org_id = _require_string(raw_project["org_id"], "Vercel organization id")
+        project_id = _require_string(raw_project["project_id"], "Vercel project id")
+        project_name = _require_string(raw_project["project_name"], "Vercel project name")
+        raw_policy = raw_project["receipt_policy"]
+        if not isinstance(raw_policy, dict) or raw_policy.get("content") != (
+            "destination-binding-only"
+        ):
+            raise HandoffError("secret matrix has invalid Vercel receipt policy")
+        if (
+            raw_policy.get("mode") != "immutable-strictly-monotonic"
+            or raw_policy.get("partial_write_recovery") != "new-version"
+            or raw_policy.get("scope") != "destination"
+        ):
+            raise HandoffError("secret matrix has invalid Vercel receipt policy")
+        if set(raw_policy) != {
+            "content",
+            "mode",
+            "partial_write_recovery",
+            "scope",
+            "target",
+        }:
+            raise HandoffError("secret matrix has invalid Vercel receipt policy")
+        receipt_target = raw_policy.get("target")
+        if (
+            not isinstance(receipt_target, str)
+            or not receipt_target.endswith(".receipt.json")
+            or receipt_target.count("{secret}") != 1
+            or receipt_target.count("{destination}") != 1
+            or receipt_target.count("{version}") != 1
+            or Path(receipt_target).is_absolute()
+            or ".." in Path(receipt_target).parts
+            or receipt_target in receipt_targets
+        ):
+            raise HandoffError("secret matrix has invalid Vercel receipt target")
+        receipt_targets.add(receipt_target)
+        vercel_projects[project_key] = VercelProjectSpec(
+            project_key=project_key,
+            org_id=org_id,
+            project_id=project_id,
+            project_name=project_name,
+            receipt_policy=VercelReceiptPolicy(target=receipt_target),
+        )
 
     secrets: dict[str, SecretSpec] = {}
     target_paths: set[str] = set()
@@ -128,8 +211,10 @@ def load_matrix(path: Path) -> HandoffMatrix:
             if len(fields) != len(raw_destination) - 2:
                 raise HandoffError(f"secret matrix has invalid destination fields for {name}")
             if kind == "vercel_env":
-                if set(fields) != {"environment", "name"}:
+                if set(fields) != {"project", "environment", "name"}:
                     raise HandoffError(f"secret matrix has invalid Vercel destination for {name}")
+                if fields["project"] not in vercel_projects:
+                    raise HandoffError(f"secret matrix has unknown Vercel project for {name}")
                 if fields["environment"] not in {"production", "preview", "development"}:
                     raise HandoffError(f"secret matrix has invalid Vercel environment for {name}")
                 _require_string(fields["name"], "Vercel variable")
@@ -176,7 +261,11 @@ def load_matrix(path: Path) -> HandoffMatrix:
             sources=tuple(sources),
             destinations=destinations,
         )
-    return HandoffMatrix(schema_version=1, secrets=secrets)
+    return HandoffMatrix(
+        schema_version=1,
+        vercel_projects=vercel_projects,
+        secrets=secrets,
+    )
 
 
 def _normalize_secret(value: bytes) -> bytes:
@@ -246,6 +335,229 @@ def _assert_safe_target(repository_root: Path, relative_target: str) -> Path:
     return target
 
 
+def _version_number(version: str) -> int:
+    return int(version[1:])
+
+
+def _assert_version_is_new_and_increasing(
+    *,
+    repository_root: Path,
+    relative_template: str,
+    version: str,
+    replacements: dict[str, str],
+    allow_pending: bool,
+    label: str,
+) -> Path:
+    rendered_template = relative_template.format(version="{version}", **replacements)
+    template_path = Path(rendered_template)
+    if "{version}" not in template_path.name:
+        raise HandoffError(f"{label} target has an invalid version position")
+    relative_target = rendered_template.format(version=version)
+    target = _assert_safe_target(repository_root, relative_target)
+
+    before, after = template_path.name.split("{version}", 1)
+    suffixes = [after]
+    if allow_pending and after.endswith(".json"):
+        suffixes.append(f"{after[:-5]}.pending.json")
+    patterns = [
+        re.compile(rf"{re.escape(before)}v([1-9][0-9]*){re.escape(suffix)}\Z")
+        for suffix in suffixes
+    ]
+    existing_versions: list[int] = []
+    if target.parent.is_dir():
+        for candidate in target.parent.iterdir():
+            for pattern in patterns:
+                match = pattern.fullmatch(candidate.name)
+                if match is not None:
+                    existing_versions.append(int(match.group(1)))
+                    break
+    if existing_versions and _version_number(version) <= max(existing_versions):
+        raise HandoffError(f"{label} version must be new and increasing")
+    if target.exists() or target.is_symlink():
+        raise HandoffError(f"{label} version must be new and increasing")
+    return target
+
+
+def _verify_vercel_project(*, expected: VercelProjectSpec, vercel_project: Path | None) -> Path:
+    if vercel_project is None or not vercel_project.is_dir():
+        raise HandoffError("--vercel-project is required for a Vercel destination")
+    project_root = vercel_project.resolve()
+    link_dir = project_root / ".vercel"
+    link_path = link_dir / "project.json"
+    if link_dir.is_symlink() or link_path.is_symlink() or not link_path.is_file():
+        raise HandoffError("Vercel project link is missing or unsafe")
+    try:
+        linked = json.loads(link_path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise HandoffError("Vercel project link is unreadable or invalid") from exc
+    if not isinstance(linked, dict) or (
+        linked.get("orgId"),
+        linked.get("projectId"),
+        linked.get("projectName"),
+    ) != (expected.org_id, expected.project_id, expected.project_name):
+        raise HandoffError("Vercel project identity does not match the destination contract")
+    return project_root
+
+
+def _timestamp() -> str:
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+    except OSError as exc:
+        raise HandoffError("local evidence durability check failed") from exc
+
+
+def _write_json_exclusive(path: Path, document: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor: int | None = None
+    created = False
+    try:
+        descriptor = os.open(path, flags, 0o600)
+        created = True
+        payload = json.dumps(document, indent=2, sort_keys=True).encode("utf-8") + b"\n"
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            view = view[written:]
+        os.fsync(descriptor)
+    except (FileExistsError, OSError) as exc:
+        if created:
+            try:
+                path.unlink()
+            except OSError:
+                pass
+        raise HandoffError("Vercel receipt could not be written safely") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    _fsync_directory(path.parent)
+
+
+def _reserve_vercel_receipt(
+    *,
+    final_path: Path,
+    secret_name: str,
+    version: str,
+    destination: DestinationSpec,
+    project: VercelProjectSpec,
+) -> VercelReceiptReservation:
+    pending_path = final_path.with_suffix(".pending.json")
+    document = {
+        "schema_version": 1,
+        "secret_name": secret_name,
+        "destination_version": version,
+        "destination_id": destination.destination_id,
+        "destination_slot": destination.slot,
+        "environment": destination.fields["environment"],
+        "variable_name": destination.fields["name"],
+        "project_key": project.project_key,
+        "org_id": project.org_id,
+        "project_id": project.project_id,
+        "project_name": project.project_name,
+        "status": "reserved",
+        "recorded_at": _timestamp(),
+    }
+    _write_json_exclusive(pending_path, document)
+    return VercelReceiptReservation(
+        final_path=final_path,
+        pending_path=pending_path,
+        document=document,
+    )
+
+
+def _finalize_vercel_receipt(reservation: VercelReceiptReservation) -> None:
+    document = {
+        **reservation.document,
+        "status": "delivered",
+        "delivered_at": _timestamp(),
+    }
+    _write_json_exclusive(reservation.final_path, document)
+    try:
+        reservation.pending_path.unlink()
+        _fsync_directory(reservation.pending_path.parent)
+    except OSError as exc:
+        raise HandoffError("Vercel receipt finalization failed") from exc
+
+
+@contextmanager
+def _hold_vercel_destination_locks(
+    vercel_contexts: dict[str, tuple[VercelProjectSpec, Path, Path]],
+) -> Iterator[None]:
+    descriptors: list[int] = []
+    try:
+        for destination_id in sorted(vercel_contexts):
+            _, _, receipt_path = vercel_contexts[destination_id]
+            receipt_path.parent.mkdir(parents=True, exist_ok=True)
+            os.chmod(receipt_path.parent, 0o700)
+            lock_path = receipt_path.parent / f".{destination_id}.handoff.lock"
+            flags = os.O_RDWR | os.O_CREAT
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor: int | None = None
+            try:
+                descriptor = os.open(lock_path, flags, 0o600)
+                os.fchmod(descriptor, 0o600)
+                fcntl.flock(descriptor, fcntl.LOCK_EX)
+            except OSError as exc:
+                if descriptor is not None:
+                    os.close(descriptor)
+                raise HandoffError("Vercel destination lock could not be acquired") from exc
+            assert descriptor is not None
+            descriptors.append(descriptor)
+        yield
+    finally:
+        for descriptor in reversed(descriptors):
+            try:
+                fcntl.flock(descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(descriptor)
+
+
+def _assert_same_container_shape(plaintext: Any, ciphertext: Any) -> None:
+    if isinstance(plaintext, dict):
+        if not isinstance(ciphertext, dict) or set(ciphertext) != set(plaintext):
+            raise HandoffError("SOPS output failed the destination shape check")
+        for key, value in plaintext.items():
+            _assert_same_container_shape(value, ciphertext[key])
+    elif isinstance(plaintext, list):
+        if not isinstance(ciphertext, list) or len(ciphertext) != len(plaintext):
+            raise HandoffError("SOPS output failed the destination shape check")
+        for plain_item, cipher_item in zip(plaintext, ciphertext, strict=True):
+            _assert_same_container_shape(plain_item, cipher_item)
+
+
+def _assert_sops_destination_shape(
+    *, destination: DestinationSpec, plaintext: dict[str, Any], ciphertext: dict[str, Any]
+) -> None:
+    sops_metadata = ciphertext.get("sops")
+    if not isinstance(sops_metadata, dict) or not sops_metadata:
+        raise HandoffError("SOPS output failed the destination shape check")
+    encrypted_payload = {key: value for key, value in ciphertext.items() if key != "sops"}
+    _assert_same_container_shape(plaintext, encrypted_payload)
+    if destination.kind == "sops_k8s_secret":
+        string_data = encrypted_payload.get("stringData")
+        sensitive_value = (
+            string_data.get(destination.fields["key"]) if isinstance(string_data, dict) else None
+        )
+    elif destination.kind == "sops_escrow":
+        sensitive_value = encrypted_payload.get(destination.fields["secret_key"])
+    else:
+        sensitive_value = encrypted_payload.get(destination.fields["variable"])
+    if not isinstance(sensitive_value, str) or not sensitive_value.startswith("ENC["):
+        raise HandoffError("SOPS output failed the destination shape check")
+
+
 def _seal_sops_document(
     *,
     destination: DestinationSpec,
@@ -299,11 +611,60 @@ def _seal_sops_document(
         if result.returncode != 0 or not encrypted_path.is_file():
             raise HandoffError("SOPS encryption failed")
         ciphertext = encrypted_path.read_bytes()
-        if not ciphertext or secret in ciphertext:
+        try:
+            secret_text = secret.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise HandoffError("secret source must be UTF-8 text") from exc
+        escaped_secret = json.dumps(secret_text).encode("utf-8")
+        if not ciphertext or secret in ciphertext or escaped_secret in ciphertext:
             raise HandoffError("SOPS output failed the ciphertext check")
+        try:
+            encrypted_document = json.loads(ciphertext)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HandoffError("SOPS output failed the destination shape check") from exc
+        if not isinstance(encrypted_document, dict):
+            raise HandoffError("SOPS output failed the destination shape check")
+        _assert_sops_destination_shape(
+            destination=destination,
+            plaintext=document,
+            ciphertext=encrypted_document,
+        )
+
+        decrypt_command = [
+            sops_bin,
+            "decrypt",
+            "--input-type",
+            "json",
+            "--output-type",
+            "json",
+            str(encrypted_path),
+        ]
+        try:
+            decrypted_result = subprocess.run(
+                decrypt_command,
+                capture_output=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise HandoffError("SOPS verification decrypt failed") from exc
+        try:
+            decrypted_document = json.loads(decrypted_result.stdout)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise HandoffError("SOPS verification decrypt failed") from exc
+        if decrypted_result.returncode != 0 or decrypted_document != document:
+            raise HandoffError("SOPS verification decrypt failed")
+
         os.chmod(encrypted_path, 0o600)
-        os.replace(encrypted_path, target)
-        os.chmod(target, 0o600)
+        with encrypted_path.open("rb") as encrypted_file:
+            os.fsync(encrypted_file.fileno())
+        try:
+            os.link(encrypted_path, target)
+        except FileExistsError as exc:
+            raise HandoffError("SOPS version must be new and increasing") from exc
+        except OSError as exc:
+            raise HandoffError("SOPS output could not be published safely") from exc
+        _fsync_directory(target.parent)
     finally:
         try:
             encrypted_path.unlink()
@@ -446,6 +807,36 @@ def execute_handoff(
         raise HandoffError("secret version must be v1 or a later positive integer")
     if not any(source.kind == source_kind for source in secret_spec.sources):
         raise HandoffError(f"source {source_kind} is not allowed for {secret_name}")
+
+    vercel_contexts: dict[str, tuple[VercelProjectSpec, Path, Path]] = {}
+    for destination in destinations:
+        if destination.kind.startswith("sops_"):
+            _assert_version_is_new_and_increasing(
+                repository_root=repository_root,
+                relative_template=destination.fields["target"],
+                version=version,
+                replacements={},
+                allow_pending=False,
+                label="SOPS",
+            )
+            continue
+        project = matrix.vercel_projects[destination.fields["project"]]
+        project_root = _verify_vercel_project(
+            expected=project,
+            vercel_project=vercel_project,
+        )
+        receipt_path = _assert_version_is_new_and_increasing(
+            repository_root=repository_root,
+            relative_template=project.receipt_policy.target,
+            version=version,
+            replacements={
+                "secret": secret_name,
+                "destination": destination.destination_id,
+            },
+            allow_pending=True,
+            label="Vercel",
+        )
+        vercel_contexts[destination.destination_id] = (project, project_root, receipt_path)
     if dry_run:
         return
 
@@ -455,31 +846,70 @@ def execute_handoff(
         repository_root=repository_root,
         terraform_bin=terraform_bin,
     )
-    for destination in destinations:
-        if destination.kind == "sops_k8s_secret":
-            _seal_k8s_secret(
-                destination=destination,
-                secret=secret,
-                version=version,
+
+    local_destinations = [
+        destination for destination in destinations if destination.kind.startswith("sops_")
+    ]
+    vercel_destinations = [
+        destination for destination in destinations if destination.kind == "vercel_env"
+    ]
+    with _hold_vercel_destination_locks(vercel_contexts):
+        for destination in vercel_destinations:
+            project, _, _ = vercel_contexts[destination.destination_id]
+            _assert_version_is_new_and_increasing(
                 repository_root=repository_root,
-                sops_bin=sops_bin,
+                relative_template=project.receipt_policy.target,
+                version=version,
+                replacements={
+                    "secret": secret_name,
+                    "destination": destination.destination_id,
+                },
+                allow_pending=True,
+                label="Vercel",
             )
-        elif destination.kind in {"sops_escrow", "sops_ansible_vars"}:
-            _seal_named_document(
-                destination=destination,
+
+        receipt_reservations: dict[str, VercelReceiptReservation] = {}
+        for destination in vercel_destinations:
+            project, _, receipt_path = vercel_contexts[destination.destination_id]
+            receipt_reservations[destination.destination_id] = _reserve_vercel_receipt(
+                final_path=receipt_path,
                 secret_name=secret_name,
-                secret=secret,
                 version=version,
-                repository_root=repository_root,
-                sops_bin=sops_bin,
+                destination=destination,
+                project=project,
             )
-        else:
+
+        for destination in local_destinations:
+            if destination.kind == "sops_k8s_secret":
+                _seal_k8s_secret(
+                    destination=destination,
+                    secret=secret,
+                    version=version,
+                    repository_root=repository_root,
+                    sops_bin=sops_bin,
+                )
+            elif destination.kind in {"sops_escrow", "sops_ansible_vars"}:
+                _seal_named_document(
+                    destination=destination,
+                    secret_name=secret_name,
+                    secret=secret,
+                    version=version,
+                    repository_root=repository_root,
+                    sops_bin=sops_bin,
+                )
+        for destination in vercel_destinations:
+            project, project_root, _ = vercel_contexts[destination.destination_id]
+            project_root = _verify_vercel_project(
+                expected=project,
+                vercel_project=project_root,
+            )
             _send_vercel_secret(
                 destination=destination,
                 secret=secret,
                 vercel_bin=vercel_bin,
-                vercel_project=vercel_project,
+                vercel_project=project_root,
             )
+            _finalize_vercel_receipt(receipt_reservations[destination.destination_id])
 
 
 def _parser() -> argparse.ArgumentParser:
