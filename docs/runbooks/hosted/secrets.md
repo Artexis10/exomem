@@ -174,11 +174,23 @@ the active-secret registry must never contain or reference it.
 After every bootstrap attempt, verify the Job and Secret are absent, then rotate
 or revoke the provider-side admin credential before Helm may continue. Retain a
 content-free provider receipt out of band and set its path as
-`EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT` for the deployment gate. Repository
+`EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT` for the deployment gate. Set a stable,
+private path outside the ephemeral deploy workspace as
+`EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE`; it binds a failed, timed-out, or
+interrupted attempt to the exact receipt required before another attempt.
+Repository
 automation cannot perform this provider mutation, so an absent receipt blocks a
 live install. A crash that leaves either ephemeral resource behind is not a
 retry signal: delete it, rotate/revoke the exposed admin credential, obtain a
 new one-use URL, and start the whole bootstrap boundary again.
+
+The runtime and admin URLs must be direct or backed by a reviewed
+session-affinity guarantee. For Neon, use the direct
+`postgresql+asyncpg://ROLE:PASSWORD@ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require`
+shape; the `ep-<endpoint-id>-pooler...neon.tech` transaction pool is refused.
+For a separately reviewed session-mode proxy, append the local
+`pool_mode=session` contract marker; that marker never converts a transaction
+pool into a supported endpoint.
 
 ## Run Ansible with SOPS vars on tmpfs
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 from pathlib import Path
 
@@ -31,6 +32,7 @@ def test_bootstrap_lock_key_is_deterministic_and_database_schema_specific() -> N
         {"can_replicate": True},
         {"can_bypass_rls": True},
         {"member_of": ("privileged_parent",)},
+        {"members": ("inherited_reader",)},
     ],
 )
 def test_existing_runtime_role_with_unsafe_attributes_fails_closed(
@@ -46,6 +48,7 @@ def test_existing_runtime_role_with_unsafe_attributes_fails_closed(
         "can_replicate": False,
         "can_bypass_rls": False,
         "member_of": (),
+        "members": (),
     }
     values.update(overrides)
 
@@ -88,6 +91,7 @@ def test_runtime_identity_or_schema_ownership_mismatch_fails_closed(
         can_replicate=False,
         can_bypass_rls=False,
         member_of=(),
+        members=(),
     )
 
     with pytest.raises(module.DatabaseBootstrapError):
@@ -161,6 +165,106 @@ def test_bootstrap_configuration_rejects_identity_or_database_mismatch(
 
     with pytest.raises(module.DatabaseBootstrapError):
         module.load_configuration(require_admin=True)
+
+
+@pytest.mark.parametrize(
+    "variable",
+    [
+        "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL",
+        "EXOMEM_PROVISIONER_DATABASE_URL",
+    ],
+)
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "ep-example-pooler.eu-west-2.aws.neon.tech/control?ssl=require",
+        "database.invalid/control?pool_mode=transaction",
+        "database.invalid/control?pgbouncer=true",
+    ],
+)
+def test_database_commands_reject_known_transaction_pooling_endpoints(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str,
+    endpoint: str,
+) -> None:
+    module = _bootstrap_module()
+    monkeypatch.setenv(
+        "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL",
+        "postgresql+asyncpg://operator:admin@database.invalid/control",
+    )
+    monkeypatch.setenv(
+        "EXOMEM_PROVISIONER_DATABASE_URL",
+        "postgresql+asyncpg://runtime:runtime@database.invalid/control",
+    )
+    monkeypatch.setenv(
+        variable,
+        f"postgresql+asyncpg://"
+        f"{'operator:admin' if variable.endswith('ADMIN_URL') else 'runtime:runtime'}"
+        f"@{endpoint}",
+    )
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", "provisioner_data")
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", "runtime")
+
+    with pytest.raises(module.DatabaseBootstrapError):
+        module.load_configuration(require_admin=True)
+
+
+def test_database_commands_accept_explicit_session_stable_pooler(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _bootstrap_module()
+    monkeypatch.setenv(
+        "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL",
+        "postgresql+asyncpg://operator:admin@session-pooler.internal/control"
+        "?pool_mode=session",
+    )
+    monkeypatch.setenv(
+        "EXOMEM_PROVISIONER_DATABASE_URL",
+        "postgresql+asyncpg://runtime:runtime@session-pooler.internal/control"
+        "?pool_mode=session",
+    )
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_SCHEMA", "provisioner_data")
+    monkeypatch.setenv("EXOMEM_PROVISIONER_DATABASE_ROLE", "runtime")
+
+    configuration = module.load_configuration(require_admin=True)
+
+    assert configuration.database == "control"
+    assert configuration.admin_url is not None
+    assert "pool_mode" not in configuration.admin_url.query
+    assert "pool_mode" not in configuration.runtime_url.query
+
+
+def test_lock_domain_challenge_is_unpredictable_signed_64_bit() -> None:
+    module = _bootstrap_module()
+
+    first = module.new_lock_domain_challenge()
+    second = module.new_lock_domain_challenge()
+
+    assert -(2**63) <= first < 2**63
+    assert -(2**63) <= second < 2**63
+    assert first != second
+
+
+def test_runtime_proof_releases_challenge_it_can_acquire_before_failing() -> None:
+    module = _bootstrap_module()
+
+    class Connection:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        async def scalar(self, statement: object, parameters: dict[str, int]) -> bool:
+            self.calls.append(str(statement))
+            assert parameters == {"key": 41}
+            return True
+
+    connection = Connection()
+    with pytest.raises(module.DatabaseBootstrapError, match="lock domain"):
+        asyncio.run(module._prove_lock_domain(connection, key=41))
+
+    assert connection.calls == [
+        "SELECT pg_try_advisory_lock(:key)",
+        "SELECT pg_advisory_unlock(:key)",
+    ]
 
 
 def test_packaged_revision_state_accepts_empty_known_or_exact_and_rejects_other() -> None:

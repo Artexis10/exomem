@@ -163,33 +163,89 @@ credential helper. Never put it in a command argument, the destination matrix,
 or a permanent cluster Secret. This one-shot Job uses the same immutable image
 as the release and its command emits only a content-free failure.
 
+For Neon, both URLs use the direct
+`postgresql+asyncpg://ROLE:PASSWORD@ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require`
+shape; the `ep-<endpoint-id>-pooler...neon.tech` transaction-pooling endpoint is
+unsupported. A separately reviewed proxy with a backend-session-affinity
+guarantee may use `pool_mode=session` as the local contract marker. That marker
+does not make a transaction pool safe.
+
 ```bash
-: "${EXOMEM_PROVISIONER_DATABASE_ADMIN_URL:?read the one-use admin URL without shell tracing}"
+: "${EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT:?set the private receipt path}"
+: "${EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE:?set a persistent private attempt-state path}"
 set +x
 bootstrap_secret=exomem-provisioner-database-bootstrap-admin
 bootstrap_job=exomem-provisioner-database-bootstrap
+bootstrap_state="$EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE"
+if test -e "$bootstrap_state"; then
+  test -f "$bootstrap_state"
+  test ! -L "$bootstrap_state"
+  test "$(stat -c %u "$bootstrap_state")" = "$(id -u)"
+  case "$(stat -c %a "$bootstrap_state")" in 400|600) ;; *) exit 1 ;; esac
+  prior_attempt_id="$(jq -er '.attemptId' "$bootstrap_state")"
+  prior_credential_version="$(jq -er '.credentialVersion' "$bootstrap_state")"
+  prior_attempt_started_ns="$(jq -er '.attemptStartNs' "$bootstrap_state")"
+  infra/scripts/database_bootstrap_rotation_gate.py \
+    --receipt "$EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT" \
+    --attempt-id "$prior_attempt_id" \
+    --credential-version "$prior_credential_version" \
+    --attempt-start-ns "$prior_attempt_started_ns" \
+    --job-status 0
+  rm -- "$bootstrap_state"
+fi
+: "${EXOMEM_PROVISIONER_DATABASE_ADMIN_URL:?read the one-use admin URL without shell tracing}"
+: "${EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION:?set the non-secret provider credential version}"
 if kubectl -n exomem-platform get "secret/${bootstrap_secret}" >/dev/null 2>&1 \
   || kubectl -n exomem-platform get "job/${bootstrap_job}" >/dev/null 2>&1; then
   echo "stale database bootstrap authority requires deletion and provider rotation" >&2
   exit 1
 fi
+bootstrap_attempt_id="$(python3 -c 'import secrets; print(secrets.token_hex(16))')"
+bootstrap_attempt_started_ns="$(date +%s%N)"
+case "$EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION" in
+  *[!A-Za-z0-9._:-]*|'') echo "database admin credential version is invalid" >&2; exit 1 ;;
+esac
+test "${#EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION}" -le 128
+bootstrap_state_tmp="${bootstrap_state}.new.$$"
+test ! -e "$bootstrap_state_tmp"
+(umask 077; jq -n \
+  --arg attempt "$bootstrap_attempt_id" \
+  --arg version "$EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION" \
+  --argjson started "$bootstrap_attempt_started_ns" \
+  '{schemaVersion: 1, attemptId: $attempt, credentialVersion: $version,
+    attemptStartNs: $started}' > "$bootstrap_state_tmp")
+mv -- "$bootstrap_state_tmp" "$bootstrap_state"
+bootstrap_materialized=0
+bootstrap_job_status=0
+bootstrap_signal_status=0
+bootstrap_cleanup_status=0
 bootstrap_cleanup() {
   kubectl -n exomem-platform delete "job/${bootstrap_job}" \
-    "secret/${bootstrap_secret}" --ignore-not-found --wait=true >/dev/null
+    "secret/${bootstrap_secret}" --ignore-not-found --wait=true >/dev/null \
+    || bootstrap_cleanup_status=$?
   unset EXOMEM_PROVISIONER_DATABASE_ADMIN_URL
 }
-trap bootstrap_cleanup EXIT INT TERM
+trap 'bootstrap_cleanup; rm -rf -- "${deploy_work_dir}"' EXIT
+trap 'bootstrap_signal_status=130' INT
+trap 'bootstrap_signal_status=143' TERM
+bootstrap_materialized=1
+set +e
 printf '%s' "$EXOMEM_PROVISIONER_DATABASE_ADMIN_URL" \
   | kubectl -n exomem-platform create secret generic "$bootstrap_secret" \
       --from-file=url=/dev/stdin --dry-run=client -o yaml \
   | kubectl apply -f - >/dev/null
+bootstrap_job_status=$?
 unset EXOMEM_PROVISIONER_DATABASE_ADMIN_URL
-kubectl apply -f - <<EOF
+if test "$bootstrap_job_status" -eq 0; then
+  kubectl apply -f - <<EOF
 apiVersion: batch/v1
 kind: Job
 metadata:
   name: ${bootstrap_job}
   namespace: exomem-platform
+  annotations:
+    exomem.io/database-bootstrap-attempt: ${bootstrap_attempt_id}
+    exomem.io/database-admin-credential-version: ${EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION}
 spec:
   backoffLimit: 0
   activeDeadlineSeconds: 300
@@ -224,20 +280,60 @@ spec:
             runAsGroup: 10001
             capabilities: {drop: [ALL]}
 EOF
-kubectl -n exomem-platform wait --for=condition=complete \
-  "job/${bootstrap_job}" --timeout=300s
+  bootstrap_job_status=$?
+fi
+if test "$bootstrap_job_status" -eq 0; then
+  timeout --signal=TERM --kill-after=10s 310s \
+    kubectl -n exomem-platform wait --for=condition=complete \
+      "job/${bootstrap_job}" --timeout=300s
+  bootstrap_job_status=$?
+fi
+if test "$bootstrap_signal_status" -ne 0; then
+  bootstrap_job_status="$bootstrap_signal_status"
+fi
 bootstrap_cleanup
-trap - EXIT INT TERM
+if test "$bootstrap_cleanup_status" -ne 0 && test "$bootstrap_job_status" -eq 0; then
+  bootstrap_job_status="$bootstrap_cleanup_status"
+fi
+trap 'rm -rf -- "${deploy_work_dir}"' EXIT
+trap - INT TERM
+set -e
 test -z "${EXOMEM_PROVISIONER_DATABASE_ADMIN_URL:-}"
-test -n "${EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT:-}"
-test -r "$EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT"
+echo "Rotate or revoke the database admin credential, then write the current attempt-bound receipt." >&2
+echo "Attempt: ${bootstrap_attempt_id}; credential version: ${EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION}" >&2
+if test "$bootstrap_materialized" -eq 1; then
+  infra/scripts/database_bootstrap_rotation_gate.py \
+    --receipt "$EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT" \
+    --attempt-id "$bootstrap_attempt_id" \
+    --credential-version "$EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION" \
+    --attempt-start-ns "$bootstrap_attempt_started_ns" \
+    --job-status "$bootstrap_job_status"
+fi
+rm -- "$bootstrap_state"
+test "$bootstrap_job_status" -eq 0
 ```
 
 Delete and provider-rotate or revoke the admin credential after every attempt,
 including a failed Job or interrupted operator session. The content-free
 rotation/revocation receipt is a mandatory live gate because this repository has
-no reviewed provider API for that mutation. Confirm both ephemeral resources are
-absent before continuing. A later chart upgrade never receives admin authority:
+no reviewed provider API for that mutation. The receipt is owner-readable only,
+is newer than the attempt boundary, and contains exactly this content-free shape:
+
+```json
+{
+  "schemaVersion": 1,
+  "kind": "exomem-database-admin-rotation",
+  "attemptId": "<attempt printed by the runbook>",
+  "credentialVersion": "<EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION>",
+  "rotatedOrRevokedAt": "<current RFC 3339 UTC timestamp>"
+}
+```
+
+The persistent private attempt-state file prevents a retry from materializing
+another credential until the preceding attempt's exact receipt has passed. Do
+not put that state inside `deploy_work_dir`, which is intentionally ephemeral.
+Confirm both ephemeral resources are absent before continuing. A later chart
+upgrade never receives admin authority:
 its pre-upgrade hook only validates that the database is already at the new
 image head and blocks any revision-advancing rollout.
 

@@ -7,6 +7,7 @@ import hashlib
 import inspect
 import os
 import re
+import secrets
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -43,6 +44,7 @@ class RuntimeRoleState:
     can_replicate: bool
     can_bypass_rls: bool
     member_of: tuple[str, ...]
+    members: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -97,6 +99,7 @@ def validate_runtime_role(
         or state.can_replicate
         or state.can_bypass_rls
         or state.member_of
+        or state.members
     ):
         raise DatabaseBootstrapError("runtime role is unsafe")
     if admin_role == expected_role:
@@ -127,7 +130,41 @@ def _database_url(name: str) -> URL:
         or not value.database
     ):
         raise DatabaseBootstrapError("database command configuration is invalid")
-    return value
+    query = {
+        str(key).lower(): tuple(
+            str(item).lower() for item in (raw if isinstance(raw, tuple) else (raw,))
+        )
+        for key, raw in value.query.items()
+    }
+    hostname = str(value.host).lower().rstrip(".")
+    hostname_labels = hostname.split(".")
+    explicit_session_pool = query.get("pool_mode") == ("session",)
+    known_neon_transaction_pool = hostname.endswith(".neon.tech") and any(
+        label.endswith("-pooler") for label in hostname_labels
+    )
+    generic_pool_shape = any(
+        label == "pooler"
+        or label.endswith("-pooler")
+        or label == "pgbouncer"
+        or label.endswith("-pgbouncer")
+        for label in hostname_labels
+    )
+    if (
+        known_neon_transaction_pool
+        or (generic_pool_shape and not explicit_session_pool)
+        or ("pool_mode" in query and not explicit_session_pool)
+        or "transaction" in query.get("pool_mode", ())
+        or "transaction" in query.get("pooling", ())
+        or (
+            not explicit_session_pool
+            and any(
+                item in {"1", "true", "yes", "on"}
+                for item in query.get("pgbouncer", ())
+            )
+        )
+    ):
+        raise DatabaseBootstrapError("database command configuration is invalid")
+    return value.difference_update_query(["pool_mode"])
 
 
 def load_configuration(*, require_admin: bool) -> DatabaseCommandConfiguration:
@@ -225,6 +262,28 @@ async def _release_lock(connection: AsyncConnection, *, key: int) -> None:
         raise DatabaseBootstrapError("database command lock ownership was lost")
 
 
+def new_lock_domain_challenge() -> int:
+    """Return a cryptographically unpredictable signed advisory-lock key."""
+
+    return int.from_bytes(secrets.token_bytes(8), byteorder="big", signed=True)
+
+
+async def _prove_lock_domain(connection: AsyncConnection, *, key: int) -> None:
+    """Prove that another session in this cluster already owns the challenge."""
+
+    acquired = await connection.scalar(
+        text("SELECT pg_try_advisory_lock(:key)"), {"key": key}
+    )
+    if acquired is not True:
+        return
+    released = await connection.scalar(
+        text("SELECT pg_advisory_unlock(:key)"), {"key": key}
+    )
+    if released is not True:
+        raise DatabaseBootstrapError("database lock domain is invalid")
+    raise DatabaseBootstrapError("database lock domain is invalid")
+
+
 async def _runtime_role_state(
     connection: AsyncConnection, role: str
 ) -> RuntimeRoleState | None:
@@ -239,7 +298,7 @@ async def _runtime_role_state(
     ).one_or_none()
     if row is None:
         return None
-    memberships = tuple(
+    member_of = tuple(
         (
             await connection.execute(
                 text(
@@ -247,6 +306,19 @@ async def _runtime_role_state(
                     "JOIN pg_roles member ON member.oid = membership.member "
                     "JOIN pg_roles parent ON parent.oid = membership.roleid "
                     "WHERE member.rolname = :role ORDER BY parent.rolname"
+                ),
+                {"role": role},
+            )
+        ).scalars()
+    )
+    members = tuple(
+        (
+            await connection.execute(
+                text(
+                    "SELECT member.rolname FROM pg_auth_members membership "
+                    "JOIN pg_roles member ON member.oid = membership.member "
+                    "JOIN pg_roles parent ON parent.oid = membership.roleid "
+                    "WHERE parent.rolname = :role ORDER BY member.rolname"
                 ),
                 {"role": role},
             )
@@ -260,7 +332,8 @@ async def _runtime_role_state(
         can_create_role=bool(row.rolcreaterole),
         can_replicate=bool(row.rolreplication),
         can_bypass_rls=bool(row.rolbypassrls),
-        member_of=memberships,
+        member_of=member_of,
+        members=members,
     )
 
 
@@ -388,7 +461,10 @@ async def _migrate_or_validate_runtime(
     *,
     exact: bool,
     lock_already_held: bool,
+    lock_domain_challenge: int | None,
 ) -> None:
+    if lock_already_held != (lock_domain_challenge is not None):
+        raise DatabaseBootstrapError("database command lock configuration is invalid")
     engine = create_async_engine(
         configuration.runtime_url,
         pool_pre_ping=True,
@@ -407,13 +483,19 @@ async def _migrate_or_validate_runtime(
                     connection, key=key, timeout_seconds=configuration.lock_timeout_seconds
                 )
             try:
+                if lock_domain_challenge is not None:
+                    await _prove_lock_domain(connection, key=lock_domain_challenge)
+                current_database = await connection.scalar(text("SELECT current_database()"))
                 current_user = await connection.scalar(text("SELECT current_user"))
                 await _validate_runtime_identity(
                     connection,
                     configuration,
                     admin_role="__operator_identity_must_be_distinct__",
                 )
-                if current_user != configuration.runtime_role:
+                if (
+                    current_database != configuration.database
+                    or current_user != configuration.runtime_role
+                ):
                     raise DatabaseBootstrapError("runtime database identity is invalid")
                 revisions = await _revisions(connection, configuration.schema)
                 validate_revision_state(
@@ -460,13 +542,29 @@ async def bootstrap(
         raise DatabaseBootstrapError("admin database credential is required")
     engine = create_async_engine(configuration.admin_url, pool_pre_ping=True)
     key = database_lock_key(configuration.database, configuration.schema)
+    challenge = new_lock_domain_challenge()
+    while challenge == key:
+        challenge = new_lock_domain_challenge()
     try:
         async with engine.connect() as connection:
-            await _acquire_lock(
-                connection, key=key, timeout_seconds=configuration.lock_timeout_seconds
-            )
-            await connection.commit()
+            acquired: list[int] = []
             try:
+                await _acquire_lock(
+                    connection, key=key, timeout_seconds=configuration.lock_timeout_seconds
+                )
+                acquired.append(key)
+                await connection.commit()
+                await _acquire_lock(
+                    connection,
+                    key=challenge,
+                    timeout_seconds=configuration.lock_timeout_seconds,
+                )
+                acquired.append(challenge)
+                await connection.commit()
+                current_database = await connection.scalar(text("SELECT current_database()"))
+                if current_database != configuration.database:
+                    raise DatabaseBootstrapError("admin database identity is invalid")
+                await connection.commit()
                 async with connection.begin():
                     await _create_or_validate_runtime_identity(connection, configuration)
                 if after_identity is not None:
@@ -478,9 +576,19 @@ async def bootstrap(
                     packaged,
                     exact=False,
                     lock_already_held=True,
+                    lock_domain_challenge=challenge,
                 )
             finally:
-                await _release_lock(connection, key=key)
+                if connection.in_transaction():
+                    await connection.rollback()
+                release_error: DatabaseBootstrapError | None = None
+                for acquired_key in reversed(acquired):
+                    try:
+                        await _release_lock(connection, key=acquired_key)
+                    except DatabaseBootstrapError as error:
+                        release_error = error
+                if release_error is not None:
+                    raise release_error
     finally:
         await engine.dispose()
 
@@ -492,6 +600,7 @@ async def migrate() -> None:
         load_packaged_migrations(),
         exact=False,
         lock_already_held=False,
+        lock_domain_challenge=None,
     )
 
 
@@ -502,6 +611,7 @@ async def validate() -> None:
         load_packaged_migrations(),
         exact=True,
         lock_already_held=False,
+        lock_domain_challenge=None,
     )
 
 

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import re
 import subprocess
 from collections.abc import Callable, Sequence
+from pathlib import Path
 
 _IMAGE_PATTERN = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
 _ENTRYPOINTS = (
@@ -26,6 +28,24 @@ _ENTRYPOINTS = (
     "exomem-volume-worker",
 )
 _MIGRATION_ROOT = "/opt/exomem/provisioner-migrations"
+_PROVISIONER_ROOT = Path(__file__).resolve().parents[1] / "provisioner"
+_EXPECTED_MIGRATION_FILES = {
+    str(path.relative_to(_PROVISIONER_ROOT)): hashlib.sha256(path.read_bytes()).hexdigest()
+    for path in [
+        _PROVISIONER_ROOT / "alembic.ini",
+        *sorted((_PROVISIONER_ROOT / "alembic").rglob("*")),
+    ]
+    if path.is_file() and "__pycache__" not in path.parts
+}
+_EXPECTED_MIGRATION_DIRECTORIES = {
+    ".",
+    *{
+        str(path.relative_to(_PROVISIONER_ROOT))
+        for path in (_PROVISIONER_ROOT / "alembic").rglob("*")
+        if path.is_dir() and "__pycache__" not in path.parts
+    },
+    "alembic",
+}
 _POSTGRES_BINARIES = (
     "/usr/bin/createdb",
     "/usr/bin/dropdb",
@@ -35,8 +55,10 @@ _POSTGRES_BINARIES = (
 )
 _PROBE = f"""
 from importlib import metadata
+import hashlib
 import os
 from pathlib import Path
+import stat
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
@@ -54,11 +76,27 @@ for path in {_POSTGRES_BINARIES!r}:
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         raise SystemExit(12)
 migration_root = Path({_MIGRATION_ROOT!r})
-for path in (migration_root, migration_root / "alembic.ini", migration_root / "alembic"):
-    if path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_gid != 0:
+expected_files = {_EXPECTED_MIGRATION_FILES!r}
+expected_directories = {_EXPECTED_MIGRATION_DIRECTORIES!r}
+observed_files = {{}}
+observed_directories = set()
+for path in (migration_root, *sorted(migration_root.rglob("*"))):
+    if path.is_symlink():
         raise SystemExit(14)
-    if path.stat().st_mode & 0o222:
+    metadata = path.stat()
+    if metadata.st_uid != 0 or metadata.st_gid != 0:
+        raise SystemExit(14)
+    if metadata.st_mode & 0o222:
         raise SystemExit(15)
+    relative = "." if path == migration_root else str(path.relative_to(migration_root))
+    if stat.S_ISDIR(metadata.st_mode):
+        observed_directories.add(relative)
+    elif stat.S_ISREG(metadata.st_mode):
+        observed_files[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    else:
+        raise SystemExit(14)
+if observed_files != expected_files or observed_directories != expected_directories:
+    raise SystemExit(17)
 configuration = Config(str(migration_root / "alembic.ini"))
 if ScriptDirectory.from_config(configuration).get_heads() != [DATABASE_REVISION]:
     raise SystemExit(16)

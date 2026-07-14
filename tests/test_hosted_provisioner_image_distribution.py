@@ -74,3 +74,16 @@ def test_image_verifier_requires_packaged_migrations_and_database_commands() -> 
     assert module._MIGRATION_ROOT == MIGRATION_ROOT
     assert "DATABASE_REVISION" in module._PROBE
     assert "is_symlink" in module._PROBE
+    assert "rglob" in module._PROBE
+    assert "sha256" in module._PROBE
+    assert "expected_files" in module._PROBE
+    assert module._EXPECTED_MIGRATION_FILES == {
+        str(path.relative_to(PROVISIONER)): __import__("hashlib").sha256(
+            path.read_bytes()
+        ).hexdigest()
+        for path in [
+            PROVISIONER / "alembic.ini",
+            *sorted((PROVISIONER / "alembic").rglob("*")),
+        ]
+        if path.is_file() and "__pycache__" not in path.parts
+    }

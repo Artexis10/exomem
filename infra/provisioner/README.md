@@ -81,6 +81,15 @@ uv run --frozen alembic upgrade head
 ```
 
 Production uses `postgresql+asyncpg`, a dedicated role, and a dedicated schema.
+Both bootstrap URLs must use direct PostgreSQL or an endpoint whose reviewed
+contract guarantees backend-session affinity for the connection lifetime. The
+supported Neon direct shape is
+`postgresql+asyncpg://ROLE:PASSWORD@ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require`.
+Neon's `ep-<endpoint-id>-pooler...neon.tech` transaction-pooling shape is
+rejected. A separately reviewed session-mode proxy may record that guarantee as
+`postgresql+asyncpg://ROLE:PASSWORD@session-pooler.internal/DATABASE?ssl=require&pool_mode=session`;
+the `pool_mode=session` marker is validated and removed before `asyncpg`
+connects. It does not turn a transaction pool into a session-stable endpoint.
 The immutable image carries the exact `alembic.ini` and revision tree at
 `/opt/exomem/provisioner-migrations`, root-owned and non-writable. Production
 database lifecycle uses three zero-argument, environment-only commands:
@@ -88,8 +97,10 @@ database lifecycle uses three zero-argument, environment-only commands:
 - `exomem-provisioner-database-bootstrap` briefly requires
   `EXOMEM_PROVISIONER_DATABASE_ADMIN_URL`. It creates or exactly validates the
   least-privilege runtime role/schema, migrates through a runtime-authenticated
-  connection, and proves final runtime access while one bounded advisory lock
-  spans the whole operation.
+  connection, and proves final runtime access while one bounded deterministic
+  advisory lock spans the whole operation. A second unpredictable admin-held
+  advisory lock proves the runtime connection reached the same database lock
+  domain before migration can succeed.
 - `exomem-provisioner-database-migrate` uses only the runtime URL, accepts an
   empty or known packaged revision, and migrates to the single packaged head.
 - `exomem-provisioner-database-validate` uses only the runtime URL and succeeds
@@ -97,7 +108,7 @@ database lifecycle uses three zero-argument, environment-only commands:
   validation-only command on upgrade so Helm never implies a rollback-safe
   revision advance.
 
-Existing role attributes, memberships, database/schema ownership, unknown or
+Existing role attributes, incoming or outgoing memberships, database/schema ownership, unknown or
 multiple revisions, and mismatched admin/runtime database identities fail
 closed. Bootstrap never repairs privilege drift. The admin URL belongs only to
 the ephemeral operator bootstrap Job; stable chart resources never reference

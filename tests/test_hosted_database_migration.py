@@ -108,8 +108,35 @@ def test_admin_database_authority_is_ephemeral_and_rotation_gated() -> None:
 
     assert "DATABASE_ADMIN_URL" not in matrix_text.upper()
     assert "database-bootstrap-admin" not in matrix_text
-    assert "trap bootstrap_cleanup EXIT INT TERM" in deploy
+    assert 'trap \'bootstrap_cleanup; rm -rf -- "${deploy_work_dir}"\' EXIT' in deploy
+    assert "trap 'bootstrap_signal_status=130' INT" in deploy
+    assert "trap 'bootstrap_signal_status=143' TERM" in deploy
+    assert "bootstrap_materialized=1" in deploy
+    assert "bootstrap_job_status=$?" in deploy
+    assert "database_bootstrap_rotation_gate.py" in deploy
+    assert deploy.index("database_bootstrap_rotation_gate.py") < deploy.index(
+        'test "$bootstrap_job_status" -eq 0'
+    )
     assert "EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT" in deploy
+    assert "EXOMEM_DATABASE_ADMIN_CREDENTIAL_VERSION" in deploy
+    assert "EXOMEM_DATABASE_BOOTSTRAP_ATTEMPT_STATE" in deploy
+    assert "prior_attempt_id" in deploy
+    assert "ep-<endpoint-id>.<region>.aws.neon.tech/DATABASE?ssl=require" in deploy
+    assert "pool_mode=session" in deploy
     assert "exomem-provisioner-database-bootstrap-admin" in deploy
     assert "no admin URL destination" in secrets
     assert "rotate/revoke" in secrets
+
+    bootstrap_block = next(
+        block
+        for block in deploy.split("```bash\n")[1:]
+        if "bootstrap_secret=exomem-provisioner-database-bootstrap-admin" in block
+    ).split("```", 1)[0]
+    syntax = subprocess.run(
+        ["bash", "-n"],
+        input=bootstrap_block,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert syntax.returncode == 0, syntax.stderr

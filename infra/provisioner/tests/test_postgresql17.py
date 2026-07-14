@@ -135,6 +135,50 @@ def postgresql17() -> Iterator[PostgreSQL17]:
         _run(["docker", "network", "rm", network], check=False)
 
 
+@pytest.fixture(scope="module")
+def other_postgresql17(postgresql17: PostgreSQL17) -> Iterator[PostgreSQL17]:
+    container = f"exomem-provisioner-pg17-other-{uuid.uuid4().hex[:12]}"
+    admin_password = f"admin-{uuid.uuid4().hex}"
+    _run(
+        [
+            "docker",
+            "run",
+            "--detach",
+            "--rm",
+            "--name",
+            container,
+            "--network",
+            postgresql17.network,
+            "--env",
+            f"POSTGRES_PASSWORD={admin_password}",
+            POSTGRESQL17_IMAGE,
+        ]
+    )
+    try:
+        for _ in range(60):
+            ready = _run(
+                ["docker", "exec", container, "pg_isready", "--username", "postgres"],
+                check=False,
+            )
+            if ready.returncode == 0:
+                break
+            time.sleep(0.5)
+        else:
+            raise AssertionError(_run(["docker", "logs", container], check=False).stdout)
+        server = PostgreSQL17(
+            container=container,
+            network=postgresql17.network,
+            port=0,
+            admin_password=admin_password,
+        )
+        assert _psql(server, "SHOW server_version_num;").stdout.strip().splitlines()[
+            -1
+        ].startswith("17")
+        yield server
+    finally:
+        _run(["docker", "rm", "--force", container], check=False)
+
+
 def _psql(
     server: PostgreSQL17,
     statement: str,
@@ -231,6 +275,7 @@ def _image_environment(
     database: ProvisionerTestDatabase,
     *,
     include_admin: bool,
+    admin_server: PostgreSQL17 | None = None,
 ) -> list[str]:
     environment = [
         "--env",
@@ -247,13 +292,14 @@ def _image_environment(
         "EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS=15",
     ]
     if include_admin:
+        admin_server = admin_server or server
         environment.extend(
             [
                 "--env",
                 (
                     "EXOMEM_PROVISIONER_DATABASE_ADMIN_URL="
-                    f"postgresql+asyncpg://postgres:{server.admin_password}@"
-                    f"{server.container}:5432/{database.name}"
+                    f"postgresql+asyncpg://postgres:{admin_server.admin_password}@"
+                    f"{admin_server.container}:5432/{database.name}"
                 ),
             ]
         )
@@ -266,6 +312,7 @@ def _image_command(
     command_name: str,
     *,
     include_admin: bool = False,
+    admin_server: PostgreSQL17 | None = None,
     python: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     assert PROVISIONER_TEST_IMAGE is not None
@@ -275,7 +322,12 @@ def _image_command(
         "--rm",
         "--network",
         server.network,
-        *_image_environment(server, database, include_admin=include_admin),
+        *_image_environment(
+            server,
+            database,
+            include_admin=include_admin,
+            admin_server=admin_server,
+        ),
     ]
     if python is None:
         command.extend([PROVISIONER_TEST_IMAGE, command_name])
@@ -599,6 +651,83 @@ def test_built_image_bootstrap_retry_and_lock_owner_do_not_deadlock(
     migration_stdout, migration_stderr = migration_process.communicate(timeout=30)
     assert bootstrap_process.returncode == 0, bootstrap_stdout + bootstrap_stderr
     assert migration_process.returncode == 0, migration_stdout + migration_stderr
+
+
+@pytest.mark.skipif(
+    PROVISIONER_TEST_IMAGE is None,
+    reason="set PROVISIONER_TEST_IMAGE to verify the built image without checkout mounts",
+)
+def test_built_image_bootstrap_rejects_same_database_name_on_different_clusters(
+    postgresql17: PostgreSQL17,
+    other_postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(other_postgresql17, "cross_domain")
+    initialized = _image_command(
+        other_postgresql17,
+        target,
+        "exomem-provisioner-database-bootstrap",
+        include_admin=True,
+    )
+    assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+    _psql(
+        postgresql17,
+        f'CREATE DATABASE "{target.name}" OWNER postgres;',
+    )
+
+    crossed = _image_command(
+        other_postgresql17,
+        target,
+        "exomem-provisioner-database-bootstrap",
+        include_admin=True,
+        admin_server=postgresql17,
+    )
+
+    assert crossed.returncode != 0
+    validated = _image_command(
+        other_postgresql17,
+        target,
+        "exomem-provisioner-database-validate",
+    )
+    assert validated.returncode == 0, validated.stdout + validated.stderr
+
+
+@pytest.mark.skipif(
+    PROVISIONER_TEST_IMAGE is None,
+    reason="set PROVISIONER_TEST_IMAGE to verify the built image without checkout mounts",
+)
+def test_built_image_rejects_incoming_runtime_role_membership(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "incoming_membership")
+    initialized = _image_command(
+        postgresql17,
+        target,
+        "exomem-provisioner-database-bootstrap",
+        include_admin=True,
+    )
+    assert initialized.returncode == 0, initialized.stdout + initialized.stderr
+    inherited_reader = f"inherited_reader_{uuid.uuid4().hex[:8]}"
+    _psql(
+        postgresql17,
+        f'CREATE ROLE "{inherited_reader}" LOGIN; '
+        f'GRANT "{target.role}" TO "{inherited_reader}";',
+        database=target.name,
+    )
+
+    bootstrap = _image_command(
+        postgresql17,
+        target,
+        "exomem-provisioner-database-bootstrap",
+        include_admin=True,
+    )
+    validation = _image_command(
+        postgresql17,
+        target,
+        "exomem-provisioner-database-validate",
+    )
+
+    assert bootstrap.returncode != 0
+    assert validation.returncode != 0
 
 
 @pytest.mark.skipif(
