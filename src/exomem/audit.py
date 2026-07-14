@@ -53,6 +53,7 @@ from . import (
     relation_registry,
     semantic_language_registry,
     semantic_units,
+    semantic_writes,
 )
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
@@ -74,7 +75,10 @@ ALL_CATEGORIES: tuple[str, ...] = (
     "relevance_pairs_pending", "stale_review", "corpus_contradictions",
     "relation_debt",
 )
-OPTIONAL_CATEGORIES: tuple[str, ...] = ("relation_registry",)
+OPTIONAL_CATEGORIES: tuple[str, ...] = (
+    "relation_registry",
+    "semantic_contract_drift",
+)
 
 # Repo-global feedback-loop logs (written by the running service) + the golden
 # query set, used by the relevance_pairs_pending check. Module-level so tests
@@ -164,7 +168,11 @@ def audit(
         )
 
     kb = kb_root(vault_root)
-    pages = _parse_all(kb, vault_root)
+    pages = (
+        []
+        if selected == {"semantic_contract_drift"}
+        else _parse_all(kb, vault_root)
+    )
 
     findings: list[AuditFinding] = []
     if "broken_wikilink" in selected:
@@ -197,6 +205,8 @@ def audit(
         findings.extend(_check_relation_registry(vault_root))
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
+    if "semantic_contract_drift" in selected:
+        findings.extend(_check_semantic_contract_drift(vault_root))
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -207,6 +217,48 @@ def audit(
         sorted(selected), len(findings), summary,
     )
     return AuditReport(findings=findings, summary=summary)
+
+
+def _check_semantic_contract_drift(vault_root: Path) -> list[AuditFinding]:
+    """Project the shared bounded posthoc result into audit findings."""
+    batch = semantic_writes.evaluate_posthoc_batch(
+        vault_root,
+        operation="audit",
+    ).as_dict()
+    out: list[AuditFinding] = []
+    for item in batch["semantic_contract_findings"]:
+        key = {
+            "code": item["code"],
+            "governed_element_identity": item["governed_element_identity"],
+            "resolved_rule": item["resolved_rule"],
+        }
+        actions = item["actions"]
+        out.append(
+            AuditFinding(
+                category="semantic_contract_drift",
+                severity="error" if item["severity"] == "error" else "warn",
+                path=item["path"],
+                detail=f"Semantic contract finding {item['code']} requires review.",
+                proposed_fix=(
+                    ", ".join(actions)
+                    if actions
+                    else "Review the current semantic contract finding."
+                ),
+                meta={
+                    "finding_key": key,
+                    "code": item["code"],
+                    "governed_element_identity": item[
+                        "governed_element_identity"
+                    ],
+                    "resolved_rule": item["resolved_rule"],
+                    "relation_disposition": item["relation_disposition"],
+                    "actions": actions,
+                    "activation": item["activation"],
+                    "grandfathered": item["grandfathered"],
+                },
+            )
+        )
+    return out
 
 
 # ---------------- vault walk ----------------
@@ -373,7 +425,9 @@ def _check_orphan_entities(
     for page in pages:
         # Don't count self-references and don't count from inside Entities/index.md
         # (those are hub listings, not real "uses").
-        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == f"{kb_prefix()}Entities/index.md":
+        if page.rel_path.endswith("/Entities/index.md") or page.rel_path == (
+            f"{kb_prefix()}Entities/index.md"
+        ):
             continue
         for match in WIKILINK_PATTERN.finditer(page.body):
             target = match.group(1).strip().removeprefix(kb_prefix()).lstrip("/")

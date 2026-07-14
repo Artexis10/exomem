@@ -15,6 +15,9 @@ from exomem import (
     semantic_language_registry,
     semantic_writes,
 )
+from exomem import (
+    audit as audit_module,
+)
 
 
 def _page(
@@ -274,3 +277,66 @@ def test_watcher_delete_skips_posthoc_parsing_and_keeps_cleanup(
     watcher._flush()
 
     assert calls == [[deleted]]
+
+
+def test_opt_in_audit_returns_shared_finding_keys_without_raw_content(
+    tmp_path: Path,
+) -> None:
+    kb = tmp_path / "Knowledge Base"
+    kb.mkdir(parents=True)
+    activation_manifest.ensure_manifest(tmp_path)
+    sentinel = "AUDIT-SENTINEL-RAW-CONTENT"
+    page = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/audit-new.md",
+        _page(
+            "00000000-0000-4000-8000-000000000106",
+            title="Audit new",
+            body=f"- [config] {sentinel}",
+        ),
+    )
+    shared = semantic_writes.evaluate_posthoc_batch(
+        tmp_path,
+        paths=[page],
+        operation="audit",
+    ).as_dict()["semantic_contract_findings"]
+
+    report = audit_module.audit(
+        tmp_path,
+        categories=["semantic_contract_drift"],
+    )
+
+    assert [finding.meta["finding_key"] for finding in report.findings] == [
+        {
+            "code": item["code"],
+            "governed_element_identity": item["governed_element_identity"],
+            "resolved_rule": item["resolved_rule"],
+        }
+        for item in shared
+    ]
+    payload = json.dumps(report.as_dict(), sort_keys=True)
+    assert sentinel not in payload
+    assert "review_reason" not in payload
+
+
+def test_default_audit_does_not_run_semantic_contract_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (tmp_path / "Knowledge Base").mkdir(parents=True)
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("default audit must not pay semantic drift cost")
+
+    monkeypatch.setattr(
+        semantic_writes,
+        "evaluate_posthoc_batch",
+        fail_if_called,
+    )
+
+    report = audit_module.audit(tmp_path)
+
+    assert all(
+        finding.category != "semantic_contract_drift"
+        for finding in report.findings
+    )

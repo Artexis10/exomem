@@ -182,7 +182,10 @@ def test_embedding_drift_flags_never_embedded_file(vault: Path) -> None:
     kb = vault / "Knowledge Base"
     sidecar = kb / ".embeddings.sqlite"
     embedded = kb / "Notes" / "Insights" / "progressive-disclosure-without-mode-fragmentation.md"
-    embedded_rel = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
+    embedded_rel = (
+        "Knowledge Base/Notes/Insights/"
+        "progressive-disclosure-without-mode-fragmentation.md"
+    )
 
     # Seed a sidecar with one already-embedded note; row mtime ahead of disk so
     # it is NOT mtime-stale.
