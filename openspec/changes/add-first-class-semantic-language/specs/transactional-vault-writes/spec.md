@@ -67,26 +67,37 @@ as rollback failure or retry the committed replacements.
 
 Abrupt private residue SHALL never be rollback or recovery authority; an exact
 retry SHALL create fresh workspaces and stages from current guarded inputs.
-Directory census and capacity checks SHALL classify a valid residue workspace
-only when its name is `.exomem-batch-` followed by exactly 32 lowercase
-hexadecimal characters, it is a real non-symlink/non-reparse directory with no
-group/other permission bits where POSIX mode bits apply, and every child is a
-real non-symlink/non-reparse regular file named `stage-<decimal>.tmp` or
-`restore-<decimal>.tmp`. Classification SHALL examine at most 64 residue
-workspaces per parent and at most 4,096 children per workspace; overflow or an
-unsafe reserved entry SHALL fail closed with stable code
-`BATCH_RESIDUE_LIMIT` or `BATCH_RESIDUE_UNSAFE`. Valid classified residue SHALL
-neither become a user destination nor block an otherwise exact retry.
+Directory census and capacity checks SHALL classify a residue workspace as
+valid for the current guard evaluation only when its name is
+`.exomem-batch-` followed by exactly 32 lowercase hexadecimal characters, it is
+a real non-symlink/non-reparse directory with no group/other permission bits
+where POSIX mode bits apply, and every observed child is a real
+non-symlink/non-reparse regular file named `stage-<decimal>.tmp` or
+`restore-<decimal>.tmp`. After child validation and workspace identity and
+metadata checks, classification SHALL end with a fresh bounded child census
+that revalidates the observed names, identities, and types against the
+validated set; workspace timestamp comparison alone SHALL NOT replace that
+final census. Each census SHALL examine at most 4,096 children, and
+classification SHALL examine at most 64 residue workspaces per parent.
+Overflow or unsafe or drifting state detected by these bounded observations
+SHALL fail closed with stable code `BATCH_RESIDUE_LIMIT` or
+`BATCH_RESIDUE_UNSAFE`. Valid classified residue SHALL neither become a user
+destination nor block an otherwise exact retry. Classification is a bounded
+observational guarantee, not a frozen namespace snapshot.
 
-The ordinary caught-failure guarantee excludes only an uncooperative process
-running as the vault owner that deliberately substitutes an exact batch-
-controlled source-stage, workspace, or destination pathname component after
-its last verified identity check and before the corresponding kernel namespace
-instruction. Portable filesystems expose no conditional identity precondition
-for every pathname component consumed by that final instruction. This narrow
-exclusion does not weaken rollback for detected drift, ordinary concurrency,
-cooperating writers, staging/replacement exceptions, or restore failures, and
-the primitive does not claim cross-file all-or-none power-loss atomicity.
+The ordinary caught-failure guarantee excludes only mutation by a process
+running as the vault owner in the unavoidable interval after the last check
+relevant to a pathname property and before that observation is consumed. This
+includes deliberate substitution of an exact batch-controlled source-stage,
+workspace, or destination pathname component before the corresponding kernel
+namespace instruction, and mutation of a residue workspace or child after its
+last relevant check before the directory guard consumes the classification
+result. Portable filesystems expose neither a conditional identity
+precondition for every pathname component nor a portable frozen directory-
+census primitive. This narrow exclusion does not weaken rollback for detected
+drift, ordinary concurrency detected by the applicable checks, cooperating
+writers, staging/replacement exceptions, or restore failures, and the
+primitive does not claim cross-file all-or-none power-loss atomicity.
 
 #### Scenario: Second replacement fails
 
@@ -145,8 +156,8 @@ the primitive does not claim cross-file all-or-none power-loss atomicity.
 - **WHEN** an internal filesystem exception contains an absolute path, raw workspace name, or low-level message and the primitive returns a rollback or cleanup outcome
 - **THEN** internal exception chaining may retain the original object while the outer message and serialized public envelope contain only the stable code, bounded logical-target summary, state, and remediation
 
-#### Scenario: Final-instruction substitution is the sole portability exclusion
+#### Scenario: Post-verification same-owner mutation is the sole portability exclusion
 
-- **WHEN** an uncooperative same-owner process deliberately substitutes an exact source-stage, workspace, or destination pathname component after its last verified guard and before the corresponding kernel namespace instruction
-- **THEN** the primitive does not claim a portable conditional-identity guarantee for every pathname component consumed by that final instruction
-- **AND** all detected-drift and cooperating-writer guarantees remain unchanged
+- **WHEN** a process running as the vault owner changes a relevant pathname component after its last verified check and before that observation is consumed, including final-instruction substitution or residue mutation after its final bounded census
+- **THEN** the primitive does not claim a portable conditional-identity or frozen-directory-census guarantee for that interval
+- **AND** detected-drift, applicable ordinary-concurrency, and cooperating-writer guarantees remain unchanged

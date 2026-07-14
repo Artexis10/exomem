@@ -1556,6 +1556,49 @@ def _open_batch_residue_directory(
     return open_with(base_flags), False
 
 
+def _scan_batch_residue_children(
+    workspace_path: Path,
+    workspace_descriptor: int,
+    *,
+    descriptor_relative: bool,
+) -> tuple[tuple[str, PathIdentity], ...]:
+    """Return one bounded, validated observation of residue children."""
+    iterator = None
+    child_names: list[str] = []
+    try:
+        iterator = os.scandir(
+            workspace_descriptor if descriptor_relative else workspace_path
+        )
+        for child in iterator:
+            child_names.append(child.name)
+            if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
+                raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
+    finally:
+        if iterator is not None:
+            iterator.close()
+
+    observations: list[tuple[str, PathIdentity]] = []
+    for child_name in sorted(child_names):
+        if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            child_info = os.stat(
+                child_name,
+                dir_fd=workspace_descriptor,
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - Windows fallback
+            child_info = (workspace_path / child_name).lstat()
+        if (
+            not stat.S_ISREG(child_info.st_mode)
+            or stat.S_ISLNK(child_info.st_mode)
+            or _is_reparse(child_info)
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        observations.append((child_name, _identity(child_name, child_info)))
+    return tuple(observations)
+
+
 def _classify_batch_residue(
     parent: Path,
     parent_descriptor: int,
@@ -1564,7 +1607,6 @@ def _classify_batch_residue(
     """Validate bounded stale residue without reading or adopting its content."""
     workspace_path = parent / name
     workspace_descriptor: int | None = None
-    iterator = None
     try:
         if _BATCH_RESIDUE_NAME.fullmatch(name) is None:
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
@@ -1598,69 +1640,11 @@ def _classify_batch_residue(
             or _is_reparse(opened)
         ):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-        iterator = os.scandir(
-            workspace_descriptor if descriptor_relative else workspace_path
+        baseline_children = _scan_batch_residue_children(
+            workspace_path,
+            workspace_descriptor,
+            descriptor_relative=descriptor_relative,
         )
-        child_names: list[str] = []
-        for child in iterator:
-            child_names.append(child.name)
-            if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
-                raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
-        iterator.close()
-        iterator = None
-
-        validated_children: dict[str, PathIdentity] = {}
-        for child_name in sorted(child_names):
-            if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
-                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-            if os.stat in getattr(os, "supports_dir_fd", set()):
-                child_info = os.stat(
-                    child_name,
-                    dir_fd=workspace_descriptor,
-                    follow_symlinks=False,
-                )
-            else:  # pragma: no cover - Windows fallback
-                child_info = (workspace_path / child_name).lstat()
-            if (
-                not stat.S_ISREG(child_info.st_mode)
-                or stat.S_ISLNK(child_info.st_mode)
-                or _is_reparse(child_info)
-            ):
-                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-            validated_children[child_name] = _identity(child_name, child_info)
-
-        iterator = os.scandir(
-            workspace_descriptor if descriptor_relative else workspace_path
-        )
-        rechecked_names: set[str] = set()
-        for child in iterator:
-            rechecked_names.add(child.name)
-            if len(rechecked_names) > _BATCH_RESIDUE_CHILD_LIMIT:
-                raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
-        iterator.close()
-        iterator = None
-
-        if rechecked_names != validated_children.keys():
-            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-        for child_name in sorted(rechecked_names):
-            if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
-                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
-            if os.stat in getattr(os, "supports_dir_fd", set()):
-                child_info = os.stat(
-                    child_name,
-                    dir_fd=workspace_descriptor,
-                    follow_symlinks=False,
-                )
-            else:  # pragma: no cover - Windows fallback
-                child_info = (workspace_path / child_name).lstat()
-            expected_child = validated_children[child_name]
-            if (
-                not _same_identity(expected_child, child_info)
-                or not stat.S_ISREG(child_info.st_mode)
-                or stat.S_ISLNK(child_info.st_mode)
-                or _is_reparse(child_info)
-            ):
-                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
 
         final_descriptor_info = os.fstat(workspace_descriptor)
         if os.stat in getattr(os, "supports_dir_fd", set()):
@@ -1685,16 +1669,29 @@ def _classify_batch_residue(
             or stat.S_ISLNK(final_path_info.st_mode)
             or _is_reparse(final_descriptor_info)
             or _is_reparse(final_path_info)
+            or (
+                os.name == "posix"
+                and (
+                    stat.S_IMODE(final_descriptor_info.st_mode) & 0o077
+                    or stat.S_IMODE(final_path_info.st_mode) & 0o077
+                )
+            )
             or metadata_changed
         ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+
+        final_children = _scan_batch_residue_children(
+            workspace_path,
+            workspace_descriptor,
+            descriptor_relative=descriptor_relative,
+        )
+        if final_children != baseline_children:
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
     except PathGuardError:
         raise
     except (OSError, ValueError) as error:
         raise _batch_residue_error("BATCH_RESIDUE_UNSAFE") from error
     finally:
-        if iterator is not None:
-            iterator.close()
         if workspace_descriptor is not None:
             os.close(workspace_descriptor)
 

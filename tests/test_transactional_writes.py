@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import stat
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -50,6 +51,82 @@ def _replace_capability_member(
     if replacement is not None:
         members.add(replacement)
     monkeypatch.setattr(os, capability, members)
+
+
+def _inject_residue_mutation_at_metadata_check(
+    monkeypatch: pytest.MonkeyPatch,
+    residue: Path,
+    mutation: Callable[[], None],
+) -> dict[str, int]:
+    """Inject after the baseline census while masking coarse timestamp changes."""
+    snapshot = residue.stat()
+    real_fstat = os.fstat
+    real_stat = os.stat
+    real_scandir = os.scandir
+    state = {
+        "injected": 0,
+        "workspace_fstats": 0,
+        "masked_metadata_checks": 0,
+        "post_injection_scans": 0,
+    }
+    workspace_descriptor: int | None = None
+
+    def inject_before_metadata_fstat(descriptor: int):
+        nonlocal workspace_descriptor
+        if descriptor == workspace_descriptor:
+            state["workspace_fstats"] += 1
+            if state["workspace_fstats"] == 2:
+                mutation()
+                state["injected"] = 1
+                state["masked_metadata_checks"] += 1
+                return snapshot
+        info = real_fstat(descriptor)
+        if (
+            workspace_descriptor is None
+            and info.st_dev == snapshot.st_dev
+            and info.st_ino == snapshot.st_ino
+        ):
+            workspace_descriptor = descriptor
+            state["workspace_fstats"] = 1
+        return info
+
+    def preserve_workspace_path_metadata(path, *args, **kwargs):
+        if (
+            state["injected"]
+            and os.fspath(path) == residue.name
+            and kwargs.get("dir_fd") is not None
+        ):
+            state["masked_metadata_checks"] += 1
+            return snapshot
+        return real_stat(path, *args, **kwargs)
+
+    def observe_post_injection_scan(path):
+        if isinstance(path, int):
+            info = real_fstat(path)
+            if (
+                state["injected"]
+                and info.st_dev == snapshot.st_dev
+                and info.st_ino == snapshot.st_ino
+            ):
+                state["post_injection_scans"] += 1
+        return real_scandir(path)
+
+    monkeypatch.setattr(vault_module.os, "fstat", inject_before_metadata_fstat)
+    monkeypatch.setattr(vault_module.os, "stat", preserve_workspace_path_metadata)
+    monkeypatch.setattr(vault_module.os, "scandir", observe_post_injection_scan)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_dir_fd",
+        real_stat,
+        preserve_workspace_path_metadata,
+    )
+    _replace_capability_member(
+        monkeypatch,
+        "supports_fd",
+        real_scandir,
+        observe_post_injection_scan,
+    )
+    return state
 
 
 def _set_descriptor_xattr(path: Path, name: str, value: bytes) -> None:
@@ -933,41 +1010,19 @@ def test_directory_census_rechecks_residue_children_after_validation(
     assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
 
 
-def test_directory_census_rejects_child_injected_before_final_workspace_check(
+def test_directory_census_ends_with_child_scan_after_coarse_metadata_check(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     guarded = tmp_path / "guarded"
     guarded.mkdir()
     residue = _make_residue(guarded, 1, children=("stage-0.tmp",))
-    residue_info = residue.stat()
     expected = vault_module._identity("guarded", guarded.lstat())
-    real_fstat = os.fstat
-    workspace_descriptor: int | None = None
-    workspace_checks = 0
-
-    def inject_before_final_fstat(descriptor: int):
-        nonlocal workspace_checks, workspace_descriptor
-        if descriptor == workspace_descriptor:
-            workspace_checks += 1
-            if workspace_checks == 2:
-                (residue / "unexpected.tmp").write_bytes(b"late injection")
-                changed = residue.stat()
-                os.utime(
-                    residue,
-                    ns=(changed.st_atime_ns, changed.st_mtime_ns + 1_000_000_000),
-                )
-        info = real_fstat(descriptor)
-        if (
-            workspace_descriptor is None
-            and info.st_dev == residue_info.st_dev
-            and info.st_ino == residue_info.st_ino
-        ):
-            workspace_descriptor = descriptor
-            workspace_checks = 1
-        return info
-
-    monkeypatch.setattr(vault_module.os, "fstat", inject_before_final_fstat)
+    state = _inject_residue_mutation_at_metadata_check(
+        monkeypatch,
+        residue,
+        lambda: (residue / "unexpected.tmp").write_bytes(b"late injection"),
+    )
 
     with pytest.raises(vault_module.PathGuardError) as unsafe:
         vault_module._bounded_directory_entries(
@@ -977,9 +1032,44 @@ def test_directory_census_rejects_child_injected_before_final_workspace_check(
             max_entries=0,
         )
 
-    assert workspace_checks >= 2
+    assert state["injected"] == 1
+    assert state["masked_metadata_checks"] == 2
+    assert state["post_injection_scans"] == 1
     assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
     assert (residue / "unexpected.tmp").read_bytes() == b"late injection"
+
+
+def test_directory_census_final_child_scan_rejects_identity_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(guarded, 1, children=("stage-0.tmp",))
+    original = (residue / "stage-0.tmp").stat()
+    replacement = tmp_path / "replacement-child"
+    replacement.write_bytes(b"replacement identity")
+    expected = vault_module._identity("guarded", guarded.lstat())
+    state = _inject_residue_mutation_at_metadata_check(
+        monkeypatch,
+        residue,
+        lambda: os.replace(replacement, residue / "stage-0.tmp"),
+    )
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module._bounded_directory_entries(
+            guarded,
+            relative="guarded",
+            expected=expected,
+            max_entries=0,
+        )
+
+    swapped = (residue / "stage-0.tmp").stat()
+    assert state["injected"] == 1
+    assert state["masked_metadata_checks"] == 2
+    assert state["post_injection_scans"] == 1
+    assert (swapped.st_dev, swapped.st_ino) != (original.st_dev, original.st_ino)
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
 
 
 def test_directory_census_does_not_overwrite_concurrent_workspace_timestamps(
@@ -1099,35 +1189,18 @@ def test_directory_census_enforces_residue_child_cap_before_validation(
 
     overflow.unlink()
     (residue / "stage-١.tmp").rename(residue / "stage-0.tmp")
-    residue_info = residue.stat()
-    real_scandir = os.scandir
-    workspace_scans = 0
-
-    def inject_overflow_before_second_pass(path):
-        nonlocal workspace_scans
-        if isinstance(path, int):
-            info = os.fstat(path)
-            if (
-                info.st_dev == residue_info.st_dev
-                and info.st_ino == residue_info.st_ino
-            ):
-                workspace_scans += 1
-                if workspace_scans == 2:
-                    overflow.touch()
-        return real_scandir(path)
-
-    monkeypatch.setattr(vault_module.os, "scandir", inject_overflow_before_second_pass)
-    _replace_capability_member(
+    state = _inject_residue_mutation_at_metadata_check(
         monkeypatch,
-        "supports_fd",
-        real_scandir,
-        inject_overflow_before_second_pass,
+        residue,
+        overflow.touch,
     )
 
-    with pytest.raises(vault_module.PathGuardError) as second_pass_limit:
+    with pytest.raises(vault_module.PathGuardError) as final_census_limit:
         census.recheck(tmp_path)
-    assert workspace_scans == 2
-    assert second_pass_limit.value.code == "BATCH_RESIDUE_LIMIT"
+    assert state["injected"] == 1
+    assert state["masked_metadata_checks"] == 2
+    assert state["post_injection_scans"] == 1
+    assert final_census_limit.value.code == "BATCH_RESIDUE_LIMIT"
 
 
 def test_directory_census_ignores_valid_residue_lifecycle_but_fails_unsafe(

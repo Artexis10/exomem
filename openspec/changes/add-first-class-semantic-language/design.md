@@ -151,18 +151,27 @@ concurrency assumptions still hold. Detected or ambiguous namespace drift
 fails closed, retains private residue when necessary, and reports bounded
 reconcile guidance rather than moving or deleting a changed path.
 
+Stale-residue classification validates children, rechecks workspace identity
+and metadata, and then ends with a fresh bounded child census as its final
+namespace observation. It fails closed on unsafe state or drift detected by
+those observations; directory timestamps are not treated as a replacement for
+the final census. This is not a frozen directory snapshot: a same-owner
+mutation after the last check relevant to a property and before the
+classification result is consumed remains the same narrow post-verification
+portability exclusion as final-instruction substitution.
+
 Private workspaces, descriptor-relative traversal, and exact guards preserve
 ordinary caught-failure and cooperating-writer rollback guarantees, but they
 are not a same-principal security boundary. Accidental concurrent edits
 observed before a destructive syscall fail closed. The excluded threat is an
-uncooperative process running as the vault owner that deliberately substitutes
-an exact batch-controlled source-stage, workspace, or destination pathname
-component after its last verified check and before the corresponding kernel
-namespace instruction. A cooperative lock may serialize Exomem writers, but it
-cannot provide the missing conditional identity precondition for every
-pathname component consumed by that instruction or defend against that
-uncooperative same-principal actor. The batch also makes no cross-file
-power-loss atomicity claim.
+uncooperative process running as the vault owner that deliberately changes a
+relevant pathname after its last applicable check and before that observation
+is consumed—whether by a kernel namespace instruction or a residue
+classification result. A cooperative lock may serialize Exomem writers, but
+it cannot provide the missing conditional identity precondition for every
+pathname component or a portable frozen directory census, nor can it defend
+against that uncooperative same-principal actor. The batch also makes no cross-
+file power-loss atomicity claim.
 
 Existing-page lifecycle review separates reusable review truth from transition recovery. A reviewed-none decision is an immutable, portable artifact keyed only by a unique stable page UUID and the resulting review-content fingerprint; it never binds the operation, prior bytes, transition token, or auxiliary plan. One guarded replaceable prepared-transition slot per UUID binds those transition-specific details and is crash machinery, not review truth. The current page is reviewed-none only when its unique UUID and exact current fingerprint match an immutable decision. A pending transition never blesses the still-current before state; exact retry may resume it, and a later transition back to a previously reviewed fingerprint reuses the immutable decision while creating a distinct prepared transition. Legacy path identities never receive lifecycle decisions: pages that need reviewed-none must first acquire a stable ID through the explicit backfill workflow.
 
