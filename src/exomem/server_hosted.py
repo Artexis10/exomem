@@ -701,7 +701,7 @@ def register_hosted_routes(
             )
 
             def invoke_admitted() -> Any:
-                if command.read_only:
+                if commands_module.invocation_is_read_only(command, kwargs):
                     with lifecycle.admit_read():
                         return invoke(
                             command,

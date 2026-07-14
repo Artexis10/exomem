@@ -500,6 +500,47 @@ def test_lifecycle_routes_gate_reads_writes_and_sealing(tmp_path: Path) -> None:
     assert client.post("/private/exomem/v1/lifecycle/resume", headers=headers).status_code == 503
 
 
+@pytest.mark.parametrize("admission_state", ["authority-down", "quiesced"])
+def test_mixed_command_route_admits_only_resolved_read_operations(
+    tmp_path: Path, admission_state: str
+) -> None:
+    client, config, lifecycle, invoker = _cell(
+        tmp_path,
+        cell_id="cell-alpha",
+        credential="alpha-private-service-credential-0001",
+    )
+    headers = _headers(config)
+    if admission_state == "authority-down":
+        lifecycle.set_mutation_authority(
+            False, reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
+        )
+    else:
+        lifecycle.quiesce(timeout=1)
+
+    read_response = client.post(
+        "/private/exomem/v1/command/connect_memory",
+        headers=headers,
+        json={
+            "operation": "suggest-links",
+            "draft_title": "Lease-safe hosted read",
+            "draft_body": "Read-only suggestions remain available without mutation admission.",
+        },
+    )
+    assert read_response.status_code == 200, read_response.text
+    assert [call["command"] for call in invoker.calls] == ["connect_memory"]
+
+    for operation in ("create-entity", "future-read-mode"):
+        blocked = client.post(
+            "/private/exomem/v1/command/connect_memory",
+            headers=headers,
+            json={"operation": operation},
+        )
+        assert blocked.status_code == 503, blocked.text
+        assert blocked.json()["error"]["code"] == "HOSTED_MUTATION_NOT_ADMITTED"
+
+    assert [call["command"] for call in invoker.calls] == ["connect_memory"]
+
+
 def test_private_export_is_verified_downloadable_and_explicitly_released(
     tmp_path: Path,
 ) -> None:
