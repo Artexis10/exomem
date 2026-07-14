@@ -341,6 +341,16 @@ def _materialize_selection(
 def _present(root: Path, run: dict, **extra) -> dict:
     out = dict(run)
     out["next_actions"] = _next_actions(run)
+    # Whenever the run carries a persisted `verify` block (set once by `apply`
+    # right after its post-commit re-hash), surface the SAME recorded counts at
+    # the top level of every presented document — never a live re-hash. This is
+    # what lets a later `status()` call stay honest even if an applied original
+    # is mutated afterward: it reports what was actually verified at apply time,
+    # not a fabricated fresh number.
+    verify = run.get("verify")
+    if verify:
+        out["verified_unchanged"] = verify.get("verified_unchanged")
+        out["verified_total"] = verify.get("verified_total")
     out.update(extra)
     return out
 
@@ -710,13 +720,19 @@ def apply(
 
         run["outcomes"] = outcomes
         run["phase"] = _recompute_phase(outcomes, plan_items)
-        store.save(run)
+        # Post-apply re-hash of applied originals, persisted as the run's single
+        # source of truth for verification counts — never recomputed live by a
+        # later `status`/`finish` call (see `_present`).
         verified_unchanged, verified_total = _verify_originals(root, plan_items, outcomes)
+        run["verify"] = {
+            "verified_unchanged": verified_unchanged,
+            "verified_total": verified_total,
+            "at": _now_iso(),
+        }
+        store.save(run)
     return _present(
         root,
         run,
-        verified_unchanged=verified_unchanged,
-        verified_total=verified_total,
         apply_result={"verified_unchanged": verified_unchanged, "verified_total": verified_total},
     )
 
@@ -758,10 +774,12 @@ def finish(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
         recall = _recall_check(root, run)
-        plan_items = (run.get("plan") or {}).get("items") or []
-        verified_unchanged, verified_total = _verify_originals(
-            root, plan_items, run.get("outcomes") or {}
-        )
+        # Reuse the SAME real counts the last `apply` call recorded — never a
+        # fresh re-hash at finish time, which could disagree with what was
+        # actually verified immediately after the commit.
+        verify = run.get("verify") or {}
+        verified_unchanged = verify.get("verified_unchanged", 0)
+        verified_total = verify.get("verified_total", 0)
         manifest_path = None
         if write_manifest:
             manifest_path = _write_run_manifest(
@@ -785,9 +803,7 @@ def finish(
         }
         run["phase"] = "done"
         store.save(run)
-    return _present(
-        root, run, verified_unchanged=verified_unchanged, verified_total=verified_total
-    )
+    return _present(root, run)
 
 
 # --------------------------------------------------------------------------- #
