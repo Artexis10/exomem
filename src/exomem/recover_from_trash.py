@@ -15,18 +15,23 @@ import datetime as dt
 import json
 import logging
 import shutil
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import semantic_writes
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
+    DirectoryCensusGuard,
+    PathGuard,
+    PathGuardError,
     VaultPathError,
     in_append_only_tree,
     in_curated_tree,
+    read_guarded_text,
     resolve_under_vault,
     write_log_entry,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -39,6 +44,8 @@ class RecoverResult:
     restored_path: str
     kind: str  # "file" | "directory"
     warnings: list[str]
+    semantic: dict | None = None
+    index: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -46,6 +53,8 @@ class RecoverResult:
             "restored_path": self.restored_path,
             "kind": self.kind,
             "warnings": self.warnings,
+            "semantic": self.semantic,
+            "index": self.index,
         }
 
 
@@ -65,6 +74,8 @@ def recover_from_trash(
     restore_path: str | None = None,
     allow_curated: bool = False,
     today: dt.date | None = None,
+    validate_only: bool = False,
+    relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
 ) -> RecoverResult:
     try:
         trash_abs, trash_rel = resolve_under_vault(
@@ -90,11 +101,15 @@ def recover_from_trash(
     # Determine restore_path: explicit > sidecar's original_path.
     sidecar = trash_abs.parent / f"{trash_abs.name}.meta.json"
     meta: dict = {}
+    sidecar_guard: PathGuard | None = None
+    sidecar_source: str | None = None
     if sidecar.exists():
         try:
-            meta = json.loads(sidecar.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            sidecar_source, sidecar_guard = read_guarded_text(vault_root, sidecar)
+            meta = json.loads(sidecar_source)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError, PathGuardError):
             meta = {}
+            sidecar_guard = None
 
     if restore_path is None or not str(restore_path).strip():
         original = meta.get("original_path")
@@ -155,15 +170,146 @@ def recover_from_trash(
             ),
         )
 
-    restore_abs.parent.mkdir(parents=True, exist_ok=True)
+    semantic: dict | None = None
+    recovery_entries: list[semantic_writes.RecoveryEntry] = []
+    destination_root_guard: PathGuard | None = None
+    trash_census_guards: tuple[DirectoryCensusGuard, ...] = ()
+    if trash_abs.is_file() and trash_rel.lower().endswith(".md"):
+        try:
+            source, source_guard = read_guarded_text(vault_root, trash_abs)
+            destination_guard = PathGuard.capture(
+                vault_root, restore_rel, leaf_policy="absent"
+            )
+            destination_root_guard = destination_guard
+            recovery_entries.append(
+                semantic_writes.RecoveryEntry(
+                    trash_rel,
+                    str(meta.get("original_path") or restore_rel),
+                    restore_rel,
+                    source,
+                    source_guard,
+                    destination_guard,
+                    sidecar_guard,
+                    sidecar_source,
+                )
+            )
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            code = getattr(error, "code", "RECOVER_FAILED")
+            raise RecoverError(code=code, reason=str(error)) from error
+    elif trash_abs.is_dir():
+        try:
+            markdown = sorted(
+                trash_abs.rglob("*.md"), key=lambda item: item.as_posix()
+            )
+            if markdown:
+                destination_root_guard = PathGuard.capture(
+                    vault_root, restore_rel, leaf_policy="absent"
+                )
+                directories = [trash_abs, *(path for path in trash_abs.rglob("*") if path.is_dir())]
+                if len(directories) > 4096:
+                    raise RecoverError(
+                        code="PATH_GUARD_LIMIT",
+                        reason="trash directory exceeds the bounded recovery census",
+                    )
+                trash_census_guards = tuple(
+                    DirectoryCensusGuard.capture(
+                        vault_root,
+                        path.relative_to(vault_root).as_posix(),
+                        max_entries=4096,
+                    )
+                    for path in sorted(directories, key=lambda item: item.as_posix())
+                )
+                original_root = str(meta.get("original_path") or restore_rel).rstrip(
+                    "/"
+                )
+                for markdown_path in markdown:
+                    suffix = markdown_path.relative_to(trash_abs).as_posix()
+                    source_path = f"{trash_rel}/{suffix}"
+                    original_path = f"{original_root}/{suffix}"
+                    destination_path = f"{restore_rel.rstrip('/')}/{suffix}"
+                    source, source_guard = read_guarded_text(
+                        vault_root, markdown_path
+                    )
+                    recovery_entries.append(
+                        semantic_writes.RecoveryEntry(
+                            source_path,
+                            original_path,
+                            destination_path,
+                            source,
+                            source_guard,
+                            PathGuard.capture(
+                                vault_root,
+                                destination_path,
+                                leaf_policy="absent",
+                            ),
+                            sidecar_guard,
+                            sidecar_source,
+                        )
+                    )
+        except (OSError, UnicodeDecodeError, PathGuardError) as error:
+            code = getattr(error, "code", "RECOVER_FAILED")
+            raise RecoverError(code=code, reason=str(error)) from error
 
-    try:
-        shutil.move(str(trash_abs), str(restore_abs))
-    except OSError as e:
-        raise RecoverError(
-            code="RECOVER_FAILED",
-            reason=f"could not move {trash_rel!r} → {restore_rel!r}: {e}",
-        ) from e
+    if recovery_entries:
+        assert destination_root_guard is not None
+        try:
+            preflight = semantic_writes.preflight_recovery(
+                vault_root,
+                entries=recovery_entries,
+                destination_root_guard=destination_root_guard,
+                trash_census_guards=trash_census_guards,
+                recovery_sidecar_guard=sidecar_guard,
+                relation_reviews=relation_reviews,
+            )
+            if validate_only:
+                return RecoverResult(
+                    trash_path=trash_rel,
+                    restored_path=restore_rel,
+                    kind="directory" if trash_abs.is_dir() else "file",
+                    warnings=[],
+                    semantic=preflight.as_dict(),
+                )
+
+            def restore() -> None:
+                try:
+                    shutil.move(str(trash_abs), str(restore_abs))
+                except OSError as error:
+                    raise RecoverError(
+                        code="RECOVER_FAILED",
+                        reason=(
+                            f"could not move {trash_rel!r} → {restore_rel!r}: {error}"
+                        ),
+                    ) from error
+
+            committed = semantic_writes.commit_recovery(
+                vault_root, preflight=preflight, mutate=restore
+            )
+            semantic = committed.as_dict()
+        except semantic_writes.SemanticWriteError as error:
+            raise RecoverError(code=error.code, reason=error.reason) from error
+        except PathGuardError as error:
+            raise RecoverError(code=error.code, reason=error.reason) from error
+    else:
+        if relation_reviews:
+            raise RecoverError(
+                code="INVALID_RELATION_REVIEW",
+                reason="recovery review mapping has no validated Markdown entry",
+            )
+        if validate_only:
+            return RecoverResult(
+                trash_path=trash_rel,
+                restored_path=restore_rel,
+                kind="directory" if trash_abs.is_dir() else "file",
+                warnings=[],
+            )
+        restore_abs.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.move(str(trash_abs), str(restore_abs))
+        except OSError as e:
+            raise RecoverError(
+                code="RECOVER_FAILED",
+                reason=f"could not move {trash_rel!r} → {restore_rel!r}: {e}",
+            ) from e
 
     warnings: list[str] = []
     if sidecar.exists():
@@ -173,6 +319,26 @@ def recover_from_trash(
             warnings.append(
                 f"recovered file ok but could not remove trash sidecar "
                 f"{sidecar.name!r}: {e}"
+            )
+
+    index_feedback: dict | None = None
+    restored_markdown = (
+        sorted(restore_abs.rglob("*.md"))
+        if restore_abs.is_dir()
+        else ([restore_abs] if restore_abs.suffix.lower() == ".md" else [])
+    )
+    if restored_markdown:
+        try:
+            from . import file_watcher, index_sync
+
+            file_watcher.register_self_write(vault_root, restored_markdown)
+            index_feedback = index_sync.upsert_after_write(
+                vault_root, restored_markdown
+            ).as_dict()
+        except Exception:  # noqa: BLE001 - restore remains authoritative
+            log.exception("restored index refresh failed for %s", restore_rel)
+            warnings.append(
+                "recovery succeeded but derived-index refresh failed; run reconcile"
             )
 
     today = today or dt.date.today()
@@ -202,4 +368,6 @@ def recover_from_trash(
         restored_path=restore_rel,
         kind=kind,
         warnings=warnings,
+        semantic=semantic,
+        index=index_feedback,
     )

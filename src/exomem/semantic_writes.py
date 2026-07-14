@@ -9,7 +9,7 @@ import hashlib
 import json
 import re
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
@@ -45,6 +45,7 @@ _FEEDBACK_COUNT_LIMIT = 32
 _FEEDBACK_STRING_BYTE_LIMIT = 256
 _FEEDBACK_NESTED_ITEM_LIMIT = 8
 _FEEDBACK_BYTE_BUDGET = 120 * 1024
+_RECOVERY_REVIEW_LIMIT = 256
 _MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
 
@@ -612,6 +613,105 @@ class MoveCommit:
         return value
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryEntry:
+    trash_path: str
+    original_path: str
+    restore_path: str
+    source: str
+    source_guard: vault.PathGuard
+    destination_guard: vault.PathGuard
+    sidecar_guard: vault.PathGuard | None
+    sidecar_source: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryPageEvaluation:
+    entry: RecoveryEntry
+    before: semantic_contract.SemanticPageState
+    after: semantic_contract.SemanticPageState
+    before_contracts: memory_schema.ResolvedMemoryContracts
+    after_contracts: memory_schema.ResolvedMemoryContracts
+    before_review: semantic_contract.RelationReviewState | None
+    after_review: semantic_contract.RelationReviewState | None
+    grandfathered: bool
+    transition_token: str
+    contract_result: semantic_contract.SemanticContractResult
+    requested_decision: relation_review.LifecycleDecision | None = None
+
+
+def _recovery_result_reviewable(
+    result: semantic_contract.SemanticContractResult,
+) -> bool:
+    return (
+        result.relation_disposition is not None
+        and result.relation_disposition.kind == "missing"
+        and {finding.code for finding in result.blocking_findings}
+        == {"RELATION_DISPOSITION_MISSING"}
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryPreflight:
+    entries: tuple[RecoveryEntry, ...]
+    evaluations: tuple[RecoveryPageEvaluation, ...]
+    before_corpus: semantic_contract.SemanticCorpusContext
+    prior_corpus: semantic_contract.SemanticCorpusContext
+    after_corpus: semantic_contract.SemanticCorpusContext
+    destination_root_guard: vault.PathGuard
+    trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = ()
+    recovery_sidecar_guard: vault.PathGuard | None = None
+    mutated: Literal[False] = False
+
+    @property
+    def should_block(self) -> bool:
+        return any(item.contract_result.should_block for item in self.evaluations)
+
+    def as_dict(self) -> dict[str, Any]:
+        review_requests = [
+            {
+                "page_identity": item.after.identity,
+                "transition_token": item.transition_token,
+                "transition_hash": hashlib.sha256(
+                    item.transition_token.encode("utf-8")
+                ).hexdigest(),
+            }
+            for item in self.evaluations
+            if item.after.eligible_compiled
+            and item.after.identity_kind == "exomem_id"
+            and item.after_review is None
+            and item.requested_decision is None
+            and _recovery_result_reviewable(item.contract_result)
+            and self.after_corpus.identity_census.paths_by_identity.get(
+                item.after.identity
+            )
+            == (item.after.path,)
+        ][:_RECOVERY_REVIEW_LIMIT]
+        return {
+            "operation": "recover",
+            "mutated": self.mutated,
+            "restored_paths": [item.restore_path for item in self.entries],
+            "contract_results": {
+                item.after.identity: _bounded_semantic_feedback(item.contract_result)
+                for item in self.evaluations
+            },
+            "relation_review_requests": review_requests,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryCommit:
+    preflight: RecoveryPreflight
+    lifecycle_states: tuple[tuple[str, str], ...]
+    mutated: Literal[True] = True
+
+    def as_dict(self) -> dict[str, Any]:
+        value = self.preflight.as_dict()
+        value["mutated"] = self.mutated
+        value["lifecycle_states"] = dict(self.lifecycle_states)
+        return value
+
+
 MoveMutation = Callable[
     [
         tuple[vault.PlannedWrite, ...],
@@ -620,6 +720,8 @@ MoveMutation = Callable[
     ],
     None,
 ]
+
+RecoveryMutation = Callable[[], None]
 
 
 def _existing_transition_token(
@@ -637,6 +739,14 @@ def _existing_transition_token(
         payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
     return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _recovery_token_path(trash_path: str, restore_path: str) -> str:
+    return json.dumps(
+        [trash_path, restore_path],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
 
 
 def _decode_existing_transition_token(token: str) -> dict[str, Any]:
@@ -1674,6 +1784,438 @@ def commit_move(
     except vault.VaultLockError as error:
         raise SemanticWriteError(error.code, error.reason) from error
     return MoveCommit(preflight, lifecycle_states)
+
+
+def _corpus_with_recovery_states(
+    root: Path,
+    base: semantic_contract.SemanticCorpusContext,
+    states: list[semantic_contract.SemanticPageState],
+    *,
+    registry: relation_registry.RelationRegistry,
+    removed_paths: frozenset[str] = frozenset(),
+) -> semantic_contract.SemanticCorpusContext:
+    pages = dict(base.pages)
+    identity_census = semantic_contract.StableIdentityCensus(
+        tuple(
+            entry
+            for entry in base.identity_census.entries
+            if entry.path not in removed_paths
+        )
+    )
+    for state in states:
+        pages[state.path] = state
+        identity_census = identity_census.with_page(state)
+    return semantic_contract.SemanticCorpusContext.from_states(
+        root,
+        pages.values(),
+        registry=registry,
+        identity_census=identity_census,
+    )
+
+
+def preflight_recovery(
+    vault_root: Path,
+    *,
+    entries: tuple[RecoveryEntry, ...] | list[RecoveryEntry],
+    destination_root_guard: vault.PathGuard | None = None,
+    trash_census_guards: tuple[vault.DirectoryCensusGuard, ...] = (),
+    recovery_sidecar_guard: vault.PathGuard | None = None,
+    relation_reviews: Mapping[str, Mapping[str, str]] | None = None,
+) -> RecoveryPreflight:
+    """Evaluate exact trashed Markdown bytes at all final restore paths."""
+    root = Path(vault_root)
+    review_mapping = relation_reviews or {}
+    if (
+        not isinstance(review_mapping, Mapping)
+        or len(review_mapping) > _RECOVERY_REVIEW_LIMIT
+    ):
+        raise SemanticWriteError(
+            "INVALID_RELATION_REVIEW",
+            "recovery relation reviews must be a bounded identity mapping",
+        )
+    consumed_reviews: set[str] = set()
+    bound_entries = tuple(entries)
+    if not bound_entries:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "recovery semantic preflight requires at least one Markdown entry",
+        )
+    if len({item.restore_path for item in bound_entries}) != len(bound_entries):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "recovery contains duplicate restore paths",
+        )
+    root_destination = destination_root_guard or bound_entries[0].destination_guard
+    if root_destination.leaf_policy != "absent":
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "recovery root destination guard must bind absence",
+        )
+    root_prefix = f"{root_destination.target.rstrip('/')}/"
+    for item in bound_entries:
+        if (
+            item.source_guard.target != item.trash_path
+            or item.source_guard.leaf_policy != "content"
+            or item.source_guard.expected_content_hash
+            != vault.content_hash(item.source)
+            or item.destination_guard.target != item.restore_path
+            or item.destination_guard.leaf_policy != "absent"
+            or (
+                item.sidecar_guard is not None
+                and item.sidecar_guard.leaf_policy != "content"
+            )
+            or (item.sidecar_guard is None) != (item.sidecar_source is None)
+            or (
+                item.restore_path != root_destination.target
+                and not item.restore_path.startswith(root_prefix)
+            )
+        ):
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_MISMATCH",
+                "recovery guards do not bind exact trash and destination state",
+            )
+
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    loaded_contracts = memory_schema.load_saved_contracts(root)
+    before_corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language
+    )
+    prior_states: list[semantic_contract.SemanticPageState] = []
+    after_states: list[semantic_contract.SemanticPageState] = []
+    for item in bound_entries:
+        prior_states.append(
+            semantic_contract.build_page_state(
+                root,
+                item.original_path,
+                item.source,
+                relation_registry=registry,
+                language_registry=language,
+            )
+        )
+        after_states.append(
+            semantic_contract.build_page_state(
+                root,
+                item.restore_path,
+                item.source,
+                relation_registry=registry,
+                language_registry=language,
+            )
+        )
+    prior_corpus = _corpus_with_recovery_states(
+        root,
+        before_corpus,
+        prior_states,
+        registry=registry,
+        removed_paths=frozenset(item.trash_path for item in bound_entries),
+    )
+    after_corpus = _corpus_with_recovery_states(
+        root,
+        before_corpus,
+        after_states,
+        registry=registry,
+        removed_paths=frozenset(item.trash_path for item in bound_entries),
+    )
+    manifest = activation_manifest.load_manifest(root)
+    evaluations: list[RecoveryPageEvaluation] = []
+    for entry, before, after in zip(
+        bound_entries, prior_states, after_states, strict=True
+    ):
+        before_contracts = memory_schema.resolve_contracts(
+            loaded_contracts,
+            projects=before.projects,
+            page_type=before.page_type,
+            language_registry=language,
+        )
+        after_contracts = memory_schema.resolve_contracts(
+            loaded_contracts,
+            projects=after.projects,
+            page_type=after.page_type,
+            language_registry=language,
+        )
+        applicability = _existing_applicability(before, after)
+        before_review = None
+        after_review = None
+        if applicability == "full":
+            try:
+                before_review = relation_review.load_relation_review(
+                    root, before, corpus=prior_corpus
+                )
+                after_review = relation_review.load_relation_review(
+                    root, after, corpus=after_corpus
+                )
+            except relation_review.RelationReviewError as error:
+                raise SemanticWriteError(error.code, error.reason) from error
+        requested_decision: relation_review.LifecycleDecision | None = None
+        requested_review = review_mapping.get(after.identity)
+        supplied_token = (
+            requested_review.get("transition_token")
+            if isinstance(requested_review, Mapping)
+            else None
+        )
+        token = supplied_token or _existing_transition_token(
+            operation="recover",
+            path=_recovery_token_path(entry.trash_path, entry.restore_path),
+            before_hash=before.source_hash,
+            after_hash=after.source_hash,
+        )
+        grandfathered = bool(
+            after.identity_kind == "exomem_id"
+            and after.eligible_compiled
+            and activation_manifest.is_grandfathered(
+                root,
+                after.path,
+                source_hash=after.source_hash,
+                exomem_id=after.identity,
+                manifest=manifest,
+                census=after_corpus.activation_census,
+            )
+        )
+        baseline_result = semantic_contract.evaluate(
+            before=before,
+            after=after,
+            operation="recover",
+            mode="precommit",
+            before_contracts=before_contracts,
+            after_contracts=after_contracts,
+            before_corpus=prior_corpus,
+            after_corpus=after_corpus,
+            before_review=before_review,
+            after_review=after_review,
+            grandfathered=grandfathered,
+            include_relation_disposition=applicability == "full",
+        )
+        if requested_review is not None:
+            expected_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+            token_value = _decode_existing_transition_token(token)
+            if (
+                applicability != "full"
+                or after_review is not None
+                or not _recovery_result_reviewable(baseline_result)
+                or after.identity_kind != "exomem_id"
+                or after.review_fingerprint is None
+                or after_corpus.identity_census.paths_by_identity.get(after.identity)
+                != (after.path,)
+                or not isinstance(requested_review, Mapping)
+                or set(requested_review)
+                != {"transition_token", "transition_hash", "reason"}
+                or token_value["operation"] != "recover"
+                or token_value["path"]
+                != _recovery_token_path(entry.trash_path, entry.restore_path)
+                or token_value["before_hash"] != before.source_hash
+                or token_value["after_hash"] != after.source_hash
+                or requested_review.get("transition_hash") != expected_hash
+            ):
+                raise SemanticWriteError(
+                    "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
+                    "recovery review mapping does not match the validated transition",
+                )
+            try:
+                requested_decision = relation_review.build_lifecycle_decision(
+                    page_identity=after.identity,
+                    after_fingerprint=after.review_fingerprint,
+                    reason=requested_review.get("reason", ""),
+                )
+            except relation_review.RelationReviewError as error:
+                raise SemanticWriteError(error.code, error.reason) from error
+            after_review = semantic_contract.RelationReviewState(
+                "reviewed_none",
+                requested_decision.page_identity,
+                requested_decision.after_fingerprint,
+                reason=requested_decision.reason,
+                reference=requested_decision.reference,
+            )
+            consumed_reviews.add(after.identity)
+        result = baseline_result
+        if requested_decision is not None:
+            result = semantic_contract.evaluate(
+                before=before,
+                after=after,
+                operation="recover",
+                mode="precommit",
+                before_contracts=before_contracts,
+                after_contracts=after_contracts,
+                before_corpus=prior_corpus,
+                after_corpus=after_corpus,
+                before_review=before_review,
+                after_review=after_review,
+                grandfathered=grandfathered,
+                include_relation_disposition=True,
+            )
+        evaluations.append(
+            RecoveryPageEvaluation(
+                entry,
+                before,
+                after,
+                before_contracts,
+                after_contracts,
+                before_review,
+                after_review,
+                grandfathered,
+                token,
+                result,
+                requested_decision,
+            )
+        )
+    if consumed_reviews != set(review_mapping):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
+            "recovery review mapping contains an unvalidated page identity",
+        )
+    reviewable_count = sum(
+        item.requested_decision is None
+        and _recovery_result_reviewable(item.contract_result)
+        for item in evaluations
+    )
+    if reviewable_count > _RECOVERY_REVIEW_LIMIT:
+        raise SemanticWriteError(
+            "RELATION_REVIEW_HISTORY_LIMIT",
+            "recovery requires too many reviewed-none decisions for one batch",
+        )
+    return RecoveryPreflight(
+        bound_entries,
+        tuple(evaluations),
+        before_corpus,
+        prior_corpus,
+        after_corpus,
+        root_destination,
+        tuple(trash_census_guards),
+        recovery_sidecar_guard,
+    )
+
+
+def _plan_recovery_lifecycle(
+    root: Path, preflight: RecoveryPreflight
+) -> tuple[
+    tuple[vault.PlannedWrite, ...],
+    tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...],
+    tuple[tuple[str, str], ...],
+]:
+    writes: list[vault.PlannedWrite] = []
+    guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = []
+    states: list[tuple[str, str]] = []
+    auxiliary_hash = relation_review.lifecycle_auxiliary_hash((), root)
+    for item in preflight.evaluations:
+        stable_active = bool(
+            item.after.eligible_compiled
+            and item.after.identity_kind == "exomem_id"
+            and item.after.review_fingerprint is not None
+            and preflight.after_corpus.identity_census.paths_by_identity.get(
+                item.after.identity
+            )
+            == (item.after.path,)
+        )
+        if not stable_active:
+            continue
+        try:
+            prepared = relation_review.build_lifecycle_prepared_transition(
+                transition_id=_existing_transition_id(item.transition_token),
+                operation="recover",
+                page_identity=item.after.identity,
+                before_path=item.entry.trash_path,
+                before_source_hash=item.before.source_hash,
+                after_path=item.after.path,
+                after_source_hash=item.after.source_hash,
+                after_fingerprint=item.after.review_fingerprint,
+                decision=item.requested_decision,
+                transition_token=item.transition_token,
+                auxiliary_hash=auxiliary_hash,
+            )
+            trash_proof = None
+            if item.entry.sidecar_guard is not None:
+                assert item.entry.sidecar_source is not None
+                live_owner_paths = tuple(
+                    path
+                    for path in preflight.before_corpus.identity_census.paths_by_identity.get(
+                        item.after.identity, ()
+                    )
+                    if not path.startswith(f"{kb_prefix()}_trash/")
+                )
+                trash_proof = relation_review.LifecycleTrashProof(
+                    page_identity=item.after.identity,
+                    original_path=item.entry.original_path,
+                    trash_path=item.entry.trash_path,
+                    source_hash=item.before.source_hash,
+                    review_fingerprint=item.before.review_fingerprint,
+                    source_guard=item.entry.source_guard,
+                    sidecar_source=item.entry.sidecar_source,
+                    sidecar_guard=item.entry.sidecar_guard,
+                    live_owner_paths=live_owner_paths,
+                )
+            plan = relation_review.plan_lifecycle_transition(
+                root,
+                decision=item.requested_decision,
+                prepared=prepared,
+                current=relation_review.LifecyclePrimaryBinding(
+                    item.entry.trash_path,
+                    item.before.source_hash,
+                    item.before.review_fingerprint,
+                ),
+                trashed_committed=trash_proof,
+            )
+        except relation_review.RelationReviewError as error:
+            raise SemanticWriteError(error.code, error.reason) from error
+        writes.extend(plan.writes)
+        guards.extend(plan.required_guards)
+        states.append((item.after.identity, plan.state))
+    return tuple(writes), tuple(guards), tuple(states)
+
+
+def commit_recovery(
+    vault_root: Path,
+    *,
+    preflight: RecoveryPreflight,
+    mutate: RecoveryMutation,
+) -> RecoveryCommit:
+    """Prepare lifecycle auxiliaries, then perform one exact restore mutation."""
+    root = Path(vault_root)
+    try:
+        with vault.vault_creation_lock(root, "semantic-creation"):
+            for census_guard in preflight.trash_census_guards:
+                census_guard.recheck(root)
+            if preflight.recovery_sidecar_guard is not None:
+                preflight.recovery_sidecar_guard.recheck(root)
+            for item in preflight.entries:
+                item.source_guard.recheck(root)
+                if item.sidecar_guard is not None:
+                    item.sidecar_guard.recheck(root)
+                item.destination_guard.recheck(root)
+            destination_root_guard = (
+                preflight.destination_root_guard.prepare_and_bind_parents(root)
+            )
+            destination_root_guard.recheck(root)
+            for item in preflight.entries:
+                item.source_guard.recheck(root)
+                item.destination_guard.recheck(root)
+                if item.sidecar_guard is not None:
+                    item.sidecar_guard.recheck(root)
+            for census_guard in preflight.trash_census_guards:
+                census_guard.recheck(root)
+            if preflight.recovery_sidecar_guard is not None:
+                preflight.recovery_sidecar_guard.recheck(root)
+            lifecycle_writes, required_guards, lifecycle_states = (
+                _plan_recovery_lifecycle(root, preflight)
+            )
+            if preflight.should_block:
+                raise SemanticWriteError(
+                    "SEMANTIC_CONTRACT_BLOCKED",
+                    "semantic contract has blocking findings",
+                )
+            if lifecycle_writes:
+                vault.batch_atomic_write(
+                    lifecycle_writes,
+                    vault_root=root,
+                    required_guards=required_guards,
+                )
+            mutate()
+    except vault.VaultLockTimeout as error:
+        raise SemanticWriteError(
+            "SEMANTIC_CREATION_LOCK_TIMEOUT",
+            "timed out acquiring semantic creation lock",
+        ) from error
+    except vault.VaultLockError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
+    return RecoveryCommit(preflight, lifecycle_states)
 
 
 def _evaluate_structural(

@@ -329,6 +329,21 @@ class LifecyclePrimaryBinding:
 
 
 @dataclass(frozen=True, slots=True)
+class LifecycleTrashProof:
+    """Exact proof that a committed primary was moved to a guarded trash entry."""
+
+    page_identity: str
+    original_path: str
+    trash_path: str
+    source_hash: str
+    review_fingerprint: str
+    source_guard: vault.PathGuard
+    sidecar_source: str
+    sidecar_guard: vault.PathGuard
+    live_owner_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class LifecycleTransitionPlan:
     state: Literal[
         "new", "pending_retry", "replace_committed", "committed_replay"
@@ -1226,18 +1241,93 @@ def _load_prepared_decision_guard(
     return guard
 
 
+def _validate_lifecycle_trash_proof(
+    *,
+    prepared: LifecyclePreparedTransition,
+    current: LifecyclePrimaryBinding,
+    proof: LifecycleTrashProof,
+) -> None:
+    try:
+        sidecar = json.loads(
+            proof.sidecar_source, object_pairs_hook=_object_no_duplicates
+        )
+    except (json.JSONDecodeError, _DuplicateJsonKey) as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "trash proof sidecar is not an exact JSON object",
+        ) from error
+    sidecar_object = sidecar if type(sidecar) is dict else {}
+    snapshot = sidecar_object.get("frontmatter_snapshot")
+    sidecar_identity = snapshot.get(ID_FIELD) if type(snapshot) is dict else None
+    sidecar_target = proof.sidecar_guard.target
+    trash_root = sidecar_target.removesuffix(".meta.json")
+    directory_proof = proof.trash_path.startswith(f"{trash_root}/")
+    if directory_proof:
+        suffix = proof.trash_path.removeprefix(f"{trash_root}/")
+        expected_original = f"{str(sidecar_object.get('original_path', '')).rstrip('/')}/{suffix}"
+        original_matches = proof.original_path == expected_original
+        identity_matches = sidecar_identity is None
+    else:
+        original_matches = proof.original_path == sidecar_object.get("original_path")
+        identity_matches = proof.page_identity == sidecar_identity
+    valid = (
+        prepared.operation == "recover"
+        and proof.page_identity == prepared.page_identity
+        and identity_matches
+        and original_matches
+        and proof.trash_path == prepared.before_path
+        and proof.trash_path == current.path
+        and proof.source_hash == prepared.before_source_hash
+        and proof.source_hash == current.source_hash
+        and proof.review_fingerprint == current.review_fingerprint
+        and proof.source_guard.target == proof.trash_path
+        and proof.source_guard.leaf_policy == "content"
+        and proof.source_guard.expected_content_hash == proof.source_hash
+        and sidecar_target == f"{trash_root}.meta.json"
+        and (directory_proof or trash_root == proof.trash_path)
+        and proof.sidecar_guard.leaf_policy == "content"
+        and proof.sidecar_guard.expected_content_hash
+        == vault.content_hash(proof.sidecar_source)
+        and not proof.live_owner_paths
+    )
+    if not valid:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "trash proof does not bind exact sidecar, UUID, bytes, and ownership",
+        )
+
+
+def _trash_proof_commits_prepared(
+    prepared: LifecyclePreparedTransition,
+    proof: LifecycleTrashProof,
+) -> bool:
+    return (
+        prepared.page_identity == proof.page_identity
+        and prepared.after_path == proof.original_path
+        and prepared.after_source_hash == proof.source_hash
+        and prepared.after_fingerprint == proof.review_fingerprint
+    )
+
+
 def plan_lifecycle_transition(
     vault_root: Path,
     *,
     decision: LifecycleDecision | None,
     prepared: LifecyclePreparedTransition,
     current: LifecyclePrimaryBinding,
+    trashed_committed: LifecycleTrashProof | None = None,
 ) -> LifecycleTransitionPlan:
     """Plan decision/slot writes without mutating lifecycle or primary state."""
     _validate_lifecycle_prepared(prepared)
     _validate_primary_binding(current)
     _validate_prepared_decision_binding(prepared, decision)
     root = Path(vault_root).absolute()
+    if trashed_committed is not None:
+        _validate_lifecycle_trash_proof(
+            prepared=prepared,
+            current=current,
+            proof=trashed_committed,
+        )
 
     writes: list[vault.PlannedWrite] = []
     _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity)
@@ -1273,6 +1363,14 @@ def plan_lifecycle_transition(
 
     if existing_prepared is not None:
         old_state = lifecycle_prepared_state(existing_prepared, current)
+        if (
+            old_state == "stale"
+            and trashed_committed is not None
+            and _trash_proof_commits_prepared(
+                existing_prepared, trashed_committed
+            )
+        ):
+            old_state = "committed"
         if old_state == "pending":
             if existing_prepared.transition_id == prepared.transition_id:
                 code = "LIFECYCLE_TRANSITION_MISMATCH"
@@ -1284,6 +1382,11 @@ def plan_lifecycle_transition(
                 )
             raise RelationReviewError(code, reason)
         if old_state == "stale":
+            if trashed_committed is not None:
+                raise RelationReviewError(
+                    "LIFECYCLE_TRANSITION_MISMATCH",
+                    "trash proof does not bind the committed prepared transition",
+                )
             raise RelationReviewError(
                 "LIFECYCLE_TRANSITION_STALE",
                 "prepared transition matches neither live side; reconcile lifecycle state",
