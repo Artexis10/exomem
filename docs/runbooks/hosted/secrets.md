@@ -142,8 +142,23 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
 
 The provisioner database URL and its separately scoped HCloud token have only
 provisioner-workload destinations. K3s bootstrap material is different again:
-`k3s_server_token` and the database-backup B2 key have exact SOPS Ansible-var
-destinations and are never installed as general cluster Secrets.
+`k3s_server_token` is written once to both its exact SOPS Ansible-var destination
+and its separately versioned offline escrow destination. It is never installed
+as a general cluster Secret:
+
+```bash
+openssl rand -base64 48 | infra/scripts/secret_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --secret k3s_server_token \
+  --version v1 \
+  --destination ansible.hosted-node.k3s-server-token.active \
+  --destination escrow.k3s-server-token.active \
+  --source stdin
+```
+
+The database-backup B2 key also has an exact SOPS Ansible-var destination. None
+of these host-bootstrap values becomes a general cluster Secret.
 
 ## Run Ansible with SOPS vars on tmpfs
 
@@ -256,3 +271,16 @@ destroy the recovery environment when the operation ends. Do not copy the age
 identity onto the K3s node, into Vercel, or into Terraform state. Every
 break-glass use must record operator, reason, ciphertext path/version, start/end
 time, and the content-free verification result.
+
+## Verify
+
+Validate retirement proof without placing a secret in arguments or evidence:
+
+```bash
+infra/scripts/rotation_gate.py \
+  --contract infra/contracts/rotation-drills-v1.json \
+  --evidence /secure/operator/content-free-rotation-evidence.json
+```
+
+Then inspect only identity/version metadata for each applied Kubernetes Secret.
+No verification command may read `.data` or `.stringData`.

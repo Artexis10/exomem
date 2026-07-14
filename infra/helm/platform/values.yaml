@@ -18,6 +18,9 @@ scheduler:
   secretName: exomem-hosted-scheduler
   secretKey: secret
 
+observability:
+  contractSha256: 0eb711e98e16e184aa48aad2b7e5dce24e65cfcfdac6f1c14a33ebba59cc6e43
+
 storage:
   className: exomem-hcloud-encrypted-retain
   encryptionSecretName: exomem-volume-encryption

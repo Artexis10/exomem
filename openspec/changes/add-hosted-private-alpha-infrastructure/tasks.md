@@ -43,7 +43,7 @@
 
 - [x] 5.1 Create `infra/terraform/{foundation,durability}`, `infra/ansible`, `infra/helm/{platform,cell}`, `infra/provisioner`, `infra/scripts`, and `docs/runbooks/hosted` with ownership documentation.
 - [x] 5.2 Add pinned tool/provider/chart versions, committed Terraform lock files, `.gitignore` rules for state/plans/plaintext, and reproducible local validation commands.
-- [ ] 5.3 Add CI/static tests for `terraform fmt/validate`, TFLint/security policy, Ansible lint/syntax, Helm lint/template/schema, Kubernetes policy, SOPS ciphertext, Ruff/type/test, and secret scanning.
+- [x] 5.3 Add CI/static tests for `terraform fmt/validate`, TFLint/security policy, Ansible lint/syntax, Helm lint/template/schema, Kubernetes policy, SOPS ciphertext, Ruff/type/test, and secret scanning.
 - [x] 5.4 Add a plan-inspection test that rejects unapproved destroy/replacement and sensitive output in logs.
 
 ## 6. Implement split-state Terraform
@@ -61,17 +61,17 @@
 - [x] 7.1 Add Molecule/check-mode or equivalent tests for base hardening, exact package/service configuration, and no fetched cluster-admin kubeconfig.
 - [x] 7.2 Implement base OS updates, key-only SSH, administrator path, UFW, fail2ban, time sync, log rotation, disk hygiene, and `cryptsetup`.
 - [x] 7.3 Add tests for pinned/checksummed K3s installation, embedded etcd, secrets encryption, metadata-safe audit, token expiry policy, image/log GC, and restricted kubeconfig.
-- [ ] 7.4 Implement K3s bootstrap plus encrypted off-host etcd snapshots and break-glass escrow.
+- [x] 7.4 Implement K3s bootstrap plus encrypted off-host etcd snapshots and break-glass escrow.
 - [ ] 7.5 Generate Ansible inventory from non-sensitive Terraform outputs and prove two consecutive site runs converge cleanly.
 
 ## 8. Implement platform and cell Helm releases
 
 - [x] 8.1 Pin and validate the exact Hetzner CSI chart/image compatible with K3s 1.35 and prove its supported LUKS key behavior.
-- [ ] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
+- [x] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
 - [ ] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
 - [ ] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
 - [x] 8.5 Add default-deny ingress/egress, exact Traefik ingress selectors, restricted Pod Security, and platform-owned validating admission for images/privilege/host/cross-cell references.
-- [ ] 8.6 Add executable network-policy probes denying cell-to-cell, Kubernetes, Neon, B2, metadata, and unlabelled-platform access.
+- [x] 8.6 Add executable network-policy probes denying cell-to-cell, Kubernetes, Neon, B2, metadata, and unlabelled-platform access.
 
 ## 9. Implement the durable provisioner core
 
@@ -129,7 +129,7 @@
 - [x] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
 - [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
 - [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
-- [ ] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks.
+- [x] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks.
 - [ ] 15.5 Add the live monthly cost sheet, actual Paddle fee/tax record, six-user/two-reserved cap, and hard capacity gate.
 
 ## 16. Deploy and prove the private alpha

@@ -1,0 +1,17 @@
+{{- $contractRaw := .Files.Get "files/observability-v1.json" -}}
+{{- $contractSha256 := $contractRaw | sha256sum -}}
+{{- if ne .Values.observability.contractSha256 $contractSha256 -}}
+{{- fail "observability contract SHA-256 mismatch" -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-hosted-observability-contract
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted
+  annotations:
+    exomem.io/contract-version: "1"
+    exomem.io/contract-sha256: {{ $contractSha256 | quote }}
+data:
+  contract.json: |-
+{{ $contractRaw | indent 4 }}

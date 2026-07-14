@@ -268,6 +268,50 @@ def test_platform_rejects_scheduler_contract_sha_drift() -> None:
     assert "scheduler contract SHA-256 mismatch" in result.stderr
 
 
+def test_platform_renders_owned_namespaces_and_content_free_observability() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    expected_enforcement = {"exomem-platform": "privileged", "exomem-system": "restricted"}
+    for name, enforcement in expected_enforcement.items():
+        namespace = _find(documents, "Namespace", name)
+        assert namespace["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+        assert namespace["metadata"]["labels"] == {
+            "app.kubernetes.io/part-of": "exomem-hosted",
+            "pod-security.kubernetes.io/enforce": enforcement,
+            "pod-security.kubernetes.io/enforce-version": "v1.35",
+            "pod-security.kubernetes.io/audit": "restricted",
+            "pod-security.kubernetes.io/audit-version": "v1.35",
+            "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/warn-version": "v1.35",
+        }
+
+    observability = _find(documents, "ConfigMap", "exomem-hosted-observability-contract")
+    contract = json.loads(observability["data"]["contract.json"])
+    assert contract == json.loads(
+        (ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
+    )
+    assert contract["alerts"]["scheduler_missed_run_seconds"] == 180
+    assert contract["alerts"]["scheduler_consecutive_failures"] == 2
+    assert contract["alerts"]["backup_warn_age_seconds"] == 2700
+    assert contract["alerts"]["backup_block_age_seconds"] == 3600
+
+    scheduler_jobs = [item for item in documents if item.get("kind") == "CronJob"]
+    scheduler_text = json.dumps(scheduler_jobs)
+    for metric in (
+        "exomem_hosted_scheduler_attempts_total",
+        "exomem_hosted_scheduler_failures_total",
+        "exomem_hosted_scheduler_duration_seconds",
+        "exomem_hosted_scheduler_last_success_unixtime",
+    ):
+        assert metric in scheduler_text
+    for forbidden in ("response_body", "authorization_value", "environment_dump"):
+        assert forbidden not in scheduler_text.lower()
+
+
 @pytest.mark.parametrize(
     ("values_name", "expected_kind"),
     (("values.initialize.yaml", "Job"), ("values.validation.yaml", "StatefulSet")),

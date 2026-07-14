@@ -77,7 +77,16 @@ spec:
               command: ["/bin/sh", "-ec"]
               args:
                 - |-
+                  started="$(date +%s)"
+                  printf '%s{job="%s",contract_version="%s"} 1\n' {{ $contract.observability.attemptCounterMetric | quote }} {{ $job.name | quote }} {{ $contract.version | quote }}
                   status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --proto '=https' --tlsv1.2 --connect-timeout {{ $contract.requestPolicy.connectTimeoutSeconds }} --max-time {{ $contract.requestPolicy.totalTimeoutSeconds }} --max-redirs 0 --request {{ $contract.requestPolicy.method }} --header "Authorization: {{ $authorizationScheme }} ${EXOMEM_HOSTED_SCHEDULER_SECRET}" {{ $contract.origin }}{{ $job.path }})"
+                  finished="$(date +%s)"
+                  printf '%s{job="%s",contract_version="%s"} %s\n' {{ $contract.observability.durationHistogramMetric | quote }} {{ $job.name | quote }} {{ $contract.version | quote }} "$((finished - started))"
+                  if test "${status}" = {{ $successStatus | quote }}; then
+                    printf '%s{job="%s",contract_version="%s"} %s\n' {{ $contract.observability.lastSuccessMetric | quote }} {{ $job.name | quote }} {{ $contract.version | quote }} "${finished}"
+                  else
+                    printf '%s{job="%s",contract_version="%s"} 1\n' {{ $contract.observability.failureCounterMetric | quote }} {{ $job.name | quote }} {{ $contract.version | quote }}
+                  fi
                   test "${status}" = {{ $successStatus | quote }}
               env:
                 - name: {{ $schedulerEnvironmentVariable }}

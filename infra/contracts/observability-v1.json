@@ -1,0 +1,58 @@
+{
+  "schema_version": 1,
+  "checks": [
+    {
+      "name": "control-availability",
+      "target_environment_variable": "EXOMEM_BLACKBOX_CONTROL_URL",
+      "timeout_seconds": 10
+    },
+    {
+      "name": "backup-freshness",
+      "target_environment_variable": "EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL",
+      "timeout_seconds": 10,
+      "maximum_age_header": "x-exomem-backup-age-seconds",
+      "maximum_age_seconds": 3600
+    },
+    {
+      "name": "scheduler-last-success",
+      "target_environment_variable": "EXOMEM_BLACKBOX_SCHEDULER_URL",
+      "timeout_seconds": 10,
+      "maximum_age_header": "x-exomem-scheduler-last-success-age-seconds",
+      "maximum_age_seconds": 180
+    }
+  ],
+  "metrics": [
+    "exomem_hosted_scheduler_attempts_total",
+    "exomem_hosted_scheduler_failures_total",
+    "exomem_hosted_scheduler_duration_seconds",
+    "exomem_hosted_scheduler_last_success_unixtime",
+    "exomem_provisioner_operations_total",
+    "exomem_provisioner_pending_seconds",
+    "exomem_backup_age_seconds",
+    "exomem_pvc_free_bytes"
+  ],
+  "alerts": {
+    "scheduler_missed_run_seconds": 180,
+    "scheduler_consecutive_failures": 2,
+    "backup_warn_age_seconds": 2700,
+    "backup_block_age_seconds": 3600,
+    "pending_operation_warn_seconds": 900,
+    "pvc_reserved_free_bytes": 1073741824,
+    "cell_log_cap_bytes": 134217728,
+    "safe_volume_attachments_remaining": 10
+  },
+  "prohibited_log_fields": [
+    "email",
+    "user_id",
+    "authorization",
+    "grant",
+    "presigned_url",
+    "filename",
+    "note",
+    "query",
+    "snippet",
+    "embedding",
+    "media",
+    "environment"
+  ]
+}
