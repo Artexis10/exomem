@@ -152,6 +152,7 @@ class LiveDeletionProvider:
         claims: dict[str, object],
         retained_until: datetime | None = None,
         wrapped_key_reference: str | None = None,
+        delete_marker: bool = False,
     ) -> DeletionResource:
         self._claims[reference] = claims
         return DeletionResource(
@@ -162,6 +163,7 @@ class LiveDeletionProvider:
             cell_id=str(claims["cellId"]),
             retained_until=retained_until,
             wrapped_key_reference=wrapped_key_reference,
+            delete_marker=delete_marker,
         )
 
     async def scan_tenant(self, tenant_id: str) -> tuple[DeletionResource, ...]:
@@ -192,7 +194,17 @@ class LiveDeletionProvider:
                     context.fence_generation,
                 ):
                     raise DeletionLeaseBusy("cell operation lock is held by another operation")
-        return tuple(sorted(resources, key=lambda item: (item.provider, item.reference, item.kind)))
+        return tuple(
+            sorted(
+                resources,
+                key=lambda item: (
+                    item.provider,
+                    0 if item.delete_marker else 1,
+                    item.reference,
+                    item.kind,
+                ),
+            )
+        )
 
     async def _scan_kubernetes(self, tenant_id: str) -> list[DeletionResource]:
         result: list[DeletionResource] = []
@@ -332,55 +344,122 @@ class LiveDeletionProvider:
             (self._export_bucket, DeletionResourceKind.EXPORT),
             (self._recovery_bucket, DeletionResourceKind.BACKUP),
         ):
-            token: str | None = None
-            while True:
-                request: dict[str, object] = {"Bucket": bucket}
-                if token is not None:
-                    request["ContinuationToken"] = token
-                page = await asyncio.to_thread(self._b2.list_objects_v2, **request)
-                for item in page.get("Contents", ()):
-                    key = str(item["Key"])
-                    head = await asyncio.to_thread(
-                        self._b2.head_object,
-                        Bucket=bucket,
-                        Key=key,
-                    )
-                    object_metadata = {
-                        str(name).lower(): str(value)
-                        for name, value in dict(head.get("Metadata", {})).items()
-                    }
-                    reference = ProviderReference.b2(bucket=bucket, key=key)
-                    claims = self._authenticated_claims(
-                        envelope=object_metadata.get("identity-envelope", ""),
+            versions, markers = await self._b2_entries(bucket=bucket)
+            claims_by_key: dict[str, dict[str, object]] = {}
+            for item in versions:
+                key, version_id = self._b2_entry_identity(item)
+                head = await asyncio.to_thread(
+                    self._b2.head_object,
+                    Bucket=bucket,
+                    Key=key,
+                    VersionId=version_id,
+                )
+                if head.get("VersionId") not in {None, version_id}:
+                    raise MetadataConflict("B2 exact version proof differs")
+                object_metadata = {
+                    str(name).lower(): str(value)
+                    for name, value in dict(head.get("Metadata", {})).items()
+                }
+                stable_reference = ProviderReference.b2(bucket=bucket, key=key)
+                claims = self._authenticated_claims(
+                    envelope=object_metadata.get("identity-envelope", ""),
+                    provider="b2",
+                    reference=stable_reference,
+                )
+                existing = claims_by_key.get(key)
+                if existing is not None and existing["tenantId"] != claims["tenantId"]:
+                    raise MetadataConflict("B2 version ownership differs within one object key")
+                claims_by_key[key] = claims
+                if claims["tenantId"] != tenant_id:
+                    continue
+                retained = head.get("ObjectLockRetainUntilDate")
+                if retained is not None and (
+                    not isinstance(retained, datetime) or retained.tzinfo is None
+                ):
+                    raise MetadataConflict("B2 retention timestamp is invalid")
+                result.append(
+                    self._record(
                         provider="b2",
-                        reference=reference,
+                        reference=ProviderReference.b2(
+                            bucket=bucket,
+                            key=key,
+                            version_id=version_id,
+                        ),
+                        kind=kind,
+                        claims=claims,
+                        retained_until=retained,
+                        wrapped_key_reference=object_metadata.get("wrapped-key-reference"),
                     )
-                    if claims["tenantId"] != tenant_id:
-                        continue
-                    retained = head.get("ObjectLockRetainUntilDate")
-                    if retained is not None and (
-                        not isinstance(retained, datetime) or retained.tzinfo is None
-                    ):
-                        raise MetadataConflict("B2 retention timestamp is invalid")
-                    wrapped_key = object_metadata.get("wrapped-key-reference")
-                    result.append(
-                        self._record(
-                            provider="b2",
-                            reference=reference,
-                            kind=kind,
-                            claims=claims,
-                            retained_until=retained,
-                            wrapped_key_reference=wrapped_key,
-                        )
+                )
+            for item in markers:
+                key, version_id = self._b2_entry_identity(item)
+                claims = claims_by_key.get(key)
+                if claims is None or claims["tenantId"] != tenant_id:
+                    continue
+                result.append(
+                    self._record(
+                        provider="b2",
+                        reference=ProviderReference.b2(
+                            bucket=bucket,
+                            key=key,
+                            version_id=version_id,
+                            delete_marker=True,
+                        ),
+                        kind=kind,
+                        claims=claims,
+                        delete_marker=True,
                     )
-                if not page.get("IsTruncated"):
-                    break
-                token = page.get("NextContinuationToken")
-                if not isinstance(token, str) or not token:
-                    raise MetadataConflict("B2 deletion scan pagination is invalid")
+                )
         return result
 
-    async def delete_resource(self, resource: DeletionResource, *, bypass_governance: bool) -> None:
+    async def _b2_entries(
+        self,
+        *,
+        bucket: str,
+        prefix: str | None = None,
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        versions: list[dict[str, object]] = []
+        markers: list[dict[str, object]] = []
+        key_marker: str | None = None
+        version_marker: str | None = None
+        while True:
+            request: dict[str, object] = {"Bucket": bucket}
+            if prefix is not None:
+                request["Prefix"] = prefix
+            if key_marker is not None:
+                request["KeyMarker"] = key_marker
+            if version_marker is not None:
+                request["VersionIdMarker"] = version_marker
+            page = await asyncio.to_thread(self._b2.list_object_versions, **request)
+            for field, target in (("Versions", versions), ("DeleteMarkers", markers)):
+                entries = page.get(field, ())
+                if not isinstance(entries, (list, tuple)):
+                    raise MetadataConflict("B2 version listing is invalid")
+                target.extend(entries)
+            if not page.get("IsTruncated"):
+                return versions, markers
+            next_key = page.get("NextKeyMarker")
+            next_version = page.get("NextVersionIdMarker")
+            if not isinstance(next_key, str) or not next_key:
+                raise MetadataConflict("B2 version pagination is invalid")
+            if next_version is not None and (
+                not isinstance(next_version, str) or not next_version
+            ):
+                raise MetadataConflict("B2 version pagination is invalid")
+            key_marker = next_key
+            version_marker = next_version
+
+    @staticmethod
+    def _b2_entry_identity(item: object) -> tuple[str, str]:
+        if not isinstance(item, dict):
+            raise MetadataConflict("B2 version listing is invalid")
+        key = item.get("Key")
+        version_id = item.get("VersionId")
+        if not isinstance(key, str) or not key or not isinstance(version_id, str) or not version_id:
+            raise MetadataConflict("B2 version identity is invalid")
+        return key, version_id
+
+    async def delete_resource(self, resource: DeletionResource) -> None:
         await self._assert_authorized(resource.tenant_id)
         if resource.reference not in self._claims:
             raise MetadataConflict("deletion resource was not authenticated by this scan")
@@ -392,12 +471,14 @@ class LiveDeletionProvider:
         elif resource.provider == "hcloud":
             await self._delete_hcloud(parsed, resource)
         elif resource.provider == "b2":
+            version_id = parsed.get("objectVersionId")
+            if not isinstance(version_id, str) or not version_id:
+                raise MetadataConflict("B2 deletion requires an exact version ID")
             arguments: dict[str, object] = {
                 "Bucket": str(parsed["bucket"]),
                 "Key": str(parsed["key"]),
+                "VersionId": version_id,
             }
-            if bypass_governance:
-                arguments["BypassGovernanceRetention"] = True
             await asyncio.to_thread(self._b2.delete_object, **arguments)
         else:
             raise MetadataConflict("deletion provider kind is unsupported")
@@ -580,12 +661,18 @@ class LiveDeletionProvider:
                     for pv in (getattr(pvs, "items", ()) or ())
                 )
             if resource.provider == "b2":
-                await asyncio.to_thread(
-                    self._b2.head_object,
-                    Bucket=str(parsed["bucket"]),
-                    Key=str(parsed["key"]),
+                version_id = parsed.get("objectVersionId")
+                if not isinstance(version_id, str) or not version_id:
+                    raise MetadataConflict("B2 absence proof requires an exact version ID")
+                versions, markers = await self._b2_entries(
+                    bucket=str(parsed["bucket"]),
+                    prefix=str(parsed["key"]),
                 )
-                return False
+                return not any(
+                    self._b2_entry_identity(item)
+                    == (str(parsed["key"]), version_id)
+                    for item in (*versions, *markers)
+                )
         except Exception as error:
             if _is_not_found(error):
                 return True

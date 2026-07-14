@@ -126,8 +126,8 @@ class BucketScopedB2Client:
             raise ValueError("bucket-scoped B2 clients require an exact allowlist")
         self._clients = dict(clients)
 
-    def list_objects_v2(self, **arguments: Any) -> dict[str, Any]:
-        return self._client(arguments).list_objects_v2(**arguments)
+    def list_object_versions(self, **arguments: Any) -> dict[str, Any]:
+        return self._client(arguments).list_object_versions(**arguments)
 
     def head_object(self, **arguments: Any) -> dict[str, Any]:
         return self._client(arguments).head_object(**arguments)

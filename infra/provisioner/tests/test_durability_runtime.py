@@ -221,9 +221,9 @@ async def test_production_deletion_builder_performs_a_canonical_empty_provider_s
             return []
 
     class B2:
-        def list_objects_v2(self, **arguments):
+        def list_object_versions(self, **arguments):
             assert arguments["Bucket"] in {"recovery-bucket", "export-bucket"}
-            return {"Contents": [], "IsTruncated": False}
+            return {"Versions": [], "DeleteMarkers": [], "IsTruncated": False}
 
     class Authority:
         async def current_fence(self, tenant_id):
@@ -273,9 +273,9 @@ def test_bucket_scoped_b2_client_dispatches_only_the_exact_bucket() -> None:
             self.name = name
             self.calls: list[tuple[str, dict[str, object]]] = []
 
-        def list_objects_v2(self, **kwargs):
+        def list_object_versions(self, **kwargs):
             self.calls.append(("list", kwargs))
-            return {"Contents": []}
+            return {"Versions": [], "DeleteMarkers": []}
 
         def head_object(self, **kwargs):
             self.calls.append(("head", kwargs))
@@ -294,17 +294,17 @@ def test_bucket_scoped_b2_client_dispatches_only_the_exact_bucket() -> None:
         }
     )
 
-    client.list_objects_v2(Bucket="exomem-recovery-deadbeef")
+    client.list_object_versions(Bucket="exomem-recovery-deadbeef")
     client.head_object(Bucket="exomem-export-deadbeef", Key="opaque")
     client.delete_object(
         Bucket="exomem-recovery-deadbeef",
         Key="opaque",
-        BypassGovernanceRetention=True,
+        VersionId="version-opaque",
     )
     assert [call[0] for call in recovery.calls] == ["list", "delete"]
     assert [call[0] for call in exports.calls] == ["head"]
     with pytest.raises(ValueError, match="outside deletion scope"):
-        client.list_objects_v2(Bucket="database-backup")
+        client.list_object_versions(Bucket="database-backup")
 
 
 @pytest.mark.asyncio

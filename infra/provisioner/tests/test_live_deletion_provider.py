@@ -225,24 +225,90 @@ class B2:
                 "ObjectLockRetainUntilDate": locked_until if kind == "backup" else None,
             }
 
-    def list_objects_v2(self, **arguments):
+    def list_object_versions(self, **arguments):
         bucket = arguments["Bucket"]
         return {
-            "Contents": [{"Key": key} for selected, key in self.objects if selected == bucket],
+            "Versions": [
+                {"Key": key, "VersionId": "version-current"}
+                for selected, key in self.objects
+                if selected == bucket
+            ],
+            "DeleteMarkers": [],
             "IsTruncated": False,
         }
 
-    def head_object(self, *, Bucket: str, Key: str):
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str):
+        assert VersionId == "version-current"
         try:
-            return self.objects[(Bucket, Key)]
+            return {**self.objects[(Bucket, Key)], "VersionId": VersionId}
         except KeyError as error:
             raise NotFound from error
 
     def delete_object(self, **arguments):
         bucket = arguments["Bucket"]
         key = arguments["Key"]
-        self.deleted.append((bucket, key, arguments.get("BypassGovernanceRetention") is True))
+        assert set(arguments) == {"Bucket", "Key", "VersionId"}
+        self.deleted.append((bucket, key, arguments["VersionId"]))
         self.objects.pop((bucket, key), None)
+
+
+class VersionedB2:
+    """Fake the B2 versioning semantics that hide bytes behind delete markers."""
+
+    def __init__(self, retained_until: datetime) -> None:
+        self.versions: dict[tuple[str, str, str], dict[str, object]] = {}
+        self.delete_markers: set[tuple[str, str, str]] = set()
+        self.deleted: list[dict[str, object]] = []
+        for bucket, key, kind in (
+            ("exports", "tenant/export.enc", "export"),
+            ("recovery", "tenant/backup.enc", "backup"),
+        ):
+            value = metadata("cell-active", operation=f"{kind}-operation", fence=8)
+            reference = ProviderReference.b2(bucket=bucket, key=key)
+            for version_id in (f"{kind}-current", f"{kind}-older"):
+                self.versions[(bucket, key, version_id)] = {
+                    "Metadata": {
+                        "identity-envelope": envelope("b2", reference, value),
+                        "wrapped-key-reference": f"wrapped:{kind}",
+                    },
+                    "ObjectLockRetainUntilDate": (
+                        retained_until if kind == "backup" else None
+                    ),
+                    "VersionId": version_id,
+                }
+            self.delete_markers.add((bucket, key, f"{kind}-marker"))
+
+    def list_objects_v2(self, **_arguments):
+        raise AssertionError("versioned deletion must not use list_objects_v2")
+
+    def list_object_versions(self, **arguments):
+        bucket = arguments["Bucket"]
+        prefix = arguments.get("Prefix")
+        versions = [
+            {"Key": key, "VersionId": version_id}
+            for selected, key, version_id in self.versions
+            if selected == bucket and (prefix is None or key.startswith(prefix))
+        ]
+        markers = [
+            {"Key": key, "VersionId": version_id}
+            for selected, key, version_id in self.delete_markers
+            if selected == bucket and (prefix is None or key.startswith(prefix))
+        ]
+        return {"Versions": versions, "DeleteMarkers": markers, "IsTruncated": False}
+
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str):
+        try:
+            return self.versions[(Bucket, Key, VersionId)]
+        except KeyError as error:
+            raise NotFound from error
+
+    def delete_object(self, **arguments):
+        assert "VersionId" in arguments
+        assert set(arguments) == {"Bucket", "Key", "VersionId"}
+        self.deleted.append(dict(arguments))
+        identity = (arguments["Bucket"], arguments["Key"], arguments["VersionId"])
+        self.versions.pop(identity, None)
+        self.delete_markers.discard(identity)
 
 
 class Authority:
@@ -346,7 +412,7 @@ async def test_live_candidate_discard_authenticates_inventory_and_preserves_acti
 
 
 @pytest.mark.asyncio
-async def test_live_tenant_destroy_waits_for_object_lock_then_bypasses_and_proves_absence():
+async def test_live_tenant_destroy_waits_for_object_lock_then_deletes_exact_version():
     now = datetime(2030, 1, 1, tzinfo=UTC)
     provider, core, custom, hcloud, b2, authority, keys = build(now)
     clock = [now]
@@ -366,7 +432,7 @@ async def test_live_tenant_destroy_waits_for_object_lock_then_bypasses_and_prove
 
     assert isinstance(final, DriverFinal)
     assert final.result["tenantResourcesDestroyed"] is True
-    assert ("recovery", "tenant/backup.enc", True) in b2.deleted
+    assert ("recovery", "tenant/backup.enc", "version-current") in b2.deleted
     assert keys.deleted == {
         ("tenant-alpha", "wrapped:export"),
         ("tenant-alpha", "wrapped:backup"),
@@ -380,6 +446,66 @@ async def test_live_tenant_destroy_waits_for_object_lock_then_bypasses_and_prove
         ("tenant-alpha", "cell-candidate", "delete-operation", 9),
         ("tenant-alpha", "cell-active", "delete-operation", 9),
     ]
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_deletes_every_exact_version_and_marker_without_bypass():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    active = metadata("cell-active", operation="active-operation", fence=7)
+    candidate = metadata("cell-candidate", operation="candidate-operation", fence=8)
+    core = Core([active, candidate])
+    custom = Custom([active, candidate])
+    hcloud = HCloudVolumes([active, candidate])
+    b2 = VersionedB2(now)
+    keys = Keys()
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=custom,
+        hcloud_client=SimpleNamespace(volumes=hcloud),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=keys,
+    )
+
+    await provider.bind(context(None))
+    inventory = await provider.scan_tenant("tenant-alpha")
+    b2_inventory = [resource for resource in inventory if resource.provider == "b2"]
+    assert len(b2_inventory) == 6
+    assert {
+        ProviderReference.parse(resource.reference)["objectVersionId"]
+        for resource in b2_inventory
+    } == {
+        "export-current",
+        "export-older",
+        "export-marker",
+        "backup-current",
+        "backup-older",
+        "backup-marker",
+    }
+
+    result = await FencedOrderedDeletionWorkflow(provider, clock=lambda: now).destroy_tenant(
+        context(None)
+    )
+
+    assert isinstance(result, DriverFinal)
+    assert not b2.versions
+    assert not b2.delete_markers
+    assert {str(item["VersionId"]) for item in b2.deleted} == {
+        "export-current",
+        "export-older",
+        "export-marker",
+        "backup-current",
+        "backup-older",
+        "backup-marker",
+    }
+    assert keys.deleted == {
+        ("tenant-alpha", "wrapped:export"),
+        ("tenant-alpha", "wrapped:backup"),
+    }
 
 
 @pytest.mark.asyncio
@@ -408,7 +534,7 @@ async def test_live_credential_deletion_never_reads_secret_payload_and_proves_or
         if resource.cell_id == "cell-candidate" and resource.kind.value == "credential"
     )
 
-    await provider.delete_resource(credential, bypass_governance=False)
+    await provider.delete_resource(credential)
 
     assert (
         metadata("cell-candidate", operation="candidate-operation", fence=8).resource_name,
@@ -432,7 +558,7 @@ async def test_live_credential_deletion_recovers_after_delete_acknowledgement_is
     namespace = metadata("cell-candidate", operation="candidate-operation", fence=8).resource_name
     core.secrets.pop((namespace, "exomem-cell-credentials"))
 
-    await provider.delete_resource(credential, bypass_governance=False)
+    await provider.delete_resource(credential)
 
     assert await provider.resource_absent(credential) is True
 
@@ -469,13 +595,13 @@ async def test_live_volume_deletion_waits_for_pv_absence_before_hcloud_delete():
         if resource.cell_id == "cell-candidate" and resource.kind.value == "volume"
     )
 
-    await provider.delete_resource(volume, bypass_governance=False)
+    await provider.delete_resource(volume)
 
     assert pv_name in core.pvs
     assert 42 in hcloud.values
 
     core.delay_pv_deletion = False
-    await provider.delete_resource(volume, bypass_governance=False)
+    await provider.delete_resource(volume)
 
     assert pv_name not in core.pvs
     assert 42 not in hcloud.values

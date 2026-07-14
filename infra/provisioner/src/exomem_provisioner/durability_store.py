@@ -188,13 +188,10 @@ class B2DeletionObjectStore(_B2StoreBase):
         key: str,
         *,
         version_id: str | None = None,
-        bypass_governance: bool = False,
     ) -> None:
         arguments: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
         if version_id is not None:
             arguments["VersionId"] = version_id
-        if bypass_governance:
-            arguments["BypassGovernanceRetention"] = True
         await asyncio.to_thread(self._client.delete_object, **arguments)
 
     async def absent(self, key: str) -> bool:
