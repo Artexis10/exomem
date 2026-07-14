@@ -21,6 +21,24 @@ def _workspaces(parent: Path) -> list[Path]:
     return sorted(parent.glob(".exomem-batch-*"))
 
 
+def _residue_name(index: int) -> str:
+    return f".exomem-batch-{index:032x}"
+
+
+def _make_residue(
+    parent: Path,
+    index: int,
+    *,
+    children: tuple[str, ...] = (),
+) -> Path:
+    workspace = parent / _residue_name(index)
+    workspace.mkdir(mode=0o700)
+    os.chmod(workspace, 0o700)
+    for name in children:
+        (workspace / name).write_bytes(f"residue:{name}".encode())
+    return workspace
+
+
 def _replace_capability_member(
     monkeypatch: pytest.MonkeyPatch,
     capability: str,
@@ -673,6 +691,262 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     assert concurrent.read_bytes() == b"concurrent-owned"
     assert _workspaces(tmp_path) == []
     assert _workspaces(guarded) == []
+
+
+def test_directory_census_ignores_exact_valid_residue_without_touching_it(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(
+        guarded,
+        1,
+        children=("stage-0.tmp", "restore-000.tmp"),
+    )
+    expected: dict[str, tuple[bytes, int, int, int]] = {}
+    for index, child in enumerate(sorted(residue.iterdir())):
+        content = child.read_bytes()
+        times = (
+            1_711_111_111_123_456_789 + index,
+            1_712_222_222_987_654_321 + index,
+        )
+        os.utime(child, ns=times)
+        info = child.stat()
+        expected[child.name] = (
+            content,
+            info.st_mode,
+            info.st_atime_ns,
+            info.st_mtime_ns,
+        )
+
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=0,
+    )
+    census.recheck(tmp_path)
+
+    assert census.entries == ()
+    actual: dict[str, tuple[bytes, int, int, int]] = {}
+    for child in residue.iterdir():
+        info = child.stat()
+        actual[child.name] = (
+            child.read_bytes(),
+            info.st_mode,
+            info.st_atime_ns,
+            info.st_mtime_ns,
+        )
+    assert actual == expected
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "malformed_name",
+        "uppercase_hex",
+        "malformed_child",
+        "workspace_symlink",
+        "workspace_file",
+        "child_directory",
+        "child_symlink",
+        "permissive_mode",
+    ],
+)
+def test_directory_census_rejects_unsafe_reserved_residue(
+    tmp_path: Path,
+    case: str,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    if case == "malformed_name":
+        (guarded / ".exomem-batch-short").mkdir()
+    elif case == "uppercase_hex":
+        (guarded / f".exomem-batch-{'A' * 32}").mkdir()
+    elif case == "malformed_child":
+        residue = _make_residue(guarded, 1)
+        (residue / "stage-١.tmp").write_bytes(b"unicode digit")
+    elif case == "workspace_symlink":
+        target = tmp_path / "workspace-target"
+        target.mkdir()
+        (guarded / _residue_name(1)).symlink_to(target, target_is_directory=True)
+    elif case == "workspace_file":
+        (guarded / _residue_name(1)).write_bytes(b"not a directory")
+    elif case == "child_directory":
+        residue = _make_residue(guarded, 1)
+        (residue / "stage-0.tmp").mkdir()
+    elif case == "child_symlink":
+        target = tmp_path / "child-target"
+        target.write_bytes(b"target")
+        residue = _make_residue(guarded, 1)
+        (residue / "restore-0.tmp").symlink_to(target)
+    else:
+        residue = _make_residue(guarded, 1)
+        os.chmod(residue, 0o755)
+
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path,
+            "guarded",
+            max_entries=0,
+        )
+
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+    assert unsafe.value.reason == "private batch residue is unsafe"
+
+
+def test_directory_census_enforces_residue_workspace_cap_before_validation(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    for index in range(64):
+        _make_residue(guarded, index)
+
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=0,
+    )
+    assert census.entries == ()
+
+    sixty_fifth = _make_residue(guarded, 64)
+    with pytest.raises(vault_module.PathGuardError) as limited:
+        census.recheck(tmp_path)
+    assert limited.value.code == "BATCH_RESIDUE_LIMIT"
+
+    sixty_fifth.rmdir()
+    (guarded / ".exomem-batch-malformed").mkdir()
+    with pytest.raises(vault_module.PathGuardError) as precedence:
+        census.recheck(tmp_path)
+    assert precedence.value.code == "BATCH_RESIDUE_LIMIT"
+
+
+def test_directory_census_enforces_residue_child_cap_before_validation(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    residue = _make_residue(guarded, 1)
+    for index in range(4_096):
+        (residue / f"stage-{index}.tmp").touch()
+
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=0,
+    )
+    assert census.entries == ()
+
+    overflow = residue / "stage-4096.tmp"
+    overflow.touch()
+    with pytest.raises(vault_module.PathGuardError) as limited:
+        census.recheck(tmp_path)
+    assert limited.value.code == "BATCH_RESIDUE_LIMIT"
+
+    overflow.unlink()
+    (residue / "stage-0.tmp").rename(residue / "stage-١.tmp")
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        census.recheck(tmp_path)
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+
+    overflow.touch()
+    with pytest.raises(vault_module.PathGuardError) as precedence:
+        census.recheck(tmp_path)
+    assert precedence.value.code == "BATCH_RESIDUE_LIMIT"
+
+
+def test_directory_census_ignores_valid_residue_lifecycle_but_fails_unsafe(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=0,
+    )
+
+    residue = _make_residue(guarded, 1, children=("stage-0.tmp",))
+    census.recheck(tmp_path)
+    (residue / "stage-0.tmp").unlink()
+    residue.rmdir()
+    census.recheck(tmp_path)
+
+    residue = _make_residue(guarded, 2, children=("restore-0.tmp",))
+    census.recheck(tmp_path)
+    (residue / "unexpected.tmp").write_bytes(b"unsafe")
+    with pytest.raises(vault_module.PathGuardError) as unsafe:
+        census.recheck(tmp_path)
+    assert unsafe.value.code == "BATCH_RESIDUE_UNSAFE"
+
+
+def test_batch_atomic_write_retries_with_fresh_workspace_beside_residue(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    target = guarded / "target.md"
+    target.write_bytes(b"old")
+    stale = _make_residue(guarded, 1, children=("stage-0.tmp",))
+    for index in range(2, 65):
+        _make_residue(guarded, index)
+    stale_bytes = (stale / "stage-0.tmp").read_bytes()
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path,
+        "guarded",
+        max_entries=1,
+    )
+    fresh_suffix = "f" * 32
+    suffixes = iter((stale.name.removeprefix(".exomem-batch-"), fresh_suffix))
+    written_workspaces: set[str] = set()
+    real_write = os.write
+
+    def fixed_token_hex(_size: int) -> str:
+        return next(suffixes)
+
+    def observe_write(descriptor: int, data) -> int:
+        try:
+            stage = Path(os.readlink(f"/proc/self/fd/{descriptor}"))
+            if stage.name.startswith("stage-"):
+                written_workspaces.add(stage.parent.name)
+        except OSError:
+            pass
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(vault_module.secrets, "token_hex", fixed_token_hex)
+    monkeypatch.setattr(vault_module.os, "write", observe_write)
+
+    replaced = vault_module.batch_atomic_write(
+        [vault_module.PlannedWrite(target, "new")],
+        vault_root=tmp_path,
+        required_guards=(census,),
+    )
+
+    assert replaced == [target]
+    assert target.read_bytes() == b"new"
+    assert written_workspaces == {f".exomem-batch-{fresh_suffix}"}
+    assert len(_workspaces(guarded)) == 64
+    assert stale in _workspaces(guarded)
+    assert (stale / "stage-0.tmp").read_bytes() == stale_bytes
+
+
+def test_directory_census_keeps_user_backup_in_ordinary_capacity(
+    tmp_path: Path,
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    _make_residue(guarded, 1)
+    (guarded / "user-owned.bak").write_bytes(b"ordinary")
+
+    with pytest.raises(vault_module.PathGuardError) as limited:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path,
+            "guarded",
+            max_entries=0,
+        )
+
+    assert limited.value.code == "PATH_GUARD_LIMIT"
 
 
 def test_directory_census_guard_enforces_its_raw_entry_bound(tmp_path: Path) -> None:

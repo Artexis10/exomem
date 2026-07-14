@@ -1494,6 +1494,125 @@ def _recheck_rollback_directory_guards(
             guard.recheck(vault_root, allowed_changes=allowed_changes)
 
 
+_BATCH_RESIDUE_PREFIX = ".exomem-batch-"
+_BATCH_RESIDUE_NAME = re.compile(r"^\.exomem-batch-[0-9a-f]{32}$", re.ASCII)
+_BATCH_RESIDUE_CHILD = re.compile(
+    r"^(?:stage|restore)-[0-9]+\.tmp$",
+    re.ASCII,
+)
+_BATCH_RESIDUE_WORKSPACE_LIMIT = 64
+_BATCH_RESIDUE_CHILD_LIMIT = 4_096
+
+
+def _batch_residue_error(code: str) -> PathGuardError:
+    reason = (
+        "private batch residue exceeds its inspection limit"
+        if code == "BATCH_RESIDUE_LIMIT"
+        else "private batch residue is unsafe"
+    )
+    return PathGuardError(code, reason)
+
+
+def _classify_batch_residue(
+    parent: Path,
+    parent_descriptor: int,
+    name: str,
+) -> None:
+    """Validate bounded stale residue without reading or adopting its content."""
+    workspace_path = parent / name
+    workspace_descriptor: int | None = None
+    iterator = None
+    try:
+        if _BATCH_RESIDUE_NAME.fullmatch(name) is None:
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            workspace_info = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - Windows fallback
+            workspace_info = workspace_path.lstat()
+        if (
+            not stat.S_ISDIR(workspace_info.st_mode)
+            or stat.S_ISLNK(workspace_info.st_mode)
+            or _is_reparse(workspace_info)
+            or (os.name == "posix" and stat.S_IMODE(workspace_info.st_mode) & 0o077)
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        workspace_identity = _identity(name, workspace_info)
+        if os.open in getattr(os, "supports_dir_fd", set()):
+            workspace_descriptor = os.open(
+                name,
+                _directory_flags(),
+                dir_fd=parent_descriptor,
+            )
+        else:  # pragma: no cover - Windows fallback
+            workspace_descriptor = os.open(workspace_path, _directory_flags())
+        opened = os.fstat(workspace_descriptor)
+        if (
+            not _same_identity(workspace_identity, opened)
+            or not stat.S_ISDIR(opened.st_mode)
+            or _is_reparse(opened)
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+
+        descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
+        iterator = os.scandir(
+            workspace_descriptor if descriptor_relative else workspace_path
+        )
+        child_names: list[str] = []
+        for child in iterator:
+            child_names.append(child.name)
+            if len(child_names) > _BATCH_RESIDUE_CHILD_LIMIT:
+                raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
+
+        for child_name in sorted(child_names):
+            if _BATCH_RESIDUE_CHILD.fullmatch(child_name) is None:
+                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+            if os.stat in getattr(os, "supports_dir_fd", set()):
+                child_info = os.stat(
+                    child_name,
+                    dir_fd=workspace_descriptor,
+                    follow_symlinks=False,
+                )
+            else:  # pragma: no cover - Windows fallback
+                child_info = (workspace_path / child_name).lstat()
+            if (
+                not stat.S_ISREG(child_info.st_mode)
+                or stat.S_ISLNK(child_info.st_mode)
+                or _is_reparse(child_info)
+            ):
+                raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+
+        final_descriptor_info = os.fstat(workspace_descriptor)
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            final_path_info = os.stat(
+                name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        else:  # pragma: no cover - Windows fallback
+            final_path_info = workspace_path.lstat()
+        if (
+            not _same_identity(workspace_identity, final_descriptor_info)
+            or not _same_identity(workspace_identity, final_path_info)
+            or not stat.S_ISDIR(final_path_info.st_mode)
+            or stat.S_ISLNK(final_path_info.st_mode)
+            or _is_reparse(final_path_info)
+        ):
+            raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+    except PathGuardError:
+        raise
+    except (OSError, ValueError) as error:
+        raise _batch_residue_error("BATCH_RESIDUE_UNSAFE") from error
+    finally:
+        if iterator is not None:
+            iterator.close()
+        if workspace_descriptor is not None:
+            os.close(workspace_descriptor)
+
+
 def _bounded_directory_entries(
     path: Path,
     *,
@@ -1514,9 +1633,24 @@ def _bounded_directory_entries(
             raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
         descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
         iterator = os.scandir(descriptor if descriptor_relative else path)
-        entries: list[PathIdentity] = []
+        residue_names: list[str] = []
+        ordinary_names: list[str] = []
         for entry in iterator:
             name = entry.name
+            if name in ignored_names:
+                continue
+            if name.startswith(_BATCH_RESIDUE_PREFIX):
+                residue_names.append(name)
+                if len(residue_names) > _BATCH_RESIDUE_WORKSPACE_LIMIT:
+                    raise _batch_residue_error("BATCH_RESIDUE_LIMIT")
+            else:
+                ordinary_names.append(name)
+
+        for name in sorted(residue_names):
+            _classify_batch_residue(path, descriptor, name)
+
+        entries: list[PathIdentity] = []
+        for name in sorted(ordinary_names):
             try:
                 encoded = name.encode("utf-8")
             except UnicodeEncodeError as error:
@@ -1527,8 +1661,6 @@ def _bounded_directory_entries(
                 raise PathGuardError(
                     "PATH_GUARD_UNSAFE", "guarded directory entry is unsafe"
                 )
-            if name in ignored_names:
-                continue
             if len(entries) >= max_entries:
                 raise PathGuardError(
                     "PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit"
@@ -1537,7 +1669,7 @@ def _bounded_directory_entries(
                 info = (
                     os.stat(name, dir_fd=descriptor, follow_symlinks=False)
                     if descriptor_relative
-                    else entry.stat(follow_symlinks=False)
+                    else (path / name).lstat()
                 )
             except OSError as error:
                 raise PathGuardError(
