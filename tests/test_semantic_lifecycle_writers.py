@@ -29,6 +29,9 @@ from exomem import (
     edit as edit_module,
 )
 from exomem import (
+    move_file as move_module,
+)
+from exomem import (
     multi_edit as multi_edit_module,
 )
 from exomem import (
@@ -136,6 +139,207 @@ def _apply_plan(root: Path, plan: relation_review.LifecycleTransitionPlan) -> No
         vault_root=root,
         required_guards=plan.required_guards,
     )
+
+
+def test_stable_id_move_prepares_exact_lifecycle_and_indexes_each_path_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Stable identity survives a path move.")
+    old_path = _PAGE
+    new_path = _OTHER_PAGE
+    old = _write(tmp_path, old_path, source)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+    upserts: list[list[str]] = []
+    deletes: list[list[str]] = []
+
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda root, paths, **_kwargs: upserts.append(
+            [path.relative_to(root).as_posix() for path in paths]
+        ),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: deletes.append(list(paths)),
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=old_path,
+        new_path=new_path,
+    )
+
+    moved = tmp_path / new_path
+    assert not old.exists()
+    assert moved.read_text(encoding="utf-8") == source
+    state = semantic_contract.build_page_state(tmp_path, new_path, source)
+    assert state.identity == _ID
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.operation == "move"
+    assert prepared.before_path == old_path
+    assert prepared.after_path == new_path
+    assert getattr(result, "semantic", None) is not None
+    assert sum(path == new_path for batch in upserts for path in batch) == 1
+    assert deletes == [[old_path]]
+
+
+def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    old = _write(tmp_path, _PAGE, target)
+    _write(tmp_path, _OTHER_PAGE, referrer)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=_PAGE,
+            new_path=new_path,
+            update_wikilinks=False,
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert old.read_text(encoding="utf-8") == target
+    assert not (tmp_path / new_path).exists()
+
+
+def test_path_only_inbound_rewrite_carries_current_reviewed_none(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source(
+        "See [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_OTHER_ID
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    _write(tmp_path, _PAGE, target)
+    referrer_path = _write(tmp_path, _OTHER_PAGE, referrer)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+    old_decision = relation_review.build_lifecycle_decision(
+        page_identity=_OTHER_ID,
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _OTHER_ID, referrer
+        ),
+        reason="No honest relation exists",
+    )
+    old_prepared = relation_review.build_lifecycle_prepared_transition(
+        transition_id=_TRANSITION_AB,
+        operation="edit",
+        page_identity=_OTHER_ID,
+        before_path=_OTHER_PAGE,
+        before_source_hash=vault.content_hash(referrer),
+        after_path=_OTHER_PAGE,
+        after_source_hash=vault.content_hash(referrer),
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _OTHER_ID, referrer
+        ),
+        decision=old_decision,
+        transition_token="seed-current-reviewed-none",
+        auxiliary_hash=relation_review.lifecycle_auxiliary_hash((), tmp_path),
+    )
+    vault.batch_atomic_write(
+        [
+            vault.PlannedWrite(
+                relation_review.lifecycle_decision_path(
+                    tmp_path, _OTHER_ID, old_decision.after_fingerprint
+                ),
+                relation_review.serialize_lifecycle_decision(old_decision),
+                create_only=True,
+            ),
+            vault.PlannedWrite(
+                relation_review.lifecycle_prepared_path(tmp_path, _OTHER_ID),
+                relation_review.serialize_lifecycle_prepared(old_prepared),
+                create_only=True,
+            ),
+        ],
+        vault_root=tmp_path,
+    )
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+    )
+
+    rewritten = referrer_path.read_text(encoding="utf-8")
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in rewritten
+    new_fingerprint = semantic_contract.review_content_fingerprint(
+        _OTHER_ID, rewritten
+    )
+    carried = relation_review.load_lifecycle_decision(
+        tmp_path, _OTHER_ID, new_fingerprint
+    )
+    assert carried is not None
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _OTHER_ID)
+    assert prepared is not None
+    assert prepared.operation == "move"
+    assert prepared.carried_from == old_decision.reference
+    assert result.semantic is not None
+
+
+def test_move_rewrites_self_link_at_destination_without_recreating_old_path(
+    tmp_path: Path,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    target = _source(
+        "Self [[Knowledge Base/Notes/Insights/lifecycle]].", page_id=_ID
+    ).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    anchor = _source(
+        "Anchor", page_id="00000000-0000-4000-8000-000000000063"
+    )
+    old = _write(tmp_path, _PAGE, target)
+    _write(tmp_path, anchor_path, anchor)
+    before_corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=before_corpus.activation_census
+    )
+
+    move_module.move_file(tmp_path, old_path=_PAGE, new_path=new_path)
+
+    assert not old.exists()
+    moved = (tmp_path / new_path).read_text(encoding="utf-8")
+    assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in moved
 
 
 def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:

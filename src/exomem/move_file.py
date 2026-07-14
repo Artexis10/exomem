@@ -16,27 +16,27 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from .kbdir import kb_dirname, kb_prefix
+from . import semantic_writes
+from .kbdir import kb_dirname
 from .vault import (
+    PathGuard,
+    PathGuardError,
     PlannedWrite,
     VaultPathError,
     batch_atomic_write,
     find_inbound_wikilinks,
     in_append_only_tree,
     in_curated_tree,
+    read_guarded_text,
     resolve_under_vault,
     walk_vault_md,
     write_log_entry,
 )
 
 log = logging.getLogger(__name__)
-
-_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
-
 
 @dataclass
 class MoveFileResult:
@@ -45,6 +45,7 @@ class MoveFileResult:
     wikilinks_updated: int
     files_touched: list[str]
     warnings: list[str]
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -53,6 +54,7 @@ class MoveFileResult:
             "wikilinks_updated": self.wikilinks_updated,
             "files_touched": self.files_touched,
             "warnings": self.warnings,
+            "semantic": self.semantic,
         }
 
 
@@ -141,8 +143,6 @@ def move_file(
     # Scan inbound links BEFORE the move, while the old path still exists.
     inbound = find_inbound_wikilinks(vault_root, old_rel) if update_wikilinks else []
 
-    new_abs.parent.mkdir(parents=True, exist_ok=True)
-
     warnings: list[str] = []
     files_touched: list[str] = []
     wikilinks_updated = 0
@@ -153,55 +153,141 @@ def move_file(
     if update_wikilinks and inbound:
         files_to_rewrite = sorted({hit.path for hit in inbound})
         for rel in files_to_rewrite:
+            if rel == old_rel:
+                continue
             try:
                 abs_file = (vault_root / rel).resolve()
                 abs_file.relative_to(vault_root.resolve())
             except (ValueError, OSError):
                 continue
             try:
-                text = abs_file.read_text(encoding="utf-8")
-            except (OSError, UnicodeDecodeError):
+                text, guard = read_guarded_text(vault_root, abs_file)
+            except (OSError, UnicodeDecodeError, PathGuardError):
                 continue
             new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
             if n_changed > 0:
-                writes.append(PlannedWrite(path=abs_file, content=new_text))
+                writes.append(
+                    PlannedWrite(path=abs_file, content=new_text, guard=guard)
+                )
                 files_touched.append(rel)
                 wikilinks_updated += n_changed
 
-    try:
-        old_abs.rename(new_abs)
-    except OSError as e:
-        raise MoveFileError(
-            code="MOVE_FAILED",
-            reason=f"could not rename {old_rel!r} to {new_rel!r}: {e}",
-        ) from e
-
-    try:
-        if writes:
-            batch_atomic_write(writes, vault_root=vault_root)
-    except Exception as e:
-        log.exception("move_file: link-update batch failed for %s -> %s", old_rel, new_rel)
+    semantic: dict | None = None
+    if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         try:
-            new_abs.rename(old_abs)
-        except OSError as rollback_error:
-            raise RuntimeError(
-                f"move link rewrite failed ({e}); rename rollback also failed: "
-                f"{rollback_error}"
+            source, source_guard = read_guarded_text(vault_root, old_abs)
+            moved_source = source
+            if update_wikilinks:
+                moved_source, source_changes = _rewrite_wikilinks(
+                    source, old_rel, new_rel
+                )
+                if source_changes:
+                    files_touched.append(old_rel)
+                    wikilinks_updated += source_changes
+            destination_guard = PathGuard.capture(
+                vault_root, new_rel, leaf_policy="absent"
+            )
+            preflight = semantic_writes.preflight_move(
+                vault_root,
+                old_path=old_rel,
+                new_path=new_rel,
+                source=source,
+                moved_source=moved_source,
+                source_guard=source_guard,
+                destination_guard=destination_guard,
+                rewrites=writes,
+            )
+
+            def mutate(
+                lifecycle_writes: tuple[PlannedWrite, ...],
+                required_guards,
+                bound_destination: PathGuard,
+            ) -> None:
+                bound_destination.recheck(vault_root)
+                try:
+                    old_abs.rename(new_abs)
+                except OSError as error:
+                    raise MoveFileError(
+                        code="MOVE_FAILED",
+                        reason=(
+                            f"could not rename {old_rel!r} to {new_rel!r}: {error}"
+                        ),
+                    ) from error
+                try:
+                    destination_writes = (
+                        [PlannedWrite(path=new_abs, content=moved_source)]
+                        if moved_source != source
+                        else []
+                    )
+                    combined = [*lifecycle_writes, *destination_writes, *writes]
+                    if combined:
+                        batch_atomic_write(
+                            combined,
+                            vault_root=vault_root,
+                            required_guards=required_guards,
+                        )
+                except Exception as error:
+                    log.exception(
+                        "move_file: link-update batch failed for %s -> %s",
+                        old_rel,
+                        new_rel,
+                    )
+                    try:
+                        new_abs.rename(old_abs)
+                    except OSError as rollback_error:
+                        raise RuntimeError(
+                            f"move link rewrite failed ({error}); rename rollback also "
+                            f"failed: {rollback_error}"
+                        ) from error
+                    raise
+
+            committed = semantic_writes.commit_move(
+                vault_root, preflight=preflight, mutate=mutate
+            )
+            semantic = committed.as_dict()
+        except semantic_writes.SemanticWriteError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        except PathGuardError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+    else:
+        new_abs.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            old_abs.rename(new_abs)
+        except OSError as e:
+            raise MoveFileError(
+                code="MOVE_FAILED",
+                reason=f"could not rename {old_rel!r} to {new_rel!r}: {e}",
             ) from e
-        raise
+        try:
+            if writes:
+                batch_atomic_write(writes, vault_root=vault_root)
+        except Exception as e:
+            log.exception(
+                "move_file: link-update batch failed for %s -> %s", old_rel, new_rel
+            )
+            try:
+                new_abs.rename(old_abs)
+            except OSError as rollback_error:
+                raise RuntimeError(
+                    f"move link rewrite failed ({e}); rename rollback also failed: "
+                    f"{rollback_error}"
+                ) from e
+            raise
 
     # The filesystem transaction succeeded. Only now notify watcher/sidecars;
     # no derived index observes a move that was subsequently rolled back.
     try:
         from . import file_watcher
         file_watcher.register_self_delete(vault_root, [old_rel])
-        file_watcher.register_self_write(vault_root, [new_abs])
+        if semantic is None or source == moved_source:
+            file_watcher.register_self_write(vault_root, [new_abs])
     except Exception:  # noqa: BLE001 — suppression is best-effort
         log.debug("move watcher suppression registration failed", exc_info=True)
 
     try:
         from . import index_sync
-        index_sync.upsert_after_write(vault_root, [new_abs])
+        if semantic is None or source == moved_source:
+            index_sync.upsert_after_write(vault_root, [new_abs])
         index_sync.delete_after_remove(vault_root, [old_rel])
     except Exception:  # noqa: BLE001 — sidecars are best-effort
         log.exception("index refresh failed for moved %s -> %s", old_rel, new_rel)
@@ -258,57 +344,12 @@ def move_file(
         wikilinks_updated=wikilinks_updated,
         files_touched=files_touched,
         warnings=warnings,
+        semantic=semantic,
     )
 
 
 def _rewrite_wikilinks(text: str, old_rel: str, new_rel: str) -> tuple[str, int]:
-    """Rewrite [[old]]/[[old.md]]/[[basename]] → [[new]] in `text`.
-
-    Only rewrites the bare basename form when the basename in the link
-    matches the OLD file's basename; this matches the resolution that
-    find_inbound_wikilinks performs.
-    """
-    old_no_ext = old_rel.removesuffix(".md")
-    new_no_ext = new_rel.removesuffix(".md")
-    old_full = old_no_ext if old_no_ext.startswith(kb_prefix()) else kb_prefix() + old_no_ext
-    new_full = new_no_ext if new_no_ext.startswith(kb_prefix()) else kb_prefix() + new_no_ext
-    old_stripped = old_full.removeprefix(kb_prefix())
-    new_stripped = new_full.removeprefix(kb_prefix())
-    old_basename = old_no_ext.rsplit("/", 1)[-1]
-    new_basename = new_no_ext.rsplit("/", 1)[-1]
-
-    n = 0
-
-    def repl(m: re.Match) -> str:
-        nonlocal n
-        target = m.group(1).strip()
-        alias = m.group(2) or ""
-        # Split off `#anchor` so refs like `[[Knowledge Base/Foo#section]]`
-        # match the path part. The anchor is preserved verbatim in the
-        # rewrite so the intra-page jump still resolves at the new location.
-        if "#" in target:
-            target_path, anchor = target.split("#", 1)
-            target_path = target_path.rstrip()
-            anchor_suffix = "#" + anchor
-        else:
-            target_path = target
-            anchor_suffix = ""
-        target_no_ext = target_path.removesuffix(".md")
-        if target_no_ext == old_full or target_no_ext == old_stripped:
-            n += 1
-            # Preserve whether the link was full-form or stripped-form, and
-            # carry the anchor through unchanged.
-            if target_path.startswith(kb_prefix()):
-                return f"[[{new_full}{anchor_suffix}{alias}]]"
-            return f"[[{new_stripped}{anchor_suffix}{alias}]]"
-        if "/" not in target_no_ext and target_no_ext == old_basename:
-            n += 1
-            # Basename links rewrite to the new basename (still bare-form).
-            return f"[[{new_basename}{anchor_suffix}{alias}]]"
-        return m.group(0)
-
-    new_text = _WIKILINK_PATTERN.sub(repl, text)
-    return new_text, n
+    return semantic_writes.rewrite_wikilinks_for_move(text, old_rel, new_rel)
 
 
 _ = walk_vault_md  # imported for parity with other Tier 2 modules
