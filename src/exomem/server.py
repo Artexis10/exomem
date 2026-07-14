@@ -238,10 +238,99 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 project_keys_hint=runtime.project_keys_hint,
             )
 
+        register_adoption_mcp(mcp, vault_root=runtime.vault_root)
+
     # Retain hosted lifetime ownership for exactly as long as the composed
     # server object can serve requests. Process exit releases the underlying FD.
     mcp._exomem_server_runtime = runtime
     return mcp
+
+
+def _newest_open_adoption_run(vault_root: Path) -> dict | None:
+    """The most recent adoption run that is neither `done` nor `cancelled`."""
+    from .adoption_run import AdoptionRunStore
+
+    try:
+        rows = AdoptionRunStore(vault_root).list_runs()
+    except Exception:  # noqa: BLE001 - discovery is best-effort; soft-fail to None
+        return None
+    for row in rows:  # list_runs is newest-first
+        if row.get("phase") not in ("done", "cancelled"):
+            return row
+    return None
+
+
+def register_adoption_mcp(mcp: FastMCP, *, vault_root: Path) -> None:
+    """Register the progressive-enhancement Adoption Studio prompt and resources.
+
+    These ride on top of the tool surface (the real handoff backbone) and are
+    additive: a zero-argument `continue_adoption` prompt that infers the newest
+    open run and surfaces the copyable handoff, plus MCP resources that read an
+    adoption run by its stable ref. Everything soft-fails when no run exists so a
+    fresh vault registers cleanly.
+
+    Deviation (noted): resources/list does not emit a per-run `list_changed`
+    notification on run creation — that would require `adoption_run` to publish an
+    event into the server, coupling the engine to the transport (and touching
+    forbidden internals). The always-fresh `exomem://adoption/runs` collection
+    resource provides discovery instead; each read reflects current runs.
+    """
+    from . import adoption_run as adoption_run_module
+
+    @mcp.prompt(
+        name="continue_adoption",
+        description=(
+            "Resume the newest open Adoption Studio run: loads the bounded, "
+            "read-only work item and hands you the copyable prompt to submit "
+            "structured proposals. Takes no arguments — the server infers the run."
+        ),
+    )
+    def continue_adoption() -> str:
+        row = _newest_open_adoption_run(vault_root)
+        if row is None:
+            return (
+                "No open Exomem adoption run was found. Start one with "
+                'adoption_studio(action="start", path="<folder>").'
+            )
+        try:
+            doc = adoption_run_module.status(vault_root, run_id=row["run_id"])
+            return doc["handoff"]["prompt_text"]
+        except Exception:  # noqa: BLE001 - fall back to a minimal, still-useful prompt
+            run_id = row.get("run_id", "")
+            return (
+                f"Continue my Exomem adoption run {run_id}. Call "
+                f'adoption_studio(action="work-item", run_id="{run_id}") to load the '
+                "bounded, read-only context, then submit structured proposals via "
+                f'adoption_studio(action="propose", run_id="{run_id}").'
+            )
+
+    @mcp.resource(
+        "exomem://adoption/runs",
+        name="adoption_runs",
+        description="Open Adoption Studio runs (newest first), read on demand.",
+        mime_type="application/json",
+    )
+    def adoption_runs() -> dict:
+        from .adoption_run import AdoptionRunStore
+
+        try:
+            rows = AdoptionRunStore(vault_root).list_runs()
+        except Exception:  # noqa: BLE001
+            rows = []
+        open_rows = [r for r in rows if r.get("phase") not in ("done", "cancelled")]
+        return {"runs": open_rows}
+
+    @mcp.resource(
+        "exomem://adoption/run/{run_id}",
+        name="adoption_run",
+        description="One durable Adoption Studio run document, read by its stable id.",
+        mime_type="application/json",
+    )
+    def adoption_run_resource(run_id: str) -> dict:
+        try:
+            return adoption_run_module.status(vault_root, run_id=run_id)
+        except adoption_run_module.AdoptionRunError as exc:
+            return {"error": {"code": exc.code, "reason": exc.reason}, "run_id": run_id}
 
 
 def _legacy_mcp_compat_enabled() -> bool:
