@@ -1,12 +1,33 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+resolve_executable() {
+  local selected="${1}"
+  local resolved
+  local resolved_dir
+
+  resolved="$(command -v -- "${selected}")" || {
+    printf 'required executable not found: %s\n' "${selected}" >&2
+    return 1
+  }
+  if [[ ! -f "${resolved}" || ! -x "${resolved}" ]]; then
+    printf 'required executable is not a file: %s\n' "${selected}" >&2
+    return 1
+  fi
+  resolved_dir="$(cd -- "$(dirname -- "${resolved}")" && pwd -P)"
+  printf '%s/%s\n' "${resolved_dir}" "$(basename -- "${resolved}")"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
+  return 0
+fi
+
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 infra_dir="$(cd -- "${script_dir}/.." && pwd -P)"
 repo_root="$(cd -- "${infra_dir}/.." && pwd -P)"
 # shellcheck source=/dev/null
 source "${infra_dir}/tool-versions.env"
-terraform_bin="${TERRAFORM_BIN:-terraform}"
+terraform_bin="$(resolve_executable "${TERRAFORM_BIN:-terraform}")"
 tflint_bin="${TFLINT_BIN:-$(command -v tflint)}"
 checkov_bin="${CHECKOV_BIN:-$(command -v checkov)}"
 ansible_playbook_bin="${ANSIBLE_PLAYBOOK_BIN:-$(command -v ansible-playbook)}"

@@ -101,6 +101,7 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
+    assert 'terraform_bin="$(resolve_executable "${TERRAFORM_BIN:-terraform}")"' in validator
     assert (
         '"${helm_bin}" lint "${infra_dir}/helm/platform" --strict \\\n  --namespace exomem-platform'
     ) in validator
@@ -109,6 +110,29 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
     ):
         assert len(action_line.rsplit("@", 1)[1].split()[0]) == 40
+
+
+def test_hosted_validator_canonicalizes_relative_terraform_binary(tmp_path: Path) -> None:
+    terraform = tmp_path / "terraform"
+    _write_executable(terraform, "#!/usr/bin/env bash\nexit 0\n")
+    validator = INFRA / "scripts/validate.sh"
+
+    resolved = subprocess.run(
+        [
+            "bash",
+            "-c",
+            'source "$1"; resolve_executable ./terraform',
+            "bash",
+            str(validator),
+        ],
+        cwd=tmp_path,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert resolved.returncode == 0, resolved.stderr
+    assert resolved.stdout.strip() == str(terraform)
 
 
 def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified() -> None:
