@@ -11,7 +11,7 @@ import pytest
 
 ROOT = Path(__file__).parents[1]
 MODEL = ROOT / "src/exomem/studio/model.v1.js"
-STATE = ROOT / "src/exomem/studio/state.v1.js"
+STATE = ROOT / "src/exomem/studio/state.v2.js"
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="Node is not installed")
 
@@ -121,12 +121,18 @@ def test_router_restores_mode_filter_panel_and_stable_review_reference() -> None
 
     result = _node(source)
 
+    # state.v2 gains view/run/astep; a legacy review URL must still round-trip
+    # to the same query string (view=review default emits nothing).
     assert result["route"] == {
         "mode": "activation",
         "state": "all",
         "category": "relation_debt",
         "ref": "exomem://review/stable",
         "panel": "evolution",
+        "view": "review",
+        "run": "",
+        "astep": "start",
     }
     assert result["target"].startswith("/studio/?mode=activation&state=all")
     assert "ref=exomem%3A%2F%2Freview%2Fstable" in result["target"]
+    assert "view=" not in result["target"]
