@@ -949,11 +949,12 @@ def test_server_composition_injects_one_authority_into_all_hosted_auth_paths(
     monkeypatch.setattr(server, "register_hosted_routes", register)
     monkeypatch.setattr("exomem.writer_lease.start_server_lifecycle", lambda: None)
 
-    server.build_server(require_auth=True)
+    app = server.build_server(require_auth=True)
 
     assert captured["mcp"] is authority
     assert captured["private_authenticator"] is authority
     assert captured["transfer_security_authority"] is authority
+    assert app._exomem_server_runtime is runtime
 
 
 def test_server_runtime_validates_dynamic_security_before_reporting_auth_ready(

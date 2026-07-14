@@ -10,13 +10,20 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from . import env_compat, hosted_runtime, privacy_log, project_keys, schema
-from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, hosted_mode_enabled
+from .hosted_runtime import (
+    HostedBindingV2,
+    HostedCellConfig,
+    HostedCellLifecycle,
+    hosted_mode_enabled,
+)
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
@@ -33,6 +40,7 @@ class ServerRuntime:
     hosted_config: HostedCellConfig | None = None
     hosted_lifecycle: HostedCellLifecycle | None = None
     hosted_security_authority: Any | None = None
+    hosted_lifetime_lock: AbstractContextManager[None] | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -75,6 +83,36 @@ def _initialize_hosted_runtime() -> ServerRuntime:
     """Initialize one explicit hosted cell without reading any dotenv file."""
     privacy_log.install_hosted_log_redaction()
     config = HostedCellConfig.from_env(require_provisioned=True)
+    binding = None
+    if config.requires_dynamic_security:
+        assert config.vault_id is not None
+        binding = HostedBindingV2(
+            cell_id=config.cell_id,
+            vault_id=config.vault_id,
+            vault_root=config.vault_root,
+            state_root=config.state_root,
+            log_root=config.log_root,
+            runtime_uid=config.runtime_uid,
+            runtime_gid=config.runtime_gid,
+        )
+    from .hosted_restore import acquire_hosted_lifetime_lock
+
+    lifetime_lock = acquire_hosted_lifetime_lock(config.state_root, binding=binding)
+    lifetime_lock.__enter__()
+    try:
+        _cleanup_hosted_transfer_temp(config.state_root)
+        return _initialize_locked_hosted_runtime(config, lifetime_lock)
+    except BaseException:
+        lifetime_lock.__exit__(*sys.exc_info())
+        raise
+
+
+def _initialize_locked_hosted_runtime(
+    config: HostedCellConfig,
+    lifetime_lock: AbstractContextManager[None],
+) -> ServerRuntime:
+    """Finish hosted startup while retaining exclusive target-root ownership."""
+
     config.apply_process_environment()
     lifecycle = HostedCellLifecycle(config)
     security_authority = _initialize_hosted_security(config)
@@ -182,7 +220,14 @@ def _initialize_hosted_runtime() -> ServerRuntime:
         hosted_config=config,
         hosted_lifecycle=lifecycle,
         hosted_security_authority=security_authority,
+        hosted_lifetime_lock=lifetime_lock,
     )
+
+
+def _cleanup_hosted_transfer_temp(state_root: Path) -> None:
+    from .hosted_transfer_routes import cleanup_hosted_transfer_temp
+
+    cleanup_hosted_transfer_temp(state_root)
 
 
 def _initialize_hosted_security(config: HostedCellConfig) -> Any | None:

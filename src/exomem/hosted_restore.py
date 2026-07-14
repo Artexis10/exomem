@@ -21,6 +21,9 @@ from .hosted_runtime import (
     SUPPORTED_HOSTED_PROTOCOL_VERSIONS,
     HostedBindingV2,
     HostedConfigError,
+    HostedMigrationLimits,
+    _converge_tree_ownership,
+    _preflight_migration_tree,
     _sync_directory,
     _validate_v2_marker,
     _write_v2_marker,
@@ -452,11 +455,13 @@ def _prepare_archive(
                 portability._verify_staged_files(
                     staging, verified.manifest, allow_derived_extras=True
                 )
+                _converge_verified_staging(staging, binding, verified.manifest)
             else:
                 # A process may die after the verified extraction rename but
                 # before its target-binding marker. Exact manifest bytes prove
                 # this deterministic operation-owned staging generation.
                 portability._verify_staged_files(staging, verified.manifest)
+                _converge_verified_staging(staging, binding, verified.manifest)
                 _write_v2_marker(staging, "vault", binding)
                 _validate_v2_marker(staging, "vault", binding)
             return portability.PreparedRestore(
@@ -500,6 +505,7 @@ def _prepare_archive(
             expected_source_cell_id=request["source_cell_id"],
             expected_source_vault_id=request["source_vault_id"],
         )
+        _converge_verified_staging(staging, binding, prepared.manifest)
         _write_v2_marker(staging, "vault", binding)
         _validate_v2_marker(staging, "vault", binding)
         portability._verify_staged_files(staging, prepared.manifest, allow_derived_extras=True)
@@ -508,6 +514,23 @@ def _prepare_archive(
     except portability.PortabilityError as exc:
         raise OperatorFailure("HOSTED_ARCHIVE_INTEGRITY_FAILURE") from exc
     return prepared
+
+
+def _converge_verified_staging(
+    staging: Path,
+    binding: HostedBindingV2,
+    manifest: Mapping[str, Any],
+) -> None:
+    """Privatize an exact operation-owned restore tree without following links."""
+
+    try:
+        portability._verify_staged_files(staging, manifest, allow_derived_extras=True)
+        entries = _preflight_migration_tree(staging, HostedMigrationLimits())
+        _converge_tree_ownership(entries, binding)
+        portability._verify_staged_files(staging, manifest, allow_derived_extras=True)
+        _sync_directory(staging)
+    except (HostedConfigError, portability.PortabilityError, OSError) as exc:
+        raise OperatorFailure("HOSTED_RESTORE_TARGET_CONFLICT") from exc
 
 
 def _publish_staging(

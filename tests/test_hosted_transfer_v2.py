@@ -594,13 +594,27 @@ def test_v2_temp_startup_removes_only_recognized_stale_uploads(tmp_path: Path) -
     root.mkdir(parents=True)
     stale = root / "upload-11111111-1111-4111-8111-111111111111.tmp"
     stale.write_bytes(b"partial")
-    hosted_transfer_routes._prepare_temp_root(config.state_root)
+    hosted_transfer_routes.cleanup_hosted_transfer_temp(config.state_root)
     assert list(root.iterdir()) == []
 
     (root / "unknown-user-file").write_bytes(b"must-not-delete")
     with pytest.raises(RuntimeError):
-        hosted_transfer_routes._prepare_temp_root(config.state_root)
+        hosted_transfer_routes.cleanup_hosted_transfer_temp(config.state_root)
     assert (root / "unknown-user-file").read_bytes() == b"must-not-delete"
+
+
+def test_route_registration_never_cleans_stale_transfer_temp(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    root = config.state_root / "tmp" / "transfers-v2"
+    root.mkdir(parents=True)
+    stale = root / "upload-11111111-1111-4111-8111-111111111111.tmp"
+    stale.write_bytes(b"partial")
+
+    with pytest.raises(RuntimeError):
+        hosted_transfer_routes._prepare_temp_root(config.state_root)
+
+    assert stale.read_bytes() == b"partial"
+
 
 def test_public_preconsumption_failure_preserves_jti_but_chunked_mismatch_burns_it(
     tmp_path: Path,

@@ -6,10 +6,11 @@ import os
 import stat
 import zipfile
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from exomem import __version__
+from exomem import __version__, server_runtime
 from exomem import hosted_portability as portability
 from exomem import init as init_module
 from exomem.hosted_operator import OperatorFailure
@@ -22,6 +23,8 @@ from exomem.hosted_restore import (
 from exomem.hosted_runtime import (
     HOSTED_PROTOCOL_VERSION,
     HostedBindingV2,
+    HostedCellConfig,
+    HostedProcessSettings,
     validate_hosted_binding_v2,
 )
 
@@ -79,6 +82,55 @@ def _bootstrap(**_kwargs: object) -> int:
     return 1
 
 
+def _binding(tmp_path: Path, *, runtime_uid: int | None = None) -> HostedBindingV2:
+    return HostedBindingV2(
+        cell_id="target-cell",
+        vault_id="logical-vault",
+        vault_root=tmp_path / "target-vault",
+        state_root=tmp_path / "target-state",
+        log_root=tmp_path / "target-log",
+        runtime_uid=os.getuid() if runtime_uid is None else runtime_uid,
+        runtime_gid=os.getgid() if runtime_uid is None else runtime_uid,
+    )
+
+
+def _configure_hosted_server(
+    monkeypatch: pytest.MonkeyPatch,
+    binding: HostedBindingV2,
+) -> None:
+    values = {
+        "EXOMEM_HOSTED_CELL": "1",
+        "EXOMEM_HOSTED_CELL_ID": binding.cell_id,
+        "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+        "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
+        "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
+        "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "a" * 64,
+    }
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("EXOMEM_HOSTED_SERVICE_CREDENTIAL", raising=False)
+    monkeypatch.setattr(
+        HostedCellConfig,
+        "apply_process_environment",
+        lambda _self: HostedProcessSettings(disabled_background_workers=()),
+    )
+    monkeypatch.setattr(server_runtime, "_initialize_hosted_security", lambda _config: object())
+    monkeypatch.setattr(
+        server_runtime,
+        "probe_hosted_mutation_authority",
+        lambda _root: (True, "HOSTED_READY"),
+    )
+    monkeypatch.setattr(
+        server_runtime.schema,
+        "load_source_schema",
+        lambda _root: SimpleNamespace(source_types=()),
+    )
+    monkeypatch.setattr(server_runtime.project_keys, "keys_hint", lambda _root: "")
+
+
 def test_restore_candidate_pins_archive_identity_and_publishes_fresh_target_binding(
     tmp_path: Path,
 ) -> None:
@@ -123,6 +175,53 @@ def test_restore_candidate_pins_archive_identity_and_publishes_fresh_target_bind
         binding.vault_root / "Knowledge Base/Notes/restore-proof.md"
     ).read_text(encoding="utf-8").endswith("canonical-sentinel\n")
     assert not (binding.vault_root / "hosted-security.sqlite").exists()
+
+
+def test_restore_candidate_converges_all_canonical_modes_to_private(
+    tmp_path: Path,
+) -> None:
+    exported = _export(tmp_path)
+    request = _request(tmp_path, exported)
+
+    restore_candidate(request, bootstrap_security=_bootstrap)
+
+    binding = _binding(tmp_path)
+    for current, directory_names, file_names in os.walk(binding.vault_root):
+        current_path = Path(current)
+        assert stat.S_IMODE(current_path.lstat().st_mode) == 0o700
+        for name in directory_names:
+            assert stat.S_IMODE((current_path / name).lstat().st_mode) == 0o700
+        for name in file_names:
+            assert stat.S_IMODE((current_path / name).lstat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.geteuid() != 0, reason="requires root to change runtime ownership")
+def test_root_restore_converges_verified_tree_to_nonroot_runtime_identity(
+    tmp_path: Path,
+) -> None:
+    exported = _export(tmp_path)
+    runtime_uid = 10_001
+    request = _request(
+        tmp_path,
+        exported,
+        runtime_uid=runtime_uid,
+        runtime_gid=runtime_uid,
+    )
+
+    restore_candidate(request, bootstrap_security=_bootstrap)
+
+    binding = _binding(tmp_path, runtime_uid=runtime_uid)
+    for current, directory_names, file_names in os.walk(binding.vault_root):
+        current_path = Path(current)
+        current_stat = current_path.lstat()
+        assert (current_stat.st_uid, current_stat.st_gid) == (runtime_uid, runtime_uid)
+        assert stat.S_IMODE(current_stat.st_mode) == 0o700
+        for name in (*directory_names, *file_names):
+            child = (current_path / name).lstat()
+            assert (child.st_uid, child.st_gid) == (runtime_uid, runtime_uid)
+            assert stat.S_IMODE(child.st_mode) == (
+                0o700 if stat.S_ISDIR(child.st_mode) else 0o600
+            )
 
 
 @pytest.mark.parametrize(
@@ -206,6 +305,59 @@ def test_lifetime_lock_rejects_a_symlink_leaf_without_touching_target(tmp_path: 
 
     assert error.value.code == "HOSTED_RESTORE_BUSY"
     assert victim.read_text(encoding="utf-8") == "do not open"
+
+
+def test_restore_owned_lifetime_lock_excludes_hosted_server_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported = _export(tmp_path)
+    request = _request(tmp_path, exported)
+    restore_candidate(request, bootstrap_security=_bootstrap)
+    binding = _binding(tmp_path)
+    _configure_hosted_server(monkeypatch, binding)
+
+    with acquire_hosted_lifetime_lock(binding.state_root, binding=binding):
+        with pytest.raises(OperatorFailure) as error:
+            server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+
+    assert error.value.code == "HOSTED_RESTORE_BUSY"
+
+
+def test_server_lifetime_lock_excludes_restore_and_wraps_temp_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported = _export(tmp_path)
+    request = _request(tmp_path, exported)
+    restore_candidate(request, bootstrap_security=_bootstrap)
+    binding = _binding(tmp_path)
+    _configure_hosted_server(monkeypatch, binding)
+    cleanup_observations: list[str] = []
+
+    def cleanup_while_locked(state_root: Path) -> None:
+        with pytest.raises(OperatorFailure) as error:
+            with acquire_hosted_lifetime_lock(state_root, binding=binding):
+                pass
+        cleanup_observations.append(error.value.code)
+
+    monkeypatch.setattr(
+        server_runtime,
+        "_cleanup_hosted_transfer_temp",
+        cleanup_while_locked,
+        raising=False,
+    )
+
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    try:
+        assert cleanup_observations == ["HOSTED_RESTORE_BUSY"]
+        with pytest.raises(OperatorFailure) as error:
+            restore_candidate(request, bootstrap_security=_bootstrap)
+        assert error.value.code == "HOSTED_RESTORE_BUSY"
+    finally:
+        lifetime_lock = getattr(runtime, "hosted_lifetime_lock", None)
+        if lifetime_lock is not None:
+            lifetime_lock.__exit__(None, None, None)
 
 
 @pytest.mark.parametrize(

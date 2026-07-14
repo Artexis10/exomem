@@ -350,12 +350,20 @@ class DownloadTooLarge(RuntimeError):
 
 
 def _prepare_temp_root(state_root: Path) -> Path:
-    temp_root = state_root / "tmp" / "transfers-v2"
+    temp_root = _ensure_temp_root(state_root)
     try:
-        if temp_root.is_symlink():
-            raise OSError("transfer temp root is a symbolic link")
-        temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        temp_root.chmod(0o700)
+        if any(temp_root.iterdir()):
+            raise OSError("transfer temp root was not cleaned during locked startup")
+    except OSError as exc:
+        raise RuntimeError("public transfer temp is unavailable") from exc
+    return temp_root
+
+
+def cleanup_hosted_transfer_temp(state_root: Path) -> Path:
+    """Remove only recognized v2 upload remnants during locked server startup."""
+
+    temp_root = _ensure_temp_root(state_root)
+    try:
         for entry in temp_root.iterdir():
             if (
                 entry.is_symlink()
@@ -367,6 +375,18 @@ def _prepare_temp_root(state_root: Path) -> Path:
             ):
                 raise OSError("transfer temp root contains an unknown entry")
             entry.unlink()
+    except OSError as exc:
+        raise RuntimeError("public transfer temp is unavailable") from exc
+    return temp_root
+
+
+def _ensure_temp_root(state_root: Path) -> Path:
+    temp_root = state_root / "tmp" / "transfers-v2"
+    try:
+        if temp_root.is_symlink():
+            raise OSError("transfer temp root is a symbolic link")
+        temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        temp_root.chmod(0o700)
     except OSError as exc:
         raise RuntimeError("public transfer temp is unavailable") from exc
     return temp_root

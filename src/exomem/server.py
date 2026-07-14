@@ -238,6 +238,9 @@ def build_server(*, require_auth: bool) -> FastMCP:
                 project_keys_hint=runtime.project_keys_hint,
             )
 
+    # Retain hosted lifetime ownership for exactly as long as the composed
+    # server object can serve requests. Process exit releases the underlying FD.
+    mcp._exomem_server_runtime = runtime
     return mcp
 
 

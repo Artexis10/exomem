@@ -1741,17 +1741,24 @@ def _converge_tree_ownership(
         visited.add(relative)
         os.fchown(descriptor, binding.runtime_uid, binding.runtime_gid)
         original_mode = recorded[1]
-        os.fchmod(
-            descriptor,
-            (
-                0o700
-                if relative == ()
-                else ((original_mode & 0o700) | 0o100)
-            )
+        converged_mode = (
+            (0o700 if relative == () else ((original_mode & 0o700) | 0o100))
             if stat.S_ISDIR(current.st_mode)
-            else original_mode & 0o700,
+            else original_mode & 0o700
         )
+        os.fchmod(descriptor, converged_mode)
         os.fsync(descriptor)
+        converged = os.fstat(descriptor)
+        if (
+            _tree_signature(converged) != recorded[0]
+            or converged.st_uid != binding.runtime_uid
+            or converged.st_gid != binding.runtime_gid
+            or stat.S_IMODE(converged.st_mode) != converged_mode
+        ):
+            raise HostedConfigError(
+                "HOSTED_ROOT_OWNERSHIP_MISMATCH",
+                "hosted migration could not prove converged ownership",
+            )
 
     def walk(directory_fd: int, relative: tuple[str, ...]) -> None:
         converge_descriptor(directory_fd, relative)
