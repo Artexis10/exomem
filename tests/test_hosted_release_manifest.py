@@ -162,8 +162,12 @@ def test_release_validator_rejects_mutable_or_partial_overrides() -> None:
 def test_real_substrate_fixture_must_match_the_complete_release_unit() -> None:
     verifier = _verifier_module()
     release = _load(RELEASE_MANIFEST)
-    fixture_path = Path("/tmp/substrate-exomem-hosted") / (
-        "src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json"
+    fixture_path = Path(
+        os.environ.get(
+            "SUBSTRATE_GATEWAY_FIXTURE",
+            "/tmp/substrate-exomem-hosted/"
+            "src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json",
+        )
     )
     if not fixture_path.is_file():
         pytest.skip("the selected Substrate release worktree is not available")
