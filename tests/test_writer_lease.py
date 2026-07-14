@@ -472,6 +472,46 @@ def test_corrupt_implicit_committed_failure_timestamp_fails_closed_without_reinv
     assert calls == 1
 
 
+def test_expired_corrupt_implicit_committed_failure_payload_fails_closed_without_reinvoking(
+    tmp_path: Path,
+) -> None:
+    clock = Clock()
+    calls = 0
+    original = _committed_error(tmp_path)
+
+    def committed_failure() -> None:
+        nonlocal calls
+        calls += 1
+        raise original
+
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path,
+        ),
+        client=FakeClient(LeaseRecord("desktop", 99, 4)),
+        clock=clock,
+    )
+    command = _command(writes=True, leaf=committed_failure)
+    marker = {"implicit_idempotency_scope": "alice"}
+    with pytest.raises(vault_module.BatchWriteError):
+        manager.invoke(command, (), {}, **marker)
+    with sqlite3.connect(manager.idempotency.path) as connection:
+        connection.execute(
+            "UPDATE mutations SET result = ? WHERE state = 'committed_failure'",
+            (b"not-json",),
+        )
+
+    clock.value += 61
+    with pytest.raises(OpError) as blocked:
+        manager.invoke(command, (), {}, **marker)
+    assert blocked.value.code == "IDEMPOTENCY_IN_PROGRESS"
+    assert "not-json" not in str(blocked.value)
+    assert calls == 1
+
+
 @pytest.mark.parametrize("failure_point", ["serialize", "update"])
 def test_committed_marker_storage_failure_keeps_pending_and_blocks_retry(
     tmp_path: Path,

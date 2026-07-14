@@ -366,13 +366,30 @@ class IdempotencyStore:
         with self._connect() as conn:
             conn.execute("BEGIN IMMEDIATE")
             if expires_after is not None:
+                cutoff = now - expires_after
                 conn.execute(
                     "DELETE FROM mutations WHERE key LIKE 'implicit:%' "
-                    "AND state IN ('completed', 'committed_failure') "
+                    "AND state = 'completed' "
                     "AND typeof(updated_at) IN ('integer', 'real') "
                     "AND updated_at >= 0 AND updated_at <= ?",
-                    (now - expires_after,),
+                    (cutoff,),
                 )
+                expired_failures = conn.execute(
+                    "SELECT key, result FROM mutations WHERE key LIKE 'implicit:%' "
+                    "AND state = 'committed_failure' "
+                    "AND typeof(updated_at) IN ('integer', 'real') "
+                    "AND updated_at >= 0 AND updated_at <= ?",
+                    (cutoff,),
+                ).fetchall()
+                for expired_key, expired_payload in expired_failures:
+                    try:
+                        _deserialize_committed_failure_payload(expired_payload)
+                    except Exception:  # noqa: BLE001 - corrupt markers remain fail-closed
+                        continue
+                    conn.execute(
+                        "DELETE FROM mutations WHERE key = ? AND state = 'committed_failure'",
+                        (expired_key,),
+                    )
             row = conn.execute(
                 "SELECT digest, state, result, updated_at FROM mutations WHERE key = ?", (key,)
             ).fetchone()
@@ -382,6 +399,15 @@ class IdempotencyStore:
                 and row[1] in {"completed", "committed_failure"}
             ):
                 updated_at = row[3]
+                if row[1] == "committed_failure":
+                    try:
+                        _deserialize_committed_failure_payload(row[2])
+                    except Exception:  # noqa: BLE001 - corrupt state blocks mutation
+                        raise OpError(
+                            "IDEMPOTENCY_IN_PROGRESS",
+                            "cached committed mutation state requires reconciliation",
+                            "Reconcile the local idempotency store before retrying this mutation.",
+                        ) from None
                 if (
                     type(updated_at) not in {int, float}
                     or not math.isfinite(updated_at)
