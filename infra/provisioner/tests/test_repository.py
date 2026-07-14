@@ -14,6 +14,7 @@ from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.models import OperationState, ResourceKind
 from exomem_provisioner.repository import (
+    ClaimConflict,
     IdempotencyConflict,
     ImmutableMetadataConflict,
     OperationRepository,
@@ -30,6 +31,7 @@ def _settings(database: Path) -> ProvisionerSettings:
         database_url=f"sqlite+aiosqlite:///{database}",
         database_schema="exomem_provisioner",
         database_role="exomem_provisioner_runtime",
+        trusted_proxy_ips="127.0.0.1",
     )
 
 
@@ -120,6 +122,46 @@ async def test_tenant_fence_is_monotonic_before_operation_creation(
 
 
 @pytest.mark.asyncio
+async def test_exact_replay_is_rejected_after_tenant_fence_advances(
+    repository: OperationRepository,
+) -> None:
+    stale_request = _request(fenceGeneration=7)
+    stale = await repository.submit("provision", "stale-replay", stale_request)
+    await repository.submit("destroy", "newer-destroy", _request(fenceGeneration=8))
+
+    with pytest.raises(StaleFence):
+        await repository.submit("provision", "stale-replay", stale_request)
+
+    unchanged = await repository.get("provision", "stale-replay")
+    assert unchanged is not None
+    assert unchanged.id == stale.id
+    assert unchanged.state is OperationState.PENDING
+
+
+@pytest.mark.asyncio
+async def test_claim_skips_queued_operation_behind_durable_tenant_fence(
+    repository: OperationRepository,
+) -> None:
+    stale = await repository.submit(
+        "provision",
+        "queued-stale",
+        _request(operationId="operation-stale", fenceGeneration=7),
+    )
+    current = await repository.submit(
+        "destroy",
+        "queued-current",
+        _request(operationId="operation-current", fenceGeneration=8),
+    )
+
+    claimed = await repository.claim_next("fence-worker", now=datetime.now(UTC))
+
+    assert claimed is not None
+    assert claimed.id == current.id
+    unchanged = await repository.get_by_id(stale.id)
+    assert unchanged is not None and unchanged.state is OperationState.PENDING
+
+
+@pytest.mark.asyncio
 async def test_sqlite_claim_fallback_atomically_assigns_one_worker(
     repository: OperationRepository,
 ) -> None:
@@ -132,6 +174,80 @@ async def test_sqlite_claim_fallback_atomically_assigns_one_worker(
     )
 
     assert sum(claim is not None for claim in claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_reclaimed_operation_rotates_token_and_rejects_old_same_owner_writes(
+    repository: OperationRepository,
+) -> None:
+    operation = await repository.submit("provision", "claim-token", _request())
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    first = await repository.claim_next("reused-worker-id", now=now)
+    assert first is not None
+    assert first.claim_generation == 1
+    assert first.claim_token
+
+    reclaimed = await repository.claim_next(
+        "reused-worker-id",
+        now=now + timedelta(seconds=31),
+    )
+    assert reclaimed is not None and reclaimed.id == operation.id
+    assert reclaimed.claim_generation == 2
+    assert reclaimed.claim_token
+    assert reclaimed.claim_token != first.claim_token
+
+    with pytest.raises(ClaimConflict):
+        await repository.record_resource(
+            operation_id=operation.id,
+            worker_id="reused-worker-id",
+            claim_token=first.claim_token,
+            claim_generation=first.claim_generation,
+            now=now + timedelta(seconds=31),
+            tenant_id="tenant-alpha",
+            cell_id="cell-alpha",
+            kind=ResourceKind.KUBERNETES_NAMESPACE,
+            recoverable_reference="stale-worker-resource",
+            provider_operation_id="operation-alpha",
+            provider_fence_generation=7,
+        )
+    with pytest.raises(ClaimConflict):
+        await repository.complete(
+            operation.id,
+            {},
+            worker_id="reused-worker-id",
+            claim_token=first.claim_token,
+            claim_generation=first.claim_generation,
+            now=now + timedelta(seconds=31),
+        )
+
+
+@pytest.mark.asyncio
+async def test_live_claim_can_renew_but_expired_claim_cannot_be_revived(
+    repository: OperationRepository,
+) -> None:
+    await repository.submit("provision", "renew-claim", _request())
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    claim = await repository.claim_next("renewing-worker", now=now)
+    assert claim is not None and claim.claim_token
+
+    renewed = await repository.renew_claim(
+        claim.id,
+        "renewing-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+        now=now + timedelta(seconds=20),
+    )
+    assert renewed.claim_expires_at is not None
+    assert renewed.claim_expires_at >= now + timedelta(seconds=50)
+
+    with pytest.raises(ClaimConflict):
+        await repository.renew_claim(
+            claim.id,
+            "renewing-worker",
+            claim_token=claim.claim_token,
+            claim_generation=claim.claim_generation,
+            now=now + timedelta(seconds=51),
+        )
 
 
 @pytest.mark.asyncio
@@ -156,8 +272,16 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     repository: OperationRepository,
 ) -> None:
     operation = await repository.submit("provision", "records", _request())
+    claim = await repository.claim_next("records-worker")
+    assert claim is not None and claim.id == operation.id and claim.claim_token
+    claim_args = {
+        "worker_id": "records-worker",
+        "claim_token": claim.claim_token,
+        "claim_generation": claim.claim_generation,
+    }
     resource = await repository.record_resource(
         operation_id=operation.id,
+        **claim_args,
         tenant_id="tenant-alpha",
         cell_id="cell-alpha",
         kind=ResourceKind.KUBERNETES_NAMESPACE,
@@ -167,6 +291,7 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     )
     same = await repository.record_resource(
         operation_id=operation.id,
+        **claim_args,
         tenant_id="tenant-alpha",
         cell_id="cell-alpha",
         kind=ResourceKind.KUBERNETES_NAMESPACE,
@@ -179,6 +304,7 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     with pytest.raises(ImmutableMetadataConflict):
         await repository.record_resource(
             operation_id=operation.id,
+            **claim_args,
             tenant_id="tenant-alpha",
             cell_id="cell-alpha",
             kind=ResourceKind.KUBERNETES_NAMESPACE,
@@ -218,6 +344,70 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
 
 
 @pytest.mark.asyncio
+async def test_export_replay_compares_every_immutable_field(
+    repository: OperationRepository,
+) -> None:
+    operation = await repository.submit("export", "immutable-export", _request())
+    original: dict[str, object] = {
+        "operation_id": operation.id,
+        "tenant_id": "tenant-alpha",
+        "cell_id": "cell-alpha",
+        "export_reference": "export-provider-sentinel",
+        "archive_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "archive_size": 1024,
+        "provider_operation_id": "operation-alpha",
+        "provider_fence_generation": 7,
+    }
+    await repository.record_export(**original)  # type: ignore[arg-type]
+
+    changes: dict[str, object] = {
+        "tenant_id": "tenant-other",
+        "cell_id": "cell-other",
+        "export_reference": "export-other",
+        "archive_sha256": "c" * 64,
+        "manifest_sha256": "d" * 64,
+        "archive_size": 2048,
+        "provider_operation_id": "operation-other",
+        "provider_fence_generation": 8,
+    }
+    for field, changed in changes.items():
+        replay = {**original, field: changed}
+        with pytest.raises(ImmutableMetadataConflict, match="export provider metadata"):
+            await repository.record_export(**replay)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_backup_replay_compares_every_immutable_field(
+    repository: OperationRepository,
+) -> None:
+    operation = await repository.submit("export", "immutable-backup", _request())
+    original: dict[str, object] = {
+        "operation_id": operation.id,
+        "tenant_id": "tenant-alpha",
+        "cell_id": "cell-alpha",
+        "backup_reference": "backup-provider-sentinel",
+        "object_sha256": "a" * 64,
+        "provider_operation_id": "operation-alpha",
+        "provider_fence_generation": 7,
+    }
+    await repository.record_backup(**original)  # type: ignore[arg-type]
+
+    changes: dict[str, object] = {
+        "tenant_id": "tenant-other",
+        "cell_id": "cell-other",
+        "backup_reference": "backup-other",
+        "object_sha256": "b" * 64,
+        "provider_operation_id": "operation-other",
+        "provider_fence_generation": 8,
+    }
+    for field, changed in changes.items():
+        replay = {**original, field: changed}
+        with pytest.raises(ImmutableMetadataConflict, match="backup provider metadata"):
+            await repository.record_backup(**replay)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
 async def test_encrypted_request_and_refs_survive_restart_without_plaintext_in_database(
     tmp_path: Path,
 ) -> None:
@@ -228,8 +418,13 @@ async def test_encrypted_request_and_refs_survive_restart_without_plaintext_in_d
     await first_database.create_for_tests()
     first_repository = OperationRepository(first_database.session_factory, codec=codec)
     operation = await first_repository.submit("provision", "restart-key", _request())
+    claim = await first_repository.claim_next("restart-worker")
+    assert claim is not None and claim.id == operation.id and claim.claim_token
     await first_repository.record_resource(
         operation_id=operation.id,
+        worker_id="restart-worker",
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
         tenant_id="tenant-alpha",
         cell_id="cell-alpha",
         kind=ResourceKind.VOLUME,

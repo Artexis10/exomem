@@ -92,6 +92,7 @@ class Operation(Base):
         default=OperationState.PENDING,
         nullable=False,
     )
+    caller_checkpoint: Mapped[str] = mapped_column(String(256), nullable=False)
     checkpoint: Mapped[str] = mapped_column(String(256), nullable=False)
     progress: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict, nullable=False)
     request_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
@@ -103,6 +104,8 @@ class Operation(Base):
         DateTime(timezone=True), default=utc_now, nullable=False
     )
     claim_owner: Mapped[str | None] = mapped_column(String(128))
+    claim_token: Mapped[str | None] = mapped_column(String(64))
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False

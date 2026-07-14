@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -73,6 +74,11 @@ def _claim_condition(claimed_at: datetime):
             Operation.state == OperationState.CLAIMED,
             Operation.claim_expires_at <= claimed_at,
         ),
+    ) & (
+        Operation.fence_generation
+        == select(TenantFence.fence_generation)
+        .where(TenantFence.tenant_id == Operation.tenant_id)
+        .scalar_subquery()
     )
 
 
@@ -97,11 +103,15 @@ class OperationSnapshot:
     external_operation_id: str
     fence_generation: int
     state: OperationState
+    caller_checkpoint: str
     checkpoint: str
     progress: dict[str, Any]
     retry_after_seconds: int
     result_redacted: dict[str, Any]
     error_code: str | None
+    claim_token: str | None
+    claim_generation: int
+    claim_expires_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,12 +134,41 @@ def _operation_snapshot(operation: Operation) -> OperationSnapshot:
         external_operation_id=operation.external_operation_id,
         fence_generation=operation.fence_generation,
         state=operation.state,
+        caller_checkpoint=operation.caller_checkpoint,
         checkpoint=operation.checkpoint,
         progress=dict(operation.progress),
         retry_after_seconds=operation.retry_after_seconds,
         result_redacted=dict(operation.result_redacted),
         error_code=operation.error_code,
+        claim_token=operation.claim_token,
+        claim_generation=operation.claim_generation,
+        claim_expires_at=operation.claim_expires_at,
     )
+
+
+def _as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _require_active_claim(
+    operation: Operation | None,
+    *,
+    worker_id: str,
+    claim_token: str,
+    claim_generation: int,
+    now: datetime,
+) -> Operation:
+    if (
+        operation is None
+        or operation.state is not OperationState.CLAIMED
+        or operation.claim_owner != worker_id
+        or operation.claim_token != claim_token
+        or operation.claim_generation != claim_generation
+        or operation.claim_expires_at is None
+        or _as_utc(operation.claim_expires_at) <= _as_utc(now)
+    ):
+        raise ClaimConflict("worker no longer owns an active operation claim")
+    return operation
 
 
 class OperationRepository:
@@ -139,10 +178,12 @@ class OperationRepository:
         *,
         codec: EnvelopeCodec,
         claim_seconds: int = 30,
+        max_failure_attempts: int = 6,
     ) -> None:
         self._sessions = session_factory
         self._codec = codec
         self.claim_seconds = claim_seconds
+        self.max_failure_attempts = max_failure_attempts
 
     async def get(self, action: str, idempotency_key: str) -> OperationSnapshot | None:
         action_value = OperationAction(action)
@@ -170,12 +211,6 @@ class OperationRepository:
     ) -> OperationSnapshot:
         action_value = OperationAction(action)
         digest = canonical_request_sha256(request)
-        existing = await self.get(action, idempotency_key)
-        if existing is not None:
-            if existing.canonical_request_sha256 != digest:
-                raise IdempotencyConflict("idempotency key is bound to another request")
-            return existing
-
         tenant_id = request["tenantId"]
         external_operation_id = request["operationId"]
         fence_generation = request["fenceGeneration"]
@@ -184,28 +219,23 @@ class OperationRepository:
         if not isinstance(fence_generation, int) or isinstance(fence_generation, bool):
             raise ValueError("request fence is invalid")
         for attempt in range(3):
-            operation = Operation(
-                action=action_value,
-                idempotency_key=idempotency_key,
-                canonical_request_sha256=digest,
-                tenant_id=tenant_id,
-                cell_id=(request.get("cellId") if isinstance(request.get("cellId"), str) else None),
-                external_operation_id=external_operation_id,
-                fence_generation=fence_generation,
-                provider_operation_id=external_operation_id,
-                provider_fence_generation=fence_generation,
-                checkpoint=str(request["checkpoint"]),
-                request_ciphertext=self._codec.encrypt_json(
-                    request,
-                    purpose=f"operation-request:{action_value.value}:{idempotency_key}",
-                ),
-                retry_after_seconds=retry_after_seconds,
-            )
             try:
                 async with self._sessions.begin() as session:
                     fence = await session.get(TenantFence, tenant_id, with_for_update=True)
+                    existing = await session.scalar(
+                        select(Operation)
+                        .where(
+                            Operation.action == action_value,
+                            Operation.idempotency_key == idempotency_key,
+                        )
+                        .with_for_update()
+                    )
+                    if existing is not None and existing.canonical_request_sha256 != digest:
+                        raise IdempotencyConflict("idempotency key is bound to another request")
                     if fence is not None and fence_generation < fence.fence_generation:
                         raise StaleFence("request fence is older than durable tenant state")
+                    if existing is not None:
+                        return _operation_snapshot(existing)
                     if fence is None:
                         session.add(
                             TenantFence(
@@ -215,15 +245,32 @@ class OperationRepository:
                         )
                     elif fence_generation > fence.fence_generation:
                         fence.fence_generation = fence_generation
+                    operation = Operation(
+                        action=action_value,
+                        idempotency_key=idempotency_key,
+                        canonical_request_sha256=digest,
+                        tenant_id=tenant_id,
+                        cell_id=(
+                            request.get("cellId")
+                            if isinstance(request.get("cellId"), str)
+                            else None
+                        ),
+                        external_operation_id=external_operation_id,
+                        fence_generation=fence_generation,
+                        provider_operation_id=external_operation_id,
+                        provider_fence_generation=fence_generation,
+                        caller_checkpoint=str(request["checkpoint"]),
+                        checkpoint="queued",
+                        request_ciphertext=self._codec.encrypt_json(
+                            request,
+                            purpose=f"operation-request:{action_value.value}:{idempotency_key}",
+                        ),
+                        retry_after_seconds=retry_after_seconds,
+                    )
                     session.add(operation)
                     await session.flush()
                     return _operation_snapshot(operation)
             except IntegrityError:
-                existing = await self.get(action, idempotency_key)
-                if existing is not None:
-                    if existing.canonical_request_sha256 != digest:
-                        raise IdempotencyConflict("concurrent idempotency conflict") from None
-                    return existing
                 if attempt == 2:
                     raise RepositoryConflict("tenant fence did not converge") from None
         raise RepositoryConflict("operation submission did not converge")
@@ -257,6 +304,7 @@ class OperationRepository:
         now: datetime | None = None,
     ) -> OperationSnapshot | None:
         claimed_at = now or datetime.now(UTC)
+        claim_token = secrets.token_urlsafe(32)
         async with self._sessions.begin() as session:
             if session.get_bind().dialect.name == "sqlite":
                 candidate = (
@@ -273,6 +321,8 @@ class OperationRepository:
                         state=OperationState.CLAIMED,
                         checkpoint="effect-prepared",
                         claim_owner=worker_id,
+                        claim_token=claim_token,
+                        claim_generation=Operation.claim_generation + 1,
                         claim_expires_at=claimed_at + timedelta(seconds=self.claim_seconds),
                         updated_at=claimed_at,
                     )
@@ -290,19 +340,52 @@ class OperationRepository:
             operation.state = OperationState.CLAIMED
             operation.checkpoint = "effect-prepared"
             operation.claim_owner = worker_id
+            operation.claim_token = claim_token
+            operation.claim_generation += 1
             operation.claim_expires_at = claimed_at + timedelta(seconds=self.claim_seconds)
             await session.flush()
             return _operation_snapshot(operation)
 
-    async def checkpoint_effect_applied(self, operation_id: str, worker_id: str) -> None:
+    async def renew_claim(
+        self,
+        operation_id: str,
+        worker_id: str,
+        *,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
+    ) -> OperationSnapshot:
+        renewed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = await session.get(Operation, operation_id, with_for_update=True)
-            if (
-                operation is None
-                or operation.state is not OperationState.CLAIMED
-                or operation.claim_owner != worker_id
-            ):
-                raise ClaimConflict("worker no longer owns operation claim")
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=renewed_at,
+            )
+            operation.claim_expires_at = renewed_at + timedelta(seconds=self.claim_seconds)
+            await session.flush()
+            return _operation_snapshot(operation)
+
+    async def checkpoint_effect_applied(
+        self,
+        operation_id: str,
+        worker_id: str,
+        *,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
+    ) -> None:
+        checked_at = now or datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=checked_at,
+            )
             operation.checkpoint = "effect-applied"
 
     async def mark_pending(
@@ -310,19 +393,21 @@ class OperationRepository:
         operation_id: str,
         worker_id: str,
         *,
+        claim_token: str,
+        claim_generation: int,
         checkpoint: str,
         retry_after_seconds: int,
         now: datetime | None = None,
     ) -> OperationSnapshot:
         pending_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = await session.get(Operation, operation_id, with_for_update=True)
-            if (
-                operation is None
-                or operation.state is not OperationState.CLAIMED
-                or operation.claim_owner != worker_id
-            ):
-                raise ClaimConflict("worker no longer owns operation claim")
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=pending_at,
+            )
             operation.state = OperationState.PENDING
             operation.checkpoint = checkpoint
             operation.progress = {
@@ -332,6 +417,7 @@ class OperationRepository:
             operation.retry_after_seconds = retry_after_seconds
             operation.available_at = pending_at + timedelta(seconds=retry_after_seconds)
             operation.claim_owner = None
+            operation.claim_token = None
             operation.claim_expires_at = None
             await session.flush()
             return _operation_snapshot(operation)
@@ -341,40 +427,86 @@ class OperationRepository:
         operation_id: str,
         worker_id: str,
         *,
+        claim_token: str,
+        claim_generation: int,
         code: str,
+        now: datetime | None = None,
     ) -> OperationSnapshot:
+        failed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = await session.get(Operation, operation_id, with_for_update=True)
-            if (
-                operation is None
-                or operation.state is not OperationState.CLAIMED
-                or operation.claim_owner != worker_id
-            ):
-                raise ClaimConflict("worker no longer owns operation claim")
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=failed_at,
+            )
             operation.state = OperationState.ERROR
             operation.checkpoint = "failed"
             operation.error_code = code
             operation.claim_owner = None
+            operation.claim_token = None
             operation.claim_expires_at = None
-            operation.finalized_at = datetime.now(UTC)
+            operation.finalized_at = failed_at
             await session.flush()
             return _operation_snapshot(operation)
 
-    async def complete(self, operation_id: str, result: dict[str, Any]) -> OperationSnapshot:
+    async def record_retryable_failure(
+        self,
+        operation_id: str,
+        worker_id: str,
+        *,
+        claim_token: str,
+        claim_generation: int,
+        retry_after_seconds: int,
+        now: datetime | None = None,
+    ) -> OperationSnapshot:
+        failed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = await session.get(Operation, operation_id, with_for_update=True)
-            if operation is None:
-                raise KeyError(operation_id)
-            if operation.state is OperationState.FINAL:
-                prior = self._codec.decrypt_json(
-                    operation.result_ciphertext or "",
-                    purpose=f"operation-result:{operation.id}",
-                )
-                if prior != result:
-                    raise ImmutableMetadataConflict("final operation result is immutable")
-                return _operation_snapshot(operation)
-            if operation.state is OperationState.ERROR:
-                raise ImmutableMetadataConflict("failed operation cannot become final")
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=failed_at,
+            )
+            attempts = int(operation.progress.get("failure_attempts", 0)) + 1
+            operation.progress = {**operation.progress, "failure_attempts": attempts}
+            operation.claim_owner = None
+            operation.claim_token = None
+            operation.claim_expires_at = None
+            if attempts >= self.max_failure_attempts:
+                operation.state = OperationState.ERROR
+                operation.checkpoint = "failed"
+                operation.error_code = "PROVISIONER_RETRY_EXHAUSTED"
+                operation.finalized_at = failed_at
+            else:
+                operation.state = OperationState.PENDING
+                operation.checkpoint = "retry-backoff"
+                operation.retry_after_seconds = retry_after_seconds
+                operation.available_at = failed_at + timedelta(seconds=retry_after_seconds)
+            await session.flush()
+            return _operation_snapshot(operation)
+
+    async def complete(
+        self,
+        operation_id: str,
+        result: dict[str, Any],
+        *,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
+    ) -> OperationSnapshot:
+        completed_at = now or datetime.now(UTC)
+        async with self._sessions.begin() as session:
+            operation = _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=completed_at,
+            )
             operation.result_ciphertext = self._codec.encrypt_json(
                 result,
                 purpose=f"operation-result:{operation.id}",
@@ -386,8 +518,9 @@ class OperationRepository:
             operation.state = OperationState.FINAL
             operation.checkpoint = "complete"
             operation.claim_owner = None
+            operation.claim_token = None
             operation.claim_expires_at = None
-            operation.finalized_at = datetime.now(UTC)
+            operation.finalized_at = completed_at
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -395,6 +528,10 @@ class OperationRepository:
         self,
         *,
         operation_id: str,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
         tenant_id: str,
         cell_id: str | None,
         kind: ResourceKind,
@@ -403,7 +540,15 @@ class OperationRepository:
         provider_fence_generation: int,
     ) -> ResourceSnapshot:
         digest = _reference_digest(recoverable_reference)
+        checked_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
+            _require_active_claim(
+                await session.get(Operation, operation_id, with_for_update=True),
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=checked_at,
+            )
             existing = await session.scalar(
                 select(Resource).where(
                     Resource.operation_id == operation_id,
@@ -503,7 +648,12 @@ class OperationRepository:
             digest = _reference_digest(export_reference)
             if existing is not None:
                 if (
-                    existing.reference_digest != digest
+                    existing.tenant_id != tenant_id
+                    or existing.cell_id != cell_id
+                    or existing.reference_digest != digest
+                    or existing.archive_sha256 != archive_sha256
+                    or existing.manifest_sha256 != manifest_sha256
+                    or existing.archive_size != archive_size
                     or existing.provider_operation_id != provider_operation_id
                     or existing.provider_fence_generation != provider_fence_generation
                 ):
@@ -545,7 +695,10 @@ class OperationRepository:
             digest = _reference_digest(backup_reference)
             if existing is not None:
                 if (
-                    existing.reference_digest != digest
+                    existing.tenant_id != tenant_id
+                    or existing.cell_id != cell_id
+                    or existing.reference_digest != digest
+                    or existing.object_sha256 != object_sha256
                     or existing.provider_operation_id != provider_operation_id
                     or existing.provider_fence_generation != provider_fence_generation
                 ):

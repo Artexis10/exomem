@@ -35,7 +35,14 @@ The role is created outside the application; Alembic owns the schema and tables.
 - `EXOMEM_PROVISIONER_DATABASE_URL`: `postgresql+asyncpg://...` in production
 - `EXOMEM_PROVISIONER_DATABASE_SCHEMA`: dedicated lower-case SQL identifier
 - `EXOMEM_PROVISIONER_DATABASE_ROLE`: dedicated lower-case SQL identifier
+- `EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS`: comma-separated private/loopback IPs
+  or networks whose forwarded HTTPS metadata Uvicorn may trust; wildcards and
+  public networks are rejected
+- `EXOMEM_PROVISIONER_MAX_FAILURE_ATTEMPTS`: bounded retryable-driver failure
+  ceiling (default six); provider-pending observations do not consume it
 
 Run `exomem-provisioner-api` only after `alembic upgrade head`. Startup fails
-closed when configuration is missing or invalid. Access logs are disabled; the
-application formatter emits only allowlisted content-free operational fields.
+closed when configuration is missing or invalid. Readiness verifies the exact
+database role, schema, and Alembic revision. Access logs are disabled and the
+installed application/server formatter emits only allowlisted content-free
+operational fields.

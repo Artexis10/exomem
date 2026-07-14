@@ -31,3 +31,17 @@ class ContentFreeFormatter(logging.Formatter):
             if isinstance(value, (str, int, float, bool)) and value != "":
                 payload[name] = value
         return json.dumps(payload, sort_keys=True, separators=(",", ":"))
+
+
+def configure_content_free_logging() -> None:
+    """Install one content-free stderr path for application and server logs."""
+
+    handler = logging.StreamHandler()
+    handler.setFormatter(ContentFreeFormatter())
+    root = logging.getLogger()
+    root.handlers[:] = [handler]
+    root.setLevel(logging.INFO)
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "exomem_provisioner"):
+        logger = logging.getLogger(name)
+        logger.handlers.clear()
+        logger.propagate = True

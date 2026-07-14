@@ -4,6 +4,7 @@ import asyncio
 import os
 import re
 from logging.config import fileConfig
+from urllib.parse import unquote, urlsplit
 
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import Connection
@@ -18,6 +19,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 _IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{2,62}$")
+_DISALLOWED_ROLES = {"postgres", "public", "neondb_owner"}
 
 
 def _configuration() -> tuple[str, str | None, str | None]:
@@ -29,12 +31,16 @@ def _configuration() -> tuple[str, str | None, str | None]:
     if url.startswith("sqlite"):
         return url, None, None
     if (
-        not schema
+        not url.startswith("postgresql+asyncpg://")
+        or not schema
         or not role
         or not _IDENTIFIER.fullmatch(schema)
         or not _IDENTIFIER.fullmatch(role)
+        or schema == "public"
+        or role in _DISALLOWED_ROLES
+        or unquote(urlsplit(url).username or "") != role
     ):
-        raise RuntimeError("dedicated provisioner schema and role are required")
+        raise RuntimeError("dedicated provisioner schema and matching runtime role are required")
     return url, schema, role
 
 

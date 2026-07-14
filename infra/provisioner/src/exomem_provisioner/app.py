@@ -108,9 +108,15 @@ def create_app(
                 return _failure("PROVISIONER_REJECTED", 413)
         except ValueError:
             return _failure("PROVISIONER_REJECTED", 400)
-        body = await request.body()
-        if len(body) > settings.request_max_bytes:
-            return _failure("PROVISIONER_REJECTED", 413)
+        chunks: list[bytes] = []
+        received = 0
+        async for chunk in request.stream():
+            received += len(chunk)
+            if received > settings.request_max_bytes:
+                return _failure("PROVISIONER_REJECTED", 413)
+            if chunk:
+                chunks.append(chunk)
+        body = b"".join(chunks)
         request._body = body  # Starlette replays this bounded generation to the endpoint.
         response = await call_next(request)
         response_length = response.headers.get("content-length")
@@ -164,7 +170,7 @@ def create_app(
                 return _validated_final(action, result, request_data)
             pending = PendingResponse(
                 operationId=operation.external_operation_id,
-                checkpoint=operation.checkpoint,
+                checkpoint=operation.caller_checkpoint,
                 retryAfterSeconds=operation.retry_after_seconds,
             )
             return JSONResponse(

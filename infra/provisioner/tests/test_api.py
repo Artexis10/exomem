@@ -30,6 +30,7 @@ def _settings(path: Path) -> ProvisionerSettings:
         database_url=f"sqlite+aiosqlite:///{path}",
         database_schema="exomem_provisioner",
         database_role="exomem_provisioner_runtime",
+        trusted_proxy_ips="127.0.0.1",
         request_max_bytes=4096,
     )
 
@@ -125,6 +126,24 @@ async def api(tmp_path: Path) -> tuple[httpx.AsyncClient, OperationRepository, P
     finally:
         await client.aclose()
         await database.dispose()
+
+
+async def _complete_as_worker(
+    repository: OperationRepository,
+    operation_id: str,
+    result: dict[str, Any],
+    *,
+    worker_id: str,
+) -> None:
+    claim = await repository.claim_next(worker_id)
+    assert claim is not None and claim.id == operation_id and claim.claim_token
+    await repository.complete(
+        operation_id,
+        result,
+        worker_id=worker_id,
+        claim_token=claim.claim_token,
+        claim_generation=claim.claim_generation,
+    )
 
 
 @pytest.mark.asyncio
@@ -268,6 +287,54 @@ async def test_unknown_invalid_oversize_and_trailing_slash_requests_are_content_
 
 
 @pytest.mark.asyncio
+async def test_streaming_body_limit_stops_reading_after_first_oversized_chunk(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+
+    class CountingStream(httpx.AsyncByteStream):
+        emitted = 0
+
+        async def __aiter__(self):
+            for _ in range(4):
+                self.emitted += 1
+                yield b"x" * 2048
+
+    stream = CountingStream()
+    response = await client.post(
+        "/cells/provision",
+        headers=_headers("stream-limit"),
+        content=stream,
+    )
+
+    assert response.status_code == 413
+    assert stream.emitted == 3
+    assert await repository.get("provision", "stream-limit") is None
+
+
+@pytest.mark.asyncio
+async def test_forwarded_https_header_is_not_trusted_by_application_layer(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    forged = httpx.AsyncClient(
+        transport=client._transport,  # type: ignore[attr-defined]
+        base_url="http://provisioner.test",
+    )
+    try:
+        response = await forged.post(
+            "/cells/provision",
+            headers={**_headers("forged-proto"), "X-Forwarded-Proto": "https"},
+            json=_base_body(),
+        )
+    finally:
+        await forged.aclose()
+
+    assert response.status_code == 400
+    assert await repository.get("provision", "forged-proto") is None
+
+
+@pytest.mark.asyncio
 async def test_replay_returns_exact_encrypted_final_proof_and_changed_body_conflicts(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:
@@ -280,7 +347,7 @@ async def test_replay_returns_exact_encrypted_final_proof_and_changed_body_confl
         "providerRef": "provider-cell-api-alpha",
         "privateEndpoint": "https://cell-api-alpha.cells.internal",
     }
-    await repository.complete(operation.id, final)
+    await _complete_as_worker(repository, operation.id, final, worker_id="final-proof-worker")
 
     replay = await client.post("/cells/provision", headers=_headers(), json=body)
     conflict = await client.post(
@@ -308,6 +375,29 @@ async def test_replay_returns_exact_encrypted_final_proof_and_changed_body_confl
 
 
 @pytest.mark.asyncio
+async def test_pending_replay_echoes_immutable_caller_checkpoint_not_worker_progress(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    body = _body_for("restore")
+    body["checkpoint"] = "caller-waiting"
+    headers = _headers("checkpoint-separation")
+    first = await client.post("/cells/restore", headers=headers, json=body)
+    driver = FakeDriver()
+    driver.remain_pending("restore", polls=1)
+    worker = ProvisionerWorker(repository, driver, worker_id="checkpoint-worker")
+
+    assert first.status_code == 202
+    assert await worker.run_once() is True
+    internal = await repository.get("restore", "checkpoint-separation")
+    replay = await client.post("/cells/restore", headers=headers, json=body)
+
+    assert internal is not None and internal.checkpoint == "provider-wait"
+    assert replay.status_code == 202
+    assert replay.json()["checkpoint"] == "caller-waiting"
+
+
+@pytest.mark.asyncio
 async def test_final_void_and_proof_responses_are_strictly_validated(
     api: tuple[httpx.AsyncClient, OperationRepository, Path],
 ) -> None:
@@ -316,7 +406,7 @@ async def test_final_void_and_proof_responses_are_strictly_validated(
     await client.post("/cells/stop", headers=_headers("stop-key"), json=stop_body)
     stop_operation = await repository.get("stop", "stop-key")
     assert stop_operation is not None
-    await repository.complete(stop_operation.id, {})
+    await _complete_as_worker(repository, stop_operation.id, {}, worker_id="stop-worker")
     stopped = await client.post("/cells/stop", headers=_headers("stop-key"), json=stop_body)
     assert stopped.status_code == 204
     assert stopped.content == b""
@@ -325,9 +415,11 @@ async def test_final_void_and_proof_responses_are_strictly_validated(
     await client.post("/cells/discard", headers=_headers("discard-key"), json=discard_body)
     discard_operation = await repository.get("discard", "discard-key")
     assert discard_operation is not None
-    await repository.complete(
+    await _complete_as_worker(
+        repository,
         discard_operation.id,
         {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": False},
+        worker_id="discard-worker",
     )
     invalid = await client.post(
         "/cells/discard", headers=_headers("discard-key"), json=discard_body
@@ -350,9 +442,11 @@ async def test_final_void_and_proof_responses_are_strictly_validated(
     )
     rotate_operation = await repository.get("rotate-credential", "rotate-finalize-key")
     assert rotate_operation is not None
-    await repository.complete(
+    await _complete_as_worker(
+        repository,
         rotate_operation.id,
         {"previousCredentialRejected": False},
+        worker_id="rotate-worker",
     )
     invalid_rotation = await client.post(
         "/cells/rotate-credential",

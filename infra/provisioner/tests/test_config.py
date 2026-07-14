@@ -16,6 +16,7 @@ def _settings(**overrides: object) -> ProvisionerSettings:
         "database_url": "sqlite+aiosqlite:///:memory:",
         "database_schema": "exomem_provisioner",
         "database_role": "exomem_provisioner_runtime",
+        "trusted_proxy_ips": "127.0.0.1",
     }
     values.update(overrides)
     return ProvisionerSettings(**values)
@@ -41,6 +42,7 @@ def test_settings_require_independent_long_secrets_and_exact_protocol() -> None:
     ("field", "value"),
     [
         ("database_schema", "public; drop schema public"),
+        ("database_schema", "public"),
         ("database_role", "postgres"),
         ("database_role", "role with spaces"),
     ],
@@ -81,9 +83,30 @@ def test_content_free_formatter_never_renders_sensitive_values() -> None:
 def test_settings_repr_redacts_database_credentials() -> None:
     settings = _settings(
         database_url=(
-            "postgresql+asyncpg://provisioner:database-password-sentinel@database.invalid/exomem"
+            "postgresql+asyncpg://exomem_provisioner_runtime:database-password-sentinel@database.invalid/exomem"
         )
     )
 
     assert "database-password-sentinel" not in repr(settings)
     assert settings.database_url.get_secret_value().startswith("postgresql+asyncpg://")
+
+
+def test_postgres_url_role_must_match_dedicated_runtime_role() -> None:
+    with pytest.raises(ValidationError):
+        _settings(database_url="postgresql+asyncpg://wrong_role:secret@database.invalid/exomem")
+
+
+def test_settings_require_bounded_failure_ceiling_and_private_trusted_proxies() -> None:
+    settings = _settings(
+        max_failure_attempts=4,
+        trusted_proxy_ips="127.0.0.1,10.42.0.0/16",
+    )
+    assert settings.max_failure_attempts == 4
+    assert settings.trusted_proxy_ips == "127.0.0.1,10.42.0.0/16"
+
+    for invalid in ("*", "0.0.0.0/0", "8.8.8.8", "not-an-address"):
+        with pytest.raises(ValidationError):
+            _settings(trusted_proxy_ips=invalid)
+    for invalid in (0, 101):
+        with pytest.raises(ValidationError):
+            _settings(max_failure_attempts=invalid)
