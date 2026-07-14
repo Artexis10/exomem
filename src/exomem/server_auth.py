@@ -28,6 +28,7 @@ from .session_oauth import ExomemSessionOAuthProxy
 
 if TYPE_CHECKING:
     from .hosted_runtime import HostedCellConfig
+    from .hosted_security import HostedAuthenticator
 
 log = logging.getLogger(__name__)
 
@@ -35,21 +36,51 @@ log = logging.getLogger(__name__)
 class HostedCellTokenVerifier(TokenVerifier):
     """FastMCP bearer verifier for one immutable private hosted cell."""
 
-    def __init__(self, config: HostedCellConfig) -> None:
+    def __init__(
+        self,
+        config: HostedCellConfig,
+        *,
+        authenticator: HostedAuthenticator | None = None,
+    ) -> None:
         super().__init__(required_scopes=["hosted:cell"])
         self._config = config
+        self._authenticator = authenticator
 
     async def verify_token(self, token: str) -> AccessToken | None:
-        if not self._config.matches_service_credential(token):
-            return None
+        credential_version: str | None = None
+        security_revision: int | None = None
+        if self._authenticator is None:
+            # Narrow compatibility seam for v1 cells until operator startup wires
+            # the durable authority. New hosted cells inject the dynamic authority.
+            if not self._config.matches_service_credential(token):
+                return None
+        else:
+            from .hosted_security import HostedSecurityError
+
+            try:
+                authenticated = self._authenticator.authenticate(token)
+            except HostedSecurityError:
+                return None
+            if authenticated is None:
+                return None
+            credential_version = authenticated.credential_version
+            security_revision = authenticated.security_revision
+        claims: dict[str, Any] = {
+            "cell_id": self._config.cell_id,
+            "kind": "hosted-cell-service",
+        }
+        if credential_version is not None and security_revision is not None:
+            claims.update(
+                {
+                    "credential_version": credential_version,
+                    "security_revision": security_revision,
+                }
+            )
         return AccessToken(
             token="hosted-cell-service",
             client_id=self._config.cell_id,
             scopes=["hosted:cell"],
-            claims={
-                "cell_id": self._config.cell_id,
-                "kind": "hosted-cell-service",
-            },
+            claims=claims,
         )
 
 
