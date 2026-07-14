@@ -1328,11 +1328,12 @@ def qualify_relation(
     return RelationQualification(not ordered, ordered)
 
 
-def _review_current(
+def is_relation_review_current(
     review: RelationReviewState,
     page: SemanticPageState,
     corpus: SemanticCorpusContext,
 ) -> bool:
+    """Return whether stable identity and exact review fingerprint are current."""
     return (
         page.identity_kind == "exomem_id"
         and review.page_identity == page.identity
@@ -1363,7 +1364,9 @@ def _relation_disposition(
             qualifying.append((direction, fact))
         else:
             rejected.append(RejectedRelationFact(fact, result.reasons))
-    review_is_current = review is not None and _review_current(review, page, corpus)
+    review_is_current = review is not None and is_relation_review_current(
+        review, page, corpus
+    )
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
     if qualifying:

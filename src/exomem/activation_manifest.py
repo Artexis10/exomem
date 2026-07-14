@@ -68,6 +68,14 @@ class ActivationManifest:
 
 
 @dataclass(frozen=True, slots=True)
+class ActivationBoundaryPlan:
+    """Pure activation boundary selected for one prospective evaluation."""
+
+    manifest: ActivationManifest
+    install_required: bool
+
+
+@dataclass(frozen=True, slots=True)
 class ActivationCandidate:
     rel_path: str
     source_hash: str
@@ -278,12 +286,14 @@ def build_census(vault_root: Path) -> ActivationCensus:
     return ActivationCensus.from_candidates(_eligible_candidates(Path(vault_root)))
 
 
-def _snapshot(
-    vault_root: Path, *, census: ActivationCensus | None = None
-) -> ActivationManifest:
-    candidates = (
-        census.candidates if census is not None else build_census(vault_root).candidates
-    )
+def snapshot_from_census(census: ActivationCensus) -> ActivationManifest:
+    """Build the immutable activation snapshot without filesystem access."""
+    if not isinstance(census, ActivationCensus):
+        raise ActivationManifestError(
+            "ACTIVATION_CENSUS_INVALID",
+            "activation snapshot requires an immutable census",
+        )
+    candidates = census.candidates
     counts = Counter(
         candidate.normalized_id
         for candidate in candidates
@@ -310,6 +320,24 @@ def _snapshot(
         contract_version=CONTRACT_VERSION,
         pages=tuple(pages),
     )
+
+
+def plan_activation_boundary(
+    census: ActivationCensus,
+    *,
+    manifest: ActivationManifest | None,
+) -> ActivationBoundaryPlan:
+    """Select an observed or prospective boundary without installing it."""
+    if manifest is not None:
+        return ActivationBoundaryPlan(manifest, False)
+    return ActivationBoundaryPlan(snapshot_from_census(census), True)
+
+
+def _snapshot(
+    vault_root: Path, *, census: ActivationCensus | None = None
+) -> ActivationManifest:
+    observed = census if census is not None else build_census(vault_root)
+    return snapshot_from_census(observed)
 
 
 def _eligible_candidates(vault_root: Path) -> list[ActivationCandidate]:
