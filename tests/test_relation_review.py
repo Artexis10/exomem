@@ -224,12 +224,21 @@ def test_reviewed_none_commit_writes_artifact_then_auxiliaries_then_primary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     source, validation = _reviewed_validation(tmp_path)
-    auxiliary = vault.PlannedWrite(tmp_path / "Knowledge Base/nav.md", "nav\n")
+    planned_directory = tmp_path / "Knowledge Base/Notes/Research/Planned Project"
+    auxiliary = vault.PlannedWrite(
+        tmp_path / "Knowledge Base/nav.md",
+        "nav\n",
+        create_only=True,
+        expected_hash=vault.MISSING_CONTENT_HASH,
+        ensure_directories=(planned_directory,),
+    )
     real_batch = relation_review.vault.batch_atomic_write
     captured: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
+    captured_writes: list[tuple[vault.PlannedWrite, ...]] = []
 
     def capture(writes, **kwargs):
         detached = tuple(writes)
+        captured_writes.append(detached)
         captured.append(
             (
                 tuple(write.path.relative_to(tmp_path).as_posix() for write in detached),
@@ -268,6 +277,11 @@ def test_reviewed_none_commit_writes_artifact_then_auxiliaries_then_primary(
         ]
     assert commit.resumed_prepared is False
     assert commit.written_paths == captured[0][0]
+    committed_auxiliary = captured_writes[0][1]
+    assert committed_auxiliary.create_only is True
+    assert committed_auxiliary.expected_hash == vault.MISSING_CONTENT_HASH
+    assert committed_auxiliary.ensure_directories == (planned_directory,)
+    assert planned_directory.is_dir()
     assert commit.review_state_current
     assert commit.review_reference == artifact.relative_to(tmp_path).as_posix()
     assert json.loads(artifact.read_text(encoding="utf-8"))["reason"] == (

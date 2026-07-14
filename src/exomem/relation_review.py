@@ -2637,12 +2637,15 @@ def commit_creation_draft(
                     vault.PlannedWrite(
                         auxiliary.path,
                         auxiliary.content,
+                        create_only=auxiliary.create_only,
                         guard=vault.PathGuard.capture(
                             root,
                             relative,
                             leaf_policy=policy,
                             expected_content_hash=expected_hash,
                         ),
+                        expected_hash=auxiliary.expected_hash,
+                        ensure_directories=auxiliary.ensure_directories,
                     )
                 )
             writes.extend(guarded_auxiliaries)
