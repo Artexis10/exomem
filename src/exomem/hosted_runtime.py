@@ -60,7 +60,7 @@ _HOSTED_CLEARED_ENV = (
 )
 
 _DEFAULT_STORAGE_LIMIT_BYTES = 5 * 1024 * 1024 * 1024
-_DEFAULT_UPLOAD_LIMIT_BYTES = 100 * 1024 * 1024
+_DEFAULT_UPLOAD_LIMIT_BYTES = 90 * 1024 * 1024
 _DEFAULT_WORKER_LIMIT = 0
 
 
@@ -112,6 +112,11 @@ class HostedCellConfig:
     protocol_version: str = HOSTED_PROTOCOL_VERSION
     feature_grants: tuple[str, ...] = ()
     resource_limits: HostedResourceLimits = field(default_factory=HostedResourceLimits)
+    transfer_browser_origin: str | None = None
+    transfer_host: str | None = None
+    transfer_v1_compat_until: str | None = None
+    signed_release_build_time: str | None = None
+    enforce_transfer_v1_compatibility: bool = False
 
     @classmethod
     def from_env(
@@ -192,6 +197,27 @@ class HostedCellConfig:
                 "hosted service credential must contain at least 32 bytes",
             )
 
+        transfer_browser_origin = str(
+            values.get("EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN", "")
+        ).strip() or None
+        transfer_host = str(values.get("EXOMEM_HOSTED_TRANSFER_HOST", "")).strip() or None
+        if (transfer_browser_origin is None) != (transfer_host is None):
+            raise HostedConfigError(
+                "HOSTED_TRANSFER_CONFIG_INVALID",
+                "hosted public transfer origin and host must be configured together",
+            )
+        if transfer_browser_origin is not None and transfer_host is not None:
+            from .hosted_transfer import canonical_https_origin, canonical_transfer_host
+
+            try:
+                transfer_browser_origin = canonical_https_origin(transfer_browser_origin)
+                transfer_host = canonical_transfer_host(transfer_host)
+            except ValueError as exc:
+                raise HostedConfigError(
+                    "HOSTED_TRANSFER_CONFIG_INVALID",
+                    "hosted public transfer origin or host is not canonical",
+                ) from exc
+
         config = cls(
             cell_id=cell_id,
             vault_root=vault_root,
@@ -201,6 +227,15 @@ class HostedCellConfig:
             protocol_version=protocol,
             feature_grants=grants,
             resource_limits=limits,
+            transfer_browser_origin=transfer_browser_origin,
+            transfer_host=transfer_host,
+            transfer_v1_compat_until=str(
+                values.get("EXOMEM_HOSTED_TRANSFER_V1_COMPAT_UNTIL", "")
+            ).strip()
+            or None,
+            signed_release_build_time=str(values.get("EXOMEM_RELEASE_BUILD_TIME", "")).strip()
+            or None,
+            enforce_transfer_v1_compatibility=True,
         )
         if require_provisioned:
             config.validate_provisioned()
@@ -228,6 +263,22 @@ class HostedCellConfig:
         candidate = hashlib.sha256(str(presented).encode("utf-8")).digest()
         return hmac.compare_digest(expected, candidate)
 
+    def private_v1_transfer_enabled(self, *, now: int | None = None) -> bool:
+        """Check the immutable rollout deadline on every private-v1 request."""
+
+        if not self.enforce_transfer_v1_compatibility:
+            # Direct construction is retained for local/in-process compatibility
+            # tests. Production hosted configuration always comes through
+            # ``from_env`` and therefore enforces the default-off window.
+            return True
+        from .hosted_transfer import private_v1_compatibility_enabled
+
+        return private_v1_compatibility_enabled(
+            deadline=self.transfer_v1_compat_until,
+            signed_release_build_time=self.signed_release_build_time,
+            now=int(time.time()) if now is None else int(now),
+        )
+
     def apply_process_environment(
         self, env: MutableMapping[str, str] | None = None
     ) -> HostedProcessSettings:
@@ -242,6 +293,7 @@ class HostedCellConfig:
         target["EXOMEM_WRITER_LEASE_STATE_DIR"] = str(self.state_root)
         target["EXOMEM_LOG_DIR"] = str(self.log_root)
         target["EXOMEM_UPLOAD_MAX_BYTES"] = str(self.resource_limits.upload_bytes)
+        target["TMPDIR"] = str(self.state_root / "tmp" / "runtime")
         target["EXOMEM_DISABLE_QUERY_LOG"] = "1"
         target["EXOMEM_DISABLE_USAGE_BOOST"] = "1"
         target["EXOMEM_DISABLE_RELEVANCE_CHECK"] = "1"
@@ -624,10 +676,28 @@ class HostedCellLifecycle:
 
     @contextmanager
     def admit_transfer(self) -> Iterator[None]:
-        """Keep deletion sealing closed until an admitted download finishes."""
+        """Track a trusted transfer, including quiesced export-artifact reads."""
 
         with self._condition:
             self._require_read_admission_locked(message="cell lifecycle does not admit transfers")
+            self._active_transfers += 1
+        try:
+            yield
+        finally:
+            with self._condition:
+                self._active_transfers -= 1
+                self._condition.notify_all()
+
+    @contextmanager
+    def admit_public_transfer(self) -> Iterator[None]:
+        """Admit browser/private compatibility transfer only in active phase."""
+
+        with self._condition:
+            if self._phase != "active" or not self._core_ready_locked():
+                raise HostedLifecycleError(
+                    "HOSTED_TRANSFER_NOT_ADMITTED",
+                    "cell lifecycle does not admit transfers",
+                )
             self._active_transfers += 1
         try:
             yield
@@ -657,12 +727,12 @@ class HostedCellLifecycle:
                 ) from exc
 
         with self._condition:
-            while self._active_mutations:
+            while self._active_mutations or self._active_transfers:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     raise HostedLifecycleError(
                         "HOSTED_QUIESCE_TIMEOUT",
-                        "hosted cell did not drain mutations before its deadline",
+                        "hosted cell did not drain mutations and transfers before its deadline",
                     )
                 self._condition.wait(remaining)
             self._persist_phase("quiesced")

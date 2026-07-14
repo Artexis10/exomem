@@ -556,7 +556,7 @@ def test_lifecycle_reports_content_free_readiness_and_degradation(
     assert readiness.reason_code == "HOSTED_MUTATION_LOCK_UNAVAILABLE"
 
 
-def test_deletion_sealing_waits_for_an_admitted_download(tmp_path: Path) -> None:
+def test_quiesce_and_deletion_sealing_wait_for_an_admitted_download(tmp_path: Path) -> None:
     _values, config = _provisioned(tmp_path)
     lifecycle = HostedCellLifecycle(config)
     lifecycle.complete_startup(
@@ -565,12 +565,24 @@ def test_deletion_sealing_waits_for_an_admitted_download(tmp_path: Path) -> None
         service_auth_ready=True,
     )
 
-    with lifecycle.admit_transfer():
-        quiesced = lifecycle.quiesce(timeout=1)
-        assert quiesced.active_transfers == 1
-        with pytest.raises(HostedLifecycleError) as error:
-            lifecycle.seal_for_deletion()
-        assert error.value.code == "HOSTED_TRANSFER_IN_FLIGHT"
+    admission = lifecycle.admit_transfer()
+    admission.__enter__()
+    quiesced: list[object] = []
+    thread = threading.Thread(
+        target=lambda: quiesced.append(lifecycle.quiesce(timeout=1)),
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 1
+    while lifecycle.readiness().phase != "quiescing":
+        assert time.monotonic() < deadline
+        time.sleep(0.005)
+    assert quiesced == []
+
+    admission.__exit__(None, None, None)
+    thread.join(1)
+    assert len(quiesced) == 1
+    assert lifecycle.readiness().phase == "quiesced"
 
     sealed = lifecycle.seal_for_deletion()
     assert sealed.phase == "sealed"

@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import stat
+import threading
 import time
 from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import AbstractContextManager
@@ -24,7 +25,13 @@ from starlette.formparsers import MultiPartException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
-from . import cli_ops, hosted_portability, hosted_runtime
+from . import (
+    cli_ops,
+    hosted_portability,
+    hosted_runtime,
+    hosted_transfer,
+    hosted_transfer_routes,
+)
 from . import commands as commands_module
 from . import hosted_gateway as gateway
 from .hosted_runtime import (
@@ -149,6 +156,8 @@ def _status_for(code: str) -> int:
         return 409
     if code == "HOSTED_TRANSFER_INTERCEPT_REQUIRED":
         return 409
+    if code == "HOSTED_TRANSFER_V1_DISABLED":
+        return 404
     if code == "HOSTED_IMPORT_INTERCEPT_REQUIRED":
         return 409
     if code in {
@@ -158,6 +167,7 @@ def _status_for(code: str) -> int:
         "HOSTED_TRANSFER_UNAVAILABLE",
         "HOSTED_READ_IN_FLIGHT",
         "HOSTED_TRANSFER_IN_FLIGHT",
+        "HOSTED_TRANSFER_NOT_ADMITTED",
         "HOSTED_DELETION_SEALED",
         "HOSTED_QUIESCE_TIMEOUT",
         "HOSTED_BACKGROUND_STOP_FAILED",
@@ -598,8 +608,9 @@ def register_hosted_routes(
     invoke_command_func: Callable[..., Any] | None = None,
     mutation_guard_factory: Callable[[Path], AbstractContextManager[None]] | None = None,
     preserve_stream_func: Callable[..., Any] | None = None,
+    transfer_security_authority: hosted_transfer.TransferSecurityAuthority | None = None,
 ) -> None:
-    """Register the private v1 contract. Every custom route authenticates itself."""
+    """Register private v1 plus the two exact public transfer-v2 capabilities."""
 
     commands = commands_module.product_commands_for("rest", expose_tier2=expose_tier2)
     by_name = {command.name: command for command in commands}
@@ -615,6 +626,27 @@ def register_hosted_routes(
     guard_factory = mutation_guard_factory or _default_mutation_guard
     preserve_stream = preserve_stream_func or _default_preserve_stream
     upload_idempotency = IdempotencyStore(config.state_root / "idempotency-hosted.sqlite")
+    private_v1_upload_slot = threading.Lock()
+    runtime_temp_root = config.state_root / "tmp" / "runtime"
+    try:
+        if runtime_temp_root.is_symlink():
+            raise OSError("runtime temp root is a symbolic link")
+        runtime_temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        runtime_temp_root.chmod(0o700)
+    except OSError as exc:
+        raise gateway.HostedGatewayError(
+            "HOSTED_TRANSFER_UNAVAILABLE", "hosted runtime temp is unavailable"
+        ) from exc
+
+    hosted_transfer_routes.register_public_transfer_routes(
+        mcp_app,
+        config=config,
+        lifecycle=lifecycle,
+        security_authority=transfer_security_authority,
+        mutation_guard_factory=guard_factory,
+        preserve_stream_func=preserve_stream,
+        run_in_threadpool_func=run_in_threadpool,
+    )
 
     @mcp_app.custom_route("/private/exomem/v1/contract", methods=["GET"])
     async def _contract(request: Request) -> Response:
@@ -1080,8 +1112,23 @@ def register_hosted_routes(
     async def _upload(request: Request) -> HostedJSONResponse:
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
+        transfer_admission: AbstractContextManager[None] | None = None
+        upload_slot_held = False
         try:
             context = _trusted_context(request, config)
+            if not config.private_v1_transfer_enabled():
+                raise gateway.HostedGatewayError(
+                    "HOSTED_TRANSFER_V1_DISABLED",
+                    "private transfer compatibility is disabled",
+                )
+            admitted_transfer = lifecycle.admit_public_transfer()
+            admitted_transfer.__enter__()
+            transfer_admission = admitted_transfer
+            if not private_v1_upload_slot.acquire(blocking=False):
+                raise gateway.HostedGatewayError(
+                    "HOSTED_TRANSFER_UNAVAILABLE", "another private upload is active"
+                )
+            upload_slot_held = True
             grant = gateway.verify_transfer_grant(
                 request.headers.get(gateway.TRANSFER_GRANT_HEADER, ""),
                 config,
@@ -1095,7 +1142,14 @@ def register_hosted_routes(
                     "IDEMPOTENCY_KEY_REQUIRED",
                     "hosted uploads require a stable retry identity",
                 )
-            max_body_bytes = grant.max_bytes + _MAX_MULTIPART_OVERHEAD_BYTES
+            v1_file_max_bytes = min(
+                grant.max_bytes,
+                hosted_transfer.TRANSFER_V1_UPLOAD_MAX_BYTES,
+            )
+            max_body_bytes = min(
+                grant.max_bytes + _MAX_MULTIPART_OVERHEAD_BYTES,
+                hosted_transfer.TRANSFER_V1_UPLOAD_MAX_BYTES,
+            )
             _upload_content_length(request, max_body_bytes=max_body_bytes)
             bounded_request = _bounded_upload_request(request, max_body_bytes=max_body_bytes)
             try:
@@ -1104,12 +1158,12 @@ def register_hosted_routes(
                     max_fields=_MAX_UPLOAD_FIELDS,
                     max_part_size=_MAX_UPLOAD_METADATA_BYTES,
                 ) as form:
-                    upload = _validate_upload_form(form, max_bytes=grant.max_bytes)
+                    upload = _validate_upload_form(form, max_bytes=v1_file_max_bytes)
                     metadata = _validate_upload_metadata(form, upload)
                     measured_size, upload_sha256 = await run_in_threadpool(
                         _measure_and_rewind_upload, upload
                     )
-                    if measured_size > grant.max_bytes:
+                    if measured_size > v1_file_max_bytes:
                         raise gateway.HostedGatewayError("TOO_LARGE", "upload is too large")
                     request_digest = hashlib.sha256(
                         json.dumps(
@@ -1141,7 +1195,7 @@ def register_hosted_routes(
                                         content_type=upload.content_type,
                                         description=metadata["description"],
                                         text=metadata["text"],
-                                        max_bytes=grant.max_bytes,
+                                        max_bytes=v1_file_max_bytes,
                                     ),
                                     reclaim_pending=True,
                                 )
@@ -1174,6 +1228,11 @@ def register_hosted_routes(
                 request_id=context.request_id if context else None,
                 started=started,
             )
+        finally:
+            if upload_slot_held:
+                private_v1_upload_slot.release()
+            if transfer_admission is not None:
+                transfer_admission.__exit__(None, None, None)
         assert context is not None
         return _success_response(
             result.as_dict(),
@@ -1191,6 +1250,11 @@ def register_hosted_routes(
         transfer_admission: AbstractContextManager[None] | None = None
         try:
             context = _trusted_context(request, config)
+            if not config.private_v1_transfer_enabled():
+                raise gateway.HostedGatewayError(
+                    "HOSTED_TRANSFER_V1_DISABLED",
+                    "private transfer compatibility is disabled",
+                )
             grant = gateway.verify_transfer_grant(
                 request.headers.get(gateway.TRANSFER_GRANT_HEADER, ""),
                 config,
@@ -1198,7 +1262,7 @@ def register_hosted_routes(
                 expected_tenant_scope=None,
                 expected_principal_scope=context.principal_scope,
             )
-            admitted_transfer = lifecycle.admit_transfer()
+            admitted_transfer = lifecycle.admit_public_transfer()
             admitted_transfer.__enter__()
             transfer_admission = admitted_transfer
             if request.query_params:
