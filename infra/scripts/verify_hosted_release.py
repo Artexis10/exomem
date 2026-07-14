@@ -99,7 +99,7 @@ def _registry_from_fixture(fixture: dict[str, Any]) -> list[dict[str, object]]:
 def _validate_registry(registry: object) -> None:
     if not isinstance(registry, list) or not registry:
         raise ValueError("release command registry is empty")
-    fixture = {"commands": []}
+    fixture: dict[str, list[dict[str, object]]] = {"commands": []}
     for row in registry:
         if not isinstance(row, dict) or set(row) != {
             "name",
@@ -334,8 +334,10 @@ def _probe_contract(
     protocol: str,
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
-    principal = base64.urlsafe_b64encode(hashlib.sha256(b"release-verifier").digest())
-    principal = principal.rstrip(b"=").decode("ascii")
+    principal_bytes = base64.urlsafe_b64encode(
+        hashlib.sha256(b"release-verifier").digest()
+    )
+    principal = principal_bytes.rstrip(b"=").decode("ascii")
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
     while time.monotonic() < deadline:
