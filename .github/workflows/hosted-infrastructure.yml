@@ -77,7 +77,8 @@ jobs:
           infra/scripts/validate.sh
       - name: Strict hosted OpenSpec
         run: |
-          npm install --global @fission-ai/openspec
+          source infra/tool-versions.env
+          npm install --global @fission-ai/openspec@${OPENSPEC_VERSION}
           openspec validate add-hosted-private-alpha-infrastructure --strict
 
   external-blackbox:
