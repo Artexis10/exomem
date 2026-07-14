@@ -13,7 +13,12 @@ from sqlalchemy.dialects import postgresql
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
-from exomem_provisioner.models import CredentialMetadata, OperationState, ResourceKind
+from exomem_provisioner.models import (
+    CredentialMetadata,
+    OperationAction,
+    OperationState,
+    ResourceKind,
+)
 from exomem_provisioner.repository import (
     ClaimConflict,
     IdempotencyConflict,
@@ -175,6 +180,35 @@ async def test_sqlite_claim_fallback_atomically_assigns_one_worker(
     )
 
     assert sum(claim is not None for claim in claims) == 1
+
+
+@pytest.mark.asyncio
+async def test_privileged_deletion_and_routine_workers_claim_disjoint_action_sets(
+    repository: OperationRepository,
+) -> None:
+    provision = await repository.submit(
+        "provision",
+        "routine-operation",
+        _request(operationId="routine-operation", tenantId="tenant-routine", cellId="cell-routine"),
+    )
+    destroy = await repository.submit(
+        "destroy",
+        "deletion-operation",
+        _request(operationId="deletion-operation", tenantId="tenant-delete", cellId="cell-delete"),
+    )
+    deletion_actions = frozenset({OperationAction.DISCARD, OperationAction.DESTROY})
+
+    privileged = await repository.claim_next(
+        "privileged-deletion-worker",
+        allowed_actions=deletion_actions,
+    )
+    routine = await repository.claim_next(
+        "routine-worker",
+        excluded_actions=deletion_actions,
+    )
+
+    assert privileged is not None and privileged.id == destroy.id
+    assert routine is not None and routine.id == provision.id
 
 
 @pytest.mark.asyncio

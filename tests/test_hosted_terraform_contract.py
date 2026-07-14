@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -91,24 +92,87 @@ def test_durability_has_object_lock_retention_and_split_credentials() -> None:
     assert storage.count("duration = 7") == 2
     assert storage.count('unit     = "days"') == 2
     assert storage.count("days_from_uploading_to_hiding = 30") == 2
+    assert 'resource "b2_bucket" "user_export"' in storage
+    user_export = storage.split('resource "b2_bucket" "user_export"', 1)[1].split(
+        'resource "b2_bucket" "database_backup"', 1
+    )[0]
+    assert "file_lock_configuration" not in user_export
+    assert "days_from_uploading_to_hiding = 31" in user_export
 
     assert 'key_name     = "exomem-recovery-upload"' in storage
-    assert 'capabilities = ["listBuckets", "listFiles", "writeFiles"]' in storage
+    assert (
+        'capabilities = ["listBuckets", "listFiles", "readFiles", "readFileRetentions", '
+        '"writeFiles", "writeFileRetentions"]' in storage
+    )
     assert 'key_name     = "exomem-recovery-restore"' in storage
     assert 'capabilities = ["listBuckets", "listFiles", "readFiles"]' in storage
     assert 'key_name     = "exomem-recovery-delete"' in storage
-    assert 'capabilities = ["deleteFiles", "listBuckets", "listFiles"]' in storage
-    assert 'key_name     = "exomem-database-backup"' in storage
-    assert "deleteFiles" not in storage.split('key_name     = "exomem-database-backup"', 1)[1]
+    assert (
+        'capabilities = ["bypassGovernance", "deleteFiles", "listBuckets", "listFiles", '
+        '"readFiles", "readFileRetentions"]'
+        in storage
+    )
+    assert 'key_name     = "exomem-database-backup-upload"' in storage
+    assert 'key_name     = "exomem-database-backup-restore-jit"' in storage
+    assert 'key_name     = "exomem-database-backup-delete-jit"' in storage
+    assert storage.count('"bypassGovernance"') == 2
+    assert 'key_name     = "exomem-etcd-snapshot-upload"' in storage
+    assert 'key_name     = "exomem-etcd-snapshot-restore-jit"' in storage
+    assert storage.count('name_prefix  = "database-backup/"') == 3
+    assert storage.count('"writeFileRetentions"') == 2
+    assert storage.count('"readFileRetentions"') == 6
+    assert storage.count('name_prefix  = "etcd-snapshot/"') == 2
+    assert 'key_name     = "exomem-user-export-upload"' in storage
+    assert 'key_name     = "exomem-user-export-restore"' in storage
+    assert 'key_name     = "exomem-user-export-delete"' in storage
 
     for secret_output in (
         "recovery_upload_application_key",
         "recovery_restore_application_key",
         "recovery_delete_application_key",
-        "database_backup_application_key",
+        "database_backup_upload_application_key",
+        "database_backup_restore_application_key",
+        "database_backup_delete_application_key",
+        "etcd_snapshot_upload_application_key",
+        "etcd_snapshot_restore_application_key",
+        "user_export_upload_application_key",
+        "user_export_restore_application_key",
+        "user_export_delete_application_key",
+        "user_export_delivery_application_key",
     ):
         block = outputs.split(f'output "{secret_output}"', 1)[1].split("}", 1)[0]
         assert re.search(r"sensitive\s*=\s*true", block)
+
+
+def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() -> None:
+    contract = json.loads(
+        (ROOT / "infra/contracts/durability-storage-v1.json").read_text(encoding="utf-8")
+    )
+    outputs = (DURABILITY / "outputs.tf").read_text(encoding="utf-8")
+
+    assert contract["schemaVersion"] == 1
+    assert contract["terraformRoot"] == "durability"
+    assert contract["kubernetes"] == {
+        "namespace": "exomem-platform",
+        "configMap": "exomem-durability-storage",
+    }
+    assert contract["bindings"] == {
+        "recovery_bucket_name": {
+            "configMapKey": "recovery-bucket",
+            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_RECOVERY_BUCKET",
+        },
+        "user_export_bucket_name": {
+            "configMapKey": "user-export-bucket",
+            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET",
+        },
+        "database_backup_bucket_name": {
+            "configMapKey": "database-backup-bucket",
+            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_DATABASE_BACKUP_BUCKET",
+        },
+    }
+    for output_name in contract["bindings"]:
+        block = outputs.split(f'output "{output_name}"', 1)[1].split("}", 1)[0]
+        assert "sensitive" not in block
 
 
 def test_bootstrap_versions_remote_state_and_splits_backend_identities() -> None:

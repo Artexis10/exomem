@@ -14,7 +14,7 @@ from sqlalchemy.pool import StaticPool
 from .config import ProvisionerSettings
 from .models import Base
 
-DATABASE_REVISION = "0001_initial"
+DATABASE_REVISION = "0003_cell_operation_lock"
 
 
 class ProvisionerDatabase:

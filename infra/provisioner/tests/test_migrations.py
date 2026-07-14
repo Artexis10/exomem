@@ -48,8 +48,12 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "credential_metadata",
         "exports",
         "backups",
+        "durability_runs",
+        "recovery_objects",
+        "provider_observations",
+        "cell_operation_locks",
     } <= tables
-    assert revision == ("0001_initial",)
+    assert revision == ("0003_cell_operation_lock",)
     assert {
         "caller_checkpoint",
         "checkpoint",

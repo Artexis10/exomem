@@ -59,6 +59,8 @@ RUN case "$(pg_dump --version)" in "pg_dump (PostgreSQL) 17."*) ;; *) exit 1;; e
     && exomem-provisioner-worker --help >/dev/null \
     && exomem-volume-worker --help >/dev/null \
     && exomem-provisioner-volume-rebind --help >/dev/null \
+    && for command in exomem-durability-backup-worker exomem-database-backup-worker \
+        exomem-deletion-worker exomem-export-gc; do command -v "${command}" >/dev/null; done \
     && groupadd --gid 10001 exomem-provisioner \
     && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent exomem-provisioner
 USER 10001:10001

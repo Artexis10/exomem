@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, true, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .crypto import EnvelopeCodec
 from .models import (
     BackupRecord,
+    CellOperationLock,
     CredentialMetadata,
     ExportRecord,
     Operation,
@@ -69,8 +70,10 @@ def _claim_condition(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    allowed_actions: frozenset[OperationAction] | None = None,
+    excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
-    condition = or_(
+    claimable = or_(
         and_(
             Operation.state == OperationState.PENDING,
             Operation.available_at <= claimed_at,
@@ -86,10 +89,25 @@ def _claim_condition(
         .scalar_subquery()
     )
     if include_checkpoints is not None:
-        condition &= Operation.checkpoint.in_(include_checkpoints)
+        claimable &= Operation.checkpoint.in_(include_checkpoints)
     if exclude_checkpoints:
-        condition &= Operation.checkpoint.not_in(exclude_checkpoints)
-    return condition
+        claimable &= Operation.checkpoint.not_in(exclude_checkpoints)
+    cell_available = or_(
+        Operation.cell_id.is_(None),
+        ~select(CellOperationLock.cell_id)
+        .where(
+            CellOperationLock.cell_id == Operation.cell_id,
+            CellOperationLock.lease_expires_at > claimed_at,
+            CellOperationLock.operation_id != Operation.external_operation_id,
+        )
+        .exists(),
+    )
+    action_scope = true()
+    if allowed_actions is not None:
+        action_scope = Operation.action.in_(allowed_actions)
+    if excluded_actions:
+        action_scope = action_scope & Operation.action.not_in(excluded_actions)
+    return claimable & cell_available & action_scope
 
 
 def _claim_candidate_statement(
@@ -97,6 +115,8 @@ def _claim_candidate_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    allowed_actions: frozenset[OperationAction] | None = None,
+    excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
     return (
         select(Operation.id, Operation.tenant_id)
@@ -105,6 +125,8 @@ def _claim_candidate_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                allowed_actions=allowed_actions,
+                excluded_actions=excluded_actions,
             )
         )
         .order_by(Operation.created_at, Operation.id)
@@ -118,6 +140,8 @@ def _claim_statement(
     *,
     include_checkpoints: frozenset[str] | None = None,
     exclude_checkpoints: frozenset[str] = frozenset(),
+    allowed_actions: frozenset[OperationAction] | None = None,
+    excluded_actions: frozenset[OperationAction] = frozenset(),
 ):
     return (
         select(Operation)
@@ -127,6 +151,8 @@ def _claim_statement(
                 claimed_at,
                 include_checkpoints=include_checkpoints,
                 exclude_checkpoints=exclude_checkpoints,
+                allowed_actions=allowed_actions,
+                excluded_actions=excluded_actions,
             ),
         )
         .with_for_update(skip_locked=True)
@@ -243,6 +269,75 @@ async def _lock_operation_fence_first(
     return operation
 
 
+async def _acquire_cell_operation_lock(
+    session: AsyncSession,
+    operation: Operation,
+    *,
+    checked_at: datetime,
+    lease_expires_at: datetime,
+) -> bool:
+    if operation.cell_id is None:
+        return True
+    lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
+    if lock is None:
+        session.add(
+            CellOperationLock(
+                cell_id=operation.cell_id,
+                tenant_id=operation.tenant_id,
+                operation_id=operation.external_operation_id,
+                fence_generation=operation.fence_generation,
+                lease_expires_at=lease_expires_at,
+                updated_at=checked_at,
+            )
+        )
+        await session.flush()
+        return True
+    if (
+        lock.lease_expires_at is not None
+        and _as_utc(lock.lease_expires_at) > checked_at
+        and lock.operation_id != operation.external_operation_id
+    ):
+        return False
+    lock.tenant_id = operation.tenant_id
+    lock.operation_id = operation.external_operation_id
+    lock.fence_generation = operation.fence_generation
+    lock.lease_expires_at = lease_expires_at
+    lock.updated_at = checked_at
+    await session.flush()
+    return True
+
+
+async def _require_cell_operation_lock(
+    session: AsyncSession,
+    operation: Operation,
+    *,
+    checked_at: datetime,
+) -> CellOperationLock | None:
+    if operation.cell_id is None:
+        return None
+    lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
+    if (
+        lock is None
+        or lock.tenant_id != operation.tenant_id
+        or lock.operation_id != operation.external_operation_id
+        or lock.fence_generation != operation.fence_generation
+        or _as_utc(lock.lease_expires_at) <= checked_at
+    ):
+        raise ClaimConflict("worker no longer owns the shared cell operation lock")
+    return lock
+
+
+async def _release_cell_operation_lock(
+    session: AsyncSession,
+    operation: Operation,
+) -> None:
+    if operation.cell_id is None:
+        return
+    lock = await session.get(CellOperationLock, operation.cell_id, with_for_update=True)
+    if lock is not None and lock.operation_id == operation.external_operation_id:
+        await session.delete(lock)
+
+
 async def _lock_active_claim(
     session: AsyncSession,
     operation_id: str,
@@ -254,16 +349,15 @@ async def _lock_active_claim(
 ) -> tuple[Operation, datetime]:
     operation = await _lock_operation_fence_first(session, operation_id)
     checked_at = await _database_now(session, now)
-    return (
-        _require_active_claim(
-            operation,
-            worker_id=worker_id,
-            claim_token=claim_token,
-            claim_generation=claim_generation,
-            now=checked_at,
-        ),
-        checked_at,
+    active = _require_active_claim(
+        operation,
+        worker_id=worker_id,
+        claim_token=claim_token,
+        claim_generation=claim_generation,
+        now=checked_at,
     )
+    await _require_cell_operation_lock(session, active, checked_at=checked_at)
+    return active, checked_at
 
 
 def _require_operation_identity(
@@ -452,7 +546,13 @@ class OperationRepository:
         now: datetime | None = None,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        allowed_actions: frozenset[OperationAction] | None = None,
+        excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> OperationSnapshot | None:
+        if allowed_actions is not None and not allowed_actions:
+            raise ValueError("allowed action claim scope cannot be empty")
+        if allowed_actions is not None and allowed_actions & excluded_actions:
+            raise ValueError("claim action scopes overlap")
         claim_token = secrets.token_urlsafe(32)
         async with self._sessions.begin() as session:
             claimed_at = await _database_now(session, now)
@@ -464,6 +564,8 @@ class OperationRepository:
                             claimed_at,
                             include_checkpoints=include_checkpoints,
                             exclude_checkpoints=exclude_checkpoints,
+                            allowed_actions=allowed_actions,
+                            excluded_actions=excluded_actions,
                         )
                     )
                     .order_by(Operation.created_at, Operation.id)
@@ -495,6 +597,18 @@ class OperationRepository:
                 fence = await session.get(TenantFence, operation.tenant_id)
                 if fence is None or fence.fence_generation != operation.fence_generation:
                     raise StaleFence("active claim fence is stale")
+                if not await _acquire_cell_operation_lock(
+                    session,
+                    operation,
+                    checked_at=claimed_at,
+                    lease_expires_at=claimed_at + timedelta(seconds=self.claim_seconds),
+                ):
+                    operation.state = OperationState.PENDING
+                    operation.claim_owner = None
+                    operation.claim_token = None
+                    operation.claim_expires_at = None
+                    operation.available_at = claimed_at + timedelta(seconds=1)
+                    return None
                 return _operation_snapshot(operation)
             candidate = (
                 await session.execute(
@@ -502,6 +616,8 @@ class OperationRepository:
                         claimed_at,
                         include_checkpoints=include_checkpoints,
                         exclude_checkpoints=exclude_checkpoints,
+                        allowed_actions=allowed_actions,
+                        excluded_actions=excluded_actions,
                     )
                 )
             ).first()
@@ -515,6 +631,8 @@ class OperationRepository:
                     claimed_at,
                     include_checkpoints=include_checkpoints,
                     exclude_checkpoints=exclude_checkpoints,
+                    allowed_actions=allowed_actions,
+                    excluded_actions=excluded_actions,
                 )
             )
             if operation is None:
@@ -529,6 +647,23 @@ class OperationRepository:
             operation.claim_generation += 1
             operation.claim_expires_at = claimed_at + timedelta(seconds=self.claim_seconds)
             operation.updated_at = claimed_at
+            if not await _acquire_cell_operation_lock(
+                session,
+                operation,
+                checked_at=claimed_at,
+                lease_expires_at=operation.claim_expires_at,
+            ):
+                # The candidate predicate and lock acquisition are separate
+                # statements. A concurrent claimant may win that race, so do
+                # not commit an operation which appears CLAIMED without owning
+                # the shared per-cell lease.
+                operation.state = OperationState.PENDING
+                operation.claim_owner = None
+                operation.claim_token = None
+                operation.claim_expires_at = None
+                operation.available_at = claimed_at + timedelta(seconds=1)
+                operation.updated_at = claimed_at
+                return None
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -551,6 +686,10 @@ class OperationRepository:
                 now=now,
             )
             operation.claim_expires_at = renewed_at + timedelta(seconds=self.claim_seconds)
+            lock = await _require_cell_operation_lock(session, operation, checked_at=renewed_at)
+            if lock is not None:
+                lock.lease_expires_at = operation.claim_expires_at
+                lock.updated_at = renewed_at
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -605,6 +744,7 @@ class OperationRepository:
             operation.claim_owner = None
             operation.claim_token = None
             operation.claim_expires_at = None
+            await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -634,6 +774,7 @@ class OperationRepository:
             operation.claim_token = None
             operation.claim_expires_at = None
             operation.finalized_at = failed_at
+            await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -671,6 +812,7 @@ class OperationRepository:
                 operation.checkpoint = "retry-backoff"
                 operation.retry_after_seconds = retry_after_seconds
                 operation.available_at = failed_at + timedelta(seconds=retry_after_seconds)
+            await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -707,6 +849,7 @@ class OperationRepository:
             operation.claim_token = None
             operation.claim_expires_at = None
             operation.finalized_at = completed_at
+            await _release_cell_operation_lock(session, operation)
             await session.flush()
             return _operation_snapshot(operation)
 

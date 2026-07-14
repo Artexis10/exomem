@@ -429,9 +429,7 @@ async def test_live_credential_deletion_recovers_after_delete_acknowledgement_is
         for resource in resources
         if resource.cell_id == "cell-candidate" and resource.kind.value == "credential"
     )
-    namespace = metadata(
-        "cell-candidate", operation="candidate-operation", fence=8
-    ).resource_name
+    namespace = metadata("cell-candidate", operation="candidate-operation", fence=8).resource_name
     core.secrets.pop((namespace, "exomem-cell-credentials"))
 
     await provider.delete_resource(credential, bypass_governance=False)

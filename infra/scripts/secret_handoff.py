@@ -172,7 +172,13 @@ def load_matrix(path: Path) -> HandoffMatrix:
             if not isinstance(raw_source, dict):
                 raise HandoffError(f"secret matrix has invalid source for {name}")
             kind = raw_source.get("kind")
-            if kind not in {"stdin", "prompt", "terraform"} or kind in seen_source_kinds:
+            if kind not in {
+                "stdin",
+                "prompt",
+                "terraform",
+                "generated-ed25519-private",
+                "derived-ed25519-public",
+            } or kind in seen_source_kinds:
                 raise HandoffError(f"secret matrix has invalid source kind for {name}")
             seen_source_kinds.add(kind)
             root = raw_source.get("root")
@@ -294,6 +300,8 @@ def _read_secret(
     source = next((item for item in secret_spec.sources if item.kind == source_kind), None)
     if source is None:
         raise HandoffError(f"source {source_kind} is not allowed for {secret_spec.name}")
+    if source_kind in {"generated-ed25519-private", "derived-ed25519-public"}:
+        raise HandoffError("derived key material requires the atomic keypair handoff")
     if source_kind == "stdin":
         return _normalize_secret(sys.stdin.buffer.read(_MAX_SECRET_BYTES + 2))
     if source_kind == "prompt":

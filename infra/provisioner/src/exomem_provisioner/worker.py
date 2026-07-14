@@ -14,6 +14,7 @@ from .driver import (
     LostAcknowledgement,
     ProvisionerDriver,
 )
+from .models import OperationAction
 from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
 
 
@@ -26,12 +27,16 @@ class ProvisionerWorker:
         worker_id: str,
         include_checkpoints: frozenset[str] | None = None,
         exclude_checkpoints: frozenset[str] = frozenset(),
+        allowed_actions: frozenset[OperationAction] | None = None,
+        excluded_actions: frozenset[OperationAction] = frozenset(),
     ) -> None:
         self._repository = repository
         self._driver = driver
         self._worker_id = worker_id
         self._include_checkpoints = include_checkpoints
         self._exclude_checkpoints = exclude_checkpoints
+        self._allowed_actions = allowed_actions
+        self._excluded_actions = excluded_actions
 
     async def run_once(self, *, now: datetime | None = None) -> bool:
         operation = await self._repository.claim_next(
@@ -39,6 +44,8 @@ class ProvisionerWorker:
             now=now,
             include_checkpoints=self._include_checkpoints,
             exclude_checkpoints=self._exclude_checkpoints,
+            allowed_actions=self._allowed_actions,
+            excluded_actions=self._excluded_actions,
         )
         if operation is None:
             return False

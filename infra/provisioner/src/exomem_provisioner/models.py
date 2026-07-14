@@ -128,6 +128,25 @@ class TenantFence(Base):
     )
 
 
+class CellOperationLock(Base):
+    """One shared lease for lifecycle and durability effects on a cell."""
+
+    __tablename__ = "cell_operation_locks"
+    __table_args__ = (
+        CheckConstraint("fence_generation >= 1", name="ck_cell_operation_lock_fence"),
+        Index("ix_cell_operation_lock_expiry", "lease_expires_at"),
+    )
+
+    cell_id: Mapped[str] = mapped_column(String(256), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    lease_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+
+
 class Resource(Base):
     __tablename__ = "resources"
     __table_args__ = (
@@ -229,3 +248,126 @@ class BackupRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=utc_now, nullable=False
     )
+
+
+class DurabilityRunKind(StrEnum):
+    USER_EXPORT = "user-export"
+    VAULT_BACKUP = "vault-backup"
+    RESTORE = "restore"
+    DATABASE_BACKUP = "database-backup"
+    DATABASE_REDISCOVERY = "database-rediscovery"
+
+
+class DurabilityRunState(StrEnum):
+    PENDING = "pending"
+    CLAIMED = "claimed"
+    COMPLETE = "complete"
+    ERROR = "error"
+
+
+class DurabilityRun(Base):
+    __tablename__ = "durability_runs"
+    __table_args__ = (
+        UniqueConstraint("operation_id", name="uq_durability_run_operation"),
+        UniqueConstraint("kind", "cell_id", "scheduled_for", name="uq_durability_run_schedule"),
+        CheckConstraint("fence_generation >= 1", name="ck_durability_run_fence"),
+        Index(
+            "uq_durability_active_cell",
+            "cell_id",
+            unique=True,
+            postgresql_where=text("state IN ('PENDING', 'CLAIMED')"),
+            sqlite_where=text("state IN ('PENDING', 'CLAIMED')"),
+        ),
+        Index("ix_durability_run_claim", "state", "claim_expires_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    kind: Mapped[DurabilityRunKind] = mapped_column(
+        Enum(DurabilityRunKind, native_enum=False, length=32), nullable=False
+    )
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    scheduled_for: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    state: Mapped[DurabilityRunState] = mapped_column(
+        Enum(DurabilityRunState, native_enum=False, length=16), nullable=False
+    )
+    checkpoint: Mapped[str] = mapped_column(String(64), nullable=False)
+    state_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    result_ciphertext: Mapped[str | None] = mapped_column(Text)
+    claim_owner: Mapped[str | None] = mapped_column(String(128))
+    claim_token: Mapped[str | None] = mapped_column(String(64))
+    claim_generation: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    claim_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=utc_now, onupdate=utc_now, nullable=False
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class RecoveryObject(Base):
+    __tablename__ = "recovery_objects"
+    __table_args__ = (
+        UniqueConstraint("run_id", name="uq_recovery_object_run"),
+        UniqueConstraint("opaque_reference_digest", name="uq_recovery_object_opaque_ref"),
+        CheckConstraint("archive_size > 0", name="ck_recovery_archive_size"),
+        CheckConstraint("ciphertext_size > 0", name="ck_recovery_ciphertext_size"),
+        CheckConstraint("fence_generation >= 1", name="ck_recovery_fence"),
+        Index("ix_recovery_cell_verified", "cell_id", "verified_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    run_id: Mapped[str] = mapped_column(
+        ForeignKey("durability_runs.id", ondelete="RESTRICT"), nullable=False
+    )
+    kind: Mapped[DurabilityRunKind] = mapped_column(
+        Enum(DurabilityRunKind, native_enum=False, length=32), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    opaque_reference_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    secret_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    archive_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    archive_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    ciphertext_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    ciphertext_size: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    metadata_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    object_lock_until: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    key_destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class ProviderDisposition(StrEnum):
+    ADOPTED = "adopted"
+    QUARANTINED = "quarantined"
+
+
+class ProviderObservation(Base):
+    __tablename__ = "provider_observations"
+    __table_args__ = (
+        UniqueConstraint("provider", "reference_digest", name="uq_provider_observation"),
+        CheckConstraint("fence_generation >= 1", name="ck_provider_observation_fence"),
+        Index("ix_provider_observation_tenant_fence", "tenant_id", "fence_generation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    provider: Mapped[str] = mapped_column(String(32), nullable=False)
+    reference_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    reference_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str | None] = mapped_column(String(256))
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    disposition: Mapped[ProviderDisposition] = mapped_column(
+        Enum(ProviderDisposition, native_enum=False, length=16), nullable=False
+    )
+    observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)

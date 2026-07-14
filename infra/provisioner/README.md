@@ -26,6 +26,30 @@ Credential-dependent HCloud, B2 Object Lock, Cloudflare, and clean-cluster
 rebind drills remain release gates even when deterministic and exact-K3s suites
 pass.
 
+## Durability contract
+
+The central vault-backup sweep enumerates cells every 30 minutes, derives one
+stable operation ID per cell/slot, and relies on the database partial unique
+constraint to serialize backup/export/restore work. It renews claims during long
+snapshots and reports verified-object age, warning at 45 minutes and blocking new
+alpha invitations at 60 minutes.
+
+Vault backups stop and verify routes, quiesce the cell, stage and authenticate the
+portable archive, reopen service, then encrypt and upload. Every archive uses a
+unique AES-256-GCM data key; the wrapped key remains in the provisioner database.
+Recovery objects use seven-day B2 governance retention and a 30-day lifecycle.
+User exports use a separate private bucket without Object Lock: their exact
+caller-supplied expiry is authenticated in the durable checkpoint, object row,
+and B2 metadata, while a 31-day provider lifecycle is only a cleanup backstop.
+
+B2 access is capability-separated. The normal worker receives upload/list only;
+restore/presign and deletion use distinct short-lived clients. Download URLs are
+HTTPS and expire within 15 minutes. Complete PostgreSQL backups use `pg_dump`'s
+serializable-deferrable custom format, prove an empty scratch restore and owner /
+tenant / cell resolution before upload, then encrypt and remotely verify the
+object. Provider rediscovery scans Kubernetes, HCloud, Traefik, and B2 completely
+before raising tenant fences or adopting/quarantining newer side effects.
+
 ## Reproducible development
 
 ```bash

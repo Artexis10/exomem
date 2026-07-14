@@ -8,8 +8,9 @@ The lifecycle domains are deliberately split:
 
 - `terraform/foundation`: Hetzner compute/network/firewall and Cloudflare
   Tunnel/DNS/Access. It cannot manage recovery buckets or backup credentials.
-- `terraform/durability`: versioned B2 state/recovery/database-backup storage
-  and least-privilege identities. It cannot manage the node or ingress.
+- `terraform/durability`: private B2 recovery, short-lived user-export, and
+  complete-database backup storage with least-privilege identities. It cannot
+  manage the node, ingress, Kubernetes objects, or tenant application records.
 - `terraform/bootstrap`: one-time creation of the versioned remote-state bucket
   and identities; never run from the normal apply path.
 - `ansible`: idempotent host hardening and pinned K3s bootstrap.

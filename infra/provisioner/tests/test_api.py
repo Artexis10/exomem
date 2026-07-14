@@ -82,6 +82,10 @@ def _body_for(action: str) -> dict[str, Any]:
             manifestSha256="b" * 64,
             archiveSize=1024,
         )
+    if action == "export":
+        return _target_body(
+            expiresAt=(datetime.now(UTC) + timedelta(hours=24)).isoformat().replace("+00:00", "Z")
+        )
     if action == "export-release":
         return _target_body(releaseRef=_RELEASE_REF)
     if action == "export":
@@ -166,9 +170,7 @@ async def test_accepted_export_continues_and_replays_after_expiry_but_new_expire
         settings=settings,
         readiness_probe=database.ready,
         repository=repository,
-        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret(
-            "provider-recovery-root"
-        ),
+        provider_identity_codec=ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root"),
         clock=lambda: clock[0],
     )
     client = httpx.AsyncClient(
@@ -472,6 +474,29 @@ async def test_provider_identity_ids_fit_hcloud_recovery_labels(
     assert response.status_code == 422
     assert response.json() == {"code": "PROVISIONER_REJECTED", "retryable": False}
     assert await repository.get("provision", "identifier-too-long") is None
+
+
+@pytest.mark.asyncio
+async def test_export_requires_future_rfc3339_expiry_no_more_than_thirty_days(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, repository, _ = api
+    missing = await client.post(
+        "/cells/export",
+        headers=_headers("export-missing-expiry"),
+        json=_target_body(),
+    )
+    too_late = await client.post(
+        "/cells/export",
+        headers=_headers("export-long-expiry"),
+        json=_target_body(
+            expiresAt=(datetime.now(UTC) + timedelta(days=31)).isoformat().replace("+00:00", "Z")
+        ),
+    )
+
+    assert missing.status_code == too_late.status_code == 422
+    assert await repository.get("export", "export-missing-expiry") is None
+    assert await repository.get("export", "export-long-expiry") is None
 
 
 @pytest.mark.asyncio

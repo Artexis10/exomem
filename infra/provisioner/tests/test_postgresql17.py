@@ -238,7 +238,7 @@ async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_
             )
         assert str(version).startswith("17")
         assert owner == target.role
-        assert revisions == ["0001_initial"]
+        assert revisions == ["0003_cell_operation_lock"]
         assert {"operations", "tenant_fences", "resources", "credential_metadata"} <= tables
         assert await database.ready() is True
 

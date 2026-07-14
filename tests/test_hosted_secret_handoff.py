@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import importlib.util
 import json
 import os
@@ -24,6 +25,16 @@ EXPECTED_VERCEL_PROJECT_ID = "prj_uMt1uqSUP5ALo0zLJvcKLBCJ7HUs"
 
 def _load_module():
     spec = importlib.util.spec_from_file_location("secret_handoff", SCRIPT)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_keypair_module():
+    path = ROOT / "infra/scripts/provider_recovery_keypair_handoff.py"
+    spec = importlib.util.spec_from_file_location("provider_recovery_keypair_handoff", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
@@ -125,6 +136,17 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
         "substrate.production"
     }
 
+    provisioner_destinations = [
+        destination
+        for secret in secrets.values()
+        for destination_id, destination in secret["destinations"].items()
+        if destination_id.startswith("k3s.provisioner.")
+    ]
+    assert provisioner_destinations
+    assert {destination["namespace"] for destination in provisioner_destinations} == {
+        "exomem-platform"
+    }
+
     access = {
         destination["kind"]
         for name in ("cloudflare_access_client_id", "cloudflare_access_client_secret")
@@ -159,11 +181,32 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
         "sops_k8s_secret",
     }
 
-    database_backup = secrets["database_backup_key"]["destinations"]
+    database_backup = secrets["database_backup_upload_key"]["destinations"]
     assert set(database_backup) == {
-        "ansible.hosted-node.etcd-s3-secret-key.active",
-        "k3s.provisioner.database-backup-key.active",
+        "k3s.provisioner.database-backup-upload-key.active",
     }
+    etcd_upload = secrets["etcd_snapshot_upload_key"]["destinations"]
+    assert set(etcd_upload) == {"ansible.hosted-node.etcd-s3-secret-key.active"}
+    assert secrets["etcd_snapshot_restore_key"]["destinations"][
+        "escrow.etcd-snapshot-restore-key.active"
+    ]["kind"] == "sops_escrow"
+
+    for capability in ("upload", "restore", "delete"):
+        for material in ("key_id", "key"):
+            secret_name = f"user_export_{capability}_{material}"
+            source = secrets[secret_name]["sources"]
+            assert source == [
+                {
+                    "kind": "terraform",
+                    "root": "durability",
+                    "output": f"user_export_{capability}_application_{material}",
+                }
+            ]
+            destinations = secrets[secret_name]["destinations"]
+            assert len(destinations) == 1
+            destination = next(iter(destinations.values()))
+            assert destination["kind"] == "sops_k8s_secret"
+            assert destination["namespace"] == "exomem-platform"
 
     assert "cell_credential" not in secrets
 
@@ -310,6 +353,174 @@ def test_k3s_handoff_seals_atomically_without_plaintext_or_output_leak(
     assert sentinel not in history.read_bytes()
     assert all(sentinel.decode() not in argument for command, _ in calls for argument in command)
     assert capsys.readouterr().out == ""
+
+
+def test_provider_recovery_keypair_handoff_derives_matching_public_key_and_routes_seed_safely(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    handoff = _load_module()
+    keypair = _load_keypair_module()
+    monkeypatch.setattr(keypair, "_load_handoff", lambda: handoff)
+    sealed: list[tuple[str, bytes]] = []
+
+    def seal(*, destination, secret, version, repository_root, **_kwargs):
+        target = repository_root / destination.fields["target"].format(version=version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sops-ciphertext")
+        sealed.append((destination.destination_id, secret))
+
+    monkeypatch.setattr(handoff, "_seal_k8s_secret", seal)
+    monkeypatch.setattr(handoff, "_seal_named_document", seal)
+    keypair.execute_keypair_handoff(
+        matrix_path=MATRIX,
+        repository_root=tmp_path,
+        version="v1",
+        sops_bin="sops",
+    )
+
+    private_values = [value for name, value in sealed if "signer" in name]
+    public_values = [value for name, value in sealed if "verifier" in name]
+    # One in-cluster signer Secret is mounted into every emitter; escrow is the
+    # only second destination. There is no independently generated volume key.
+    assert len(private_values) == 2 and len(set(private_values)) == 1
+    assert len(public_values) == 1
+    private_raw = base64.urlsafe_b64decode(private_values[0] + b"==")
+    public_raw = base64.urlsafe_b64decode(public_values[0] + b"==")
+    derived = Ed25519PrivateKey.from_private_bytes(private_raw).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    assert derived == public_raw
+    assert all("worker" not in name or "volume-worker" in name for name, _ in sealed if "signer" in name)
+    assert capsys.readouterr().out == ""
+
+
+def test_provider_recovery_keypair_handoff_rolls_back_every_destination_on_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    handoff = _load_module()
+    keypair = _load_keypair_module()
+    monkeypatch.setattr(keypair, "_load_handoff", lambda: handoff)
+    calls = 0
+
+    def seal(*, destination, version, repository_root, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            raise handoff.HandoffError("simulated verifier failure")
+        target = repository_root / destination.fields["target"].format(version=version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sops-ciphertext")
+
+    monkeypatch.setattr(handoff, "_seal_k8s_secret", seal)
+    monkeypatch.setattr(handoff, "_seal_named_document", seal)
+    with pytest.raises(handoff.HandoffError):
+        keypair.execute_keypair_handoff(
+            matrix_path=MATRIX,
+            repository_root=tmp_path,
+            version="v1",
+            sops_bin="sops",
+        )
+
+    assert not list((tmp_path / "infra/secrets").rglob("*.sops.json"))
+
+
+def test_capacity_receipt_keypair_keeps_verifier_out_of_collector(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    handoff = _load_module()
+    keypair = _load_keypair_module()
+    monkeypatch.setattr(keypair, "_load_handoff", lambda: handoff)
+    sealed: list[tuple[str, str, bytes]] = []
+
+    def seal(*, destination, secret, version, repository_root, **_kwargs):
+        target = repository_root / destination.fields["target"].format(version=version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sops-ciphertext")
+        sealed.append((destination.destination_id, destination.kind, secret))
+
+    monkeypatch.setattr(handoff, "_seal_k8s_secret", seal)
+    monkeypatch.setattr(handoff, "_seal_named_document", seal)
+    keypair.execute_keypair_handoff(
+        matrix_path=MATRIX,
+        repository_root=tmp_path,
+        version="v1",
+        sops_bin="sops",
+        pair_name="capacity_receipt",
+    )
+
+    assert [kind for _, kind, _ in sealed] == ["sops_k8s_secret", "sops_escrow"]
+    private_raw = base64.urlsafe_b64decode(sealed[0][2] + b"==")
+    public_raw = base64.urlsafe_b64decode(sealed[1][2] + b"==")
+    derived = Ed25519PrivateKey.from_private_bytes(private_raw).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    assert derived == public_raw
+    assert sealed[0][0] == "k3s.capacity-collector.capacity-receipt-signer.active"
+    assert sealed[1][0] == "escrow.capacity-receipt-verifier.active"
+
+
+def test_hcloud_capacity_reader_is_a_distinct_collector_secret() -> None:
+    matrix = _matrix()
+    secret = matrix["secrets"]["hcloud_capacity_reader_token"]
+    destination = next(iter(secret["destinations"].values()))
+
+    assert destination["kubernetes_secret"] == "exomem-hcloud-capacity-reader"
+    assert destination["key"] == "token"
+
+
+@pytest.mark.parametrize("pair_name", ["economics_receipt", "rotation_receipt"])
+def test_off_cluster_receipt_keypairs_route_private_seed_and_pem_verifier_to_escrow_only(
+    pair_name: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+
+    handoff = _load_module()
+    keypair = _load_keypair_module()
+    monkeypatch.setattr(keypair, "_load_handoff", lambda: handoff)
+    sealed: list[tuple[str, str, bytes]] = []
+
+    def seal(*, destination, secret, version, repository_root, **_kwargs):
+        target = repository_root / destination.fields["target"].format(version=version)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"sops-ciphertext")
+        sealed.append((destination.destination_id, destination.kind, secret))
+
+    monkeypatch.setattr(handoff, "_seal_k8s_secret", seal)
+    monkeypatch.setattr(handoff, "_seal_named_document", seal)
+    keypair.execute_keypair_handoff(
+        matrix_path=MATRIX,
+        repository_root=tmp_path,
+        version="v1",
+        sops_bin="sops",
+        pair_name=pair_name,
+    )
+
+    assert [kind for _, kind, _ in sealed] == ["sops_escrow", "sops_escrow"]
+    private_raw = base64.urlsafe_b64decode(sealed[0][2] + b"==")
+    public = serialization.load_pem_public_key(sealed[1][2])
+    expected = Ed25519PrivateKey.from_private_bytes(private_raw).public_key().public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    actual = public.public_bytes(
+        encoding=serialization.Encoding.Raw,
+        format=serialization.PublicFormat.Raw,
+    )
+    assert len(private_raw) == 32
+    assert actual == expected
+    assert sealed[0][0] == f"escrow.{pair_name.replace('_', '-')}-collector.active"
+    assert sealed[1][0] == f"escrow.{pair_name.replace('_', '-')}-operator-verifier.active"
 
 
 def test_vercel_handoff_uses_stdin_and_discards_cli_output(

@@ -972,9 +972,7 @@ class HCloudVolumeAdapter:
         if identity_present:
             OpaqueProviderMetadata.from_hcloud_labels(labels).require_same(metadata)
         reference = ProviderReference.hcloud(kind="volume", resource_id=handle)
-        existing_recovery_identity = any(
-            key.startswith("exomem_identity_") for key in labels
-        )
+        existing_recovery_identity = any(key.startswith("exomem_identity_") for key in labels)
         if existing_recovery_identity:
             try:
                 existing_envelope = decode_hcloud_identity_envelope(labels)
@@ -992,9 +990,7 @@ class HCloudVolumeAdapter:
                     fence_generation=metadata.fence_generation,
                 )
                 if recovery_envelope is not None and recovery_envelope != existing_envelope:
-                    raise ProviderIdentityConflict(
-                        "provider recovery identity is immutable"
-                    )
+                    raise ProviderIdentityConflict("provider recovery identity is immutable")
             except ProviderIdentityConflict as error:
                 raise MetadataConflict(
                     "HCloud provider recovery identity did not authenticate"
