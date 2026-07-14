@@ -130,6 +130,48 @@ def test_lifecycle_trash_proof_type_mismatch_is_governed() -> None:
     assert exc.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
 
 
+def test_lifecycle_trash_proof_rejects_oversized_sidecar(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _source(_ID_A)
+    prepared = relation_review.build_lifecycle_prepared_transition(
+        transition_id="00000000-0000-4000-8000-000000000098",
+        operation="edit",
+        page_identity=_ID_A,
+        before_path=_PAGE_A,
+        before_source_hash=vault.content_hash(source),
+        after_path=_PAGE_A,
+        after_source_hash=vault.content_hash(source),
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _ID_A, source
+        ),
+        decision=None,
+        transition_token="oversized-trash-sidecar",
+        auxiliary_hash=hashlib.sha256(b"auxiliary").hexdigest(),
+    )
+    proof = relation_review.LifecycleTrashProof(
+        page_identity=_ID_A,
+        original_path=_PAGE_A,
+        trash_path="Knowledge Base/_trash/oversized.md",
+        source_hash=vault.content_hash(source),
+        review_fingerprint=semantic_contract.review_content_fingerprint(
+            _ID_A, source
+        ),
+        source_guard=None,  # type: ignore[arg-type]
+        sidecar_source='{"padding":"xxxxxxxx"}',
+        sidecar_guard=None,  # type: ignore[arg-type]
+        live_owner_paths=(),
+    )
+    monkeypatch.setattr(
+        relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 8
+    )
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.trash_proof_commits_prepared(prepared, proof)
+
+    assert exc.value.code == "LIFECYCLE_TRASH_LIMIT"
+
+
 def _crash_commit_worker(
     root_text: str,
     source: str,

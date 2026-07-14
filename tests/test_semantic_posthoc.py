@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -340,3 +341,36 @@ def test_default_audit_does_not_run_semantic_contract_drift(
         finding.category != "semantic_contract_drift"
         for finding in report.findings
     )
+
+
+def test_semantic_audit_reports_shared_omission_and_truncation_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    projection = {
+        "semantic_contract_findings": [],
+        "omitted_counts": {
+            "evaluated_paths": 0,
+            "semantic_contract_findings": 44,
+            "semantic_contract_summary": 0,
+        },
+        "truncation": {
+            "byte_budget": 120 * 1024,
+            "finding_limit": 256,
+            "budget_items_omitted": 44,
+        },
+    }
+    monkeypatch.setattr(
+        semantic_writes,
+        "evaluate_posthoc_batch",
+        lambda *args, **kwargs: SimpleNamespace(as_dict=lambda: projection),
+    )
+
+    report = audit_module.audit(
+        tmp_path, categories=["semantic_contract_drift"]
+    ).as_dict()
+
+    assert report["metadata"]["semantic_contract_drift"] == {
+        "omitted_counts": projection["omitted_counts"],
+        "truncation": projection["truncation"],
+    }

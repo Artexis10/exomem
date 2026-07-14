@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -21,6 +22,7 @@ from exomem import (
     index_sync,
     relation_review,
     semantic_contract,
+    semantic_writes,
 )
 from exomem import audit as audit_module
 from exomem import reconcile as reconcile_module
@@ -437,9 +439,9 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
             ),
             encoding="utf-8",
         )
-    real_cleanup = relation_review.cleanup_stale_lifecycle_prepared
+    real_cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch
 
-    def race_then_cleanup(root: Path, inspection):
+    def race_then_cleanup(root: Path, inspections):
         if race == "prepared_replacement":
             current = relation_review.load_lifecycle_prepared(root, page_id)
             assert current is not None
@@ -480,11 +482,11 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
         else:
             assert race_trash is not None
             race_trash.write_text(after, encoding="utf-8")
-        return real_cleanup(root, inspection)
+        return real_cleanup(root, inspections)
 
     monkeypatch.setattr(
         relation_review,
-        "cleanup_stale_lifecycle_prepared",
+        "cleanup_stale_lifecycle_prepared_batch",
         race_then_cleanup,
     )
 
@@ -495,6 +497,129 @@ def test_reconcile_blocks_prepared_primary_and_trash_races(
         {"page_identity": page_id, "code": "LIFECYCLE_RECONCILE_RACE"}
     ]
     assert prepared_path.exists()
+
+
+def test_lifecycle_batch_cleanup_blocks_late_unrelated_duplicate_owner(
+    tmp_path: Path,
+) -> None:
+    page_id = _LIFECYCLE_IDS["stale"]
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=page_id,
+        path="Knowledge Base/Notes/Insights/late-owner.md",
+    )
+    posthoc = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, operation="reconcile"
+    )
+    assert posthoc.corpus is not None
+    inspected = relation_review.inspect_lifecycle_prepared_slots(
+        tmp_path, corpus=posthoc.corpus
+    )
+    assert inspected.cleanup_safe
+    assert len(inspected.inspections) == 1
+    duplicate = tmp_path / "Knowledge Base/Notes/Insights/late-duplicate.md"
+    duplicate.write_text(
+        _semantic_page(page_id).replace(
+            "Direct editor content.", "Late duplicate owner."
+        ),
+        encoding="utf-8",
+    )
+
+    result = relation_review.cleanup_stale_lifecycle_prepared_batch(
+        tmp_path, inspected.inspections
+    )
+
+    assert result.cleaned == ()
+    assert [issue.as_dict() for issue in result.blocked] == [
+        {"code": "LIFECYCLE_PRIMARY_RACE", "page_identity": page_id}
+    ]
+    assert prepared.exists()
+
+
+def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_paths: list[Path] = []
+    for page_id, name in (
+        (_LIFECYCLE_IDS["stale"], "batch-stale-one"),
+        ("00000000-0000-4000-8000-000000000218", "batch-stale-two"),
+    ):
+        _, prepared, _, _ = _install_lifecycle_slot(
+            tmp_path,
+            state="stale",
+            page_id=page_id,
+            path=f"Knowledge Base/Notes/Insights/{name}.md",
+        )
+        prepared_paths.append(prepared)
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/unrelated.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("unrelated trash", encoding="utf-8")
+    trash.with_name(f"{trash.name}.meta.json").write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/unrelated.txt"}),
+        encoding="utf-8",
+    )
+    posthoc = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, operation="reconcile"
+    )
+    assert posthoc.corpus is not None
+    inspected = relation_review.inspect_lifecycle_prepared_slots(
+        tmp_path, corpus=posthoc.corpus
+    )
+    assert inspected.cleanup_safe
+    stale = tuple(item for item in inspected.inspections if item.cleanup_eligible)
+    assert len(stale) == 2
+    shared_directories = {id(guard) for guard in stale[0].trash_guards}
+    shared_sidecars = {id(guard) for guard in stale[0].trash_content_guards}
+    directory_rechecks = {guard_id: 0 for guard_id in shared_directories}
+    sidecar_rechecks = {guard_id: 0 for guard_id in shared_sidecars}
+    lock_count = 0
+    real_lock = vault_module.vault_creation_lock
+    real_directory_recheck = vault_module.DirectoryCensusGuard.recheck
+    real_path_recheck = vault_module.PathGuard.recheck
+
+    @contextmanager
+    def counted_lock(root: Path, namespace: str, *, timeout: float = 30.0):
+        nonlocal lock_count
+        lock_count += 1
+        with real_lock(root, namespace, timeout=timeout) as handle:
+            yield handle
+
+    def counted_directory_recheck(self, root: Path, *, allowed_changes=()):
+        if id(self) in directory_rechecks:
+            directory_rechecks[id(self)] += 1
+        return real_directory_recheck(
+            self, root, allowed_changes=allowed_changes
+        )
+
+    def counted_path_recheck(self, root: Path):
+        if id(self) in sidecar_rechecks:
+            sidecar_rechecks[id(self)] += 1
+        return real_path_recheck(self, root)
+
+    monkeypatch.setattr(vault_module, "vault_creation_lock", counted_lock)
+    monkeypatch.setattr(
+        vault_module.DirectoryCensusGuard,
+        "recheck",
+        counted_directory_recheck,
+    )
+    monkeypatch.setattr(
+        vault_module.PathGuard,
+        "recheck",
+        counted_path_recheck,
+    )
+
+    result = relation_review.cleanup_stale_lifecycle_prepared_batch(
+        tmp_path, stale
+    )
+
+    assert lock_count == 1
+    assert set(directory_rechecks.values()) == {1}
+    assert set(sidecar_rechecks.values()) == {1}
+    assert len(result.cleaned) == 2
+    assert result.blocked == ()
+    assert all(not path.exists() for path in prepared_paths)
 
 
 def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -> None:
@@ -525,6 +650,85 @@ def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -
     assert malformed.read_text(encoding="utf-8") == "not-json"
     assert stale.read_bytes() == stale_bytes
     assert stale_page.read_bytes() == page_bytes
+
+
+@pytest.mark.parametrize("limit_kind", ["single", "aggregate"])
+def test_reconcile_sidecar_byte_limits_make_cleanup_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_kind: str,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-sidecar-limit.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15"
+    trash.mkdir(parents=True, exist_ok=True)
+    sidecar_count = 1 if limit_kind == "single" else 2
+    for index in range(sidecar_count):
+        target = trash / f"bounded-{index}.txt"
+        target.write_text("trash", encoding="utf-8")
+        target.with_name(f"{target.name}.meta.json").write_text(
+            json.dumps(
+                {
+                    "original_path": f"Knowledge Base/Notes/bounded-{index}.txt",
+                    "padding": "x" * 96,
+                }
+            ),
+            encoding="utf-8",
+        )
+    if limit_kind == "single":
+        monkeypatch.setattr(
+            relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 64
+        )
+    else:
+        monkeypatch.setattr(
+            relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 1_024
+        )
+        monkeypatch.setattr(
+            relation_review,
+            "_LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES",
+            200,
+        )
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert "LIFECYCLE_TRASH_LIMIT" in {
+        issue["code"] for issue in payload["lifecycle_prepared_issues"]
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert prepared.exists()
+
+
+def test_reconcile_lifecycle_projection_reports_each_omitted_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reconcile_module, "_LIFECYCLE_REPORT_LIMIT", 1)
+
+    retained, omitted = reconcile_module._bounded_lifecycle_values(
+        ("one", "two", "three")
+    )
+    report = reconcile_module.ReconcileReport(
+        lifecycle_prepared=retained,
+        lifecycle_prepared_omitted_count=omitted,
+        lifecycle_prepared_omitted_counts={
+            "lifecycle_prepared": omitted,
+            "lifecycle_prepared_issues": 2,
+            "lifecycle_prepared_cleaned": 3,
+            "lifecycle_prepared_cleanup_blocked": 4,
+        },
+    ).as_dict()
+
+    assert retained == ["one"]
+    assert report["lifecycle_prepared_omitted_count"] == 2
+    assert report["lifecycle_prepared_omitted_counts"] == {
+        "lifecycle_prepared": 2,
+        "lifecycle_prepared_issues": 2,
+        "lifecycle_prepared_cleaned": 3,
+        "lifecycle_prepared_cleanup_blocked": 4,
+    }
 
 
 @pytest.mark.parametrize("failure", ["decision", "ambiguous_owner"])

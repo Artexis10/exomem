@@ -3,9 +3,22 @@ parent-vault wikilinks must resolve (SKILL.md rule 1 allows them)."""
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 
 from exomem import audit as audit_module
+
+
+def test_audit_and_reconcile_import_in_fresh_process() -> None:
+    imported = subprocess.run(
+        [sys.executable, "-c", "import exomem.audit; import exomem.reconcile"],
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+
+    assert imported.returncode == 0, imported.stderr
 
 
 def test_audit_findings_have_non_empty_path(vault: Path) -> None:

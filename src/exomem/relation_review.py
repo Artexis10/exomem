@@ -47,6 +47,8 @@ _LIFECYCLE_MAX_IDENTITIES = 4_096
 _LIFECYCLE_TRASH_MAX_DIRECTORY_ENTRIES = 1_024
 _LIFECYCLE_TRASH_MAX_DIRECTORIES = 4_096
 _LIFECYCLE_TRASH_MAX_FILES = 16_384
+_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES = 2 * 1024 * 1024
+_LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES = 32 * 1024 * 1024
 _LIFECYCLE_ATOMIC_RESIDUE = re.compile(
     r"^\.(?:prepared\.json|[0-9a-f]{64}\.json)\.[a-z0-9_]{8}\.(?:tmp|bak)$"
 )
@@ -366,6 +368,7 @@ class LifecyclePreparedInspection:
     prepared: LifecyclePreparedTransition
     state: Literal["pending", "committed", "trashed_committed", "stale"]
     cleanup_eligible: bool
+    live_owner_paths: tuple[str, ...]
     prepared_guard: vault.PathGuard
     primary_guards: tuple[vault.PathGuard, ...]
     trash_guards: tuple[vault.DirectoryCensusGuard, ...]
@@ -399,6 +402,12 @@ class LifecyclePreparedBatch:
     inspections: tuple[LifecyclePreparedInspection, ...]
     issues: tuple[LifecyclePreparedIssue, ...]
     cleanup_safe: bool
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePreparedCleanupBatch:
+    cleaned: tuple[str, ...]
+    blocked: tuple[LifecyclePreparedIssue, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1307,11 +1316,32 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
                 )
     content_guards: list[vault.PathGuard] = []
     sidecars: dict[str, list[_LifecycleTrashSidecar]] = {}
+    aggregate_sidecar_bytes = 0
     for relative in sorted(files):
         if not relative.endswith(".meta.json"):
             continue
         try:
-            raw = (root / relative).read_bytes()
+            sidecar_path = root / relative
+            info = sidecar_path.lstat()
+            if (
+                info.st_size > _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES
+                or aggregate_sidecar_bytes + info.st_size
+                > _LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES
+            ):
+                raise RelationReviewError(
+                    "LIFECYCLE_TRASH_LIMIT",
+                    "trash sidecar bytes exceed the bounded proof inventory",
+                )
+            raw = sidecar_path.read_bytes()
+            if (
+                len(raw) > _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES
+                or aggregate_sidecar_bytes + len(raw)
+                > _LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES
+            ):
+                raise RelationReviewError(
+                    "LIFECYCLE_TRASH_LIMIT",
+                    "trash sidecar bytes exceed the bounded proof inventory",
+                )
             guard = vault.PathGuard.capture(
                 root,
                 relative,
@@ -1323,11 +1353,14 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
             original = metadata.get("original_path")
             if not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
+        except RelationReviewError:
+            raise
         except (OSError, UnicodeDecodeError, ValueError, vault.PathGuardError) as error:
             raise RelationReviewError(
                 "LIFECYCLE_TRASH_INVALID",
                 "trash proof inventory contains an invalid sidecar or changed file",
             ) from error
+        aggregate_sidecar_bytes += len(raw)
         content_guards.append(guard)
         assert isinstance(original, str)
         trash_root = relative.removesuffix(".meta.json")
@@ -1580,6 +1613,7 @@ def inspect_lifecycle_prepared_slots(
                 prepared=prepared,
                 state=state,
                 cleanup_eligible=state == "stale" and proof is None,
+                live_owner_paths=owner_paths,
                 prepared_guard=prepared_guard,
                 primary_guards=primary_guards,
                 trash_guards=trash.guards if trash is not None else (),
@@ -1598,71 +1632,166 @@ def inspect_lifecycle_prepared_slots(
     )
 
 
+def _live_identity_owner_paths(
+    census: semantic_contract.StableIdentityCensus,
+    page_identity: str,
+) -> tuple[str, ...]:
+    return tuple(
+        path
+        for path in census.paths_by_identity.get(page_identity, ())
+        if not path.startswith(f"{kb_dirname()}/_trash/")
+    )
+
+
+def _cleanup_stale_lifecycle_prepared_locked(
+    root: Path,
+    inspection: LifecyclePreparedInspection,
+) -> str:
+    inspection.prepared_guard.recheck(root)
+    for guard in inspection.primary_guards:
+        guard.recheck(root)
+    for guard in inspection.trash_target_guards:
+        guard.recheck(root)
+    prepared, prepared_guard = _load_lifecycle_prepared_bound(
+        root, inspection.prepared.page_identity
+    )
+    if prepared != inspection.prepared or prepared_guard is None:
+        raise RelationReviewError(
+            "LIFECYCLE_RECONCILE_RACE",
+            "prepared transition changed before cleanup",
+        )
+    inspection.prepared_guard.recheck(root)
+    with _open_review_directory(
+        root,
+        nested=("lifecycle", inspection.prepared.page_identity),
+        max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+    ) as opened:
+        if opened is None or "prepared.json" not in opened.names:
+            raise RelationReviewError(
+                "LIFECYCLE_RECONCILE_RACE",
+                "prepared transition changed before cleanup",
+            )
+        raw, immediate_guard = _read_artifact_bytes(opened, "prepared.json")
+        immediate = _parse_lifecycle_prepared(
+            raw,
+            page_identity=inspection.prepared.page_identity,
+        )
+        if immediate != inspection.prepared:
+            raise RelationReviewError(
+                "LIFECYCLE_RECONCILE_RACE",
+                "prepared transition changed before cleanup",
+            )
+        inspection.prepared_guard.recheck(root)
+        immediate_guard.recheck(root)
+        if opened.descriptor_relative:
+            os.unlink("prepared.json", dir_fd=opened.descriptor)
+        else:  # pragma: no cover - Windows fallback
+            (opened.path / "prepared.json").unlink()
+    return inspection.prepared.reference
+
+
+def cleanup_stale_lifecycle_prepared_batch(
+    vault_root: Path,
+    inspections: tuple[LifecyclePreparedInspection, ...],
+) -> LifecyclePreparedCleanupBatch:
+    """Clean stale slots under one lock and one shared trash recheck pass."""
+    root = Path(vault_root).absolute()
+    items = tuple(inspections)
+    if not items:
+        return LifecyclePreparedCleanupBatch((), ())
+    if len(items) > _LIFECYCLE_MAX_IDENTITIES:
+        raise RelationReviewError(
+            "LIFECYCLE_RECONCILE_LIMIT",
+            "lifecycle cleanup exceeds its bounded identity limit",
+        )
+    shared_directories = items[0].trash_guards
+    shared_sidecars = items[0].trash_content_guards
+    if any(
+        item.trash_guards is not shared_directories
+        or item.trash_content_guards is not shared_sidecars
+        for item in items[1:]
+    ):
+        return LifecyclePreparedCleanupBatch(
+            (),
+            tuple(
+                LifecyclePreparedIssue(
+                    "LIFECYCLE_RECONCILE_SNAPSHOT_MISMATCH",
+                    item.prepared.page_identity,
+                )
+                for item in items
+            ),
+        )
+    cleaned: list[str] = []
+    blocked: list[LifecyclePreparedIssue] = []
+    with vault.vault_creation_lock(root, "semantic-creation"):
+        try:
+            census = semantic_contract.build_stable_identity_census(root)
+        except activation_manifest.ActivationManifestError:
+            return LifecyclePreparedCleanupBatch(
+                (),
+                tuple(
+                    LifecyclePreparedIssue(
+                        "LIFECYCLE_PRIMARY_CENSUS_FAILED",
+                        item.prepared.page_identity,
+                    )
+                    for item in items
+                ),
+            )
+        try:
+            for guard in shared_directories:
+                guard.recheck(root)
+            for guard in shared_sidecars:
+                guard.recheck(root)
+        except vault.PathGuardError:
+            return LifecyclePreparedCleanupBatch(
+                (),
+                tuple(
+                    LifecyclePreparedIssue(
+                        "LIFECYCLE_RECONCILE_RACE",
+                        item.prepared.page_identity,
+                    )
+                    for item in items
+                ),
+            )
+        for item in items:
+            identity = item.prepared.page_identity
+            if item.state != "stale" or not item.cleanup_eligible:
+                blocked.append(
+                    LifecyclePreparedIssue(
+                        "LIFECYCLE_RECONCILE_NOT_STALE", identity
+                    )
+                )
+                continue
+            fresh_owners = _live_identity_owner_paths(census, identity)
+            if fresh_owners != item.live_owner_paths:
+                blocked.append(
+                    LifecyclePreparedIssue("LIFECYCLE_PRIMARY_RACE", identity)
+                )
+                continue
+            try:
+                cleaned.append(
+                    _cleanup_stale_lifecycle_prepared_locked(root, item)
+                )
+            except (OSError, RelationReviewError, vault.PathGuardError):
+                blocked.append(
+                    LifecyclePreparedIssue("LIFECYCLE_RECONCILE_RACE", identity)
+                )
+    return LifecyclePreparedCleanupBatch(tuple(cleaned), tuple(blocked))
+
+
 def cleanup_stale_lifecycle_prepared(
     vault_root: Path,
     inspection: LifecyclePreparedInspection,
 ) -> str:
-    """Guarded-remove exactly one still-stale slot; never touch decisions/content."""
-    root = Path(vault_root).absolute()
-    if inspection.state != "stale" or not inspection.cleanup_eligible:
-        raise RelationReviewError(
-            "LIFECYCLE_RECONCILE_NOT_STALE",
-            "only an exactly inspected stale prepared slot is cleanup-eligible",
-        )
-    try:
-        with vault.vault_creation_lock(root, "semantic-creation"):
-            inspection.prepared_guard.recheck(root)
-            for guard in inspection.primary_guards:
-                guard.recheck(root)
-            for guard in inspection.trash_guards:
-                guard.recheck(root)
-            for guard in inspection.trash_content_guards:
-                guard.recheck(root)
-            for guard in inspection.trash_target_guards:
-                guard.recheck(root)
-            prepared, prepared_guard = _load_lifecycle_prepared_bound(
-                root, inspection.prepared.page_identity
-            )
-            if prepared != inspection.prepared or prepared_guard is None:
-                raise RelationReviewError(
-                    "LIFECYCLE_RECONCILE_RACE",
-                    "prepared transition changed before cleanup",
-                )
-            inspection.prepared_guard.recheck(root)
-            with _open_review_directory(
-                root,
-                nested=("lifecycle", inspection.prepared.page_identity),
-                max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
-            ) as opened:
-                if opened is None or "prepared.json" not in opened.names:
-                    raise RelationReviewError(
-                        "LIFECYCLE_RECONCILE_RACE",
-                        "prepared transition changed before cleanup",
-                    )
-                raw, immediate_guard = _read_artifact_bytes(
-                    opened, "prepared.json"
-                )
-                immediate = _parse_lifecycle_prepared(
-                    raw,
-                    page_identity=inspection.prepared.page_identity,
-                )
-                if immediate != inspection.prepared:
-                    raise RelationReviewError(
-                        "LIFECYCLE_RECONCILE_RACE",
-                        "prepared transition changed before cleanup",
-                    )
-                inspection.prepared_guard.recheck(root)
-                immediate_guard.recheck(root)
-                if opened.descriptor_relative:
-                    os.unlink("prepared.json", dir_fd=opened.descriptor)
-                else:  # pragma: no cover - Windows fallback
-                    (opened.path / "prepared.json").unlink()
-    except vault.PathGuardError as error:
-        raise RelationReviewError(
-            "LIFECYCLE_RECONCILE_RACE",
-            "primary, trash, or prepared state changed before cleanup",
-        ) from error
-    return inspection.prepared.reference
+    """Compatibility wrapper routed through the guarded batch cleanup path."""
+    result = cleanup_stale_lifecycle_prepared_batch(vault_root, (inspection,))
+    if result.cleaned:
+        return result.cleaned[0]
+    issue = result.blocked[0]
+    raise RelationReviewError(
+        issue.code,
+        "prepared lifecycle cleanup was blocked by changed or unsafe state",
+    )
 
 
 def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
@@ -1794,6 +1923,18 @@ def _validate_exact_lifecycle_trash_proof(
         raise RelationReviewError(
             "LIFECYCLE_TRANSITION_MISMATCH",
             "trash proof does not bind exact sidecar, UUID, bytes, and ownership",
+        )
+    try:
+        sidecar_bytes = proof.sidecar_source.encode("utf-8", errors="strict")
+    except (AttributeError, UnicodeEncodeError) as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "trash proof sidecar is not strict UTF-8 text",
+        ) from error
+    if len(sidecar_bytes) > _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_LIMIT",
+            "trash proof sidecar exceeds the accepted byte limit",
         )
     try:
         sidecar = parse_exact_json_object(proof.sidecar_source)

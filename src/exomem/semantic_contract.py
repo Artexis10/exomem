@@ -913,6 +913,12 @@ def _build_identity_census(
     return StableIdentityCensus(tuple(entries)), MappingProxyType(dict(sources))
 
 
+def build_stable_identity_census(vault_root: Path) -> StableIdentityCensus:
+    """Re-derive UUID ownership without building or parsing a semantic corpus."""
+    census, _ = _build_identity_census(Path(vault_root))
+    return census
+
+
 def _resolver_snapshot(
     resolver: vault.WikilinkResolver,
 ) -> tuple[

@@ -64,6 +64,9 @@ class ReconcileReport:
     )
     lifecycle_prepared_issues: list[dict[str, str]] = field(default_factory=list)
     lifecycle_prepared_omitted_count: int = 0
+    lifecycle_prepared_omitted_counts: dict[str, int] = field(
+        default_factory=dict
+    )
     remaining_drift: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
@@ -91,6 +94,9 @@ class ReconcileReport:
             "lifecycle_prepared_omitted_count": (
                 self.lifecycle_prepared_omitted_count
             ),
+            "lifecycle_prepared_omitted_counts": (
+                self.lifecycle_prepared_omitted_counts
+            ),
             "remaining_drift": self.remaining_drift,
             "dry_run": self.dry_run,
         }
@@ -114,6 +120,11 @@ def _changed_writes(writes: list[PlannedWrite]) -> list[PlannedWrite]:
         if current != w.content:
             out.append(w)
     return out
+
+
+def _bounded_lifecycle_values(values):
+    retained = list(values[:_LIFECYCLE_REPORT_LIMIT])
+    return retained, max(0, len(values) - len(retained))
 
 
 def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
@@ -142,39 +153,45 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         corpus=semantic_batch.corpus,
     )
     lifecycle = lifecycle_batch.inspections
-    report.lifecycle_prepared = [
-        item.as_dict() for item in lifecycle[:_LIFECYCLE_REPORT_LIMIT]
-    ]
-    report.lifecycle_prepared_omitted_count = max(
-        0, len(lifecycle) - len(report.lifecycle_prepared)
+    report.lifecycle_prepared, prepared_omitted = _bounded_lifecycle_values(
+        tuple(item.as_dict() for item in lifecycle)
     )
+    report.lifecycle_prepared_omitted_count = prepared_omitted
+    report.lifecycle_prepared_omitted_counts = {
+        "lifecycle_prepared": prepared_omitted,
+        "lifecycle_prepared_issues": 0,
+        "lifecycle_prepared_cleaned": 0,
+        "lifecycle_prepared_cleanup_blocked": 0,
+    }
     report.lifecycle_prepared_summary = {
         state: sum(item.state == state for item in lifecycle)
         for state in ("committed", "pending", "stale", "trashed_committed")
     }
-    report.lifecycle_prepared_issues = [
-        issue.as_dict()
-        for issue in lifecycle_batch.issues[:_LIFECYCLE_REPORT_LIMIT]
-    ]
+    (
+        report.lifecycle_prepared_issues,
+        report.lifecycle_prepared_omitted_counts["lifecycle_prepared_issues"],
+    ) = _bounded_lifecycle_values(
+        tuple(issue.as_dict() for issue in lifecycle_batch.issues)
+    )
     if not dry_run and lifecycle_batch.cleanup_safe:
-        for item in lifecycle:
-            if not item.cleanup_eligible:
-                continue
-            try:
-                cleaned = relation_review.cleanup_stale_lifecycle_prepared(
-                    vault_root, item
-                )
-            except relation_review.RelationReviewError as error:
-                if len(report.lifecycle_prepared_cleanup_blocked) < _LIFECYCLE_REPORT_LIMIT:
-                    report.lifecycle_prepared_cleanup_blocked.append(
-                        {
-                            "page_identity": item.prepared.page_identity,
-                            "code": error.code,
-                        }
-                    )
-                continue
-            if len(report.lifecycle_prepared_cleaned) < _LIFECYCLE_REPORT_LIMIT:
-                report.lifecycle_prepared_cleaned.append(cleaned)
+        cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch(
+            vault_root,
+            tuple(item for item in lifecycle if item.cleanup_eligible),
+        )
+        (
+            report.lifecycle_prepared_cleaned,
+            report.lifecycle_prepared_omitted_counts[
+                "lifecycle_prepared_cleaned"
+            ],
+        ) = _bounded_lifecycle_values(cleanup.cleaned)
+        (
+            report.lifecycle_prepared_cleanup_blocked,
+            report.lifecycle_prepared_omitted_counts[
+                "lifecycle_prepared_cleanup_blocked"
+            ],
+        ) = _bounded_lifecycle_values(
+            tuple(issue.as_dict() for issue in cleanup.blocked)
+        )
     kb = kb_root(vault_root)
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----

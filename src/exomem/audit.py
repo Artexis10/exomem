@@ -53,7 +53,6 @@ from . import (
     relation_registry,
     semantic_language_registry,
     semantic_units,
-    semantic_writes,
 )
 from . import find as find_module
 from .kbdir import kb_dirname, kb_prefix
@@ -139,12 +138,16 @@ class AuditFinding:
 class AuditReport:
     findings: list[AuditFinding]
     summary: dict[str, int]  # category → count
+    metadata: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        value = {
             "findings": [f.as_dict() for f in self.findings],
             "summary": self.summary,
         }
+        if self.metadata:
+            value["metadata"] = self.metadata
+        return value
 
 
 def audit(
@@ -175,6 +178,7 @@ def audit(
     )
 
     findings: list[AuditFinding] = []
+    metadata: dict = {}
     if "broken_wikilink" in selected:
         findings.extend(_check_broken_wikilinks(vault_root, pages))
     if "orphan_entity" in selected:
@@ -206,7 +210,11 @@ def audit(
     if "relation_debt" in selected:
         findings.extend(_check_relation_debt(vault_root, pages))
     if "semantic_contract_drift" in selected:
-        findings.extend(_check_semantic_contract_drift(vault_root))
+        semantic_findings, semantic_metadata = _check_semantic_contract_drift(
+            vault_root
+        )
+        findings.extend(semantic_findings)
+        metadata["semantic_contract_drift"] = semantic_metadata
 
     summary: dict[str, int] = {}
     for f in findings:
@@ -216,11 +224,19 @@ def audit(
         "audit complete: categories=%s findings=%d summary=%s",
         sorted(selected), len(findings), summary,
     )
-    return AuditReport(findings=findings, summary=summary)
+    return AuditReport(
+        findings=findings,
+        summary=summary,
+        metadata=metadata or None,
+    )
 
 
-def _check_semantic_contract_drift(vault_root: Path) -> list[AuditFinding]:
+def _check_semantic_contract_drift(
+    vault_root: Path,
+) -> tuple[list[AuditFinding], dict]:
     """Project the shared bounded posthoc result into audit findings."""
+    from . import semantic_writes
+
     batch = semantic_writes.evaluate_posthoc_batch(
         vault_root,
         operation="audit",
@@ -258,7 +274,10 @@ def _check_semantic_contract_drift(vault_root: Path) -> list[AuditFinding]:
                 },
             )
         )
-    return out
+    return out, {
+        "omitted_counts": batch["omitted_counts"],
+        "truncation": batch["truncation"],
+    }
 
 
 # ---------------- vault walk ----------------
