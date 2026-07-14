@@ -21,12 +21,12 @@ provisioner:
   location: fsn1
   internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
   pollSeconds: "1"
-  providerRecoverySigningKeySecret:
-    name: exomem-provider-recovery-signer
-    key: private-key
   providerRecoveryPublicKeySecret:
     name: exomem-provider-recovery-verifier
     key: public-key
+  providerRecoverySigningKeySecret:
+    name: exomem-provider-recovery-signer
+    key: private-key
 
 admission:
   namespaceContractOperatorUsernames:
@@ -36,9 +36,45 @@ admission:
 scheduler:
   contractVersion: 1
   contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc
-  image: docker.io/curlimages/curl:8.18.0@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
   secretName: exomem-hosted-scheduler
   secretKey: secret
+
+observability:
+  contractSha256: cd576fd9012557787d8c740e96fdafdbfc851cf6a818207ec128731e8d732ad0
+  alertDeliverySecretName: exomem-hosted-alert-delivery
+  alertDeliverySecretKey: url
+
+capacityCollector:
+  schedule: "* * * * *"
+  contractSha256: 1ff4737fa940bffefddd260d02b0a67f0bdffbcf56ec26e40264ee21895f9598
+  stateConfigMap: exomem-capacity-receipt
+  privateKeySecret:
+    name: exomem-capacity-receipt-signer
+    key: private-key
+  hcloudTokenSecret:
+    name: exomem-hcloud-capacity-reader
+    key: token
+
+durability:
+  contractSha256: d3f32142323f64e540fc95c39dc2ca8c82ec060e7ebc84caeab6d6e7ed0fbe48
+  storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
+  b2Endpoint: ""
+  b2Region: ""
+  recoveryBucket: ""
+  userExportBucket: ""
+  databaseBackupBucket: ""
+  databaseBackup:
+    proofTenantId: ""
+    proofCellId: ""
+    sourceService: substrate-production
+    maintenanceService: postgres-maintenance
+    scratchService: exomem-restore-verification
+    scratchDatabase: exomem_restore_verification
+    expectedRestoreOwner: substrate
+    verificationSql: >-
+      SELECT current_user,
+      current_setting('app.restore_tenant_id', true),
+      current_setting('app.restore_cell_id', true)
 
 storage:
   className: exomem-hcloud-encrypted-retain

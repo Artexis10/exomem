@@ -31,7 +31,7 @@ etcd-s3: true
 etcd-s3-endpoint: {{ k3s_etcd_s3_endpoint | to_json }}
 etcd-s3-region: {{ k3s_etcd_s3_region | to_json }}
 etcd-s3-bucket: {{ k3s_etcd_s3_bucket | to_json }}
-etcd-s3-folder: etcd-snapshot
+etcd-s3-folder: exomem-private-alpha/etcd
 etcd-s3-access-key: {{ k3s_etcd_s3_access_key | to_json }}
 etcd-s3-secret-key: {{ k3s_etcd_s3_secret_key | to_json }}
 etcd-s3-retention: 336

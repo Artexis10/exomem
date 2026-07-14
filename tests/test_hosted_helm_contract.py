@@ -72,20 +72,11 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "runtime" not in values
     release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
     assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
-    assert len(release["commandRegistry"]) == 21
-    platform_schema = json.loads(
-        (PLATFORM / "values.schema.json").read_text(encoding="utf-8")
-    )
+    platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
     assert platform_schema["properties"]["runtime"] is False
     assert "releaseManifestJson" in platform_schema["properties"]["provisioner"]["required"]
-    assert "contractDigest" not in platform_schema["properties"]["provisioner"]["properties"]
-    assert "apiSecretName" not in platform_schema["properties"]["provisioner"]["properties"]
-    assert "workerSecretName" not in platform_schema["properties"]["provisioner"]["properties"]
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
-    )
-    assert values["scheduler"]["image"].endswith(
-        "@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17"
     )
     assert "@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f" in json.dumps(
         values["hcloud-csi"]
@@ -94,6 +85,625 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "1dd5776c2810f80f038454c9333a3814a2319b1b" in provenance
     assert "encryption-passphrase" in provenance
     assert "crypto_LUKS" in provenance
+
+
+def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
+    tmp_path: Path,
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    mutable = {**release, "runtimeImage": "ghcr.io/artexis10/exomem:latest"}
+    partial = dict(release)
+    partial.pop("gatewayContractSha256")
+    for index, invalid in enumerate((mutable, partial), start=1):
+        override = tmp_path / f"invalid-release-{index}.yaml"
+        override.write_text(
+            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                str(HELM),
+                "template",
+                "exomem-platform",
+                str(PLATFORM),
+                "--namespace",
+                "exomem-platform",
+                "--values",
+                str(PLATFORM / "values.validation.yaml"),
+                "--values",
+                str(override),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "hosted release" in result.stderr
+
+
+def test_platform_rejects_malformed_release_fields_and_noncanonical_registry(
+    tmp_path: Path,
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    invalid_releases = []
+    for field, value in (
+        ("schemaVersion", "1"),
+        ("release", {"not": "a version"}),
+        ("hostedProtocol", "999"),
+        ("releaseBuildTime", False),
+        ("releaseBuildTime", "2026-99-99T03:50:34Z"),
+        ("commandRegistry", [None] * 21),
+        ("commandRegistry", list(reversed(release["commandRegistry"]))),
+    ):
+        invalid_releases.append({**release, field: value})
+    for index, invalid in enumerate(invalid_releases, start=1):
+        override = tmp_path / f"malformed-release-{index}.yaml"
+        override.write_text(
+            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                str(HELM),
+                "template",
+                "exomem-platform",
+                str(PLATFORM),
+                "--namespace",
+                "exomem-platform",
+                "--values",
+                str(PLATFORM / "values.validation.yaml"),
+                "--values",
+                str(override),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0, (index, result.stdout)
+        assert "hosted release" in result.stderr
+
+
+def test_platform_rejects_wrong_provisioner_image_repository(tmp_path: Path) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    override = tmp_path / "wrong-provisioner-image.yaml"
+    override.write_text(
+        yaml.safe_dump(
+            {
+                "provisioner": {
+                    "image": "ghcr.io/someone/else@sha256:" + "e" * 64,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "exomem-platform",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+            "--values",
+            str(override),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+
+
+def test_platform_renders_real_provisioner_composition() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    expected_image = validation_values["provisioner"]["image"]
+    expected_release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+
+    release = _find(documents, "ConfigMap", "exomem-hosted-release-v1")
+    assert release["metadata"]["namespace"] == "exomem-platform"
+    assert release.get("immutable") is not True
+    assert json.loads(release["data"]["exomem-hosted-release-v1.json"]) == expected_release
+
+    service = _find(documents, "Service", "exomem-provisioner")
+    assert service["metadata"]["namespace"] == "exomem-platform"
+    assert service["spec"]["type"] == "ClusterIP"
+    assert service["spec"]["ports"] == [
+        {"name": "http", "port": 8080, "protocol": "TCP", "targetPort": "http"}
+    ]
+
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    worker = _find(documents, "Deployment", "exomem-provisioner-worker")
+    api_spec = api["spec"]["template"]["spec"]
+    worker_spec = worker["spec"]["template"]["spec"]
+    assert api_spec["automountServiceAccountToken"] is False
+    assert api_spec["containers"][0]["image"] == expected_image
+    api_environment = {item["name"]: item for item in api_spec["containers"][0]["env"]}
+    assert api_environment["EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-provider-recovery-signer",
+        "key": "private-key",
+    }
+    assert worker_spec["serviceAccountName"] == "exomem-cell-provisioner"
+    assert worker_spec["containers"][0]["image"] == expected_image
+    worker_container = worker_spec["containers"][0]
+    environment = {item["name"]: item for item in worker_container["env"]}
+    assert environment["EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-provider-recovery-verifier",
+        "key": "public-key",
+    }
+    assert "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" not in environment
+    assert not any(
+        privileged_fragment in name
+        for name in environment
+        for privileged_fragment in ("HCLOUD", "B2_", "DELETE_CREDENTIAL")
+    )
+    assert environment["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
+        "/etc/exomem/release/exomem-hosted-release-v1.json"
+    )
+    assert {item["name"] for item in worker_container["volumeMounts"]} >= {
+        "hosted-release",
+        "temporary",
+    }
+    assert (
+        next(volume for volume in worker_spec["volumes"] if volume["name"] == "hosted-release")[
+            "configMap"
+        ]["name"]
+        == "exomem-hosted-release-v1"
+    )
+    provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    volume_attachment_rule = next(
+        rule
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == ["storage.k8s.io"]
+        and rule.get("resources") == ["volumeattachments"]
+    )
+    assert volume_attachment_rule["verbs"] == ["get", "list", "watch"]
+    assert not any(
+        resource in {"persistentvolumes", "pods", "pods/exec"}
+        for rule in provisioner_role["rules"]
+        for resource in rule.get("resources", [])
+    )
+    _find(documents, "ClusterRoleBinding", "exomem-cell-provisioner")
+
+    route = _find(documents, "IngressRoute", "exomem-provisioner-control")
+    assert route["metadata"]["namespace"] == "exomem-platform"
+    assert route["spec"]["entryPoints"] == ["web"]
+    assert len(route["spec"]["routes"]) == 1
+    rule = route["spec"]["routes"][0]
+    assert "Host(`control.example.test`)" in rule["match"]
+    assert "transfer.example.test" not in rule["match"]
+    assert "PathPrefix" not in rule["match"]
+    actions = json.loads(
+        (ROOT / "infra/contracts/platform-composition-v1.json").read_text(encoding="utf-8")
+    )["provisioner"]["actions"]
+    for action in actions:
+        assert f"Path(`/cells/{action}`)" in rule["match"]
+    assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
+
+
+def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    runtime = _find(documents, "ConfigMap", "exomem-operational-receipt-collector")
+    assert runtime["data"]["private-alpha-capacity-v1.json"] == (
+        ROOT / "infra/operations/private-alpha-capacity-v1.json"
+    ).read_text(encoding="utf-8")
+    assert (
+        "exomem.capacity-live-receipt.v1\\0" in runtime["data"]["operational_receipt_collector.py"]
+    )
+
+    state = _find(documents, "ConfigMap", "exomem-capacity-receipt")
+    assert state["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+    assert json.loads(state["data"]["state.json"]) == {
+        "schema_version": 1,
+        "last_sequence": 0,
+    }
+
+    collector = _find(documents, "CronJob", "exomem-capacity-receipt-collector")
+    assert collector["spec"]["schedule"] == "* * * * *"
+    assert collector["spec"]["concurrencyPolicy"] == "Forbid"
+    pod = collector["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "exomem-capacity-receipt-collector"
+    container = pod["containers"][0]
+    assert container["command"] == [
+        "python",
+        "/opt/exomem-hosted/operational_receipt_collector.py",
+        "capacity",
+    ]
+    environment = {item["name"]: item for item in container["env"]}
+    assert environment["EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-capacity-receipt-signer",
+        "key": "private-key",
+    }
+    assert environment["EXOMEM_HCLOUD_CAPACITY_TOKEN"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-hcloud-capacity-reader",
+        "key": "token",
+    }
+    assert environment["EXOMEM_ALERT_WEBHOOK_URL"]["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-hosted-alert-delivery",
+        "key": "url",
+    }
+    projected = next(volume for volume in pod["volumes"] if volume["name"] == "kube-api")
+    token_projection = projected["projected"]["sources"][0]["serviceAccountToken"]
+    assert token_projection["audience"] == "https://kubernetes.default.svc.cluster.local"
+    assert token_projection["expirationSeconds"] == 600
+
+    role = _find(documents, "ClusterRole", "exomem-capacity-receipt-collector")
+    assert role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["namespaces"],
+            "verbs": ["get", "list"],
+        }
+    ]
+    namespaced_role = _find(documents, "Role", "exomem-capacity-receipt-collector")
+    assert namespaced_role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resourceNames": ["exomem-capacity-receipt"],
+            "resources": ["configmaps"],
+            "verbs": ["get", "patch"],
+        }
+    ]
+
+    rendered = json.dumps(documents)
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    worker = _find(documents, "Deployment", "exomem-provisioner-worker")
+    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps([api, worker])
+    assert rendered.count("exomem-capacity-receipt-signer") == 1
+
+
+def test_platform_renders_disjoint_durability_workloads() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    storage = _find(documents, "ConfigMap", "exomem-durability-storage")
+    assert storage["data"] == {
+        "s3-endpoint": "https://s3.eu-central-003.backblazeb2.com",
+        "s3-region": "eu-central-003",
+        "recovery-bucket": "recovery-example",
+        "user-export-bucket": "user-export-example",
+        "database-backup-bucket": "database-backup-example",
+    }
+    contract = json.loads(
+        _find(documents, "ConfigMap", "exomem-durability-workload-contract")["data"][
+            "durability-workloads-v1.json"
+        ]
+    )
+    assert contract["schemaVersion"] == 1
+
+    expected = {
+        "exomem-export-gc": ("CronJob", ["exomem-export-gc"], "*/5 * * * *", False),
+        "exomem-durability-backup": (
+            "CronJob",
+            ["exomem-durability-backup-worker"],
+            "*/30 * * * *",
+            True,
+        ),
+        "exomem-database-backup": (
+            "CronJob",
+            ["exomem-database-backup-worker"],
+            "*/30 * * * *",
+            False,
+        ),
+        "exomem-deletion-worker": (
+            "Deployment",
+            ["exomem-deletion-worker"],
+            None,
+            True,
+        ),
+        "exomem-volume-worker": (
+            "Deployment",
+            ["exomem-volume-worker"],
+            None,
+            True,
+        ),
+    }
+
+    def pod_spec(document: dict) -> dict:
+        if document["kind"] == "CronJob":
+            return document["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+        return document["spec"]["template"]["spec"]
+
+    def secret_refs(pod: dict) -> set[str]:
+        refs = {
+            f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
+            for container in pod.get("containers", [])
+            for item in container.get("env", [])
+            if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
+        }
+        refs.update(
+            f"{source['secret']['name']}/{item['key']}"
+            for volume in pod.get("volumes", [])
+            for source in volume.get("projected", {}).get("sources", [])
+            if "secret" in source
+            for item in source["secret"].get("items", [])
+        )
+        return refs
+
+    expected_secrets = {
+        "exomem-export-gc": {
+            "exomem-provisioner-database/url",
+            "exomem-provisioner-wrapping-key/key-material",
+            "exomem-user-export-delete-key-id/application-key-id",
+            "exomem-user-export-delete-key/application-key",
+        },
+        "exomem-durability-backup": {
+            "exomem-provisioner-database/url",
+            "exomem-provisioner-wrapping-key/key-material",
+            "exomem-provider-recovery-signer/private-key",
+            "exomem-recovery-upload-key-id/application-key-id",
+            "exomem-recovery-upload-key/application-key",
+        },
+        "exomem-database-backup": {
+            "exomem-provisioner-database/url",
+            "exomem-provisioner-wrapping-key/key-material",
+            "exomem-provider-recovery-signer/private-key",
+            "exomem-database-backup-upload-key-id/application-key-id",
+            "exomem-database-backup-upload-key/application-key",
+            "exomem-database-backup-pg-service/pg_service.conf",
+            "exomem-database-backup-pgpass/pgpass",
+        },
+        "exomem-deletion-worker": {
+            "exomem-provisioner-database/url",
+            "exomem-provisioner-wrapping-key/key-material",
+            "exomem-provider-recovery-verifier/public-key",
+            "exomem-provisioner-hcloud-token/token",
+            "exomem-recovery-delete-key-id/application-key-id",
+            "exomem-recovery-delete-key/application-key",
+            "exomem-user-export-delete-key-id/application-key-id",
+            "exomem-user-export-delete-key/application-key",
+        },
+        "exomem-volume-worker": {
+            "exomem-provisioner-auth/credential",
+            "exomem-provisioner-database/url",
+            "exomem-provisioner-wrapping-key/key-material",
+            "exomem-provider-recovery-signer/private-key",
+            "exomem-provisioner-hcloud-token/token",
+        },
+    }
+    for name, (kind, command, schedule, token) in expected.items():
+        workload = _find(documents, kind, name)
+        if kind == "CronJob":
+            assert workload["spec"]["schedule"] == schedule
+            assert workload["spec"]["concurrencyPolicy"] == "Forbid"
+        pod = pod_spec(workload)
+        assert pod["automountServiceAccountToken"] is token
+        assert pod["containers"][0]["command"] == command
+        assert secret_refs(pod) == expected_secrets[name]
+        assert pod["containers"][0]["securityContext"]["readOnlyRootFilesystem"] is True
+        assert pod["securityContext"]["seccompProfile"]["type"] == "RuntimeDefault"
+
+    database_pod = pod_spec(_find(documents, "CronJob", "exomem-database-backup"))
+    assert database_pod["initContainers"][0]["name"] == "prepare-pg-files"
+    database_env = {
+        item["name"]: item.get("value")
+        for item in database_pod["containers"][0]["env"]
+        if "value" in item
+    }
+    assert database_env["EXOMEM_DATABASE_BACKUP_PG_SERVICE_FILE"] == (
+        "/run/secrets/exomem/database-backup/pg_service.conf"
+    )
+    assert database_env["EXOMEM_DATABASE_BACKUP_PGPASS_FILE"] == (
+        "/run/secrets/exomem/database-backup/.pgpass"
+    )
+    assert database_env["EXOMEM_DATABASE_BACKUP_PG_DUMP"] == "/usr/bin/pg_dump"
+    assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_TENANT_ID"] == "tenant-owner-proof"
+    assert database_env["EXOMEM_DATABASE_BACKUP_PROOF_CELL_ID"] == "cell-owner-proof"
+
+    volume_pod = pod_spec(_find(documents, "Deployment", "exomem-volume-worker"))
+    volume_env = {
+        item["name"]: item.get("value")
+        for item in volume_pod["containers"][0]["env"]
+        if "value" in item
+    }
+    assert volume_env["EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS"] == "10.0.0.0/8"
+    assert volume_env["EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME"] == (
+        "exomem-volume-encryption"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE"] == (
+        "exomem-platform"
+    )
+
+    deletion_pod = pod_spec(_find(documents, "Deployment", "exomem-deletion-worker"))
+    deletion_env_names = {item["name"] for item in deletion_pod["containers"][0]["env"]}
+    assert {
+        "EXOMEM_PROVISIONER_HCLOUD_TOKEN",
+        "EXOMEM_PROVISIONER_B2_ENDPOINT_URL",
+        "EXOMEM_PROVISIONER_B2_REGION",
+        "EXOMEM_PROVISIONER_RECOVERY_BUCKET",
+        "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET",
+        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID",
+        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY",
+        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID",
+        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY",
+        "EXOMEM_PROVISIONER_WORKER_ID",
+    } <= deletion_env_names
+    assert (
+        not {
+            "EXOMEM_DURABILITY_RECOVERY_BUCKET",
+            "EXOMEM_DURABILITY_USER_EXPORT_BUCKET",
+            "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
+            "EXOMEM_PROVISIONER_DATABASE_BACKUP_BUCKET",
+            "EXOMEM_DURABILITY_DATABASE_BACKUP_DELETE_KEY_ID",
+            "EXOMEM_DURABILITY_DATABASE_BACKUP_DELETE_KEY",
+            "EXOMEM_PROVISIONER_DATABASE_BACKUP_DELETE_KEY_ID",
+            "EXOMEM_PROVISIONER_DATABASE_BACKUP_DELETE_KEY",
+            "EXOMEM_DELETION_WORKER_ID",
+        }
+        & deletion_env_names
+    )
+
+    backup_role = _find(documents, "ClusterRole", "exomem-durability-backup")
+    assert backup_role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["namespaces"],
+            "verbs": ["get", "list", "watch"],
+        },
+        {
+            "apiGroups": ["apps"],
+            "resources": ["statefulsets"],
+            "verbs": ["get"],
+        },
+        {
+            "apiGroups": ["coordination.k8s.io"],
+            "resources": ["leases"],
+            "verbs": ["create", "delete", "get", "patch", "update"],
+        },
+        {
+            "apiGroups": ["traefik.io"],
+            "resources": ["ingressroutes"],
+            "verbs": ["get", "list", "patch"],
+        },
+    ]
+    deletion_role = _find(documents, "ClusterRole", "exomem-deletion-worker")
+    assert deletion_role["rules"] == [
+        {
+            "apiGroups": [""],
+            "resources": ["namespaces"],
+            "verbs": ["delete", "get", "list", "patch", "watch"],
+        },
+        {"apiGroups": [""], "resources": ["secrets"], "verbs": ["delete"]},
+        {
+            "apiGroups": [""],
+            "resources": ["persistentvolumes"],
+            "verbs": ["delete", "get", "list"],
+        },
+        {"apiGroups": ["apps"], "resources": ["statefulsets"], "verbs": ["get"]},
+        {
+            "apiGroups": ["traefik.io"],
+            "resources": ["ingressroutes"],
+            "verbs": ["delete", "get", "list"],
+        },
+    ]
+    volume_role = _find(documents, "ClusterRole", "exomem-volume-worker")
+    assert not any("secrets" in rule.get("resources", []) for rule in volume_role["rules"])
+    namespace_rule = next(
+        rule for rule in volume_role["rules"] if "namespaces" in rule.get("resources", [])
+    )
+    assert namespace_rule["resources"] == ["namespaces"]
+    assert namespace_rule["verbs"] == ["get", "list", "watch"]
+
+    for policy_name, service_account in (
+        ("exomem-provisioner-scope", "exomem-cell-provisioner"),
+        ("exomem-durability-backup-scope", "exomem-durability-backup"),
+        ("exomem-deletion-worker-scope", "exomem-deletion-worker"),
+        ("exomem-volume-worker-scope", "exomem-volume-worker"),
+    ):
+        policy = _find(documents, "ValidatingAdmissionPolicy", policy_name)
+        rendered_policy = json.dumps(policy)
+        assert f"system:serviceaccount:exomem-platform:{service_account}" in rendered_policy
+        assert "request.namespace.startsWith('exo-')" in rendered_policy
+        if policy_name != "exomem-volume-worker-scope":
+            assert "exomem-platform" not in " ".join(
+                validation["expression"] for validation in policy["spec"]["validations"]
+            )
+        _find(documents, "ValidatingAdmissionPolicyBinding", policy_name)
+    volume_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-volume-worker-scope")
+    rendered_volume_scope = json.dumps(volume_scope)
+    for required_guard in (
+        "exomem.io/recovery-envelope",
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/fence",
+        "exomem-hcloud-encrypted-retain",
+        "ReadWriteOnce",
+        "quantity('10Gi')",
+        "Filesystem",
+        "nodePublishSecretRef",
+        "exomem-volume-encryption",
+        "exomem-platform",
+        "oldObject.spec == object.spec",
+    ):
+        assert required_guard in rendered_volume_scope
+    backup_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-durability-backup-scope")
+    assert backup_scope["spec"]["matchConstraints"]["resourceRules"] == [
+        {
+            "apiGroups": ["coordination.k8s.io"],
+            "apiVersions": ["*"],
+            "operations": ["CREATE", "UPDATE", "DELETE"],
+            "resources": ["leases"],
+            "scope": "Namespaced",
+        },
+        {
+            "apiGroups": ["traefik.io"],
+            "apiVersions": ["*"],
+            "operations": ["UPDATE"],
+            "resources": ["ingressroutes"],
+            "scope": "Namespaced",
+        },
+    ]
+    deletion_scope = _find(documents, "ValidatingAdmissionPolicy", "exomem-deletion-worker-scope")
+    rendered_deletion_scope = json.dumps(deletion_scope)
+    for required_guard in (
+        "exomem.io/recovery-envelope",
+        "exomem.io/credentials-secret-name",
+        "exomem-cell-credentials",
+        "exomem.io/credential-deletion-operation-digest",
+        "exomem.io/credential-deletion-fence",
+        "9007199254740991",
+        "oldObject.metadata.labels == object.metadata.labels",
+        "dyn(oldObject).spec == dyn(object).spec",
+        "may update only the namespace deletion receipt",
+    ):
+        assert required_guard in rendered_deletion_scope
+    assert "middlewares" not in rendered_deletion_scope
+
+
+def test_platform_pins_exact_durability_contracts() -> None:
+    values = yaml.safe_load((PLATFORM / "values.yaml").read_text(encoding="utf-8"))
+    for name, value_key in (
+        ("durability-workloads-v1.json", "contractSha256"),
+        ("durability-storage-v1.json", "storageContractSha256"),
+    ):
+        source = (ROOT / "infra/contracts" / name).read_bytes()
+        vendored = (PLATFORM / "files" / name).read_bytes()
+        assert vendored == source
+        assert values["durability"][value_key] == hashlib.sha256(source).hexdigest()
+    workloads = json.loads(
+        (ROOT / "infra/contracts/durability-workloads-v1.json").read_text(encoding="utf-8")
+    )["workloads"]
+    assert workloads["volumeLifecycle"]["privateKey"] == workloads["vaultBackup"]["privateKey"]
+    assert workloads["deliveryGc"]["publicVerifier"] is False
+    assert workloads["vaultBackup"]["publicVerifier"] is False
+    assert workloads["volumeLifecycle"]["publicVerifier"] is False
+    assert workloads["deletion"]["privateKey"] is None
+    assert workloads["deletion"]["publicVerifier"] is True
+    assert all(
+        "database-backup" not in permission
+        for permission in workloads["deletion"]["providerPermissions"]
+    )
+    bindings = json.loads(
+        (ROOT / "infra/contracts/durability-workloads-v1.json").read_text(encoding="utf-8")
+    )["secretBindings"]
+    assert not any("databaseBackupDelete" in name for name in bindings)
+    storage = json.loads(
+        (ROOT / "infra/contracts/durability-storage-v1.json").read_text(encoding="utf-8")
+    )
+    assert {
+        name: binding["workerEnvironmentVariable"] for name, binding in storage["bindings"].items()
+    } == {
+        "recovery_bucket_name": "EXOMEM_DURABILITY_RECOVERY_BUCKET",
+        "user_export_bucket_name": "EXOMEM_DURABILITY_USER_EXPORT_BUCKET",
+        "database_backup_bucket_name": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
+    }
 
 
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
@@ -112,9 +722,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert runtime_class["handler"] == "runc"
     tenant_admission = _find(documents, "ValidatingAdmissionPolicy", "exomem-tenant-boundary")
     assert "paramKind" not in tenant_admission["spec"]
-    tenant_binding = _find(
-        documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary"
-    )
+    tenant_binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary")
     assert "matchResources" not in tenant_binding["spec"]
     assert "matchConditions" not in tenant_admission["spec"]
     variables = tenant_admission["spec"]["variables"]
@@ -195,6 +803,8 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         document["metadata"]["name"]: document
         for document in documents
         if document.get("kind") == "CronJob"
+        and document.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
     }
     assert set(cronjobs) == {job["name"] for job in contract["jobs"]}
     for job in contract["jobs"]:
@@ -213,12 +823,36 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert job_spec["ttlSecondsAfterFinished"] == 300
         assert pod["restartPolicy"] == "Never"
         assert container["env"][0]["name"] == "EXOMEM_HOSTED_SCHEDULER_SECRET"
-        command = " ".join(container["args"])
-        assert contract["origin"] + job["path"] in command
-        assert "--connect-timeout 5" in command
-        assert "--max-time 20" in command
-        assert 'test "${status}" = "200"' in command
+        env = {item["name"]: item.get("value") for item in container["env"]}
+        assert env["TARGET_URL"] == contract["origin"] + job["path"]
+        assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
+        assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
+        assert env["CADENCE_SECONDS"] == ("60" if job["schedule"] == "* * * * *" else "3600")
+        assert container["command"] == [
+            "python",
+            "/opt/exomem-hosted/scheduler_runtime.py",
+            "request",
+        ]
+        assert container["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+        assert pod["automountServiceAccountToken"] is False
+        assert {volume["name"] for volume in pod["volumes"]} == {"runtime", "kube-api"}
+        projected = next(volume for volume in pod["volumes"] if volume["name"] == "kube-api")
+        token_projection = projected["projected"]["sources"][0]["serviceAccountToken"]
+        assert token_projection["audience"] == "https://kubernetes.default.svc.cluster.local"
+        assert projected["projected"]["defaultMode"] == 0o440
+        assert pod["securityContext"]["fsGroup"] == 10001
         assert "CRON_SECRET" not in json.dumps(rendered)
+
+        state = _find(documents, "ConfigMap", f"exomem-hosted-scheduler-state-{job['name']}")
+        persisted = json.loads(state["data"]["state.json"])
+        assert persisted["job"] == job["name"]
+        assert persisted["duration_seconds"]["buckets"] == {
+            "1": 0,
+            "5": 0,
+            "20": 0,
+            "+Inf": 0,
+        }
+        assert state["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
 
     policy = _find(documents, "ConfigMap", "exomem-hosted-scheduler-contract")
     rendered_contract = json.loads(policy["data"]["contract.json"])
@@ -272,6 +906,118 @@ def test_platform_rejects_scheduler_contract_sha_drift() -> None:
     assert "scheduler contract SHA-256 mismatch" in result.stderr
 
 
+def test_platform_renders_owned_namespaces_and_content_free_observability() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    expected_enforcement = {"exomem-platform": "privileged", "exomem-system": "restricted"}
+    for name, enforcement in expected_enforcement.items():
+        namespace = _find(documents, "Namespace", name)
+        assert namespace["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+        assert namespace["metadata"]["annotations"]["meta.helm.sh/release-name"] == (
+            "exomem-platform"
+        )
+        assert (
+            namespace["metadata"]["annotations"]["meta.helm.sh/release-namespace"]
+            == "exomem-platform"
+        )
+        assert namespace["metadata"]["labels"] == {
+            "app.kubernetes.io/managed-by": "Helm",
+            "app.kubernetes.io/part-of": "exomem-hosted",
+            "pod-security.kubernetes.io/enforce": enforcement,
+            "pod-security.kubernetes.io/enforce-version": "v1.35",
+            "pod-security.kubernetes.io/audit": "restricted",
+            "pod-security.kubernetes.io/audit-version": "v1.35",
+            "pod-security.kubernetes.io/warn": "restricted",
+            "pod-security.kubernetes.io/warn-version": "v1.35",
+        }
+
+    observability = _find(documents, "ConfigMap", "exomem-hosted-observability-contract")
+    contract = json.loads(observability["data"]["contract.json"])
+    assert contract == json.loads(
+        (ROOT / "infra/contracts/observability-v1.json").read_text(encoding="utf-8")
+    )
+    assert contract["alerts"]["scheduler_missed_run_seconds"] == 180
+    assert contract["alerts"]["scheduler_consecutive_failures"] == 2
+    assert contract["poll_interval_seconds"] == 300
+    scheduler_check = next(
+        check for check in contract["checks"] if check["name"] == "scheduler-last-success"
+    )
+    assert scheduler_check["maximum_age_seconds"] == 480
+    assert contract["alerts"]["backup_warn_age_seconds"] == 2700
+    assert contract["alerts"]["backup_block_age_seconds"] == 3600
+
+    scheduler_jobs = [
+        item
+        for item in documents
+        if item.get("kind") == "CronJob"
+        and item.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/part-of")
+        == "exomem-hosted-scheduler"
+    ]
+    assert {
+        item["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
+        for item in scheduler_jobs
+    } == {"ghcr.io/artexis10/exomem@sha256:" + "a" * 64}
+    scheduler_text = json.dumps(scheduler_jobs)
+    runtime = _find(documents, "ConfigMap", "exomem-hosted-scheduler-runtime")
+    runtime_source = runtime["data"]["scheduler_runtime.py"]
+    assert "record_attempt" in runtime_source
+    assert "evaluate_alerts" in runtime_source
+    assert "ThreadingHTTPServer" in runtime_source
+    assert "NoRedirect" in runtime_source
+    assert _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
+    evaluator = _find(documents, "Deployment", "exomem-hosted-scheduler-alerts")
+    collector = _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
+    for deployment in (collector, evaluator):
+        assert deployment["spec"]["template"]["spec"]["containers"][0]["image"] == (
+            "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+        )
+    evaluator_env = {
+        item["name"]: item.get("value")
+        for item in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert evaluator_env["MISSED_RUN_SECONDS"] == "180"
+    assert evaluator_env["FAILURE_THRESHOLD"] == "2"
+    evaluator_container = evaluator["spec"]["template"]["spec"]["containers"][0]
+    webhook = next(
+        item for item in evaluator_container["env"] if item["name"] == "ALERT_WEBHOOK_URL"
+    )
+    assert webhook["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-hosted-alert-delivery",
+        "key": "url",
+    }
+    assert evaluator_env["COLLECTOR_SNAPSHOT_URL"] == (
+        "http://exomem-hosted-scheduler-metrics.exomem-platform.svc.cluster.local:9090/snapshot"
+    )
+    evaluator_projected = next(
+        volume
+        for volume in evaluator["spec"]["template"]["spec"]["volumes"]
+        if volume["name"] == "kube-api"
+    )
+    assert (
+        evaluator_projected["projected"]["sources"][0]["serviceAccountToken"]["audience"]
+        == "https://kubernetes.default.svc.cluster.local"
+    )
+    metrics_service = _find(documents, "Service", "exomem-hosted-scheduler-metrics")
+    assert metrics_service["metadata"]["annotations"]["prometheus.io/scrape"] == "true"
+    alert_state = _find(documents, "ConfigMap", "exomem-hosted-scheduler-alert-state")
+    assert json.loads(alert_state["data"]["state.json"])["transitions_total"] == 0
+    template = (PLATFORM / "templates/observability.yaml").read_text(encoding="utf-8")
+    assert 'lookup "v1" "ConfigMap"' in template
+    for metric in (
+        "exomem_hosted_scheduler_attempts_total",
+        "exomem_hosted_scheduler_failures_total",
+        "exomem_hosted_scheduler_duration_seconds",
+        "exomem_hosted_scheduler_last_success_unixtime",
+    ):
+        assert metric in runtime_source
+    for forbidden in ("response_body", "authorization_value", "environment_dump"):
+        assert forbidden not in (scheduler_text + runtime_source).lower()
+
+
 @pytest.mark.parametrize(
     ("values_name", "expected_kind"),
     (("values.initialize.yaml", "Job"), ("values.validation.yaml", "StatefulSet")),
@@ -280,13 +1026,16 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     values_name: str, expected_kind: str
 ) -> None:
     documents = _render(CELL, CELL / values_name, namespace="cell-alpha-test")
-    pvc = _find(documents, "PersistentVolumeClaim", "cell-alpha-data")
-    assert not any(document.get("kind") == "Secret" for document in documents)
+    assert _find(documents, "PersistentVolumeClaim", "cell-alpha-data")
     quota = _find(documents, "ResourceQuota", "cell-alpha-quota")
     assert quota["spec"]["hard"]["persistentvolumeclaims"] == "1"
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
 
-    workload = _find(documents, expected_kind, "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init")
+    workload = _find(
+        documents,
+        expected_kind,
+        "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init",
+    )
     namespace = _find(documents, "Namespace", "cell-alpha-test")
     assert namespace["metadata"]["labels"] == {
         "exomem.io/tenant-cell": "true",
@@ -302,36 +1051,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "helm.sh/resource-policy": "keep",
         "exomem.io/resource-name": "cell-alpha",
         "exomem.io/pvc-name": "cell-alpha-data",
-        "exomem.io/credentials-secret-name": "exomem-cell-credentials",
+        "exomem.io/credentials-secret-name": "cell-alpha-credentials",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
-        "exomem.io/tenant-id": "tenant-alpha",
-        "exomem.io/cell-id": "cell-alpha",
-        "exomem.io/operation-id": "operation-alpha",
-        "exomem.io/tenant-digest": "a" * 64,
-        "exomem.io/subject-digest": "b" * 64,
-        "exomem.io/operation-digest": "c" * 64,
-        "exomem.io/fence": "7",
-        "exomem.io/recovery-envelope": "a" * 64,
-    }
-    assert {
-        key: pvc["metadata"]["annotations"][key]
-        for key in (
-            "exomem.io/tenant-id",
-            "exomem.io/cell-id",
-            "exomem.io/operation-id",
-            "exomem.io/tenant-digest",
-            "exomem.io/subject-digest",
-            "exomem.io/operation-digest",
-            "exomem.io/fence",
-        )
-    } == {
-        "exomem.io/tenant-id": "tenant-alpha",
-        "exomem.io/cell-id": "cell-alpha",
-        "exomem.io/operation-id": "operation-alpha",
-        "exomem.io/tenant-digest": "a" * 64,
-        "exomem.io/subject-digest": "b" * 64,
-        "exomem.io/operation-digest": "c" * 64,
-        "exomem.io/fence": "7",
     }
     if expected_kind == "Job":
         pod = workload["spec"]["template"]["spec"]
@@ -381,11 +1102,9 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert temporary["emptyDir"]["sizeLimit"] == "256Mi"
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 
-        credentials = next(
-            volume for volume in pod["volumes"] if volume["name"] == "credentials"
-        )
+        credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
-        assert credentials["secret"]["secretName"] == "exomem-cell-credentials"
+        assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
         assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 
@@ -396,14 +1115,6 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert (len(service) == 1) == (expected_kind == "StatefulSet")
     if service:
         assert service[0]["spec"]["type"] == "ClusterIP"
-    recovery_envelopes = [
-        document.get("metadata", {}).get("annotations", {}).get(
-            "exomem.io/recovery-envelope"
-        )
-        for document in documents
-    ]
-    assert all(recovery_envelopes)
-    assert len(set(recovery_envelopes)) == len(recovery_envelopes)
 
 
 def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
@@ -425,9 +1136,7 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
         extra_args=("--set", "routes.enabled=true"),
     )
     middleware = _find(documents, "Middleware", "cell-alpha-strip-cell")
-    assert middleware["spec"]["stripPrefix"]["prefixes"] == [
-        "/cells/alpha-test-original"
-    ]
+    assert middleware["spec"]["stripPrefix"]["prefixes"] == ["/cells/alpha-test-original"]
 
     control = _find(documents, "IngressRoute", "cell-alpha-control")
     transfer = _find(documents, "IngressRoute", "cell-alpha-transfer")
@@ -474,9 +1183,7 @@ def test_cell_route_and_runtime_share_one_transfer_hostname() -> None:
     }
     assert environment["EXOMEM_HOSTED_TRANSFER_HOST"] == "files.example.test"
     route = _find(documents, "IngressRoute", "cell-alpha-transfer")
-    assert route["spec"]["routes"][0]["match"].startswith(
-        "Host(`files.example.test`)"
-    )
+    assert route["spec"]["routes"][0]["match"].startswith("Host(`files.example.test`)")
 
 
 def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> None:
@@ -496,312 +1203,5 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
         {"name": "web", "port": 80, "protocol": "TCP", "targetPort": "web"}
     ]
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(
-        encoding="utf-8"
-    )
+    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
     assert cloudflare.count(target) == 2
-
-
-def test_platform_exposes_only_exact_access_protected_provisioner_actions() -> None:
-    documents = _render(
-        PLATFORM,
-        PLATFORM / "values.validation.yaml",
-        namespace="exomem-platform",
-        release_name="exomem-platform",
-    )
-    route = _find(documents, "IngressRoute", "exomem-provisioner-control")
-    rule = route["spec"]["routes"][0]
-    actions = (
-        "provision",
-        "health",
-        "rotate-credential",
-        "quiesce",
-        "resume",
-        "stop",
-        "export",
-        "export-release",
-        "export-delete",
-        "restore",
-        "export-download",
-        "seal",
-        "discard",
-        "destroy",
-    )
-    assert rule["match"] == "Host(`control.example.test`) && (" + " || ".join(
-        f"Path(`/cells/{action}`)" for action in actions
-    ) + ")"
-    assert rule["services"] == [{"name": "exomem-provisioner", "port": 8080}]
-    assert route["spec"]["entryPoints"] == ["web"]
-    rendered = json.dumps(route)
-    assert "PathPrefix" not in rendered
-    assert "/health/" not in rendered
-
-
-def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
-    documents = _render(
-        PLATFORM,
-        PLATFORM / "values.validation.yaml",
-        namespace="exomem-platform",
-        release_name="exomem-platform",
-    )
-    routine = _find(documents, "ClusterRole", "exomem-cell-provisioner")
-    routine_rules = json.dumps(routine["rules"], sort_keys=True)
-
-    assert '"persistentvolumes"' not in routine_rules
-    assert '"pods/exec"' not in routine_rules
-    assert next(
-        rule for rule in routine["rules"] if "volumeattachments" in rule.get("resources", [])
-    ) == {
-        "apiGroups": ["storage.k8s.io"],
-        "resources": ["volumeattachments"],
-        "verbs": ["get", "list", "watch"],
-    }
-    assert all(
-        forbidden not in routine_rules
-        for forbidden in (
-            '"nodes"',
-            '"customresourcedefinitions"',
-            '"clusterroles"',
-            '"clusterrolebindings"',
-            '"validatingadmissionpolicies"',
-        )
-    )
-    volume_role = _find(documents, "ClusterRole", "exomem-volume-lifecycle")
-    assert volume_role["rules"] == [
-        {
-            "apiGroups": [""],
-            "resources": ["persistentvolumeclaims"],
-            "verbs": ["create", "delete", "get", "patch", "update"],
-        },
-        {
-            "apiGroups": [""],
-            "resources": ["persistentvolumes"],
-            "verbs": ["create", "delete", "get", "patch", "update"],
-        },
-    ]
-    secret_rules = [
-        rule for rule in routine["rules"] if "secrets" in rule.get("resources", [])
-    ]
-    assert secret_rules == [
-        {
-            "apiGroups": [""],
-            "resources": ["secrets"],
-            "verbs": ["create"],
-        },
-        {
-            "apiGroups": [""],
-            "resourceNames": ["exomem-cell-credentials"],
-            "resources": ["secrets"],
-            "verbs": ["delete", "get", "patch", "update"],
-        },
-    ]
-    assert all(
-        "list" not in rule["verbs"] and "watch" not in rule["verbs"]
-        for rule in secret_rules
-    )
-    assert next(
-        rule for rule in routine["rules"] if "leases" in rule.get("resources", [])
-    ) == {
-        "apiGroups": ["coordination.k8s.io"],
-        "resources": ["leases"],
-        "verbs": ["create", "delete", "get", "patch", "update"],
-    }
-
-    bindings = {
-        document["metadata"]["name"]: document
-        for document in documents
-        if document.get("kind") == "ClusterRoleBinding"
-        and document.get("metadata", {}).get("name", "").startswith("exomem-")
-    }
-    assert bindings["exomem-cell-provisioner"]["subjects"] == [
-        {
-            "kind": "ServiceAccount",
-            "name": "exomem-cell-provisioner",
-            "namespace": "exomem-platform",
-        }
-    ]
-    assert bindings["exomem-volume-lifecycle"]["subjects"] == [
-        {
-            "kind": "ServiceAccount",
-            "name": "exomem-volume-lifecycle",
-            "namespace": "exomem-platform",
-        }
-    ]
-
-    scope = _find(
-        documents,
-        "ValidatingAdmissionPolicy",
-        "exomem-provisioner-scope",
-    )
-    scope_text = json.dumps(scope, sort_keys=True)
-    assert "system:serviceaccount:exomem-platform:exomem-cell-provisioner" in scope_text
-    assert "request.namespace.startsWith('exo-')" in scope_text
-    assert "object.metadata.name.startsWith('exo-')" in scope_text
-    assert "exomem-cell-credentials" in scope_text
-
-    volume_scope = _find(
-        documents,
-        "ValidatingAdmissionPolicy",
-        "exomem-volume-lifecycle-scope",
-    )
-    volume_scope_text = json.dumps(volume_scope, sort_keys=True)
-    assert "system:serviceaccount:exomem-platform:exomem-volume-lifecycle" in (
-        volume_scope_text
-    )
-    assert "oldObject.spec == object.spec" in volume_scope_text
-    assert "oldObject.metadata.annotations" in volume_scope_text
-    assert "dyn(object.spec).claimRef.namespace.startsWith('exo-')" in volume_scope_text
-    assert "dyn(object.spec).csi.driver == 'csi.hetzner.cloud'" in volume_scope_text
-    assert "object.metadata.name == request.namespace + '-data'" in volume_scope_text
-    for identity_key in (
-        "exomem.io/tenant-id",
-        "exomem.io/cell-id",
-        "exomem.io/operation-id",
-        "exomem.io/tenant-digest",
-        "exomem.io/subject-digest",
-        "exomem.io/operation-digest",
-        "exomem.io/fence",
-    ):
-        assert identity_key in volume_scope_text
-
-
-def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None:
-    documents = _render(
-        PLATFORM,
-        PLATFORM / "values.validation.yaml",
-        namespace="exomem-platform",
-        release_name="exomem-platform",
-    )
-    api = _find(documents, "Deployment", "exomem-provisioner-api")
-    worker = _find(documents, "Deployment", "exomem-provisioner-worker")
-    service = _find(documents, "Service", "exomem-provisioner")
-    release_config = _find(documents, "ConfigMap", "exomem-hosted-release-v1")
-
-    assert api["spec"]["template"]["spec"]["serviceAccountName"] == (
-        "exomem-provisioner-api"
-    )
-    assert api["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
-    assert service["spec"]["type"] == "ClusterIP"
-    assert worker["spec"]["replicas"] == 1
-    assert worker["spec"]["strategy"] == {"type": "Recreate"}
-    api_container = api["spec"]["template"]["spec"]["containers"][0]
-    assert "envFrom" not in api_container
-    pod = worker["spec"]["template"]["spec"]
-    assert pod["serviceAccountName"] == "exomem-cell-provisioner"
-    container = pod["containers"][0]
-    assert container["command"] == ["exomem-provisioner-worker"]
-    assert container["image"].endswith("@sha256:" + "b" * 64)
-    assert "envFrom" not in container
-    api_secret_env = {
-        item["name"]: item["valueFrom"]["secretKeyRef"]
-        for item in api_container["env"]
-        if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
-    }
-    assert api_secret_env == {
-        "EXOMEM_PROVISIONER_BEARER": {
-            "name": "exomem-provisioner-auth",
-            "key": "credential",
-        },
-        "EXOMEM_PROVISIONER_DATABASE_URL": {
-            "name": "exomem-provisioner-database",
-            "key": "url",
-        },
-        "EXOMEM_PROVISIONER_ENVELOPE_KEY": {
-            "name": "exomem-provisioner-wrapping-key",
-            "key": "key-material",
-        },
-        "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY": {
-            "name": "exomem-provider-recovery-signer",
-            "key": "private-key",
-        },
-    }
-    worker_secret_env = {
-        item["name"]: item["valueFrom"]["secretKeyRef"]
-        for item in container["env"]
-        if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
-    }
-    assert worker_secret_env == {
-        "EXOMEM_PROVISIONER_BEARER": {
-            "name": "exomem-provisioner-auth",
-            "key": "credential",
-        },
-        "EXOMEM_PROVISIONER_DATABASE_URL": {
-            "name": "exomem-provisioner-database",
-            "key": "url",
-        },
-        "EXOMEM_PROVISIONER_ENVELOPE_KEY": {
-            "name": "exomem-provisioner-wrapping-key",
-            "key": "key-material",
-        },
-        "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY": {
-            "name": "exomem-provider-recovery-verifier",
-            "key": "public-key",
-        },
-    }
-    worker_config_env = {
-        item["name"]: item["valueFrom"]["configMapKeyRef"]
-        for item in container["env"]
-        if "valueFrom" in item and "configMapKeyRef" in item["valueFrom"]
-    }
-    assert worker_config_env == {}
-    rendered = json.dumps(container)
-    assert "HighFidelity" not in rendered
-    assert "EXOMEM_PROVISIONER_CELL_IMAGE" not in rendered
-    assert "EXOMEM_PROVISIONER_CONTRACT_DIGEST" not in rendered
-    assert {
-        "name": "EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH",
-        "value": "/etc/exomem/release/exomem-hosted-release-v1.json",
-    } in container["env"]
-    assert {"name": "hosted-release", "mountPath": "/etc/exomem/release", "readOnly": True} in (
-        container["volumeMounts"]
-    )
-    assert {
-        "name": "hosted-release",
-        "configMap": {
-            "name": "exomem-hosted-release-v1",
-            "items": [
-                {
-                    "key": "exomem-hosted-release-v1.json",
-                    "path": "exomem-hosted-release-v1.json",
-                }
-            ],
-        },
-    } in pod["volumes"]
-    assert release_config["immutable"] is True
-    assert set(release_config["data"]) == {"exomem-hosted-release-v1.json"}
-    release = json.loads(release_config["data"]["exomem-hosted-release-v1.json"])
-    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
-    assert release["gatewayContractSha256"] == "b" * 64
-    assert release["operatorContractSha256"] == "c" * 64
-    assert "EXOMEM_PROVISIONER_HCLOUD_TOKEN" not in rendered
-    assert "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" not in rendered
-    assert "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY" in rendered
-    assert "EXOMEM_PROVISIONER_ACCESS_CLIENT_SECRET" not in rendered
-    assert "CF-Access-Client" not in rendered
-
-
-def test_platform_rejects_independent_runtime_release_overrides() -> None:
-    if HELM is None:
-        pytest.skip("set HELM_BIN to run pinned Helm rendering")
-    for arguments in (
-        ("--set", "runtime.image=ghcr.io/artexis10/exomem@sha256:" + "d" * 64),
-        ("--set", "provisioner.contractDigest=" + "d" * 64),
-    ):
-        result = subprocess.run(
-            [
-                str(HELM),
-                "template",
-                "exomem-platform",
-                str(PLATFORM),
-                "--namespace",
-                "exomem-platform",
-                "--values",
-                str(PLATFORM / "values.validation.yaml"),
-                *arguments,
-            ],
-            cwd=ROOT,
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        assert result.returncode != 0

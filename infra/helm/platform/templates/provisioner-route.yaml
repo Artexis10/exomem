@@ -1,0 +1,31 @@
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: exomem-provisioner-control
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-provisioner
+    app.kubernetes.io/part-of: exomem-hosted
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: >-
+        Host(`{{ .Values.provisioner.controlHostname }}`) &&
+        (Path(`/cells/provision`) ||
+        Path(`/cells/health`) ||
+        Path(`/cells/rotate-credential`) ||
+        Path(`/cells/quiesce`) ||
+        Path(`/cells/resume`) ||
+        Path(`/cells/stop`) ||
+        Path(`/cells/export`) ||
+        Path(`/cells/export-release`) ||
+        Path(`/cells/export-delete`) ||
+        Path(`/cells/restore`) ||
+        Path(`/cells/export-download`) ||
+        Path(`/cells/seal`) ||
+        Path(`/cells/discard`) ||
+        Path(`/cells/destroy`))
+      services:
+        - name: exomem-provisioner
+          port: 8080

@@ -14,13 +14,7 @@ rules:
     resources: ["namespaces"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: [""]
-    resources:
-      - configmaps
-      - limitranges
-      - persistentvolumeclaims
-      - resourcequotas
-      - serviceaccounts
-      - services
+    resources: ["configmaps", "limitranges", "persistentvolumeclaims", "resourcequotas", "serviceaccounts", "services"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: [""]
     resources: ["secrets"]
@@ -59,36 +53,4 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: exomem-cell-provisioner
-    namespace: {{ .Release.Namespace }}
----
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: exomem-volume-lifecycle
-  namespace: {{ .Release.Namespace }}
-automountServiceAccountToken: true
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: exomem-volume-lifecycle
-rules:
-  - apiGroups: [""]
-    resources: ["persistentvolumeclaims"]
-    verbs: ["create", "delete", "get", "patch", "update"]
-  - apiGroups: [""]
-    resources: ["persistentvolumes"]
-    verbs: ["create", "delete", "get", "patch", "update"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: exomem-volume-lifecycle
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: exomem-volume-lifecycle
-subjects:
-  - kind: ServiceAccount
-    name: exomem-volume-lifecycle
     namespace: {{ .Release.Namespace }}

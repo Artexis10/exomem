@@ -172,13 +172,17 @@ def load_matrix(path: Path) -> HandoffMatrix:
             if not isinstance(raw_source, dict):
                 raise HandoffError(f"secret matrix has invalid source for {name}")
             kind = raw_source.get("kind")
-            if kind not in {
-                "stdin",
-                "prompt",
-                "terraform",
-                "generated-ed25519-private",
-                "derived-ed25519-public",
-            } or kind in seen_source_kinds:
+            if (
+                kind
+                not in {
+                    "stdin",
+                    "prompt",
+                    "terraform",
+                    "generated-ed25519-private",
+                    "derived-ed25519-public",
+                }
+                or kind in seen_source_kinds
+            ):
                 raise HandoffError(f"secret matrix has invalid source kind for {name}")
             seen_source_kinds.add(kind)
             root = raw_source.get("root")

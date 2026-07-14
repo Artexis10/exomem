@@ -13,6 +13,16 @@ output "private_node_ip" {
   value       = var.private_node_ip
 }
 
+output "control_hostname" {
+  description = "Access-protected public control hostname used by the platform release."
+  value       = var.control_hostname
+}
+
+output "transfer_hostname" {
+  description = "Direct public transfer hostname used by the platform release."
+  value       = var.transfer_hostname
+}
+
 output "tunnel_id" {
   description = "Opaque Cloudflare Tunnel identifier."
   value       = cloudflare_zero_trust_tunnel_cloudflared.alpha.id

@@ -19,15 +19,15 @@ spec:
   validations:
     - expression: >-
         request.resource.resource == 'namespaces'
-          ? (object != null
-              ? object.metadata.name.startsWith('exo-')
-              : oldObject.metadata.name.startsWith('exo-'))
+          ? (request.operation == 'DELETE'
+              ? oldObject.metadata.name.startsWith('exo-')
+              : object.metadata.name.startsWith('exo-'))
           : (request.namespace.startsWith('exo-') &&
               (request.resource.resource != 'secrets' ||
-                (object != null
-                  ? object.metadata.name == 'exomem-cell-credentials'
-                  : oldObject.metadata.name == 'exomem-cell-credentials')))
-      message: The hosted provisioner may mutate only opaque exo-* tenant namespaces.
+                (request.operation == 'DELETE'
+                  ? oldObject.metadata.name == 'exomem-cell-credentials'
+                  : object.metadata.name == 'exomem-cell-credentials')))
+      message: The hosted provisioner may mutate only fixed resources in opaque exo-* tenant namespaces.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
@@ -40,7 +40,168 @@ spec:
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
-  name: exomem-volume-lifecycle-scope
+  name: exomem-durability-backup-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["coordination.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["leases"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+  matchConditions:
+    - name: durability-backup-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-durability-backup'
+  validations:
+    - expression: request.namespace.startsWith('exo-')
+      message: The durability worker may coordinate only opaque exo-* tenant namespaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-durability-backup-scope
+spec:
+  policyName: exomem-durability-backup-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-deletion-worker-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces", "persistentvolumes"]
+        scope: Cluster
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["secrets"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["DELETE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces"]
+        scope: Cluster
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["statefulsets"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+  matchConditions:
+    - name: deletion-worker-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-deletion-worker'
+  validations:
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        (request.resource.resource == 'namespaces' &&
+          oldObject.metadata.name == object.metadata.name &&
+          object.metadata.name.startsWith('exo-') &&
+          oldObject.metadata.labels == object.metadata.labels &&
+          dyn(oldObject).spec == dyn(object).spec)
+      message: The deletion worker may update only metadata on an exo-* tenant namespace.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        (has(oldObject.metadata.annotations) &&
+          has(object.metadata.annotations) &&
+          oldObject.metadata.annotations.all(k,
+            k == 'exomem.io/credential-deletion-operation-digest' ||
+            k == 'exomem.io/credential-deletion-fence' ||
+            (k in object.metadata.annotations &&
+              oldObject.metadata.annotations[k] == object.metadata.annotations[k])) &&
+          object.metadata.annotations.all(k,
+            k == 'exomem.io/credential-deletion-operation-digest' ||
+            k == 'exomem.io/credential-deletion-fence' ||
+            (k in oldObject.metadata.annotations &&
+              object.metadata.annotations[k] == oldObject.metadata.annotations[k])))
+      message: The deletion worker may change only the credential-deletion receipt annotations.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        ('exomem.io/credentials-secret-name' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credentials-secret-name'] == 'exomem-cell-credentials' &&
+          'exomem.io/credential-deletion-operation-digest' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credential-deletion-operation-digest'].matches('^[a-f0-9]{64}$') &&
+          'exomem.io/credential-deletion-fence' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credential-deletion-fence'].matches('^[1-9][0-9]{0,15}$') &&
+          int(object.metadata.annotations['exomem.io/credential-deletion-fence']) <= 9007199254740991)
+      message: The deletion worker must write a bounded content-free credential-deletion receipt.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        ((('exomem.io/credential-deletion-operation-digest' in oldObject.metadata.annotations) ==
+            ('exomem.io/credential-deletion-fence' in oldObject.metadata.annotations)) &&
+          (!('exomem.io/credential-deletion-fence' in oldObject.metadata.annotations) ||
+            (oldObject.metadata.annotations['exomem.io/credential-deletion-fence'].matches('^[1-9][0-9]{0,15}$') &&
+              int(oldObject.metadata.annotations['exomem.io/credential-deletion-fence']) <= 9007199254740991 &&
+              (int(object.metadata.annotations['exomem.io/credential-deletion-fence']) >
+                int(oldObject.metadata.annotations['exomem.io/credential-deletion-fence']) ||
+                (object.metadata.annotations['exomem.io/credential-deletion-fence'] ==
+                  oldObject.metadata.annotations['exomem.io/credential-deletion-fence'] &&
+                  object.metadata.annotations['exomem.io/credential-deletion-operation-digest'] ==
+                    oldObject.metadata.annotations['exomem.io/credential-deletion-operation-digest'])))))
+      message: The deletion worker receipt must be idempotent or advance its fencing token.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource == 'namespaces'
+      message: The deletion worker may update only the namespace deletion receipt.
+    - expression: >-
+        request.operation != 'DELETE' ||
+        ((request.resource.resource == 'persistentvolumes' &&
+            has(oldObject.metadata.annotations) &&
+            'exomem.io/recovery-envelope' in oldObject.metadata.annotations &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() >= 64 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$')) ||
+          (request.resource.resource == 'namespaces' &&
+            oldObject.metadata.name.startsWith('exo-')) ||
+          (request.resource.resource == 'secrets' &&
+            request.namespace.startsWith('exo-') &&
+            oldObject.metadata.name == 'exomem-cell-credentials') ||
+          (request.resource.resource == 'ingressroutes' &&
+            request.namespace.startsWith('exo-') &&
+            has(oldObject.metadata.labels) &&
+            oldObject.metadata.labels['exomem.io/tenant-route'] == 'true' &&
+            has(oldObject.metadata.annotations) &&
+              'exomem.io/recovery-envelope' in oldObject.metadata.annotations &&
+              oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() >= 64 &&
+              oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$')))
+      message: The deletion worker may delete only authenticated resources in opaque exo-* tenant namespaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-deletion-worker-scope
+spec:
+  policyName: exomem-deletion-worker-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-volume-worker-scope
 spec:
   failurePolicy: Fail
   matchConstraints:
@@ -51,23 +212,23 @@ spec:
         resources: ["persistentvolumes", "persistentvolumeclaims"]
         scope: "*"
   matchConditions:
-    - name: volume-lifecycle-service-account
+    - name: volume-worker-service-account
       expression: >-
         request.userInfo.username ==
-        'system:serviceaccount:{{ .Release.Namespace }}:exomem-volume-lifecycle'
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-volume-worker'
   variables:
     - name: newAnnotations
       expression: >-
-        object != null && has(object.metadata.annotations)
-          ? object.metadata.annotations
-          : {}
+        object != null && has(object.metadata.annotations) ? object.metadata.annotations : {}
     - name: oldAnnotations
       expression: >-
-        oldObject != null && has(oldObject.metadata.annotations)
-          ? oldObject.metadata.annotations
-          : {}
+        oldObject != null && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
     - name: newIdentity
       expression: >-
+        'exomem.io/recovery-envelope' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].size() >= 64 &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$') &&
         'exomem.io/tenant-id' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
         'exomem.io/cell-id' in variables.newAnnotations &&
@@ -84,6 +245,10 @@ spec:
         variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
     - name: oldIdentity
       expression: >-
+        'exomem.io/recovery-envelope' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].size() >= 64 &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$') &&
         'exomem.io/tenant-id' in variables.oldAnnotations &&
         variables.oldAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
         'exomem.io/cell-id' in variables.oldAnnotations &&
@@ -101,6 +266,7 @@ spec:
     - name: identityUnchanged
       expression: >-
         variables.oldIdentity && variables.newIdentity &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'] == variables.newAnnotations['exomem.io/recovery-envelope'] &&
         variables.oldAnnotations['exomem.io/tenant-id'] == variables.newAnnotations['exomem.io/tenant-id'] &&
         variables.oldAnnotations['exomem.io/cell-id'] == variables.newAnnotations['exomem.io/cell-id'] &&
         variables.oldAnnotations['exomem.io/operation-id'] == variables.newAnnotations['exomem.io/operation-id'] &&
@@ -110,54 +276,105 @@ spec:
         variables.oldAnnotations['exomem.io/fence'] == variables.newAnnotations['exomem.io/fence']
   validations:
     - expression: >-
-        request.resource.resource == 'persistentvolumeclaims'
-          ? (
-              request.namespace.startsWith('exo-') &&
-              (request.operation == 'DELETE'
-                ? oldObject.metadata.name == request.namespace + '-data'
-                : object.metadata.name == request.namespace + '-data') &&
-              (request.operation == 'DELETE'
-                ? variables.oldIdentity
-                : variables.newIdentity) &&
-              (request.operation != 'UPDATE' ||
-                (variables.identityUnchanged && oldObject.spec == object.spec)) &&
-              (request.operation == 'DELETE'
-                ? oldObject.spec.storageClassName == 'exomem-hcloud-encrypted-retain'
-                : object.spec.storageClassName == 'exomem-hcloud-encrypted-retain')
-            )
-          : (
-              (request.operation == 'DELETE'
-                ? variables.oldIdentity
-                : variables.newIdentity) &&
-              (request.operation != 'UPDATE' ||
-                (oldObject.spec == object.spec &&
-                  (!variables.oldIdentity || variables.identityUnchanged))) &&
-              (request.operation == 'DELETE'
-                ? (
-                    has(dyn(oldObject.spec).csi) &&
-                    dyn(oldObject.spec).csi.driver == 'csi.hetzner.cloud' &&
-                    dyn(oldObject.spec).persistentVolumeReclaimPolicy == 'Retain' &&
-                    oldObject.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-                    has(dyn(oldObject.spec).claimRef) &&
-                    dyn(oldObject.spec).claimRef.namespace.startsWith('exo-') &&
-                    dyn(oldObject.spec).claimRef.name == dyn(oldObject.spec).claimRef.namespace + '-data'
-                  )
-                : (
-                    has(dyn(object.spec).csi) &&
-                    dyn(object.spec).csi.driver == 'csi.hetzner.cloud' &&
-                    dyn(object.spec).persistentVolumeReclaimPolicy == 'Retain' &&
-                    object.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
-                    has(dyn(object.spec).claimRef) &&
-                    dyn(object.spec).claimRef.namespace.startsWith('exo-') &&
-                    dyn(object.spec).claimRef.name == dyn(object.spec).claimRef.namespace + '-data'
-                  ))
-            )
-      message: The volume worker may mutate only immutable tagged hosted HCloud PV/PVC bindings.
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.namespace.startsWith('exo-') &&
+          (request.operation == 'DELETE'
+            ? oldObject.metadata.name == request.namespace + '-data'
+            : object.metadata.name == request.namespace + '-data') &&
+          (request.operation == 'DELETE' ? variables.oldIdentity : variables.newIdentity) &&
+          (request.operation == 'DELETE'
+            ? (has(oldObject.metadata.labels) &&
+                oldObject.metadata.labels['exomem.io/resource-name'] == request.namespace)
+            : (has(object.metadata.labels) &&
+                object.metadata.labels['exomem.io/resource-name'] == request.namespace)))
+      message: The volume worker requires an immutable authenticated hosted PVC identity.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).storageClassName == 'exomem-hcloud-encrypted-retain'
+          : dyn(object.spec).storageClassName == 'exomem-hcloud-encrypted-retain')
+      message: The volume worker requires the encrypted Retain storage class.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).accessModes == ['ReadWriteOnce']
+          : dyn(object.spec).accessModes == ['ReadWriteOnce'])
+      message: The volume worker requires exactly ReadWriteOnce access.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? quantity(dyn(oldObject.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0
+          : quantity(dyn(object.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
+      message: The volume worker requires exactly 10 GiB of requested storage.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).volumeMode == 'Filesystem'
+          : dyn(object.spec).volumeMode == 'Filesystem')
+      message: The volume worker requires Filesystem volume mode.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? (has(dyn(oldObject.spec).volumeName) &&
+              dyn(oldObject.spec).volumeName.matches('^[a-z0-9][a-z0-9-]{0,252}$'))
+          : (has(dyn(object.spec).volumeName) &&
+              dyn(object.spec).volumeName.matches('^[a-z0-9][a-z0-9-]{0,252}$')))
+      message: The volume worker requires a statically bound volume name.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        request.operation != 'UPDATE' ||
+        (variables.identityUnchanged && oldObject.spec == object.spec)
+      message: The volume worker may not change a hosted PVC identity or specification.
+    - expression: >-
+        request.resource.resource != 'persistentvolumes' ||
+        ((request.operation == 'DELETE' ? variables.oldIdentity : variables.newIdentity) &&
+          (request.operation != 'UPDATE' ||
+            (oldObject.spec == object.spec &&
+              (!variables.oldIdentity || variables.identityUnchanged))))
+      message: The volume worker requires an immutable authenticated hosted PV identity.
+    - expression: >-
+        request.resource.resource != 'persistentvolumes' ||
+        (request.operation == 'DELETE'
+          ? (has(dyn(oldObject.spec).csi) &&
+              dyn(oldObject.spec).csi.driver == 'csi.hetzner.cloud' &&
+              dyn(oldObject.spec).csi.fsType == 'ext4' &&
+              has(dyn(oldObject.spec).csi.nodePublishSecretRef) &&
+              dyn(oldObject.spec).csi.nodePublishSecretRef.name == {{ .Values.storage.encryptionSecretName | quote }} &&
+              dyn(oldObject.spec).csi.nodePublishSecretRef.namespace == {{ .Values.storage.encryptionSecretNamespace | quote }} &&
+              dyn(oldObject.spec).csi.volumeHandle.matches('^[1-9][0-9]{0,19}$') &&
+              dyn(oldObject.spec).accessModes == ['ReadWriteOnce'] &&
+              quantity(dyn(oldObject.spec).capacity['storage']).compareTo(quantity('10Gi')) == 0 &&
+              dyn(oldObject.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+              dyn(oldObject.spec).storageClassName == 'exomem-hcloud-encrypted-retain' &&
+              dyn(oldObject.spec).volumeMode == 'Filesystem' &&
+              has(dyn(oldObject.spec).claimRef) &&
+              dyn(oldObject.spec).claimRef.namespace.startsWith('exo-') &&
+              dyn(oldObject.spec).claimRef.name == dyn(oldObject.spec).claimRef.namespace + '-data' &&
+              has(oldObject.metadata.labels) &&
+              oldObject.metadata.labels['exomem.io/resource-name'] == dyn(oldObject.spec).claimRef.namespace)
+          : (has(dyn(object.spec).csi) &&
+              dyn(object.spec).csi.driver == 'csi.hetzner.cloud' &&
+              dyn(object.spec).csi.fsType == 'ext4' &&
+              has(dyn(object.spec).csi.nodePublishSecretRef) &&
+              dyn(object.spec).csi.nodePublishSecretRef.name == {{ .Values.storage.encryptionSecretName | quote }} &&
+              dyn(object.spec).csi.nodePublishSecretRef.namespace == {{ .Values.storage.encryptionSecretNamespace | quote }} &&
+              dyn(object.spec).csi.volumeHandle.matches('^[1-9][0-9]{0,19}$') &&
+              dyn(object.spec).accessModes == ['ReadWriteOnce'] &&
+              quantity(dyn(object.spec).capacity['storage']).compareTo(quantity('10Gi')) == 0 &&
+              dyn(object.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+              dyn(object.spec).storageClassName == 'exomem-hcloud-encrypted-retain' &&
+              dyn(object.spec).volumeMode == 'Filesystem' &&
+              has(dyn(object.spec).claimRef) &&
+              dyn(object.spec).claimRef.namespace.startsWith('exo-') &&
+              dyn(object.spec).claimRef.name == dyn(object.spec).claimRef.namespace + '-data' &&
+              has(object.metadata.labels) &&
+              object.metadata.labels['exomem.io/resource-name'] == dyn(object.spec).claimRef.namespace))
+      message: The volume worker requires the exact encrypted 10 GiB Retain HCloud PV specification.
 ---
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: exomem-volume-lifecycle-scope
+  name: exomem-volume-worker-scope
 spec:
-  policyName: exomem-volume-lifecycle-scope
+  policyName: exomem-volume-worker-scope
   validationActions: [Deny]

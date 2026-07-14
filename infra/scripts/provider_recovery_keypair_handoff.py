@@ -54,17 +54,14 @@ def execute_keypair_handoff(
     if signer is None or verifier is None:
         raise handoff.HandoffError("keypair contract is unavailable")
     destinations = [*signer.destinations.values(), *verifier.destinations.values()]
-    targets: list[Path] = []
     for destination in destinations:
-        targets.append(
-            handoff._assert_version_is_new_and_increasing(
-                repository_root=repository_root,
-                relative_template=destination.fields["target"],
-                version=version,
-                replacements={},
-                allow_pending=False,
-                label="Ed25519 keypair",
-            )
+        handoff._assert_version_is_new_and_increasing(
+            repository_root=repository_root,
+            relative_template=destination.fields["target"],
+            version=version,
+            replacements={},
+            allow_pending=False,
+            label="Ed25519 keypair",
         )
 
     lock_dir = repository_root / "infra" / "secrets"
@@ -121,12 +118,9 @@ def execute_keypair_handoff(
                             sops_bin=sops_bin,
                         )
                     else:
-                        raise handoff.HandoffError(
-                            "keypair destination is unsupported"
-                        )
+                        raise handoff.HandoffError("keypair destination is unsupported")
                     published.append(
-                        repository_root
-                        / destination.fields["target"].format(version=version)
+                        repository_root / destination.fields["target"].format(version=version)
                     )
         except Exception:
             for target in published:
@@ -143,7 +137,9 @@ def execute_keypair_handoff(
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Generate and hand off an approved Ed25519 keypair")
+    parser = argparse.ArgumentParser(
+        description="Generate and hand off an approved Ed25519 keypair"
+    )
     parser.add_argument("--matrix", type=Path, required=True)
     parser.add_argument("--repository-root", type=Path, required=True)
     parser.add_argument("--version", required=True)
@@ -171,7 +167,7 @@ def main(argv: list[str] | None = None) -> int:
             sops_bin=args.sops_bin,
             pair_name=args.pair.replace("-", "_"),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001 - this boundary must suppress secret-bearing diagnostics
         # The handoff boundary is deliberately content-free: neither provider
         # diagnostics nor exception text may echo generated key material.
         print("Ed25519 keypair handoff rejected", file=sys.stderr)

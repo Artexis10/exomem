@@ -33,7 +33,7 @@ def test_foundation_and_durability_are_disjoint_lifecycle_domains() -> None:
     assert re.search(r'key\s*=\s*"durability/terraform\.tfstate"', durability)
     assert re.search(r"use_lockfile\s*=\s*true", foundation)
     assert re.search(r"use_lockfile\s*=\s*true", durability)
-    assert "backend \"s3\"" not in _all_tf(BOOTSTRAP)
+    assert 'backend "s3"' not in _all_tf(BOOTSTRAP)
 
 
 def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> None:
@@ -46,7 +46,7 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
     assert 'default     = "fsn1"' in variables
     assert 'default     = "ubuntu-24.04"' in variables
     assert 'default     = "10.50.1.10"' in variables
-    assert 'condition     = length(var.admin_ssh_cidrs) > 0' in variables
+    assert "condition     = length(var.admin_ssh_cidrs) > 0" in variables
     assert 'cidr != "0.0.0.0/0" && cidr != "::/0"' in variables
 
     assert 'port        = "22"' in firewall
@@ -62,6 +62,8 @@ def test_foundation_defaults_are_cost_safe_and_admin_cidrs_are_explicit() -> Non
 
     outputs = (FOUNDATION / "outputs.tf").read_text(encoding="utf-8")
     assert 'output "estimated_fixed_monthly_eur_ex_vat"' in outputs
+    assert 'output "control_hostname"' in outputs
+    assert 'output "transfer_hostname"' in outputs
     assert re.search(r"value\s*=\s*8\.99", outputs)
 
 
@@ -159,15 +161,15 @@ def test_durability_bucket_outputs_have_one_exact_platform_configmap_contract() 
     assert contract["bindings"] == {
         "recovery_bucket_name": {
             "configMapKey": "recovery-bucket",
-            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_RECOVERY_BUCKET",
+                "workerEnvironmentVariable": "EXOMEM_DURABILITY_RECOVERY_BUCKET",
         },
         "user_export_bucket_name": {
             "configMapKey": "user-export-bucket",
-            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET",
+                "workerEnvironmentVariable": "EXOMEM_DURABILITY_USER_EXPORT_BUCKET",
         },
         "database_backup_bucket_name": {
             "configMapKey": "database-backup-bucket",
-            "workerEnvironmentVariable": "EXOMEM_PROVISIONER_DATABASE_BACKUP_BUCKET",
+                "workerEnvironmentVariable": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
         },
     }
     for output_name in contract["bindings"]:
@@ -182,18 +184,21 @@ def test_bootstrap_versions_remote_state_and_splits_backend_identities() -> None
     assert 'bucket_type = "allPrivate"' in bootstrap
     assert 'mode      = "SSE-B2"' in bootstrap
     assert 'algorithm = "AES256"' in bootstrap
-    assert 'days_from_hiding_to_deleting = 30' in bootstrap
-    assert 'days_from_uploading_to_hiding' not in bootstrap
-    assert 'prevent_destroy = true' in bootstrap
+    assert "days_from_hiding_to_deleting = 30" in bootstrap
+    assert "days_from_uploading_to_hiding" not in bootstrap
+    assert "prevent_destroy = true" in bootstrap
 
     assert bootstrap.count('resource "b2_application_key"') == 2
     assert 'key_name     = "exomem-terraform-foundation"' in bootstrap
     assert 'name_prefix  = "foundation/"' in bootstrap
     assert 'key_name     = "exomem-terraform-durability"' in bootstrap
     assert 'name_prefix  = "durability/"' in bootstrap
-    assert bootstrap.count(
-        'capabilities = ["deleteFiles", "listBuckets", "listFiles", "readFiles", "writeFiles"]'
-    ) == 1
+    assert (
+        bootstrap.count(
+            'capabilities = ["deleteFiles", "listBuckets", "listFiles", "readFiles", "writeFiles"]'
+        )
+        == 1
+    )
     assert bootstrap.count("capabilities = local.state_capabilities") == 2
 
     outputs = (BOOTSTRAP / "outputs.tf").read_text(encoding="utf-8")
@@ -212,10 +217,10 @@ def test_plan_wrapper_requires_private_backend_config() -> None:
         script = (ROOT / f"infra/scripts/{script_name}").read_text(encoding="utf-8")
         assert 'backend_config="${TF_BACKEND_CONFIG_FILE:-}"' in script
         assert 'stat -c "%a"' in script
-        assert 'backend config must have mode 0600' in script
+        assert "backend config must have mode 0600" in script
         assert '-backend-config="${backend_config}"' in script
-        assert 'AWS_ACCESS_KEY_ID' in script
-        assert 'AWS_SECRET_ACCESS_KEY' in script
+        assert "AWS_ACCESS_KEY_ID" in script
+        assert "AWS_SECRET_ACCESS_KEY" in script
     assert "*.tfbackend" in gitignore
 
 
@@ -224,10 +229,10 @@ def test_backend_bootstrap_seals_local_state_and_uses_saved_plans() -> None:
 
     assert 'case "${action}" in' in script
     assert "plan|apply" in script
-    assert "-state=\"${state_path}\"" in script
+    assert '-state="${state_path}"' in script
     assert "inspect_terraform_plan.py" in script
-    assert 'plaintext_safe_to_remove=false' in script
-    assert 'SOPS_AGE_RECIPIENTS' in script
+    assert "plaintext_safe_to_remove=false" in script
+    assert "SOPS_AGE_RECIPIENTS" in script
     assert '"${sops_bin}" encrypt' in script
     assert '"${sops_bin}" decrypt "${encrypted_tmp}" >/dev/null' in script
     assert 'mv -f -- "${encrypted_tmp}" "${escrow_path}"' in script

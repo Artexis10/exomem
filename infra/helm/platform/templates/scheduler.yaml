@@ -1,4 +1,5 @@
 {{- $contractRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
+{{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
 {{- $contract := $contractRaw | fromJson -}}
 {{- $contractSha256 := $contractRaw | sha256sum -}}
 {{- if ne (int .Values.scheduler.contractVersion) (int $contract.version) -}}
@@ -16,14 +17,41 @@
 {{- if ne (int $contract.kubernetesJobPolicy.maxAttempts) (add 1 (int $contract.kubernetesJobPolicy.backoffLimit) | int) -}}
 {{- fail "scheduler maxAttempts must equal backoffLimit plus one" -}}
 {{- end }}
+{{- if or (ne $contract.observability.contentFree true) (ne $contract.observability.attemptCounterMetric "exomem_hosted_scheduler_attempts_total") (ne $contract.observability.failureCounterMetric "exomem_hosted_scheduler_failures_total") (ne $contract.observability.durationHistogramMetric "exomem_hosted_scheduler_duration_seconds") (ne $contract.observability.lastSuccessMetric "exomem_hosted_scheduler_last_success_unixtime") (ne (int $contract.observability.missedRunAlertAfterSeconds) 180) (ne (int $contract.observability.consecutiveFailureAlertThreshold) 2) -}}
+{{- fail "unsupported hosted scheduler observability contract" -}}
+{{- end }}
 {{- $schedulerEnvironmentVariable := $contract.authentication.schedulerEnvironmentVariable -}}
-{{- $authorizationScheme := $contract.authentication.scheme | title -}}
-{{- $successStatus := first $contract.requestPolicy.successStatusCodes -}}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: exomem-hosted-scheduler
 automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-hosted-scheduler-state-writer
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+{{- range $job := $contract.jobs }}
+      - exomem-hosted-scheduler-state-{{ $job.name }}
+{{- end }}
+    verbs: ["get", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-hosted-scheduler-state-writer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-hosted-scheduler-state-writer
+subjects:
+  - kind: ServiceAccount
+    name: exomem-hosted-scheduler
+    namespace: exomem-platform
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -35,6 +63,14 @@ data:
   contract.json: |-
 {{ $contractRaw | indent 4 }}
 {{- range $job := $contract.jobs }}
+{{- $cadenceSeconds := 0 -}}
+{{- if eq $job.schedule "* * * * *" -}}
+{{- $cadenceSeconds = 60 -}}
+{{- else if eq $job.schedule "17 * * * *" -}}
+{{- $cadenceSeconds = 3600 -}}
+{{- else -}}
+{{- fail "scheduler job has an unsupported cadence" -}}
+{{- end }}
 ---
 apiVersion: batch/v1
 kind: CronJob
@@ -68,34 +104,69 @@ spec:
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
             seccompProfile:
               type: RuntimeDefault
           containers:
             - name: request
-              image: {{ $.Values.scheduler.image }}
+              image: {{ $runtimeImage }}
               imagePullPolicy: IfNotPresent
-              command: ["/bin/sh", "-ec"]
-              args:
-                - |-
-                  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --proto '=https' --tlsv1.2 --connect-timeout {{ $contract.requestPolicy.connectTimeoutSeconds }} --max-time {{ $contract.requestPolicy.totalTimeoutSeconds }} --max-redirs 0 --request {{ $contract.requestPolicy.method }} --header "Authorization: {{ $authorizationScheme }} ${EXOMEM_HOSTED_SCHEDULER_SECRET}" {{ $contract.origin }}{{ $job.path }})"
-                  test "${status}" = {{ $successStatus | quote }}
+              command: ["python", "/opt/exomem-hosted/scheduler_runtime.py", "request"]
               env:
                 - name: {{ $schedulerEnvironmentVariable }}
                   valueFrom:
                     secretKeyRef:
                       name: {{ $.Values.scheduler.secretName }}
                       key: {{ $.Values.scheduler.secretKey }}
+                - name: JOB_NAME
+                  value: {{ $job.name | quote }}
+                - name: TARGET_URL
+                  value: {{ printf "%s%s" $contract.origin $job.path | quote }}
+                - name: CADENCE_SECONDS
+                  value: {{ $cadenceSeconds | quote }}
+                - name: CONNECT_TIMEOUT_SECONDS
+                  value: {{ $contract.requestPolicy.connectTimeoutSeconds | quote }}
+                - name: TOTAL_TIMEOUT_SECONDS
+                  value: {{ $contract.requestPolicy.totalTimeoutSeconds | quote }}
+              volumeMounts:
+                - name: runtime
+                  mountPath: /opt/exomem-hosted
+                  readOnly: true
+                - name: kube-api
+                  mountPath: /var/run/secrets/exomem-api
+                  readOnly: true
               resources:
                 requests:
                   cpu: 5m
-                  memory: 8Mi
+                  memory: 24Mi
                 limits:
                   cpu: 100m
-                  memory: 32Mi
+                  memory: 64Mi
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
                 runAsNonRoot: true
+                runAsUser: 10001
                 capabilities:
                   drop: [ALL]
+          volumes:
+            - name: runtime
+              configMap:
+                name: exomem-hosted-scheduler-runtime
+                defaultMode: 0444
+            - name: kube-api
+              projected:
+                defaultMode: 0440
+                sources:
+                  - serviceAccountToken:
+                      path: token
+                      expirationSeconds: 600
+                      audience: https://kubernetes.default.svc.cluster.local
+                  - configMap:
+                      name: kube-root-ca.crt
+                      items:
+                        - key: ca.crt
+                          path: ca.crt
 {{- end }}

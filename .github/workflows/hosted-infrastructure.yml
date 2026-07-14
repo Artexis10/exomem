@@ -1,0 +1,107 @@
+name: Hosted infrastructure
+
+on:
+  pull_request:
+    paths:
+      - "infra/**"
+      - "docs/runbooks/hosted/**"
+      - "tests/test_hosted_*.py"
+      - "openspec/changes/add-hosted-private-alpha-infrastructure/**"
+      - ".github/workflows/hosted-infrastructure.yml"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "docs/runbooks/hosted/**"
+      - "tests/test_hosted_*.py"
+      - "openspec/changes/add-hosted-private-alpha-infrastructure/**"
+      - ".github/workflows/hosted-infrastructure.yml"
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.11.28"
+  PYTHON_VERSION: "3.13.5"
+  NODE_VERSION: "22.17.1"
+
+jobs:
+  static:
+    if: github.event_name != 'schedule'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: ${{ env.UV_VERSION }}
+          python-version: ${{ env.PYTHON_VERSION }}
+          enable-cache: true
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: "1.25.1"
+          cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3
+        with:
+          terraform_version: "1.15.8"
+          terraform_wrapper: false
+      - name: Install exact infrastructure validators
+        run: |
+          source infra/tool-versions.env
+          go install github.com/terraform-linters/tflint@v${TFLINT_VERSION}
+          go install helm.sh/helm/v3/cmd/helm@v${HELM_VERSION}
+          go install github.com/yannh/kubeconform/cmd/kubeconform@v${KUBECONFORM_VERSION}
+          go install github.com/open-policy-agent/conftest@v${CONFTEST_VERSION}
+          go install github.com/getsops/sops/v3/cmd/sops@v${SOPS_VERSION}
+          go install filippo.io/age/cmd/age-keygen@v${AGE_VERSION}
+          go install github.com/aquasecurity/trivy/cmd/trivy@v${TRIVY_VERSION}
+          curl --fail --silent --show-error --location \
+            --output /tmp/shellcheck.tar.xz \
+            https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz
+          echo "8c3be12b05d5c177a04c29e3c78ce89ac86f1595681cab149b65b97c4e227198  /tmp/shellcheck.tar.xz" | sha256sum --check
+          tar --extract --xz --file /tmp/shellcheck.tar.xz --directory /tmp
+          install -m 0755 /tmp/shellcheck-v${SHELLCHECK_VERSION}/shellcheck "$HOME/.local/bin/shellcheck"
+          uv venv .venv-hosted-ci
+          uv pip install --python .venv-hosted-ci/bin/python \
+            ansible-core==${ANSIBLE_CORE_VERSION} ansible-lint==${ANSIBLE_LINT_VERSION} \
+            checkov==${CHECKOV_VERSION}
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          echo "$PWD/.venv-hosted-ci/bin" >> "$GITHUB_PATH"
+          export PATH="$PWD/.venv-hosted-ci/bin:$PATH"
+          ansible-galaxy collection install -r infra/ansible/collections/requirements.yml
+      - name: Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan
+        run: |
+          EXOMEM_RUN_REAL_SOPS_TESTS=1 \
+          RUN_K3S_ADMISSION_TEST=1 \
+          SOPS_BIN="$(command -v sops)" \
+          AGE_KEYGEN_BIN="$(command -v age-keygen)" \
+          infra/scripts/validate.sh
+      - name: Strict hosted OpenSpec
+        run: |
+          source infra/tool-versions.env
+          npm install --global @fission-ai/openspec@${OPENSPEC_VERSION}
+          openspec validate add-hosted-private-alpha-infrastructure --strict
+
+  external-blackbox:
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+      - name: External availability, backup-freshness, and scheduler-last-success checks
+        env:
+          EXOMEM_BLACKBOX_CONTROL_URL: ${{ secrets.EXOMEM_BLACKBOX_CONTROL_URL }}
+          EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL: ${{ secrets.EXOMEM_BLACKBOX_BACKUP_FRESHNESS_URL }}
+          EXOMEM_BLACKBOX_SCHEDULER_URL: ${{ secrets.EXOMEM_BLACKBOX_SCHEDULER_URL }}
+        run: python3 infra/scripts/external_blackbox.py --contract infra/contracts/observability-v1.json

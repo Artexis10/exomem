@@ -16,7 +16,7 @@ provisioner:
       "runtimeImage": "ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       "publishedTag": "ghcr.io/artexis10/exomem:54618b931dec8f0ad053dce48dd80cc36c95c549-hosted",
       "operatorContractSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
-      "gatewayContractSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "gatewayContractSha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "commandRegistry": [
         {"name": "coordination_status", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
         {"name": "bootstrap", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
@@ -43,3 +43,12 @@ provisioner:
     }
 scheduler:
   contractVersion: 1
+durability:
+  b2Endpoint: https://s3.eu-central-003.backblazeb2.com
+  b2Region: eu-central-003
+  recoveryBucket: recovery-example
+  userExportBucket: user-export-example
+  databaseBackupBucket: database-backup-example
+  databaseBackup:
+    proofTenantId: tenant-owner-proof
+    proofCellId: cell-owner-proof
