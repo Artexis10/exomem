@@ -166,6 +166,11 @@ class HostedCellConfig:
                 "HOSTED_CONFIG_MISSING",
                 "hosted v2 identity or a legacy service credential is required",
             )
+        if service_credential is not None and vault_id is not None:
+            raise HostedConfigError(
+                "HOSTED_CONFIG_CONFLICT",
+                "hosted v2 credentials must be provided only by the fixed Secret mount",
+            )
         if service_credential is not None and len(service_credential.encode("utf-8")) < 32:
             raise HostedConfigError(
                 "HOSTED_CREDENTIAL_WEAK",

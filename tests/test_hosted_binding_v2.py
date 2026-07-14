@@ -71,6 +71,21 @@ def test_v2_runtime_config_uses_bound_identity_without_plaintext_env_credential(
     assert config.requires_dynamic_security is True
     assert config.matches_service_credential("legacy-must-not-work") is False
 
+    conflicting = {
+        "EXOMEM_HOSTED_CELL_ID": binding.cell_id,
+        "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
+        "EXOMEM_VAULT_PATH": str(binding.vault_root),
+        "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+        "EXOMEM_LOG_DIR": str(binding.log_root),
+        "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
+        "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
+        "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "a" * 64,
+        "EXOMEM_HOSTED_SERVICE_CREDENTIAL": "legacy-secret-must-not-coexist-with-v2",
+    }
+    with pytest.raises(HostedConfigError) as error:
+        HostedCellConfig.from_env(conflicting, require_provisioned=True)
+    assert error.value.code == "HOSTED_CONFIG_CONFLICT"
+
 
 def test_binding_v2_persists_storage_identity_not_release_proof(tmp_path: Path) -> None:
     binding = _binding(tmp_path)
