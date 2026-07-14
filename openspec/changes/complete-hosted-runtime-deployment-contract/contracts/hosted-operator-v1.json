@@ -1,0 +1,939 @@
+{
+  "artifact": "exomem-hosted-operator-contract",
+  "contract_version": 1,
+  "binding_version": 2,
+  "invocation": {
+    "argv_by_command": {
+      "init": [
+        "exomem",
+        "hosted",
+        "init",
+        "--contract-version",
+        "1",
+        "--request-file",
+        "/run/exomem/operator-requests/init.json"
+      ],
+      "restore-candidate": [
+        "exomem",
+        "hosted",
+        "restore-candidate",
+        "--contract-version",
+        "1",
+        "--request-file",
+        "/run/exomem/operator-requests/restore-candidate.json"
+      ],
+      "credential": [
+        "exomem",
+        "hosted",
+        "credential",
+        "--contract-version",
+        "1",
+        "--request-file",
+        "-"
+      ],
+      "probe": [
+        "exomem",
+        "hosted",
+        "probe",
+        "--contract-version",
+        "1",
+        "--request-file",
+        "-"
+      ]
+    },
+    "commands": [
+      "init",
+      "restore-candidate",
+      "credential",
+      "probe"
+    ],
+    "request_encoding": "utf-8-json-with-no-duplicate-keys",
+    "request_max_bytes": 65536,
+    "stdout": "exactly-one-canonical-json-line",
+    "stdout_max_bytes": 65536,
+    "stderr_for_modeled_outcome": "empty",
+    "unknown_argument_or_request_field": "HOSTED_OPERATOR_CONTRACT_INVALID"
+  },
+  "offline_request_file": {
+    "commands": [
+      "init",
+      "restore-candidate"
+    ],
+    "directory": "/run/exomem/operator-requests",
+    "path_by_command": {
+      "init": "/run/exomem/operator-requests/init.json",
+      "restore-candidate": "/run/exomem/operator-requests/restore-candidate.json"
+    },
+    "kubernetes_delivery": "one-shot-read-only-subPath-regular-file",
+    "container_mount_read_only": true,
+    "updates_supported": false,
+    "absolute_path_required": true,
+    "parent_symlink_components": false,
+    "leaf_symlink": false,
+    "owner_uid": 0,
+    "allowed_modes_octal": [
+      "0400",
+      "0440",
+      "0444"
+    ],
+    "write_bits": false,
+    "regular_file": true,
+    "hard_link_count": 1,
+    "open_flags": [
+      "O_RDONLY",
+      "O_CLOEXEC",
+      "O_NOFOLLOW"
+    ],
+    "read_once_from_one_fd": true,
+    "fstat_before_and_after_must_match": [
+      "device",
+      "inode",
+      "type",
+      "owner_uid",
+      "mode",
+      "size"
+    ],
+    "max_bytes": 65536,
+    "replacement_after_open": "cannot-change-read-generation"
+  },
+  "live_request_stdin": {
+    "commands": [
+      "credential",
+      "probe"
+    ],
+    "request_file_argument": "-",
+    "kubernetes_delivery": "authenticated-provisioner-exec-stdin-to-running-exomem-container",
+    "shell": false,
+    "terminal_or_pty": false,
+    "stdin_is_only_request_source": true,
+    "stdin_must_reach_eof": true,
+    "stdin_trailing_bytes_after_json": "rejected",
+    "stdin_max_bytes": 65536,
+    "argv_environment_or_persistent_file_request": false,
+    "exec_transport_trust_boundary": "authorized-kubernetes-api-exec-principal-and-provisioner-operation",
+    "reason": "live commands must execute inside the running cell for current security state and literal-loopback readiness without restarting the pod or mutating its filesystem"
+  },
+  "formats": {
+    "opaque_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "credential_version": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "uuid_v4": {
+      "type": "string",
+      "canonical_rfc4122_version": 4
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "absolute_root": {
+      "type": "string",
+      "max_utf8_bytes": 4096,
+      "normalization": "absolute-normalized-no-symlink-components"
+    },
+    "runtime_id": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2147483647
+    },
+    "operation_id": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"
+    }
+  },
+  "common_request": {
+    "required": [
+      "request_id"
+    ],
+    "properties": {
+      "request_id": "uuid_v4"
+    }
+  },
+  "mutating_request": {
+    "required": [
+      "request_id",
+      "operation_id"
+    ],
+    "properties": {
+      "request_id": "uuid_v4",
+      "operation_id": "operation_id"
+    },
+    "idempotency": "operation_id-plus-sha256-of-canonical-complete-request"
+  },
+  "credential_delivery": {
+    "path": "/run/exomem/credentials/credentials.json",
+    "path_is_caller_configurable": false,
+    "kubernetes_volume": "native-secret-atomic-writer",
+    "kubernetes_default_mode_octal": "0444",
+    "pod_fs_group": null,
+    "mounted_containers_exact": [
+      "exomem"
+    ],
+    "file_owner_uid": 0,
+    "file_owner_gid": 0,
+    "file_mode_octal": "0444",
+    "container_mount_read_only": true,
+    "resolved_type": "regular-file",
+    "accepted_symlink_topology": "fixed-leaf-to-kubelet-owned-dotdot-data-generation-confined-inside-mount",
+    "one_fd_generation_read": true,
+    "threat_boundary": "single-process-single-tenant-container; no untrusted sidecar or user process",
+    "max_bytes": 8192,
+    "schema": {
+      "required": [
+        "schema_version",
+        "credentials"
+      ],
+      "additional_properties": false,
+      "schema_version": 1,
+      "credential_count_minimum": 1,
+      "credential_count_maximum": 2,
+      "credential_version_format": "credential_version",
+      "credential_value": "unpadded-base64url-of-exactly-32-random-bytes"
+    }
+  },
+  "envelopes": {
+    "success": {
+      "required": [
+        "contract_version",
+        "ok",
+        "command",
+        "request_id",
+        "code",
+        "data"
+      ],
+      "additional_properties": false,
+      "constants": {
+        "contract_version": 1,
+        "ok": true
+      }
+    },
+    "error": {
+      "required": [
+        "contract_version",
+        "ok",
+        "command",
+        "request_id",
+        "error"
+      ],
+      "additional_properties": false,
+      "constants": {
+        "contract_version": 1,
+        "ok": false
+      },
+      "field_types": {
+        "command": {
+          "one_of": [
+            {
+              "enum": [
+                "init",
+                "restore-candidate",
+                "credential",
+                "probe"
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "request_id": {
+          "one_of": [
+            "uuid_v4",
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "null_rule": "command or request_id is null only when that field cannot be validated before failure; unvalidated input is never echoed",
+      "error_required": [
+        "code",
+        "message",
+        "retryable",
+        "operator_action"
+      ],
+      "error_additional_properties": false
+    }
+  },
+  "exit_status": {
+    "0": "success",
+    "2": "contract-or-input-invalid",
+    "3": "durable-state-or-ownership-conflict",
+    "4": "retryable-busy-or-unavailable",
+    "5": "archive-or-persistent-integrity-failure",
+    "6": "redacted-internal-failure"
+  },
+  "error_classes": {
+    "input": {
+      "exit_status": 2,
+      "retryable": false,
+      "message": "hosted operator request is invalid",
+      "operator_action": "fix-request"
+    },
+    "conflict": {
+      "exit_status": 3,
+      "retryable": false,
+      "message": "hosted operator state conflicts with the request",
+      "operator_action": "inspect-content-free-state"
+    },
+    "unavailable": {
+      "exit_status": 4,
+      "retryable": true,
+      "message": "hosted operator dependency is temporarily unavailable",
+      "operator_action": "retry-with-the-same-request"
+    },
+    "integrity": {
+      "exit_status": 5,
+      "retryable": false,
+      "message": "hosted data integrity verification failed",
+      "operator_action": "quarantine-and-investigate"
+    },
+    "internal": {
+      "exit_status": 6,
+      "retryable": false,
+      "message": "hosted operator failed safely",
+      "operator_action": "inspect-redacted-operator-logs"
+    }
+  },
+  "stable_error_classes": {
+    "HOSTED_OPERATOR_CONTRACT_INVALID": "input",
+    "HOSTED_RELEASE_MISMATCH": "input",
+    "HOSTED_PROTOCOL_UNSUPPORTED": "input",
+    "HOSTED_RUNTIME_ID_INVALID": "input",
+    "HOSTED_ROOT_INVALID": "input",
+    "HOSTED_ROOT_OVERLAP": "input",
+    "HOSTED_CREDENTIAL_BUNDLE_INVALID": "input",
+    "HOSTED_CREDENTIAL_WEAK": "input",
+    "HOSTED_PROBE_TRANSPORT_INVALID": "input",
+    "HOSTED_ROOT_UNSAFE_ENTRY": "conflict",
+    "HOSTED_ROOT_OWNERSHIP_MISMATCH": "conflict",
+    "HOSTED_BINDING_CONFLICT": "conflict",
+    "HOSTED_PROVISIONING_CONFLICT": "conflict",
+    "HOSTED_OPERATION_CONFLICT": "conflict",
+    "HOSTED_CREDENTIAL_STATE_INVALID": "conflict",
+    "HOSTED_CREDENTIAL_TRANSITION_INVALID": "conflict",
+    "HOSTED_CREDENTIAL_REVISION_CONFLICT": "conflict",
+    "HOSTED_CREDENTIAL_PROOF_REQUIRED": "conflict",
+    "HOSTED_CREDENTIAL_PROOF_STALE": "conflict",
+    "HOSTED_RESTORE_NOT_OFFLINE": "conflict",
+    "HOSTED_RESTORE_TARGET_CONFLICT": "conflict",
+    "HOSTED_RESTORE_IDENTITY_CONFLICT": "conflict",
+    "HOSTED_RESTORE_JOURNAL_CONFLICT": "conflict",
+    "HOSTED_PROBE_REDIRECT": "conflict",
+    "HOSTED_PROBE_RESPONSE_TOO_LARGE": "conflict",
+    "HOSTED_PROBE_MEDIA_INVALID": "conflict",
+    "HOSTED_PROBE_SCHEMA_INVALID": "conflict",
+    "HOSTED_PROBE_AUTH_FAILED": "conflict",
+    "HOSTED_PROBE_CONTRACT_MISMATCH": "conflict",
+    "HOSTED_SECURITY_UNAVAILABLE": "unavailable",
+    "HOSTED_RESTORE_BUSY": "unavailable",
+    "HOSTED_PROBE_UNAVAILABLE": "unavailable",
+    "HOSTED_PROBE_TIMEOUT": "unavailable",
+    "HOSTED_ARTIFACT_DIGEST_MISMATCH": "integrity",
+    "HOSTED_ARCHIVE_INVALID": "integrity",
+    "HOSTED_ARCHIVE_UNSAFE_ENTRY": "integrity",
+    "HOSTED_ARCHIVE_RUNTIME_STATE": "integrity",
+    "HOSTED_ARCHIVE_INTEGRITY_FAILURE": "integrity",
+    "HOSTED_RESTORE_CANONICAL_INTEGRITY": "integrity",
+    "HOSTED_OPERATOR_INTERNAL": "internal"
+  },
+  "commands": {
+    "init": {
+      "request_kind": "mutating_request",
+      "required": [
+        "request_id",
+        "operation_id",
+        "cell_id",
+        "vault_id",
+        "vault_root",
+        "state_root",
+        "log_root",
+        "expected_release",
+        "expected_protocol",
+        "runtime_uid",
+        "runtime_gid",
+        "active_credential_version"
+      ],
+      "properties": {
+        "request_id": "uuid_v4",
+        "operation_id": "operation_id",
+        "cell_id": "opaque_id",
+        "vault_id": "opaque_id",
+        "vault_root": "absolute_root",
+        "state_root": "absolute_root",
+        "log_root": "absolute_root",
+        "expected_release": {
+          "type": "string",
+          "min_utf8_bytes": 1,
+          "max_utf8_bytes": 64
+        },
+        "expected_protocol": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+        },
+        "runtime_uid": "runtime_id",
+        "runtime_gid": "runtime_id",
+        "active_credential_version": "credential_version"
+      },
+      "additional_properties": false,
+      "success_code": "HOSTED_CELL_INITIALIZED",
+      "success_data_required": [
+        "status",
+        "cell_id",
+        "vault_id",
+        "binding_version",
+        "lifecycle_status",
+        "exomem_release",
+        "hosted_protocol",
+        "runtime_uid",
+        "runtime_gid",
+        "credential_version",
+        "credential_revision",
+        "capabilities"
+      ],
+      "success_data_enums": {
+        "status": [
+          "provisioned",
+          "migrated",
+          "existing"
+        ],
+        "lifecycle_status": [
+          "stopped"
+        ]
+      },
+      "success_data_properties": {
+        "status": "enum",
+        "cell_id": "opaque_id",
+        "vault_id": "opaque_id",
+        "binding_version": {
+          "const": 2
+        },
+        "lifecycle_status": "enum",
+        "exomem_release": {
+          "type": "string"
+        },
+        "hosted_protocol": {
+          "type": "string"
+        },
+        "runtime_uid": "runtime_id",
+        "runtime_gid": "runtime_id",
+        "credential_version": "credential_version",
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "capabilities": {
+          "type": "array",
+          "items": "opaque_id",
+          "unique_items": true
+        }
+      },
+      "success_data_additional_properties": false,
+      "stable_errors": [
+        "HOSTED_OPERATOR_CONTRACT_INVALID",
+        "HOSTED_RELEASE_MISMATCH",
+        "HOSTED_PROTOCOL_UNSUPPORTED",
+        "HOSTED_RUNTIME_ID_INVALID",
+        "HOSTED_ROOT_INVALID",
+        "HOSTED_ROOT_OVERLAP",
+        "HOSTED_ROOT_UNSAFE_ENTRY",
+        "HOSTED_ROOT_OWNERSHIP_MISMATCH",
+        "HOSTED_BINDING_CONFLICT",
+        "HOSTED_PROVISIONING_CONFLICT",
+        "HOSTED_CREDENTIAL_BUNDLE_INVALID",
+        "HOSTED_CREDENTIAL_WEAK",
+        "HOSTED_OPERATION_CONFLICT",
+        "HOSTED_SECURITY_UNAVAILABLE",
+        "HOSTED_OPERATOR_INTERNAL"
+      ]
+    },
+    "restore-candidate": {
+      "request_kind": "mutating_request",
+      "required": [
+        "request_id",
+        "operation_id",
+        "artifact_reference",
+        "archive_path",
+        "expected_archive_sha256",
+        "source_cell_id",
+        "source_vault_id",
+        "target_cell_id",
+        "target_vault_id",
+        "target_vault_root",
+        "target_state_root",
+        "target_log_root",
+        "expected_release",
+        "expected_protocol",
+        "runtime_uid",
+        "runtime_gid",
+        "active_credential_version",
+        "routing_stopped",
+        "workload_stopped"
+      ],
+      "properties": {
+        "request_id": "uuid_v4",
+        "operation_id": "operation_id",
+        "artifact_reference": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]{0,511}$"
+        },
+        "archive_path": "absolute_root",
+        "expected_archive_sha256": "sha256",
+        "source_cell_id": "opaque_id",
+        "source_vault_id": "opaque_id",
+        "target_cell_id": "opaque_id",
+        "target_vault_id": "opaque_id",
+        "target_vault_root": "absolute_root",
+        "target_state_root": "absolute_root",
+        "target_log_root": "absolute_root",
+        "expected_release": {
+          "type": "string",
+          "min_utf8_bytes": 1,
+          "max_utf8_bytes": 64
+        },
+        "expected_protocol": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+        },
+        "runtime_uid": "runtime_id",
+        "runtime_gid": "runtime_id",
+        "active_credential_version": "credential_version",
+        "routing_stopped": {
+          "const": true
+        },
+        "workload_stopped": {
+          "const": true
+        }
+      },
+      "additional_properties": false,
+      "cross_field_constraints": [
+        "target_cell_id != source_cell_id",
+        "target_vault_id == source_vault_id",
+        "target roots pairwise disjoint",
+        "archive_path is outside all target roots",
+        "staging is an unclaimed sibling of target_vault_root on one filesystem"
+      ],
+      "success_code": "HOSTED_RESTORE_CANDIDATE_READY",
+      "success_data_required": [
+        "status",
+        "artifact_reference_digest",
+        "archive_sha256",
+        "manifest_sha256",
+        "source_cell_id",
+        "source_vault_id",
+        "target_cell_id",
+        "target_vault_id",
+        "binding_version",
+        "exomem_release",
+        "hosted_protocol",
+        "journal_phase",
+        "derived_state",
+        "derived_error_code",
+        "credential_version",
+        "credential_revision"
+      ],
+      "success_data_enums": {
+        "status": [
+          "ready",
+          "degraded"
+        ],
+        "journal_phase": [
+          "complete"
+        ],
+        "derived_state": [
+          "ready",
+          "degraded"
+        ]
+      },
+      "success_data_properties": {
+        "status": "enum",
+        "artifact_reference_digest": "sha256",
+        "archive_sha256": "sha256",
+        "manifest_sha256": "sha256",
+        "source_cell_id": "opaque_id",
+        "source_vault_id": "opaque_id",
+        "target_cell_id": "opaque_id",
+        "target_vault_id": "opaque_id",
+        "binding_version": {
+          "const": 2
+        },
+        "exomem_release": {
+          "type": "string"
+        },
+        "hosted_protocol": {
+          "type": "string"
+        },
+        "journal_phase": "enum",
+        "derived_state": "enum",
+        "derived_error_code": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "credential_version": "credential_version",
+        "credential_revision": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "success_data_additional_properties": false,
+      "success_data_cross_field_constraints": [
+        "status=ready iff derived_state=ready and derived_error_code=null",
+        "status=degraded iff derived_state=degraded and derived_error_code is a stable nonempty code"
+      ],
+      "stable_errors": [
+        "HOSTED_OPERATOR_CONTRACT_INVALID",
+        "HOSTED_RESTORE_NOT_OFFLINE",
+        "HOSTED_RESTORE_BUSY",
+        "HOSTED_RESTORE_TARGET_CONFLICT",
+        "HOSTED_RESTORE_IDENTITY_CONFLICT",
+        "HOSTED_ARTIFACT_DIGEST_MISMATCH",
+        "HOSTED_ARCHIVE_INVALID",
+        "HOSTED_ARCHIVE_UNSAFE_ENTRY",
+        "HOSTED_ARCHIVE_RUNTIME_STATE",
+        "HOSTED_ARCHIVE_INTEGRITY_FAILURE",
+        "HOSTED_RESTORE_JOURNAL_CONFLICT",
+        "HOSTED_RESTORE_CANONICAL_INTEGRITY",
+        "HOSTED_CREDENTIAL_BUNDLE_INVALID",
+        "HOSTED_OPERATION_CONFLICT",
+        "HOSTED_SECURITY_UNAVAILABLE",
+        "HOSTED_OPERATOR_INTERNAL"
+      ]
+    },
+    "credential": {
+      "request_kind": "mutating_request",
+      "required": [
+        "request_id",
+        "operation_id",
+        "cell_id",
+        "vault_id",
+        "state_root",
+        "action",
+        "expected_revision"
+      ],
+      "properties": {
+        "request_id": "uuid_v4",
+        "operation_id": "operation_id",
+        "cell_id": "opaque_id",
+        "vault_id": "opaque_id",
+        "state_root": "absolute_root",
+        "action": {
+          "enum": [
+            "stage",
+            "promote",
+            "abort",
+            "finalize"
+          ]
+        },
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "pending_version": "credential_version"
+      },
+      "conditional_fields": {
+        "stage": {
+          "required": [
+            "pending_version"
+          ]
+        },
+        "promote": {
+          "forbidden": [
+            "pending_version"
+          ]
+        },
+        "abort": {
+          "forbidden": [
+            "pending_version"
+          ]
+        },
+        "finalize": {
+          "forbidden": [
+            "pending_version"
+          ]
+        }
+      },
+      "additional_properties": false,
+      "success_code_by_action": {
+        "stage": "HOSTED_CREDENTIAL_STAGED",
+        "promote": "HOSTED_CREDENTIAL_PROMOTED",
+        "abort": "HOSTED_CREDENTIAL_ABORTED",
+        "finalize": "HOSTED_CREDENTIAL_FINALIZED"
+      },
+      "success_by_action": {
+        "stage": [
+          "phase=staged",
+          "pending_version equals request.pending_version",
+          "preferred_version=active_version",
+          "rotation_id is nonnull",
+          "proof_valid_until=null"
+        ],
+        "promote": [
+          "phase=promoted",
+          "pending_version is nonnull",
+          "preferred_version=pending_version",
+          "rotation_id is nonnull",
+          "proof_valid_until is nonnull"
+        ],
+        "abort": [
+          "phase=stable",
+          "pending_version=null",
+          "preferred_version=active_version",
+          "rotation_id=null",
+          "proof_valid_until=null"
+        ],
+        "finalize": [
+          "phase=stable",
+          "active_version equals the pre-transition pending_version",
+          "pending_version=null",
+          "preferred_version=active_version",
+          "rotation_id=null",
+          "proof_valid_until=null"
+        ]
+      },
+      "success_all_actions": [
+        "revision=request.expected_revision+1"
+      ],
+      "success_data_required": [
+        "phase",
+        "revision",
+        "active_version",
+        "pending_version",
+        "preferred_version",
+        "rotation_id",
+        "proof_valid_until"
+      ],
+      "success_data_properties": {
+        "phase": {
+          "enum": [
+            "stable",
+            "staged",
+            "promoted"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "active_version": "credential_version",
+        "pending_version": {
+          "one_of": [
+            "credential_version",
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "preferred_version": "credential_version",
+        "rotation_id": {
+          "one_of": [
+            "uuid_v4",
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "proof_valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "utc-rfc3339"
+        }
+      },
+      "success_data_additional_properties": false,
+      "redacted_nullable_fields": [
+        "pending_version",
+        "rotation_id",
+        "proof_valid_until"
+      ],
+      "stable_errors": [
+        "HOSTED_OPERATOR_CONTRACT_INVALID",
+        "HOSTED_CREDENTIAL_BUNDLE_INVALID",
+        "HOSTED_CREDENTIAL_WEAK",
+        "HOSTED_CREDENTIAL_STATE_INVALID",
+        "HOSTED_CREDENTIAL_TRANSITION_INVALID",
+        "HOSTED_CREDENTIAL_REVISION_CONFLICT",
+        "HOSTED_CREDENTIAL_PROOF_REQUIRED",
+        "HOSTED_CREDENTIAL_PROOF_STALE",
+        "HOSTED_OPERATION_CONFLICT",
+        "HOSTED_SECURITY_UNAVAILABLE",
+        "HOSTED_OPERATOR_INTERNAL"
+      ]
+    },
+    "probe": {
+      "request_kind": "mutating_request",
+      "required": [
+        "request_id",
+        "operation_id",
+        "cell_id",
+        "vault_id",
+        "state_root",
+        "selected_credential_version",
+        "expected_release",
+        "expected_protocol",
+        "expected_worker_policy_digest",
+        "expected_revision",
+        "port"
+      ],
+      "properties": {
+        "request_id": "uuid_v4",
+        "operation_id": "operation_id",
+        "cell_id": "opaque_id",
+        "vault_id": "opaque_id",
+        "state_root": "absolute_root",
+        "selected_credential_version": "credential_version",
+        "expected_release": {
+          "type": "string",
+          "min_utf8_bytes": 1,
+          "max_utf8_bytes": 64
+        },
+        "expected_protocol": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$"
+        },
+        "expected_worker_policy_digest": "sha256",
+        "expected_revision": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 65535
+        }
+      },
+      "additional_properties": false,
+      "transport": {
+        "scheme": "http",
+        "host_literal": "127.0.0.1",
+        "path": "/private/exomem/v1/ready",
+        "userinfo": false,
+        "query": false,
+        "fragment": false,
+        "dns": false,
+        "proxy_environment": false,
+        "netrc": false,
+        "redirects": false,
+        "connect_timeout_seconds": 1,
+        "read_timeout_seconds": 2,
+        "total_timeout_seconds": 3,
+        "response_max_bytes": 16384,
+        "response_media_type": "application/json"
+      },
+      "success_code": "HOSTED_PROBE_READY",
+      "success_data_required": [
+        "cell_id",
+        "vault_id",
+        "exomem_release",
+        "hosted_protocol",
+        "authenticated_credential_version",
+        "security_revision",
+        "service_authenticated",
+        "mutation_authority",
+        "admission_phase",
+        "read_admission",
+        "write_admission",
+        "worker_policy_digest",
+        "proof_recorded",
+        "proof_valid_until"
+      ],
+      "success_data_constants": {
+        "service_authenticated": true,
+        "mutation_authority": true,
+        "admission_phase": "active",
+        "read_admission": true,
+        "write_admission": true
+      },
+      "success_data_properties": {
+        "cell_id": "opaque_id",
+        "vault_id": "opaque_id",
+        "exomem_release": {
+          "type": "string"
+        },
+        "hosted_protocol": {
+          "type": "string"
+        },
+        "authenticated_credential_version": "credential_version",
+        "security_revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "service_authenticated": {
+          "const": true
+        },
+        "mutation_authority": {
+          "const": true
+        },
+        "admission_phase": {
+          "const": "active"
+        },
+        "read_admission": {
+          "const": true
+        },
+        "write_admission": {
+          "const": true
+        },
+        "worker_policy_digest": "sha256",
+        "proof_recorded": {
+          "type": "boolean"
+        },
+        "proof_valid_until": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "utc-rfc3339"
+        }
+      },
+      "success_data_additional_properties": false,
+      "idempotency_semantics": [
+        "every invocation performs a fresh loopback HTTP request and current readiness validation",
+        "operation replay applies only to pending-proof persistence",
+        "a recorded proof is reusable only while expected/current security revision, rotation, credential digest, release, protocol, worker policy, and readiness fields all match"
+      ],
+      "success_data_cross_field_constraints": [
+        "security_revision equals the current authority revision and request.expected_revision",
+        "selected active version implies proof_recorded=false and proof_valid_until=null",
+        "selected pending version implies proof_recorded=true and proof_valid_until is nonnull",
+        "authenticated_credential_version equals request.selected_credential_version"
+      ],
+      "stable_errors": [
+        "HOSTED_OPERATOR_CONTRACT_INVALID",
+        "HOSTED_CREDENTIAL_BUNDLE_INVALID",
+        "HOSTED_CREDENTIAL_STATE_INVALID",
+        "HOSTED_PROBE_TRANSPORT_INVALID",
+        "HOSTED_PROBE_UNAVAILABLE",
+        "HOSTED_PROBE_TIMEOUT",
+        "HOSTED_PROBE_REDIRECT",
+        "HOSTED_PROBE_RESPONSE_TOO_LARGE",
+        "HOSTED_PROBE_MEDIA_INVALID",
+        "HOSTED_PROBE_SCHEMA_INVALID",
+        "HOSTED_PROBE_AUTH_FAILED",
+        "HOSTED_PROBE_CONTRACT_MISMATCH",
+        "HOSTED_SECURITY_UNAVAILABLE",
+        "HOSTED_OPERATOR_INTERNAL"
+      ]
+    }
+  },
+  "redaction": {
+    "forbidden_in_stdout_stderr_logs": [
+      "credential plaintext",
+      "authorization values",
+      "credential bundle contents",
+      "vault/state/log/archive absolute paths",
+      "probe URL or raw response body",
+      "user filenames, relative paths, note/source/media content",
+      "transfer grants and JTIs"
+    ],
+    "error_message_vocabulary": "checked-in-content-free-message-by-stable-code",
+    "unexpected_exception": "HOSTED_OPERATOR_INTERNAL"
+  }
+}
