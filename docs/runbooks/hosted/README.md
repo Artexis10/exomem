@@ -8,3 +8,7 @@ credential, mutable image tag, tenant content, or destructive default.
 
 The owner canary is the only deployment target until all private-alpha proof
 gates in the active OpenSpec change are green.
+
+Implemented runbooks:
+
+- [Secret handoff and rotation](secrets.md)

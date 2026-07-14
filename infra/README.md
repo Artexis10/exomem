@@ -52,3 +52,8 @@ Destruction or replacement is rejected unless the apply command receives one
 resource. The plan is never recomputed during apply. Terraform state, saved
 plans, plan JSON, generated inventory, `.tfvars`, decrypted SOPS material, and
 age keys are ignored by Git.
+
+The versioned non-printing secret workflow is documented in
+`docs/runbooks/hosted/secrets.md`. Its destination matrix keeps Access in
+Vercel, Tunnel in K3s, the hosted scheduler in its exact two peers, and global
+`CRON_SECRET` out of K3s.

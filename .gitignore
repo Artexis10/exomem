@@ -50,8 +50,12 @@ infra/ansible/group_vars/hosted_nodes.yml
 infra/helm/*/charts/
 infra/secrets/*.dec.yaml
 infra/secrets/*.plain.yaml
+infra/secrets/**/*.dec.*
+infra/secrets/**/*.plain.*
+infra/secrets/**/*.decrypted.*
 infra/secrets/age.key
 infra/secrets/*.agekey
+infra/secrets/**/*.agekey
 infra/provisioner/.mypy_cache/
 infra/provisioner/.ruff_cache/
 infra/provisioner/.pytest_cache/
