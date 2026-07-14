@@ -1,0 +1,9 @@
+{
+  "artifact": "exomem-hosted-substrate-gateway-selection",
+  "schemaVersion": 1,
+  "sourceRepository": "https://github.com/substrate-systems/substrate",
+  "sourceCommit": "d451153469718fc113abef085044a09001942b8d",
+  "fixturePath": "src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json",
+  "fixtureSha256": "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054",
+  "gatewayContractSha256": "49ac4d346991f0f1de5f692a78ad043de6020f9a1692cafc951ec84490f02940"
+}

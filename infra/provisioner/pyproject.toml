@@ -1,0 +1,56 @@
+[project]
+name = "exomem-provisioner"
+version = "0.1.0"
+description = "Durable hosted-cell provisioner for Exomem"
+requires-python = ">=3.11"
+dependencies = [
+    "aiosqlite>=0.21,<1",
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "boto3>=1.40,<2",
+    "cryptography>=45,<47",
+    "fastapi>=0.116,<1",
+    "hcloud>=2.22,<3",
+    "httpx>=0.28,<1",
+    "kubernetes>=35.0,<36",
+    "pydantic-settings>=2.10,<3",
+    "sqlalchemy[asyncio]>=2.0.41,<3",
+    "uvicorn>=0.35,<1",
+]
+
+[project.scripts]
+exomem-provisioner-api = "exomem_provisioner.main:run_api"
+exomem-provisioner-worker = "exomem_provisioner.production:run_worker"
+exomem-volume-worker = "exomem_provisioner.volume:run_volume_worker"
+exomem-provisioner-volume-rebind = "exomem_provisioner.volume:run_volume_rebind"
+exomem-durability-backup-worker = "exomem_provisioner.durability_jobs:run_durability_backup"
+exomem-database-backup-worker = "exomem_provisioner.durability_jobs:run_database_backup"
+exomem-deletion-worker = "exomem_provisioner.durability_jobs:run_deletion_worker"
+exomem-export-gc = "exomem_provisioner.durability_jobs:run_export_gc"
+exomem-durability-actions = "exomem_provisioner.durability_actions:run_durability_actions"
+exomem-restore-fetch = "exomem_provisioner.restore_fetch:run_restore_fetch"
+
+[dependency-groups]
+dev = [
+    "pytest>=8,<10",
+    "pytest-asyncio>=1,<2",
+    "ruff>=0.12,<1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/exomem_provisioner"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "BLE"]
+ignore = ["E501"]

@@ -1,0 +1,9 @@
+---
+all:
+  children:
+    hosted_nodes:
+      hosts:
+        exomem-alpha:
+          ansible_host: 192.0.2.10
+          ansible_user: root
+          private_node_ip: 10.50.1.10

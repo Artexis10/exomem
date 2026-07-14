@@ -1,0 +1,21 @@
+---
+- name: Validate SSH configuration
+  ansible.builtin.command: /usr/sbin/sshd -t
+  changed_when: false
+  listen: Validate and reload SSH
+
+- name: Reload SSH
+  ansible.builtin.systemd_service:
+    name: ssh
+    state: reloaded
+  listen: Validate and reload SSH
+
+- name: Restart fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    state: restarted
+
+- name: Restart journald
+  ansible.builtin.systemd_service:
+    name: systemd-journald
+    state: restarted

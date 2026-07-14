@@ -1,0 +1,8 @@
+hcloud_token         = "read-from-secret-manager"
+cloudflare_api_token = "read-from-secret-manager"
+cloudflare_account_id = "opaque-account-id"
+cloudflare_zone_id    = "opaque-zone-id"
+control_hostname      = "control.example.com"
+transfer_hostname     = "transfer.example.com"
+admin_ssh_cidrs       = ["192.0.2.10/32"]
+ssh_public_key        = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIExampleOnlyReplaceMe operator"

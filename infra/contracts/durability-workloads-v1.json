@@ -1,0 +1,127 @@
+{
+  "schemaVersion": 1,
+  "namespace": "exomem-platform",
+  "workloads": {
+    "deliveryGc": {
+      "kind": "CronJob",
+      "command": ["exomem-export-gc"],
+      "serviceAccount": "exomem-export-gc",
+      "schedule": "*/5 * * * *",
+      "concurrencyPolicy": "Forbid",
+      "startingDeadlineSeconds": 180,
+      "activeDeadlineSeconds": 240,
+      "backoffLimit": 1,
+      "automountServiceAccountToken": false,
+      "providerPermissions": ["b2:user-export:delete-list-read-metadata"],
+      "privateKey": null,
+      "publicVerifier": false
+    },
+    "vaultBackup": {
+      "kind": "CronJob",
+      "command": ["exomem-durability-backup-worker"],
+      "serviceAccount": "exomem-durability-backup",
+      "schedule": "*/30 * * * *",
+      "concurrencyPolicy": "Forbid",
+      "startingDeadlineSeconds": 180,
+      "activeDeadlineSeconds": 1500,
+      "backoffLimit": 1,
+      "automountServiceAccountToken": true,
+      "maxConcurrency": 4,
+      "providerPermissions": [
+        "kubernetes:verified-route-close-reopen",
+        "b2:recovery:upload-list"
+      ],
+      "privateKey": "exomem-provider-recovery-signer/private-key",
+      "publicVerifier": false
+    },
+    "databaseBackup": {
+      "kind": "CronJob",
+      "command": ["exomem-database-backup-worker"],
+      "serviceAccount": "exomem-database-backup",
+      "schedule": "*/30 * * * *",
+      "concurrencyPolicy": "Forbid",
+      "startingDeadlineSeconds": 180,
+      "activeDeadlineSeconds": 1500,
+      "backoffLimit": 1,
+      "automountServiceAccountToken": false,
+      "providerPermissions": ["b2:database-backup:upload-list"],
+      "privateKey": "exomem-provider-recovery-signer/private-key",
+      "publicVerifier": false
+    },
+    "durabilityActions": {
+      "kind": "CronJob",
+      "command": ["exomem-durability-actions"],
+      "serviceAccount": "exomem-durability-actions",
+      "schedule": "* * * * *",
+      "concurrencyPolicy": "Forbid",
+      "startingDeadlineSeconds": 45,
+      "activeDeadlineSeconds": 4800,
+      "backoffLimit": 0,
+      "automountServiceAccountToken": true,
+      "maxOperations": 1,
+      "scratchSize": "6Gi",
+      "providerPermissions": [
+        "kubernetes:authenticated-tenant-durability-actions",
+        "b2:recovery:restore-read",
+        "b2:user-export:upload-list",
+        "b2:user-export:restore-read",
+        "b2:user-export:delete-list-read-metadata",
+        "b2:user-export:delivery-write-read"
+      ],
+      "privateKey": "exomem-provider-recovery-signer/private-key",
+      "publicVerifier": false
+    },
+    "deletion": {
+      "kind": "Deployment",
+      "command": ["exomem-deletion-worker"],
+      "serviceAccount": "exomem-deletion-worker",
+      "replicas": 1,
+      "claimActions": ["discard", "destroy"],
+      "providerPermissions": [
+        "kubernetes:authenticated-tenant-delete",
+        "traefik:authenticated-route-delete",
+        "hcloud:volume-write",
+        "b2:recovery:delete-list-bypass-governance",
+        "b2:user-export:delete-list-read-metadata"
+      ],
+      "privateKey": null,
+      "publicVerifier": true
+    },
+    "volumeLifecycle": {
+      "kind": "Deployment",
+      "command": ["exomem-volume-worker"],
+      "serviceAccount": "exomem-volume-worker",
+      "replicas": 1,
+      "providerPermissions": [
+        "kubernetes:pvc-pv-lifecycle",
+        "hcloud:volume-write"
+      ],
+      "privateKey": "exomem-provider-recovery-signer/private-key",
+      "publicVerifier": false
+    }
+  },
+  "secretBindings": {
+    "databaseUrl": "exomem-provisioner-database/url",
+    "wrappingKey": "exomem-provisioner-wrapping-key/key-material",
+    "providerVerifier": "exomem-provider-recovery-verifier/public-key",
+    "hcloudWriter": "exomem-provisioner-hcloud-token/token",
+    "recoveryUploadKeyId": "exomem-recovery-upload-key-id/application-key-id",
+    "recoveryUploadKey": "exomem-recovery-upload-key/application-key",
+    "recoveryRestoreKeyId": "exomem-recovery-restore-key-id/application-key-id",
+    "recoveryRestoreKey": "exomem-recovery-restore-key/application-key",
+    "recoveryDeleteKeyId": "exomem-recovery-delete-key-id/application-key-id",
+    "recoveryDeleteKey": "exomem-recovery-delete-key/application-key",
+    "userExportUploadKeyId": "exomem-user-export-upload-key-id/application-key-id",
+    "userExportUploadKey": "exomem-user-export-upload-key/application-key",
+    "userExportRestoreKeyId": "exomem-user-export-restore-key-id/application-key-id",
+    "userExportRestoreKey": "exomem-user-export-restore-key/application-key",
+    "userExportDeleteKeyId": "exomem-user-export-delete-key-id/application-key-id",
+    "userExportDeleteKey": "exomem-user-export-delete-key/application-key",
+    "userExportDeliveryKeyId": "exomem-user-export-delivery-key-id/application-key-id",
+    "userExportDeliveryKey": "exomem-user-export-delivery-key/application-key",
+    "databaseBackupUploadKeyId": "exomem-database-backup-upload-key-id/application-key-id",
+    "databaseBackupUploadKey": "exomem-database-backup-upload-key/application-key",
+    "databaseBackupPgService": "exomem-database-backup-pg-service/pg_service.conf",
+    "databaseBackupPgpass": "exomem-database-backup-pgpass/pgpass"
+  }
+}

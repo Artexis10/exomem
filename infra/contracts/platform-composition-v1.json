@@ -1,0 +1,116 @@
+{
+  "schema_version": 1,
+  "release": {
+    "config_map": "exomem-hosted-release-v1",
+    "key": "exomem-hosted-release-v1.json",
+    "mount_path": "/etc/exomem/release/exomem-hosted-release-v1.json",
+    "worker_environment": "EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"
+  },
+  "release_manifest": {
+    "artifact": "exomem-hosted-release",
+    "schema_version": 1,
+    "exact_fields": [
+      "artifact",
+      "schemaVersion",
+      "sourceRepository",
+      "sourceCommit",
+      "release",
+      "hostedProtocol",
+      "releaseBuildTime",
+      "runtimeImage",
+      "publishedTag",
+      "operatorContractSha256",
+      "gatewayContractSha256",
+      "commandRegistry"
+    ],
+    "command_registry_length": 21,
+    "command_exact_fields": ["name", "readOnly", "mode", "tier", "capability"],
+    "command_types": {
+      "name": "snake_case string",
+      "readOnly": "boolean",
+      "mode": "read|write",
+      "tier": "integer >= 1",
+      "capability": "non-empty string"
+    },
+    "partial_overrides_allowed": false
+  },
+  "provisioner": {
+    "image_contract": "ghcr.io/artexis10/exomem-provisioner@sha256:<64 lowercase hex>",
+    "api_deployment": "exomem-provisioner-api",
+    "worker_deployment": "exomem-provisioner-worker",
+    "service": {
+      "name": "exomem-provisioner",
+      "namespace": "exomem-platform",
+      "port": 8080
+    },
+    "protocol": "exomem-cell-provisioner.v1",
+    "required_headers": [
+      "Authorization",
+      "Content-Type",
+      "Idempotency-Key",
+      "X-Exomem-Provisioner-Protocol"
+    ],
+    "actions": {
+      "provision": {"method": "POST", "path": "/cells/provision"},
+      "health": {"method": "POST", "path": "/cells/health"},
+      "rotate-credential": {"method": "POST", "path": "/cells/rotate-credential"},
+      "quiesce": {"method": "POST", "path": "/cells/quiesce"},
+      "resume": {"method": "POST", "path": "/cells/resume"},
+      "stop": {"method": "POST", "path": "/cells/stop"},
+      "export": {"method": "POST", "path": "/cells/export"},
+      "export-release": {"method": "POST", "path": "/cells/export-release"},
+      "export-delete": {"method": "POST", "path": "/cells/export-delete"},
+      "restore": {"method": "POST", "path": "/cells/restore"},
+      "export-download": {"method": "POST", "path": "/cells/export-download"},
+      "seal": {"method": "POST", "path": "/cells/seal"},
+      "discard": {"method": "POST", "path": "/cells/discard"},
+      "destroy": {"method": "POST", "path": "/cells/destroy"}
+    }
+  },
+  "capacity_gate": {
+    "implementation": "KubernetesHCloudCapacityGate",
+    "invoked_before": ["namespace-create", "pvc-create"],
+    "pending_retry_seconds": 300,
+    "sources": ["kubernetes-tenant-namespaces", "hcloud-attached-volumes"],
+    "limits": {
+      "active_user_cells": 6,
+      "reserved_volume_attachments": 2,
+      "provider_volume_attachment_limit": 16,
+      "minimum_unused_provider_headroom": 8
+    }
+  },
+  "volume_rebind": {
+    "public_endpoint": null,
+    "invoked_by": ["restore", "node-recovery"],
+    "worker_primitive": "VolumeLifecycleWorker.rebind_static"
+  },
+  "provider_recovery_identity": {
+    "algorithm": "ed25519",
+    "version": 1,
+    "annotation": "exomem.io/recovery-envelope",
+    "cell_values": "providerRecoveryEnvelopes",
+    "identity_issuer_environment": "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
+    "routine_worker_environment": "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY",
+    "routine_worker_material": "public-key-only",
+    "signing_seed_mounts": [
+      "exomem-provisioner-api",
+      "exomem-durability-backup",
+      "exomem-database-backup",
+      "exomem-volume-worker"
+    ]
+  },
+  "durability": {
+    "workload_contract": "infra/contracts/durability-workloads-v1.json",
+    "storage_contract": "infra/contracts/durability-storage-v1.json",
+    "storage_config_map": "exomem-durability-storage",
+    "workloads": {
+      "delivery_gc": "exomem-export-gc",
+      "vault_backup": "exomem-durability-backup",
+      "database_backup": "exomem-database-backup",
+      "deletion": "exomem-deletion-worker",
+      "volume_lifecycle": "exomem-volume-worker"
+    },
+    "private_signers": ["exomem-provider-recovery-signer/private-key"],
+    "public_verifier": "exomem-provider-recovery-verifier/public-key"
+  }
+}

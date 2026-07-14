@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "runbooks": {
+    "backend": {"path": "docs/runbooks/hosted/backend.md", "destructive": false, "approval_flag": ""},
+    "deploy": {"path": "docs/runbooks/hosted/deploy.md", "destructive": false, "approval_flag": ""},
+    "secrets": {"path": "docs/runbooks/hosted/secrets.md", "destructive": false, "approval_flag": ""},
+    "cell": {"path": "docs/runbooks/hosted/cell.md", "destructive": false, "approval_flag": ""},
+    "maintenance": {"path": "docs/runbooks/hosted/maintenance.md", "destructive": false, "approval_flag": ""},
+    "volume-rebind": {"path": "docs/runbooks/hosted/volume-rebind.md", "destructive": false, "approval_flag": ""},
+    "backup-restore": {"path": "docs/runbooks/hosted/backup-restore.md", "destructive": false, "approval_flag": ""},
+    "deletion": {"path": "docs/runbooks/hosted/deletion.md", "destructive": true, "approval_flag": "--allow-destructive"},
+    "node-replacement": {"path": "docs/runbooks/hosted/node-replacement.md", "destructive": true, "approval_flag": "--allow-destructive"},
+    "break-glass": {"path": "docs/runbooks/hosted/break-glass.md", "destructive": false, "approval_flag": ""}
+  }
+}

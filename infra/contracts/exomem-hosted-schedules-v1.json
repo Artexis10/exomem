@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "scheduler": "kubernetes-cronjob",
+  "origin": "https://substratesystems.io",
+  "authentication": {
+    "scheme": "bearer",
+    "schedulerEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+    "receiverActiveEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+    "receiverPreviousEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET_PREVIOUS",
+    "maxReceiverVersions": 2
+  },
+  "requestPolicy": {
+    "method": "GET",
+    "redirect": "error",
+    "connectTimeoutSeconds": 5,
+    "totalTimeoutSeconds": 20,
+    "successStatusCodes": [200]
+  },
+  "kubernetesJobPolicy": {
+    "concurrencyPolicy": "Forbid",
+    "startingDeadlineSeconds": 45,
+    "activeDeadlineSeconds": 30,
+    "backoffLimit": 1,
+    "maxAttempts": 2,
+    "successfulJobsHistoryLimit": 1,
+    "failedJobsHistoryLimit": 3,
+    "ttlSecondsAfterFinished": 300
+  },
+  "observability": {
+    "contentFree": true,
+    "attemptCounterMetric": "exomem_hosted_scheduler_attempts_total",
+    "durationHistogramMetric": "exomem_hosted_scheduler_duration_seconds",
+    "lastSuccessMetric": "exomem_hosted_scheduler_last_success_unixtime",
+    "failureCounterMetric": "exomem_hosted_scheduler_failures_total",
+    "missedRunAlertAfterSeconds": 180,
+    "consecutiveFailureAlertThreshold": 2
+  },
+  "jobs": [
+    {
+      "name": "exomem-access-delivery",
+      "path": "/api/cron/exomem-access-delivery",
+      "schedule": "* * * * *"
+    },
+    {
+      "name": "exomem-reconcile",
+      "path": "/api/cron/exomem-reconcile",
+      "schedule": "* * * * *"
+    },
+    {
+      "name": "exomem-export-gc",
+      "path": "/api/cron/exomem-export-gc",
+      "schedule": "17 * * * *"
+    }
+  ]
+}

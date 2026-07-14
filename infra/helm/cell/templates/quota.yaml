@@ -1,0 +1,35 @@
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: {{ .Values.resourceName }}-quota
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "resourceQuota") | nindent 4 }}
+spec:
+  hard:
+    persistentvolumeclaims: "1"
+    requests.storage: 10Gi
+    pods: "2"
+    requests.cpu: "1500m"
+    requests.memory: 1536Mi
+    limits.cpu: "2"
+    limits.memory: 2Gi
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: {{ .Values.resourceName }}-limits
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "limitRange") | nindent 4 }}
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 128Mi
+      default:
+        cpu: 1
+        memory: 1Gi

@@ -1,0 +1,3 @@
+b2_application_key_id = "replace-with-bootstrap-key-id"
+b2_application_key    = "replace-with-bootstrap-application-key"
+state_bucket_name     = "replace-with-globally-unique-state-bucket"

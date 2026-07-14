@@ -1,0 +1,14 @@
+{{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-hosted-release-v1
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-hosted-release
+    app.kubernetes.io/part-of: exomem-hosted
+  annotations:
+    exomem.io/release-manifest-sha256: {{ $releaseJson | sha256sum | quote }}
+data:
+  exomem-hosted-release-v1.json: |-
+    {{- $releaseJson | nindent 4 }}

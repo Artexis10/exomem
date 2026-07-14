@@ -1,0 +1,71 @@
+{
+  "schema_version": 1,
+  "receipt_authentication": {
+    "algorithm": "ed25519",
+    "domain": "exomem.rotation-drill-receipt.v1",
+    "ttl_seconds": 86400,
+    "private_key_custody": "drill-collector-only",
+    "public_key_id": null,
+    "verifier_material": "public-key-only"
+  },
+  "rotations": {
+    "cloudflare-access": {
+      "retirement_requires": [
+        "new_token_staged_at_vercel",
+        "new_token_accepts_control_path",
+        "old_token_accepts_during_overlap",
+        "k3s_has_no_access_credential",
+        "destination_receipts_verified"
+      ]
+    },
+    "cloudflare-tunnel": {
+      "retirement_requires": [
+        "new_sops_ciphertext_applied",
+        "cloudflared_rollout_ready",
+        "control_path_available",
+        "transfer_path_available",
+        "vercel_access_credential_unchanged"
+      ]
+    },
+    "provisioner-credential": {
+      "retirement_requires": [
+        "new_receiver_version_staged",
+        "old_caller_accepts_during_overlap",
+        "new_caller_accepts",
+        "old_caller_rejected_after_retirement",
+        "unrelated_routes_reject_both_versions"
+      ]
+    },
+    "cell-credential": {
+      "retirement_requires": [
+        "pending_cell_version_staged",
+        "pending_version_health_passed",
+        "new_version_promoted",
+        "new_version_health_passed",
+        "old_version_rejected_after_finalization"
+      ]
+    },
+    "hosted-scheduler": {
+      "retirement_requires": [
+        "new_active_and_old_previous_staged_at_vercel",
+        "old_k3s_sender_accepts_during_overlap",
+        "new_k3s_sender_accepts_all_three_routes",
+        "old_sender_rejected_after_retirement",
+        "unrelated_global_cron_routes_reject_both_versions",
+        "global_cron_secret_unchanged",
+        "no_missed_cadence_or_two_failure_alert",
+        "destination_receipts_verified"
+      ]
+    },
+    "provisioner-wrapping-key": {
+      "retirement_requires": [
+        "old_and_new_decrypt_versions_overlap",
+        "new_writes_use_new_version",
+        "all_records_rewrapped_or_reencrypted",
+        "all_ciphertexts_decrypt_verified",
+        "old_version_live_reference_count_zero",
+        "new_offline_escrow_ciphertext_verified"
+      ]
+    }
+  }
+}

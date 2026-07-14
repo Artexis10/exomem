@@ -1,0 +1,333 @@
+{{- $contractRaw := .Files.Get "files/observability-v1.json" -}}
+{{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
+{{- $contractSha256 := $contractRaw | sha256sum -}}
+{{- if ne .Values.observability.contractSha256 $contractSha256 -}}
+{{- fail "observability contract SHA-256 mismatch" -}}
+{{- end }}
+{{- $scheduleRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
+{{- $schedule := $scheduleRaw | fromJson -}}
+{{- $jobNames := list -}}
+{{- range $job := $schedule.jobs -}}
+{{- $jobNames = append $jobNames $job.name -}}
+{{- end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-hosted-observability-contract
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted
+  annotations:
+    exomem.io/contract-version: "1"
+    exomem.io/contract-sha256: {{ $contractSha256 | quote }}
+data:
+  contract.json: |-
+{{ $contractRaw | indent 4 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-hosted-scheduler-runtime
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+data:
+  scheduler_runtime.py: |-
+{{ .Files.Get "files/scheduler_runtime.py" | indent 4 }}
+{{- range $job := $schedule.jobs }}
+{{- $cadenceSeconds := 0 -}}
+{{- if eq $job.schedule "* * * * *" -}}
+{{- $cadenceSeconds = 60 -}}
+{{- else if eq $job.schedule "17 * * * *" -}}
+{{- $cadenceSeconds = 3600 -}}
+{{- else -}}
+{{- fail "scheduler job has an unsupported cadence" -}}
+{{- end }}
+{{- $stateName := printf "exomem-hosted-scheduler-state-%s" $job.name -}}
+{{- $initialState := printf `{"schema_version":1,"job":%q,"cadence_seconds":%d,"attempts_total":0,"failures_total":0,"consecutive_failures":0,"last_attempt_unixtime":0,"last_success_unixtime":0,"duration_seconds":{"buckets":{"1":0,"5":0,"20":0,"+Inf":0},"count":0,"sum":0.0}}` $job.name $cadenceSeconds -}}
+{{- $existingState := lookup "v1" "ConfigMap" $.Release.Namespace $stateName -}}
+{{- $persistedState := $initialState -}}
+{{- if and $existingState $existingState.data (hasKey $existingState.data "state.json") -}}
+{{- $persistedState = index $existingState.data "state.json" -}}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $stateName }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+    exomem.io/scheduler-state: "true"
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: false
+data:
+  state.json: {{ $persistedState | quote }}
+{{- end }}
+{{- $alertStateName := "exomem-hosted-scheduler-alert-state" -}}
+{{- $initialAlertState := `{"schema_version":1,"baselines":{},"active":{},"transitions_total":0,"last_evaluated_unixtime":0}` -}}
+{{- $existingAlertState := lookup "v1" "ConfigMap" .Release.Namespace $alertStateName -}}
+{{- $persistedAlertState := $initialAlertState -}}
+{{- if and $existingAlertState $existingAlertState.data (hasKey $existingAlertState.data "state.json") -}}
+{{- $persistedAlertState = index $existingAlertState.data "state.json" -}}
+{{- end }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $alertStateName }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+    exomem.io/scheduler-alert-state: "true"
+  annotations:
+    helm.sh/resource-policy: keep
+immutable: false
+data:
+  state.json: {{ $persistedAlertState | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-hosted-scheduler-collector
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-hosted-scheduler-alerts
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-hosted-scheduler-state-reader
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - exomem-hosted-scheduler-alert-state
+{{- range $job := $schedule.jobs }}
+      - exomem-hosted-scheduler-state-{{ $job.name }}
+{{- end }}
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-hosted-scheduler-state-reader
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-hosted-scheduler-state-reader
+subjects:
+  - kind: ServiceAccount
+    name: exomem-hosted-scheduler-collector
+    namespace: exomem-platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-hosted-scheduler-alert-evaluator
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames:
+      - exomem-hosted-scheduler-alert-state
+{{- range $job := $schedule.jobs }}
+      - exomem-hosted-scheduler-state-{{ $job.name }}
+{{- end }}
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["exomem-hosted-scheduler-alert-state"]
+    verbs: ["update"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-hosted-scheduler-alert-evaluator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-hosted-scheduler-alert-evaluator
+subjects:
+  - kind: ServiceAccount
+    name: exomem-hosted-scheduler-alerts
+    namespace: exomem-platform
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-hosted-scheduler-collector
+  labels:
+    app.kubernetes.io/name: exomem-hosted-scheduler-collector
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-hosted-scheduler-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-hosted-scheduler-collector
+        app.kubernetes.io/part-of: exomem-hosted-scheduler
+    spec:
+      serviceAccountName: exomem-hosted-scheduler-collector
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: collector
+          image: {{ $runtimeImage }}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/opt/exomem-hosted/scheduler_runtime.py", "collect"]
+          env:
+            - name: SCHEDULER_JOBS
+              value: {{ join "," $jobNames | quote }}
+          ports:
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+          readinessProbe:
+            httpGet:
+              path: /metrics
+              port: metrics
+            initialDelaySeconds: 3
+            periodSeconds: 10
+          volumeMounts:
+            - name: runtime
+              mountPath: /opt/exomem-hosted
+              readOnly: true
+            - name: kube-api
+              mountPath: /var/run/secrets/exomem-api
+              readOnly: true
+          resources:
+            requests: {cpu: 10m, memory: 32Mi}
+            limits: {cpu: 100m, memory: 96Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: runtime
+          configMap:
+            name: exomem-hosted-scheduler-runtime
+            defaultMode: 0444
+        - name: kube-api
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+                  audience: https://kubernetes.default.svc.cluster.local
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: exomem-hosted-scheduler-metrics
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/path: /metrics
+    prometheus.io/port: "9090"
+spec:
+  selector:
+    app.kubernetes.io/name: exomem-hosted-scheduler-collector
+  ports:
+    - name: metrics
+      port: 9090
+      targetPort: metrics
+      protocol: TCP
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: exomem-hosted-scheduler-alerts
+  labels:
+    app.kubernetes.io/name: exomem-hosted-scheduler-alerts
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: exomem-hosted-scheduler-alerts
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-hosted-scheduler-alerts
+        app.kubernetes.io/part-of: exomem-hosted-scheduler
+    spec:
+      serviceAccountName: exomem-hosted-scheduler-alerts
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: evaluator
+          image: {{ $runtimeImage }}
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/opt/exomem-hosted/scheduler_runtime.py", "evaluate"]
+          env:
+            - name: SCHEDULER_JOBS
+              value: {{ join "," $jobNames | quote }}
+            - name: MISSED_RUN_SECONDS
+              value: {{ $schedule.observability.missedRunAlertAfterSeconds | quote }}
+            - name: FAILURE_THRESHOLD
+              value: {{ $schedule.observability.consecutiveFailureAlertThreshold | quote }}
+            - name: COLLECTOR_SNAPSHOT_URL
+              value: http://exomem-hosted-scheduler-metrics.exomem-platform.svc.cluster.local:9090/snapshot
+            - name: ALERT_WEBHOOK_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.observability.alertDeliverySecretName }}
+                  key: {{ .Values.observability.alertDeliverySecretKey }}
+          volumeMounts:
+            - name: runtime
+              mountPath: /opt/exomem-hosted
+              readOnly: true
+            - name: kube-api
+              mountPath: /var/run/secrets/exomem-api
+              readOnly: true
+          resources:
+            requests: {cpu: 5m, memory: 24Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            capabilities: {drop: [ALL]}
+      volumes:
+        - name: runtime
+          configMap:
+            name: exomem-hosted-scheduler-runtime
+            defaultMode: 0444
+        - name: kube-api
+          projected:
+            defaultMode: 0440
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+                  audience: https://kubernetes.default.svc.cluster.local
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{key: ca.crt, path: ca.crt}]
