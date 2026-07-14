@@ -693,6 +693,72 @@ def test_exact_v2_reviewed_none_retry_ignores_later_inbound_relation(
     assert replay.value.code == "DRAFT_ALREADY_COMMITTED"
 
 
+def test_exact_v2_primary_rejects_otherwise_valid_wrong_kind_receipt(
+    tmp_path: Path,
+) -> None:
+    source = _source(_ID_A, title="Kind-bound")
+    token = "kind-bound-v2-token"
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_A,
+        source=source,
+        draft_id=_ID_A,
+        operation="create",
+        draft_token=token,
+    )
+    artifact = relation_review.review_artifact_path(tmp_path, _ID_A)
+    payload = json.loads(artifact.read_text(encoding="utf-8"))
+    assert payload["kind"] == "bootstrap"
+    payload["kind"] = "qualifying"
+    artifact.write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(relation_review.RelationReviewError) as replay:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_A,
+            source=source,
+            draft_id=_ID_A,
+            operation="create",
+            draft_token=token,
+        )
+
+    assert replay.value.code == "DRAFT_ID_IN_USE"
+
+
+def test_draft_token_hash_accepts_semantic_token_and_enforces_shared_bound() -> None:
+    from exomem import semantic_writes
+
+    encoded = semantic_writes.DraftToken(
+        "note",
+        "create",
+        "Knowledge Base/Notes/Insights/large-token.md",
+        "2026-07-14",
+        (
+            semantic_writes.DraftRegistration(
+                "large-token-project", "domain", "x" * 9000
+            ),
+        ),
+    ).encode()
+    assert semantic_writes.DraftToken.decode(encoded).encode() == encoded
+    assert relation_review.draft_token_hash(encoded) == hashlib.sha256(
+        encoded.encode("utf-8")
+    ).hexdigest()
+
+    maximum = "x" * relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
+    assert relation_review.draft_token_hash(maximum) == hashlib.sha256(
+        maximum.encode("utf-8")
+    ).hexdigest()
+    with pytest.raises(relation_review.RelationReviewError) as over:
+        relation_review.draft_token_hash(maximum + "x")
+    assert over.value.code == "INVALID_DRAFT_TOKEN"
+    with pytest.raises(semantic_writes.SemanticWriteError) as decode_over:
+        semantic_writes.DraftToken.decode(maximum + "x")
+    assert decode_over.value.code == "INVALID_DRAFT_TOKEN"
+
+
 def test_load_reviews_returns_sorted_immutable_records_and_ignores_temp_residue(
     tmp_path: Path,
 ) -> None:

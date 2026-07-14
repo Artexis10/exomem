@@ -250,7 +250,9 @@ def create_file(
             operation_token=creation_token,
         )
     except (OSError, UnicodeError, ValueError) as error:
-        raise CreateFileError("LOG_PLAN_CONFLICT", str(error)) from error
+        raise CreateFileError(
+            "LOG_PLAN_CONFLICT", "file log update could not be planned safely"
+        ) from error
     if log_plan.warning is not None:
         warnings.append(log_plan.warning)
     if log_plan.rotation_note is not None:

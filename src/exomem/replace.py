@@ -456,13 +456,19 @@ def replace(
             try:
                 token = semantic_writes.DraftToken.decode(draft_token)
                 recovery_receipt = relation_review.load_creation_receipt(root, draft_id)
+                supplied_token_hash = relation_review.draft_token_hash(draft_token)
             except (semantic_writes.SemanticWriteError, relation_review.RelationReviewError):
                 recovery_receipt = None
             exact_backlink = bool(
                 recovery_receipt is not None
                 and recovery_receipt.schema_version == 2
+                and recovery_receipt.page_identity == draft_id
+                and recovery_receipt.page_path_at_review == token.destination
+                and recovery_receipt.draft_hash == draft_hash
                 and recovery_receipt.operation == "replacement"
+                and recovery_receipt.draft_token_hash == supplied_token_hash
                 and recovery_receipt.predecessor_path == rel_old_with_ext
+                and token.writer == "note"
                 and token.operation == "replacement"
                 and token.destination.removesuffix(".md")
                 in str(old_parsed.frontmatter.get("superseded_by", ""))
@@ -568,7 +574,11 @@ def replace(
             operation_token=prepared.draft_token,
         )
     except (OSError, UnicodeError, ValueError) as error:
-        raise ReplaceError("LOG_PLAN_CONFLICT", [], str(error)) from error
+        raise ReplaceError(
+            "LOG_PLAN_CONFLICT",
+            [],
+            "replacement log update could not be planned safely",
+        ) from error
     auxiliary.extend(log_plan.writes)
     auxiliary.append(PlannedWrite(old_resolved, old_updated, guard=predecessor_guard))
     try:

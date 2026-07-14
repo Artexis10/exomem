@@ -592,6 +592,77 @@ def test_replace_rejects_predecessor_drift_before_coordinator_commit(
     assert not (vault / validation.destination).exists()
 
 
+def test_superseded_recovery_rejects_mismatched_draft_token_with_pinned_precedence(
+    vault: Path,
+) -> None:
+    old_rel = "Knowledge Base/Notes/Insights/token-bound-predecessor.md"
+    destination = "Knowledge Base/Notes/Insights/token-bound-successor.md"
+    draft_id = "00000000-0000-4000-8000-000000000099"
+    original_token = semantic_writes.DraftToken(
+        "note", "replacement", destination, TODAY.isoformat()
+    ).encode()
+    altered_token = semantic_writes.DraftToken(
+        "note",
+        "replacement",
+        destination,
+        (TODAY + dt.timedelta(days=1)).isoformat(),
+    ).encode()
+    old_path = vault / old_rel
+    old_path.parent.mkdir(parents=True, exist_ok=True)
+    old_path.write_text(
+        "---\n"
+        "type: insight\n"
+        "status: superseded\n"
+        "exomem_id: 00000000-0000-4000-8000-000000000098\n"
+        f'superseded_by: "[[{destination.removesuffix(".md")}]]"\n'
+        "---\n"
+        "# Token-bound predecessor\n",
+        encoding="utf-8",
+    )
+    receipt = relation_review.review_artifact_path(vault, draft_id)
+    receipt.parent.mkdir(parents=True, exist_ok=True)
+    receipt.write_text(
+        json.dumps(
+            {
+                "schema_version": 2,
+                "kind": "qualifying",
+                "page_identity": draft_id,
+                "page_path_at_review": destination,
+                "content_fingerprint": "a" * 64,
+                "draft_hash": "b" * 64,
+                "auxiliary_hash": "c" * 64,
+                "reason": None,
+                "operation": "replacement",
+                "draft_token_hash": hashlib.sha256(
+                    original_token.encode("utf-8")
+                ).hexdigest(),
+                "predecessor_path": old_rel,
+                "predecessor_content_hash": "d" * 64,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(replace.ReplaceError) as exc:
+        replace.replace(
+            vault,
+            old_path=old_rel,
+            content="# Token-bound successor\n\nMust not recover.\n",
+            note_type="insight",
+            title="Token-bound successor",
+            today=TODAY,
+            draft_id=draft_id,
+            draft_hash="b" * 64,
+            draft_token=altered_token,
+        )
+
+    assert exc.value.code == "ALREADY_SUPERSEDED"
+    assert not (vault / destination).exists()
+
+
 def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -814,6 +885,84 @@ def test_draft_token_rejects_cross_writer_and_duplicate_json_keys(vault: Path) -
     with pytest.raises(semantic_writes.SemanticWriteError) as duplicate_exc:
         semantic_writes.DraftToken.decode(encoded)
     assert duplicate_exc.value.code == "INVALID_DRAFT_TOKEN"
+
+
+@pytest.mark.parametrize("writer", ("note", "replace", "link", "create_file"))
+def test_log_plan_errors_are_typed_and_never_expose_underlying_text(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, writer: str
+) -> None:
+    secret = "SECRET_LOG_PLAN_MARKER"
+
+    def fail_log_plan(*args: object, **kwargs: object) -> object:
+        raise ValueError(secret)
+
+    if writer == "note":
+        monkeypatch.setattr(note, "plan_log_writes", fail_log_plan)
+        error_type = note.NoteError
+
+        def invoke() -> object:
+            return note.note(
+                vault,
+                content="# Sanitized note\n\nDraft.\n",
+                note_type="insight",
+                title="Sanitized note log failure",
+                status="draft",
+                today=TODAY,
+            )
+
+    elif writer == "replace":
+        predecessor = note.note(
+            vault,
+            content="# Log predecessor\n\nDraft.\n",
+            note_type="insight",
+            title="Sanitized replace predecessor",
+            status="draft",
+            today=TODAY,
+        )
+        monkeypatch.setattr(replace, "plan_log_writes", fail_log_plan)
+        error_type = replace.ReplaceError
+
+        def invoke() -> object:
+            return replace.replace(
+                vault,
+                old_path=predecessor.path,
+                content="# Sanitized successor\n\nActive replacement.\n",
+                note_type="insight",
+                title="Sanitized replace successor",
+                today=TODAY,
+            )
+
+    elif writer == "link":
+        monkeypatch.setattr(link, "plan_log_writes", fail_log_plan)
+        error_type = link.LinkError
+
+        def invoke() -> object:
+            return link.link(
+                vault,
+                entity_type="concept",
+                name="Sanitized link log failure",
+                summary="A structural entity.",
+                today=TODAY,
+            )
+
+    else:
+        monkeypatch.setattr(create_file, "plan_log_writes", fail_log_plan)
+        error_type = create_file.CreateFileError
+
+        def invoke() -> object:
+            return create_file.create_file(
+                vault,
+                path="Knowledge Base/sanitized-log-failure.txt",
+                content="arbitrary\n",
+                today=TODAY,
+            )
+
+    with pytest.raises(error_type) as exc:
+        invoke()
+
+    assert exc.value.code == "LOG_PLAN_CONFLICT"
+    assert secret not in exc.value.reason
+    assert secret not in str(exc.value)
 
 
 def test_v2_qualifying_receipt_is_internal_and_never_review_state(tmp_path: Path) -> None:

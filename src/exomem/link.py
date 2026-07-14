@@ -729,7 +729,9 @@ def link(
             operation_token=token,
         )
     except (OSError, UnicodeError, ValueError) as error:
-        raise LinkError("LOG_PLAN_CONFLICT", [], str(error)) from error
+        raise LinkError(
+            "LOG_PLAN_CONFLICT", [], "entity log update could not be planned safely"
+        ) from error
     auxiliary.extend(log_plan.writes)
     if log_plan.warning is not None:
         warnings.append(log_plan.warning)

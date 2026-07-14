@@ -84,11 +84,19 @@ class DraftToken:
         ).encode("utf-8")
         if len(raw) > _MAX_TOKEN_BYTES:
             raise SemanticWriteError("DRAFT_TOKEN_TOO_LARGE", "draft token exceeds its bound")
-        return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        encoded = base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+        if len(encoded.encode("utf-8")) > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES:
+            raise SemanticWriteError("DRAFT_TOKEN_TOO_LARGE", "draft token exceeds its bound")
+        return encoded
 
     @classmethod
     def decode(cls, token: object) -> DraftToken:
-        if type(token) is not str or not token or len(token) > _MAX_TOKEN_BYTES * 2:
+        if (
+            type(token) is not str
+            or not token
+            or len(token.encode("utf-8"))
+            > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
+        ):
             raise SemanticWriteError("INVALID_DRAFT_TOKEN", "draft token is invalid")
         try:
             padded = token + "=" * (-len(token) % 4)

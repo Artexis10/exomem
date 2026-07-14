@@ -34,6 +34,7 @@ _MAX_REASON_POINTS = 2_000
 _MAX_REASON_BYTES = 8_192
 _MAX_CANDIDATES = 64
 _MAX_RAW_TARGET = 1_024
+MAX_DRAFT_TOKEN_ENCODED_BYTES = 16_384
 _SUPPORTS_REVIEW_DIR_FD = bool(
     os.open in getattr(os, "supports_dir_fd", set())
     and os.stat in getattr(os, "supports_dir_fd", set())
@@ -337,8 +338,12 @@ def _auxiliary_hash(writes: tuple[vault.PlannedWrite, ...], root: Path) -> str:
     )
 
 
-def _draft_token_hash(value: object) -> str:
-    if type(value) is not str or len(value) > 12_000 or len(value.encode("utf-8")) > 16_384:
+def draft_token_hash(value: object) -> str:
+    """Hash a bounded encoded draft token using the coordinator's public contract."""
+    if (
+        type(value) is not str
+        or len(value.encode("utf-8")) > MAX_DRAFT_TOKEN_ENCODED_BYTES
+    ):
         raise RelationReviewError("INVALID_DRAFT_TOKEN", "draft token is invalid or too large")
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
@@ -965,6 +970,17 @@ def _attempt(
             else result.relation_disposition.kind
         )
         expected_artifact = expected_kind in _KINDS
+        receipt_expected_kind = expected_kind
+        if commit_disposition == "reviewed_none":
+            receipt_expected_kind = "reviewed_none"
+        elif (
+            expected_kind not in {"bootstrap", "qualifying"}
+            and artifact is not None
+            and artifact.kind == "bootstrap"
+        ):
+            # A committed first page is no longer evaluated as bootstrap once
+            # its own primary is visible, and remains immutable after growth.
+            receipt_expected_kind = artifact.kind
         artifact_matches = bool(
             artifact
             and artifact.draft_hash == validation.draft_hash
@@ -978,6 +994,7 @@ def _attempt(
                 )
                 or (
                     artifact.schema_version == 2
+                    and artifact.kind == receipt_expected_kind
                     and artifact.operation == operation
                     and artifact.draft_token_hash == draft_token_hash
                     and artifact.predecessor_path == predecessor_path
@@ -1084,7 +1101,7 @@ def revalidate_prepared_creation_draft(
     reconstruct that exact ordered batch.
     """
     try:
-        token_hash = _draft_token_hash(draft_token)
+        token_hash = draft_token_hash(draft_token)
         attempt = _attempt(
             Path(vault_root).absolute(),
             path=path,
@@ -1394,7 +1411,7 @@ def commit_creation_draft(
     root = Path(vault_root).absolute()
     try:
         identity = _canonical_id(draft_id)
-        token_hash = _draft_token_hash(draft_token)
+        token_hash = draft_token_hash(draft_token)
         predecessor_fields = (predecessor_path is not None, predecessor_content_hash is not None)
         if operation == "replacement":
             if predecessor_fields != (True, True):
