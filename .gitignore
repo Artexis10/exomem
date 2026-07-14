@@ -42,6 +42,8 @@ scripts/generic/substitutions.txt
 *.plan.json
 *.auto.tfvars
 *.tfvars
+*.tfbackend
+!*.tfbackend.example
 !*.tfvars.example
 infra/ansible/inventory.yml
 infra/secrets/*.dec.yaml

@@ -41,3 +41,13 @@ Evidence is appended as implementation gates close. A checked task means the res
 - Git ignores state, saved plans/JSON, tfvars, generated inventory, decrypted SOPS material, and age keys. Reproducible validation/plan/apply commands are documented.
 - The non-printing JSON plan inspector rejects unapproved delete/replacement, unknown plan actions, duplicate approval, and secret-like output lacking Terraform sensitivity. Six focused tests pass; ShellCheck, Terraform formatting, Ruff, and diff checks pass.
 - Apply accepts only a mode-0600 saved plan, re-inspects that exact plan, and never recomputes it. Destructive approval is per exact Terraform address.
+
+## 2026-07-14 — split-state Terraform implementation
+
+- Foundation now declares the dedicated CX33, stable IPv4, private network, restricted SSH-only firewall, Cloudflare Tunnel, exact control/transfer DNS ingress, and a service-token-only Access application. Destructive provider controls and Terraform `prevent_destroy` protect the node, address, network, SSH key, firewall, and tunnel.
+- Durability now owns only the recovery and complete-database B2 buckets. Both use B2 server-side encryption, seven-day governance Object Lock, 30-day current-object retention, and split upload/restore/delete identities; the database backup identity cannot delete.
+- The one-time local bootstrap owns only the encrypted/versioned B2 state bucket and two prefix-scoped backend identities. Foundation and durability use distinct state keys plus native S3 lockfiles. Its wrapper accepts reviewed mode-0600 plans, seals local state with SOPS/age, verifies decryption, and removes plaintext only after successful atomic replacement; interrupted applies retain recoverable local state rather than losing it.
+- Normal plan/apply wrappers require a mode-0600 backend config and prefix-scoped B2 credentials from environment variables. Backend examples contain no credentials. State, backend config, plan, JSON, and tfvars artifacts remain ignored.
+- Red-to-green contract tests cover lifecycle-domain separation, fixed cost-safe defaults, explicit non-global SSH CIDRs, absence of public 80/443/6443, destroy protection, exact two-host Tunnel ingress, Access service authentication, B2 retention/capability splits, sensitive outputs, backend bootstrap, sealed-state workflow, and backend-config permissions.
+- Terraform 1.15.8 formatted and validated foundation, durability, and bootstrap against the committed provider locks. Focused infrastructure suites pass: 14 tests; Ruff, ShellCheck, and `git diff --check` pass.
+- Real B2 concurrent lock contention and prior-version recovery remain deliberately open as task 6.6; no live apply is permitted until that evidence is recorded.

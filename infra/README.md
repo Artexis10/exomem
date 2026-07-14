@@ -28,10 +28,24 @@ Install the exact versions from `tool-versions.env`, then run:
 
 ```bash
 infra/scripts/validate.sh
-infra/scripts/plan.sh foundation infra/terraform/foundation/foundation.tfplan
-infra/scripts/plan.sh durability infra/terraform/durability/durability.tfplan
+SOPS_AGE_RECIPIENTS=age1... \
+  infra/scripts/bootstrap_backend.sh plan \
+  /run/user/$UID/exomem-bootstrap.tfplan \
+  /secure/operator/exomem-bootstrap-state.sops.json
+SOPS_AGE_RECIPIENTS=age1... \
+  infra/scripts/bootstrap_backend.sh apply \
+  /run/user/$UID/exomem-bootstrap.tfplan \
+  /secure/operator/exomem-bootstrap-state.sops.json
+TF_BACKEND_CONFIG_FILE=/run/user/$UID/exomem-foundation.tfbackend \
+  infra/scripts/plan.sh foundation infra/terraform/foundation/foundation.tfplan
+TF_BACKEND_CONFIG_FILE=/run/user/$UID/exomem-durability.tfbackend \
+  infra/scripts/plan.sh durability infra/terraform/durability/durability.tfplan
 infra/scripts/apply_saved_plan.sh foundation infra/terraform/foundation/foundation.tfplan
 ```
+
+The backend config must be mode `0600` and contains only the B2 state bucket
+and S3 endpoint. Supply its prefix-scoped key through `AWS_ACCESS_KEY_ID` and
+`AWS_SECRET_ACCESS_KEY`; do not write those secrets into the backend config.
 
 Destruction or replacement is rejected unless the apply command receives one
 `--allow-destructive <exact Terraform address>` flag for every affected
