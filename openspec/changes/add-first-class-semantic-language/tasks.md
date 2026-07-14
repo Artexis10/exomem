@@ -20,7 +20,7 @@
 - [x] 3.2 Add failing lifecycle tests for every exact qualifying-relation predicate branch, normal origins, the frontmatter+supersession-only exception, family exclusions, target resolution, fingerprint-bound reviewed-none, empty-corpus bootstrap expiry, invalid placeholder, generic-link exclusion, and provenance separation.
 - [x] 3.3 Extend saved memory contracts and infer/validate/diff output to semantic-unit kinds/categories with deterministic scope resolution.
 - [x] 3.4 Implement one pure semantic contract result over fields, units, categories, typed relations, schema findings, page lifecycle, and review disposition, with precommit-blocking and posthoc-nonblocking caller modes.
-- [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output and atomic unchanged-draft commit/reuse guards.
+- [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
 - [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
 - [ ] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
 - [ ] 3.8 Grandfather existing pages into activation/review using stable finding keys and the mechanical after-errors-subset-of-before-errors rule while preventing invalidated accepted dispositions.
@@ -68,7 +68,7 @@
 - [ ] 7.2 Implement canonical compact/rich Markdown rendering and minimal span-aware edits that preserve unrelated formatting.
 - [ ] 7.3 Implement `observe_memory` over writable compiled pages and shared atomic writer/contract/index hooks.
 - [ ] 7.4 Enforce Sources/Evidence, outside-KB, read-only/excluded, superseded, and append-only boundaries on unit mutation.
-- [ ] 7.5 Add create/draft-review/edit/move/trash/recover/delete tests proving atomic reviewed-none creation, changed-draft rejection, old category/text/path/index hit removal, stable-ID anchor survival, and legacy path-reference invalidation.
+- [ ] 7.5 Add create/draft-review/edit/move/trash/recover/delete tests proving logically atomic reviewed-none visibility and exact crash recovery, changed-draft rejection, old category/text/path/index hit removal, stable-ID anchor survival, and legacy path-reference invalidation.
 - [ ] 7.6 Add out-of-band watcher/reconcile tests proving user Markdown survives invalid edits, valid units remain indexed, and repaired state clears findings idempotently.
 - [ ] 7.7 Add sidecar-failure tests proving committed Markdown is preserved and deterministic reconcile guidance/drift is returned.
 

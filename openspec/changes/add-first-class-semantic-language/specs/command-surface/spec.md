@@ -23,11 +23,11 @@ The command registry SHALL define `observe_memory` once and expose its add/updat
 - **THEN** both return the same machine-readable stale-reference code and remediation
 
 ### Requirement: Creation Draft Review Protocol Is Surface-Complete
-Every creation-capable governed writer surface SHALL expose `validate_only`, `draft_id`, `draft_hash`, `relation_disposition`, `relation_review_hash`, and `relation_review_reason` consistently. Validation responses SHALL preserve deterministic relation findings/candidates; commit responses/errors SHALL preserve hash, identity, and atomic-review status across MCP, REST, CLI, OpenAPI, and generated capability documentation.
+Every creation-capable governed writer surface SHALL expose `validate_only`, `draft_id`, `draft_hash`, `relation_disposition`, `relation_review_hash`, and `relation_review_reason` consistently. Validation responses SHALL preserve deterministic relation findings/candidates; commit responses/errors SHALL preserve hash, identity, and logical-commit/prepared-recovery status across MCP, REST, CLI, OpenAPI, and generated capability documentation.
 
 #### Scenario: Reviewed-none creation round-trips across facades
 - **WHEN** a caller validates a disconnected page through MCP and commits the unchanged draft through REST
-- **THEN** the shared draft identity/hash is accepted and the page plus portable reviewed-none state commit atomically
+- **THEN** the shared draft identity/hash is accepted, portable state is prepared first, and the primary page becomes the logical commit marker across both facades
 
 #### Scenario: Draft mismatch error is identical across facades
 - **WHEN** a reviewed-none commit changes content after validation
