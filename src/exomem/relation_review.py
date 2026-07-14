@@ -1790,6 +1790,11 @@ def _load_prepared_decision_guard(
 def _validate_exact_lifecycle_trash_proof(
     proof: LifecycleTrashProof,
 ) -> None:
+    if not isinstance(proof, LifecycleTrashProof):
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "trash proof does not bind exact sidecar, UUID, bytes, and ownership",
+        )
     try:
         sidecar = parse_exact_json_object(proof.sidecar_source)
     except ValueError as error:
@@ -1812,8 +1817,7 @@ def _validate_exact_lifecycle_trash_proof(
         original_matches = proof.original_path == sidecar_object.get("original_path")
         identity_matches = proof.page_identity == sidecar_identity
     valid = (
-        isinstance(proof, LifecycleTrashProof)
-        and normalize_id(proof.page_identity) == proof.page_identity
+        normalize_id(proof.page_identity) == proof.page_identity
         and identity_matches
         and original_matches
         and _safe_record_path(proof.original_path)

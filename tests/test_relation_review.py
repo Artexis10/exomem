@@ -104,6 +104,32 @@ def _reviewed_validation(root: Path) -> tuple[str, relation_review.CreationDraft
     return source, validation
 
 
+def test_lifecycle_trash_proof_type_mismatch_is_governed() -> None:
+    source = _source(_ID_A)
+    prepared = relation_review.build_lifecycle_prepared_transition(
+        transition_id="00000000-0000-4000-8000-000000000099",
+        operation="edit",
+        page_identity=_ID_A,
+        before_path=_PAGE_A,
+        before_source_hash=vault.content_hash(source),
+        after_path=_PAGE_A,
+        after_source_hash=vault.content_hash(source),
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            _ID_A, source
+        ),
+        decision=None,
+        transition_token="trash-proof-type-check",
+        auxiliary_hash=hashlib.sha256(b"auxiliary").hexdigest(),
+    )
+
+    with pytest.raises(relation_review.RelationReviewError) as exc:
+        relation_review.trash_proof_commits_prepared(
+            prepared, object()  # type: ignore[arg-type]
+        )
+
+    assert exc.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
+
+
 def _crash_commit_worker(
     root_text: str,
     source: str,
