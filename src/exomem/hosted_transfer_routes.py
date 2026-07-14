@@ -132,6 +132,7 @@ def register_public_transfer_routes(
                 config,
                 method="PUT",
                 allowed_headers=("Content-Type", hosted_transfer.TRANSFER_GRANT_HEADER),
+                optional_headers=("Content-Type",),
             )
         except PublicRequestError as exc:
             return _error_response(
@@ -491,6 +492,7 @@ def _require_preflight(
     *,
     method: str,
     allowed_headers: tuple[str, ...],
+    optional_headers: tuple[str, ...] = (),
 ) -> dict[str, str]:
     _require_route_request(request, config, expected_method="OPTIONS")
     if _raw_header_values(request, hosted_transfer.TRANSFER_GRANT_HEADER):
@@ -505,8 +507,16 @@ def _require_preflight(
     if len(methods) != 1 or methods[0] != method or len(headers) != 1:
         raise PublicRequestError("TRANSFER_REQUEST_INVALID")
     presented = tuple(part.strip().lower() for part in headers[0].split(","))
-    expected = tuple(value.lower() for value in allowed_headers)
-    if len(presented) != len(expected) or set(presented) != set(expected):
+    allowed = frozenset(value.lower() for value in allowed_headers)
+    optional = frozenset(value.lower() for value in optional_headers)
+    required = allowed - optional
+    presented_set = frozenset(presented)
+    if (
+        not optional.issubset(allowed)
+        or len(presented) != len(presented_set)
+        or not required.issubset(presented_set)
+        or not presented_set.issubset(allowed)
+    ):
         raise PublicRequestError("TRANSFER_REQUEST_INVALID")
     return {
         **_cors_headers(request, config),

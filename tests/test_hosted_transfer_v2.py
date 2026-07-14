@@ -556,6 +556,24 @@ def test_public_preflight_is_route_specific_bodyless_and_non_consuming(tmp_path:
     assert "access-control-allow-credentials" not in upload.headers
     assert security.consume_calls == []
 
+    safelisted_content_type = asyncio.run(
+        _request(
+            app,
+            "OPTIONS",
+            "/public/exomem/v2/transfers/upload",
+            headers={
+                "Origin": ORIGIN,
+                "Access-Control-Request-Method": "PUT",
+                "Access-Control-Request-Headers": "X-Exomem-Transfer-Grant",
+            },
+        )
+    )
+    assert safelisted_content_type.status_code == 204, safelisted_content_type.text
+    assert safelisted_content_type.headers["access-control-allow-headers"] == (
+        "Content-Type, X-Exomem-Transfer-Grant"
+    )
+    assert security.consume_calls == []
+
     hostile = asyncio.run(
         _request(
             app,
