@@ -400,6 +400,7 @@ def build_deletion_operation_worker(
         DeletionOnlyDriver(authority=authority, workflow=workflow),
         worker_id=worker_id,
         allowed_actions=DELETION_OPERATION_ACTIONS,
+        resume_claim=True,
     )
 
 

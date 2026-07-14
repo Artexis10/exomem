@@ -766,6 +766,46 @@ def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only(
     assert "exomem-deletion-worker" in rendered_admission
 
 
+def test_deletion_dispatcher_admission_closes_probe_and_container_override_surfaces() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    admission = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-deletion-dispatcher-job-scope",
+    )
+    expressions = "\n".join(
+        validation["expression"] for validation in admission["spec"]["validations"]
+    )
+    container = "object.spec.template.spec.containers[0]"
+
+    assert "object.metadata.name.matches('^exomem-deletion-[0-9a-f]{16}$')" in expressions
+    assert "!has(object.metadata.generateName)" in expressions
+    for field in (
+        "args",
+        "envFrom",
+        "lifecycle",
+        "workingDir",
+        "stdin",
+        "stdinOnce",
+        "tty",
+        "ports",
+        "volumeDevices",
+        "startupProbe",
+        "livenessProbe",
+        "readinessProbe",
+    ):
+        assert f"!has({container}.{field})" in expressions
+
+    # These are the two concrete mutation regressions from the adversarial review:
+    # an exec probe and a per-container privilege/seccomp override are both outside
+    # the reviewed Job shape and therefore denied at admission.
+    assert f"!has({container}.startupProbe)" in expressions
+    assert f"!has({container}.securityContext.privileged)" in expressions
+    assert f"!has({container}.securityContext.seccompProfile)" in expressions
+    assert f"{container}.resources.requests.cpu == quantity('25m')" in expressions
+    assert f"{container}.resources.limits.memory == quantity('384Mi')" in expressions
+
+
 def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     contract = json.loads(

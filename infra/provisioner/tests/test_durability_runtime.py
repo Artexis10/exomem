@@ -449,7 +449,7 @@ async def test_deletion_driver_maps_provider_failures_without_leaking_detail(
 
 
 @pytest.mark.asyncio
-async def test_deletion_worker_claims_only_discard_and_destroy(tmp_path: Path) -> None:
+async def test_deletion_worker_resumes_only_reserved_discard_or_destroy(tmp_path: Path) -> None:
     settings = _settings(tmp_path / "deletion-worker.sqlite")
     database = ProvisionerDatabase(settings)
     await database.create_for_tests()
@@ -492,6 +492,11 @@ async def test_deletion_worker_claims_only_discard_and_destroy(tmp_path: Path) -
             "destroy-must-run",
             _request(operation_id="provider-destroy", tenant_id="tenant-destroy"),
         )
+        reserved = await repository.claim_next(
+            "deletion-worker",
+            allowed_actions=DELETION_OPERATION_ACTIONS,
+        )
+        assert reserved is not None and reserved.id == destroy.id
         worker = build_deletion_operation_worker(
             repository=repository,
             workflow=Workflow(),

@@ -29,6 +29,7 @@ class ProvisionerWorker:
         exclude_checkpoints: frozenset[str] = frozenset(),
         allowed_actions: frozenset[OperationAction] | None = None,
         excluded_actions: frozenset[OperationAction] = frozenset(),
+        resume_claim: bool = False,
     ) -> None:
         self._repository = repository
         self._driver = driver
@@ -37,9 +38,15 @@ class ProvisionerWorker:
         self._exclude_checkpoints = exclude_checkpoints
         self._allowed_actions = allowed_actions
         self._excluded_actions = excluded_actions
+        self._resume_claim = resume_claim
 
     async def run_once(self, *, now: datetime | None = None) -> bool:
-        operation = await self._repository.claim_next(
+        claim_method = (
+            self._repository.resume_claim
+            if self._resume_claim
+            else self._repository.claim_next
+        )
+        operation = await claim_method(
             self._worker_id,
             now=now,
             include_checkpoints=self._include_checkpoints,

@@ -17,7 +17,7 @@ from exomem_provisioner.driver import (
     EffectContext,
     FakeDriver,
 )
-from exomem_provisioner.models import OperationState
+from exomem_provisioner.models import OperationAction, OperationState
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
 
@@ -111,6 +111,58 @@ async def test_worker_checkpoints_before_and_after_effect(
     assert final is not None
     assert final.state is OperationState.FINAL
     assert final.checkpoint == "complete"
+
+
+@pytest.mark.asyncio
+async def test_worker_resumes_only_the_dispatcher_claim_bound_to_its_job_identity(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    _, repository, _ = worker_context
+    target = await repository.submit("destroy", "reserved-target", _request())
+    other = await repository.submit(
+        "destroy",
+        "other-eligible-destroy",
+        _request(
+            operationId="operation-worker-other",
+            tenantId="tenant-worker-other",
+            cellId="cell-worker-other",
+        ),
+    )
+    job_name = "exomem-deletion-0123456789abcdef"
+    claimed = await repository.claim_next(
+        job_name,
+        allowed_actions=frozenset({OperationAction.DESTROY}),
+    )
+    assert claimed is not None and claimed.id == target.id
+
+    class RecordingDriver:
+        operation_ids: list[str] = []
+
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(
+            self,
+            _action: str,
+            _request_data: dict[str, object],
+            context: EffectContext,
+        ) -> DriverFinal:
+            self.operation_ids.append(context.operation_id)
+            return DriverFinal(result={"deleted": True})
+
+    driver = RecordingDriver()
+    worker = ProvisionerWorker(
+        repository,
+        driver,
+        worker_id=job_name,
+        allowed_actions=frozenset({OperationAction.DESTROY}),
+        resume_claim=True,
+    )
+
+    assert await worker.run_once() is True
+    assert driver.operation_ids == [target.id]
+    assert (await repository.get_by_id(target.id)).state is OperationState.FINAL  # type: ignore[union-attr]
+    assert (await repository.get_by_id(other.id)).state is OperationState.PENDING  # type: ignore[union-attr]
 
 
 @pytest.mark.asyncio

@@ -667,6 +667,67 @@ class OperationRepository:
             await session.flush()
             return _operation_snapshot(operation)
 
+    async def resume_claim(
+        self,
+        worker_id: str,
+        *,
+        now: datetime | None = None,
+        include_checkpoints: frozenset[str] | None = None,
+        exclude_checkpoints: frozenset[str] = frozenset(),
+        allowed_actions: frozenset[OperationAction] | None = None,
+        excluded_actions: frozenset[OperationAction] = frozenset(),
+    ) -> OperationSnapshot | None:
+        """Resume the one unexpired claim already bound to ``worker_id``."""
+
+        if allowed_actions is not None and not allowed_actions:
+            raise ValueError("allowed action claim scope cannot be empty")
+        if allowed_actions is not None and allowed_actions & excluded_actions:
+            raise ValueError("claim action scopes overlap")
+        async with self._sessions.begin() as session:
+            checked_at = await _database_now(session, now)
+            claim_scope = and_(
+                Operation.state == OperationState.CLAIMED,
+                Operation.claim_owner == worker_id,
+                Operation.claim_token.is_not(None),
+                Operation.claim_expires_at > checked_at,
+            )
+            if include_checkpoints is not None:
+                claim_scope &= Operation.checkpoint.in_(include_checkpoints)
+            if exclude_checkpoints:
+                claim_scope &= Operation.checkpoint.not_in(exclude_checkpoints)
+            if allowed_actions is not None:
+                claim_scope &= Operation.action.in_(allowed_actions)
+            if excluded_actions:
+                claim_scope &= Operation.action.not_in(excluded_actions)
+            rows = (
+                await session.execute(
+                    select(
+                        Operation.id,
+                        Operation.claim_token,
+                        Operation.claim_generation,
+                    )
+                    .where(claim_scope)
+                    .order_by(Operation.created_at, Operation.id)
+                    .limit(2)
+                )
+            ).all()
+            if not rows:
+                return None
+            if len(rows) != 1:
+                raise ClaimConflict("worker identity owns multiple active operation claims")
+            row = rows[0]
+            if not isinstance(row.claim_token, str) or not row.claim_token:
+                raise ClaimConflict("claimed operation has no claim token")
+            operation, _ = await _lock_active_claim(
+                session,
+                str(row.id),
+                worker_id=worker_id,
+                claim_token=row.claim_token,
+                claim_generation=int(row.claim_generation),
+                now=checked_at,
+            )
+            return _operation_snapshot(operation)
+
     async def renew_claim(
         self,
         operation_id: str,

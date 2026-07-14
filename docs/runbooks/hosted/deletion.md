@@ -24,8 +24,11 @@ removes online resources, and remains pending while Object Lock protects recover
 data. Never force-delete finalizers or buckets.
 
 `exomem-deletion-dispatcher` is the minute-scheduled, credential-free CronJob. It
-reads only whether eligible destructive work exists and creates at most one
-reviewed `exomem-deletion-*` Job; when no work exists it creates nothing. Its
+atomically claims one eligible destroy/discard operation under a precomputed
+exact `exomem-deletion-<16 lowercase hex>` Job identity before creating that
+Job; when no work exists it creates nothing. The Job resumes only its named,
+unexpired claim, and a failed Kubernetes create leaves a bounded claim that
+expires for retry. Its
 namespaced RBAC can create/get/list/watch Jobs only, and admission restricts the
 created Job to the pinned deletion-worker image, command, credentials, mounts,
 `exomem-deletion-worker` service account, and deadline. Only that short-lived Job receives HCloud write,
@@ -71,7 +74,10 @@ Final `deleted` requires independently true compute, storage, key, and all-tenan
 resource proofs after locked objects expire and provider absence is verified.
 The provider proof starts from the durable tenant recovery and plaintext-delivery
 ledgers, then performs an exact-key B2 version/marker check for each recorded
-reference. It deletes only exact version IDs after the seven-day lock expires and
+reference with an explicit page size and hard page/item/cursor bounds, stopping
+as soon as the listing moves lexicographically into prefix siblings. It takes the
+maximum durable-row/live retention deadline for versions, markers, and phantom
+expected versions, then deletes only exact version IDs after that lock expires and
 must re-read the ledger to prove every provider object absent and every wrapped
 key erased before completion. A crash after object deletion but before key
 erasure therefore resumes key destruction instead of producing a false final

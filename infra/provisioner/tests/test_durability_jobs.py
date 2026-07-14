@@ -220,22 +220,25 @@ async def test_deletion_dispatcher_creates_only_one_claimed_job_and_no_work_crea
     class Source:
         def __init__(self, operation_id: str | None) -> None:
             self.operation_id = operation_id
-            self.calls = 0
+            self.claims: list[str] = []
 
-        async def next_dispatchable_deletion(self) -> str | None:
-            self.calls += 1
+        async def claim_dispatchable_deletion(self, job_name: str) -> str | None:
+            self.claims.append(job_name)
             return self.operation_id
 
     class Launcher:
         def __init__(self, *, active: bool = False) -> None:
             self.active = active
-            self.created: list[str] = []
+            self.created: list[tuple[str, str]] = []
 
         async def has_active_job(self) -> bool:
             return self.active
 
-        async def create_scoped_job(self, operation_id: str) -> None:
-            self.created.append(operation_id)
+        def new_scoped_job_name(self) -> str:
+            return "exomem-deletion-0123456789abcdef"
+
+        async def create_scoped_job(self, job_name: str, operation_id: str) -> None:
+            self.created.append((job_name, operation_id))
 
     empty_source = Source(None)
     empty_launcher = Launcher()
@@ -249,17 +252,22 @@ async def test_deletion_dispatcher_creates_only_one_claimed_job_and_no_work_crea
     assert (
         await durability_jobs.dispatch_one_deletion_job(active_source, active_launcher) is False
     )
-    assert active_source.calls == 0
+    assert active_source.claims == []
     assert active_launcher.created == []
 
     ready_source = Source("operation-ready")
     ready_launcher = Launcher()
     assert await durability_jobs.dispatch_one_deletion_job(ready_source, ready_launcher) is True
-    assert ready_launcher.created == ["operation-ready"]
+    assert ready_source.claims == ["exomem-deletion-0123456789abcdef"]
+    assert ready_launcher.created == [
+        ("exomem-deletion-0123456789abcdef", "operation-ready")
+    ]
 
 
 @pytest.mark.asyncio
-async def test_deletion_dispatch_source_reads_only_eligible_destroy_or_discard(tmp_path: Path) -> None:
+async def test_deletion_dispatch_source_atomically_binds_exact_job_to_one_deletion(
+    tmp_path: Path,
+) -> None:
     settings = ProvisionerSettings(
         bearer="b" * 32,
         envelope_key="k" * 32,
@@ -286,11 +294,21 @@ async def test_deletion_dispatch_source_reads_only_eligible_destroy_or_discard(t
         await repository.submit("provision", "provision-first", request)
         destroy = await repository.submit("destroy", "destroy-ready", request)
         source = durability_jobs.RepositoryDeletionDispatchSource(database.session_factory)
+        job_name = "exomem-deletion-0123456789abcdef"
 
-        assert await source.next_dispatchable_deletion(now=now) == destroy.id
-        unchanged = await repository.get_by_id(destroy.id)
-        assert unchanged is not None and unchanged.state.value == "pending"
-        assert unchanged.claim_token is None and unchanged.claim_generation == 0
+        assert (
+            await source.claim_dispatchable_deletion(job_name, now=now) == destroy.id
+        )
+        claimed = await repository.get_by_id(destroy.id)
+        assert claimed is not None and claimed.state.value == "claimed"
+        assert claimed.claim_token is not None and claimed.claim_generation == 1
+        assert await repository.resume_claim("wrong-job", now=now) is None
+        resumed = await repository.resume_claim(
+            job_name,
+            now=now,
+            allowed_actions=frozenset({destroy.action}),
+        )
+        assert resumed is not None and resumed.id == destroy.id
     finally:
         await database.dispose()
 
@@ -340,11 +358,16 @@ async def test_kubernetes_deletion_launcher_uses_scoped_template_and_content_fre
     )
 
     assert await launcher.has_active_job() is False
-    await launcher.create_scoped_job("operation-sensitive-opaque")
+    job_name = launcher.new_scoped_job_name()
+    await launcher.create_scoped_job(job_name, "operation-sensitive-opaque")
 
     assert len(batch.created) == 1
     namespace, body = batch.created[0]
     assert namespace == "exomem-platform"
+    assert body["metadata"]["name"] == job_name
+    assert "generateName" not in body["metadata"]
+    assert job_name.startswith("exomem-deletion-")
+    assert len(job_name) == len("exomem-deletion-") + 16
     annotations = body["metadata"]["annotations"]
     assert set(annotations) == {"exomem.io/deletion-operation-sha256"}
     assert annotations["exomem.io/deletion-operation-sha256"] != "operation-sensitive-opaque"

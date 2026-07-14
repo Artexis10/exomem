@@ -329,6 +329,34 @@ class PrefixRequiredB2(VersionedB2):
         return super().head_object(Bucket=Bucket, Key=Key, VersionId=VersionId)
 
 
+class TruncatedSiblingFloodB2(VersionedB2):
+    """Adversarial provider that offers endless sibling-only pages."""
+
+    def __init__(self, retained_until: datetime) -> None:
+        super().__init__(retained_until)
+        self.calls: dict[tuple[str, str], int] = {}
+
+    def list_object_versions(self, **arguments):
+        bucket = str(arguments["Bucket"])
+        exact_key = str(arguments["Prefix"])
+        identity = (bucket, exact_key)
+        self.calls[identity] = self.calls.get(identity, 0) + 1
+        assert arguments.get("MaxKeys") == 100
+        if self.calls[identity] > 1:
+            raise AssertionError("exact-key lookup page-walked prefix siblings")
+        sibling = f"{exact_key}-sibling"
+        return {
+            "Versions": [
+                {"Key": sibling, "VersionId": f"sibling-{index:03d}"}
+                for index in range(100)
+            ],
+            "DeleteMarkers": [],
+            "IsTruncated": True,
+            "NextKeyMarker": sibling,
+            "NextVersionIdMarker": "sibling-099",
+        }
+
+
 class Authority:
     def __init__(self, fence: int) -> None:
         self.fence = fence
@@ -744,6 +772,39 @@ async def test_live_tenant_destroy_uses_only_ledger_bounded_exact_key_scans():
 
 
 @pytest.mark.asyncio
+async def test_exact_b2_lookup_stops_at_truncated_prefix_siblings_in_one_bounded_call():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    b2 = TruncatedSiblingFloodB2(now)
+    ledger = CrashOnceLedger(now)
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    await provider.bind(context(None))
+    inventory = await provider.scan_tenant("tenant-alpha")
+
+    assert b2.calls == {
+        ("exports", "tenant/export.enc"): 1,
+        ("recovery", "tenant/backup.enc"): 1,
+    }
+    assert {
+        ProviderReference.parse(resource.reference)["key"]
+        for resource in inventory
+        if resource.provider == "b2"
+    } == {"tenant/export.enc", "tenant/backup.enc"}
+
+
+@pytest.mark.asyncio
 async def test_live_tenant_destroy_keeps_marker_while_its_recovery_version_is_locked():
     now = datetime(2030, 1, 1, tzinfo=UTC)
     locked_until = now + timedelta(days=7)
@@ -804,6 +865,80 @@ async def test_live_tenant_destroy_attributes_marker_only_key_from_durable_ledge
         and ProviderReference.parse(resource.reference).get("key") == "tenant/backup.enc"
         for resource in inventory
     )
+
+
+@pytest.mark.asyncio
+async def test_marker_only_recovery_row_honors_future_durable_object_lock():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    locked_until = datetime(2030, 1, 8, tzinfo=UTC)
+    b2 = VersionedB2(now)
+    for identity in tuple(b2.versions):
+        if identity[0] == "recovery":
+            b2.versions.pop(identity)
+    ledger = CrashOnceLedger(locked_until)
+    ledger.fail_next_destroy = False
+    recovery = next(record for record in ledger.records if record.kind is RunKind.VAULT_BACKUP)
+    provider = LiveDeletionProvider(
+        core_v1=Core([]),
+        apps_v1=Apps(Core([])),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    result = await FencedOrderedDeletionWorkflow(provider, clock=lambda: now).destroy_tenant(
+        context(None)
+    )
+
+    assert isinstance(result, DriverPending)
+    assert result.checkpoint == "retained-wait"
+    assert ("recovery", "tenant/backup.enc", "backup-marker") in b2.delete_markers
+    assert recovery.deleted_at is None
+    assert recovery.wrapped_data_key == "wrapped-material:backup"
+    assert recovery.key_destroyed_at is None
+
+
+@pytest.mark.asyncio
+async def test_durable_object_lock_applies_to_every_live_version_before_deletion():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    locked_until = datetime(2030, 1, 8, tzinfo=UTC)
+    b2 = VersionedB2(now)
+    ledger = CrashOnceLedger(locked_until)
+    ledger.fail_next_destroy = False
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    result = await FencedOrderedDeletionWorkflow(provider, clock=lambda: now).destroy_tenant(
+        context(None)
+    )
+
+    assert isinstance(result, DriverPending)
+    assert result.checkpoint == "retained-wait"
+    assert {
+        identity
+        for identity in b2.versions
+        if identity[0] == "recovery"
+    } == {
+        ("recovery", "tenant/backup.enc", "backup-current"),
+        ("recovery", "tenant/backup.enc", "backup-older"),
+    }
+    assert not any(item["Bucket"] == "recovery" for item in b2.deleted)
 
 
 @pytest.mark.asyncio

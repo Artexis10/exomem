@@ -796,6 +796,10 @@ data:
             "serviceAccountName": {{ $deletion.serviceAccount | quote }},
             "automountServiceAccountToken": {{ $deletion.automountServiceAccountToken }},
             "restartPolicy": "Never",
+            "terminationGracePeriodSeconds": 30,
+            "dnsPolicy": "ClusterFirst",
+            "schedulerName": "default-scheduler",
+            "enableServiceLinks": false,
             "securityContext": {
               "runAsNonRoot": true,
               "runAsUser": 10001,
@@ -808,6 +812,8 @@ data:
               "image": {{ .Values.provisioner.image | quote }},
               "imagePullPolicy": "IfNotPresent",
               "command": {{ $deletion.command | toJson }},
+              "terminationMessagePath": "/dev/termination-log",
+              "terminationMessagePolicy": "File",
               "env": [
                 {"name": "EXOMEM_PROVISIONER_DATABASE_URL", "valueFrom": {"secretKeyRef": {"name": "exomem-provisioner-database", "key": "url"}}},
                 {"name": "EXOMEM_PROVISIONER_DATABASE_SCHEMA", "value": {{ .Values.provisioner.databaseSchema | quote }}},

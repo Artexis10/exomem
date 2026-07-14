@@ -84,7 +84,7 @@ Every 30 minutes, a dedicated read-only backup job SHALL take a transactionally 
 - **THEN** the owner can authenticate, resolve the same tenant and cell, and complete representative capture and recall after reconciliation
 
 ### Requirement: Deletion separates immediate service revocation from retained recovery expiry
-Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. A recurring credential-free dispatcher SHALL create no Job when no destructive work is eligible and SHALL create at most one admission-scoped short-lived Job when work is eligible; only that Job may receive the deletion, HCloud, wrapping-key, and public-verifier credentials. At lock expiry, the Job SHALL load tenant recovery and plaintext-delivery rows from the durable ledger, perform bounded exact-key provider checks, delete every recorded exact tenant object version and associated delete marker without governance bypass, independently verify absence, erase every wrapped key, and re-read the durable ledger before returning final destroy proofs and permitting `deleted`. Routine tenant deletion MUST NOT scan a whole provider bucket.
+Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. A recurring credential-free dispatcher SHALL create no Job when no destructive work is eligible and SHALL create at most one admission-scoped short-lived Job when work is eligible. Before Job creation it SHALL atomically reserve one eligible discard/destroy operation to the exact generated Job name; the Job SHALL resume only that durable unexpired claim, and a failed Job create SHALL leave a bounded lease that expires safely. Only that Job may receive the deletion, HCloud, wrapping-key, and public-verifier credentials. Admission SHALL fix the complete reviewed Job name, pod/container execution, resource, environment, security, and volume shape and SHALL reject probes, arguments, lifecycle hooks, interactive fields, ports, volume devices, and container security overrides. At lock expiry, the Job SHALL load tenant recovery and plaintext-delivery rows from the durable ledger, initialize effective retention from each durable row, and perform exact-key provider checks with an explicit page size, hard page/item ceilings, cursor-order validation, and an immediate lexicographic stop at prefix siblings. It SHALL delete every recorded exact tenant object version and associated delete marker without governance bypass, independently verify absence, erase every wrapped key, and re-read the durable ledger before returning final destroy proofs and permitting `deleted`. Routine tenant deletion MUST NOT scan a whole provider bucket.
 
 #### Scenario: Delete request arrives with locked backup
 - **WHEN** a tenant has a recovery object with unexpired seven-day lock
@@ -97,6 +97,14 @@ Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, option
 #### Scenario: Process crashes after exact object deletion
 - **WHEN** the short-lived Job deletes the last exact provider version and exits before erasing the durable wrapped key
 - **THEN** the next Job resumes from the ledger, proves provider absence, erases the remaining wrapped key, and refuses final proof until the ledger re-read is complete
+
+#### Scenario: Dispatcher Job creation fails after reservation
+- **WHEN** the dispatcher atomically binds an eligible destroy to an exact Job name but Kubernetes does not accept the Job
+- **THEN** no other Job executes that claim, the bounded lease expires, and a later dispatcher run can reserve it again without a second destructive worker racing it
+
+#### Scenario: Exact-key listing returns truncated sibling pages
+- **WHEN** B2 returns a truncated page whose entries or next key are lexicographically beyond the durable exact key
+- **THEN** deletion stops after that bounded call without accumulating or walking sibling pages and still treats the durable row's Object Lock deadline as effective for its marker-only key
 
 #### Scenario: Tenant has a recent plaintext delivery
 - **WHEN** deletion encounters a recorded `user-export-delivery` object without a recovery identity envelope

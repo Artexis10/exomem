@@ -79,6 +79,9 @@ class LiveDeletionProvider:
     _CREDENTIAL_NAME = "exomem-cell-credentials"
     _CREDENTIAL_DELETION_OPERATION = "exomem.io/credential-deletion-operation-digest"
     _CREDENTIAL_DELETION_FENCE = "exomem.io/credential-deletion-fence"
+    _B2_EXACT_MAX_KEYS = 100
+    _B2_EXACT_MAX_PAGES = 10
+    _B2_EXACT_MAX_ITEMS = 1000
 
     def __init__(
         self,
@@ -394,7 +397,10 @@ class LiveDeletionProvider:
         markers = [item for item in markers if self._b2_entry_identity(item)[0] == key]
         resources: list[DeletionResource] = []
         listed_versions: set[str] = set()
-        locked_until: datetime | None = None
+        listed_version_order: list[str] = []
+        locked_until = getattr(record, "object_lock_until", None)
+        if not isinstance(locked_until, datetime) or locked_until.tzinfo is None:
+            raise MetadataConflict("recovery ledger retention timestamp is invalid")
         for item in versions:
             _, version_id = self._b2_entry_identity(item)
             listed_versions.add(version_id)
@@ -425,6 +431,8 @@ class LiveDeletionProvider:
                 raise MetadataConflict("B2 retention timestamp is invalid")
             if retained is not None and (locked_until is None or retained > locked_until):
                 locked_until = retained
+            listed_version_order.append(version_id)
+        for version_id in listed_version_order:
             resources.append(
                 self._record(
                     provider="b2",
@@ -435,7 +443,7 @@ class LiveDeletionProvider:
                     ),
                     kind=kind,
                     claims=claims,
-                    retained_until=retained,
+                    retained_until=locked_until,
                     wrapped_key_reference=record.opaque_reference,
                     ledger_reference=record.opaque_reference,
                 )
@@ -447,6 +455,7 @@ class LiveDeletionProvider:
                     reference=record.provider_reference,
                     kind=kind,
                     claims=claims,
+                    retained_until=locked_until,
                     wrapped_key_reference=record.opaque_reference,
                     ledger_reference=record.opaque_reference,
                 )
@@ -568,36 +577,64 @@ class LiveDeletionProvider:
         self,
         *,
         bucket: str,
-        prefix: str | None = None,
+        prefix: str,
     ) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+        if not prefix:
+            raise MetadataConflict("B2 exact-key listing requires a key")
         versions: list[dict[str, object]] = []
         markers: list[dict[str, object]] = []
         key_marker: str | None = None
         version_marker: str | None = None
         seen_cursors: set[tuple[str, str | None]] = set()
-        while True:
-            request: dict[str, object] = {"Bucket": bucket}
-            if prefix is not None:
-                request["Prefix"] = prefix
+        total_items = 0
+        for _page_number in range(1, self._B2_EXACT_MAX_PAGES + 1):
+            request: dict[str, object] = {
+                "Bucket": bucket,
+                "Prefix": prefix,
+                "MaxKeys": self._B2_EXACT_MAX_KEYS,
+            }
             if key_marker is not None:
                 request["KeyMarker"] = key_marker
             if version_marker is not None:
                 request["VersionIdMarker"] = version_marker
             page = await asyncio.to_thread(self._b2.list_object_versions, **request)
+            page_items = 0
+            moved_beyond_exact_key = False
             for field, target in (("Versions", versions), ("DeleteMarkers", markers)):
                 entries = page.get(field, ())
                 if not isinstance(entries, (list, tuple)):
                     raise MetadataConflict("B2 version listing is invalid")
-                target.extend(entries)
+                page_items += len(entries)
+                previous_entry_key: str | None = None
+                for item in entries:
+                    entry_key, _ = self._b2_entry_identity(item)
+                    if previous_entry_key is not None and entry_key < previous_entry_key:
+                        raise MetadataConflict("B2 exact-key results are out of order")
+                    previous_entry_key = entry_key
+                    if entry_key < prefix:
+                        raise MetadataConflict("B2 exact-key results moved backwards")
+                    if entry_key == prefix:
+                        target.append(item)
+                    else:
+                        moved_beyond_exact_key = True
+            if page_items > self._B2_EXACT_MAX_KEYS:
+                raise MetadataConflict("B2 exact-key page exceeded its item bound")
+            total_items += page_items
+            if total_items > self._B2_EXACT_MAX_ITEMS:
+                raise MetadataConflict("B2 exact-key listing exceeded its item bound")
+            if moved_beyond_exact_key:
+                return versions, markers
             if not page.get("IsTruncated"):
                 return versions, markers
             next_key = page.get("NextKeyMarker")
             next_version = page.get("NextVersionIdMarker")
             if not isinstance(next_key, str) or not next_key:
                 raise MetadataConflict("B2 version pagination is invalid")
-            if next_version is not None and (
-                not isinstance(next_version, str) or not next_version
-            ):
+            if next_key < prefix or (key_marker is not None and next_key < key_marker):
+                raise MetadataConflict("B2 version pagination moved backwards")
+            if next_key > prefix:
+                return versions, markers
+            if not isinstance(next_version, str) or not next_version:
                 raise MetadataConflict("B2 version pagination is invalid")
             cursor = (next_key, next_version)
             if cursor in seen_cursors:
@@ -605,6 +642,7 @@ class LiveDeletionProvider:
             seen_cursors.add(cursor)
             key_marker = next_key
             version_marker = next_version
+        raise MetadataConflict("B2 exact-key listing exceeded its page bound")
 
     @staticmethod
     def _b2_entry_identity(item: object) -> tuple[str, str]:

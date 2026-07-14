@@ -74,9 +74,11 @@ class RecordingS3Client:
         *,
         Bucket: str,
         Prefix: str,
+        MaxKeys: int,
         KeyMarker: str | None = None,
         VersionIdMarker: str | None = None,
     ) -> dict[str, object]:
+        assert MaxKeys == 100
         del Bucket, KeyMarker, VersionIdMarker
         return {
             "Versions": [
@@ -128,6 +130,29 @@ class VersionedS3Client:
             if entry[:2] == (Key, VersionId):
                 self.entries.remove(entry)
                 self.deleted.append((Key, VersionId))
+
+
+class TruncatedSiblingFloodS3Client:
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def list_object_versions(self, **arguments: object) -> dict[str, object]:
+        self.calls += 1
+        assert arguments["MaxKeys"] == 100
+        if self.calls > 1:
+            raise AssertionError("absence proof page-walked prefix siblings")
+        key = str(arguments["Prefix"])
+        sibling = f"{key}-sibling"
+        return {
+            "Versions": [
+                {"Key": sibling, "VersionId": f"sibling-{index:03d}"}
+                for index in range(100)
+            ],
+            "DeleteMarkers": [],
+            "IsTruncated": True,
+            "NextKeyMarker": sibling,
+            "NextVersionIdMarker": "sibling-099",
+        }
 
 
 @pytest.mark.asyncio
@@ -239,6 +264,15 @@ async def test_deletion_absence_cannot_be_faked_by_a_delete_marker() -> None:
         await deletion.delete("user-export/object-opaque", version_id=version_id)
 
     assert await deletion.absent("user-export/object-opaque") is True
+
+
+@pytest.mark.asyncio
+async def test_deletion_absence_stops_at_truncated_prefix_siblings_in_one_bounded_call() -> None:
+    client = TruncatedSiblingFloodS3Client()
+    deletion = B2DeletionObjectStore(client, bucket="user-export-bucket")
+
+    assert await deletion.absent("user-export/object-opaque") is True
+    assert client.calls == 1
 
 
 @pytest.mark.asyncio
