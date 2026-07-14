@@ -161,6 +161,25 @@ openssl rand -base64 48 | infra/scripts/secret_handoff.py \
 The database-backup B2 key also has an exact SOPS Ansible-var destination. None
 of these host-bootstrap values becomes a general cluster Secret.
 
+## Ephemeral provisioner database bootstrap authority
+
+The destination matrix contains only the dedicated runtime database URL. It
+deliberately has no admin URL destination. An admin URL may exist in K3s only as
+`exomem-provisioner-database-bootstrap-admin` for the one-shot bootstrap Job in
+the deployment runbook. It must be read through a non-printing prompt, FIFO, or
+provider helper, streamed to `kubectl` over stdin, and removed on both success
+and failure. Stable hooks, Deployments, CronJobs, SOPS artifacts, receipts, and
+the active-secret registry must never contain or reference it.
+
+After every bootstrap attempt, verify the Job and Secret are absent, then rotate
+or revoke the provider-side admin credential before Helm may continue. Retain a
+content-free provider receipt out of band and set its path as
+`EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT` for the deployment gate. Repository
+automation cannot perform this provider mutation, so an absent receipt blocks a
+live install. A crash that leaves either ephemeral resource behind is not a
+retry signal: delete it, rotate/revoke the exposed admin credential, obtain a
+new one-use URL, and start the whole bootstrap boundary again.
+
 ## Run Ansible with SOPS vars on tmpfs
 
 Keep the non-secret generated host variables in the normal ignored

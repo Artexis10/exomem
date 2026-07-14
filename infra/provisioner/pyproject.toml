@@ -30,6 +30,9 @@ exomem-deletion-dispatcher = "exomem_provisioner.durability_jobs:run_deletion_di
 exomem-export-gc = "exomem_provisioner.durability_jobs:run_export_gc"
 exomem-durability-actions = "exomem_provisioner.durability_actions:run_durability_actions"
 exomem-restore-fetch = "exomem_provisioner.restore_fetch:run_restore_fetch"
+exomem-provisioner-database-bootstrap = "exomem_provisioner.database_bootstrap:run_bootstrap"
+exomem-provisioner-database-migrate = "exomem_provisioner.database_bootstrap:run_migrate"
+exomem-provisioner-database-validate = "exomem_provisioner.database_bootstrap:run_validate"
 
 [dependency-groups]
 dev = [

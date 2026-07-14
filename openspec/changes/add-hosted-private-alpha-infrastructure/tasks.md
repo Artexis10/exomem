@@ -81,6 +81,7 @@
 - [x] 9.4 Add failing API contract tests for bearer/protocol/content type, exact 14 paths, field/identifier bounds, no redirects, body limits, retry status, pending/final unions, and redaction.
 - [x] 9.5 Implement the FastAPI v1 surface and a database-backed worker that resumes claimed operations after restart, uses PostgreSQL time for leases, locks the tenant fence before claim writes, and binds durable side effects to the current operation claim and identity.
 - [x] 9.6 Add cross-language contract fixtures/tests against Substrate's real TypeScript parser for every request, pending response, final proof, and error class.
+- [x] 9.7 Package exact provisioner migrations and environment-only database commands; add serialized split-authority bootstrap with ephemeral admin cleanup, runtime-only install migration, validation-only upgrade gating, and built-image PostgreSQL 17 reconstruction/concurrency/failure proofs.
 
 ## 10. Implement HCloud retained-volume ownership and recovery
 

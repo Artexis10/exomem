@@ -154,6 +154,96 @@ infra/scripts/apply_active_sops_secrets.py \
   --registry "$EXOMEM_ACTIVE_SECRET_REGISTRY" \
   --registry-public-key "$EXOMEM_ACTIVE_SECRET_REGISTRY_PUBLIC_KEY" \
   --trust-contract infra/contracts/active-secret-registry-v1.json
+```
+
+Bootstrap the dedicated provisioner role/schema before the first Helm install.
+The runtime URL is already in `exomem-provisioner-database`; the admin URL is
+operator-only and MUST arrive through a non-printing prompt, FIFO, or provider
+credential helper. Never put it in a command argument, the destination matrix,
+or a permanent cluster Secret. This one-shot Job uses the same immutable image
+as the release and its command emits only a content-free failure.
+
+```bash
+: "${EXOMEM_PROVISIONER_DATABASE_ADMIN_URL:?read the one-use admin URL without shell tracing}"
+set +x
+bootstrap_secret=exomem-provisioner-database-bootstrap-admin
+bootstrap_job=exomem-provisioner-database-bootstrap
+if kubectl -n exomem-platform get "secret/${bootstrap_secret}" >/dev/null 2>&1 \
+  || kubectl -n exomem-platform get "job/${bootstrap_job}" >/dev/null 2>&1; then
+  echo "stale database bootstrap authority requires deletion and provider rotation" >&2
+  exit 1
+fi
+bootstrap_cleanup() {
+  kubectl -n exomem-platform delete "job/${bootstrap_job}" \
+    "secret/${bootstrap_secret}" --ignore-not-found --wait=true >/dev/null
+  unset EXOMEM_PROVISIONER_DATABASE_ADMIN_URL
+}
+trap bootstrap_cleanup EXIT INT TERM
+printf '%s' "$EXOMEM_PROVISIONER_DATABASE_ADMIN_URL" \
+  | kubectl -n exomem-platform create secret generic "$bootstrap_secret" \
+      --from-file=url=/dev/stdin --dry-run=client -o yaml \
+  | kubectl apply -f - >/dev/null
+unset EXOMEM_PROVISIONER_DATABASE_ADMIN_URL
+kubectl apply -f - <<EOF
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ${bootstrap_job}
+  namespace: exomem-platform
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+        - name: bootstrap
+          image: ${EXOMEM_PROVISIONER_IMAGE}
+          command: ["exomem-provisioner-database-bootstrap"]
+          env:
+            - name: EXOMEM_PROVISIONER_DATABASE_ADMIN_URL
+              valueFrom:
+                secretKeyRef: {name: ${bootstrap_secret}, key: url}
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef: {name: exomem-provisioner-database, key: url}
+            - {name: EXOMEM_PROVISIONER_DATABASE_SCHEMA, value: exomem_provisioner}
+            - {name: EXOMEM_PROVISIONER_DATABASE_ROLE, value: exomem_provisioner_runtime}
+            - {name: EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS, value: "60"}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities: {drop: [ALL]}
+EOF
+kubectl -n exomem-platform wait --for=condition=complete \
+  "job/${bootstrap_job}" --timeout=300s
+bootstrap_cleanup
+trap - EXIT INT TERM
+test -z "${EXOMEM_PROVISIONER_DATABASE_ADMIN_URL:-}"
+test -n "${EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT:-}"
+test -r "$EXOMEM_DATABASE_ADMIN_ROTATION_RECEIPT"
+```
+
+Delete and provider-rotate or revoke the admin credential after every attempt,
+including a failed Job or interrupted operator session. The content-free
+rotation/revocation receipt is a mandatory live gate because this repository has
+no reviewed provider API for that mutation. Confirm both ephemeral resources are
+absent before continuing. A later chart upgrade never receives admin authority:
+its pre-upgrade hook only validates that the database is already at the new
+image head and blocks any revision-advancing rollout.
+
+```bash
+test -z "$(kubectl -n exomem-platform get "job/${bootstrap_job}" \
+  "secret/${bootstrap_secret}" --ignore-not-found -o name)"
 
 helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
   --values infra/helm/platform/values.yaml \

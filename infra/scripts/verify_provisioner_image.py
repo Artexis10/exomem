@@ -11,6 +11,9 @@ from collections.abc import Callable, Sequence
 
 _IMAGE_PATTERN = re.compile(r"^ghcr\.io/artexis10/exomem-provisioner@sha256:[0-9a-f]{64}$")
 _ENTRYPOINTS = (
+    "exomem-provisioner-database-bootstrap",
+    "exomem-provisioner-database-migrate",
+    "exomem-provisioner-database-validate",
     "exomem-provisioner-api",
     "exomem-provisioner-worker",
     "exomem-provisioner-volume-rebind",
@@ -22,6 +25,7 @@ _ENTRYPOINTS = (
     "exomem-deletion-worker",
     "exomem-volume-worker",
 )
+_MIGRATION_ROOT = "/opt/exomem/provisioner-migrations"
 _POSTGRES_BINARIES = (
     "/usr/bin/createdb",
     "/usr/bin/dropdb",
@@ -32,6 +36,11 @@ _POSTGRES_BINARIES = (
 _PROBE = f"""
 from importlib import metadata
 import os
+from pathlib import Path
+
+from alembic.config import Config
+from alembic.script import ScriptDirectory
+from exomem_provisioner.database import DATABASE_REVISION
 
 required = {set(_ENTRYPOINTS)!r}
 installed = {{entry.name: entry for entry in metadata.distribution('exomem-provisioner').entry_points}}
@@ -44,6 +53,15 @@ for name in required:
 for path in {_POSTGRES_BINARIES!r}:
     if not os.path.isfile(path) or not os.access(path, os.X_OK):
         raise SystemExit(12)
+migration_root = Path({_MIGRATION_ROOT!r})
+for path in (migration_root, migration_root / "alembic.ini", migration_root / "alembic"):
+    if path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_gid != 0:
+        raise SystemExit(14)
+    if path.stat().st_mode & 0o222:
+        raise SystemExit(15)
+configuration = Config(str(migration_root / "alembic.ini"))
+if ScriptDirectory.from_config(configuration).get_heads() != [DATABASE_REVISION]:
+    raise SystemExit(16)
 """.strip()
 
 

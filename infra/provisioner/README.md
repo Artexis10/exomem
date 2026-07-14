@@ -81,11 +81,30 @@ uv run --frozen alembic upgrade head
 ```
 
 Production uses `postgresql+asyncpg`, a dedicated role, and a dedicated schema.
-The role is created outside the application. Alembic creates the schema before
-its version table in the same migration transaction and rejects an existing
-schema owned by any other role. The opt-in PostgreSQL 17 suite proves fresh
-bootstrap, ownership rejection, readiness, database-clock leases, and concurrent
-fence/claim interleavings against a real server.
+The immutable image carries the exact `alembic.ini` and revision tree at
+`/opt/exomem/provisioner-migrations`, root-owned and non-writable. Production
+database lifecycle uses three zero-argument, environment-only commands:
+
+- `exomem-provisioner-database-bootstrap` briefly requires
+  `EXOMEM_PROVISIONER_DATABASE_ADMIN_URL`. It creates or exactly validates the
+  least-privilege runtime role/schema, migrates through a runtime-authenticated
+  connection, and proves final runtime access while one bounded advisory lock
+  spans the whole operation.
+- `exomem-provisioner-database-migrate` uses only the runtime URL, accepts an
+  empty or known packaged revision, and migrates to the single packaged head.
+- `exomem-provisioner-database-validate` uses only the runtime URL and succeeds
+  only when the database already equals that head. The platform uses this
+  validation-only command on upgrade so Helm never implies a rollback-safe
+  revision advance.
+
+Existing role attributes, memberships, database/schema ownership, unknown or
+multiple revisions, and mismatched admin/runtime database identities fail
+closed. Bootstrap never repairs privilege drift. The admin URL belongs only to
+the ephemeral operator bootstrap Job; stable chart resources never reference
+it. The opt-in PostgreSQL 17 suite runs the built image without a checkout mount
+and proves fresh/concurrent/retry bootstrap, exact role authority, lock
+serialization, package integrity, exact-head upgrade refusal, and credential
+non-disclosure.
 
 Worker claims lock the tenant fence before the operation row and recheck that
 the claimed generation is still current. Every checkpoint and durable side
@@ -132,6 +151,11 @@ helm upgrade --install exomem-platform infra/helm/platform \
 - `EXOMEM_PROVISIONER_DATABASE_URL`: `postgresql+asyncpg://...` in production
 - `EXOMEM_PROVISIONER_DATABASE_SCHEMA`: dedicated lower-case SQL identifier
 - `EXOMEM_PROVISIONER_DATABASE_ROLE`: dedicated lower-case SQL identifier
+- `EXOMEM_PROVISIONER_DATABASE_ADMIN_URL`: one-use operator credential accepted
+  only by `exomem-provisioner-database-bootstrap`; never configure it on API,
+  worker, recurring migration, or validation workloads
+- `EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS`: bounded database-command
+  advisory-lock wait in seconds (default 60, range 1-300)
 - `EXOMEM_PROVISIONER_TRUSTED_PROXY_IPS`: comma-separated private/loopback IPs
   or networks whose forwarded HTTPS metadata Uvicorn may trust; wildcards and
   public networks are rejected
@@ -159,7 +183,7 @@ only `volume-registration-required` continuations. B2 credentials are confined
 to the corresponding durability workloads, and Cloudflare Access credentials
 remain outside K3s.
 
-Run `exomem-provisioner-api` only after `alembic upgrade head`. Startup fails
+Run `exomem-provisioner-api` only after the packaged runtime migration gate. Startup fails
 closed when configuration is missing or invalid. Readiness verifies the exact
 database role, schema owner, current schema, and singleton Alembic revision.
 Access logs are disabled and the installed application/server formatter emits
