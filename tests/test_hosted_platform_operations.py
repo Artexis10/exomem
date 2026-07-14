@@ -58,6 +58,7 @@ def _signed_receipt(
 def test_hosted_ci_wires_every_static_security_gate() -> None:
     workflow = (ROOT / ".github/workflows/hosted-infrastructure.yml").read_text(encoding="utf-8")
     validator = (INFRA / "scripts/validate.sh").read_text(encoding="utf-8")
+    tool_versions = (INFRA / "tool-versions.env").read_text(encoding="utf-8")
     combined = workflow + validator
     for required in (
         "terraform",
@@ -80,6 +81,13 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'UV_VERSION: "0.11.28"' in workflow
     assert 'PYTHON_VERSION: "3.13.5"' in workflow
     assert 'NODE_VERSION: "22.17.1"' in workflow
+    assert "go install github.com/aquasecurity/trivy" not in workflow
+    assert "https://github.com/aquasecurity/trivy/releases/download/" in workflow
+    assert "${TRIVY_LINUX_AMD64_SHA256}" in workflow
+    assert (
+        "TRIVY_LINUX_AMD64_SHA256="
+        "bbb64b9695866ce4a7a8f5c9592002c5961cab378577fa3f8a040df362b9b2ea"
+    ) in tool_versions
     parsed = yaml.safe_load(workflow)
     assert parsed["jobs"]["static"]["name"] == "Offline static validation (not release proof)"
     release_job = parsed["jobs"]["release-proof"]

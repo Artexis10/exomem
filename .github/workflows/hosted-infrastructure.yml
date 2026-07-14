@@ -73,7 +73,12 @@ jobs:
           go install github.com/open-policy-agent/conftest@v${CONFTEST_VERSION}
           go install github.com/getsops/sops/v3/cmd/sops@v${SOPS_VERSION}
           go install filippo.io/age/cmd/age-keygen@v${AGE_VERSION}
-          go install github.com/aquasecurity/trivy/cmd/trivy@v${TRIVY_VERSION}
+          curl --fail --silent --show-error --location \
+            --output /tmp/trivy.tar.gz \
+            https://github.com/aquasecurity/trivy/releases/download/v${TRIVY_VERSION}/trivy_${TRIVY_VERSION}_Linux-64bit.tar.gz
+          echo "${TRIVY_LINUX_AMD64_SHA256}  /tmp/trivy.tar.gz" | sha256sum --check
+          tar --extract --gzip --file /tmp/trivy.tar.gz --directory /tmp trivy
+          install -m 0755 /tmp/trivy "$HOME/.local/bin/trivy"
           curl --fail --silent --show-error --location \
             --output /tmp/shellcheck.tar.xz \
             https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.xz
