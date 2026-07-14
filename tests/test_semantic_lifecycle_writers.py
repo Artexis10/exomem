@@ -306,7 +306,21 @@ def test_decision_reason_and_pending_token_drift_fail_before_mutation(
             ),
             current=_binding(_PAGE, source_a),
         )
-    assert collision.value.code == "RELATION_REVIEW_DECISION_COLLISION"
+    assert collision.value.code == "LIFECYCLE_TRANSITION_MISMATCH"
+
+    with pytest.raises(relation_review.RelationReviewError) as pending:
+        relation_review.plan_lifecycle_transition(
+            tmp_path,
+            decision=changed_reason,
+            prepared=_prepared(
+                source_a,
+                source_b,
+                transition_id=_TRANSITION_BC,
+                decision=changed_reason,
+            ),
+            current=_binding(_PAGE, source_a),
+        )
+    assert pending.value.code == "LIFECYCLE_TRANSITION_PENDING"
 
     token_drift = _prepared(
         source_a,
@@ -425,6 +439,53 @@ def test_lifecycle_bounds_alias_symlink_and_history_limit_are_closed(
     assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
 
 
+def test_lifecycle_residue_policy_accepts_only_three_atomic_batch_files(
+    tmp_path: Path,
+) -> None:
+    decision = _decision(_source("B"))
+    path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, decision.after_fingerprint
+    )
+    path.parent.mkdir(parents=True)
+    path.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    supported = (
+        f".{path.name}.abcdefgh.tmp",
+        ".prepared.json.abcdefgh.tmp",
+        ".prepared.json.abcdefgh.bak",
+    )
+    for name in supported:
+        (path.parent / name).write_text("atomic residue", encoding="utf-8")
+
+    assert (
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+        == decision
+    )
+
+    (path.parent / f".{path.name}.ijklmnop.bak").write_text(
+        "excess residue", encoding="utf-8"
+    )
+    with pytest.raises(relation_review.RelationReviewError) as excessive:
+        relation_review.load_lifecycle_decision(
+            tmp_path, _ID, decision.after_fingerprint
+        )
+    assert excessive.value.code == "RELATION_REVIEW_DIRECTORY_LIMIT"
+
+
+def test_lifecycle_arbitrary_tmp_suffix_is_not_ignored(tmp_path: Path) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    (directory / "arbitrary.tmp").write_text("not batch residue", encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as unsafe:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+
+    assert unsafe.value.code == "RELATION_REVIEW_ALIAS"
+
+
 def test_planning_a_257th_lifecycle_decision_fails_closed(tmp_path: Path) -> None:
     directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
     directory.mkdir(parents=True)
@@ -458,6 +519,66 @@ def test_planning_a_257th_lifecycle_decision_fails_closed(tmp_path: Path) -> Non
             current=_binding(_PAGE, source_a),
         )
     assert overflow.value.code == "RELATION_REVIEW_HISTORY_LIMIT"
+
+
+def test_guarded_apply_refuses_a_concurrent_257th_lifecycle_decision(
+    tmp_path: Path,
+) -> None:
+    directory = relation_review.lifecycle_prepared_path(tmp_path, _ID).parent
+    directory.mkdir(parents=True)
+    for index in range(255):
+        fingerprint = f"{index:064x}"
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID,
+            after_fingerprint=fingerprint,
+            reason="Reviewed",
+        )
+        relation_review.lifecycle_decision_path(
+            tmp_path, _ID, fingerprint
+        ).write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+
+    source_a = _source("A")
+    source_b = _source("B")
+    primary = _write(tmp_path, _PAGE, source_a)
+    planned_decision = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=planned_decision,
+    )
+    plan = relation_review.plan_lifecycle_transition(
+        tmp_path,
+        decision=planned_decision,
+        prepared=prepared,
+        current=_binding(_PAGE, source_a),
+    )
+
+    concurrent_fingerprint = f"{255:064x}"
+    concurrent_decision = relation_review.build_lifecycle_decision(
+        page_identity=_ID,
+        after_fingerprint=concurrent_fingerprint,
+        reason="Concurrent review",
+    )
+    relation_review.lifecycle_decision_path(
+        tmp_path, _ID, concurrent_fingerprint
+    ).write_text(
+        relation_review.serialize_lifecycle_decision(concurrent_decision),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(vault.PathGuardError) as changed:
+        _apply_plan(tmp_path, plan)
+
+    assert changed.value.code == "PATH_GUARD_CHANGED"
+    assert not relation_review.lifecycle_decision_path(
+        tmp_path, _ID, planned_decision.after_fingerprint
+    ).exists()
+    assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert primary.read_text(encoding="utf-8") == source_a
+    assert len(tuple(directory.glob("[0-9a-f]" * 64 + ".json"))) == 256
 
 
 def test_lifecycle_identity_directory_swap_is_detected(
@@ -525,6 +646,60 @@ def test_duplicate_key_prepared_alias_and_unsafe_identity_directory_are_rejected
     with pytest.raises(relation_review.RelationReviewError) as unsafe:
         relation_review.load_lifecycle_prepared(tmp_path, _ID)
     assert unsafe.value.code == "RELATION_REVIEW_DIRECTORY_UNSAFE"
+
+
+@pytest.mark.parametrize(
+    ("mutate", "code"),
+    [
+        (lambda value: {**value, "extra": True}, "RELATION_REVIEW_INVALID_SCHEMA"),
+        (
+            lambda value: {
+                key: item for key, item in value.items() if key != "carried_from"
+            },
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "schema_version": True},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "contract_version": 99},
+            "RELATION_REVIEW_UNSUPPORTED_VERSION",
+        ),
+        (
+            lambda value: {
+                **value,
+                "decision_reference": None,
+                "decision_bytes_hash": "a" * 64,
+            },
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            lambda value: {**value, "transition_id": _TRANSITION_AB.upper()},
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+    ],
+)
+def test_lifecycle_prepared_schema_is_strict(
+    tmp_path: Path, mutate, code: str
+) -> None:
+    source_a = _source("A")
+    source_b = _source("B")
+    decision = _decision(source_b)
+    prepared = _prepared(
+        source_a,
+        source_b,
+        transition_id=_TRANSITION_AB,
+        decision=decision,
+    )
+    path = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(mutate(prepared.storage_dict())), encoding="utf-8")
+
+    with pytest.raises(relation_review.RelationReviewError) as invalid:
+        relation_review.load_lifecycle_prepared(tmp_path, _ID)
+
+    assert invalid.value.code == code
 
 
 def test_lifecycle_loader_prefers_decision_then_current_creation_receipt_and_never_legacy(

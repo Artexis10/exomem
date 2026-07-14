@@ -38,6 +38,13 @@ MAX_DRAFT_TOKEN_ENCODED_BYTES = 16_384
 _LIFECYCLE_SCHEMA_VERSION = 1
 _LIFECYCLE_CONTRACT_VERSION = 1
 _LIFECYCLE_MAX_DECISIONS = 256
+_LIFECYCLE_MAX_RESIDUE = 3
+_LIFECYCLE_MAX_DIRECTORY_ENTRIES = (
+    _LIFECYCLE_MAX_DECISIONS + 1 + _LIFECYCLE_MAX_RESIDUE
+)
+_LIFECYCLE_ATOMIC_RESIDUE = re.compile(
+    r"^\.(?:prepared\.json|[0-9a-f]{64}\.json)\.[a-z0-9_]{8}\.(?:tmp|bak)$"
+)
 _LIFECYCLE_OPERATIONS = frozenset(
     {"edit", "tier2_overwrite", "tier2_append", "move", "recover"}
 )
@@ -329,7 +336,7 @@ class LifecycleTransitionPlan:
     decision: LifecycleDecision | None
     prepared: LifecyclePreparedTransition
     writes: tuple[vault.PlannedWrite, ...]
-    required_guards: tuple[vault.PathGuard, ...]
+    required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -344,6 +351,7 @@ class _Attempt:
     validation: CreationDraftValidation
     artifact: RelationReviewRecord | None
     artifact_bytes_hash: str | None
+    lifecycle_guard: vault.DirectoryCensusGuard | None
 
 
 class _DuplicateJsonKey(ValueError):
@@ -770,105 +778,64 @@ def serialize_lifecycle_prepared(prepared: LifecyclePreparedTransition) -> str:
     return _bounded_lifecycle_text(prepared.storage_dict())
 
 
-def _safe_directory(path: Path, *, code: str) -> None:
+def _validate_lifecycle_entry(
+    directory: Path, entry: vault.PathIdentity, name: str
+) -> None:
     try:
-        info = path.lstat()
+        info = (directory / name).lstat()
     except OSError as error:
-        raise RelationReviewError(code, "review directory cannot be inspected") from error
+        raise RelationReviewError(
+            "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
+        ) from error
+    if not vault._same_identity(entry, info):
+        raise RelationReviewError(
+            "RELATION_REVIEW_SWAPPED", "review artifact changed during inspection"
+        )
     if (
         stat.S_ISLNK(info.st_mode)
         or vault._is_reparse(info)
-        or not stat.S_ISDIR(info.st_mode)
+        or not stat.S_ISREG(info.st_mode)
     ):
-        raise RelationReviewError(code, "review directory is unsafe")
-
-
-def _descend_lifecycle_directory(parent: Path, component: str) -> Path | None:
-    _safe_directory(parent, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
-    try:
-        names = os.listdir(parent)
-    except (OSError, UnicodeError) as error:
         raise RelationReviewError(
-            "RELATION_REVIEW_DIRECTORY_UNSAFE",
-            "review directory cannot be enumerated",
-        ) from error
-    aliases = tuple(name for name in names if name.casefold() == component.casefold())
-    if any(name != component for name in aliases) or len(aliases) > 1:
-        raise RelationReviewError(
-            "RELATION_REVIEW_ALIAS", "review identity has a filename alias"
+            "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
         )
-    if component not in aliases:
-        return None
-    child = parent / component
-    _safe_directory(child, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
-    return child
 
 
 def _inspect_lifecycle_identity(
     vault_root: Path, page_identity: str
-) -> tuple[Path, tuple[str, ...], tuple[vault.PathIdentity, ...]] | None:
+) -> tuple[Path, tuple[str, ...], vault.DirectoryCensusGuard]:
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
-    _safe_directory(root, code="RELATION_REVIEW_DIRECTORY_UNSAFE")
+    relative = _lifecycle_reference(identity, "").removesuffix("/")
     try:
-        root_info = root.lstat()
-    except OSError as error:
+        census = vault.DirectoryCensusGuard.capture(
+            root,
+            relative,
+            max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+        )
+    except vault.PathGuardError as error:
+        if error.code == "PATH_GUARD_LIMIT":
+            raise RelationReviewError(
+                "RELATION_REVIEW_DIRECTORY_LIMIT",
+                "lifecycle directory exceeds its bounded entry limit",
+            ) from error
         raise RelationReviewError(
             "RELATION_REVIEW_DIRECTORY_UNSAFE",
             "review directory cannot be inspected",
         ) from error
-    chain = [vault._identity(".", root_info)]
-    current = root
-    for component in (
-        kb_dirname(),
-        "_Schema",
-        "relation-reviews",
-        "lifecycle",
-        identity,
-    ):
-        descended = _descend_lifecycle_directory(current, component)
-        if descended is None:
-            _recheck_review_directory(root, tuple(chain))
-            return None
-        current = descended
-        try:
-            info = current.lstat()
-        except OSError as error:
-            raise RelationReviewError(
-                "RELATION_REVIEW_DIRECTORY_UNSAFE",
-                "review directory cannot be inspected",
-            ) from error
-        chain.append(
-            vault._identity(current.relative_to(root).as_posix(), info)
-        )
-    try:
-        raw_names = tuple(sorted(os.listdir(current), key=lambda item: item.encode()))
-    except (OSError, UnicodeError) as error:
-        raise RelationReviewError(
-            "RELATION_REVIEW_DIRECTORY_UNSAFE",
-            "review directory cannot be enumerated",
-        ) from error
+    current = root / relative
+    if census.directory_identity is None:
+        return current, (), census
+    raw_names = tuple(Path(entry.relative_path).name for entry in census.entries)
     logical: set[str] = set()
     decisions = 0
+    residue = 0
     names: list[str] = []
-    for name in raw_names:
-        if name.endswith((".tmp", ".bak")):
+    for entry, name in zip(census.entries, raw_names, strict=True):
+        _validate_lifecycle_entry(current, entry, name)
+        if _LIFECYCLE_ATOMIC_RESIDUE.fullmatch(name):
+            residue += 1
             continue
-        path = current / name
-        try:
-            info = path.lstat()
-        except OSError as error:
-            raise RelationReviewError(
-                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
-            ) from error
-        if (
-            stat.S_ISLNK(info.st_mode)
-            or vault._is_reparse(info)
-            or not stat.S_ISREG(info.st_mode)
-        ):
-            raise RelationReviewError(
-                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
-            )
         canonical = name == "prepared.json" or bool(
             re.fullmatch(r"[0-9a-f]{64}\.json", name)
         )
@@ -887,142 +854,24 @@ def _inspect_lifecycle_identity(
         if name != "prepared.json":
             decisions += 1
         names.append(name)
+    if residue > _LIFECYCLE_MAX_RESIDUE:
+        raise RelationReviewError(
+            "RELATION_REVIEW_DIRECTORY_LIMIT",
+            "lifecycle directory exceeds three atomic residue files",
+        )
     if decisions > _LIFECYCLE_MAX_DECISIONS:
         raise RelationReviewError(
             "RELATION_REVIEW_HISTORY_LIMIT",
             "lifecycle review history exceeds 256 decisions; clean it up through "
             "governed review tooling",
         )
-    bound_chain = tuple(chain)
-    _recheck_review_directory(root, bound_chain)
-    return current, tuple(names), bound_chain
-
-
-def _read_lifecycle_bytes(
-    root: Path,
-    path: Path,
-    chain: tuple[vault.PathIdentity, ...],
-) -> tuple[bytes, vault.PathGuard]:
-    _recheck_review_directory(root, chain)
     try:
-        relative = path.relative_to(root).as_posix()
-    except ValueError as error:
-        raise RelationReviewError(
-            "RELATION_REVIEW_IO", "review artifact cannot be inspected"
-        ) from error
-    directory_flags = (
-        os.O_RDONLY
-        | getattr(os, "O_DIRECTORY", 0)
-        | getattr(os, "O_NOFOLLOW", 0)
-    )
-    try:
-        directory_descriptor = os.open(path.parent, directory_flags)
-    except OSError as error:
-        raise RelationReviewError(
-            "RELATION_REVIEW_DIRECTORY_UNSAFE",
-            "review directory cannot be opened",
-        ) from error
-    try:
-        opened_directory = os.fstat(directory_descriptor)
-        if not stat.S_ISDIR(opened_directory.st_mode) or not vault._same_identity(
-            chain[-1], opened_directory
-        ):
-            raise RelationReviewError(
-                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
-            )
-        descriptor_relative = _SUPPORTS_REVIEW_DIR_FD
-        try:
-            before = (
-                os.stat(
-                    path.name,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-                if descriptor_relative
-                else path.lstat()
-            )
-        except OSError as error:
-            raise RelationReviewError(
-                "RELATION_REVIEW_IO", "review artifact cannot be inspected"
-            ) from error
-        if (
-            stat.S_ISLNK(before.st_mode)
-            or vault._is_reparse(before)
-            or not stat.S_ISREG(before.st_mode)
-        ):
-            raise RelationReviewError(
-                "RELATION_REVIEW_UNSAFE_FILE", "review artifact is unsafe"
-            )
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = (
-                os.open(path.name, flags, dir_fd=directory_descriptor)
-                if descriptor_relative
-                else os.open(path, flags)
-            )
-        except OSError as error:
-            raise RelationReviewError(
-                "RELATION_REVIEW_IO", "review artifact cannot be opened"
-            ) from error
-        try:
-            opened = os.fstat(descriptor)
-            if (
-                not stat.S_ISREG(opened.st_mode)
-                or not vault._same_identity(
-                    vault._identity(relative, before), opened
-                )
-            ):
-                raise RelationReviewError(
-                    "RELATION_REVIEW_SWAPPED",
-                    "review artifact changed during read",
-                )
-            try:
-                raw = os.read(descriptor, _MAX_ARTIFACT_BYTES + 1)
-            except OSError as error:
-                raise RelationReviewError(
-                    "RELATION_REVIEW_IO", "review artifact cannot be read"
-                ) from error
-        finally:
-            os.close(descriptor)
-        try:
-            after = (
-                os.stat(
-                    path.name,
-                    dir_fd=directory_descriptor,
-                    follow_symlinks=False,
-                )
-                if descriptor_relative
-                else path.lstat()
-            )
-        except OSError as error:
-            raise RelationReviewError(
-                "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
-            ) from error
-        if not vault._same_identity(vault._identity(relative, before), after):
-            raise RelationReviewError(
-                "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
-            )
-        _recheck_review_directory(root, chain)
-    finally:
-        os.close(directory_descriptor)
-    if len(raw) > _MAX_ARTIFACT_BYTES:
-        raise RelationReviewError(
-            "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
-        )
-    digest = hashlib.sha256(raw).hexdigest()
-    try:
-        guard = vault.PathGuard.capture(
-            root,
-            relative,
-            leaf_policy="content",
-            expected_content_hash=digest,
-        )
+        census.recheck(root)
     except vault.PathGuardError as error:
         raise RelationReviewError(
-            "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
+            "RELATION_REVIEW_SWAPPED", "review directory changed during access"
         ) from error
-    _recheck_review_directory(root, chain)
-    return raw, guard
+    return current, tuple(names), census
 
 
 def _parse_lifecycle_json(raw: bytes) -> dict[str, Any]:
@@ -1183,13 +1032,22 @@ def _load_lifecycle_decision_bound(
     fingerprint = _canonical_fingerprint(after_fingerprint)
     root = Path(vault_root).absolute()
     inspected = _inspect_lifecycle_identity(root, identity)
-    if inspected is None:
+    _, names, census = inspected
+    if census.directory_identity is None:
         return None, None
-    directory, names, chain = inspected
     name = f"{fingerprint}.json"
     if name not in names:
         return None, None
-    raw, guard = _read_lifecycle_bytes(root, directory / name, chain)
+    with _open_review_directory(
+        root,
+        nested=("lifecycle", identity),
+        max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+    ) as opened:
+        if opened is None:
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            )
+        raw, guard = _read_artifact_bytes(opened, name)
     return (
         _parse_lifecycle_decision(
             raw, page_identity=identity, after_fingerprint=fingerprint
@@ -1213,14 +1071,21 @@ def _load_lifecycle_prepared_bound(
     identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
     root = Path(vault_root).absolute()
     inspected = _inspect_lifecycle_identity(root, identity)
-    if inspected is None:
+    _, names, census = inspected
+    if census.directory_identity is None:
         return None, None
-    directory, names, chain = inspected
     if "prepared.json" not in names:
         return None, None
-    raw, guard = _read_lifecycle_bytes(
-        root, directory / "prepared.json", chain
-    )
+    with _open_review_directory(
+        root,
+        nested=("lifecycle", identity),
+        max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+    ) as opened:
+        if opened is None:
+            raise RelationReviewError(
+                "RELATION_REVIEW_SWAPPED", "review directory changed during access"
+            )
+        raw, guard = _read_artifact_bytes(opened, "prepared.json")
     return _parse_lifecycle_prepared(raw, page_identity=identity), guard
 
 
@@ -1233,14 +1098,15 @@ def load_lifecycle_prepared(
 
 def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
     """Return whether any exact lifecycle identity directory reserves the UUID."""
-    return _inspect_lifecycle_identity(vault_root, page_identity) is not None
+    _, _, census = _inspect_lifecycle_identity(vault_root, page_identity)
+    return census.directory_identity is not None
 
 
 def _ensure_lifecycle_decision_capacity(root: Path, page_identity: str) -> None:
     inspected = _inspect_lifecycle_identity(root, page_identity)
-    if inspected is None:
+    _, names, census = inspected
+    if census.directory_identity is None:
         return
-    _, names, _ = inspected
     count = sum(name != "prepared.json" for name in names)
     if count >= _LIFECYCLE_MAX_DECISIONS:
         raise RelationReviewError(
@@ -1366,21 +1232,10 @@ def plan_lifecycle_transition(
     root = Path(vault_root).absolute()
 
     writes: list[vault.PlannedWrite] = []
-    read_guards: list[vault.PathGuard] = []
-    existing_decision: LifecycleDecision | None = None
-    decision_guard: vault.PathGuard | None = None
-    if decision is not None:
-        existing_decision, decision_guard = _load_lifecycle_decision_bound(
-            root, decision.page_identity, decision.after_fingerprint
-        )
-        if existing_decision is not None and existing_decision != decision:
-            raise RelationReviewError(
-                "RELATION_REVIEW_DECISION_COLLISION",
-                "immutable lifecycle decision collides with existing bytes",
-            )
-        if existing_decision is not None and decision_guard is not None:
-            read_guards.append(decision_guard)
-
+    _, _, identity_guard = _inspect_lifecycle_identity(root, prepared.page_identity)
+    read_guards: list[vault.PathGuard | vault.DirectoryCensusGuard] = [
+        identity_guard
+    ]
     existing_prepared, prepared_guard = _load_lifecycle_prepared_bound(
         root, prepared.page_identity
     )
@@ -1408,6 +1263,43 @@ def plan_lifecycle_transition(
             tuple(read_guards),
         )
 
+    if existing_prepared is not None:
+        old_state = lifecycle_prepared_state(existing_prepared, current)
+        if old_state == "pending":
+            if existing_prepared.transition_id == prepared.transition_id:
+                code = "LIFECYCLE_TRANSITION_MISMATCH"
+                reason = "prepared transition bindings changed for the same transition"
+            else:
+                code = "LIFECYCLE_TRANSITION_PENDING"
+                reason = (
+                    "retry the exact pending lifecycle transition before starting another"
+                )
+            raise RelationReviewError(code, reason)
+        if old_state == "stale":
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_STALE",
+                "prepared transition matches neither live side; reconcile lifecycle state",
+            )
+        if existing_prepared.transition_id == prepared.transition_id:
+            raise RelationReviewError(
+                "LIFECYCLE_TRANSITION_MISMATCH",
+                "prepared transition bindings changed for the same transition",
+            )
+
+    existing_decision: LifecycleDecision | None = None
+    decision_guard: vault.PathGuard | None = None
+    if decision is not None:
+        existing_decision, decision_guard = _load_lifecycle_decision_bound(
+            root, decision.page_identity, decision.after_fingerprint
+        )
+        if existing_decision is not None and existing_decision != decision:
+            raise RelationReviewError(
+                "RELATION_REVIEW_DECISION_COLLISION",
+                "immutable lifecycle decision collides with existing bytes",
+            )
+        if existing_decision is not None and decision_guard is not None:
+            read_guards.append(decision_guard)
+
     prepared_path = lifecycle_prepared_path(root, prepared.page_identity)
     prepared_relative = prepared_path.relative_to(root).as_posix()
     if existing_prepared is None:
@@ -1433,25 +1325,6 @@ def plan_lifecycle_transition(
         )
 
     assert prepared_guard is not None
-    old_state = lifecycle_prepared_state(existing_prepared, current)
-    if old_state == "pending":
-        if existing_prepared.transition_id == prepared.transition_id:
-            code = "LIFECYCLE_TRANSITION_MISMATCH"
-            reason = "prepared transition bindings changed for the same transition"
-        else:
-            code = "LIFECYCLE_TRANSITION_PENDING"
-            reason = "retry the exact pending lifecycle transition before starting another"
-        raise RelationReviewError(code, reason)
-    if old_state == "stale":
-        raise RelationReviewError(
-            "LIFECYCLE_TRANSITION_STALE",
-            "prepared transition matches neither live side; reconcile lifecycle state",
-        )
-    if existing_prepared.transition_id == prepared.transition_id:
-        raise RelationReviewError(
-            "LIFECYCLE_TRANSITION_MISMATCH",
-            "prepared transition bindings changed for the same transition",
-        )
     if lifecycle_prepared_state(prepared, current) != "pending":
         raise RelationReviewError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -1473,6 +1346,7 @@ def plan_lifecycle_transition(
 
 @dataclass(frozen=True, slots=True)
 class _OpenReviewDirectory:
+    root: Path
     path: Path
     descriptor: int
     names: tuple[str, ...]
@@ -1482,10 +1356,11 @@ class _OpenReviewDirectory:
 
 def _capture_review_directory(
     root: Path,
+    nested: tuple[str, ...] = (),
 ) -> tuple[Path, tuple[vault.PathIdentity, ...] | None]:
-    directory = root / kb_dirname() / "_Schema" / "relation-reviews"
+    directory = root / kb_dirname() / "_Schema" / "relation-reviews" / Path(*nested)
     current = root
-    components = (kb_dirname(), "_Schema", "relation-reviews")
+    components = (kb_dirname(), "_Schema", "relation-reviews", *nested)
     identities: list[vault.PathIdentity] = []
     for component in (None, *components):
         if component is not None:
@@ -1529,8 +1404,13 @@ def _recheck_review_directory(root: Path, chain: tuple[vault.PathIdentity, ...])
 
 
 @contextmanager
-def _open_review_directory(root: Path) -> Iterator[_OpenReviewDirectory | None]:
-    directory, chain = _capture_review_directory(root)
+def _open_review_directory(
+    root: Path,
+    *,
+    nested: tuple[str, ...] = (),
+    max_entries: int | None = None,
+) -> Iterator[_OpenReviewDirectory | None]:
+    directory, chain = _capture_review_directory(root, nested)
     if chain is None:
         yield None
         return
@@ -1550,14 +1430,34 @@ def _open_review_directory(root: Path) -> Iterator[_OpenReviewDirectory | None]:
                 "RELATION_REVIEW_SWAPPED", "review directory changed during access"
             )
         descriptor_relative = _SUPPORTS_REVIEW_DIR_FD
-        try:
-            raw_names = os.listdir(descriptor)
-        except (TypeError, NotImplementedError):  # pragma: no cover - platform fallback
-            raw_names = [entry.name for entry in os.scandir(directory)]
-            descriptor_relative = False
+        if max_entries is None:
+            try:
+                raw_names = os.listdir(descriptor)
+            except (TypeError, NotImplementedError):  # pragma: no cover - platform fallback
+                raw_names = [entry.name for entry in os.scandir(directory)]
+                descriptor_relative = False
+        else:
+            try:
+                census = vault.DirectoryCensusGuard.capture(
+                    root,
+                    directory.relative_to(root).as_posix(),
+                    max_entries=max_entries,
+                )
+            except vault.PathGuardError as error:
+                code = (
+                    "RELATION_REVIEW_DIRECTORY_LIMIT"
+                    if error.code == "PATH_GUARD_LIMIT"
+                    else "RELATION_REVIEW_DIRECTORY_UNSAFE"
+                )
+                raise RelationReviewError(
+                    code, "review directory cannot be enumerated safely"
+                ) from error
+            raw_names = [Path(entry.relative_path).name for entry in census.entries]
         names = tuple(sorted(raw_names, key=lambda name: name.encode("utf-8")))
         _recheck_review_directory(root, chain)
-        yield _OpenReviewDirectory(directory, descriptor, names, chain, descriptor_relative)
+        yield _OpenReviewDirectory(
+            root, directory, descriptor, names, chain, descriptor_relative
+        )
     except UnicodeEncodeError as error:
         raise RelationReviewError(
             "RELATION_REVIEW_DIRECTORY_UNSAFE", "review directory name is invalid"
@@ -1581,7 +1481,9 @@ def _artifact_children_for(opened: _OpenReviewDirectory | None, identity: str) -
     return matches
 
 
-def _read_artifact_bytes(opened: _OpenReviewDirectory, name: str) -> bytes:
+def _read_artifact_bytes(
+    opened: _OpenReviewDirectory, name: str
+) -> tuple[bytes, vault.PathGuard]:
     path = opened.path / name
     try:
         before = (
@@ -1635,12 +1537,25 @@ def _read_artifact_bytes(opened: _OpenReviewDirectory, name: str) -> bytes:
         ) from error
     if not vault._same_identity(vault._identity(name, before), after):
         raise RelationReviewError("RELATION_REVIEW_SWAPPED", "review artifact changed during read")
-    _recheck_review_directory(opened.path.parents[2], opened.chain)
+    _recheck_review_directory(opened.root, opened.chain)
     if len(raw) > _MAX_ARTIFACT_BYTES:
         raise RelationReviewError(
             "RELATION_REVIEW_TOO_LARGE", "review artifact exceeds its size limit"
         )
-    return raw
+    relative = path.relative_to(opened.root).as_posix()
+    try:
+        guard = vault.PathGuard.capture(
+            opened.root,
+            relative,
+            leaf_policy="content",
+            expected_content_hash=hashlib.sha256(raw).hexdigest(),
+        )
+    except vault.PathGuardError as error:
+        raise RelationReviewError(
+            "RELATION_REVIEW_SWAPPED", "review artifact changed during read"
+        ) from error
+    _recheck_review_directory(opened.root, opened.chain)
+    return raw, guard
 
 
 def _object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -1670,7 +1585,7 @@ def _safe_record_path(value: str) -> bool:
 def _parse_record(
     opened: _OpenReviewDirectory, name: str, reference: str
 ) -> tuple[RelationReviewRecord, str]:
-    raw = _read_artifact_bytes(opened, name)
+    raw, _ = _read_artifact_bytes(opened, name)
     try:
         text = raw.decode("utf-8", errors="strict")
     except UnicodeDecodeError as error:
@@ -2013,14 +1928,15 @@ def _attempt(
         raise RelationReviewError(
             "DRAFT_ID_IN_USE", "draft identity is already reserved"
         ) from error
+    lifecycle_guard: vault.DirectoryCensusGuard | None = None
     if artifact is None:
         try:
-            lifecycle_reserved = lifecycle_identity_reserved(root, identity)
+            _, _, lifecycle_guard = _inspect_lifecycle_identity(root, identity)
         except RelationReviewError as error:
             raise RelationReviewError(
                 "DRAFT_ID_IN_USE", "draft identity is already reserved"
             ) from error
-        if lifecycle_reserved:
+        if lifecycle_guard.directory_identity is not None:
             raise RelationReviewError(
                 "DRAFT_ID_IN_USE", "draft identity is already reserved"
             )
@@ -2185,6 +2101,7 @@ def _attempt(
         validation,
         artifact,
         artifact_hash,
+        lifecycle_guard,
     )
 
 
@@ -2670,7 +2587,9 @@ def commit_creation_draft(
 
             prepared = attempt.artifact
             resumed = False
-            required_guards: tuple[vault.PathGuard, ...] = ()
+            required_guards: tuple[
+                vault.PathGuard | vault.DirectoryCensusGuard, ...
+            ] = ()
             writes: list[vault.PlannedWrite] = []
             if prepared is not None:
                 if attempt.artifact_bytes_hash is None:
@@ -2695,6 +2614,11 @@ def commit_creation_draft(
                         guard=vault.PathGuard.capture(root, artifact_rel, leaf_policy="absent"),
                     )
                 )
+                if attempt.lifecycle_guard is None:
+                    raise RelationReviewError(
+                        "DRAFT_ID_IN_USE", "draft identity reservation is unguarded"
+                    )
+                required_guards = (*required_guards, attempt.lifecycle_guard)
             guarded_auxiliaries: list[vault.PlannedWrite] = []
             for auxiliary in auxiliaries:
                 if auxiliary.guard is not None:
@@ -2741,6 +2665,15 @@ def commit_creation_draft(
                 raise RelationReviewError(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
+            except vault.PathGuardError:
+                if attempt.lifecycle_guard is not None:
+                    try:
+                        attempt.lifecycle_guard.recheck(root)
+                    except vault.PathGuardError as lifecycle_error:
+                        raise RelationReviewError(
+                            "DRAFT_ID_IN_USE", "draft identity became reserved"
+                        ) from lifecycle_error
+                raise
             written_paths = tuple(item.relative_to(root).as_posix() for item in written)
             review_record = record if record is not None and record.kind != "qualifying" else None
             reference = review_record.reference if review_record is not None else None

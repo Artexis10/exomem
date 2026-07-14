@@ -254,14 +254,18 @@ def test_reviewed_none_commit_writes_artifact_then_auxiliaries_then_primary(
     artifact = relation_review.review_artifact_path(tmp_path, _ID_B)
     assert captured == [
         (
-            (
-                artifact.relative_to(tmp_path).as_posix(),
-                "Knowledge Base/nav.md",
-                _PAGE_B,
-            ),
-            (),
-        )
-    ]
+                (
+                    artifact.relative_to(tmp_path).as_posix(),
+                    "Knowledge Base/nav.md",
+                    _PAGE_B,
+                ),
+                (
+                    relation_review.lifecycle_prepared_path(
+                        tmp_path, _ID_B
+                    ).parent.relative_to(tmp_path).as_posix(),
+                ),
+            )
+        ]
     assert commit.resumed_prepared is False
     assert commit.written_paths == captured[0][0]
     assert commit.review_state_current
@@ -832,6 +836,56 @@ def test_hash_mismatch_is_rejected_before_activation_mutates_vault(
 
     assert exc.value.code == "DRAFT_HASH_MISMATCH"
     assert not activation_manifest.manifest_path(tmp_path).exists()
+    assert not relation_review.review_artifact_path(tmp_path, _ID_B).exists()
+    assert not (tmp_path / _PAGE_B).exists()
+
+
+@pytest.mark.parametrize("existing_lifecycle_root", [False, True])
+def test_creation_commit_rechecks_lifecycle_uuid_reservation_at_atomic_apply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    existing_lifecycle_root: bool,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    lifecycle_root = relation_review.lifecycle_prepared_path(
+        tmp_path, _ID_B
+    ).parent.parent
+    if existing_lifecycle_root:
+        lifecycle_root.mkdir(parents=True)
+    real_batch = relation_review.vault.batch_atomic_write
+
+    def inject_lifecycle_reservation(*args, **kwargs):
+        decision = relation_review.build_lifecycle_decision(
+            page_identity=_ID_B,
+            after_fingerprint=validation.content_fingerprint,
+            reason="Concurrent lifecycle reservation",
+        )
+        decision_path = relation_review.lifecycle_decision_path(
+            tmp_path, _ID_B, validation.content_fingerprint
+        )
+        decision_path.parent.mkdir(parents=True, exist_ok=True)
+        decision_path.write_text(
+            relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+        )
+        return real_batch(*args, **kwargs)
+
+    monkeypatch.setattr(
+        relation_review.vault, "batch_atomic_write", inject_lifecycle_reservation
+    )
+
+    with pytest.raises(relation_review.RelationReviewError) as reserved:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest typed relation yet",
+        )
+
+    assert reserved.value.code == "DRAFT_ID_IN_USE"
     assert not relation_review.review_artifact_path(tmp_path, _ID_B).exists()
     assert not (tmp_path / _PAGE_B).exists()
 

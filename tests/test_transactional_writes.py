@@ -100,6 +100,60 @@ def test_batch_atomic_write_reports_and_retains_failed_restore(
     assert list(tmp_path.glob("*.bak")) or list(tmp_path.glob(".*.bak"))
 
 
+def test_batch_atomic_write_rolls_back_when_required_directory_census_changes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    census = vault_module.DirectoryCensusGuard.capture(
+        tmp_path, "guarded", max_entries=4
+    )
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("first-old", encoding="utf-8")
+    second.write_text("second-old", encoding="utf-8")
+    real_replace = os.replace
+    replacements = 0
+
+    def inject_census_change(src, dst):
+        nonlocal replacements
+        result = real_replace(src, dst)
+        if str(src).endswith(".tmp"):
+            replacements += 1
+            if replacements == 1:
+                (guarded / "concurrent").write_text("new", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(vault_module.os, "replace", inject_census_change)
+    with pytest.raises(vault_module.PathGuardError) as changed:
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ],
+            vault_root=tmp_path,
+            required_guards=(census,),
+        )
+
+    assert changed.value.code == "PATH_GUARD_CHANGED"
+    assert first.read_text(encoding="utf-8") == "first-old"
+    assert second.read_text(encoding="utf-8") == "second-old"
+
+
+def test_directory_census_guard_enforces_its_raw_entry_bound(tmp_path: Path) -> None:
+    guarded = tmp_path / "guarded"
+    guarded.mkdir()
+    for index in range(5):
+        (guarded / f"{index}.txt").write_text("entry", encoding="utf-8")
+
+    with pytest.raises(vault_module.PathGuardError) as bounded:
+        vault_module.DirectoryCensusGuard.capture(
+            tmp_path, "guarded", max_entries=4
+        )
+
+    assert bounded.value.code == "PATH_GUARD_LIMIT"
+
+
 def test_move_file_rolls_back_rename_when_link_batch_fails(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

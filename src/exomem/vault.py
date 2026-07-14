@@ -614,6 +614,250 @@ class PathGuard:
             raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
 
 
+def _bounded_directory_entries(
+    path: Path,
+    *,
+    relative: str,
+    expected: PathIdentity,
+    max_entries: int,
+    ignored_names: frozenset[str] = frozenset(),
+) -> tuple[PathIdentity, ...]:
+    """Capture a bounded descriptor-relative directory census."""
+    try:
+        descriptor = os.open(path, _directory_flags())
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
+    iterator = None
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISDIR(opened.st_mode) or not _same_identity(expected, opened):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+        descriptor_relative = os.scandir in getattr(os, "supports_fd", set())
+        iterator = os.scandir(descriptor if descriptor_relative else path)
+        entries: list[PathIdentity] = []
+        for entry in iterator:
+            name = entry.name
+            try:
+                encoded = name.encode("utf-8")
+            except UnicodeEncodeError as error:
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "guarded directory entry is unsafe"
+                ) from error
+            if not name or name in {".", ".."} or "/" in name or "\\" in name or b"\0" in encoded:
+                raise PathGuardError(
+                    "PATH_GUARD_UNSAFE", "guarded directory entry is unsafe"
+                )
+            if name in ignored_names:
+                continue
+            if len(entries) >= max_entries:
+                raise PathGuardError(
+                    "PATH_GUARD_LIMIT", "guarded directory exceeds its entry limit"
+                )
+            try:
+                info = (
+                    os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    if descriptor_relative
+                    else entry.stat(follow_symlinks=False)
+                )
+            except OSError as error:
+                raise PathGuardError(
+                    "PATH_GUARD_CHANGED", "guarded directory entry changed"
+                ) from error
+            entry_relative = f"{relative}/{name}"
+            entries.append(_identity(entry_relative, info))
+        if not _same_identity(expected, os.fstat(descriptor)):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+    finally:
+        if iterator is not None:
+            iterator.close()
+        os.close(descriptor)
+    return tuple(sorted(entries, key=lambda item: item.relative_path.encode("utf-8")))
+
+
+@dataclass(frozen=True, slots=True)
+class DirectoryCensusGuard:
+    """Bind an absent directory or a bounded exact child census to commit time."""
+
+    target: str
+    ancestors: tuple[PathIdentity, ...]
+    missing_paths: tuple[str, ...]
+    directory_identity: PathIdentity | None
+    entries: tuple[PathIdentity, ...]
+    max_entries: int
+
+    @classmethod
+    def capture(
+        cls,
+        vault_root: Path,
+        target: str,
+        *,
+        max_entries: int,
+    ) -> DirectoryCensusGuard:
+        parts = _safe_guard_target(target)
+        if type(max_entries) is not int or max_entries < 0:
+            raise PathGuardError("PATH_GUARD_INVALID", "directory entry limit is invalid")
+        root = Path(vault_root)
+        try:
+            root_info = root.lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root is unavailable") from error
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or _is_reparse(root_info)
+        ):
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root is unsafe")
+        ancestors = [_identity(".", root_info)]
+        current = root
+        missing: list[str] = []
+        for index, part in enumerate(parts):
+            current /= part
+            relative = "/".join(parts[: index + 1])
+            if missing:
+                missing.append(relative)
+                continue
+            try:
+                info = current.lstat()
+            except FileNotFoundError:
+                missing.append(relative)
+                continue
+            except OSError as error:
+                raise PathGuardError("PATH_GUARD_IO", "guard directory is unreadable") from error
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "guard directory is unsafe")
+            if index < len(parts) - 1:
+                ancestors.append(_identity(relative, info))
+                continue
+            directory_identity = _identity(relative, info)
+            entries = _bounded_directory_entries(
+                current,
+                relative=relative,
+                expected=directory_identity,
+                max_entries=max_entries,
+            )
+            guard = cls(
+                target,
+                tuple(ancestors),
+                (),
+                directory_identity,
+                entries,
+                max_entries,
+            )
+            guard.recheck(root)
+            return guard
+        guard = cls(target, tuple(ancestors), tuple(missing), None, (), max_entries)
+        guard.recheck(root)
+        return guard
+
+    def recheck(
+        self,
+        vault_root: Path,
+        *,
+        allowed_changes: Iterable[Path] = (),
+    ) -> None:
+        root = Path(vault_root)
+        for expected in self.ancestors:
+            path = root if expected.relative_path == "." else root / expected.relative_path
+            try:
+                info = path.lstat()
+            except OSError as error:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed") from error
+            if (
+                not _same_identity(expected, info)
+                or not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or _is_reparse(info)
+            ):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
+        if self.directory_identity is None:
+            for relative in self.missing_paths[:-1]:
+                path = root / relative
+                if not os.path.lexists(path):
+                    return
+                try:
+                    info = path.lstat()
+                except OSError as error:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory ancestor changed"
+                    ) from error
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or _is_reparse(info)
+                ):
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory ancestor changed"
+                    )
+            if self.missing_paths and os.path.lexists(root / self.missing_paths[-1]):
+                directory = root / self.target
+                allowed_names = frozenset(
+                    path.name
+                    for path in allowed_changes
+                    if os.path.abspath(path.parent) == os.path.abspath(directory)
+                )
+                if not allowed_names:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory appeared"
+                    )
+                try:
+                    info = directory.lstat()
+                except OSError as error:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory changed"
+                    ) from error
+                if (
+                    not stat.S_ISDIR(info.st_mode)
+                    or stat.S_ISLNK(info.st_mode)
+                    or _is_reparse(info)
+                ):
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory changed"
+                    )
+                current = _bounded_directory_entries(
+                    directory,
+                    relative=self.target,
+                    expected=_identity(self.target, info),
+                    max_entries=self.max_entries,
+                    ignored_names=allowed_names,
+                )
+                if current:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "guarded directory census changed"
+                    )
+            return
+        directory = root / self.target
+        try:
+            info = directory.lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
+        if (
+            not _same_identity(self.directory_identity, info)
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed")
+        allowed_names = frozenset(
+            path.name
+            for path in allowed_changes
+            if os.path.abspath(path.parent) == os.path.abspath(directory)
+        )
+        current = _bounded_directory_entries(
+            directory,
+            relative=self.target,
+            expected=self.directory_identity,
+            max_entries=self.max_entries,
+            ignored_names=allowed_names,
+        )
+        expected = tuple(
+            entry
+            for entry in self.entries
+            if Path(entry.relative_path).name not in allowed_names
+        )
+        if current != expected:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory census changed")
+
+
 def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
     """Read UTF-8 text once and bind a guard to those exact source bytes."""
     root = Path(vault_root)
@@ -783,7 +1027,7 @@ def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
     vault_root: Path | None = None,
-    required_guards: Iterable[PathGuard] = (),
+    required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
     index_reports: list[Any] | None = None,
 ) -> list[Path]:
     """Stage each write as a sibling .tmp file, then os.replace() them into place.
@@ -808,7 +1052,20 @@ def batch_atomic_write(
     for write in writes:
         deduped[write.path] = write
     writes = list(deduped.values())
-    read_only_guards = tuple(required_guards)
+    all_required_guards = tuple(required_guards)
+    if any(
+        not isinstance(guard, (PathGuard, DirectoryCensusGuard))
+        for guard in all_required_guards
+    ):
+        raise PathGuardError("PATH_GUARD_INVALID", "unsupported required guard")
+    read_only_guards = tuple(
+        guard for guard in all_required_guards if isinstance(guard, PathGuard)
+    )
+    directory_guards = tuple(
+        guard
+        for guard in all_required_guards
+        if isinstance(guard, DirectoryCensusGuard)
+    )
     # Access-tier backstop: when the caller knows the vault root, refuse any
     # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
     # here so every content writer inherits it without per-tool wiring. No
@@ -830,7 +1087,9 @@ def batch_atomic_write(
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
     if (
-        read_only_guards or any(write.guard is not None for write in writes)
+        read_only_guards
+        or directory_guards
+        or any(write.guard is not None for write in writes)
     ) and vault_root is None:
         raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
     bound_guards: list[PathGuard | None] = []
@@ -855,6 +1114,8 @@ def batch_atomic_write(
         read_only_guards = prepared[len(write_guards) :]
         for guard in (*read_only_guards, *(item for item in bound_guards if item is not None)):
             guard.recheck(root)
+        for guard in directory_guards:
+            guard.recheck(root, allowed_changes=(write.path for write in writes))
     else:
         bound_guards = [None] * len(writes)
     for write in writes:
@@ -909,6 +1170,13 @@ def batch_atomic_write(
                 for guard in bound_guards[index:]:
                     if guard is not None:
                         guard.recheck(root)
+                allowed_census_changes = (
+                    *(write.path for write in writes),
+                    *(staged_tmp for _, staged_tmp in staged),
+                    *(backup for backup in backups.values() if backup is not None),
+                )
+                for guard in directory_guards:
+                    guard.recheck(root, allowed_changes=allowed_census_changes)
             if writes[index].create_only and os.path.lexists(final):
                 raise CreateOnlyConflict(_safe_write_target(final, vault_root))
             os.replace(tmp, final)
