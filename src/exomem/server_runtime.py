@@ -32,6 +32,7 @@ class ServerRuntime:
     file_watcher: Any | None = None
     hosted_config: HostedCellConfig | None = None
     hosted_lifecycle: HostedCellLifecycle | None = None
+    hosted_security_authority: Any | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -76,6 +77,7 @@ def _initialize_hosted_runtime() -> ServerRuntime:
     config = HostedCellConfig.from_env(require_provisioned=True)
     config.apply_process_environment()
     lifecycle = HostedCellLifecycle(config)
+    security_authority = _initialize_hosted_security(config)
     vault_root = config.vault_root
 
     source_schema = schema.load_source_schema(vault_root)
@@ -91,7 +93,7 @@ def _initialize_hosted_runtime() -> ServerRuntime:
     startup = lifecycle.complete_startup(
         vault_ready=True,
         mutation_authority_ready=mutation_ready,
-        service_auth_ready=True,
+        service_auth_ready=(security_authority is not None or config.service_credential is not None),
     )
     if not mutation_ready:
         lifecycle.set_mutation_authority(False, reason_code=mutation_reason)
@@ -179,7 +181,27 @@ def _initialize_hosted_runtime() -> ServerRuntime:
         file_watcher=file_watcher,
         hosted_config=config,
         hosted_lifecycle=lifecycle,
+        hosted_security_authority=security_authority,
     )
+
+
+def _initialize_hosted_security(config: HostedCellConfig) -> Any | None:
+    """Open and validate the v2 authority before the server becomes reachable."""
+
+    if not config.requires_dynamic_security:
+        return None
+    assert config.vault_id is not None
+    from .hosted_security import HostedSecurityAuthority
+
+    authority = HostedSecurityAuthority(
+        config.state_root,
+        cell_id=config.cell_id,
+        vault_id=config.vault_id,
+        expected_uid=config.runtime_uid,
+        expected_gid=config.runtime_gid,
+    )
+    authority.validate_ready()
+    return authority
 
 
 def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:

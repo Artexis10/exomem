@@ -57,6 +57,8 @@ class TrustedGatewayContext:
     request_id: str
     principal_scope: str
     idempotency_key: str | None = None
+    authenticated_credential_version: str | None = None
+    security_revision: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -315,6 +317,13 @@ def mint_transfer_grant(
 ) -> str:
     """Mint an alpha HMAC grant using the existing unique cell credential."""
 
+    service_credential = config.service_credential
+    if service_credential is None:
+        raise HostedGatewayError(
+            "HOSTED_TRANSFER_UNAVAILABLE",
+            "legacy private transfer is unavailable for dynamic-credential cells",
+        )
+
     if operation not in _OPERATIONS:
         raise HostedGatewayError(
             "HOSTED_TRANSFER_OPERATION_INVALID", "transfer operation is invalid"
@@ -346,7 +355,7 @@ def mint_transfer_grant(
     }
     payload = _b64encode(canonical_json(claims))
     signature = hmac.new(
-        config.service_credential.encode("utf-8"),
+        service_credential.encode("utf-8"),
         payload.encode("ascii"),
         hashlib.sha256,
     ).digest()
@@ -388,6 +397,13 @@ def verify_transfer_grant(
 ) -> TransferGrant:
     """Verify signature, strict claims, bindings, lifetime, and resource bounds."""
 
+    service_credential = config.service_credential
+    if service_credential is None:
+        raise HostedGatewayError(
+            "HOSTED_TRANSFER_UNAVAILABLE",
+            "legacy private transfer is unavailable for dynamic-credential cells",
+        )
+
     try:
         payload, signature = str(token or "").split(".")
     except ValueError as exc:
@@ -396,7 +412,7 @@ def verify_transfer_grant(
         ) from exc
     presented_signature = _b64decode(signature)
     expected_signature = hmac.new(
-        config.service_credential.encode("utf-8"),
+        service_credential.encode("utf-8"),
         payload.encode("ascii"),
         hashlib.sha256,
     ).digest()

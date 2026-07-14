@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, Response, StreamingResponse
 
 from . import (
+    __version__,
     cli_ops,
     hosted_portability,
     hosted_runtime,
@@ -318,12 +319,42 @@ def _bearer_credential(request: Request) -> str | None:
     return credential.strip()
 
 
-def _trusted_context(request: Request, config: HostedCellConfig) -> gateway.TrustedGatewayContext:
+def _trusted_context(
+    request: Request,
+    config: HostedCellConfig,
+    authenticator: Any | None = None,
+) -> gateway.TrustedGatewayContext:
     if _has_duplicate_sensitive_headers(request):
         raise gateway.HostedGatewayError(
             "HOSTED_CONTEXT_INVALID", "trusted headers must occur exactly once"
         )
-    if not config.matches_service_credential(_bearer_credential(request)):
+    presented = _bearer_credential(request)
+    authenticated_credential_version: str | None = None
+    security_revision: int | None = None
+    if authenticator is None:
+        authenticated = config.matches_service_credential(presented)
+    else:
+        from .hosted_security import HostedSecurityError
+
+        try:
+            authentication = authenticator.authenticate(presented)
+        except HostedSecurityError:
+            authentication = None
+        authenticated = authentication is not None
+        if authentication is not None:
+            authenticated_credential_version = getattr(
+                authentication, "credential_version", None
+            )
+            security_revision = getattr(authentication, "security_revision", None)
+            if (
+                not isinstance(authenticated_credential_version, str)
+                or not authenticated_credential_version
+                or isinstance(security_revision, bool)
+                or not isinstance(security_revision, int)
+                or security_revision < 1
+            ):
+                authenticated = False
+    if not authenticated:
         raise gateway.HostedGatewayError(
             "HOSTED_UNAUTHORIZED", "private service authentication failed"
         )
@@ -352,6 +383,8 @@ def _trusted_context(request: Request, config: HostedCellConfig) -> gateway.Trus
         request_id=request_id,
         principal_scope=principal,
         idempotency_key=idempotency_key,
+        authenticated_credential_version=authenticated_credential_version,
+        security_revision=security_revision,
     )
 
 
@@ -608,6 +641,7 @@ def register_hosted_routes(
     invoke_command_func: Callable[..., Any] | None = None,
     mutation_guard_factory: Callable[[Path], AbstractContextManager[None]] | None = None,
     preserve_stream_func: Callable[..., Any] | None = None,
+    private_authenticator: Any | None = None,
     transfer_security_authority: hosted_transfer.TransferSecurityAuthority | None = None,
 ) -> None:
     """Register private v1 plus the two exact public transfer-v2 capabilities."""
@@ -652,7 +686,7 @@ def register_hosted_routes(
     async def _contract(request: Request) -> Response:
         started = time.perf_counter()
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="contract", started=started)
         _trace(
@@ -672,7 +706,7 @@ def register_hosted_routes(
     async def _live(request: Request) -> HostedJSONResponse:
         started = time.perf_counter()
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="live", started=started)
         return _success_response(
@@ -687,12 +721,37 @@ def register_hosted_routes(
     async def _ready(request: Request) -> HostedJSONResponse:
         started = time.perf_counter()
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
         except gateway.HostedGatewayError as exc:
             return _error_response(exc.code, config=config, operation="ready", started=started)
         readiness = lifecycle.readiness()
+        if private_authenticator is not None:
+            assert config.vault_id is not None
+            assert config.worker_policy_digest is not None
+            assert context.authenticated_credential_version is not None
+            assert context.security_revision is not None
+            data = {
+                "cell_id": config.cell_id,
+                "vault_id": config.vault_id,
+                "exomem_release": __version__,
+                "hosted_protocol": config.protocol_version,
+                "authenticated_credential_version": (
+                    context.authenticated_credential_version
+                ),
+                "security_revision": context.security_revision,
+                "service_authenticated": True,
+                "mutation_authority": lifecycle.control_plane_readiness()[
+                    "mutationAuthority"
+                ],
+                "admission_phase": readiness.phase,
+                "read_admission": readiness.read_admitted,
+                "write_admission": readiness.write_admitted,
+                "worker_policy_digest": config.worker_policy_digest,
+            }
+        else:
+            data = {**readiness.as_dict(), **lifecycle.control_plane_readiness()}
         return _success_response(
-            {**readiness.as_dict(), **lifecycle.control_plane_readiness()},
+            data,
             config=config,
             operation="ready",
             request_id=context.request_id,
@@ -705,7 +764,7 @@ def register_hosted_routes(
         operation = "command"
         context: gateway.TrustedGatewayContext | None = None
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
             body = await _json_body(request)
             command_name = str(request.path_params.get("command_name", ""))
             command = by_name.get(command_name)
@@ -791,7 +850,7 @@ def register_hosted_routes(
     ) -> tuple[gateway.TrustedGatewayContext | None, HostedJSONResponse | None, float]:
         started = time.perf_counter()
         try:
-            return _trusted_context(request, config), None, started
+            return _trusted_context(request, config, private_authenticator), None, started
         except gateway.HostedGatewayError as exc:
             return (
                 None,
@@ -1115,7 +1174,7 @@ def register_hosted_routes(
         transfer_admission: AbstractContextManager[None] | None = None
         upload_slot_held = False
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
             if not config.private_v1_transfer_enabled():
                 raise gateway.HostedGatewayError(
                     "HOSTED_TRANSFER_V1_DISABLED",
@@ -1249,7 +1308,7 @@ def register_hosted_routes(
         context: gateway.TrustedGatewayContext | None = None
         transfer_admission: AbstractContextManager[None] | None = None
         try:
-            context = _trusted_context(request, config)
+            context = _trusted_context(request, config, private_authenticator)
             if not config.private_v1_transfer_enabled():
                 raise gateway.HostedGatewayError(
                     "HOSTED_TRANSFER_V1_DISABLED",

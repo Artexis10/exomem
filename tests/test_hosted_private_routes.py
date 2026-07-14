@@ -147,6 +147,7 @@ def _cell(
     credential: str,
     invoker: Any | None = None,
     guard_events: list[str] | None = None,
+    private_authenticator: Any | None = None,
 ) -> tuple[_ASGIClient, HostedCellConfig, HostedCellLifecycle, IsolatedInvoker]:
     vault_root = tmp_path / cell_id / "vault"
     from exomem.init import init_vault
@@ -158,6 +159,8 @@ def _cell(
         state_root=tmp_path / cell_id / "state",
         log_root=tmp_path / cell_id / "logs",
         service_credential=credential,
+        vault_id=f"vault-{cell_id}" if private_authenticator is not None else None,
+        worker_policy_digest="a" * 64 if private_authenticator is not None else None,
         resource_limits=HostedResourceLimits(
             storage_bytes=1024 * 1024,
             upload_bytes=4096,
@@ -190,8 +193,59 @@ def _cell(
         source_schema=schema.load_source_schema(vault_root),
         invoke_command_func=isolated,
         mutation_guard_factory=mutation_guard,
+        private_authenticator=private_authenticator,
     )
     return _ASGIClient(app.http_app()), config, lifecycle, isolated
+
+
+def test_private_routes_use_the_injected_dynamic_authority_for_every_request(
+    tmp_path: Path,
+) -> None:
+    dynamic_credential = "dynamic-secret-not-configured-in-the-environment"
+
+    class DynamicAuthority:
+        def authenticate(self, presented: str | None) -> object | None:
+            if presented == dynamic_credential:
+                return SimpleNamespace(
+                    credential_version="active-v1",
+                    security_revision=1,
+                    preferred=True,
+                )
+            return None
+
+    client, config, _lifecycle, _invoker = _cell(
+        tmp_path,
+        cell_id="cell-dynamic-auth",
+        credential="legacy-credential-must-not-authorize-this-route",
+        private_authenticator=DynamicAuthority(),
+    )
+
+    accepted = client.get(
+        "/private/exomem/v1/ready",
+        headers=_headers(config, credential=dynamic_credential),
+    )
+    rejected = client.get(
+        "/private/exomem/v1/live",
+        headers=_headers(config, credential=config.service_credential),
+    )
+
+    assert accepted.status_code == 200
+    assert accepted.json()["data"] == {
+        "cell_id": "cell-dynamic-auth",
+        "vault_id": "vault-cell-dynamic-auth",
+        "exomem_release": hosted_runtime.__version__,
+        "hosted_protocol": "1",
+        "authenticated_credential_version": "active-v1",
+        "security_revision": 1,
+        "service_authenticated": True,
+        "mutation_authority": True,
+        "admission_phase": "active",
+        "read_admission": True,
+        "write_admission": True,
+        "worker_policy_digest": "a" * 64,
+    }
+    assert rejected.status_code == 401
+    assert rejected.json()["error"]["code"] == "HOSTED_UNAUTHORIZED"
 
 
 def _headers(

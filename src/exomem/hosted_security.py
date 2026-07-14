@@ -834,6 +834,23 @@ class HostedSecurityAuthority:
         finally:
             connection.close()
 
+    def validate_ready(self) -> SecuritySnapshot:
+        """Prove durable credential state matches the current Secret generation."""
+
+        connection = self._connect()
+        try:
+            row = self._read_state(connection)
+            self._validate_recorded_bundle(row, self._bundle())
+            return self._snapshot(row)
+        except HostedSecurityError:
+            raise
+        except sqlite3.Error as exc:
+            if _is_busy(exc):
+                raise HostedSecurityUnavailable() from exc
+            raise HostedSecurityStateInvalid() from exc
+        finally:
+            connection.close()
+
     def _operation_replay(
         self,
         connection: sqlite3.Connection,

@@ -12,6 +12,7 @@ from exomem import __version__, hosted_runtime
 from exomem.hosted_runtime import (
     HOSTED_PROTOCOL_VERSION,
     HostedBindingV2,
+    HostedCellConfig,
     HostedConfigError,
     HostedMigrationLimits,
     initialize_hosted_cell_v2,
@@ -35,6 +36,40 @@ def _binding(tmp_path: Path, **overrides: object) -> HostedBindingV2:
 
 def _bootstrap(**_kwargs: object) -> int:
     return 1
+
+
+def test_v2_runtime_config_uses_bound_identity_without_plaintext_env_credential(
+    tmp_path: Path,
+) -> None:
+    binding = _binding(tmp_path)
+    initialize_hosted_cell_v2(
+        binding,
+        expected_release=__version__,
+        expected_protocol=HOSTED_PROTOCOL_VERSION,
+        active_credential_version="credential-v1",
+        bootstrap_security=_bootstrap,
+    )
+    config = HostedCellConfig.from_env(
+        {
+            "EXOMEM_HOSTED_CELL_ID": binding.cell_id,
+            "EXOMEM_HOSTED_VAULT_ID": binding.vault_id,
+            "EXOMEM_VAULT_PATH": str(binding.vault_root),
+            "EXOMEM_HOSTED_STATE_ROOT": str(binding.state_root),
+            "EXOMEM_LOG_DIR": str(binding.log_root),
+            "EXOMEM_HOSTED_RUNTIME_UID": str(binding.runtime_uid),
+            "EXOMEM_HOSTED_RUNTIME_GID": str(binding.runtime_gid),
+            "EXOMEM_HOSTED_WORKER_POLICY_DIGEST": "a" * 64,
+        },
+        require_provisioned=True,
+    )
+
+    assert config.vault_id == binding.vault_id
+    assert config.runtime_uid == binding.runtime_uid
+    assert config.runtime_gid == binding.runtime_gid
+    assert config.worker_policy_digest == "a" * 64
+    assert config.service_credential is None
+    assert config.requires_dynamic_security is True
+    assert config.matches_service_credential("legacy-must-not-work") is False
 
 
 def test_binding_v2_persists_storage_identity_not_release_proof(tmp_path: Path) -> None:

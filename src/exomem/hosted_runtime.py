@@ -45,6 +45,7 @@ _HOSTED_CLEARED_ENV = (
     "EXOMEM_CF_ACCESS_AUD",
     "EXOMEM_CF_ACCESS_TEAM_DOMAIN",
     "EXOMEM_GITHUB_USERNAME",
+    "EXOMEM_HOSTED_SERVICE_CREDENTIAL",
     "EXOMEM_LARGE_UPLOAD_BASE_URL",
     "EXOMEM_REST_API_KEY",
     "EXOMEM_UPLOAD_TOKEN",
@@ -108,7 +109,11 @@ class HostedCellConfig:
     vault_root: Path
     state_root: Path
     log_root: Path
-    service_credential: str = field(repr=False)
+    service_credential: str | None = field(repr=False)
+    vault_id: str | None = None
+    runtime_uid: int = field(default_factory=os.geteuid)
+    runtime_gid: int = field(default_factory=os.getegid)
+    worker_policy_digest: str | None = None
     protocol_version: str = HOSTED_PROTOCOL_VERSION
     feature_grants: tuple[str, ...] = ()
     resource_limits: HostedResourceLimits = field(default_factory=HostedResourceLimits)
@@ -132,7 +137,6 @@ class HostedCellConfig:
             "EXOMEM_VAULT_PATH": values.get("EXOMEM_VAULT_PATH", ""),
             "EXOMEM_HOSTED_STATE_ROOT": values.get("EXOMEM_HOSTED_STATE_ROOT", ""),
             "EXOMEM_LOG_DIR": values.get("EXOMEM_LOG_DIR", ""),
-            "EXOMEM_HOSTED_SERVICE_CREDENTIAL": values.get("EXOMEM_HOSTED_SERVICE_CREDENTIAL", ""),
         }
         missing = [name for name, value in required.items() if not str(value).strip()]
         if missing:
@@ -147,6 +151,49 @@ class HostedCellConfig:
                 "HOSTED_CELL_ID_INVALID",
                 "cell identity must be opaque ASCII letters, digits, underscores, or hyphens",
             )
+        vault_id = str(values.get("EXOMEM_HOSTED_VAULT_ID", "")).strip() or None
+        if vault_id is not None and not _CELL_ID.fullmatch(vault_id):
+            raise HostedConfigError(
+                "HOSTED_VAULT_ID_INVALID",
+                "vault identity must be opaque ASCII letters, digits, underscores, or hyphens",
+            )
+
+        service_credential = (
+            str(values.get("EXOMEM_HOSTED_SERVICE_CREDENTIAL", "")).strip() or None
+        )
+        if service_credential is None and vault_id is None:
+            raise HostedConfigError(
+                "HOSTED_CONFIG_MISSING",
+                "hosted v2 identity or a legacy service credential is required",
+            )
+        if service_credential is not None and len(service_credential.encode("utf-8")) < 32:
+            raise HostedConfigError(
+                "HOSTED_CREDENTIAL_WEAK",
+                "hosted service credential must contain at least 32 bytes",
+            )
+
+        def runtime_identity(name: str) -> int:
+            raw = str(values.get(name, "")).strip()
+            if not raw:
+                if vault_id is not None:
+                    raise HostedConfigError(
+                        "HOSTED_CONFIG_MISSING", f"{name} is required for hosted v2 identity"
+                    )
+                return os.geteuid() if name.endswith("UID") else os.getegid()
+            try:
+                parsed = int(raw)
+            except ValueError as exc:
+                raise HostedConfigError(
+                    "HOSTED_RUNTIME_ID_INVALID", "hosted runtime identity is invalid"
+                ) from exc
+            if str(parsed) != raw or not _valid_runtime_identity(parsed):
+                raise HostedConfigError(
+                    "HOSTED_RUNTIME_ID_INVALID", "hosted runtime identity is invalid"
+                )
+            return parsed
+
+        runtime_uid = runtime_identity("EXOMEM_HOSTED_RUNTIME_UID")
+        runtime_gid = runtime_identity("EXOMEM_HOSTED_RUNTIME_GID")
         protocol = str(
             values.get("EXOMEM_HOSTED_PROTOCOL_VERSION", HOSTED_PROTOCOL_VERSION)
         ).strip()
@@ -189,12 +236,19 @@ class HostedCellConfig:
                 "HOSTED_LIMIT_INVALID",
                 "hosted upload limit cannot exceed the hosted storage limit",
             )
-
-        service_credential = str(required["EXOMEM_HOSTED_SERVICE_CREDENTIAL"]).strip()
-        if len(service_credential.encode("utf-8")) < 32:
+        worker_policy_digest = (
+            str(values.get("EXOMEM_HOSTED_WORKER_POLICY_DIGEST", "")).strip() or None
+        )
+        if vault_id is not None and worker_policy_digest is None:
             raise HostedConfigError(
-                "HOSTED_CREDENTIAL_WEAK",
-                "hosted service credential must contain at least 32 bytes",
+                "HOSTED_CONFIG_MISSING",
+                "EXOMEM_HOSTED_WORKER_POLICY_DIGEST is required for hosted v2 identity",
+            )
+        if worker_policy_digest is not None and not _SHA256_HEX.fullmatch(
+            worker_policy_digest
+        ):
+            raise HostedConfigError(
+                "HOSTED_WORKER_POLICY_INVALID", "hosted worker policy digest is invalid"
             )
 
         transfer_browser_origin = str(
@@ -224,6 +278,10 @@ class HostedCellConfig:
             state_root=state_root,
             log_root=log_root,
             service_credential=service_credential,
+            vault_id=vault_id,
+            runtime_uid=runtime_uid,
+            runtime_gid=runtime_gid,
+            worker_policy_digest=worker_policy_digest,
             protocol_version=protocol,
             feature_grants=grants,
             resource_limits=limits,
@@ -243,6 +301,17 @@ class HostedCellConfig:
 
     @property
     def binding_digest(self) -> str:
+        if self.requires_dynamic_security:
+            assert self.vault_id is not None
+            return HostedBindingV2(
+                cell_id=self.cell_id,
+                vault_id=self.vault_id,
+                vault_root=self.vault_root,
+                state_root=self.state_root,
+                log_root=self.log_root,
+                runtime_uid=self.runtime_uid,
+                runtime_gid=self.runtime_gid,
+            ).binding_digest
         payload = "\0".join(
             (
                 self.cell_id,
@@ -253,11 +322,15 @@ class HostedCellConfig:
         )
         return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
+    @property
+    def requires_dynamic_security(self) -> bool:
+        return self.vault_id is not None
+
     def has_feature(self, feature: str) -> bool:
         return _normalize_feature(feature) in self.feature_grants
 
     def matches_service_credential(self, presented: str | None) -> bool:
-        if not presented:
+        if not presented or self.service_credential is None:
             return False
         expected = hashlib.sha256(self.service_credential.encode("utf-8")).digest()
         candidate = hashlib.sha256(str(presented).encode("utf-8")).digest()
@@ -340,6 +413,20 @@ class HostedCellConfig:
         return HostedProcessSettings(disabled_background_workers=disabled_workers)
 
     def validate_provisioned(self) -> None:
+        if self.requires_dynamic_security:
+            assert self.vault_id is not None
+            binding = HostedBindingV2(
+                cell_id=self.cell_id,
+                vault_id=self.vault_id,
+                vault_root=self.vault_root,
+                state_root=self.state_root,
+                log_root=self.log_root,
+                runtime_uid=self.runtime_uid,
+                runtime_gid=self.runtime_gid,
+            )
+            validate_hosted_binding_v2(binding, require_scaffold=True)
+            _reject_tree_symlinks(self.vault_root)
+            return
         for kind, root in self.roots():
             if not root.exists():
                 raise HostedConfigError("HOSTED_ROOT_MISSING", f"hosted {kind} root does not exist")

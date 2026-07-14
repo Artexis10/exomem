@@ -172,7 +172,13 @@ def build_server(*, require_auth: bool) -> FastMCP:
     if hosted:
         assert runtime.hosted_config is not None
         assert runtime.hosted_lifecycle is not None
-        auth = HostedCellTokenVerifier(runtime.hosted_config)
+        security_authority = runtime.hosted_security_authority
+        if runtime.hosted_config.requires_dynamic_security and security_authority is None:
+            raise RuntimeError("hosted security authority is required for a v2 cell")
+        auth = HostedCellTokenVerifier(
+            runtime.hosted_config,
+            authenticator=security_authority,
+        )
         mcp = ExomemFastMCP("exomem", auth=auth)
         mcp.add_middleware(CallTraceMiddleware(hosted=True))
         expose_tier2 = not os.environ.get("EXOMEM_DISABLE_TIER2")
@@ -182,6 +188,8 @@ def build_server(*, require_auth: bool) -> FastMCP:
             lifecycle=runtime.hosted_lifecycle,
             source_schema=runtime.source_schema,
             expose_tier2=expose_tier2,
+            private_authenticator=security_authority,
+            transfer_security_authority=security_authority,
         )
     else:
         auth = build_oauth(require_auth=require_auth, base_url=runtime.base_url)

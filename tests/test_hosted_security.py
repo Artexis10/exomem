@@ -880,6 +880,123 @@ def test_bootstrap_operator_adapter_constructs_bound_authority(
     assert snapshot.active_version == "active"
 
 
+def test_ready_snapshot_requires_the_projected_bundle_to_match_durable_state(
+    tmp_path: Path,
+) -> None:
+    active = _credential("active")
+    current_bundle = [_bundle(active=active)]
+    authority = security.HostedSecurityAuthority(
+        tmp_path / "state",
+        cell_id="cell-alpha",
+        vault_id="vault-alpha",
+        bundle_loader=lambda: current_bundle[0],
+    )
+    bootstrapped = authority.bootstrap(
+        active_version="active",
+        operation_id="bootstrap",
+        request_digest=_digest("bootstrap"),
+    )
+
+    assert authority.validate_ready() == bootstrapped
+
+    current_bundle[0] = _bundle(foreign=_credential("foreign"))
+    with pytest.raises(security.HostedSecurityStateInvalid):
+        authority.validate_ready()
+
+
+def test_server_composition_injects_one_authority_into_all_hosted_auth_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server
+    from exomem.hosted_runtime import HostedCellLifecycle
+    from exomem.server_runtime import ServerRuntime
+
+    for name in ("vault", "state", "logs"):
+        (tmp_path / name).mkdir()
+    config = HostedCellConfig(
+        cell_id="cell-alpha",
+        vault_id="vault-alpha",
+        vault_root=tmp_path / "vault",
+        state_root=tmp_path / "state",
+        log_root=tmp_path / "logs",
+        service_credential=None,
+        runtime_uid=os.geteuid(),
+        runtime_gid=os.getegid(),
+    )
+    lifecycle = HostedCellLifecycle(config)
+    authority = object()
+    runtime = ServerRuntime(
+        vault_root=config.vault_root,
+        source_schema=object(),
+        project_keys_hint="",
+        base_url="",
+        hosted_config=config,
+        hosted_lifecycle=lifecycle,
+        hosted_security_authority=authority,
+    )
+    captured: dict[str, object] = {}
+    original_verifier = server.HostedCellTokenVerifier
+
+    def verifier(config_arg: HostedCellConfig, *, authenticator: object | None = None):
+        captured["mcp"] = authenticator
+        return original_verifier(config_arg, authenticator=authenticator)
+
+    def register(_app: object, **kwargs: object) -> None:
+        captured.update(kwargs)
+
+    monkeypatch.setattr(server, "initialize_runtime", lambda **_kwargs: runtime)
+    monkeypatch.setattr(server, "HostedCellTokenVerifier", verifier)
+    monkeypatch.setattr(server, "register_hosted_routes", register)
+    monkeypatch.setattr("exomem.writer_lease.start_server_lifecycle", lambda: None)
+
+    server.build_server(require_auth=True)
+
+    assert captured["mcp"] is authority
+    assert captured["private_authenticator"] is authority
+    assert captured["transfer_security_authority"] is authority
+
+
+def test_server_runtime_validates_dynamic_security_before_reporting_auth_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import server_runtime
+
+    config = HostedCellConfig(
+        cell_id="cell-alpha",
+        vault_id="vault-alpha",
+        vault_root=tmp_path / "vault",
+        state_root=tmp_path / "state",
+        log_root=tmp_path / "logs",
+        service_credential=None,
+        runtime_uid=os.geteuid(),
+        runtime_gid=os.getegid(),
+        worker_policy_digest="a" * 64,
+    )
+    captured: dict[str, object] = {}
+
+    class FakeAuthority:
+        def __init__(self, state_root: Path, **kwargs: object) -> None:
+            captured["state_root"] = state_root
+            captured.update(kwargs)
+
+        def validate_ready(self) -> None:
+            captured["validated"] = True
+
+    monkeypatch.setattr(security, "HostedSecurityAuthority", FakeAuthority)
+
+    authority = server_runtime._initialize_hosted_security(config)
+
+    assert isinstance(authority, FakeAuthority)
+    assert captured == {
+        "state_root": config.state_root,
+        "cell_id": "cell-alpha",
+        "vault_id": "vault-alpha",
+        "expected_uid": os.geteuid(),
+        "expected_gid": os.getegid(),
+        "validated": True,
+    }
+
+
 def test_credential_operator_adapter_dispatches_and_returns_exact_schema(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
