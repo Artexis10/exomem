@@ -100,9 +100,9 @@ def test_batch_atomic_write_reports_and_retains_failed_restore(
     assert list(tmp_path.glob("*.bak")) or list(tmp_path.glob(".*.bak"))
 
 
-@pytest.mark.parametrize("attack", ["content", "identity"])
+@pytest.mark.parametrize("change_kind", ["content", "identity"])
 def test_batch_atomic_write_rejects_changed_staged_artifact(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, attack: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, change_kind: str
 ) -> None:
     guarded = tmp_path / "guarded"
     guarded.mkdir()
@@ -113,26 +113,41 @@ def test_batch_atomic_write_rejects_changed_staged_artifact(
     census = vault_module.DirectoryCensusGuard.capture(
         tmp_path, "guarded", max_entries=8
     )
-    real_write_text = Path.write_text
+    real_bind_content = vault_module._OwnedBatchArtifact.bind_content
     staged: list[Path] = []
 
-    def tamper_after_second_stage(path: Path, data: str, *args, **kwargs) -> int:
-        result = real_write_text(path, data, *args, **kwargs)
-        if path.suffix != ".tmp":
-            return result
-        staged.append(path)
+    def change_after_second_stage(owner, descriptor, *, expected_content_hash):
+        guard = real_bind_content(
+            owner,
+            descriptor,
+            expected_content_hash=expected_content_hash,
+        )
+        if owner.path.suffix != ".tmp":
+            return guard
+        staged.append(owner.path)
         if len(staged) == 2:
-            if attack == "content":
-                staged[0].write_bytes(b"attacker-staged-bytes")
+            if change_kind == "content":
+                staged[0].write_bytes(b"changed-staged-bytes")
             else:
-                replacement = staged[0].with_suffix(".attack")
-                replacement.write_bytes(b"attacker-staged-bytes")
+                replacement = staged[0].with_suffix(".replacement")
+                replacement.write_bytes(b"changed-staged-bytes")
                 os.replace(replacement, staged[0])
-        return result
+        return guard
 
-    monkeypatch.setattr(Path, "write_text", tamper_after_second_stage)
+    monkeypatch.setattr(
+        vault_module._OwnedBatchArtifact,
+        "bind_content",
+        change_after_second_stage,
+    )
 
-    with pytest.raises(vault_module.PathGuardError):
+    expected_failure = (
+        pytest.raises(vault_module.PathGuardError)
+        if change_kind == "content"
+        else pytest.raises(
+            RuntimeError, match="batch cleanup retained changed artifacts"
+        )
+    )
+    with expected_failure as failure:
         vault_module.batch_atomic_write(
             [
                 vault_module.PlannedWrite(first, "first-new"),
@@ -144,7 +159,11 @@ def test_batch_atomic_write_rejects_changed_staged_artifact(
 
     assert first.read_text(encoding="utf-8") == "first-old"
     assert second.read_text(encoding="utf-8") == "second-old"
-    assert not list(guarded.glob(".*.tmp"))
+    if change_kind == "content":
+        assert not list(guarded.glob(".*.tmp"))
+    else:
+        assert staged[0].read_bytes() == b"changed-staged-bytes"
+        assert str(tmp_path) not in str(failure.value)
     assert not list(guarded.glob(".*.bak"))
 
 
@@ -155,28 +174,37 @@ def test_batch_atomic_write_never_restores_a_changed_backup(
     second = tmp_path / "second.md"
     first.write_text("first-old", encoding="utf-8")
     second.write_text("second-old", encoding="utf-8")
-    real_copy2 = vault_module.shutil.copy2
+    real_bind_content = vault_module._OwnedBatchArtifact.bind_content
     backups: list[Path] = []
 
-    def capture_backup(src, dst, *args, **kwargs):
-        result = real_copy2(src, dst, *args, **kwargs)
-        backups.append(Path(dst))
-        return result
+    def capture_backup(owner, descriptor, *, expected_content_hash):
+        guard = real_bind_content(
+            owner,
+            descriptor,
+            expected_content_hash=expected_content_hash,
+        )
+        if owner.path.suffix == ".bak":
+            backups.append(owner.path)
+        return guard
 
     real_replace = os.replace
     temp_commits = 0
 
-    def tamper_before_rollback(src, dst):
+    def change_before_rollback(src, dst):
         nonlocal temp_commits
         if str(src).endswith(".tmp"):
             temp_commits += 1
             if temp_commits == 2:
-                backups[0].write_bytes(b"attacker-backup-bytes")
+                backups[0].write_bytes(b"changed-backup-bytes")
                 raise OSError("injected second replacement failure")
         return real_replace(src, dst)
 
-    monkeypatch.setattr(vault_module.shutil, "copy2", capture_backup)
-    monkeypatch.setattr(vault_module.os, "replace", tamper_before_rollback)
+    monkeypatch.setattr(
+        vault_module._OwnedBatchArtifact,
+        "bind_content",
+        capture_backup,
+    )
+    monkeypatch.setattr(vault_module.os, "replace", change_before_rollback)
 
     with pytest.raises(RuntimeError, match="rollback also failed.*PATH_GUARD"):
         vault_module.batch_atomic_write(
@@ -189,7 +217,7 @@ def test_batch_atomic_write_never_restores_a_changed_backup(
 
     assert first.read_text(encoding="utf-8") == "first-new"
     assert second.read_text(encoding="utf-8") == "second-old"
-    assert first.read_bytes() != b"attacker-backup-bytes"
+    assert first.read_bytes() != b"changed-backup-bytes"
     assert not list(tmp_path.glob(".*.tmp"))
     assert list(tmp_path.glob(".*.bak"))
 
@@ -224,6 +252,104 @@ def test_batch_atomic_write_records_flip_before_final_binding_failure(
     assert second.read_text(encoding="utf-8") == "second-old"
     assert not list(tmp_path.glob(".*.tmp"))
     assert list(tmp_path.glob(".*.bak"))
+
+
+def test_batch_atomic_write_owns_staged_descriptor_during_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = tmp_path / "final.md"
+    unrelated = tmp_path / "unrelated.md"
+    unrelated.write_text("unrelated-original", encoding="utf-8")
+    real_mkstemp = vault_module.tempfile.mkstemp
+
+    def substitute_stage_name(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        artifact = Path(name)
+        owned = artifact.with_name(f"{artifact.name}.owned")
+        os.replace(artifact, owned)
+        os.link(unrelated, artifact)
+        return fd, name
+
+    monkeypatch.setattr(vault_module.tempfile, "mkstemp", substitute_stage_name)
+
+    with pytest.raises(
+        RuntimeError, match="batch cleanup retained changed artifacts"
+    ) as failure:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(final, "planned")],
+            vault_root=tmp_path,
+        )
+
+    assert unrelated.read_text(encoding="utf-8") == "unrelated-original"
+    assert not final.exists()
+    assert str(tmp_path) not in str(failure.value)
+
+
+def test_batch_atomic_write_owns_backup_descriptor_during_initialization(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = tmp_path / "final.md"
+    unrelated = tmp_path / "unrelated.md"
+    final.write_text("final-original", encoding="utf-8")
+    unrelated.write_text("unrelated-original", encoding="utf-8")
+    real_mkstemp = vault_module.tempfile.mkstemp
+
+    def substitute_backup_name(*args, **kwargs):
+        fd, name = real_mkstemp(*args, **kwargs)
+        if kwargs.get("suffix") != ".bak":
+            return fd, name
+        artifact = Path(name)
+        owned = artifact.with_name(f"{artifact.name}.owned")
+        os.replace(artifact, owned)
+        os.link(unrelated, artifact)
+        return fd, name
+
+    monkeypatch.setattr(vault_module.tempfile, "mkstemp", substitute_backup_name)
+
+    with pytest.raises(
+        RuntimeError, match="batch cleanup retained changed artifacts"
+    ) as failure:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(final, "planned")],
+            vault_root=tmp_path,
+        )
+
+    assert unrelated.read_text(encoding="utf-8") == "unrelated-original"
+    assert final.read_text(encoding="utf-8") == "final-original"
+    assert str(tmp_path) not in str(failure.value)
+
+
+def test_batch_atomic_write_retains_changed_name_during_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    final = tmp_path / "final.md"
+    final.write_text("final-original", encoding="utf-8")
+    real_mkstemp = vault_module.tempfile.mkstemp
+    replacement: Path | None = None
+
+    def substitute_before_cleanup(*args, **kwargs):
+        nonlocal replacement
+        if kwargs.get("suffix") == ".bak":
+            replacement = next(tmp_path.glob(".*.tmp"))
+            replacement.unlink()
+            replacement.write_text("replacement", encoding="utf-8")
+            raise OSError("injected backup creation failure")
+        return real_mkstemp(*args, **kwargs)
+
+    monkeypatch.setattr(vault_module.tempfile, "mkstemp", substitute_before_cleanup)
+
+    with pytest.raises(
+        RuntimeError, match="batch cleanup retained changed artifacts"
+    ) as failure:
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(final, "planned")],
+            vault_root=tmp_path,
+        )
+
+    assert replacement is not None
+    assert replacement.read_text(encoding="utf-8") == "replacement"
+    assert str(tmp_path) not in str(failure.value)
+    assert final.read_text(encoding="utf-8") == "final-original"
 
 
 def test_batch_atomic_write_rolls_back_when_required_directory_census_changes(
