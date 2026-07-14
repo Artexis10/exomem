@@ -26,6 +26,12 @@ from exomem import (
     create_file as create_file_module,
 )
 from exomem import (
+    delete_directory as delete_directory_module,
+)
+from exomem import (
+    delete_file as delete_file_module,
+)
+from exomem import (
     edit as edit_module,
 )
 from exomem import (
@@ -340,6 +346,134 @@ def test_move_rewrites_self_link_at_destination_without_recreating_old_path(
     assert not old.exists()
     moved = (tmp_path / new_path).read_text(encoding="utf-8")
     assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in moved
+
+
+def test_trash_indebted_page_preserves_review_history_and_returns_exact_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Indebted active page with no qualifying relation.")
+    _write(tmp_path, _PAGE, source)
+    history = relation_review.lifecycle_prepared_path(tmp_path, _ID)
+    history.parent.mkdir(parents=True)
+    history.write_text("governed history stays", encoding="utf-8")
+    report = index_sync.IndexSyncReport(
+        "delete",
+        (_PAGE,),
+        (_PAGE,),
+        (
+            index_sync.IndexComponentOutcome(
+                "lexstore", "accepted", "accepted_unverified"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "accepted", "embeddings_disabled"
+            ),
+            index_sync.IndexComponentOutcome(
+                "resolver", "degraded", "dispatch_failed"
+            ),
+        ),
+    )
+    calls: list[list[str]] = []
+
+    def cleanup(_root: Path, paths: list[str]):
+        calls.append(list(paths))
+        return report
+
+    monkeypatch.setattr(index_sync, "delete_after_remove", cleanup)
+
+    result = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 0, 0),
+    )
+
+    assert calls == [[_PAGE]]
+    assert not (tmp_path / _PAGE).exists()
+    assert history.read_text(encoding="utf-8") == "governed history stays"
+    assert getattr(result, "index", None) == report.as_dict()
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+
+
+def test_recursive_trash_registers_sorted_markdown_once_and_returns_cleanup(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = "Knowledge Base/Notes/Insights/doomed"
+    first = f"{directory}/a.md"
+    second = f"{directory}/b.md"
+    _write(tmp_path, second, _source("B", page_id=_OTHER_ID))
+    _write(tmp_path, first, _source("A", page_id=_ID))
+    _write(tmp_path, f"{directory}/raw.txt", "non-Markdown")
+    expected = [first, second]
+    report = index_sync.IndexSyncReport(
+        "delete",
+        tuple(expected),
+        tuple(expected),
+        (
+            index_sync.IndexComponentOutcome(
+                "memory_refs", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "epistemic_graph", "completed", "dispatch_completed"
+            ),
+            index_sync.IndexComponentOutcome(
+                "embeddings", "deferred", "queued"
+            ),
+        ),
+    )
+    watcher_calls: list[list[str]] = []
+    cleanup_calls: list[list[str]] = []
+
+    from exomem import file_watcher
+
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_delete",
+        lambda _root, paths: watcher_calls.append(list(paths)),
+    )
+
+    def cleanup(_root: Path, paths: list[str]):
+        cleanup_calls.append(list(paths))
+        return report
+
+    monkeypatch.setattr(index_sync, "delete_after_remove", cleanup)
+
+    result = delete_directory_module.delete_directory(
+        tmp_path,
+        path=directory,
+        confirm=True,
+        recursive=True,
+        now=dt.datetime(2026, 7, 14, 12, 1, 0),
+    )
+
+    assert watcher_calls == [expected]
+    assert cleanup_calls == [expected]
+    assert getattr(result, "index", None) == report.as_dict()
+    assert not (tmp_path / directory).exists()
+
+
+def test_non_markdown_trash_does_not_register_markdown_self_delete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import file_watcher
+
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    _write(tmp_path, path, "raw")
+    watcher_calls: list[list[str]] = []
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_delete",
+        lambda _root, paths: watcher_calls.append(list(paths)),
+    )
+
+    delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 2, 0),
+    )
+
+    assert watcher_calls == []
 
 
 def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:
