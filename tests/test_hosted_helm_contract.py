@@ -99,7 +99,7 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
             "9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c"
         ),
         "sourceRepository": "https://github.com/Artexis10/exomem",
-        "sourceCommit": "c255ffb2dfcd7bc470372d4efa0e8a11b00f0640",
+        "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
         "release": "0.22.0",
         "hostedProtocol": "1",
         "dockerTarget": "hosted",
