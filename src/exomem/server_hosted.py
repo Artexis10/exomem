@@ -30,6 +30,7 @@ from . import (
     cli_ops,
     hosted_portability,
     hosted_runtime,
+    hosted_runtime_temp,
     hosted_transfer,
     hosted_transfer_routes,
 )
@@ -643,6 +644,7 @@ def register_hosted_routes(
     preserve_stream_func: Callable[..., Any] | None = None,
     private_authenticator: Any | None = None,
     transfer_security_authority: hosted_transfer.TransferSecurityAuthority | None = None,
+    runtime_temp_authority: hosted_runtime_temp.HostedRuntimeTempAuthority | None = None,
 ) -> None:
     """Register private v1 plus the two exact public transfer-v2 capabilities."""
 
@@ -661,13 +663,18 @@ def register_hosted_routes(
     preserve_stream = preserve_stream_func or _default_preserve_stream
     upload_idempotency = IdempotencyStore(config.state_root / "idempotency-hosted.sqlite")
     private_v1_upload_slot = threading.Lock()
-    runtime_temp_root = config.state_root / "tmp" / "runtime"
     try:
-        if runtime_temp_root.is_symlink():
-            raise OSError("runtime temp root is a symbolic link")
-        runtime_temp_root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        runtime_temp_root.chmod(0o700)
-    except OSError as exc:
+        runtime_temp_root = hosted_runtime_temp.ensure_hosted_runtime_temp(
+            config.state_root,
+            expected_uid=config.runtime_uid,
+            expected_gid=config.runtime_gid,
+        )
+        runtime_temp = runtime_temp_authority or hosted_runtime_temp.HostedRuntimeTempAuthority(
+            runtime_temp_root,
+            expected_uid=config.runtime_uid,
+            expected_gid=config.runtime_gid,
+        )
+    except hosted_runtime_temp.HostedRuntimeTempUnavailable as exc:
         raise gateway.HostedGatewayError(
             "HOSTED_TRANSFER_UNAVAILABLE", "hosted runtime temp is unavailable"
         ) from exc
@@ -1172,6 +1179,8 @@ def register_hosted_routes(
         started = time.perf_counter()
         context: gateway.TrustedGatewayContext | None = None
         transfer_admission: AbstractContextManager[None] | None = None
+        runtime_temp_reservation: AbstractContextManager[Path] | None = None
+        runtime_temp_reserved = False
         upload_slot_held = False
         try:
             context = _trusted_context(request, config, private_authenticator)
@@ -1210,6 +1219,14 @@ def register_hosted_routes(
                 hosted_transfer.TRANSFER_V1_UPLOAD_MAX_BYTES,
             )
             _upload_content_length(request, max_body_bytes=max_body_bytes)
+            runtime_temp_reservation = runtime_temp.reserve(max_body_bytes)
+            try:
+                runtime_temp_reservation.__enter__()
+                runtime_temp_reserved = True
+            except hosted_runtime_temp.HostedRuntimeTempUnavailable as exc:
+                raise gateway.HostedGatewayError(
+                    "HOSTED_TRANSFER_UNAVAILABLE", "hosted runtime temp quota is unavailable"
+                ) from exc
             bounded_request = _bounded_upload_request(request, max_body_bytes=max_body_bytes)
             try:
                 async with bounded_request.form(
@@ -1288,6 +1305,8 @@ def register_hosted_routes(
                 started=started,
             )
         finally:
+            if runtime_temp_reserved and runtime_temp_reservation is not None:
+                runtime_temp_reservation.__exit__(None, None, None)
             if upload_slot_held:
                 private_v1_upload_slot.release()
             if transfer_admission is not None:

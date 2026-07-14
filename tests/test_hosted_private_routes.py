@@ -161,6 +161,7 @@ def _cell(
         service_credential=credential,
         vault_id=f"vault-{cell_id}" if private_authenticator is not None else None,
         worker_policy_digest="a" * 64 if private_authenticator is not None else None,
+        enforce_transfer_v1_compatibility=False,
         resource_limits=HostedResourceLimits(
             storage_bytes=1024 * 1024,
             upload_bytes=4096,

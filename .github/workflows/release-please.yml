@@ -134,7 +134,10 @@ jobs:
         id: meta
         env:
           TAG: ${{ needs.release-please.outputs.tag_name }}
-        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          build_time=$(git show -s --format=%cI "$TAG")
+          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push lean image (multi-arch)
         uses: docker/build-push-action@v6
@@ -175,6 +178,21 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push hosted image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: hosted
+          platforms: linux/amd64
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem:hosted
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   publish-existing-image:
     if: ${{ github.event_name == 'workflow_dispatch' && vars.GHCR_PUBLISH_ENABLED == 'true' }}
     runs-on: ubuntu-latest
@@ -198,7 +216,10 @@ jobs:
         id: meta
         env:
           TAG: ${{ inputs.tag }}
-        run: echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+          build_time=$(git show -s --format=%cI "$TAG")
+          echo "build_time=$(date -u -d "$build_time" +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push lean image (multi-arch)
         uses: docker/build-push-action@v6
@@ -233,6 +254,20 @@ jobs:
           push: true
           tags: |
             ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push hosted image (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          target: hosted
+          platforms: linux/amd64
+          build-args: |
+            EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+          push: true
+          tags: |
+            ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

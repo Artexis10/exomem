@@ -121,7 +121,7 @@ class HostedCellConfig:
     transfer_host: str | None = None
     transfer_v1_compat_until: str | None = None
     signed_release_build_time: str | None = None
-    enforce_transfer_v1_compatibility: bool = False
+    enforce_transfer_v1_compatibility: bool = True
 
     @classmethod
     def from_env(
@@ -345,9 +345,7 @@ class HostedCellConfig:
         """Check the immutable rollout deadline on every private-v1 request."""
 
         if not self.enforce_transfer_v1_compatibility:
-            # Direct construction is retained for local/in-process compatibility
-            # tests. Production hosted configuration always comes through
-            # ``from_env`` and therefore enforces the default-off window.
+            # Explicitly limited to compatibility fixtures and controlled rollback.
             return True
         from .hosted_transfer import private_v1_compatibility_enabled
 
@@ -401,7 +399,7 @@ class HostedCellConfig:
         )
         _apply_truthy_gate(
             target,
-            workers_enabled and "diarization" in self.feature_grants,
+            False,
             "EXOMEM_DIARIZE",
         )
         _apply_truthy_gate(

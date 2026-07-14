@@ -100,7 +100,7 @@ def _initialize_hosted_runtime() -> ServerRuntime:
     lifetime_lock = acquire_hosted_lifetime_lock(config.state_root, binding=binding)
     lifetime_lock.__enter__()
     try:
-        _cleanup_hosted_transfer_temp(config.state_root)
+        _cleanup_hosted_transfer_temp(config)
         return _initialize_locked_hosted_runtime(config, lifetime_lock)
     except BaseException:
         lifetime_lock.__exit__(*sys.exc_info())
@@ -133,6 +133,12 @@ def _initialize_locked_hosted_runtime(
         mutation_authority_ready=mutation_ready,
         service_auth_ready=(security_authority is not None or config.service_credential is not None),
     )
+    if config.has_feature("diarization"):
+        lifecycle.set_worker_status(
+            "diarization",
+            ready=False,
+            reason_code="HOSTED_RUNTIME_TEMP_AUTHORITY_REQUIRED",
+        )
     if not mutation_ready:
         lifecycle.set_mutation_authority(False, reason_code=mutation_reason)
 
@@ -224,10 +230,16 @@ def _initialize_locked_hosted_runtime(
     )
 
 
-def _cleanup_hosted_transfer_temp(state_root: Path) -> None:
+def _cleanup_hosted_transfer_temp(config: HostedCellConfig) -> None:
+    from .hosted_runtime_temp import prepare_hosted_runtime_temp
     from .hosted_transfer_routes import cleanup_hosted_transfer_temp
 
-    cleanup_hosted_transfer_temp(state_root)
+    prepare_hosted_runtime_temp(
+        config.state_root,
+        expected_uid=config.runtime_uid,
+        expected_gid=config.runtime_gid,
+    )
+    cleanup_hosted_transfer_temp(config.state_root)
 
 
 def _initialize_hosted_security(config: HostedCellConfig) -> Any | None:

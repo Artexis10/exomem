@@ -22,6 +22,22 @@ def test_dockerfile_declares_cuda_target_as_capable_not_resident() -> None:
     assert "EXOMEM_MODE=performance" not in text
 
 
+def test_dockerfile_has_a_fixed_nonroot_immutable_hosted_target() -> None:
+    text = _read("Dockerfile")
+    hosted = text.split("FROM python:3.12-slim AS hosted", 1)[1].split(
+        "FROM python:3.12-slim AS lean", 1
+    )[0]
+
+    assert "ARG EXOMEM_RELEASE_BUILD_TIME" in hosted
+    assert 'test -n "$EXOMEM_RELEASE_BUILD_TIME"' in hosted
+    assert "EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME}" in hosted
+    assert "EXOMEM_CONTAINER_VARIANT=hosted" in hosted
+    assert "PYTHONDONTWRITEBYTECODE=1" in hosted
+    assert "USER 10001:10001" in hosted
+    assert "ENTRYPOINT [\"exomem\"]" in hosted
+    assert "VOLUME" not in hosted
+
+
 def test_release_workflow_publishes_cuda_tags() -> None:
     text = _read(".github/workflows/release-please.yml")
 
@@ -29,6 +45,18 @@ def test_release_workflow_publishes_cuda_tags() -> None:
     assert "platforms: linux/amd64" in text
     assert "ghcr.io/artexis10/exomem:cuda" in text
     assert "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-cuda" in text
+
+
+def test_release_workflow_publishes_hosted_image_with_immutable_build_time() -> None:
+    text = _read(".github/workflows/release-please.yml")
+
+    assert text.count("target: hosted") == 2
+    assert text.count("EXOMEM_RELEASE_BUILD_TIME=${{ steps.meta.outputs.build_time }}") == 2
+    assert text.count(
+        "ghcr.io/artexis10/exomem:${{ steps.meta.outputs.version }}-hosted"
+    ) == 2
+    assert "ghcr.io/artexis10/exomem:hosted" in text
+    assert text.count('build_time=$(git show -s --format=%cI "$TAG")') == 2
 
 
 def test_compose_overrides_select_cpu_ml_and_cuda() -> None:

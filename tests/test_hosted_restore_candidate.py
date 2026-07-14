@@ -335,9 +335,9 @@ def test_server_lifetime_lock_excludes_restore_and_wraps_temp_cleanup(
     _configure_hosted_server(monkeypatch, binding)
     cleanup_observations: list[str] = []
 
-    def cleanup_while_locked(state_root: Path) -> None:
+    def cleanup_while_locked(config: HostedCellConfig) -> None:
         with pytest.raises(OperatorFailure) as error:
-            with acquire_hosted_lifetime_lock(state_root, binding=binding):
+            with acquire_hosted_lifetime_lock(config.state_root, binding=binding):
                 pass
         cleanup_observations.append(error.value.code)
 
@@ -358,6 +358,44 @@ def test_server_lifetime_lock_excludes_restore_and_wraps_temp_cleanup(
         lifetime_lock = getattr(runtime, "hosted_lifetime_lock", None)
         if lifetime_lock is not None:
             lifetime_lock.__exit__(None, None, None)
+
+
+def test_server_startup_clears_runtime_temp_without_following_stale_links(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    exported = _export(tmp_path)
+    request = _request(tmp_path, exported)
+    restore_candidate(request, bootstrap_security=_bootstrap)
+    binding = _binding(tmp_path)
+    runtime_temp = binding.state_root / "tmp" / "runtime"
+    nested = runtime_temp / "multipart"
+    nested.mkdir(parents=True)
+    (nested / "body.tmp").write_bytes(b"stale multipart")
+    victim = tmp_path / "victim"
+    victim.write_bytes(b"must survive")
+    try:
+        (runtime_temp / "diarizer.tmp").symlink_to(victim)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    _configure_hosted_server(monkeypatch, binding)
+    monkeypatch.setattr(
+        HostedCellConfig,
+        "apply_process_environment",
+        lambda self: (
+            monkeypatch.setenv("TMPDIR", str(self.state_root / "tmp" / "runtime"))
+            or HostedProcessSettings(disabled_background_workers=())
+        ),
+    )
+
+    runtime = server_runtime.initialize_runtime(load_dotenv_func=lambda **_kwargs: None)
+    try:
+        assert list(runtime_temp.iterdir()) == []
+        assert victim.read_bytes() == b"must survive"
+        assert os.environ["TMPDIR"] == str(runtime_temp)
+    finally:
+        assert runtime.hosted_lifetime_lock is not None
+        runtime.hosted_lifetime_lock.__exit__(None, None, None)
 
 
 @pytest.mark.parametrize(

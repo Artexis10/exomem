@@ -146,6 +146,7 @@ def _config(tmp_path: Path) -> HostedCellConfig:
         state_root=tmp_path / "state",
         log_root=tmp_path / "logs",
         service_credential="private-service-credential-with-thirty-two-bytes",
+        enforce_transfer_v1_compatibility=False,
         transfer_browser_origin=ORIGIN,
         transfer_host=TRANSFER_HOST,
         resource_limits=HostedResourceLimits(
@@ -162,6 +163,7 @@ def _app(
     *,
     preserve_stream_func: Any | None = None,
     config_value: HostedCellConfig | None = None,
+    runtime_temp_authority: Any | None = None,
 ) -> tuple[Any, HostedCellConfig, HostedCellLifecycle]:
     from exomem.init import init_vault
     from exomem.schema import load_source_schema
@@ -184,6 +186,7 @@ def _app(
         source_schema=load_source_schema(config.vault_root),
         transfer_security_authority=security,
         preserve_stream_func=preserve_stream_func,
+        runtime_temp_authority=runtime_temp_authority,
     )
     return app.http_app(), config, lifecycle
 
@@ -924,6 +927,18 @@ def test_hosted_transfer_defaults_and_private_v1_deadline_are_fail_closed(
         assert getattr(error.value, "code", "") == "HOSTED_TRANSFER_CONFIG_INVALID"
 
 
+def test_direct_hosted_config_is_also_private_v1_default_off(tmp_path: Path) -> None:
+    config = HostedCellConfig(
+        cell_id="cell-alpha",
+        vault_root=tmp_path / "vault",
+        state_root=tmp_path / "state",
+        log_root=tmp_path / "logs",
+        service_credential="private-service-credential-with-thirty-two-bytes",
+    )
+
+    assert config.private_v1_transfer_enabled(now=NOW) is False
+
+
 def test_private_v1_routes_authenticate_then_fail_closed_without_deadline(tmp_path: Path) -> None:
     security = FakeSecurityAuthority()
     config = replace(
@@ -995,6 +1010,131 @@ def test_private_v1_compatibility_caps_entire_multipart_request_at_four_mib(
     )
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "TOO_LARGE"
+
+
+def test_private_v1_upload_reserves_the_shared_runtime_temp_quota(tmp_path: Path) -> None:
+    security = FakeSecurityAuthority()
+    config = replace(
+        _config(tmp_path),
+        resource_limits=HostedResourceLimits(
+            storage_bytes=8 * 1024 * 1024,
+            upload_bytes=8 * 1024 * 1024,
+            worker_count=0,
+        ),
+    )
+    runtime_root = config.state_root / "tmp" / "runtime"
+    runtime_root.mkdir(parents=True)
+    existing = runtime_root / "existing-worker.tmp"
+    existing.write_bytes(b"x" * (13 * 1024 * 1024))
+    existing.chmod(0o600)
+    app, config, _lifecycle = _app(tmp_path, security, config_value=config)
+    grant = gateway.mint_transfer_grant(
+        config,
+        tenant_scope="tenant-alpha",
+        principal_scope=PRINCIPAL,
+        operation="upload",
+        jti="legacy-runtime-quota",
+        max_bytes=4 * 1024 * 1024,
+    )
+
+    response = asyncio.run(
+        _request(
+            app,
+            "POST",
+            "/private/exomem/v1/upload",
+            headers={
+                "Authorization": f"Bearer {config.service_credential}",
+                gateway.CELL_HEADER: config.cell_id,
+                gateway.PROTOCOL_HEADER: config.protocol_version,
+                gateway.REQUEST_HEADER: "44444444-4444-4444-8444-444444444444",
+                gateway.PRINCIPAL_HEADER: PRINCIPAL,
+                gateway.TRANSFER_GRANT_HEADER: grant,
+                "Idempotency-Key": "legacy-runtime-quota",
+            },
+            files={
+                "file": (
+                    "large.bin",
+                    b"y" * (3 * 1024 * 1024),
+                    "application/octet-stream",
+                )
+            },
+            data={"scope": "research", "category": "documents"},
+        )
+    )
+
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "HOSTED_TRANSFER_UNAVAILABLE"
+    assert existing.stat().st_size == 13 * 1024 * 1024
+
+
+def test_private_v1_allows_only_one_active_upload(tmp_path: Path) -> None:
+    admitted = threading.Event()
+    release = threading.Event()
+
+    class BlockingReservation:
+        def __enter__(self) -> Path:
+            admitted.set()
+            assert release.wait(timeout=5)
+            return tmp_path
+
+        def __exit__(self, *_args: object) -> None:
+            return None
+
+    class BlockingRuntimeTempAuthority:
+        def reserve(self, _maximum_bytes: int) -> BlockingReservation:
+            return BlockingReservation()
+
+    security = FakeSecurityAuthority()
+    app, config, _lifecycle = _app(
+        tmp_path,
+        security,
+        runtime_temp_authority=BlockingRuntimeTempAuthority(),
+    )
+
+    def upload(jti: str, request_id: str) -> httpx.Response:
+        grant = gateway.mint_transfer_grant(
+            config,
+            tenant_scope="tenant-alpha",
+            principal_scope=PRINCIPAL,
+            operation="upload",
+            jti=jti,
+            max_bytes=1024,
+        )
+        return asyncio.run(
+            _request(
+                app,
+                "POST",
+                "/private/exomem/v1/upload",
+                headers={
+                    "Authorization": f"Bearer {config.service_credential}",
+                    gateway.CELL_HEADER: config.cell_id,
+                    gateway.PROTOCOL_HEADER: config.protocol_version,
+                    gateway.REQUEST_HEADER: request_id,
+                    gateway.PRINCIPAL_HEADER: PRINCIPAL,
+                    gateway.TRANSFER_GRANT_HEADER: grant,
+                    "Idempotency-Key": jti,
+                },
+                files={"file": ("small.bin", b"small", "application/octet-stream")},
+                data={"scope": "research", "category": "documents"},
+            )
+        )
+
+    first_result: list[httpx.Response] = []
+    first = threading.Thread(
+        target=lambda: first_result.append(
+            upload("legacy-first", "55555555-5555-4555-8555-555555555555")
+        )
+    )
+    first.start()
+    assert admitted.wait(timeout=5)
+    second = upload("legacy-second", "66666666-6666-4666-8666-666666666666")
+    release.set()
+    first.join(timeout=5)
+
+    assert not first.is_alive()
+    assert first_result[0].status_code == 201
+    assert second.status_code == 503
+    assert second.json()["error"]["code"] == "HOSTED_TRANSFER_UNAVAILABLE"
 
 
 def test_quiesce_drains_admitted_transfer_and_closes_new_transfer_admission(

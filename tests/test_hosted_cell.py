@@ -520,6 +520,47 @@ def test_zero_worker_limit_keeps_granted_background_features_disabled(
     assert hosted_runtime.os.environ["EXOMEM_DISABLE_FILE_WATCHER"] == "1"
 
 
+def test_hosted_diarization_stays_gated_until_it_uses_runtime_temp_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    values, _config = _provisioned(tmp_path, grants="media,diarization")
+    values["EXOMEM_HOSTED_WORKER_LIMIT"] = "1"
+    for key, value in values.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    monkeypatch.setattr(
+        server_runtime,
+        "probe_hosted_mutation_authority",
+        lambda _vault_root: (True, "HOSTED_READY"),
+    )
+
+    class Worker:
+        def start(self) -> None:
+            pass
+
+        def stop(self) -> None:
+            pass
+
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: Worker())
+
+    runtime = server_runtime.initialize_runtime(
+        load_dotenv_func=lambda **_kwargs: pytest.fail("hosted startup loaded dotenv")
+    )
+    try:
+        assert "EXOMEM_DIARIZE" not in hosted_runtime.os.environ
+        assert runtime.hosted_lifecycle is not None
+        assert runtime.hosted_lifecycle.readiness().as_dict()["degraded"] == [
+            {
+                "check": "worker:diarization",
+                "reason_code": "HOSTED_RUNTIME_TEMP_AUTHORITY_REQUIRED",
+            }
+        ]
+    finally:
+        assert runtime.hosted_lifetime_lock is not None
+        runtime.hosted_lifetime_lock.__exit__(None, None, None)
+
+
 def test_lifecycle_reports_content_free_readiness_and_degradation(
     tmp_path: Path,
 ) -> None:
