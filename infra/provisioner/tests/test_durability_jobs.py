@@ -9,7 +9,9 @@ from pydantic import ValidationError
 
 from exomem_provisioner.durability_jobs import (
     DatabaseBackupSettings,
+    DeletionJobSettings,
     ExportGcSettings,
+    _run_live_deletion_worker,
     run_bounded_operation_batch,
     run_verified_backup_sweep,
 )
@@ -144,6 +146,33 @@ async def test_operation_batch_is_bounded_and_stops_when_queue_is_empty() -> Non
     drained = Worker([True, False, True])
     assert await run_bounded_operation_batch(drained, max_operations=10) == 1
     assert drained.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_deletion_entrypoint_runs_one_bounded_batch_and_exits(monkeypatch) -> None:
+    from contextlib import asynccontextmanager
+
+    from exomem_provisioner import durability_runtime
+
+    class Worker:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def run_once(self) -> bool:
+            self.calls += 1
+            return self.calls <= 2
+
+    worker = Worker()
+
+    @asynccontextmanager
+    async def live_worker():
+        yield worker
+
+    monkeypatch.setattr(durability_runtime, "live_deletion_worker", live_worker)
+
+    await _run_live_deletion_worker(DeletionJobSettings(batch_size=5))
+
+    assert worker.calls == 3
 
 
 @pytest.mark.asyncio

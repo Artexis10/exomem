@@ -411,9 +411,9 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             False,
         ),
         "exomem-deletion-worker": (
-            "Deployment",
+            "CronJob",
             ["exomem-deletion-worker"],
-            None,
+            "* * * * *",
             True,
         ),
         "exomem-volume-worker": (
@@ -529,7 +529,16 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-platform"
     )
 
-    deletion_pod = pod_spec(_find(documents, "Deployment", "exomem-deletion-worker"))
+    deletion_job = _find(documents, "CronJob", "exomem-deletion-worker")
+    assert not any(
+        item.get("kind") == "Deployment"
+        and item.get("metadata", {}).get("name") == "exomem-deletion-worker"
+        for item in documents
+    )
+    assert deletion_job["spec"]["concurrencyPolicy"] == "Forbid"
+    assert deletion_job["spec"]["jobTemplate"]["spec"]["backoffLimit"] == 0
+    assert deletion_job["spec"]["jobTemplate"]["spec"]["ttlSecondsAfterFinished"] == 300
+    deletion_pod = pod_spec(deletion_job)
     deletion_env_names = {item["name"] for item in deletion_pod["containers"][0]["env"]}
     assert {
         "EXOMEM_PROVISIONER_HCLOUD_TOKEN",

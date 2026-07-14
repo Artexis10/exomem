@@ -394,7 +394,14 @@ class ExportBackupWorkflow:
                 lock_until=lock_until,
             )
 
-        provider_reference = f"b2://{key}#{state.get('provider_version_id', '')}"
+        provider_version_id = str(state.get("provider_version_id", ""))
+        if not provider_version_id:
+            raise DurabilityVerificationError("uploaded recovery object has no exact version ID")
+        provider_reference = ProviderReference.b2(
+            bucket=self._provider_bucket,
+            key=key,
+            version_id=provider_version_id,
+        )
         await self._repository.record_verified_object(
             run.id,
             worker_id,
@@ -893,7 +900,10 @@ class RestoreWorkflow:
                 run,
                 worker_id=worker_id,
             )
-        key, expected_version = self._provider_location(source.provider_reference)
+        key, expected_version = self._provider_location(
+            source.provider_reference,
+            expected_bucket=self._provider_bucket,
+        )
         head = await self._restore_store.head(key)
         if head is None:
             raise RestoreVerificationError("provider object is unavailable")
@@ -1030,10 +1040,29 @@ class RestoreWorkflow:
         return result
 
     @staticmethod
-    def _provider_location(reference: str) -> tuple[str, str | None]:
-        if not reference.startswith("b2://") or "#" not in reference:
+    def _provider_location(
+        reference: str,
+        *,
+        expected_bucket: str | None = None,
+    ) -> tuple[str, str | None]:
+        if reference.startswith("pr1_"):
+            try:
+                parsed = ProviderReference.parse(reference)
+            except RuntimeError as error:
+                raise RestoreVerificationError("provider reference is invalid") from error
+            if (
+                parsed.get("provider") != "b2"
+                or parsed.get("deleteMarker") is not False
+                or not isinstance(parsed.get("objectVersionId"), str)
+                or (expected_bucket is not None and parsed.get("bucket") != expected_bucket)
+            ):
+                raise RestoreVerificationError("provider reference is invalid")
+            key = str(parsed.get("key", ""))
+            version = str(parsed["objectVersionId"])
+        elif reference.startswith("b2://") and "#" in reference:
+            key, version = reference[5:].split("#", 1)
+        else:
             raise RestoreVerificationError("provider reference is invalid")
-        key, version = reference[5:].split("#", 1)
         if (
             not key
             or key.startswith("/")
@@ -1435,14 +1464,29 @@ class ExportObjectService:
 
     @staticmethod
     def _provider_location(reference: str) -> tuple[str, str | None]:
-        if not reference.startswith("b2://"):
+        if reference.startswith("pr1_"):
+            try:
+                parsed = ProviderReference.parse(reference)
+            except RuntimeError as error:
+                raise ExportObjectUnavailable("export object is unavailable") from error
+            if (
+                parsed.get("provider") != "b2"
+                or parsed.get("deleteMarker") is not False
+                or not isinstance(parsed.get("objectVersionId"), str)
+            ):
+                raise ExportObjectUnavailable("export object is unavailable")
+            key = str(parsed.get("key", ""))
+            version = str(parsed["objectVersionId"])
+        elif reference.startswith("b2://"):
+            raw = reference[5:]
+            key, separator, legacy_version = raw.partition("#")
+            version = legacy_version if separator and legacy_version else None
+        else:
             raise ExportObjectUnavailable("export object is unavailable")
-        raw = reference[5:]
-        key, separator, version = raw.partition("#")
         if (
             not key
             or key.startswith("/")
             or any(part in {"", ".", ".."} for part in key.split("/"))
         ):
             raise ExportObjectUnavailable("export object is unavailable")
-        return key, version if separator and version else None
+        return key, version

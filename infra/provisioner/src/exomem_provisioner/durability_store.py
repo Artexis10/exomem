@@ -189,13 +189,52 @@ class B2DeletionObjectStore(_B2StoreBase):
         *,
         version_id: str | None = None,
     ) -> None:
-        arguments: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
-        if version_id is not None:
-            arguments["VersionId"] = version_id
+        if not version_id:
+            raise ProviderObjectConflict("B2 deletion requires an exact object version ID")
+        arguments: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "VersionId": version_id,
+        }
         await asyncio.to_thread(self._client.delete_object, **arguments)
 
     async def absent(self, key: str) -> bool:
-        return await self.head(key) is None
+        key_marker: str | None = None
+        version_marker: str | None = None
+        seen_cursors: set[tuple[str, str]] = set()
+        while True:
+            arguments: dict[str, str] = {"Bucket": self._bucket, "Prefix": key}
+            if key_marker is not None:
+                arguments["KeyMarker"] = key_marker
+            if version_marker is not None:
+                arguments["VersionIdMarker"] = version_marker
+            response = await asyncio.to_thread(self._client.list_object_versions, **arguments)
+            for group in ("Versions", "DeleteMarkers"):
+                entries = response.get(group, [])
+                if not isinstance(entries, list):
+                    raise ProviderObjectConflict("provider returned invalid object-version listing")
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("Key"), str):
+                        raise ProviderObjectConflict(
+                            "provider returned invalid object-version listing"
+                        )
+                    if entry["Key"] == key:
+                        if not isinstance(entry.get("VersionId"), str) or not entry["VersionId"]:
+                            raise ProviderObjectConflict(
+                                "provider returned invalid object-version identity"
+                            )
+                        return False
+            if not response.get("IsTruncated"):
+                return True
+            next_key = response.get("NextKeyMarker")
+            next_version = response.get("NextVersionIdMarker")
+            if not isinstance(next_key, str) or not isinstance(next_version, str):
+                raise ProviderObjectConflict("provider returned invalid object-version cursor")
+            cursor = (next_key, next_version)
+            if cursor in seen_cursors:
+                raise ProviderObjectConflict("provider object-version cursor did not advance")
+            seen_cursors.add(cursor)
+            key_marker, version_marker = cursor
 
 
 class B2PortableDeliveryStore(_B2StoreBase):

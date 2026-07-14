@@ -38,6 +38,8 @@ Vault backups stop and verify routes, quiesce the cell, stage and authenticate t
 portable archive, reopen service, then encrypt and upload. Every archive uses a
 unique AES-256-GCM data key; the wrapped key remains in the provisioner database.
 Recovery objects use seven-day B2 governance retention and a 30-day lifecycle.
+After the lock expires, deletion uses exact B2 version IDs without governance
+bypass and proves that neither object versions nor delete markers remain.
 User exports use a separate private bucket without Object Lock: their exact
 caller-supplied expiry is authenticated in the durable checkpoint, object row,
 and B2 metadata, while a 31-day provider lifecycle is only a cleanup backstop.
@@ -138,8 +140,8 @@ helm upgrade --install exomem-platform infra/helm/platform \
 - `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`: URL-safe base64 Ed25519 seed confined
   to signer-bearing processes. The API uses its governed seed to pre-seal the
   bounded recovery-identity pool, and the volume worker uses that same governed
-  trust root for retained-volume identities. The routine and deletion workers
-  receive only the corresponding public verifier and must never receive the
+  trust root for retained-volume identities. The routine worker and short-lived
+  deletion Jobs receive only the corresponding public verifier and must never receive the
   seed.
 
 The routine worker additionally requires the release-manifest path, pinned

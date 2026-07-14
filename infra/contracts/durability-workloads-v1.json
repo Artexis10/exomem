@@ -72,16 +72,23 @@
       "publicVerifier": false
     },
     "deletion": {
-      "kind": "Deployment",
+      "kind": "CronJob",
       "command": ["exomem-deletion-worker"],
       "serviceAccount": "exomem-deletion-worker",
-      "replicas": 1,
+      "schedule": "* * * * *",
+      "concurrencyPolicy": "Forbid",
+      "startingDeadlineSeconds": 45,
+      "activeDeadlineSeconds": 240,
+      "backoffLimit": 0,
+      "ttlSecondsAfterFinished": 300,
+      "automountServiceAccountToken": true,
+      "maxOperations": 1,
       "claimActions": ["discard", "destroy"],
       "providerPermissions": [
         "kubernetes:authenticated-tenant-delete",
         "traefik:authenticated-route-delete",
         "hcloud:volume-write",
-        "b2:recovery:delete-list-bypass-governance",
+        "b2:recovery:delete-list-read-metadata",
         "b2:user-export:delete-list-read-metadata"
       ],
       "privateKey": null,

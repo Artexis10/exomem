@@ -1347,13 +1347,12 @@ def test_secret_matrix_materializes_every_hosted_platform_workload_secret() -> N
         "exomem-user-export-delete-key/application-key",
         "exomem-database-backup-upload-key-id/application-key-id",
         "exomem-database-backup-upload-key/application-key",
-        "exomem-database-backup-delete-key-id/application-key-id",
-        "exomem-database-backup-delete-key/application-key",
         "exomem-database-backup-pg-service/pg_service.conf",
         "exomem-database-backup-pgpass/pgpass",
     }
     assert required <= materialized
     assert "exomem-provider-recovery-volume-signer/private-key" not in materialized
+    assert not any("database-backup-delete" in value for value in materialized)
 
     terraform_outputs = {
         source["output"]

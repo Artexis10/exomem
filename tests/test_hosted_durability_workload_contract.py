@@ -24,6 +24,10 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
         ("exomem-volume-worker",),
     }
     assert workloads["deletion"]["claimActions"] == ["discard", "destroy"]
+    assert workloads["deletion"]["kind"] == "CronJob"
+    assert workloads["deletion"]["schedule"] == "* * * * *"
+    assert workloads["deletion"]["concurrencyPolicy"] == "Forbid"
+    assert workloads["deletion"]["maxOperations"] == 1
     assert workloads["deliveryGc"]["automountServiceAccountToken"] is False
     assert workloads["databaseBackup"]["automountServiceAccountToken"] is False
     assert workloads["deletion"]["privateKey"] is None
@@ -70,7 +74,7 @@ def test_every_workload_secret_binding_exists_in_the_handoff_matrix() -> None:
             assert private_key in destinations
 
 
-def test_only_privileged_deletion_identity_can_bypass_governance() -> None:
+def test_no_hosted_durability_identity_can_bypass_governance() -> None:
     contract = _document("durability-workloads-v1.json")
     workloads = contract["workloads"]
 
@@ -79,4 +83,7 @@ def test_only_privileged_deletion_identity_can_bypass_governance() -> None:
         for name, workload in workloads.items()
         if any("bypass-governance" in value for value in workload["providerPermissions"])
     }
-    assert bypass_consumers == {"deletion"}
+    assert bypass_consumers == set()
+    assert "bypassGovernance" not in (
+        ROOT / "infra" / "terraform" / "durability" / "storage.tf"
+    ).read_text(encoding="utf-8")

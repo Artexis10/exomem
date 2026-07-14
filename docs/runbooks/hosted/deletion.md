@@ -23,12 +23,13 @@ Use the product destroy action. It immediately revokes service, stops billing,
 removes online resources, and remains pending while Object Lock protects recovery
 data. Never force-delete finalizers or buckets.
 
-The continuously reconciled `exomem-deletion-worker` is the only workload that
-receives HCloud write plus the tenant-recovery and user-export delete
-credentials. Complete database backups are system-scoped and are never exposed
-to tenant deletion; their aggregate retention cleanup is part of database
-durability. The deletion worker receives the provider-recovery public verifier,
-never the signing key. Its
+`exomem-deletion-worker` is a minute-scheduled CronJob whose short-lived Job pod
+drains at most one deletion operation and exits. Only that running pod receives
+HCloud write plus the tenant-recovery and user-export delete credentials; no
+always-on pod holds them. Complete database backups are system-scoped, have no
+delete credential synced into K3s, and are never exposed to tenant deletion.
+The deletion Job receives the provider-recovery public verifier, never the
+signing key. Its
 admission policy permits mutation only in opaque `exo-*` tenant namespaces or
 against a PV carrying an authenticated recovery envelope; its Secret RBAC is
 delete-only. The separate `exomem-volume-worker` owns authenticated PV/PVC and
@@ -58,8 +59,12 @@ curl --fail-with-body --silent --show-error --max-redirs 0 --max-time 30 \
 ```bash
 kubectl get all,pvc,secret,ingressroute -A -l "exomem.io/tenant=$tenant_id"
 kubectl get pv -o jsonpath='{range .items[*]}{.metadata.labels.exomem\.io/tenant}{"\n"}{end}'
-kubectl -n exomem-platform rollout status deployment/exomem-deletion-worker --timeout=120s
+kubectl -n exomem-platform get cronjob/exomem-deletion-worker
+kubectl -n exomem-platform get jobs -l app.kubernetes.io/name=exomem-deletion-worker
 ```
 
 Final `deleted` requires independently true compute, storage, key, and all-tenant-
 resource proofs after locked objects expire and provider absence is verified.
+The provider proof enumerates B2 object versions and delete markers, deletes only
+their exact version IDs after the seven-day lock expires, and must find neither
+before wrapped-key destruction. Governance-retention bypass is not permitted.

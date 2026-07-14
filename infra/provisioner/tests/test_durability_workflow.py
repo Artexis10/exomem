@@ -225,6 +225,16 @@ async def test_backup_reopens_routes_before_encryption_upload_and_records_remote
     assert result.opaque_reference.startswith("recovery_")
     uploaded = next(iter(store.objects.values()))
     assert uploaded.metadata["wrapped-key-reference"] == result.opaque_reference
+    recorded = await repository.get_recovery_object(result.opaque_reference)
+    assert recorded is not None
+    assert ProviderReference.parse(recorded.provider_reference) == {
+        "bucket": "recovery-test-bucket",
+        "deleteMarker": False,
+        "key": uploaded.key,
+        "objectVersionId": "version-opaque",
+        "provider": "b2",
+        "version": 1,
+    }
     observation = ProviderRecoveryIdentityDecoder.b2(
         provider_reference=ProviderReference.b2(bucket="recovery-test-bucket", key=uploaded.key),
         metadata=uploaded.metadata,

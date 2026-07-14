@@ -116,12 +116,12 @@ identity issuer, the two scheduled backup workloads, and the privileged volume
 worker;
 `exomem-provider-recovery-verifier/public-key` is the raw 32-byte Ed25519 public
 key encoded as unpadded base64url. It is the only half mounted into the routine
-and deletion workers; the vault-backup reconciler mounts it alongside the signer
+worker and short-lived deletion Jobs; the vault-backup reconciler mounts it alongside the signer
 to authenticate discovered provider objects and prove both halves share one
 trust root. Generate and hand off both halves as one atomic keypair operation, then
 include both exact ciphertext artifacts in the signed active-secret registry.
 Never place both halves in one Secret or mount the signing seed into the routine
-or deletion worker. The volume worker derives its verifier from this same seed;
+or deletion Job. The volume worker derives its verifier from this same seed;
 a second recovery signing root is forbidden because a single-key verifier could
 not rediscover its objects. Create both ciphertexts and the escrow copy through
 the atomic handoff only:

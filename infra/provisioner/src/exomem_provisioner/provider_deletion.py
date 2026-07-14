@@ -422,6 +422,7 @@ class LiveDeletionProvider:
         markers: list[dict[str, object]] = []
         key_marker: str | None = None
         version_marker: str | None = None
+        seen_cursors: set[tuple[str, str | None]] = set()
         while True:
             request: dict[str, object] = {"Bucket": bucket}
             if prefix is not None:
@@ -446,6 +447,10 @@ class LiveDeletionProvider:
                 not isinstance(next_version, str) or not next_version
             ):
                 raise MetadataConflict("B2 version pagination is invalid")
+            cursor = (next_key, next_version)
+            if cursor in seen_cursors:
+                raise MetadataConflict("B2 version pagination did not advance")
+            seen_cursors.add(cursor)
             key_marker = next_key
             version_marker = next_version
 

@@ -26,7 +26,7 @@ The owner proof SHALL measure route-closure through resume for a representative 
 - **THEN** the invitation gate fails and records the required entitlement or snapshot redesign decision
 
 ### Requirement: Recovery objects are encrypted and provider-protected
-Every recovery archive SHALL use envelope AES-256-GCM with a unique data key and authenticated metadata. The object metadata/manifest SHALL authenticate the immutable opaque tenant ID, cell/candidate ID, operation ID, and fence generation needed for provider rediscovery. The wrapped key and opaque provider reference SHALL be stored outside the object. The system backup credential SHALL allow upload/list but no delete; a separate privileged restore/deletion job SHALL hold the required read/delete credential only while running. B2 objects SHALL use seven-day Object Lock and 30-day normal retention.
+Every recovery archive SHALL use envelope AES-256-GCM with a unique data key and authenticated metadata. The object metadata/manifest SHALL authenticate the immutable opaque tenant ID, cell/candidate ID, operation ID, and fence generation needed for provider rediscovery. The wrapped key and an opaque provider reference containing the exact B2 bucket, key, and object version ID SHALL be stored outside the object. The system backup credential SHALL allow upload/list but no delete; a separate privileged restore/deletion job SHALL hold the required read/delete credential only while running. B2 objects SHALL use seven-day Object Lock and 30-day normal retention.
 
 #### Scenario: B2 credential is exposed alone
 - **WHEN** an attacker obtains only the runtime upload/list B2 credential
@@ -84,7 +84,7 @@ Every 30 minutes, a dedicated read-only backup job SHALL take a transactionally 
 - **THEN** the owner can authenticate, resolve the same tenant and cell, and complete representative capture and recall after reconciliation
 
 ### Requirement: Deletion separates immediate service revocation from retained recovery expiry
-Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. At lock expiry, the privileged deletion worker SHALL override the normal 30-day lifecycle, delete and independently verify all recovery/export objects absent, destroy wrapped keys, and only then return final destroy proofs and permit `deleted`.
+Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. At lock expiry, a short-lived privileged deletion Job SHALL delete every exact tenant object version and delete marker without governance bypass, independently verify that none remain, destroy wrapped keys, and only then return final destroy proofs and permit `deleted`.
 
 #### Scenario: Delete request arrives with locked backup
 - **WHEN** a tenant has a recovery object with unexpired seven-day lock
@@ -92,7 +92,7 @@ Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, option
 
 #### Scenario: Lock expires before 30-day lifecycle
 - **WHEN** the last tenant recovery lock expires during deletion
-- **THEN** the deletion worker removes the object immediately rather than waiting for normal 30-day lifecycle, verifies absence, destroys its wrapped key, and completes proof
+- **THEN** a short-lived deletion Job removes every exact object version and delete marker without governance bypass rather than waiting for normal 30-day lifecycle, verifies absence, destroys its wrapped key, and completes proof
 
 ### Requirement: Recovery objectives are explicit and demonstrated
 The private alpha SHALL target RPO 0/RTO 5 minutes for pod failure, RPO 0/RTO 60 minutes for node loss with intact volume, and RPO at most one hour/RTO four hours for volume or operational-database loss. Measurements SHALL be retained as release evidence; failure SHALL block invitations.

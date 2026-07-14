@@ -94,9 +94,10 @@ may therefore write the K3s `v1` value to a previously unused Vercel-previous
 `v1` slot, but only through the shown direct pipe. A single multi-destination
 handoff reads once and therefore does guarantee the same value for that command.
 
-Use the matrix's exact durability output/destination pair for each B2 key. The
-upload, restore, delete, and database-backup identities are separate on purpose;
-never combine or substitute them.
+Use the matrix's exact durability output/destination pair for each B2 key.
+Recovery and user-export upload, restore, and delete identities are separate on
+purpose; database backup has upload and restore identities only. There is no
+database-backup delete output or K3s Secret. Never combine or substitute them.
 
 ## Generated shared credentials
 

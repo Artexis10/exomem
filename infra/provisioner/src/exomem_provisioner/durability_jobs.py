@@ -245,8 +245,8 @@ class DatabaseBackupSettings(BaseSettings):
         return self
 
 
-class DeletionLoopSettings(BaseSettings):
-    """Bounded polling policy for the isolated discard/destroy worker."""
+class DeletionJobSettings(BaseSettings):
+    """Bounded batch policy for one isolated discard/destroy Job."""
 
     model_config = SettingsConfigDict(
         env_prefix="EXOMEM_DELETION_",
@@ -255,7 +255,6 @@ class DeletionLoopSettings(BaseSettings):
     )
 
     batch_size: int = Field(default=25, ge=1, le=1000)
-    idle_seconds: float = Field(default=1.0, ge=0.05, le=30.0)
 
 
 def _b2_client(settings, *, key_id: SecretStr, application_key: SecretStr):
@@ -411,25 +410,20 @@ def run_durability_backup() -> None:
         raise SystemExit(1) from None
 
 
-async def _run_live_deletion_worker(settings: DeletionLoopSettings) -> None:
+async def _run_live_deletion_worker(settings: DeletionJobSettings) -> None:
     from .durability_runtime import live_deletion_worker
 
     async with live_deletion_worker() as worker:
-        while True:
-            completed = await run_bounded_operation_batch(
-                worker,
-                max_operations=settings.batch_size,
-            )
-            if completed < settings.batch_size:
-                await asyncio.sleep(settings.idle_seconds)
+        await run_bounded_operation_batch(
+            worker,
+            max_operations=settings.batch_size,
+        )
 
 
 def run_deletion_worker() -> None:
     configure_content_free_logging()
     try:
-        settings = DeletionLoopSettings()
+        settings = DeletionJobSettings()
         asyncio.run(_run_live_deletion_worker(settings))
-    except KeyboardInterrupt:
-        return
-    except Exception:  # noqa: BLE001 - long-running worker output remains content-free
+    except Exception:  # noqa: BLE001 - one-shot deletion Job output remains content-free
         raise SystemExit(1) from None
