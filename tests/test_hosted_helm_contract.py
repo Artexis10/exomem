@@ -69,14 +69,12 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    assert values["runtime"]["image"] == ""
-    assert validation_values["runtime"]["image"] == (
-        "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
-    )
-    platform_schema = json.loads(
-        (PLATFORM / "values.schema.json").read_text(encoding="utf-8")
-    )
-    assert "@sha256:" in json.dumps(platform_schema["properties"]["runtime"])
+    assert "runtime" not in values
+    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
+    assert platform_schema["properties"]["runtime"] is False
+    assert "releaseManifestJson" in platform_schema["properties"]["provisioner"]["required"]
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
@@ -87,6 +85,46 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "1dd5776c2810f80f038454c9333a3814a2319b1b" in provenance
     assert "encryption-passphrase" in provenance
     assert "crypto_LUKS" in provenance
+
+
+def test_platform_rejects_mutable_or_partial_runtime_release_overrides(
+    tmp_path: Path,
+) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    validation_values = yaml.safe_load(
+        (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
+    )
+    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    mutable = {**release, "runtimeImage": "ghcr.io/artexis10/exomem:latest"}
+    partial = dict(release)
+    partial.pop("gatewayContractSha256")
+    for index, invalid in enumerate((mutable, partial), start=1):
+        override = tmp_path / f"invalid-release-{index}.yaml"
+        override.write_text(
+            yaml.safe_dump({"provisioner": {"releaseManifestJson": json.dumps(invalid)}}),
+            encoding="utf-8",
+        )
+        result = subprocess.run(
+            [
+                str(HELM),
+                "template",
+                "exomem-platform",
+                str(PLATFORM),
+                "--namespace",
+                "exomem-platform",
+                "--values",
+                str(PLATFORM / "values.validation.yaml"),
+                "--values",
+                str(override),
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0
+        assert "hosted release" in result.stderr
 
 
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
@@ -105,9 +143,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert runtime_class["handler"] == "runc"
     tenant_admission = _find(documents, "ValidatingAdmissionPolicy", "exomem-tenant-boundary")
     assert "paramKind" not in tenant_admission["spec"]
-    tenant_binding = _find(
-        documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary"
-    )
+    tenant_binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary")
     assert "matchResources" not in tenant_binding["spec"]
     assert "matchConditions" not in tenant_admission["spec"]
     variables = tenant_admission["spec"]["variables"]
@@ -210,9 +246,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert env["TARGET_URL"] == contract["origin"] + job["path"]
         assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
         assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
-        assert env["CADENCE_SECONDS"] == (
-            "60" if job["schedule"] == "* * * * *" else "3600"
-        )
+        assert env["CADENCE_SECONDS"] == ("60" if job["schedule"] == "* * * * *" else "3600")
         assert container["command"] == [
             "python",
             "/opt/exomem-hosted/scheduler_runtime.py",
@@ -221,11 +255,14 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert container["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
         assert pod["automountServiceAccountToken"] is False
         assert {volume["name"] for volume in pod["volumes"]} == {"runtime", "kube-api"}
+        projected = next(volume for volume in pod["volumes"] if volume["name"] == "kube-api")
+        token_projection = projected["projected"]["sources"][0]["serviceAccountToken"]
+        assert token_projection["audience"] == "https://kubernetes.default.svc.cluster.local"
+        assert projected["projected"]["defaultMode"] == 0o440
+        assert pod["securityContext"]["fsGroup"] == 10001
         assert "CRON_SECRET" not in json.dumps(rendered)
 
-        state = _find(
-            documents, "ConfigMap", f"exomem-hosted-scheduler-state-{job['name']}"
-        )
+        state = _find(documents, "ConfigMap", f"exomem-hosted-scheduler-state-{job['name']}")
         persisted = json.loads(state["data"]["state.json"])
         assert persisted["job"] == job["name"]
         assert persisted["duration_seconds"]["buckets"] == {
@@ -234,6 +271,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
             "20": 0,
             "+Inf": 0,
         }
+        assert state["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
 
     policy = _find(documents, "ConfigMap", "exomem-hosted-scheduler-contract")
     rendered_contract = json.loads(policy["data"]["contract.json"])
@@ -298,7 +336,15 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     for name, enforcement in expected_enforcement.items():
         namespace = _find(documents, "Namespace", name)
         assert namespace["metadata"]["annotations"]["helm.sh/resource-policy"] == "keep"
+        assert namespace["metadata"]["annotations"]["meta.helm.sh/release-name"] == (
+            "exomem-platform"
+        )
+        assert (
+            namespace["metadata"]["annotations"]["meta.helm.sh/release-namespace"]
+            == "exomem-platform"
+        )
         assert namespace["metadata"]["labels"] == {
+            "app.kubernetes.io/managed-by": "Helm",
             "app.kubernetes.io/part-of": "exomem-hosted",
             "pod-security.kubernetes.io/enforce": enforcement,
             "pod-security.kubernetes.io/enforce-version": "v1.35",
@@ -324,6 +370,10 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     assert contract["alerts"]["backup_block_age_seconds"] == 3600
 
     scheduler_jobs = [item for item in documents if item.get("kind") == "CronJob"]
+    assert {
+        item["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["image"]
+        for item in scheduler_jobs
+    } == {"ghcr.io/artexis10/exomem@sha256:" + "a" * 64}
     scheduler_text = json.dumps(scheduler_jobs)
     runtime = _find(documents, "ConfigMap", "exomem-hosted-scheduler-runtime")
     runtime_source = runtime["data"]["scheduler_runtime.py"]
@@ -333,16 +383,43 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     assert "NoRedirect" in runtime_source
     assert _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
     evaluator = _find(documents, "Deployment", "exomem-hosted-scheduler-alerts")
+    collector = _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
+    for deployment in (collector, evaluator):
+        assert deployment["spec"]["template"]["spec"]["containers"][0]["image"] == (
+            "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+        )
     evaluator_env = {
-        item["name"]: item["value"]
+        item["name"]: item.get("value")
         for item in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
     }
     assert evaluator_env["MISSED_RUN_SECONDS"] == "180"
     assert evaluator_env["FAILURE_THRESHOLD"] == "2"
+    evaluator_container = evaluator["spec"]["template"]["spec"]["containers"][0]
+    webhook = next(
+        item for item in evaluator_container["env"] if item["name"] == "ALERT_WEBHOOK_URL"
+    )
+    assert webhook["valueFrom"]["secretKeyRef"] == {
+        "name": "exomem-hosted-alert-delivery",
+        "key": "url",
+    }
+    assert evaluator_env["COLLECTOR_SNAPSHOT_URL"] == (
+        "http://exomem-hosted-scheduler-metrics.exomem-platform.svc.cluster.local:9090/snapshot"
+    )
+    evaluator_projected = next(
+        volume
+        for volume in evaluator["spec"]["template"]["spec"]["volumes"]
+        if volume["name"] == "kube-api"
+    )
+    assert (
+        evaluator_projected["projected"]["sources"][0]["serviceAccountToken"]["audience"]
+        == "https://kubernetes.default.svc.cluster.local"
+    )
     metrics_service = _find(documents, "Service", "exomem-hosted-scheduler-metrics")
     assert metrics_service["metadata"]["annotations"]["prometheus.io/scrape"] == "true"
     alert_state = _find(documents, "ConfigMap", "exomem-hosted-scheduler-alert-state")
     assert json.loads(alert_state["data"]["state.json"])["transitions_total"] == 0
+    template = (PLATFORM / "templates/observability.yaml").read_text(encoding="utf-8")
+    assert 'lookup "v1" "ConfigMap"' in template
     for metric in (
         "exomem_hosted_scheduler_attempts_total",
         "exomem_hosted_scheduler_failures_total",
@@ -367,7 +444,11 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert quota["spec"]["hard"]["persistentvolumeclaims"] == "1"
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
 
-    workload = _find(documents, expected_kind, "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init")
+    workload = _find(
+        documents,
+        expected_kind,
+        "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init",
+    )
     namespace = _find(documents, "Namespace", "cell-alpha-test")
     assert namespace["metadata"]["labels"] == {
         "exomem.io/tenant-cell": "true",
@@ -434,9 +515,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert temporary["emptyDir"]["sizeLimit"] == "256Mi"
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 
-        credentials = next(
-            volume for volume in pod["volumes"] if volume["name"] == "credentials"
-        )
+        credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
         assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
@@ -470,9 +549,7 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
         extra_args=("--set", "routes.enabled=true"),
     )
     middleware = _find(documents, "Middleware", "cell-alpha-strip-cell")
-    assert middleware["spec"]["stripPrefix"]["prefixes"] == [
-        "/cells/alpha-test-original"
-    ]
+    assert middleware["spec"]["stripPrefix"]["prefixes"] == ["/cells/alpha-test-original"]
 
     control = _find(documents, "IngressRoute", "cell-alpha-control")
     transfer = _find(documents, "IngressRoute", "cell-alpha-transfer")
@@ -519,9 +596,7 @@ def test_cell_route_and_runtime_share_one_transfer_hostname() -> None:
     }
     assert environment["EXOMEM_HOSTED_TRANSFER_HOST"] == "files.example.test"
     route = _find(documents, "IngressRoute", "cell-alpha-transfer")
-    assert route["spec"]["routes"][0]["match"].startswith(
-        "Host(`files.example.test`)"
-    )
+    assert route["spec"]["routes"][0]["match"].startswith("Host(`files.example.test`)")
 
 
 def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> None:
@@ -541,7 +616,5 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
         {"name": "web", "port": 80, "protocol": "TCP", "targetPort": "web"}
     ]
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(
-        encoding="utf-8"
-    )
+    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
     assert cloudflare.count(target) == 2

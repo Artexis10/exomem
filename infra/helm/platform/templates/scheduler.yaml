@@ -1,4 +1,5 @@
 {{- $contractRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
+{{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
 {{- $contract := $contractRaw | fromJson -}}
 {{- $contractSha256 := $contractRaw | sha256sum -}}
 {{- if ne (int .Values.scheduler.contractVersion) (int $contract.version) -}}
@@ -104,11 +105,13 @@ spec:
           securityContext:
             runAsNonRoot: true
             runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
             seccompProfile:
               type: RuntimeDefault
           containers:
             - name: request
-              image: {{ $.Values.runtime.image }}
+              image: {{ $runtimeImage }}
               imagePullPolicy: IfNotPresent
               command: ["python", "/opt/exomem-hosted/scheduler_runtime.py", "request"]
               env:
@@ -155,12 +158,12 @@ spec:
                 defaultMode: 0444
             - name: kube-api
               projected:
-                defaultMode: 0400
+                defaultMode: 0440
                 sources:
                   - serviceAccountToken:
                       path: token
                       expirationSeconds: 600
-                      audience: https://kubernetes.default.svc
+                      audience: https://kubernetes.default.svc.cluster.local
                   - configMap:
                       name: kube-root-ca.crt
                       items:

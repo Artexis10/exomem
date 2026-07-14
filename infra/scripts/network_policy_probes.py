@@ -8,6 +8,7 @@ import json
 import re
 import subprocess
 import sys
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -109,7 +110,9 @@ class Probe:
     executor: str = "existing-cell"
 
 
-def _run(kubectl: str, arguments: list[str], *, stdin: str | None = None) -> subprocess.CompletedProcess[str]:
+def _run(
+    kubectl: str, arguments: list[str], *, stdin: str | None = None
+) -> subprocess.CompletedProcess[str]:
     try:
         return subprocess.run(
             [kubectl, *arguments],
@@ -233,21 +236,29 @@ def build_probe_plan(
     ]
 
 
-def _job(probe: Probe) -> dict[str, Any]:
+def _job(probe: Probe, *, run_id: str, job_name: str) -> dict[str, Any]:
     return {
         "apiVersion": "batch/v1",
         "kind": "Job",
         "metadata": {
-            "name": f"exomem-deny-{probe.name}",
+            "name": job_name,
             "namespace": probe.namespace,
-            "labels": {"exomem.io/network-probe": "deny-v1"},
+            "labels": {
+                "exomem.io/network-probe": "deny-v1",
+                "exomem.io/network-probe-run": run_id,
+            },
         },
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": 20,
             "ttlSecondsAfterFinished": 300,
             "template": {
-                "metadata": {"labels": {"exomem.io/network-probe": "deny-v1"}},
+                "metadata": {
+                    "labels": {
+                        "exomem.io/network-probe": "deny-v1",
+                        "exomem.io/network-probe-run": run_id,
+                    }
+                },
                 "spec": {
                     "automountServiceAccountToken": False,
                     "restartPolicy": "Never",
@@ -286,14 +297,18 @@ def _job(probe: Probe) -> dict[str, Any]:
     }
 
 
-def _positive_job(plan: list[Probe]) -> dict[str, Any]:
+def _positive_job(plan: list[Probe], *, run_id: str) -> dict[str, Any]:
     targets = [probe.target for probe in plan]
-    job = _job(Probe("positive-controls", "exomem-platform", targets[0], False))
-    job["metadata"]["name"] = "exomem-network-positive-controls"
+    job = _job(
+        Probe("positive-controls", "exomem-platform", targets[0], False),
+        run_id=run_id,
+        job_name=f"exomem-network-positive-{run_id}",
+    )
     job["metadata"]["labels"]["exomem.io/network-probe"] = "positive-v1"
     template = job["spec"]["template"]
     template["metadata"]["labels"] = {
         "exomem.io/network-probe": "positive-v1",
+        "exomem.io/network-probe-run": run_id,
         "app.kubernetes.io/name": "traefik",
         "exomem.io/ingress": "traefik",
     }
@@ -309,25 +324,99 @@ def _positive_job(plan: list[Probe]) -> dict[str, Any]:
     return job
 
 
-def render_probe_manifest(plan: list[Probe]) -> str:
+def render_probe_manifest(plan: list[Probe], *, run_id: str) -> str:
     if not plan or any(not probe.expect_denied for probe in plan):
         raise NetworkProbeError("network probe plan must contain only deny assertions")
     temporary = [probe for probe in plan if probe.executor == "temporary-platform-pod"]
     if len(temporary) != 1:
         raise NetworkProbeError("network probe plan has an invalid temporary probe set")
-    return yaml.safe_dump_all([_job(probe) for probe in temporary], sort_keys=False)
+    if not re.fullmatch(r"[a-f0-9]{12}", run_id):
+        raise NetworkProbeError("network probe run identity is invalid")
+    return yaml.safe_dump_all(
+        [
+            _job(
+                probe,
+                run_id=run_id,
+                job_name=f"exomem-deny-unlabelled-{run_id}",
+            )
+            for probe in temporary
+        ],
+        sort_keys=False,
+    )
 
 
-def _apply_and_wait(kubectl: str, manifest: str, namespace: str, job_name: str) -> None:
-    applied = _run(kubectl, ["apply", "-f", "-"], stdin=manifest)
+def _job_status(kubectl: str, namespace: str, job_name: str) -> dict[str, Any]:
+    return _get_json(kubectl, ["job", job_name, "-n", namespace])
+
+
+def _apply_and_wait(
+    kubectl: str, manifest: str, namespace: str, job_name: str, run_id: str
+) -> None:
+    applied = _run(kubectl, ["create", "-f", "-"], stdin=manifest)
     if applied.returncode != 0:
         raise NetworkProbeError(f"network probe could not start: {job_name}")
+    created = _job_status(kubectl, namespace, job_name)
+    metadata = created.get("metadata")
+    labels = metadata.get("labels") if isinstance(metadata, dict) else None
+    uid = metadata.get("uid") if isinstance(metadata, dict) else None
+    if (
+        not isinstance(uid, str)
+        or not uid
+        or not isinstance(labels, dict)
+        or labels.get("exomem.io/network-probe-run") != run_id
+    ):
+        raise NetworkProbeError(f"network probe has no fresh identity: {job_name}")
     waited = _run(
         kubectl,
         ["wait", "--for=condition=complete", "--timeout=40s", "-n", namespace, f"job/{job_name}"],
     )
     if waited.returncode != 0:
         raise NetworkProbeError(f"network probe did not prove its assertion: {job_name}")
+    completed = _job_status(kubectl, namespace, job_name)
+    completed_metadata = completed.get("metadata")
+    status = completed.get("status")
+    conditions = status.get("conditions") if isinstance(status, dict) else None
+    if (
+        not isinstance(completed_metadata, dict)
+        or completed_metadata.get("uid") != uid
+        or not isinstance(status, dict)
+        or not isinstance(status.get("startTime"), str)
+        or not isinstance(status.get("completionTime"), str)
+        or status.get("succeeded") != 1
+        or not isinstance(conditions, list)
+        or not any(
+            isinstance(condition, dict)
+            and condition.get("type") == "Complete"
+            and condition.get("status") == "True"
+            for condition in conditions
+        )
+    ):
+        raise NetworkProbeError(f"network probe completion is not fresh: {job_name}")
+
+
+def _delete_and_confirm(kubectl: str) -> None:
+    selector = "exomem.io/network-probe"
+    deleted = _run(
+        kubectl,
+        [
+            "delete",
+            "jobs",
+            "-n",
+            "exomem-platform",
+            f"--selector={selector}",
+            "--ignore-not-found",
+            "--wait=true",
+            "--timeout=30s",
+        ],
+    )
+    if deleted.returncode != 0:
+        raise NetworkProbeError("network probe cleanup failed")
+    remaining = _get_json(
+        kubectl,
+        ["jobs", "-n", "exomem-platform", f"--selector={selector}"],
+    )
+    if remaining.get("items") != []:
+        raise NetworkProbeError("stale network probe jobs remain")
 
 
 def _execute_from_existing_cell(probe: Probe, kubectl: str, cell_service: str) -> None:
@@ -361,45 +450,35 @@ def _execute_from_existing_cell(probe: Probe, kubectl: str, cell_service: str) -
 
 
 def execute_probe_manifest(
-    manifest: str,
     plan: list[Probe],
     kubectl: str,
     cell_service: str,
     *,
     targets: LiveTargets,
+    run_id: str | None = None,
 ) -> None:
+    selected_run_id = run_id or uuid.uuid4().hex[:12]
+    if not re.fullmatch(r"[a-f0-9]{12}", selected_run_id):
+        raise NetworkProbeError("network probe run identity is invalid")
     try:
+        _delete_and_confirm(kubectl)
         verify_live_targets(targets, kubectl)
-        positive = yaml.safe_dump(_positive_job(plan), sort_keys=False)
-        _apply_and_wait(kubectl, positive, "exomem-platform", "exomem-network-positive-controls")
+        positive_name = f"exomem-network-positive-{selected_run_id}"
+        positive = yaml.safe_dump(_positive_job(plan, run_id=selected_run_id), sort_keys=False)
+        _apply_and_wait(kubectl, positive, "exomem-platform", positive_name, selected_run_id)
         for probe in plan:
             if probe.executor == "existing-cell":
                 _execute_from_existing_cell(probe, kubectl, cell_service)
-        platform_probe = next(
-            probe for probe in plan if probe.executor == "temporary-platform-pod"
-        )
+        platform_probe = next(probe for probe in plan if probe.executor == "temporary-platform-pod")
         _apply_and_wait(
             kubectl,
-            manifest,
+            render_probe_manifest(plan, run_id=selected_run_id),
             platform_probe.namespace,
-            f"exomem-deny-{platform_probe.name}",
+            f"exomem-deny-unlabelled-{selected_run_id}",
+            selected_run_id,
         )
     finally:
-        for selector in ("positive-v1", "deny-v1"):
-            try:
-                _run(
-                    kubectl,
-                    [
-                        "delete",
-                        "jobs",
-                        "-n",
-                        "exomem-platform",
-                        f"--selector=exomem.io/network-probe={selector}",
-                        "--ignore-not-found",
-                    ],
-                )
-            except NetworkProbeError:
-                pass
+        _delete_and_confirm(kubectl)
 
 
 def _plan(targets: LiveTargets) -> list[Probe]:
@@ -418,7 +497,14 @@ def main() -> int:
     parser.add_argument("--kubectl", default="kubectl")
     subparsers = parser.add_subparsers(dest="command", required=True)
     capture = subparsers.add_parser("capture")
-    for option in ("source-namespace", "source-service", "peer-namespace", "peer-service", "neon-host", "b2-host"):
+    for option in (
+        "source-namespace",
+        "source-service",
+        "peer-namespace",
+        "peer-service",
+        "neon-host",
+        "b2-host",
+    ):
         capture.add_argument(f"--{option}", required=True)
     capture.add_argument("--output", type=Path, required=True)
     run = subparsers.add_parser("run")
@@ -437,7 +523,9 @@ def main() -> int:
             )
             descriptor = args.output.parent
             descriptor.mkdir(parents=True, exist_ok=True)
-            args.output.write_text(json.dumps(targets.as_document(), indent=2) + "\n", encoding="utf-8")
+            args.output.write_text(
+                json.dumps(targets.as_document(), indent=2) + "\n", encoding="utf-8"
+            )
             args.output.chmod(0o600)
             print(f"Captured network target identities in {args.output}")
             return 0
@@ -445,7 +533,6 @@ def main() -> int:
         targets = LiveTargets.from_document(document)
         plan = _plan(targets)
         execute_probe_manifest(
-            render_probe_manifest(plan),
             plan,
             args.kubectl,
             targets.source.name,

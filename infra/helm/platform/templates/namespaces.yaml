@@ -4,7 +4,10 @@ metadata:
   name: exomem-platform
   annotations:
     helm.sh/resource-policy: keep
+    meta.helm.sh/release-name: exomem-platform
+    meta.helm.sh/release-namespace: exomem-platform
   labels:
+    app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: exomem-hosted
     # The pinned CSI node plugin requires hostPath/device access. Tenant workloads
     # never run here; platform admission and exact Helm values own this namespace.
@@ -21,7 +24,10 @@ metadata:
   name: exomem-system
   annotations:
     helm.sh/resource-policy: keep
+    meta.helm.sh/release-name: exomem-platform
+    meta.helm.sh/release-namespace: exomem-platform
   labels:
+    app.kubernetes.io/managed-by: Helm
     app.kubernetes.io/part-of: exomem-hosted
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/enforce-version: v1.35

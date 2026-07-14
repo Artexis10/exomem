@@ -4,8 +4,9 @@ cloudflared:
   tokenSecretName: exomem-cloudflared-token
   tokenSecretKey: token
 
-runtime:
+provisioner:
   image: ""
+  releaseManifestJson: ""
 
 admission:
   namespaceContractOperatorUsernames:
@@ -19,6 +20,8 @@ scheduler:
 
 observability:
   contractSha256: cd576fd9012557787d8c740e96fdafdbfc851cf6a818207ec128731e8d732ad0
+  alertDeliverySecretName: exomem-hosted-alert-delivery
+  alertDeliverySecretKey: url
 
 storage:
   className: exomem-hcloud-encrypted-retain

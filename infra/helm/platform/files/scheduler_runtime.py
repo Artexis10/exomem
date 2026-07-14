@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import os
 import signal
@@ -17,7 +18,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 NAMESPACE = "exomem-platform"
-API_ORIGIN = "https://kubernetes.default.svc"
+API_ORIGIN = "https://kubernetes.default.svc.cluster.local"
 TOKEN_PATH = "/var/run/secrets/exomem-api/token"
 CA_PATH = "/var/run/secrets/exomem-api/ca.crt"
 STATE_PREFIX = "exomem-hosted-scheduler-state-"
@@ -180,9 +181,7 @@ def render_metrics(states: list[dict[str, Any]], alert_state: dict[str, Any]) ->
         lines.append(f"exomem_hosted_scheduler_attempts_total{labels} {state['attempts_total']}")
         lines.append(f"exomem_hosted_scheduler_failures_total{labels} {state['failures_total']}")
         for bound in ("1", "5", "20", "+Inf"):
-            bucket_labels = _labels(
-                job=state["job"], contract_version="1", le=bound
-            )
+            bucket_labels = _labels(job=state["job"], contract_version="1", le=bound)
             count = state["duration_seconds"]["buckets"][bound]
             lines.append(f"exomem_hosted_scheduler_duration_seconds_bucket{bucket_labels} {count}")
         lines.append(
@@ -208,6 +207,14 @@ def render_metrics(states: list[dict[str, Any]], alert_state: dict[str, Any]) ->
         )
     lines.append("# EOF")
     return "\n".join(lines) + "\n"
+
+
+def render_snapshot(states: list[dict[str, Any]]) -> str:
+    for state in states:
+        _validate_state(state)
+    return json.dumps(
+        {"schema_version": 1, "states": states}, separators=(",", ":"), sort_keys=True
+    )
 
 
 def _api_request(method: str, path: str, payload: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -283,6 +290,94 @@ def _exact_https_request(target: str, bearer: str, connect_timeout: int) -> bool
         return False
 
 
+def _fetch_snapshot(target: str) -> list[dict[str, Any]]:
+    parsed = urlsplit(target)
+    if (
+        parsed.scheme != "http"
+        or parsed.netloc != "exomem-hosted-scheduler-metrics.exomem-platform.svc.cluster.local:9090"
+        or parsed.path != "/snapshot"
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise RuntimeError("scheduler collector target is invalid")
+    opener = urllib.request.build_opener(NoRedirect())
+    request = urllib.request.Request(target, method="GET", headers={"Accept": "application/json"})
+    with opener.open(request, timeout=10) as response:
+        if response.status != 200 or response.geturl() != target:
+            raise RuntimeError("scheduler collector scrape failed")
+        body = response.read(1024 * 1024 + 1)
+    if len(body) > 1024 * 1024:
+        raise RuntimeError("scheduler collector snapshot is oversized")
+    document = json.loads(body)
+    if not isinstance(document, dict):
+        raise RuntimeError("scheduler collector snapshot is invalid")
+    states = document.get("states")
+    if document.get("schema_version") != 1 or not isinstance(states, list):
+        raise RuntimeError("scheduler collector snapshot is invalid")
+    for state in states:
+        if not isinstance(state, dict):
+            raise RuntimeError("scheduler collector snapshot is invalid")
+        _validate_state(state)
+    return states
+
+
+def deliver_transition(transition: dict[str, Any], *, webhook_url: str, transition_id: str) -> None:
+    parsed = urlsplit(webhook_url)
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+        or not transition_id
+    ):
+        raise RuntimeError("scheduler alert delivery target is invalid")
+    payload = json.dumps(
+        {"schema_version": 1, "transition_id": transition_id, **transition},
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode()
+    request = urllib.request.Request(
+        webhook_url,
+        data=payload,
+        method="POST",
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "X-Exomem-Alert-Transition": transition_id,
+        },
+    )
+    opener = urllib.request.build_opener(NoRedirect())
+    try:
+        with opener.open(request, timeout=10) as response:
+            if not 200 <= response.status < 300 or response.geturl() != webhook_url:
+                raise RuntimeError("scheduler alert delivery failed")
+    except (OSError, TimeoutError, urllib.error.URLError, ValueError) as exc:
+        raise RuntimeError("scheduler alert delivery failed") from exc
+
+
+def transition_identifier(
+    alert_state: dict[str, Any], transition: dict[str, Any], index: int
+) -> str:
+    transitions_total = alert_state.get("transitions_total")
+    if (
+        not isinstance(transitions_total, int)
+        or isinstance(transitions_total, bool)
+        or transitions_total < 0
+        or not isinstance(index, int)
+        or isinstance(index, bool)
+        or index < 0
+    ):
+        raise RuntimeError("scheduler alert transition identity is invalid")
+    return hashlib.sha256(
+        json.dumps(
+            {"sequence": transitions_total + index + 1, **transition},
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode()
+    ).hexdigest()
+
+
 def request_once() -> int:
     job = os.environ["JOB_NAME"]
     target = os.environ["TARGET_URL"]
@@ -310,7 +405,9 @@ def request_once() -> int:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous_handler)
     duration = max(0.0, time.monotonic() - started)
-    updated = record_attempt(state, success=success, duration_seconds=duration, observed_at=int(time.time()))
+    updated = record_attempt(
+        state, success=success, duration_seconds=duration, observed_at=int(time.time())
+    )
     _write_state(resource, updated)
     return 0 if success else 2
 
@@ -322,13 +419,21 @@ def _all_states() -> list[dict[str, Any]]:
 
 def evaluate_once() -> None:
     alert_resource, alert_state = _read_state(ALERT_STATE)
+    observed_at = int(time.time())
     updated, transitions = evaluate_alerts(
-        _all_states(),
+        _fetch_snapshot(os.environ["COLLECTOR_SNAPSHOT_URL"]),
         alert_state,
-        observed_at=int(time.time()),
+        observed_at=observed_at,
         missed_run_seconds=int(os.environ["MISSED_RUN_SECONDS"]),
         failure_threshold=int(os.environ["FAILURE_THRESHOLD"]),
     )
+    for index, transition in enumerate(transitions):
+        transition_id = transition_identifier(alert_state, transition, index)
+        deliver_transition(
+            transition,
+            webhook_url=os.environ["ALERT_WEBHOOK_URL"],
+            transition_id=transition_id,
+        )
     _write_state(alert_resource, updated)
     for transition in transitions:
         firing = transition["active"]
@@ -358,17 +463,23 @@ def evaluate_once() -> None:
 
 class MetricsHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
-        if self.path != "/metrics":
+        if self.path not in {"/metrics", "/snapshot"}:
             self.send_error(404)
             return
         try:
-            _, alerts = _read_state(ALERT_STATE)
-            body = render_metrics(_all_states(), alerts).encode()
+            states = _all_states()
+            if self.path == "/snapshot":
+                body = render_snapshot(states).encode()
+                content_type = "application/json"
+            else:
+                _, alerts = _read_state(ALERT_STATE)
+                body = render_metrics(states, alerts).encode()
+                content_type = "application/openmetrics-text; version=1.0.0"
         except Exception:  # noqa: BLE001
             self.send_error(503)
             return
         self.send_response(200)
-        self.send_header("Content-Type", "application/openmetrics-text; version=1.0.0")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)

@@ -1,15 +1,18 @@
 {
   "$schema": "https://json-schema.org/draft-07/schema#",
   "type": "object",
+  "required": ["provisioner", "admission", "scheduler", "observability"],
   "properties": {
-    "runtime": {
+    "runtime": false,
+    "provisioner": {
       "type": "object",
-      "required": ["image"],
+      "required": ["image", "releaseManifestJson"],
       "properties": {
         "image": {
           "type": "string",
           "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"
-        }
+        },
+        "releaseManifestJson": {"type": "string", "minLength": 1, "maxLength": 1048576, "contentMediaType": "application/json"}
       }
     },
     "admission": {
@@ -22,6 +25,25 @@
           "uniqueItems": true,
           "items": {"type": "string", "minLength": 1}
         }
+      }
+    },
+    "scheduler": {
+      "type": "object",
+      "required": ["contractVersion", "contractSha256", "secretName", "secretKey"],
+      "properties": {
+        "contractVersion": {"const": 1},
+        "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "secretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "secretKey": {"type": "string", "minLength": 1}
+      }
+    },
+    "observability": {
+      "type": "object",
+      "required": ["contractSha256", "alertDeliverySecretName", "alertDeliverySecretKey"],
+      "properties": {
+        "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "alertDeliverySecretName": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
+        "alertDeliverySecretKey": {"type": "string", "minLength": 1}
       }
     }
   }

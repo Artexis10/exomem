@@ -70,9 +70,7 @@ def _retain_k3s_logs(name: str, path: Path) -> None:
 
 
 @pytest.fixture(scope="module")
-def k3s(
-    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
-) -> Iterator[str]:
+def k3s(request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory) -> Iterator[str]:
     if not RUN_LIVE:
         pytest.skip("set RUN_K3S_ADMISSION_TEST=1 to run exact K3s API admission tests")
     if HELM is None:
@@ -185,6 +183,85 @@ def _assert_denied(
     assert result.returncode != 0
     assert message in result.stderr
     return result
+
+
+def test_exact_k3s_accepts_only_the_rendered_service_account_token_audience(
+    k3s: str,
+) -> None:
+    namespace = "audience-contract"
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[
+            {"apiVersion": "v1", "kind": "Namespace", "metadata": {"name": namespace}},
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {"name": "scheduler", "namespace": namespace},
+            },
+        ],
+    )
+    audience = "https://kubernetes.default.svc.cluster.local"
+    issued = _kubectl(
+        k3s,
+        [
+            "create",
+            "token",
+            "scheduler",
+            "--namespace",
+            namespace,
+            "--audience",
+            audience,
+            "--duration",
+            "10m",
+        ],
+    )
+    review = _kubectl(
+        k3s,
+        ["create", "--filename=-", "--output=json"],
+        documents=[
+            {
+                "apiVersion": "authentication.k8s.io/v1",
+                "kind": "TokenReview",
+                "spec": {"token": issued.stdout.strip(), "audiences": [audience]},
+            }
+        ],
+    )
+    reviewed = json.loads(review.stdout)
+    assert reviewed["status"]["authenticated"] is True
+    assert reviewed["status"]["audiences"] == [audience]
+
+    short_audience_token = _kubectl(
+        k3s,
+        [
+            "create",
+            "token",
+            "scheduler",
+            "--namespace",
+            namespace,
+            "--audience",
+            "https://kubernetes.default.svc",
+            "--duration",
+            "10m",
+        ],
+    )
+    rejected = _kubectl(
+        k3s,
+        ["create", "--filename=-", "--output=json"],
+        documents=[
+            {
+                "apiVersion": "authentication.k8s.io/v1",
+                "kind": "TokenReview",
+                "spec": {
+                    "token": short_audience_token.stdout.strip(),
+                    "audiences": [audience],
+                },
+            }
+        ],
+    )
+    rejected_status = json.loads(rejected.stdout)["status"]
+    assert rejected_status.get("authenticated") is not True
+    assert "audience" in rejected_status.get("error", "").lower()
 
 
 def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
@@ -389,16 +466,14 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
 
     wrong_image = copy.deepcopy(init_pod)
     wrong_image["metadata"]["name"] = "cell-alpha-init-wrong-image"
-    wrong_image["spec"]["containers"][0]["image"] = (
-        "ghcr.io/artexis10/exomem@sha256:" + "c" * 64
-    )
+    wrong_image["spec"]["containers"][0]["image"] = "ghcr.io/artexis10/exomem@sha256:" + "c" * 64
     _assert_denied(k3s, wrong_image, message="exact approved immutable image")
 
     extra_capability = copy.deepcopy(init_pod)
     extra_capability["metadata"]["name"] = "cell-alpha-init-extra-capability"
-    extra_capability["spec"]["containers"][0]["securityContext"]["capabilities"][
-        "add"
-    ].append("SYS_ADMIN")
+    extra_capability["spec"]["containers"][0]["securityContext"]["capabilities"]["add"].append(
+        "SYS_ADMIN"
+    )
     _assert_denied(k3s, extra_capability, message="exact approved operator command")
 
     excessive_resources = copy.deepcopy(init_pod)
@@ -504,16 +579,14 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
 
     serving_unconfined = copy.deepcopy(serving_pod)
     serving_unconfined["metadata"]["name"] = "cell-alpha-serve-unconfined"
-    serving_unconfined["spec"]["containers"][0]["securityContext"][
-        "seccompProfile"
-    ] = {"type": "Unconfined"}
+    serving_unconfined["spec"]["containers"][0]["securityContext"]["seccompProfile"] = {
+        "type": "Unconfined"
+    }
     _assert_denied(k3s, serving_unconfined, message="seccompProfile")
 
     unbounded_tmp = copy.deepcopy(serving_pod)
     unbounded_tmp["metadata"]["name"] = "cell-alpha-serve-unbounded-tmp"
-    temporary = next(
-        item for item in unbounded_tmp["spec"]["volumes"] if item["name"] == "tmp"
-    )
+    temporary = next(item for item in unbounded_tmp["spec"]["volumes"] if item["name"] == "tmp")
     temporary["emptyDir"].pop("sizeLimit")
     _assert_denied(k3s, unbounded_tmp, message="bounded temporary volume")
 
