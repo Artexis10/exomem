@@ -577,7 +577,9 @@ def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
     lock_count = 0
     real_lock = vault_module.vault_creation_lock
     real_directory_recheck = vault_module.DirectoryCensusGuard.recheck
-    real_path_recheck = vault_module.PathGuard.recheck
+    real_sidecar_recheck = (
+        relation_review._BoundedLifecycleSidecarGuard.recheck
+    )
 
     @contextmanager
     def counted_lock(root: Path, namespace: str, *, timeout: float = 30.0):
@@ -593,10 +595,10 @@ def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
             self, root, allowed_changes=allowed_changes
         )
 
-    def counted_path_recheck(self, root: Path):
+    def counted_sidecar_recheck(self, root: Path):
         if id(self) in sidecar_rechecks:
             sidecar_rechecks[id(self)] += 1
-        return real_path_recheck(self, root)
+        return real_sidecar_recheck(self, root)
 
     monkeypatch.setattr(vault_module, "vault_creation_lock", counted_lock)
     monkeypatch.setattr(
@@ -605,9 +607,9 @@ def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
         counted_directory_recheck,
     )
     monkeypatch.setattr(
-        vault_module.PathGuard,
+        relation_review._BoundedLifecycleSidecarGuard,
         "recheck",
-        counted_path_recheck,
+        counted_sidecar_recheck,
     )
 
     result = relation_review.cleanup_stale_lifecycle_prepared_batch(
@@ -696,6 +698,134 @@ def test_reconcile_sidecar_byte_limits_make_cleanup_indeterminate(
     payload = reconcile_module.reconcile(tmp_path).as_dict()
 
     assert "LIFECYCLE_TRASH_LIMIT" in {
+        issue["code"] for issue in payload["lifecycle_prepared_issues"]
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert prepared.exists()
+
+
+def test_lifecycle_sidecar_snapshot_reads_only_bounded_descriptor_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-bounded-read.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/bounded-read.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("trash", encoding="utf-8")
+    sidecar = trash.with_name(f"{trash.name}.meta.json")
+    sidecar.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/bounded-read.txt"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 256
+    )
+    monkeypatch.setattr(
+        relation_review,
+        "_LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES",
+        512,
+    )
+    requested: list[int] = []
+    tracked_descriptors: set[int] = set()
+    real_open = relation_review.os.open
+    real_read = relation_review.os.read
+    real_close = relation_review.os.close
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = real_open(path, flags, mode)
+        else:
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == sidecar:
+            tracked_descriptors.add(descriptor)
+        return descriptor
+
+    def counted_read(descriptor: int, size: int) -> bytes:
+        if descriptor in tracked_descriptors:
+            requested.append(size)
+        return real_read(descriptor, size)
+
+    def tracked_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            tracked_descriptors.discard(descriptor)
+
+    monkeypatch.setattr(relation_review.os, "open", tracked_open)
+    monkeypatch.setattr(relation_review.os, "read", counted_read)
+    monkeypatch.setattr(relation_review.os, "close", tracked_close)
+
+    payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert requested
+    assert max(requested) <= 257
+    assert payload["lifecycle_prepared_issues"] == []
+    assert prepared.exists()
+
+
+def test_lifecycle_issue_projection_keeps_one_batch_issue_beyond_identity_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(relation_review, "_LIFECYCLE_MAX_IDENTITIES", 2)
+    issues = [
+        relation_review.LifecyclePreparedIssue("IDENTITY_A", "a"),
+        relation_review.LifecyclePreparedIssue("IDENTITY_B", "b"),
+        relation_review.LifecyclePreparedIssue("BATCH"),
+        relation_review.LifecyclePreparedIssue("UNREACHABLE"),
+    ]
+
+    projected = relation_review._bounded_lifecycle_prepared_issues(issues)
+
+    assert projected == tuple(issues[:3])
+
+
+def test_lifecycle_sidecar_symlink_swap_fails_closed_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-sidecar-swap.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/swapped.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("trash", encoding="utf-8")
+    sidecar = trash.with_name(f"{trash.name}.meta.json")
+    sidecar.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
+        encoding="utf-8",
+    )
+    replacement = tmp_path / "replacement-sidecar.json"
+    replacement.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
+        encoding="utf-8",
+    )
+    real_open = relation_review.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if Path(path) == sidecar and not swapped:
+            sidecar.unlink()
+            sidecar.symlink_to(replacement)
+            swapped = True
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(relation_review.os, "open", swap_then_open)
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert swapped
+    assert "LIFECYCLE_TRASH_RACE" in {
         issue["code"] for issue in payload["lifecycle_prepared_issues"]
     }
     assert payload["lifecycle_prepared_cleaned"] == []

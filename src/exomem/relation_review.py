@@ -1254,10 +1254,192 @@ def _safe_trash_original_path(value: object) -> bool:
     )
 
 
+def _read_bounded_lifecycle_sidecar_bytes(
+    root: Path,
+    relative: str,
+    *,
+    expected_identity: vault.PathIdentity,
+    byte_limit: int,
+) -> bytes:
+    """Read one exact sidecar without following or allocating past its cap."""
+    path = root / relative
+    if byte_limit < 0:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_LIMIT",
+            "trash sidecar bytes exceed the bounded proof inventory",
+        )
+    try:
+        before = path.lstat()
+    except OSError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed before bounded read",
+        ) from error
+    if (
+        not vault._same_identity(expected_identity, before)
+        or stat.S_ISLNK(before.st_mode)
+        or vault._is_reparse(before)
+        or not stat.S_ISREG(before.st_mode)
+    ):
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed before bounded read",
+        )
+    if before.st_size > byte_limit:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_LIMIT",
+            "trash sidecar bytes exceed the bounded proof inventory",
+        )
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed before bounded read",
+        ) from error
+    try:
+        opened = os.fstat(descriptor)
+        if (
+            not vault._same_identity(expected_identity, opened)
+            or not stat.S_ISREG(opened.st_mode)
+        ):
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_RACE",
+                "trash sidecar changed before bounded read",
+            )
+        if opened.st_size > byte_limit:
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_LIMIT",
+                "trash sidecar bytes exceed the bounded proof inventory",
+            )
+        remaining = byte_limit + 1
+        chunks: list[bytes] = []
+        while remaining > 0:
+            chunk = os.read(descriptor, min(64 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        after = os.fstat(descriptor)
+        if not vault._same_identity(expected_identity, after):
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_RACE",
+                "trash sidecar changed during bounded read",
+            )
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > byte_limit:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_LIMIT",
+            "trash sidecar bytes exceed the bounded proof inventory",
+        )
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed after bounded read",
+        ) from error
+    if (
+        not vault._same_identity(expected_identity, current)
+        or stat.S_ISLNK(current.st_mode)
+        or vault._is_reparse(current)
+        or not stat.S_ISREG(current.st_mode)
+    ):
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed after bounded read",
+        )
+    return raw
+
+
+@dataclass(frozen=True, slots=True)
+class _BoundedLifecycleSidecarGuard(vault.PathGuard):
+    """Content guard whose exact hash recheck never streams past its cap."""
+
+    byte_limit: int
+
+    def recheck(self, vault_root: Path) -> None:
+        if self.leaf_identity is None or self.expected_content_hash is None:
+            raise vault.PathGuardError(
+                "PATH_GUARD_CHANGED", "bounded sidecar guard is incomplete"
+            )
+        stable = vault.PathGuard(
+            self.target,
+            self.ancestors,
+            self.missing_parents,
+            self.leaf_identity,
+            "stable",
+            None,
+        )
+        stable.recheck(vault_root)
+        try:
+            raw = _read_bounded_lifecycle_sidecar_bytes(
+                Path(vault_root),
+                self.target,
+                expected_identity=self.leaf_identity,
+                byte_limit=self.byte_limit,
+            )
+        except RelationReviewError as error:
+            raise vault.PathGuardError(
+                "PATH_GUARD_CHANGED", "bounded sidecar guard changed"
+            ) from error
+        if hashlib.sha256(raw).hexdigest() != self.expected_content_hash:
+            raise vault.PathGuardError(
+                "PATH_GUARD_CONTENT", "guarded content changed"
+            )
+
+
+def _capture_bounded_lifecycle_sidecar_guard(
+    root: Path,
+    relative: str,
+    *,
+    expected_identity: vault.PathIdentity,
+    expected_content_hash: str,
+    byte_limit: int,
+) -> vault.PathGuard:
+    try:
+        stable = vault.PathGuard.capture(root, relative, leaf_policy="stable")
+    except vault.PathGuardError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed before guard capture",
+        ) from error
+    if stable.leaf_identity != expected_identity:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed before guard capture",
+        )
+    guard = _BoundedLifecycleSidecarGuard(
+        stable.target,
+        stable.ancestors,
+        stable.missing_parents,
+        stable.leaf_identity,
+        "content",
+        expected_content_hash,
+        byte_limit,
+    )
+    try:
+        guard.recheck(root)
+    except vault.PathGuardError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_TRASH_RACE",
+            "trash sidecar changed during guard capture",
+        ) from error
+    return guard
+
+
 def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
     start = f"{kb_dirname()}/_trash"
     pending = [start]
     files: set[str] = set()
+    file_identities: dict[str, vault.PathIdentity] = {}
     directories: set[str] = set()
     guards: list[vault.DirectoryCensusGuard] = []
     while pending:
@@ -1304,6 +1486,7 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
                 pending.append(entry.relative_path)
             elif stat.S_ISREG(info.st_mode):
                 files.add(entry.relative_path)
+                file_identities[entry.relative_path] = entry
                 if len(files) > _LIFECYCLE_TRASH_MAX_FILES:
                     raise RelationReviewError(
                         "LIFECYCLE_TRASH_LIMIT",
@@ -1321,38 +1504,32 @@ def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
         if not relative.endswith(".meta.json"):
             continue
         try:
-            sidecar_path = root / relative
-            info = sidecar_path.lstat()
-            if (
-                info.st_size > _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES
-                or aggregate_sidecar_bytes + info.st_size
-                > _LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES
-            ):
-                raise RelationReviewError(
-                    "LIFECYCLE_TRASH_LIMIT",
-                    "trash sidecar bytes exceed the bounded proof inventory",
-                )
-            raw = sidecar_path.read_bytes()
-            if (
-                len(raw) > _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES
-                or aggregate_sidecar_bytes + len(raw)
-                > _LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES
-            ):
-                raise RelationReviewError(
-                    "LIFECYCLE_TRASH_LIMIT",
-                    "trash sidecar bytes exceed the bounded proof inventory",
-                )
-            guard = vault.PathGuard.capture(
+            remaining = (
+                _LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES
+                - aggregate_sidecar_bytes
+            )
+            byte_limit = min(
+                _LIFECYCLE_TRASH_MAX_SIDECAR_BYTES,
+                remaining,
+            )
+            raw = _read_bounded_lifecycle_sidecar_bytes(
                 root,
                 relative,
-                leaf_policy="content",
-                expected_content_hash=hashlib.sha256(raw).hexdigest(),
+                expected_identity=file_identities[relative],
+                byte_limit=byte_limit,
             )
             source = raw.decode("utf-8", errors="strict")
             metadata = parse_exact_json_object(source)
             original = metadata.get("original_path")
             if not _safe_trash_original_path(original):
                 raise ValueError("trash sidecar original_path is invalid")
+            guard = _capture_bounded_lifecycle_sidecar_guard(
+                root,
+                relative,
+                expected_identity=file_identities[relative],
+                expected_content_hash=hashlib.sha256(raw).hexdigest(),
+                byte_limit=byte_limit,
+            )
         except RelationReviewError:
             raise
         except (OSError, UnicodeDecodeError, ValueError, vault.PathGuardError) as error:
@@ -1628,8 +1805,15 @@ def inspect_lifecycle_prepared_slots(
     if not cleanup_safe:
         inspections = [replace(item, cleanup_eligible=False) for item in inspections]
     return LifecyclePreparedBatch(
-        tuple(inspections), tuple(issues[:_LIFECYCLE_MAX_IDENTITIES]), cleanup_safe
+        tuple(inspections), _bounded_lifecycle_prepared_issues(issues), cleanup_safe
     )
+
+
+def _bounded_lifecycle_prepared_issues(
+    issues: list[LifecyclePreparedIssue],
+) -> tuple[LifecyclePreparedIssue, ...]:
+    """Keep one batch issue in addition to the bounded per-identity issues."""
+    return tuple(issues[: _LIFECYCLE_MAX_IDENTITIES + 1])
 
 
 def _live_identity_owner_paths(
