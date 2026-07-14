@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import threading
 import time
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
@@ -35,6 +36,7 @@ _LIFECYCLE_STATE_VERSION = 1
 _LIFECYCLE_STATE_FILENAME = "hosted-lifecycle-state.json"
 _CELL_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$")
 _PROTOCOL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,31}$")
+_CREDENTIAL_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _TRUE = frozenset({"1", "true", "yes", "on"})
 _FALSE = frozenset({"", "0", "false", "no", "off"})
 _KNOWN_FEATURES = frozenset({"diarization", "embeddings", "file-watcher", "media", "vision"})
@@ -1154,3 +1156,884 @@ def _sync_directory(path: Path) -> None:
         os.fsync(descriptor)
     finally:
         os.close(descriptor)
+
+
+# Hosted operator storage binding.  The legacy environment-driven runtime above
+# remains available for the rollout window; operator-created cells use this
+# richer storage identity and never persist release/protocol as ownership.
+HOSTED_BINDING_VERSION = 2
+_RUNTIME_ID_MAX = 2_147_483_647
+_INIT_OPERATION_DIRECTORY = "hosted-init-operations"
+_SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
+_OPERATION_ID_V2 = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$")
+
+
+@dataclass(frozen=True, slots=True)
+class HostedBindingV2:
+    """Exact persistent ownership identity for one hosted cell's three roots."""
+
+    cell_id: str
+    vault_id: str
+    vault_root: Path
+    state_root: Path
+    log_root: Path
+    runtime_uid: int
+    runtime_gid: int
+
+    def __post_init__(self) -> None:
+        if not _CELL_ID.fullmatch(self.cell_id) or not _CELL_ID.fullmatch(self.vault_id):
+            raise HostedConfigError(
+                "HOSTED_BINDING_CONFLICT", "hosted binding identity is invalid"
+            )
+        if not _valid_runtime_identity(self.runtime_uid) or not _valid_runtime_identity(
+            self.runtime_gid
+        ):
+            raise HostedConfigError(
+                "HOSTED_RUNTIME_ID_INVALID", "hosted runtime identity is outside its safe range"
+            )
+        normalized: list[Path] = []
+        for kind, raw in (
+            ("vault", self.vault_root),
+            ("state", self.state_root),
+            ("log", self.log_root),
+        ):
+            path = Path(raw)
+            if not path.is_absolute() or Path(os.path.normpath(str(path))) != path:
+                raise HostedConfigError(
+                    "HOSTED_ROOT_INVALID", f"hosted {kind} root must be normalized and absolute"
+                )
+            _reject_symlink_components(path)
+            normalized.append(path)
+        _validate_disjoint_roots(*normalized)
+        object.__setattr__(self, "vault_root", normalized[0])
+        object.__setattr__(self, "state_root", normalized[1])
+        object.__setattr__(self, "log_root", normalized[2])
+
+    @property
+    def binding_digest(self) -> str:
+        return hashlib.sha256(
+            json.dumps(
+                {
+                    "binding_version": HOSTED_BINDING_VERSION,
+                    "cell_id": self.cell_id,
+                    "vault_id": self.vault_id,
+                    "vault_root": str(self.vault_root),
+                    "state_root": str(self.state_root),
+                    "log_root": str(self.log_root),
+                    "runtime_uid": self.runtime_uid,
+                    "runtime_gid": self.runtime_gid,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+
+    def roots(self) -> tuple[tuple[str, Path], ...]:
+        return (
+            ("vault", self.vault_root),
+            ("state", self.state_root),
+            ("log", self.log_root),
+        )
+
+    def marker_payload(self, kind: str) -> dict[str, Any]:
+        if kind not in {"vault", "state", "log"}:
+            raise HostedConfigError("HOSTED_BINDING_CONFLICT", "hosted root kind is invalid")
+        return {
+            "binding_version": HOSTED_BINDING_VERSION,
+            "cell_id": self.cell_id,
+            "vault_id": self.vault_id,
+            "vault_root": str(self.vault_root),
+            "state_root": str(self.state_root),
+            "log_root": str(self.log_root),
+            "root_kind": kind,
+            "runtime_uid": self.runtime_uid,
+            "runtime_gid": self.runtime_gid,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HostedMigrationLimits:
+    max_entries: int = 100_000
+    max_bytes: int = 10 * 1024 * 1024 * 1024
+
+    def __post_init__(self) -> None:
+        for value in (self.max_entries, self.max_bytes):
+            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+                raise HostedConfigError(
+                    "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration limits are invalid"
+                )
+
+
+@dataclass(frozen=True, slots=True)
+class HostedInitV2Result:
+    status: str
+    cell_id: str
+    vault_id: str
+    binding_version: int
+    lifecycle_status: str
+    exomem_release: str
+    hosted_protocol: str
+    runtime_uid: int
+    runtime_gid: int
+    credential_version: str
+    credential_revision: int
+    capabilities: tuple[str, ...]
+
+    def as_operator_data(self) -> dict[str, Any]:
+        return {
+            "status": self.status,
+            "cell_id": self.cell_id,
+            "vault_id": self.vault_id,
+            "binding_version": self.binding_version,
+            "lifecycle_status": self.lifecycle_status,
+            "exomem_release": self.exomem_release,
+            "hosted_protocol": self.hosted_protocol,
+            "runtime_uid": self.runtime_uid,
+            "runtime_gid": self.runtime_gid,
+            "credential_version": self.credential_version,
+            "credential_revision": self.credential_revision,
+            "capabilities": list(self.capabilities),
+        }
+
+
+def _valid_runtime_identity(value: object) -> bool:
+    return (
+        isinstance(value, int)
+        and not isinstance(value, bool)
+        and 1 <= value <= _RUNTIME_ID_MAX
+    )
+
+
+def _v2_marker_path(root: Path) -> Path:
+    return root / _BINDING_FILENAME
+
+
+def _read_marker_payload(
+    root: Path,
+    *,
+    expected_uid: int | None = None,
+    expected_gid: int | None = None,
+    expected_mode: int | None = None,
+) -> dict[str, Any]:
+    marker = _v2_marker_path(root)
+    try:
+        descriptor = os.open(
+            marker,
+            os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+        )
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root ownership marker is unavailable"
+        ) from exc
+    try:
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or before.st_size > 16_384
+            or (expected_uid is not None and before.st_uid != expected_uid)
+            or (expected_gid is not None and before.st_gid != expected_gid)
+            or (expected_mode is not None and stat.S_IMODE(before.st_mode) != expected_mode)
+        ):
+            raise HostedConfigError(
+                "HOSTED_BINDING_CONFLICT", "hosted root ownership marker is unsafe"
+            )
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(4096, 16_385 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > 16_384:
+                raise HostedConfigError(
+                    "HOSTED_BINDING_CONFLICT", "hosted root ownership marker is unsafe"
+                )
+        after = os.fstat(descriptor)
+    except HostedConfigError:
+        raise
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root ownership marker cannot be read safely"
+        ) from exc
+    finally:
+        os.close(descriptor)
+    if (
+        before.st_dev,
+        before.st_ino,
+        stat.S_IFMT(before.st_mode),
+        before.st_uid,
+        before.st_gid,
+        stat.S_IMODE(before.st_mode),
+        before.st_size,
+    ) != (
+        after.st_dev,
+        after.st_ino,
+        stat.S_IFMT(after.st_mode),
+        after.st_uid,
+        after.st_gid,
+        stat.S_IMODE(after.st_mode),
+        after.st_size,
+    ) or total != before.st_size:
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root ownership marker changed during read"
+        )
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError("duplicate marker key")
+            result[key] = value
+        return result
+
+    try:
+        payload = json.loads(b"".join(chunks).decode("utf-8"), object_pairs_hook=reject_duplicates)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root ownership marker is invalid"
+        ) from exc
+    if not isinstance(payload, dict):
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root ownership marker is invalid"
+        )
+    return payload
+
+
+def _stat_no_follow(path: Path, *, kind: str) -> os.stat_result:
+    try:
+        value = path.lstat()
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH", f"hosted {kind} ownership cannot be verified"
+        ) from exc
+    if stat.S_ISLNK(value.st_mode):
+        raise HostedConfigError(
+            "HOSTED_ROOT_UNSAFE_ENTRY", f"hosted {kind} path is a symbolic link"
+        )
+    return value
+
+
+def _validate_v2_marker(root: Path, kind: str, binding: HostedBindingV2) -> None:
+    root_stat = _stat_no_follow(root, kind=kind)
+    marker = _v2_marker_path(root)
+    marker_stat = _stat_no_follow(marker, kind=f"{kind} marker")
+    if (
+        not stat.S_ISDIR(root_stat.st_mode)
+        or root_stat.st_uid != binding.runtime_uid
+        or root_stat.st_gid != binding.runtime_gid
+        or stat.S_IMODE(root_stat.st_mode) != 0o700
+        or not stat.S_ISREG(marker_stat.st_mode)
+        or marker_stat.st_nlink != 1
+        or marker_stat.st_uid != binding.runtime_uid
+        or marker_stat.st_gid != binding.runtime_gid
+        or stat.S_IMODE(marker_stat.st_mode) != 0o600
+    ):
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH",
+            "hosted root ownership or private mode differs from binding",
+        )
+    if _read_marker_payload(
+        root,
+        expected_uid=binding.runtime_uid,
+        expected_gid=binding.runtime_gid,
+        expected_mode=0o600,
+    ) != binding.marker_payload(kind):
+        raise HostedConfigError(
+            "HOSTED_BINDING_CONFLICT", "hosted root belongs to another identity or layout"
+        )
+
+
+def validate_hosted_binding_v2(
+    binding: HostedBindingV2, *, require_scaffold: bool = False
+) -> None:
+    """Validate marker bytes plus actual no-follow ownership and modes."""
+
+    for kind, root in binding.roots():
+        _reject_symlink_components(root)
+        _validate_v2_marker(root, kind, binding)
+    if require_scaffold and not _valid_vault_scaffold(binding.vault_root):
+        raise HostedConfigError(
+            "HOSTED_PROVISIONING_CONFLICT", "hosted vault scaffold is incomplete"
+        )
+
+
+def _legacy_binding_payload(kind: str, binding: HostedBindingV2) -> dict[str, Any]:
+    digest = hashlib.sha256(
+        "\0".join(
+            (
+                binding.cell_id,
+                str(binding.vault_root),
+                str(binding.state_root),
+                str(binding.log_root),
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        "version": 1,
+        "cell_id": binding.cell_id,
+        "root_kind": kind,
+        "binding_digest": digest,
+    }
+
+
+def _root_binding_generation(root: Path, kind: str, binding: HostedBindingV2) -> int | None:
+    if not os.path.lexists(root):
+        return None
+    root_stat = _stat_no_follow(root, kind=kind)
+    if not stat.S_ISDIR(root_stat.st_mode):
+        raise HostedConfigError(
+            "HOSTED_PROVISIONING_CONFLICT", f"hosted {kind} root is not a directory"
+        )
+    marker = _v2_marker_path(root)
+    if not os.path.lexists(marker):
+        if any(root.iterdir()):
+            raise HostedConfigError(
+                "HOSTED_PROVISIONING_CONFLICT", f"hosted {kind} root contains unowned data"
+            )
+        return None
+    payload = _read_marker_payload(root)
+    if payload == binding.marker_payload(kind):
+        _validate_v2_marker(root, kind, binding)
+        return 2
+    if payload == _legacy_binding_payload(kind, binding):
+        return 1
+    raise HostedConfigError(
+        "HOSTED_BINDING_CONFLICT", f"hosted {kind} root has a foreign ownership binding"
+    )
+
+
+def _tree_signature(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        stat.S_IFMT(value.st_mode),
+        value.st_nlink,
+        value.st_size,
+    )
+
+
+def _preflight_migration_tree(
+    root: Path, limits: HostedMigrationLimits
+) -> list[tuple[Path, tuple[int, int, int, int, int], int]]:
+    entries: list[tuple[Path, tuple[int, int, int, int, int], int]] = []
+    total_bytes = 0
+    for current, directory_names, file_names in os.walk(root, topdown=True, followlinks=False):
+        base = Path(current)
+        current_stat = _stat_no_follow(base, kind="migration")
+        if not stat.S_ISDIR(current_stat.st_mode):
+            raise HostedConfigError(
+                "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration encountered an unsafe directory"
+            )
+        entries.append((base, _tree_signature(current_stat), stat.S_IMODE(current_stat.st_mode)))
+        for name in (*directory_names, *file_names):
+            child = base / name
+            child_stat = _stat_no_follow(child, kind="migration")
+            if stat.S_ISDIR(child_stat.st_mode):
+                continue
+            if not stat.S_ISREG(child_stat.st_mode) or child_stat.st_nlink != 1:
+                raise HostedConfigError(
+                    "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration encountered an unsafe entry"
+                )
+            total_bytes += child_stat.st_size
+            entries.append(
+                (child, _tree_signature(child_stat), stat.S_IMODE(child_stat.st_mode))
+            )
+        if len(entries) > limits.max_entries or total_bytes > limits.max_bytes:
+            raise HostedConfigError(
+                "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration exceeds its bounded limits"
+            )
+    if len(entries) > limits.max_entries:
+        raise HostedConfigError(
+            "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration exceeds its bounded limits"
+        )
+    return entries
+
+
+def _converge_tree_ownership(
+    entries: list[tuple[Path, tuple[int, int, int, int, int], int]],
+    binding: HostedBindingV2,
+) -> None:
+    root = entries[0][0]
+    expected = {
+        path.relative_to(root).parts: (signature, original_mode)
+        for path, signature, original_mode in entries
+    }
+    visited: set[tuple[str, ...]] = set()
+    directory_flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
+    file_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+    def converge_descriptor(descriptor: int, relative: tuple[str, ...]) -> None:
+        current = os.fstat(descriptor)
+        recorded = expected.get(relative)
+        if recorded is None or _tree_signature(current) != recorded[0]:
+            raise HostedConfigError(
+                "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration entry changed during traversal"
+            )
+        visited.add(relative)
+        os.fchown(descriptor, binding.runtime_uid, binding.runtime_gid)
+        original_mode = recorded[1]
+        os.fchmod(
+            descriptor,
+            (
+                0o700
+                if relative == ()
+                else ((original_mode & 0o700) | 0o100)
+            )
+            if stat.S_ISDIR(current.st_mode)
+            else original_mode & 0o700,
+        )
+        os.fsync(descriptor)
+
+    def walk(directory_fd: int, relative: tuple[str, ...]) -> None:
+        converge_descriptor(directory_fd, relative)
+        for name in sorted(os.listdir(directory_fd)):
+            child_relative = (*relative, name)
+            try:
+                child_stat = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+            except OSError as exc:
+                raise HostedConfigError(
+                    "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration entry changed during traversal"
+                ) from exc
+            flags = directory_flags if stat.S_ISDIR(child_stat.st_mode) else file_flags
+            try:
+                child_fd = os.open(name, flags, dir_fd=directory_fd)
+            except OSError as exc:
+                raise HostedConfigError(
+                    "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration entry changed during traversal"
+                ) from exc
+            try:
+                if stat.S_ISDIR(child_stat.st_mode):
+                    walk(child_fd, child_relative)
+                elif stat.S_ISREG(child_stat.st_mode) and child_stat.st_nlink == 1:
+                    converge_descriptor(child_fd, child_relative)
+                else:
+                    raise HostedConfigError(
+                        "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration encountered an unsafe entry"
+                    )
+            finally:
+                os.close(child_fd)
+
+    try:
+        root_fd = os.open(root, directory_flags)
+        try:
+            walk(root_fd, ())
+        finally:
+            os.close(root_fd)
+    except HostedConfigError:
+        raise
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH", "hosted migration could not converge ownership"
+        ) from exc
+    if visited != set(expected):
+        raise HostedConfigError(
+            "HOSTED_ROOT_UNSAFE_ENTRY", "hosted migration tree changed during traversal"
+        )
+
+
+def _write_v2_marker(root: Path, kind: str, binding: HostedBindingV2) -> None:
+    marker = _v2_marker_path(root)
+    temporary = root / f".{_BINDING_FILENAME}.v2-{os.getpid()}.tmp"
+    payload = (
+        json.dumps(binding.marker_payload(kind), sort_keys=True, separators=(",", ":")) + "\n"
+    ).encode("utf-8")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o600)
+        if os.geteuid() == 0:
+            os.fchown(descriptor, binding.runtime_uid, binding.runtime_gid)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _sync_directory(root)
+
+
+def _prepare_fresh_root(root: Path, kind: str, binding: HostedBindingV2) -> None:
+    if not root.exists():
+        root.mkdir(mode=0o700, parents=True)
+        _sync_directory(root.parent)
+    if any(root.iterdir()):
+        raise HostedConfigError(
+            "HOSTED_PROVISIONING_CONFLICT", f"hosted {kind} root contains unowned data"
+        )
+    try:
+        if os.geteuid() == 0:
+            os.chown(root, binding.runtime_uid, binding.runtime_gid, follow_symlinks=False)
+        root.chmod(0o700, follow_symlinks=False)
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH", f"hosted {kind} ownership cannot be converged"
+        ) from exc
+    root_stat = root.lstat()
+    if root_stat.st_uid != binding.runtime_uid or root_stat.st_gid != binding.runtime_gid:
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH", f"hosted {kind} root has another owner"
+        )
+
+
+def _default_security_bootstrap(**kwargs: Any) -> int:
+    try:
+        from .hosted_security import bootstrap_hosted_security
+    except ImportError as exc:
+        raise HostedConfigError(
+            "HOSTED_SECURITY_UNAVAILABLE", "hosted security authority is unavailable"
+        ) from exc
+    result = bootstrap_hosted_security(**kwargs)
+    revision = result if isinstance(result, int) else getattr(result, "revision", None)
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise HostedConfigError(
+            "HOSTED_SECURITY_UNAVAILABLE", "hosted security bootstrap returned no revision"
+        )
+    return revision
+
+
+def _init_operation_path(binding: HostedBindingV2, operation_id: str) -> Path:
+    key = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+    return binding.state_root / _INIT_OPERATION_DIRECTORY / f"{key}.json"
+
+
+def _read_init_operation(
+    binding: HostedBindingV2,
+    operation_id: str | None,
+    request_digest: str | None,
+    active_credential_version: str,
+) -> dict[str, Any] | None:
+    if (operation_id is None) != (request_digest is None):
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization identity is incomplete"
+        )
+    if operation_id is None:
+        return None
+    if not _OPERATION_ID_V2.fullmatch(operation_id) or not _SHA256_HEX.fullmatch(
+        request_digest or ""
+    ):
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization identity is invalid"
+        )
+    path = _init_operation_path(binding, operation_id)
+    if not os.path.lexists(path):
+        return None
+
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in result:
+                raise ValueError("duplicate initialization proof key")
+            result[key] = item
+        return result
+
+    try:
+        directory = path.parent.lstat()
+        if (
+            stat.S_ISLNK(directory.st_mode)
+            or not stat.S_ISDIR(directory.st_mode)
+            or directory.st_uid != binding.runtime_uid
+            or directory.st_gid != binding.runtime_gid
+            or stat.S_IMODE(directory.st_mode) != 0o700
+        ):
+            raise ValueError("unsafe initialization proof directory")
+        value = path.lstat()
+        if (
+            stat.S_ISLNK(value.st_mode)
+            or not stat.S_ISREG(value.st_mode)
+            or value.st_nlink != 1
+            or value.st_uid != binding.runtime_uid
+            or value.st_gid != binding.runtime_gid
+            or stat.S_IMODE(value.st_mode) != 0o600
+            or value.st_size > 4096
+        ):
+            raise ValueError("unsafe initialization proof")
+        record = json.loads(
+            path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates
+        )
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization proof is invalid"
+        ) from exc
+    expected = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "request_digest": request_digest,
+        "binding_digest": binding.binding_digest,
+        "credential_version": active_credential_version,
+    }
+    if not isinstance(record, dict) or any(record.get(key) != item for key, item in expected.items()):
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization operation conflicts"
+        )
+    if set(record) != {*expected, "status", "credential_revision"}:
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization proof is invalid"
+        )
+    if record["status"] not in {"provisioned", "migrated", "existing"} or not isinstance(
+        record["credential_revision"], int
+    ):
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization proof is invalid"
+        )
+    return record
+
+
+def _write_init_operation(
+    binding: HostedBindingV2,
+    *,
+    operation_id: str,
+    request_digest: str,
+    active_credential_version: str,
+    status: str,
+    credential_revision: int,
+) -> None:
+    path = _init_operation_path(binding, operation_id)
+    directory_existed = path.parent.exists()
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    try:
+        directory = path.parent.lstat()
+        if stat.S_ISLNK(directory.st_mode) or not stat.S_ISDIR(directory.st_mode):
+            raise OSError("unsafe initialization proof directory")
+        if os.geteuid() == 0:
+            os.chown(
+                path.parent,
+                binding.runtime_uid,
+                binding.runtime_gid,
+                follow_symlinks=False,
+            )
+        path.parent.chmod(0o700, follow_symlinks=False)
+        directory = path.parent.lstat()
+        if directory.st_uid != binding.runtime_uid or directory.st_gid != binding.runtime_gid:
+            raise OSError("foreign initialization proof directory")
+    except OSError as exc:
+        raise HostedConfigError(
+            "HOSTED_OPERATION_CONFLICT", "hosted initialization proof directory is unsafe"
+        ) from exc
+    if not directory_existed:
+        _sync_directory(path.parent.parent)
+    record = {
+        "schema_version": 1,
+        "operation_id": operation_id,
+        "request_digest": request_digest,
+        "binding_digest": binding.binding_digest,
+        "credential_version": active_credential_version,
+        "status": status,
+        "credential_revision": credential_revision,
+    }
+    temporary = path.parent / f".{path.name}.{os.getpid()}.tmp"
+    descriptor = os.open(
+        temporary,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    try:
+        payload = (
+            json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+        ).encode("utf-8")
+        offset = 0
+        while offset < len(payload):
+            offset += os.write(descriptor, payload[offset:])
+        os.fsync(descriptor)
+        os.fchmod(descriptor, 0o600)
+        if os.geteuid() == 0:
+            os.fchown(descriptor, binding.runtime_uid, binding.runtime_gid)
+    finally:
+        os.close(descriptor)
+    try:
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+    _sync_directory(path.parent)
+
+
+def initialize_hosted_cell_v2(
+    binding: HostedBindingV2,
+    *,
+    expected_release: str,
+    expected_protocol: str,
+    active_credential_version: str,
+    operation_id: str | None = None,
+    request_digest: str | None = None,
+    bootstrap_security: Callable[..., int] | None = None,
+    allow_privileged_migration: bool = False,
+    migration_limits: HostedMigrationLimits | None = None,
+) -> HostedInitV2Result:
+    """Create/converge a v2-bound cell without adopting foreign bytes."""
+
+    if expected_release != __version__:
+        raise HostedConfigError("HOSTED_RELEASE_MISMATCH", "hosted release proof differs")
+    if expected_protocol not in SUPPORTED_HOSTED_PROTOCOL_VERSIONS:
+        raise HostedConfigError(
+            "HOSTED_PROTOCOL_UNSUPPORTED", "hosted protocol proof is unsupported"
+        )
+    if not _CREDENTIAL_VERSION.fullmatch(active_credential_version):
+        raise HostedConfigError(
+            "HOSTED_CREDENTIAL_BUNDLE_INVALID", "hosted credential version is invalid"
+        )
+
+    generations = {
+        kind: _root_binding_generation(root, kind, binding) for kind, root in binding.roots()
+    }
+    has_v1 = 1 in generations.values()
+    if has_v1 and (not allow_privileged_migration or os.geteuid() != 0):
+        raise HostedConfigError(
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH", "version one migration requires privilege"
+        )
+
+    limits = migration_limits or HostedMigrationLimits()
+    migration_entries: dict[str, list[tuple[Path, tuple[int, int, int, int, int], int]]] = {}
+    for kind, root in binding.roots():
+        if generations[kind] == 1:
+            migration_entries[kind] = _preflight_migration_tree(root, limits)
+
+    existing = all(generation == 2 for generation in generations.values())
+    if existing:
+        validate_hosted_binding_v2(binding, require_scaffold=True)
+    else:
+        # Preflight above covers all roots before the first mutation.
+        for kind, root in binding.roots():
+            generation = generations[kind]
+            if generation == 1:
+                _converge_tree_ownership(migration_entries[kind], binding)
+                _write_v2_marker(root, kind, binding)
+            elif generation is None and kind != "vault":
+                _prepare_fresh_root(root, kind, binding)
+                _write_v2_marker(root, kind, binding)
+
+        vault_generation = generations["vault"]
+        if vault_generation is None:
+            stage = binding.vault_root.parent / (
+                f".{binding.vault_root.name}.hosted-v2-stage-"
+                f"{hashlib.sha256(binding.cell_id.encode()).hexdigest()[:12]}"
+            )
+            if stage.exists():
+                _validate_v2_marker(stage, "vault", binding)
+                if not _valid_vault_scaffold(stage):
+                    raise HostedConfigError(
+                        "HOSTED_PROVISIONING_CONFLICT", "hosted vault staging is incomplete"
+                    )
+            else:
+                stage.mkdir(mode=0o700, parents=False)
+                if os.geteuid() == 0:
+                    os.chown(
+                        stage,
+                        binding.runtime_uid,
+                        binding.runtime_gid,
+                        follow_symlinks=False,
+                    )
+                stage.chmod(0o700, follow_symlinks=False)
+                _write_v2_marker(stage, "vault", binding)
+                init_module.init_vault(stage)
+                _sync_tree(stage)
+            if binding.vault_root.exists():
+                binding.vault_root.rmdir()
+            os.replace(stage, binding.vault_root)
+            _sync_directory(binding.vault_root.parent)
+
+    recorded_operation = _read_init_operation(
+        binding,
+        operation_id,
+        request_digest,
+        active_credential_version,
+    )
+    bootstrap = bootstrap_security or _default_security_bootstrap
+    revision = bootstrap(
+        binding=binding,
+        active_credential_version=active_credential_version,
+        operation_id=operation_id,
+        request_digest=request_digest,
+    )
+    if not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        raise HostedConfigError(
+            "HOSTED_SECURITY_UNAVAILABLE", "hosted security bootstrap returned no revision"
+        )
+    validate_hosted_binding_v2(binding, require_scaffold=True)
+    if recorded_operation is not None:
+        if recorded_operation["credential_revision"] != revision:
+            raise HostedConfigError(
+                "HOSTED_OPERATION_CONFLICT", "hosted security replay differs from init proof"
+            )
+        status = recorded_operation["status"]
+    else:
+        status = "existing" if existing else ("migrated" if has_v1 else "provisioned")
+        if operation_id is not None and request_digest is not None:
+            _write_init_operation(
+                binding,
+                operation_id=operation_id,
+                request_digest=request_digest,
+                active_credential_version=active_credential_version,
+                status=status,
+                credential_revision=revision,
+            )
+    return HostedInitV2Result(
+        status=status,
+        cell_id=binding.cell_id,
+        vault_id=binding.vault_id,
+        binding_version=HOSTED_BINDING_VERSION,
+        lifecycle_status="stopped",
+        exomem_release=__version__,
+        hosted_protocol=expected_protocol,
+        runtime_uid=binding.runtime_uid,
+        runtime_gid=binding.runtime_gid,
+        credential_version=active_credential_version,
+        credential_revision=revision,
+        capabilities=("hosted-operator-v1",),
+    )
+
+
+def execute_hosted_init_v2(request: dict[str, Any]) -> tuple[str, dict[str, Any]]:
+    """Operator adapter kept separate from the storage primitive."""
+
+    from .hosted_operator import OperatorFailure, canonical_request_digest
+
+    try:
+        binding = HostedBindingV2(
+            cell_id=request["cell_id"],
+            vault_id=request["vault_id"],
+            vault_root=Path(request["vault_root"]),
+            state_root=Path(request["state_root"]),
+            log_root=Path(request["log_root"]),
+            runtime_uid=request["runtime_uid"],
+            runtime_gid=request["runtime_gid"],
+        )
+        result = initialize_hosted_cell_v2(
+            binding,
+            expected_release=request["expected_release"],
+            expected_protocol=request["expected_protocol"],
+            active_credential_version=request["active_credential_version"],
+            operation_id=request["operation_id"],
+            request_digest=canonical_request_digest(request),
+            allow_privileged_migration=os.geteuid() == 0,
+        )
+    except HostedConfigError as exc:
+        code = "HOSTED_ROOT_UNSAFE_ENTRY" if exc.code == "HOSTED_ROOT_SYMLINK" else exc.code
+        code = code if code in {
+            "HOSTED_RELEASE_MISMATCH",
+            "HOSTED_PROTOCOL_UNSUPPORTED",
+            "HOSTED_RUNTIME_ID_INVALID",
+            "HOSTED_ROOT_INVALID",
+            "HOSTED_ROOT_OVERLAP",
+            "HOSTED_ROOT_UNSAFE_ENTRY",
+            "HOSTED_ROOT_OWNERSHIP_MISMATCH",
+            "HOSTED_BINDING_CONFLICT",
+            "HOSTED_PROVISIONING_CONFLICT",
+            "HOSTED_CREDENTIAL_BUNDLE_INVALID",
+            "HOSTED_CREDENTIAL_WEAK",
+            "HOSTED_OPERATION_CONFLICT",
+            "HOSTED_SECURITY_UNAVAILABLE",
+        } else "HOSTED_OPERATOR_INTERNAL"
+        raise OperatorFailure(
+            code, command="init", request_id=request.get("request_id")
+        ) from exc
+    return "HOSTED_CELL_INITIALIZED", result.as_operator_data()

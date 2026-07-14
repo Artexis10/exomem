@@ -1,15 +1,15 @@
 ## 1. Freeze The Operator Contract
 
-- [ ] 1.1 Check in and golden-test `contracts/hosted-operator-v1.json`: exact per-command argv/request transport, bounded request schemas/conditionals, correlated success/error envelopes, exit mapping, stable codes, redaction, operation IDs, and retry identity.
-- [ ] 1.2 Add the hosted-only CLI dispatcher and common bounded strict request decoder. For offline init/restore, implement a one-FD parser for the fixed root-owned, no-write-bit, single-link regular `subPath` file and test absolute path, owner/mode/link/type, symlink/parent escape, size, replacement race, and one-generation read. For live credential/probe, implement exact `--request-file -` stdin-only parsing and test direct argv/no shell, non-TTY EOF, incomplete/trailing/oversize input, and rejection of alternate sources. Cover duplicate JSON, canonical envelope, redaction, modeled exits, and empty stderr for both without changing ordinary CLI startup.
+- [x] 1.1 Check in and golden-test `contracts/hosted-operator-v1.json`: exact per-command argv/request transport, bounded request schemas/conditionals, correlated success/error envelopes, exit mapping, stable codes, redaction, operation IDs, and retry identity.
+- [x] 1.2 Add the hosted-only CLI dispatcher and common bounded strict request decoder. For offline init/restore, implement a one-FD parser for the fixed root-owned, no-write-bit, single-link regular `subPath` file and test absolute path, owner/mode/link/type, symlink/parent escape, size, replacement race, and one-generation read. For live credential/probe, implement exact `--request-file -` stdin-only parsing and test direct argv/no shell, non-TTY EOF, incomplete/trailing/oversize input, and rejection of alternate sources. Cover duplicate JSON, canonical envelope, redaction, modeled exits, and empty stderr for both without changing ordinary CLI startup.
 
 ## 2. Bind And Restore Cells
 
-- [ ] 2.1 Add failing pure tests for binding v2 cell/vault/root/UID/GID identity, exact release/protocol proof, non-root bounds, actual no-follow owner/mode checks, private marker modes, idempotent convergence, and foreign/unowned conflicts.
-- [ ] 2.2 Add failing privileged migration tests for recognized v1 roots, bounded descriptor-relative no-follow chown, partial retry, and symlink/hardlink/device/FIFO/socket/race rejection; implement `hosted init` plus binding migration/bootstrap.
-- [ ] 2.3 Add failing restore tests for pinned artifact/archive digest, unsigned-manifest behavior, source cell/vault verification, target-cell distinction/logical-vault preservation, runtime-state rejection, lifetime locking, empty roots, and sibling-staging constraints.
-- [ ] 2.4 Add crash injection after each state/log marker, journal phase, canonical rename, derived rebuild, and proof write; prove exact-request resume, changed-request conflict, post-rename inference, canonical-byte preservation, cleanup ownership, and concurrent server/restore exclusion.
-- [ ] 2.5 Implement `hosted restore-candidate` with the durable phase journal, target lifetime lock, canonical rename commit point, fresh bindings/security bootstrap, and degraded derived rebuild result.
+- [x] 2.1 Add failing pure tests for binding v2 cell/vault/root/UID/GID identity, exact release/protocol proof, non-root bounds, actual no-follow owner/mode checks, private marker modes, idempotent convergence, and foreign/unowned conflicts.
+- [x] 2.2 Add failing privileged migration tests for recognized v1 roots, bounded descriptor-relative no-follow chown, partial retry, and symlink/hardlink/device/FIFO/socket/race rejection; implement `hosted init` plus binding migration/bootstrap.
+- [x] 2.3 Add failing restore tests for pinned artifact/archive digest, unsigned-manifest behavior, source cell/vault verification, target-cell distinction/logical-vault preservation, runtime-state rejection, lifetime locking, empty roots, and sibling-staging constraints.
+- [x] 2.4 Add crash injection after each state/log marker, journal phase, canonical rename, derived rebuild, and proof write; prove exact-request resume, changed-request conflict, post-rename inference, canonical-byte preservation, cleanup ownership, and concurrent server/restore exclusion.
+- [x] 2.5 Implement `hosted restore-candidate` with the durable phase journal, target lifetime lock, canonical rename commit point, fresh bindings/security bootstrap, and degraded derived rebuild result.
 
 ## 3. Rotate And Probe Credentials
 

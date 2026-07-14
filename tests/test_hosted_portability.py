@@ -108,6 +108,12 @@ def _raw_zip(
         ("Knowledge Base/.refs.sqlite-shm", "disposable-runtime"),
         ("Knowledge Base/.voice_profiles.json", "disposable-runtime"),
         (".exomem-hosted-cell.json", "disposable-runtime"),
+        ("hosted-security.sqlite", "disposable-runtime"),
+        ("hosted-security.sqlite-wal", "disposable-runtime"),
+        ("hosted-lifecycle-state.json", "disposable-runtime"),
+        ("restore-journal/operation.json", "disposable-runtime"),
+        ("hosted-init-operations/operation.json", "disposable-runtime"),
+        ("tmp/transfers-v2/upload.partial", "disposable-runtime"),
         ("writer-leases.sqlite", "disposable-runtime"),
         ("writer-leases.sqlite-wal", "disposable-runtime"),
         ("writer-leases.sqlite-shm", "disposable-runtime"),
@@ -409,6 +415,30 @@ def test_archive_verification_rejects_unsupported_manifest_version(tmp_path: Pat
         portability.verify_export_archive(archive)
 
     assert _error_code(exc) == "UNSUPPORTED_MANIFEST_VERSION"
+
+
+def test_manifest_rejects_a_non_null_signature_algorithm_even_without_value(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source"
+    _seed_vault(source, "unsigned")
+    exported = portability.export_quiesced_vault(
+        source,
+        tmp_path / "artifacts",
+        context=_context(),
+    )
+    manifest = dict(exported.manifest)
+    manifest["signature"] = {"algorithm": "ed25519", "value": None}
+    manifest.pop("overall_digest")
+    manifest["overall_digest"] = {
+        "algorithm": "sha256",
+        "value": portability._manifest_digest(manifest),
+    }
+
+    with pytest.raises(portability.PortabilityError) as exc:
+        portability._require_manifest_shape(manifest)
+
+    assert _error_code(exc) == "UNSUPPORTED_MANIFEST_SIGNATURE"
 
 
 def test_archive_verification_rejects_unix_hardlink_extension_metadata(tmp_path: Path) -> None:

@@ -166,10 +166,21 @@ def _is_rebuildable_sidecar(_path: str, parts: tuple[str, ...]) -> bool:
 
 def _is_hosted_runtime_state(_path: str, parts: tuple[str, ...]) -> bool:
     basename = parts[-1].casefold() if parts else ""
-    if basename == ".exomem-hosted-cell.json" or basename in {
+    if basename in {
+        ".exomem-hosted-cell.json",
+        "hosted-lifecycle-state.json",
+        "hosted-security.sqlite",
+        "hosted-security.sqlite-wal",
+        "hosted-security.sqlite-shm",
         "writer-leases.sqlite",
         "writer-leases.sqlite-wal",
         "writer-leases.sqlite-shm",
+    }:
+        return True
+    if parts and parts[0].casefold() in {
+        "hosted-init-operations",
+        "restore-journal",
+        "tmp",
     }:
         return True
     return basename.startswith("idempotency-") and basename.endswith(
@@ -977,7 +988,7 @@ def _require_manifest_shape(manifest: Any) -> dict[str, Any]:
     signature = manifest["signature"]
     if not isinstance(signature, dict) or set(signature) != {"algorithm", "value"}:
         _fail("INVALID_MANIFEST", "manifest signature metadata is invalid")
-    if signature["value"] is not None:
+    if signature["algorithm"] is not None or signature["value"] is not None:
         _fail(
             "UNSUPPORTED_MANIFEST_SIGNATURE", "signed manifests are not supported by this version"
         )

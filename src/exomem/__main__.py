@@ -39,6 +39,10 @@ from .kbdir import kb_dirname, kb_prefix
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "hosted":
+        from .hosted_operator import main as hosted_operator_main
+
+        return hosted_operator_main(raw[1:])
     if raw and raw[0] == "setup":
         from .setup_wizard import setup_main
 
