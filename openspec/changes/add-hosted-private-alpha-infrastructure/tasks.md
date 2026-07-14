@@ -35,8 +35,8 @@
 ## 4. Freeze the cross-repository release unit
 
 - [x] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
-- [ ] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
-- [ ] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
+- [x] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
+- [x] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
 - [ ] 4.4 Pin the release manifest in infrastructure values and reject mutable tags or partial version overrides.
 
 ## 5. Scaffold and statically validate the IaC surfaces

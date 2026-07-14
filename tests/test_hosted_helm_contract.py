@@ -103,7 +103,7 @@ def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
         "release": "0.22.0",
         "hostedProtocol": "1",
         "dockerTarget": "hosted",
-        "releaseBuildTime": "2026-07-14T03:50:34Z",
+        "releaseBuildTime": "2026-07-14T05:37:15Z",
         "operatorContractSha256": (
             "407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6"
         ),
