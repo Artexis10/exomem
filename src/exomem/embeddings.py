@@ -206,7 +206,7 @@ def _is_embeddable_path(path: Path) -> bool:
 
 
 def get_model():
-    """Lazy singleton. Device via `accel.select_device` — CPU-default, `EXOMEM_EMBED_DEVICE` opts in."""
+    """Lazy singleton selected by ``accel``, CPU-default unless explicitly set."""
     global _MODEL
     if _MODEL is not None:
         return _MODEL
@@ -225,7 +225,7 @@ def get_model():
 
 
 def get_reranker():
-    """Lazy singleton for the cross-encoder reranker. Shares the text-path device (`EXOMEM_EMBED_DEVICE`)."""
+    """Lazy cross-encoder reranker sharing the configured text-path device."""
     global _RERANKER
     if _RERANKER is not None:
         return _RERANKER
@@ -1001,24 +1001,59 @@ def index_cache_status() -> dict:
     }
 
 
-def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
-    """Re-embed each markdown file in `written_paths` and refresh the sidecar.
+@dataclass(frozen=True, slots=True)
+class EmbeddingSyncStatus:
+    """Bounded outcome from one embedding-sidecar dispatch.
 
-    Soft no-op when sentence-transformers/torch aren't importable — keyword
-    mode keeps working in stripped environments. Non-`.md` paths are skipped
-    silently (writers pass log.md, index.md, etc. through here too). Returns
-    whether all eligible semantic writes completed, for durable queue draining.
+    ``code`` is deliberately a stable enum-like value rather than an exception
+    message.  Writer results can therefore report observed degradation without
+    leaking backend, model, or filesystem details.
     """
+
+    status: str
+    code: str
+    eligible_count: int
+
+    def __post_init__(self) -> None:
+        if type(self.status) is not str or self.status not in {
+            "completed",
+            "disabled",
+            "deferred",
+            "degraded",
+        }:
+            raise ValueError("unsupported embedding sync status")
+        if type(self.code) is not str or not self.code or len(self.code) > 64:
+            raise ValueError("embedding sync code must be bounded and nonempty")
+        if type(self.eligible_count) is not int or self.eligible_count < 0:
+            raise ValueError("embedding eligible_count must be nonnegative")
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "code": self.code,
+            "eligible_count": self.eligible_count,
+        }
+
+
+def upsert_after_write_status(
+    vault_root: Path, written_paths: list[Path]
+) -> EmbeddingSyncStatus:
+    """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
-    if _IMPORT_FAILED:
-        return False
+    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
+    eligible_count = len(md_paths)
     # Test runs disable the heavy embedding path to keep the suite fast.
     # Production servers leave EXOMEM_DISABLE_EMBEDDINGS unset.
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return False
-    md_paths = [p for p in written_paths if index_paths.is_embeddable_path(p)]
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_disabled", eligible_count
+        )
     if not md_paths:
-        return True
+        return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
+    if _IMPORT_FAILED:
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
 
     # While the background warm-up is loading the model, don't block this
     # write on the singleton lock — park the batch; the warm thread drains it
@@ -1026,8 +1061,11 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
     # process dies before draining, audit/reconcile recover the stale sidecar.
     from . import readiness
     if readiness.defer("embeddings", (vault_root, tuple(md_paths))):
-        log.info("write-embed deferred until the embedding model is warm (%d file(s))", len(md_paths))
-        return False
+        log.info(
+            "write-embed deferred until the embedding model is warm (%d file(s))",
+            len(md_paths),
+        )
+        return EmbeddingSyncStatus("deferred", "deferred_warmup", eligible_count)
 
     try:
         get_model()  # triggers the heavy import; cheap thereafter.
@@ -1039,10 +1077,14 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
                 e,
             )
             _IMPORT_FAILED = True
-        return False
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
     except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
         log.warning("embedding model load failed: %s; skipping upsert", e)
-        return False
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_model_load_failed", eligible_count
+        )
 
     from . import find as find_module
 
@@ -1050,8 +1092,11 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
         index = get_embedding_index(vault_root)
     except Exception as e:  # noqa: BLE001 - derived index open is best-effort
         log.warning("could not open embedding sidecar for upsert: %s", e)
-        return False
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_index_open_failed", eligible_count
+        )
     per_file: list[tuple[str, list[str], float]] = []
+    failure_code: str | None = None
     for md in md_paths:
         try:
             mtime = md.stat().st_mtime
@@ -1061,29 +1106,54 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
                 rel = md.resolve().relative_to(vault_root.resolve()).as_posix()
                 index.delete_file(rel)
             except ValueError:
-                pass
+                continue
+            except Exception as e:  # noqa: BLE001 - derived delete is observable
+                log.warning("embedding cleanup failed for disappeared file: %s", e)
+                failure_code = "embedding_delete_failed"
             continue
-        page = find_module._CACHE.get(md, vault_root)
+        except OSError as e:
+            log.warning("embedding input metadata could not be read: %s", e)
+            failure_code = "embedding_input_unavailable"
+            continue
+        try:
+            page = find_module._CACHE.get(md, vault_root)
+        except Exception as e:  # noqa: BLE001 - parsing/cache failures are observable
+            log.warning("embedding input could not be parsed: %s", e)
+            failure_code = "embedding_input_unavailable"
+            continue
         if page is None:
+            failure_code = "embedding_input_unavailable"
             continue
-        chunks = _chunks_for_page(vault_root, page)
+        try:
+            chunks = _chunks_for_page(vault_root, page)
+        except Exception as e:  # noqa: BLE001 - chunk extraction is best-effort
+            log.warning("embedding chunks could not be prepared: %s", e)
+            failure_code = "embedding_chunking_failed"
+            continue
         if not chunks:
             # Page has no embeddable content — drop any stale rows for it.
-            index.delete_file(page.rel_path)
+            try:
+                index.delete_file(page.rel_path)
+            except Exception as e:  # noqa: BLE001 - stale-row cleanup is observable
+                log.warning("embedding stale-row cleanup failed: %s", e)
+                failure_code = "embedding_delete_failed"
             continue
         per_file.append((page.rel_path, chunks, mtime))
 
     if not per_file:
-        return True
+        return EmbeddingSyncStatus(
+            "completed" if failure_code is None else "degraded",
+            failure_code or "embedding_upsert_completed",
+            eligible_count,
+        )
 
-    succeeded = True
     for rel_path, chunks, mtime in per_file:
         try:
             vectors = _embed_live_chunks(chunks)
             index.upsert_file(rel_path, chunks, vectors, mtime)
         except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
             log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, e)
-            succeeded = False
+            failure_code = "embedding_encode_failed"
             continue
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
@@ -1097,7 +1167,21 @@ def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
             claims.upsert_claims_after_write(vault_root, md_paths)
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
-    return succeeded
+        failure_code = failure_code or "embedding_auxiliary_failed"
+    return EmbeddingSyncStatus(
+        "completed" if failure_code is None else "degraded",
+        failure_code or "embedding_upsert_completed",
+        eligible_count,
+    )
+
+
+def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
+    """Compatibility wrapper returning whether all eligible work completed."""
+    status = upsert_after_write_status(vault_root, written_paths)
+    # Preserve the legacy memoized-import-failure precedence: historically a
+    # stripped install returned ``False`` even for a batch containing no
+    # embeddable paths.
+    return not _IMPORT_FAILED and status.status == "completed"
 
 
 def _live_embed_max_chunks() -> int:
@@ -1121,24 +1205,45 @@ def _embed_live_chunks(chunks: list[str]) -> np.ndarray:
     return np.concatenate(parts, axis=0)
 
 
-def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
-    """Drop sidecar rows for files that were trashed. No-op if torch missing."""
-    if _IMPORT_FAILED:
-        return
+def delete_after_remove_status(
+    vault_root: Path, removed_rel_paths: list[str]
+) -> EmbeddingSyncStatus:
+    """Drop sidecar rows and return an observable bounded outcome."""
+    eligible_count = len(removed_rel_paths)
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        return
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_disabled", eligible_count
+        )
     if not removed_rel_paths:
-        return
+        return EmbeddingSyncStatus("completed", "no_eligible_paths", 0)
+    if _IMPORT_FAILED:
+        return EmbeddingSyncStatus(
+            "disabled", "embeddings_import_unavailable", eligible_count
+        )
     try:
         index = get_embedding_index(vault_root)
     except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
         log.warning("could not open embedding sidecar for delete: %s", e)
-        return
+        return EmbeddingSyncStatus(
+            "degraded", "embedding_index_open_failed", eligible_count
+        )
+    succeeded = True
     for rel in removed_rel_paths:
         try:
             index.delete_file(rel)
         except Exception as e:  # noqa: BLE001 - derived index deletion is best-effort
             log.warning("delete_file(%s) failed in sidecar: %s", rel, e)
+            succeeded = False
+    return EmbeddingSyncStatus(
+        "completed" if succeeded else "degraded",
+        "embedding_delete_completed" if succeeded else "embedding_delete_failed",
+        eligible_count,
+    )
+
+
+def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:
+    """Compatibility wrapper preserving the legacy ``None`` return."""
+    delete_after_remove_status(vault_root, removed_rel_paths)
 
 
 def index_incremental(

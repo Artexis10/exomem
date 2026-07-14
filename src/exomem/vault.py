@@ -784,6 +784,7 @@ def batch_atomic_write(
     *,
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard] = (),
+    index_reports: list[Any] | None = None,
 ) -> list[Path]:
     """Stage each write as a sibling .tmp file, then os.replace() them into place.
 
@@ -796,7 +797,9 @@ def batch_atomic_write(
     `<vault>/Knowledge Base/.embeddings.sqlite` is refreshed for every
     embeddable file in the batch after the markdown writes succeed. Failures
     in the embedding pass are logged and swallowed — keyword-mode find()
-    still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.
+    still works, and `audit_fix(rebuild_embeddings=True)` recovers drift.  An
+    opt-in ``index_reports`` collector receives the report from that same
+    fan-out; requesting feedback never dispatches indexes a second time.
     """
     # Several high-level writers independently refresh the same navigation
     # file in one logical batch. Preserve the original destination order but
@@ -958,7 +961,9 @@ def batch_atomic_write(
         try:
             from . import index_sync
 
-            index_sync.upsert_after_write(vault_root, replaced)
+            report = index_sync.upsert_after_write(vault_root, replaced)
+            if index_reports is not None:
+                index_reports.append(report)
         except Exception:  # noqa: BLE001 — embeddings are best-effort
             import logging
 
