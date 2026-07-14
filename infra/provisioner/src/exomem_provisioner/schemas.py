@@ -93,7 +93,7 @@ class ContextRequest(StrictSchema):
     tenantId: OpaqueId
 
 
-class ProvisionRequest(ContextRequest):
+class CellRequest(ContextRequest):
     cellId: OpaqueId
     protocolVersion: ShortLabel
     releaseVersion: ShortLabel
@@ -101,7 +101,11 @@ class ProvisionRequest(ContextRequest):
     workerPolicy: WorkerPolicy
 
 
-class TargetRequest(ProvisionRequest):
+class ProvisionRequest(CellRequest):
+    provisionMode: Literal["serve", "restore-candidate"]
+
+
+class TargetRequest(CellRequest):
     providerRef: OpaqueReference
 
 

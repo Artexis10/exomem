@@ -448,6 +448,7 @@ class LiveLifecyclePlane:
         self._owned: dict[str, OpaqueProviderMetadata] = {}
         self._snapshots: dict[str, KubernetesProviderSnapshot] = {}
         self._recovery_envelopes: dict[str, dict[str, str]] = {}
+        self._helm_requests: dict[str, dict[str, Any]] = {}
 
     @staticmethod
     def _key(metadata: OpaqueProviderMetadata) -> str:
@@ -500,6 +501,7 @@ class LiveLifecyclePlane:
             cell_id=context.cell_id,
         )
         owned = current
+        helm_request = request
         for resource in resources:
             if resource.kind is ResourceKind.KUBERNETES_NAMESPACE:
                 owned = OpaqueProviderMetadata(
@@ -508,8 +510,10 @@ class LiveLifecyclePlane:
                     operation_id=resource.provider_operation_id,
                     fence_generation=resource.provider_fence_generation,
                 )
+                helm_request = await self._repository.load_request(resource.operation_id)
                 break
         self._owned[self._key(current)] = owned
+        self._helm_requests[self._key(current)] = dict(helm_request)
         snapshot = await self._refresh(current)
         if snapshot.namespace:
             await self._registry.record_operation(
@@ -596,7 +600,15 @@ class LiveLifecyclePlane:
         return self._snapshot(metadata).runtime_admitted
 
     async def enable_routes(self, metadata: OpaqueProviderMetadata) -> None:
-        await self._routes.enable(self._owner(metadata))
+        owner = self._owner(metadata)
+        try:
+            request = self._helm_requests[self._key(metadata)]
+        except KeyError as error:
+            raise MetadataConflict("original Helm request was not authenticated") from error
+        values = _fixed_helm_values(owner, request, self._config)
+        values["workloadMode"] = "serve"
+        values["routes"]["enabled"] = True
+        await self._helm.ensure_release(owner, values)
         await self._refresh(metadata)
 
     async def disable_routes(self, metadata: OpaqueProviderMetadata) -> None:
@@ -697,7 +709,7 @@ class LiveLifecyclePlane:
             "request_id": _deterministic_uuid4(transition),
             "operation_id": transition,
             "cell_id": metadata.subject_id,
-            "vault_id": metadata.subject_id,
+            "vault_id": metadata.tenant_id,
             "state_root": "/var/lib/exomem/state",
             "action": action,
             "expected_revision": expected,
@@ -791,7 +803,7 @@ class LiveLifecyclePlane:
             "request_id": _deterministic_uuid4(probe_operation),
             "operation_id": probe_operation,
             "cell_id": owned.subject_id,
-            "vault_id": owned.subject_id,
+            "vault_id": owned.tenant_id,
             "state_root": "/var/lib/exomem/state",
             "selected_credential_version": pending,
             "expected_release": str(request["releaseVersion"]),

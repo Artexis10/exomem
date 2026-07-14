@@ -213,6 +213,137 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path()
 
 
 @pytest.mark.asyncio
+async def test_live_route_enable_reconciles_the_original_authenticated_helm_release() -> None:
+    metadata = _metadata()
+    calls: list[dict[str, object]] = []
+
+    class Helm:
+        async def ensure_release(self, owner, values):
+            assert owner == metadata
+            calls.append(values)
+
+    class Registry:
+        async def inspect(self, current, owner):
+            assert current == owner == metadata
+            return SimpleNamespace(routes=(True, True))
+
+    class Routes:
+        async def enable(self, owner):  # pragma: no cover - must use Helm
+            raise AssertionError("direct route writes lose provider recovery identity")
+
+    config = SimpleNamespace(
+        image="ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        browser_origin="https://substratesystems.io",
+        control_hostname="control.example.invalid",
+        transfer_hostname="transfer.example.invalid",
+        protocol_version="1",
+        release_version="0.22.0",
+    )
+    request = {
+        "provisionMode": "serve",
+        "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        "_providerRecoveryEnvelopes": {"controlRoute": "signed-control"},
+    }
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=Helm(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=Routes(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=config,  # type: ignore[arg-type]
+    )
+    plane._owned[plane._key(metadata)] = metadata
+    plane._helm_requests[plane._key(metadata)] = request
+
+    await plane.enable_routes(metadata)
+
+    assert calls[0]["workloadMode"] == "serve"
+    assert calls[0]["routes"] == {
+        "controlHostname": "control.example.invalid",
+        "enabled": True,
+    }
+    assert calls[0]["providerRecoveryEnvelopes"] == {"controlRoute": "signed-control"}
+
+
+@pytest.mark.asyncio
+async def test_credential_operator_requests_keep_physical_cell_and_stable_tenant_vault_ids() -> (
+    None
+):
+    metadata = _metadata()
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class Cell:
+        async def write_credential_bundle(self, *args, **kwargs):
+            return None
+
+        async def read_credential_bundle(self, _metadata):
+            return (
+                {"1": "credential-current", "2": "credential-pending"},
+                {
+                    "exomem.io/active-credential-version": "1",
+                    "exomem.io/credential-phase": "staged",
+                    "exomem.io/security-revision": "2",
+                },
+            )
+
+    class Runtime:
+        async def operator(self, command, _metadata, request, **kwargs):
+            calls.append((command, dict(request)))
+            if command == "credential":
+                return {"revision": 2}
+            return {
+                "authenticated_credential_version": "2",
+                "security_revision": 2,
+                "proof_recorded": True,
+            }
+
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=SimpleNamespace(),  # type: ignore[arg-type]
+        cell=Cell(),  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=Runtime(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=SimpleNamespace(),  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(protocol_version="1"),  # type: ignore[arg-type]
+    )
+
+    await plane._credential_transition(
+        metadata,
+        credentials={"1": "credential-current", "2": "credential-pending"},
+        annotations={
+            "exomem.io/active-credential-version": "1",
+            "exomem.io/security-revision": "1",
+        },
+        action="stage",
+        operation_id="rotate-alpha",
+        version="2",
+    )
+    accepted = await plane.credential_accepted(
+        metadata,
+        2,
+        "credential-pending",
+        {
+            "releaseVersion": "0.22.0",
+            "protocolVersion": "1",
+            "workerPolicy": {"workerCount": 0, "semantic": False, "media": False},
+        },
+        "rotate-alpha",
+    )
+
+    assert accepted is True
+    assert [command for command, _ in calls] == ["credential", "probe"]
+    assert all(request["cell_id"] == "cell-alpha" for _, request in calls)
+    assert all(request["vault_id"] == "tenant-alpha" for _, request in calls)
+
+
+@pytest.mark.asyncio
 async def test_registry_rejects_unowned_existing_namespace() -> None:
     metadata = _metadata()
 

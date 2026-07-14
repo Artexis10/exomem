@@ -17,7 +17,7 @@ from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.driver import FakeDriver
 from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
 from exomem_provisioner.repository import OperationRepository
-from exomem_provisioner.schemas import FailureResponse
+from exomem_provisioner.schemas import FailureResponse, ProvisionRequest, TargetRequest
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
@@ -54,6 +54,7 @@ def _base_body(**overrides: Any) -> dict[str, Any]:
         "fenceGeneration": 1,
         "tenantId": "tenant-api-alpha",
         "cellId": "cell-api-alpha",
+        "provisionMode": "serve",
         "protocolVersion": "exomem-hosted.v1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _SERVICE_CREDENTIAL,
@@ -63,8 +64,31 @@ def _base_body(**overrides: Any) -> dict[str, Any]:
     return body
 
 
+def test_provision_request_requires_explicit_bounded_mode() -> None:
+    assert ProvisionRequest.model_validate(_base_body()).provisionMode == "serve"
+    assert (
+        ProvisionRequest.model_validate(_base_body(provisionMode="restore-candidate")).provisionMode
+        == "restore-candidate"
+    )
+    missing = _base_body()
+    missing.pop("provisionMode")
+    with pytest.raises(ValidationError):
+        ProvisionRequest.model_validate(missing)
+    with pytest.raises(ValidationError):
+        ProvisionRequest.model_validate(_base_body(provisionMode="initialize"))
+
+
 def _target_body(**overrides: Any) -> dict[str, Any]:
-    return _base_body(providerRef="provider-cell-api-alpha", **overrides)
+    body = _base_body()
+    body.pop("provisionMode")
+    body.update(providerRef="provider-cell-api-alpha", **overrides)
+    return body
+
+
+def test_target_request_excludes_provision_only_mode() -> None:
+    assert TargetRequest.model_validate(_target_body()).providerRef == "provider-cell-api-alpha"
+    with pytest.raises(ValidationError):
+        TargetRequest.model_validate(_target_body(provisionMode="serve"))
 
 
 def _body_for(action: str) -> dict[str, Any]:
@@ -139,9 +163,7 @@ async def test_export_requires_canonical_bounded_expiry(
         (
             (None, "PROVISIONER_REJECTED"),
             (
-                (datetime.now(UTC) - timedelta(seconds=1))
-                .isoformat()
-                .replace("+00:00", "Z"),
+                (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
                 "EXPORT_REQUEST_EXPIRED",
             ),
             (

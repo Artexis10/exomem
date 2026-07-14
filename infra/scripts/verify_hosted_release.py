@@ -23,6 +23,20 @@ from typing import Any
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE = re.compile(r"^ghcr\.io/artexis10/exomem@sha256:[0-9a-f]{64}$")
+_SUBSTRATE_REPOSITORY = "https://github.com/substrate-systems/substrate"
+_SUBSTRATE_COMMIT = "d451153469718fc113abef085044a09001942b8d"
+_SUBSTRATE_FIXTURE_PATH = "src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json"
+_SUBSTRATE_SELECTION_KEYS = {
+    "artifact",
+    "schemaVersion",
+    "sourceRepository",
+    "sourceCommit",
+    "fixturePath",
+    "fixtureSha256",
+    "gatewayContractSha256",
+}
+_MAX_FIXTURE_BYTES = 1_048_576
+_SUBSTRATE_FIXTURE_SHA256 = "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054"
 _RELEASE_KEYS = {
     "artifact",
     "schemaVersion",
@@ -167,6 +181,53 @@ def validate_gateway_fixture(release: dict[str, Any], fixture: dict[str, Any]) -
         raise ValueError("gateway fixture semantic digest drift")
     if _registry_from_fixture(fixture) != release.get("commandRegistry"):
         raise ValueError("gateway fixture command registry drift")
+
+
+def validate_substrate_selection(release: dict[str, Any], selection: dict[str, Any]) -> None:
+    """Require one reviewed Substrate commit and byte-exact generated fixture."""
+
+    if set(selection) != _SUBSTRATE_SELECTION_KEYS:
+        raise ValueError("Substrate gateway selection fields are incomplete or unknown")
+    if (
+        selection.get("artifact") != "exomem-hosted-substrate-gateway-selection"
+        or type(selection.get("schemaVersion")) is not int
+        or selection.get("schemaVersion") != 1
+    ):
+        raise ValueError("Substrate gateway selection identity is invalid")
+    if selection.get("sourceRepository") != _SUBSTRATE_REPOSITORY:
+        raise ValueError("Substrate gateway selection repository is not canonical")
+    source_commit = selection.get("sourceCommit")
+    if (
+        not isinstance(source_commit, str)
+        or not _COMMIT.fullmatch(source_commit)
+        or source_commit != _SUBSTRATE_COMMIT
+    ):
+        raise ValueError("Substrate gateway selection commit is not the reviewed commit")
+    if selection.get("fixturePath") != _SUBSTRATE_FIXTURE_PATH:
+        raise ValueError("Substrate gateway selection path is not canonical")
+    fixture_digest = selection.get("fixtureSha256")
+    if (
+        not isinstance(fixture_digest, str)
+        or not _SHA256.fullmatch(fixture_digest)
+        or fixture_digest != _SUBSTRATE_FIXTURE_SHA256
+    ):
+        raise ValueError("Substrate gateway fixture byte digest is not reviewed")
+    if selection.get("gatewayContractSha256") != release.get("gatewayContractSha256"):
+        raise ValueError("Substrate gateway selection contract digest drift")
+
+
+def validate_selected_gateway_fixture(
+    release: dict[str, Any],
+    selection: dict[str, Any],
+    fixture: dict[str, Any],
+    raw_fixture: bytes,
+) -> None:
+    """Bind the semantic gateway contract to the exact reviewed fixture bytes."""
+
+    validate_substrate_selection(release, selection)
+    if hashlib.sha256(raw_fixture).hexdigest() != selection["fixtureSha256"]:
+        raise ValueError("Substrate gateway fixture byte digest drift")
+    validate_gateway_fixture(release, fixture)
 
 
 def validate_image_provenance(release: dict[str, Any], provenance: dict[str, Any]) -> None:
@@ -334,9 +395,7 @@ def _probe_contract(
     protocol: str,
     timeout_seconds: int = 60,
 ) -> dict[str, Any]:
-    principal_bytes = base64.urlsafe_b64encode(
-        hashlib.sha256(b"release-verifier").digest()
-    )
+    principal_bytes = base64.urlsafe_b64encode(hashlib.sha256(b"release-verifier").digest())
     principal = principal_bytes.rstrip(b"=").decode("ascii")
     deadline = time.monotonic() + timeout_seconds
     last_error: Exception | None = None
@@ -505,26 +564,91 @@ def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[st
             _reclaim_runtime_tree(image, root)
 
 
-def _load(path: Path) -> dict[str, Any]:
-    value = json.loads(path.read_text(encoding="utf-8"))
+def _decode_object(raw: bytes, *, label: str) -> dict[str, Any]:
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        value: dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise ValueError(f"{label} contains a duplicate JSON field")
+            value[key] = item
+        return value
+
+    try:
+        value = json.loads(
+            raw.decode("utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicates,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"{label} is not strict UTF-8 JSON") from error
     if not isinstance(value, dict):
-        raise ValueError(f"{path} is not a JSON object")
+        raise ValueError(f"{label} is not a JSON object")
     return value
+
+
+def _load_bytes(path: Path, *, label: str, max_bytes: int = _MAX_FIXTURE_BYTES) -> bytes:
+    raw = path.read_bytes()
+    if not 1 <= len(raw) <= max_bytes:
+        raise ValueError(f"{label} exceeds its size contract")
+    return raw
+
+
+def _load(path: Path) -> dict[str, Any]:
+    return _decode_object(_load_bytes(path, label=str(path)), label=str(path))
+
+
+def fetch_selected_gateway_fixture(
+    release: dict[str, Any],
+    selection: dict[str, Any],
+) -> tuple[dict[str, Any], bytes]:
+    """Fetch only the reviewed commit/path and accept it only at the pinned digest."""
+
+    validate_substrate_selection(release, selection)
+    url = (
+        "https://raw.githubusercontent.com/substrate-systems/substrate/"
+        f"{selection['sourceCommit']}/{selection['fixturePath']}"
+    )
+    request = urllib.request.Request(
+        url,
+        headers={"Accept": "application/json", "User-Agent": "exomem-release-verifier/1"},
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            raw = response.read(_MAX_FIXTURE_BYTES + 1)
+    except (OSError, urllib.error.HTTPError, urllib.error.URLError) as error:
+        raise RuntimeError("reviewed Substrate fixture could not be fetched") from error
+    if not 1 <= len(raw) <= _MAX_FIXTURE_BYTES:
+        raise ValueError("reviewed Substrate fixture exceeds its size contract")
+    fixture = _decode_object(raw, label="reviewed Substrate fixture")
+    validate_selected_gateway_fixture(release, selection, fixture, raw)
+    return fixture, raw
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--manifest", type=Path, required=True)
     parser.add_argument("--runtime-gate", type=Path, required=True)
-    parser.add_argument("--substrate-fixture", type=Path, required=True)
+    parser.add_argument("--substrate-selection", type=Path, required=True)
+    fixture_source = parser.add_mutually_exclusive_group(required=True)
+    fixture_source.add_argument("--substrate-fixture", type=Path)
+    fixture_source.add_argument("--fetch-substrate-fixture", action="store_true")
     parser.add_argument("--probe-image", action="store_true")
     args = parser.parse_args(argv)
 
     release = _load(args.manifest)
     gate = _load(args.runtime_gate)
-    fixture = _load(args.substrate_fixture)
+    selection = _load(args.substrate_selection)
     validate_release_manifest(release, gate)
-    validate_gateway_fixture(release, fixture)
+    validate_substrate_selection(release, selection)
+    if args.fetch_substrate_fixture:
+        fixture, _ = fetch_selected_gateway_fixture(release, selection)
+    else:
+        raw_fixture = _load_bytes(
+            args.substrate_fixture,
+            label="selected Substrate fixture",
+        )
+        fixture = _decode_object(raw_fixture, label="selected Substrate fixture")
+        validate_selected_gateway_fixture(release, selection, fixture, raw_fixture)
     if args.probe_image:
         if not shutil_which("docker"):
             raise SystemExit("docker is required for --probe-image")

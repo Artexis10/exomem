@@ -430,8 +430,10 @@ class VerifiedRouteMaintenancePort:
             "/private/exomem/v1/ready",
             headers={
                 "Authorization": f"Bearer {target.credential}",
-                "X-Exomem-Hosted-Cell": target.metadata.subject_id,
-                "X-Exomem-Hosted-Protocol": target.protocol_version,
+                "X-Exomem-Cell-Id": target.metadata.subject_id,
+                "X-Exomem-Protocol-Version": target.protocol_version,
+                "X-Exomem-Request-Id": str(uuid.uuid4()),
+                "X-Exomem-Principal-Scope": _PRINCIPAL_SCOPE,
             },
         )
         transfer_url = (
@@ -524,6 +526,9 @@ class HttpPortableRuntimePort:
                 raise RuntimeError("portable export archive proof differs")
             if hashlib.sha256(manifest_bytes).hexdigest() != manifest_sha:
                 raise RuntimeError("portable export manifest proof differs")
+            hosted_state_included = descriptor.get("hostedStateIncluded")
+            if hosted_state_included is not False:
+                raise RuntimeError("portable export hosted-state proof differs")
             result = PortableArchive(
                 archive_path=archive_path,
                 manifest_path=manifest_path,
@@ -532,7 +537,7 @@ class HttpPortableRuntimePort:
                 archive_size=size,
                 source_cell_id=_required_text(descriptor, "sourceCellId"),
                 release_version=_required_text(descriptor, "releaseVersion"),
-                hosted_state_included=descriptor.get("hostedStateIncluded") is True,
+                hosted_state_included=hosted_state_included,
             )
             if result.source_cell_id != cell_id or result.release_version != target.release_version:
                 raise RuntimeError("portable export source identity differs")

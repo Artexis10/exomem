@@ -19,6 +19,7 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
         ("exomem-export-gc",),
         ("exomem-durability-backup-worker",),
         ("exomem-database-backup-worker",),
+        ("exomem-durability-actions",),
         ("exomem-deletion-worker",),
         ("exomem-volume-worker",),
     }
@@ -31,10 +32,12 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
     signer = "exomem-provider-recovery-signer/private-key"
     assert workloads["vaultBackup"]["privateKey"] == signer
     assert workloads["databaseBackup"]["privateKey"] == signer
+    assert workloads["durabilityActions"]["privateKey"] == signer
     assert workloads["volumeLifecycle"]["privateKey"] == signer
     assert workloads["volumeLifecycle"]["publicVerifier"] is False
     assert workloads["vaultBackup"]["publicVerifier"] is False
     assert workloads["databaseBackup"]["publicVerifier"] is False
+    assert workloads["durabilityActions"]["publicVerifier"] is False
     assert workloads["deletion"]["publicVerifier"] is True
     assert workloads["deliveryGc"]["publicVerifier"] is False
     assert not any(

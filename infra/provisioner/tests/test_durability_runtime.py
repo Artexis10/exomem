@@ -25,9 +25,22 @@ from exomem_provisioner.durability_runtime import (
     DeletionRuntimeSettings,
     RepositoryWrappedKeyStore,
     build_deletion_operation_worker,
+    build_live_deletion_provider,
 )
-from exomem_provisioner.models import OperationState
+from exomem_provisioner.models import OperationAction, OperationState
+from exomem_provisioner.production import (
+    build_routine_operation_worker,
+)
+from exomem_provisioner.production_durability import build_durability_operation_worker
+from exomem_provisioner.provider_identity import (
+    ProviderRecoveryIdentityVerifier as CanonicalProviderRecoveryIdentityVerifier,
+)
 from exomem_provisioner.repository import OperationRepository
+from exomem_provisioner.worker_ownership import (
+    DELETION_OPERATION_ACTIONS,
+    DURABILITY_OPERATION_ACTIONS,
+    ROUTINE_OPERATION_ACTIONS,
+)
 
 
 def _settings(path: Path) -> ProvisionerSettings:
@@ -126,6 +139,132 @@ def test_deletion_settings_are_verifier_only_and_bind_exact_bucket_contract() ->
             provider_recovery_public_key=public_key,
             user_export_bucket="exomem-recovery-deadbeef",
         )
+
+
+def test_production_worker_action_sets_have_one_owner_for_every_action() -> None:
+    ownership = {
+        action: sum(
+            action in actions
+            for actions in (
+                ROUTINE_OPERATION_ACTIONS,
+                DURABILITY_OPERATION_ACTIONS,
+                DELETION_OPERATION_ACTIONS,
+            )
+        )
+        for action in OperationAction
+    }
+
+    assert len(ownership) == 14
+    assert set(ownership.values()) == {1}
+    assert DELETION_OPERATION_ACTIONS == frozenset(
+        {OperationAction.DISCARD, OperationAction.DESTROY}
+    )
+    assert DURABILITY_OPERATION_ACTIONS == frozenset(
+        {
+            OperationAction.EXPORT,
+            OperationAction.RESTORE,
+            OperationAction.EXPORT_RELEASE,
+            OperationAction.EXPORT_DOWNLOAD,
+            OperationAction.EXPORT_DELETE,
+        }
+    )
+
+
+def test_production_builders_pass_explicit_disjoint_action_allowlists() -> None:
+    repository = object()
+    routine = build_routine_operation_worker(
+        repository=repository,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        worker_id="routine-worker",
+    )
+    deletion = build_deletion_operation_worker(
+        repository=repository,  # type: ignore[arg-type]
+        workflow=object(),  # type: ignore[arg-type]
+        authority=object(),  # type: ignore[arg-type]
+        worker_id="deletion-worker",
+    )
+    durability = build_durability_operation_worker(
+        repository=repository,  # type: ignore[arg-type]
+        driver=object(),  # type: ignore[arg-type]
+        worker_id="durability-worker",
+    )
+
+    assert routine._allowed_actions == ROUTINE_OPERATION_ACTIONS
+    assert durability._allowed_actions == DURABILITY_OPERATION_ACTIONS
+    assert deletion._allowed_actions == DELETION_OPERATION_ACTIONS
+    assert routine._allowed_actions.isdisjoint(durability._allowed_actions)
+    assert routine._allowed_actions.isdisjoint(deletion._allowed_actions)
+    assert durability._allowed_actions.isdisjoint(deletion._allowed_actions)
+
+
+def test_deletion_runtime_uses_the_live_provider_canonical_identity_verifier() -> None:
+    from exomem_provisioner import durability_runtime
+
+    assert (
+        durability_runtime.ProviderRecoveryIdentityVerifier
+        is CanonicalProviderRecoveryIdentityVerifier
+    )
+
+
+@pytest.mark.asyncio
+async def test_production_deletion_builder_performs_a_canonical_empty_provider_scan() -> None:
+    from exomem_provisioner.provider_identity import ProviderRecoveryIdentityCodec
+
+    class Core:
+        def list_namespace(self, *, label_selector):
+            assert label_selector == "exomem.io/tenant-cell=true"
+            return SimpleNamespace(items=[])
+
+    class Volumes:
+        def get_all(self, *, label_selector):
+            assert label_selector
+            return []
+
+    class B2:
+        def list_objects_v2(self, **arguments):
+            assert arguments["Bucket"] in {"recovery-bucket", "export-bucket"}
+            return {"Contents": [], "IsTruncated": False}
+
+    class Authority:
+        async def current_fence(self, tenant_id):
+            assert tenant_id == "tenant-alpha"
+            return 8
+
+        async def acquire(self, tenant_id, operation_id, fence):
+            return (tenant_id, operation_id, fence) == (
+                "tenant-alpha",
+                "destroy-alpha",
+                8,
+            )
+
+        async def acquire_cell(self, *args):
+            raise AssertionError("an empty scan has no cell lock to acquire")
+
+    codec = ProviderRecoveryIdentityCodec.from_secret("canonical-production-root")
+    provider = build_live_deletion_provider(
+        core_v1=Core(),
+        apps_v1=SimpleNamespace(),
+        custom_objects=SimpleNamespace(),
+        hcloud_client=SimpleNamespace(volumes=Volumes()),
+        b2_client=B2(),
+        recovery_bucket="recovery-bucket",
+        export_bucket="export-bucket",
+        provider_recovery_public_key=codec.public_key(),
+        authority=Authority(),
+        key_store=SimpleNamespace(),
+    )
+    context = EffectContext(
+        "operation-alpha",
+        "destroy-alpha",
+        "tenant-alpha",
+        None,
+        8,
+    )
+
+    await provider.bind(context)
+
+    assert await provider.scan_tenant("tenant-alpha") == ()
+    assert isinstance(provider._verifier, CanonicalProviderRecoveryIdentityVerifier)
 
 
 def test_bucket_scoped_b2_client_dispatches_only_the_exact_bucket() -> None:

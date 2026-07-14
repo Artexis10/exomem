@@ -532,7 +532,7 @@ def _run_authenticated_probe(
 
 
 def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
-    namespace = "cell-alpha-test"
+    namespace = "exo-cell-alpha-test"
     platform = _render(PLATFORM, PLATFORM / "values.validation.yaml", "exomem-platform")
     platform_admission = [
         item
@@ -540,11 +540,24 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         if item.get("kind")
         in {"RuntimeClass", "ValidatingAdmissionPolicy", "ValidatingAdmissionPolicyBinding"}
     ]
+    route_crds = [
+        item
+        for item in platform
+        if item.get("kind") == "CustomResourceDefinition"
+        and item.get("metadata", {}).get("name")
+        in {"ingressroutes.traefik.io", "middlewares.traefik.io"}
+    ]
+    assert len(route_crds) == 2
+    _kubectl(k3s, ["apply", "--filename=-"], documents=route_crds)
     _kubectl(k3s, ["apply", "--filename=-"], documents=platform_admission)
 
     for policy_name in (
         "exomem-tenant-boundary",
+        "exomem-tenant-restore-candidate",
         "exomem-tenant-namespace-contract",
+        "exomem-provisioner-scope",
+        "exomem-durability-actions-scope",
+        "exomem-durability-actions-namespace-scope",
     ):
         _wait_for_policy_typecheck(k3s, policy_name)
 
@@ -587,7 +600,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         documents=[service_account],
     )
 
-    routine_username = "system:serviceaccount:exomem-platform:routine-provisioner"
+    routine_username = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
     _kubectl(
         k3s,
         ["apply", "--filename=-"],
@@ -601,7 +614,15 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                 "apiVersion": "v1",
                 "kind": "ServiceAccount",
                 "metadata": {
-                    "name": "routine-provisioner",
+                    "name": "exomem-cell-provisioner",
+                    "namespace": "exomem-platform",
+                },
+            },
+            {
+                "apiVersion": "v1",
+                "kind": "ServiceAccount",
+                "metadata": {
+                    "name": "exomem-durability-actions",
                     "namespace": "exomem-platform",
                 },
             },
@@ -614,7 +635,22 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                         "apiGroups": [""],
                         "resources": ["namespaces"],
                         "verbs": ["create", "get", "patch", "update"],
-                    }
+                    },
+                    {
+                        "apiGroups": [""],
+                        "resources": ["services"],
+                        "verbs": ["create", "delete", "get", "patch", "update"],
+                    },
+                    {
+                        "apiGroups": ["networking.k8s.io"],
+                        "resources": ["networkpolicies"],
+                        "verbs": ["create", "delete", "get", "patch", "update"],
+                    },
+                    {
+                        "apiGroups": ["traefik.io"],
+                        "resources": ["ingressroutes"],
+                        "verbs": ["create", "delete", "get", "patch", "update"],
+                    },
                 ],
             },
             {
@@ -629,7 +665,36 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                 "subjects": [
                     {
                         "kind": "ServiceAccount",
-                        "name": "routine-provisioner",
+                        "name": "exomem-cell-provisioner",
+                        "namespace": "exomem-platform",
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRole",
+                "metadata": {"name": "admission-test-restore-pod-cleanup"},
+                "rules": [
+                    {
+                        "apiGroups": [""],
+                        "resources": ["pods"],
+                        "verbs": ["delete", "get", "list"],
+                    }
+                ],
+            },
+            {
+                "apiVersion": "rbac.authorization.k8s.io/v1",
+                "kind": "ClusterRoleBinding",
+                "metadata": {"name": "admission-test-restore-pod-cleanup"},
+                "roleRef": {
+                    "apiGroup": "rbac.authorization.k8s.io",
+                    "kind": "ClusterRole",
+                    "name": "admission-test-restore-pod-cleanup",
+                },
+                "subjects": [
+                    {
+                        "kind": "ServiceAccount",
+                        "name": "exomem-durability-actions",
                         "namespace": "exomem-platform",
                     }
                 ],
@@ -638,13 +703,12 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     )
 
     routine_namespace = copy.deepcopy(namespace_document)
-    routine_namespace["metadata"]["name"] = "cell-routine-create"
+    routine_namespace["metadata"]["name"] = "exo-routine-create"
     routine_namespace["metadata"]["labels"]["exomem.io/cell-resource"] = "cell-routine"
     routine_namespace["metadata"]["annotations"].update(
         {
             "exomem.io/resource-name": "cell-routine",
             "exomem.io/pvc-name": "cell-routine-data",
-            "exomem.io/credentials-secret-name": "cell-routine-credentials",
             "exomem.io/init-request-configmap-name": "cell-routine-init-request",
         }
     )
@@ -655,6 +719,98 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert routine_create.returncode == 0, routine_create.stderr
+
+    cleanup_namespace = "exo-restore-cleanup-test"
+    _kubectl(k3s, ["create", "namespace", cleanup_namespace])
+    orphan_names = (
+        "restore-" + "a" * 20 + "-abcde",
+        "restore-" + "b" * 20 + "-abcde",
+    )
+    orphan_pods = [
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": {"name": name, "namespace": cleanup_namespace},
+            "spec": {
+                "automountServiceAccountToken": False,
+                "restartPolicy": "Never",
+                "securityContext": {
+                    "runAsNonRoot": True,
+                    "seccompProfile": {"type": "RuntimeDefault"},
+                },
+                "containers": [
+                    {
+                        "name": "pause",
+                        "image": "registry.k8s.io/pause:3.10",
+                        "securityContext": {
+                            "allowPrivilegeEscalation": False,
+                            "capabilities": {"drop": ["ALL"]},
+                        },
+                    }
+                ],
+            },
+        }
+        for name in orphan_names
+    ]
+    _kubectl(k3s, ["apply", "--filename=-"], documents=orphan_pods)
+    cleanup_contract = copy.deepcopy(namespace_document)
+    cleanup_contract["metadata"]["name"] = cleanup_namespace
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[cleanup_contract])
+    for index, name in enumerate(orphan_names):
+        job_name = name.rsplit("-", 1)[0]
+        labels = {
+            "app.kubernetes.io/name": "exomem-restore-candidate",
+            "exomem.io/cell": cleanup_namespace,
+            "exomem.io/restore-candidate": "true",
+            "exomem.io/cell-id": (
+                cleanup_contract["metadata"]["annotations"]["exomem.io/cell-id"]
+                if index == 0
+                else "foreign-cell"
+            ),
+            "exomem.io/operation-digest": "c" * 32,
+            "exomem.io/fence": "1",
+            "job-name": job_name,
+        }
+        arguments = [
+            "label",
+            "pod",
+            name,
+            "--namespace",
+            cleanup_namespace,
+            *(f"{key}={value}" for key, value in labels.items()),
+            "--overwrite",
+        ]
+        _kubectl(k3s, arguments)
+
+    action_username = "system:serviceaccount:exomem-platform:exomem-durability-actions"
+    exact_orphan_delete = _kubectl(
+        k3s,
+        [
+            "delete",
+            "pod",
+            orphan_names[0],
+            "--namespace",
+            cleanup_namespace,
+            f"--as={action_username}",
+        ],
+        check=False,
+    )
+    assert exact_orphan_delete.returncode == 0, exact_orphan_delete.stderr
+    forged_orphan_delete = _kubectl(
+        k3s,
+        [
+            "delete",
+            "pod",
+            orphan_names[1],
+            "--namespace",
+            cleanup_namespace,
+            "--dry-run=server",
+            f"--as={action_username}",
+        ],
+        check=False,
+    )
+    assert forged_orphan_delete.returncode != 0
+    assert "exact authenticated candidate Job Pod" in forged_orphan_delete.stderr
 
     init_job = next(item for item in initialize if item.get("kind") == "Job")
     init_pod = _pod(init_job, name="cell-alpha-init-positive", namespace=namespace)
@@ -673,7 +829,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert protected_update.returncode != 0
-    assert "operator authority" in protected_update.stderr
+    assert "exact restricted tenant namespace contract" in protected_update.stderr
 
     legacy_allowlist_update = _kubectl(
         k3s,
@@ -688,7 +844,115 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert legacy_allowlist_update.returncode != 0
-    assert "operator authority" in legacy_allowlist_update.stderr
+    assert "exact restricted tenant namespace contract" in legacy_allowlist_update.stderr
+
+    identity = {
+        "exomem.io/recovery-envelope": "A" * 64,
+        "exomem.io/tenant-id": "tenant-scope",
+        "exomem.io/cell-id": "cell-scope",
+        "exomem.io/fence": "1",
+    }
+    labels = {"exomem.io/cell": namespace}
+    service = {
+        "apiVersion": "v1",
+        "kind": "Service",
+        "metadata": {
+            "name": namespace,
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": labels,
+        },
+        "spec": {
+            "type": "ClusterIP",
+            "selector": {
+                "app.kubernetes.io/name": "exomem-cell",
+                "exomem.io/cell": namespace,
+            },
+            "ports": [
+                {
+                    "name": "http",
+                    "port": 8765,
+                    "targetPort": "http",
+                    "protocol": "TCP",
+                }
+            ],
+        },
+    }
+    network_policy = {
+        "apiVersion": "networking.k8s.io/v1",
+        "kind": "NetworkPolicy",
+        "metadata": {
+            "name": namespace + "-default-deny",
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": labels,
+        },
+        "spec": {"podSelector": {}, "policyTypes": ["Ingress", "Egress"]},
+    }
+    route = {
+        "apiVersion": "traefik.io/v1alpha1",
+        "kind": "IngressRoute",
+        "metadata": {
+            "name": namespace + "-control",
+            "namespace": namespace,
+            "annotations": identity,
+            "labels": labels,
+        },
+        "spec": {
+            "entryPoints": ["web"],
+            "routes": [
+                {
+                    "kind": "Rule",
+                    "match": "Host(`control.example.test`) && "
+                    "(Path(`/cells/cell-scope/private/exomem/v1`) || "
+                    "PathPrefix(`/cells/cell-scope/private/exomem/v1/`))",
+                    "middlewares": [{"name": namespace + "-strip-cell"}],
+                    "services": [{"name": namespace, "port": 8765}],
+                }
+            ],
+        },
+    }
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[service, network_policy, route])
+
+    retargeted_service = copy.deepcopy(service)
+    retargeted_service["spec"]["selector"]["exomem.io/cell"] = "exo-foreign-cell"
+    service_attack = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={routine_username}"],
+        documents=[retargeted_service],
+        check=False,
+    )
+    assert service_attack.returncode != 0
+    assert "exact private ClusterIP cell service" in service_attack.stderr
+
+    public_route = copy.deepcopy(route)
+    public_route["metadata"]["name"] = namespace + "-transfer"
+    public_route["spec"]["entryPoints"] = ["websecure"]
+    public_route["spec"]["routes"][0]["match"] = "Host(`attacker.example.test`)"
+    route_attack = _kubectl(
+        k3s,
+        ["apply", "--dry-run=server", "--filename=-", f"--as={routine_username}"],
+        documents=[public_route],
+        check=False,
+    )
+    assert route_attack.returncode != 0
+    assert "exact private cell routes" in route_attack.stderr
+
+    policy_delete = _kubectl(
+        k3s,
+        [
+            "delete",
+            "networkpolicy",
+            network_policy["metadata"]["name"],
+            "--namespace",
+            namespace,
+            "--dry-run=server",
+            f"--as={routine_username}",
+        ],
+        check=False,
+    )
+    assert policy_delete.returncode != 0
+    assert "reserved for namespace destruction" in policy_delete.stderr
 
     _kubectl(
         k3s,
@@ -973,7 +1237,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                 "subjects": [
                     {
                         "kind": "ServiceAccount",
-                        "name": "routine-provisioner",
+                        "name": "exomem-cell-provisioner",
                         "namespace": "exomem-platform",
                     }
                 ],
@@ -1012,7 +1276,10 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert finalizer_escape.returncode != 0
-    assert "controller-owned Job finalizer transition" in finalizer_escape.stderr
+    assert any(
+        message in finalizer_escape.stderr
+        for message in ("fixed cell resource kinds", "controller-owned Job finalizer transition")
+    )
 
     scheduled_init_job = copy.deepcopy(init_job)
     scheduled_init_job["metadata"]["name"] = "cell-alpha-init-finalizer-control"
@@ -1104,7 +1371,10 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         check=False,
     )
     assert routine_finalizer_removal.returncode != 0
-    assert "controller-owned Job finalizer transition" in routine_finalizer_removal.stderr
+    assert any(
+        message in routine_finalizer_removal.stderr
+        for message in ("fixed cell resource kinds", "controller-owned Job finalizer transition")
+    )
 
     for patch_operation in (
         {"op": "add", "path": "/spec/activeDeadlineSeconds", "value": 1},

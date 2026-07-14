@@ -127,7 +127,11 @@ async def test_route_close_failure_restores_exact_specs_and_releases_lease() -> 
             self.released = True
 
     class Http:
+        control_headers: dict[str, str] = {}
+
         async def get(self, *arguments: object, **keywords: object) -> httpx.Response:
+            if str(arguments[0]).endswith("/private/exomem/v1/ready"):
+                self.control_headers = dict(keywords["headers"])  # type: ignore[arg-type]
             return httpx.Response(200)
 
         async def options(self, *arguments: object, **keywords: object) -> httpx.Response:
@@ -135,10 +139,11 @@ async def test_route_close_failure_restores_exact_specs_and_releases_lease() -> 
 
     custom = Custom()
     maintenance = Maintenance()
+    http = Http()
     port = VerifiedRouteMaintenancePort(
         custom_objects=custom,
         coordination_v1=object(),
-        http=Http(),  # type: ignore[arg-type]
+        http=http,  # type: ignore[arg-type]
         registry=registry,
         maintenance=maintenance,
     )
@@ -147,6 +152,10 @@ async def test_route_close_failure_restores_exact_specs_and_releases_lease() -> 
         await port.close_and_verify(target.metadata.subject_id, "backup-operation")
 
     assert maintenance.released is True
+    assert http.control_headers["X-Exomem-Cell-Id"] == "cell-alpha"
+    assert http.control_headers["X-Exomem-Protocol-Version"] == "1"
+    assert http.control_headers["X-Exomem-Principal-Scope"]
+    assert http.control_headers["X-Exomem-Request-Id"].count("-") == 4
     assert [call["body"] for call in custom.calls[:2]] == [
         {"spec": {"routes": []}},
         {"spec": {"routes": []}},
@@ -222,3 +231,45 @@ async def test_http_runtime_streams_verified_archive_and_cleans_local_artifacts(
         await port.release(target.metadata.subject_id, "backup-operation")
         assert not result.archive_path.exists()
         assert not result.manifest_path.exists()
+
+
+@pytest.mark.parametrize("hosted_state", [True, None])
+@pytest.mark.asyncio
+async def test_http_runtime_requires_explicit_false_hosted_state_proof(
+    tmp_path: Path,
+    hosted_state: bool | None,
+) -> None:
+    target = _target()
+    registry = LiveBackupTargetRegistry()
+    registry.replace({target.metadata.subject_id: target})
+    archive = b"portable archive\n"
+    manifest = '{"hostedStateIncluded":false}\n'
+    descriptor: dict[str, object] = {
+        "downloadPath": "artifact",
+        "archiveSha256": hashlib.sha256(archive).hexdigest(),
+        "manifestSha256": hashlib.sha256(manifest.encode()).hexdigest(),
+        "archiveSize": len(archive),
+        "sourceCellId": target.metadata.subject_id,
+        "releaseVersion": target.release_version,
+        "manifestJson": manifest,
+    }
+    if hosted_state is not None:
+        descriptor["hostedStateIncluded"] = hosted_state
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/lifecycle/export"):
+            return httpx.Response(200, json={"success": True, "data": descriptor})
+        if request.url.path.endswith("/artifact"):
+            return httpx.Response(200, content=archive)
+        return httpx.Response(404)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        port = HttpPortableRuntimePort(
+            http=http,
+            registry=registry,
+            scratch_root=tmp_path,
+        )
+        with pytest.raises(RuntimeError, match="hosted-state proof"):
+            await port.portable_export(target.metadata.subject_id, "backup-operation")
+
+    assert list(tmp_path.iterdir()) == []

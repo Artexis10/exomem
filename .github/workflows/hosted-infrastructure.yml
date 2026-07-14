@@ -19,6 +19,16 @@ on:
   schedule:
     - cron: "*/5 * * * *"
   workflow_dispatch:
+    inputs:
+      release_proof:
+        description: Pull and verify the reviewed immutable release before promotion
+        required: false
+        default: false
+        type: boolean
+      provisioner_image:
+        description: Exact published ghcr.io/artexis10/exomem-provisioner@sha256 digest
+        required: false
+        type: string
 
 permissions:
   contents: read
@@ -30,6 +40,7 @@ env:
 
 jobs:
   static:
+    name: Offline static validation (not release proof)
     if: github.event_name != 'schedule'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -89,6 +100,29 @@ jobs:
           source infra/tool-versions.env
           npm install --global @fission-ai/openspec@${OPENSPEC_VERSION}
           openspec validate add-hosted-private-alpha-infrastructure --strict
+
+  release-proof:
+    name: Published release promotion proof
+    if: github.event_name == 'workflow_dispatch' && inputs.release_proof
+    needs: static
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - name: Pull and prove both published images against the reviewed release
+        env:
+          PROVISIONER_IMAGE: ${{ inputs.provisioner_image }}
+        run: |
+          python3 infra/scripts/verify_hosted_release.py \
+            --manifest infra/contracts/exomem-hosted-release-v1.json \
+            --runtime-gate infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json \
+            --substrate-selection infra/contracts/substrate-gateway-contract-selection-v1.json \
+            --fetch-substrate-fixture \
+            --probe-image
+          python3 infra/scripts/verify_provisioner_image.py \
+            --image "$PROVISIONER_IMAGE" \
+            --require-published
 
   external-blackbox:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'

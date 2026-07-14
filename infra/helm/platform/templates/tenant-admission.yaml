@@ -1,4 +1,5 @@
 {{- $runtimeImage := include "exomem.hostedRuntimeImage" . -}}
+{{- $provisionerImage := .Values.provisioner.image -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -20,8 +21,14 @@ spec:
         has(namespaceObject.metadata.labels) &&
         'exomem.io/tenant-cell' in namespaceObject.metadata.labels &&
         namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true'
+    - name: restoreCandidate
+      expression: >-
+        has(object.metadata.labels) &&
+        'exomem.io/restore-candidate' in object.metadata.labels &&
+        object.metadata.labels['exomem.io/restore-candidate'] == 'true'
     - name: inScope
-      expression: variables.storageInit || variables.tenantNamespace
+      expression: >-
+        (variables.storageInit || variables.tenantNamespace) && !variables.restoreCandidate
     - name: controllerUpdate
       expression: >-
         request.operation == 'UPDATE' &&
@@ -353,4 +360,212 @@ metadata:
   name: exomem-tenant-boundary
 spec:
   policyName: exomem-tenant-boundary
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-tenant-restore-candidate
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  matchConditions:
+    - name: restore-candidate-pod
+      expression: >-
+        has(object.metadata.labels) &&
+        'exomem.io/restore-candidate' in object.metadata.labels &&
+        object.metadata.labels['exomem.io/restore-candidate'] == 'true'
+  variables:
+    - name: labels
+      expression: object.metadata.labels
+    - name: jobName
+      expression: variables.labels['job-name']
+    - name: resourceName
+      expression: namespaceObject.metadata.annotations['exomem.io/resource-name']
+    - name: init
+      expression: object.spec.initContainers[0]
+    - name: restore
+      expression: object.spec.containers[0]
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:kube-system:job-controller' &&
+        has(namespaceObject.metadata.labels) &&
+        namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true' &&
+        request.namespace.startsWith('exo-') &&
+        variables.jobName.matches('^restore-[a-f0-9]{20}$') &&
+        object.metadata.name.startsWith(variables.jobName + '-') &&
+        variables.labels['app.kubernetes.io/name'] == 'exomem-restore-candidate' &&
+        variables.labels['exomem.io/cell'] == request.namespace &&
+        variables.labels['exomem.io/cell-id'] ==
+          namespaceObject.metadata.annotations['exomem.io/cell-id'] &&
+        variables.labels['exomem.io/operation-digest'].matches('^[a-f0-9]{32}$') &&
+        variables.labels['exomem.io/fence'].matches('^[1-9][0-9]{0,15}$') &&
+        size(object.metadata.ownerReferences) == 1 &&
+        object.metadata.ownerReferences[0].apiVersion == 'batch/v1' &&
+        object.metadata.ownerReferences[0].kind == 'Job' &&
+        object.metadata.ownerReferences[0].name == variables.jobName &&
+        object.metadata.ownerReferences[0].controller == true
+      message: Restore candidate pods must be created only by the exact authenticated restore Job.
+    - expression: >-
+        object.spec.serviceAccountName == variables.resourceName &&
+        object.spec.automountServiceAccountToken == false &&
+        object.spec.restartPolicy == 'Never' &&
+        !has(object.spec.runtimeClassName) &&
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        !has(object.spec.nodeName) && !has(object.spec.hostAliases) &&
+        object.spec.securityContext.runAsNonRoot == true &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        object.spec.securityContext.fsGroup == 10001 &&
+        object.spec.securityContext.fsGroupChangePolicy == 'OnRootMismatch' &&
+        !has(object.spec.securityContext.runAsUser) &&
+        !has(object.spec.securityContext.runAsGroup) &&
+        !has(object.spec.securityContext.supplementalGroups) &&
+        !has(object.spec.securityContext.sysctls)
+      message: Restore candidate pods must use the exact no-token restricted pod security contract.
+    - expression: >-
+        size(object.spec.initContainers) == 1 && size(object.spec.containers) == 1 &&
+        variables.init.name == 'fetch-restore-source' &&
+        variables.init.image == {{ $provisionerImage | quote }} &&
+        variables.init.imagePullPolicy == 'IfNotPresent' &&
+        variables.init.command.size() == 11 &&
+        variables.init.command[0] == 'exomem-restore-fetch' &&
+        variables.init.command[1] == '--url-file' &&
+        variables.init.command[2] == '/run/exomem/restore-source/url' &&
+        variables.init.command[3] == '--output' &&
+        variables.init.command[4].matches('^/system-scratch/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') &&
+        variables.init.command[5] == '--expected-sha256' &&
+        variables.init.command[6].matches('^[a-f0-9]{64}$') &&
+        variables.init.command[7] == '--expected-size' &&
+        variables.init.command[8].matches('^[1-9][0-9]{0,9}$') &&
+        int(variables.init.command[8]) <= 6442450944 &&
+        variables.init.command[9] == '--allowed-host' &&
+        variables.init.command[10].matches('^[A-Za-z0-9.-]{1,253}$')
+      message: Restore candidate fetch must use the exact pinned provisioner command and bounded source.
+    - expression: >-
+        variables.restore.name == 'restore-candidate' &&
+        variables.restore.image == {{ $runtimeImage | quote }} &&
+        variables.restore.imagePullPolicy == 'IfNotPresent' &&
+        variables.restore.command ==
+          ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
+            '--request-file', '/run/exomem/operator-requests/restore-candidate.json'] &&
+        (!has(variables.restore.args) || size(variables.restore.args) == 0) &&
+        (!has(variables.restore.env) || size(variables.restore.env) == 0) &&
+        (!has(variables.restore.envFrom) || size(variables.restore.envFrom) == 0) &&
+        (!has(variables.restore.ports) || size(variables.restore.ports) == 0) &&
+        !has(variables.restore.lifecycle) && !has(variables.restore.livenessProbe) &&
+        !has(variables.restore.readinessProbe) && !has(variables.restore.startupProbe)
+      message: Restore candidate must use the exact pinned offline runtime command without network service surfaces.
+    - expression: >-
+        variables.init.securityContext.allowPrivilegeEscalation == false &&
+        variables.init.securityContext.readOnlyRootFilesystem == true &&
+        variables.init.securityContext.runAsNonRoot == true &&
+        variables.init.securityContext.runAsUser == 10001 &&
+        variables.init.securityContext.runAsGroup == 10001 &&
+        (!has(variables.init.securityContext.privileged) ||
+          variables.init.securityContext.privileged == false) &&
+        variables.init.securityContext.capabilities.drop == ['ALL'] &&
+        variables.restore.securityContext.allowPrivilegeEscalation == false &&
+        variables.restore.securityContext.readOnlyRootFilesystem == true &&
+        variables.restore.securityContext.runAsNonRoot == true &&
+        variables.restore.securityContext.runAsUser == 10001 &&
+        variables.restore.securityContext.runAsGroup == 10001 &&
+        (!has(variables.restore.securityContext.privileged) ||
+          variables.restore.securityContext.privileged == false) &&
+        variables.restore.securityContext.capabilities.drop == ['ALL']
+      message: Restore candidate containers must use the exact non-root no-capability security contexts.
+    - expression: >-
+        string(dyn(variables.init.resources).requests['cpu']) == '25m' &&
+        string(dyn(variables.init.resources).requests['memory']) == '64Mi' &&
+        string(dyn(variables.init.resources).limits['cpu']) == '500m' &&
+        string(dyn(variables.init.resources).limits['memory']) == '256Mi' &&
+        size(dyn(variables.init.resources).requests) == 2 &&
+        size(dyn(variables.init.resources).limits) == 2 &&
+        string(dyn(variables.restore.resources).requests['cpu']) == '100m' &&
+        string(dyn(variables.restore.resources).requests['memory']) == '256Mi' &&
+        string(dyn(variables.restore.resources).limits['cpu']) == '1' &&
+        string(dyn(variables.restore.resources).limits['memory']) == '1Gi' &&
+        size(dyn(variables.restore.resources).requests) == 2 &&
+        size(dyn(variables.restore.resources).limits) == 2
+      message: Restore candidate containers must use the exact bounded compute resources.
+    - expression: >-
+        size(object.spec.volumes) == 6 &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'operator-request' &&
+          volume.configMap.name == variables.jobName + '-request' &&
+          volume.configMap.defaultMode == 292 &&
+          size(volume.configMap.items) == 1 &&
+          volume.configMap.items[0].key == 'restore-candidate.json' &&
+          volume.configMap.items[0].path == 'restore-candidate.json' &&
+          volume.configMap.items[0].mode == 292) &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'restore-source' &&
+          volume.secret.secretName == variables.jobName + '-source' &&
+          volume.secret.defaultMode == 256 &&
+          size(volume.secret.items) == 1 &&
+          volume.secret.items[0].key == 'url' &&
+          volume.secret.items[0].path == 'url' &&
+          volume.secret.items[0].mode == 256) &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'system-scratch' && dyn(volume.emptyDir).sizeLimit == '6Gi') &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'target-data' &&
+          volume.persistentVolumeClaim.claimName ==
+            namespaceObject.metadata.annotations['exomem.io/pvc-name']) &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'credentials' &&
+          volume.secret.secretName ==
+            namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
+          volume.secret.defaultMode == 292) &&
+        object.spec.volumes.exists(volume,
+          volume.name == 'tmp' && dyn(volume.emptyDir).sizeLimit == '512Mi')
+      message: Restore candidate pods may mount only the exact request, source, scratch, target PVC, credentials, and tmp volumes.
+    - expression: >-
+        size(variables.init.volumeMounts) == 3 &&
+        variables.init.volumeMounts.exists(mount,
+          mount.name == 'restore-source' && mount.mountPath == '/run/exomem/restore-source' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        variables.init.volumeMounts.exists(mount,
+          mount.name == 'system-scratch' && mount.mountPath == '/system-scratch' &&
+          (!has(mount.readOnly) || mount.readOnly == false) && !has(mount.subPath)) &&
+        variables.init.volumeMounts.exists(mount,
+          mount.name == 'tmp' && mount.mountPath == '/tmp' &&
+          (!has(mount.readOnly) || mount.readOnly == false) && !has(mount.subPath)) &&
+        size(variables.restore.volumeMounts) == 5 &&
+        variables.restore.volumeMounts.exists(mount,
+          mount.name == 'operator-request' &&
+          mount.mountPath == '/run/exomem/operator-requests/restore-candidate.json' &&
+          mount.subPath == 'restore-candidate.json' && mount.readOnly == true) &&
+        variables.restore.volumeMounts.exists(mount,
+          mount.name == 'system-scratch' && mount.mountPath.startsWith('/system-scratch/') &&
+          mount.subPath.matches('^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') && mount.readOnly == true) &&
+        variables.restore.volumeMounts.exists(mount,
+          mount.name == 'target-data' && mount.mountPath == '/var/lib/exomem' &&
+          (!has(mount.readOnly) || mount.readOnly == false) && !has(mount.subPath)) &&
+        variables.restore.volumeMounts.exists(mount,
+          mount.name == 'credentials' && mount.mountPath == '/run/exomem/credentials' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        variables.restore.volumeMounts.exists(mount,
+          mount.name == 'tmp' && mount.mountPath == '/tmp' &&
+          (!has(mount.readOnly) || mount.readOnly == false) && !has(mount.subPath))
+      message: Restore candidate mounts must match the exact offline restore paths.
+    - expression: >-
+        variables.init.terminationMessagePath == '/dev/termination-log' &&
+        variables.init.terminationMessagePolicy == 'File' &&
+        variables.restore.terminationMessagePath == '/dev/termination-log' &&
+        variables.restore.terminationMessagePolicy == 'File'
+      message: Restore candidate containers must use safe termination-message defaults.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-tenant-restore-candidate
+spec:
+  policyName: exomem-tenant-restore-candidate
   validationActions: [Deny]

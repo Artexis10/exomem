@@ -177,6 +177,21 @@ async def test_kubernetes_adapter_rejects_pvc_identity_or_location_without_mutat
 @pytest.mark.asyncio
 async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle() -> None:
     metadata = _metadata()
+    identity = ProviderRecoveryIdentityCodec.from_secret("credential-secret-recovery")
+    envelope = identity.seal(
+        provider="kubernetes",
+        provider_reference=ProviderReference.kubernetes(
+            provider="kubernetes",
+            api_version="v1",
+            kind="Secret",
+            namespace=metadata.resource_name,
+            name="exomem-cell-credentials",
+        ),
+        tenant_id=metadata.tenant_id,
+        cell_id=metadata.subject_id,
+        operation_id=metadata.operation_id,
+        fence_generation=metadata.fence_generation,
+    )
 
     class Core:
         secret = None
@@ -221,16 +236,26 @@ async def test_cell_adapter_creates_external_secret_then_reads_the_exact_bundle(
             return self.secret
 
     core = Core()
-    adapter = KubernetesCellAdapter(core_v1=core, apps_v1=SimpleNamespace())
+    adapter = KubernetesCellAdapter(
+        core_v1=core,
+        apps_v1=SimpleNamespace(),
+        identity_verifier=identity.verifier(),
+    )
     await adapter.write_credential_bundle(
         metadata,
         {"1": _credential()},
-        lifecycle_annotations={"exomem.io/security-revision": "1"},
+        lifecycle_annotations={
+            "exomem.io/security-revision": "1",
+            "exomem.io/recovery-envelope": envelope,
+        },
     )
 
     credentials, annotations = await adapter.read_credential_bundle(metadata)
     assert credentials == {"1": _credential()}
     assert annotations["exomem.io/security-revision"] == "1"
+    core.secret.metadata.annotations["exomem.io/recovery-envelope"] = "forged"
+    with pytest.raises(MetadataConflict, match="did not authenticate"):
+        await adapter.read_credential_bundle(metadata)
 
 
 @pytest.mark.asyncio
@@ -512,15 +537,15 @@ async def test_traefik_adapter_closes_and_reopens_only_exact_routes() -> None:
         is True
     )
     assert len(probes) == 3
-    assert probes[0] == (
+    assert probes[0][0:2] == (
         "GET",
         "https://control.example.invalid/cells/cell-alpha/private/exomem/v1/ready",
-        {
-            "Authorization": "Bearer credential-current",
-            "X-Exomem-Hosted-Cell": "cell-alpha",
-            "X-Exomem-Hosted-Protocol": "1",
-        },
     )
+    assert probes[0][2]["Authorization"] == "Bearer credential-current"
+    assert probes[0][2]["X-Exomem-Cell-Id"] == "cell-alpha"
+    assert probes[0][2]["X-Exomem-Protocol-Version"] == "1"
+    assert probes[0][2]["X-Exomem-Principal-Scope"]
+    assert probes[0][2]["X-Exomem-Request-Id"].count("-") == 4
     assert probes[1][0] == "OPTIONS"
     assert probes[1][1].endswith("/public/exomem/v2/transfers/download")
     assert probes[1][2] == {
@@ -644,7 +669,7 @@ async def test_private_cell_api_uses_fresh_identity_and_exact_lifecycle_routes()
     worker_policy = {"workerCount": 0, "semantic": False, "media": False}
     ready = {
         "cell_id": "cell-alpha",
-        "vault_id": "cell-alpha",
+        "vault_id": "tenant-alpha",
         "exomem_release": "0.22.0",
         "hosted_protocol": "1",
         "authenticated_credential_version": "1",

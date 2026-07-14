@@ -14,6 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 RELEASE_MANIFEST = ROOT / "infra/contracts/exomem-hosted-release-v1.json"
 RUNTIME_GATE = ROOT / "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
+SUBSTRATE_SELECTION = ROOT / "infra/contracts/substrate-gateway-contract-selection-v1.json"
 VERIFIER = ROOT / "infra/scripts/verify_hosted_release.py"
 
 EXPECTED_COMMAND_REGISTRY = [
@@ -172,7 +173,15 @@ def test_real_substrate_fixture_must_match_the_complete_release_unit() -> None:
     if not fixture_path.is_file():
         pytest.skip("the selected Substrate release worktree is not available")
     fixture = _load(fixture_path)
+    selection = _load(SUBSTRATE_SELECTION)
 
+    verifier.validate_substrate_selection(release, selection)
+    verifier.validate_selected_gateway_fixture(
+        release,
+        selection,
+        fixture,
+        fixture_path.read_bytes(),
+    )
     verifier.validate_gateway_fixture(release, fixture)
 
     for field, value in (
@@ -194,6 +203,66 @@ def test_real_substrate_fixture_must_match_the_complete_release_unit() -> None:
         changed_release[field] = value
         with pytest.raises(ValueError):
             verifier.validate_gateway_fixture(changed_release, fixture)
+
+
+def test_substrate_selection_pins_one_reviewed_commit_path_and_fixture_digest() -> None:
+    verifier = _verifier_module()
+    release = _load(RELEASE_MANIFEST)
+    selection = _load(SUBSTRATE_SELECTION)
+
+    verifier.validate_substrate_selection(release, selection)
+    assert selection == {
+        "artifact": "exomem-hosted-substrate-gateway-selection",
+        "schemaVersion": 1,
+        "sourceRepository": "https://github.com/substrate-systems/substrate",
+        "sourceCommit": "d451153469718fc113abef085044a09001942b8d",
+        "fixturePath": ("src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json"),
+        "fixtureSha256": "ba3c211377616ba87877947ba7392ffa66e9769a9f631027a141ce5cccc40054",
+        "gatewayContractSha256": release["gatewayContractSha256"],
+    }
+
+    for field, value in (
+        ("sourceRepository", "https://example.invalid/substrate"),
+        ("sourceCommit", "a" * 40),
+        ("fixturePath", "src/another-fixture.json"),
+        ("fixtureSha256", "b" * 64),
+        ("gatewayContractSha256", "c" * 64),
+    ):
+        changed = copy.deepcopy(selection)
+        changed[field] = value
+        with pytest.raises(ValueError):
+            verifier.validate_substrate_selection(release, changed)
+
+
+def test_selected_substrate_fixture_rejects_any_byte_or_semantic_drift() -> None:
+    verifier = _verifier_module()
+    release = _load(RELEASE_MANIFEST)
+    selection = _load(SUBSTRATE_SELECTION)
+    fixture_path = Path(
+        os.environ.get(
+            "SUBSTRATE_GATEWAY_FIXTURE",
+            "/tmp/substrate-exomem-hosted/"
+            "src/lib/exomem-hosted/__tests__/gateway-contract-0-22-0.json",
+        )
+    )
+    if not fixture_path.is_file():
+        pytest.skip("the selected Substrate release worktree is not available")
+    raw = fixture_path.read_bytes()
+    fixture = json.loads(raw)
+
+    verifier.validate_selected_gateway_fixture(release, selection, fixture, raw)
+    with pytest.raises(ValueError, match="byte digest"):
+        verifier.validate_selected_gateway_fixture(release, selection, fixture, raw + b"\n")
+
+    changed = copy.deepcopy(fixture)
+    changed["commands"] = changed["commands"][:-1]
+    with pytest.raises(ValueError):
+        verifier.validate_selected_gateway_fixture(
+            release,
+            selection,
+            changed,
+            json.dumps(changed).encode(),
+        )
 
 
 def test_image_provenance_must_bind_source_target_and_build_time() -> None:
@@ -294,6 +363,8 @@ def test_published_image_contract_route_exactly_matches_substrate_fixture() -> N
             str(RUNTIME_GATE),
             "--substrate-fixture",
             str(fixture_path),
+            "--substrate-selection",
+            str(SUBSTRATE_SELECTION),
             "--probe-image",
         ],
         cwd=ROOT,

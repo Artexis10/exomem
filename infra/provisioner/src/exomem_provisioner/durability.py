@@ -822,6 +822,8 @@ class OfflineRestoreRuntime(Protocol):
 
     async def product_checks(self, candidate_cell_id: str) -> dict[str, bool]: ...
 
+    async def finalize_candidate(self, candidate_cell_id: str) -> dict[str, bool]: ...
+
 
 class RestoreWorkflow:
     """Decrypt and publish a provider recovery object into a stopped new candidate."""
@@ -874,6 +876,8 @@ class RestoreWorkflow:
             raise RestoreVerificationError("recovery object key was destroyed")
         if source.tenant_id != run.identity.tenant_id:
             raise RestoreVerificationError("recovery object belongs to another tenant")
+        if source.kind is RunKind.USER_EXPORT and source.expires_at <= datetime.now(UTC):
+            raise RestoreVerificationError("user export restore source has expired")
         expected_values = (
             (expected_source_cell_id, source.cell_id),
             (expected_archive_sha256, source.archive_sha256),
@@ -884,6 +888,11 @@ class RestoreWorkflow:
             raise RestoreVerificationError("restore request differs from recovery proof")
         if source.cell_id == run.identity.cell_id:
             raise RestoreVerificationError("restore must publish into a new candidate identity")
+        if run.checkpoint == "candidate-published":
+            return await self._verify_and_complete_candidate(
+                run,
+                worker_id=worker_id,
+            )
         key, expected_version = self._provider_location(source.provider_reference)
         head = await self._restore_store.head(key)
         if head is None:
@@ -954,12 +963,34 @@ class RestoreWorkflow:
                 archive_path,
                 helper_version=self.HELPER_VERSION,
                 release_version=self._release_version,
-                operation_id=run.identity.operation_id,
+                operation_id=(f"{run.identity.operation_id}-baseline-{run.claim_generation}"),
                 fence_generation=run.identity.fence_generation,
                 source_cell_id=source.cell_id,
                 archive_sha256=source.archive_sha256,
                 artifact_reference=source_reference,
             )
+            try:
+                checks = await self._runtime.product_checks(run.identity.cell_id)
+            finally:
+                try:
+                    await self._runtime.stop_candidate(run.identity.cell_id)
+                finally:
+                    await self._runtime.offline_restore(
+                        run.identity.cell_id,
+                        archive_path,
+                        helper_version=self.HELPER_VERSION,
+                        release_version=self._release_version,
+                        operation_id=(
+                            f"{run.identity.operation_id}-cleanup-{run.claim_generation}"
+                        ),
+                        fence_generation=run.identity.fence_generation,
+                        source_cell_id=source.cell_id,
+                        archive_sha256=source.archive_sha256,
+                        artifact_reference=source_reference,
+                    )
+            checks.update(await self._runtime.finalize_candidate(run.identity.cell_id))
+            if set(checks) != self.REQUIRED_PRODUCT_CHECKS or not all(checks.values()):
+                raise RestoreVerificationError("candidate product checks failed")
             await self._repository.checkpoint(
                 run.id,
                 worker_id,
@@ -967,25 +998,36 @@ class RestoreWorkflow:
                 checkpoint="candidate-published",
                 state={"archive_sha256": source.archive_sha256},
             )
-            if not await self._runtime.authenticated_readiness(run.identity.cell_id):
-                raise RestoreVerificationError("candidate authenticated readiness failed")
-            checks = await self._runtime.product_checks(run.identity.cell_id)
-            if set(checks) != self.REQUIRED_PRODUCT_CHECKS or not all(checks.values()):
-                raise RestoreVerificationError("candidate product checks failed")
-            result: dict[str, object] = {
-                "restored": True,
-                "candidateCellId": run.identity.cell_id,
-            }
-            await self._repository.complete(
-                run.id,
-                worker_id,
-                **claim,
-                result=result,
+            return await self._verify_and_complete_candidate(
+                run,
+                worker_id=worker_id,
             )
-            return result
         finally:
             encrypted_path.unlink(missing_ok=True)
             archive_path.unlink(missing_ok=True)
+
+    async def _verify_and_complete_candidate(
+        self,
+        run: RunSnapshot,
+        *,
+        worker_id: str,
+    ) -> dict[str, object]:
+        if run.claim_token is None:
+            raise RestoreVerificationError("restore run has no active claim")
+        if not await self._runtime.authenticated_readiness(run.identity.cell_id):
+            raise RestoreVerificationError("candidate authenticated readiness failed")
+        result: dict[str, object] = {
+            "restored": True,
+            "candidateCellId": run.identity.cell_id,
+        }
+        await self._repository.complete(
+            run.id,
+            worker_id,
+            claim_token=run.claim_token,
+            claim_generation=run.claim_generation,
+            result=result,
+        )
+        return result
 
     @staticmethod
     def _provider_location(reference: str) -> tuple[str, str | None]:

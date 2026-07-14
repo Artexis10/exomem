@@ -2,6 +2,7 @@ resourceName: cell-alpha
 cellId: alpha-test-original
 vaultId: vault-alpha-original
 workloadMode: serve
+provisionMode: serve
 image: ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
 expectedRelease: 0.1.0-alpha
 expectedProtocol: "1"

@@ -52,6 +52,7 @@ def _request(**overrides: object) -> dict[str, object]:
         "fenceGeneration": 7,
         "tenantId": "tenant-alpha",
         "cellId": "cell-alpha",
+        "provisionMode": "serve",
         "protocolVersion": "1",
         "releaseVersion": "0.22.0",
         "serviceCredential": _credential(),
@@ -642,6 +643,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "initOperationId": "operation-alpha",
         "initRequestId": "5ec7a442-663f-476b-80f8-dd803afe5590",
         "pvcSize": "10Gi",
+        "provisionMode": "serve",
         "providerIdentity": {
             "tenantId": "tenant-alpha",
             "cellId": "cell-alpha",
@@ -660,7 +662,7 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "storageLimitBytes": 5 * 1024**3,
         "transferHostname": "transfer.example.invalid",
         "uploadLimitBytes": 90 * 1024**2,
-        "vaultId": "cell-alpha",
+        "vaultId": "tenant-alpha",
         "workerLimit": 0,
         "workerPolicyDigest": hashlib.sha256(
             b'{"media":false,"semantic":false,"workerCount":0}'
@@ -668,6 +670,51 @@ async def test_provision_adopts_partial_attempt_and_waits_for_volume_health_and_
         "workloadMode": "serve",
     }
     assert _credential() not in repr(plane)
+
+
+@pytest.mark.asyncio
+async def test_restore_candidate_provision_stops_after_verified_volume_ownership() -> None:
+    plane = HighFidelityProviderPlane(location="fsn1")
+    codec = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+    driver = CellLifecycleDriver(plane=plane, volume_worker=None, config=_config())
+    volume_driver = VolumeRegistrationDriver(
+        VolumeLifecycleWorker(plane, plane, identity_codec=codec),
+        identity_verifier=codec.verifier(),
+    )
+    request = _request_with_provider_identity(provisionMode="restore-candidate")
+    context = _context()
+
+    checkpoints: list[str] = []
+    final: DriverFinal | None = None
+    for _ in range(8):
+        selected = volume_driver if context.checkpoint == "volume-registration-required" else driver
+        outcome = await selected.execute("provision", request, context)
+        if isinstance(outcome, DriverPending):
+            checkpoints.append(outcome.checkpoint)
+            context = _context(checkpoint=outcome.checkpoint)
+            continue
+        final = outcome
+        break
+
+    assert checkpoints == [
+        "namespace-ready",
+        "release-applied",
+        "volume-registration-required",
+        "volume-owned",
+    ]
+    assert final == DriverFinal(
+        {
+            "providerRef": plane.provider_reference(_metadata()),
+            "privateEndpoint": "https://control.example.invalid/cells/cell-alpha",
+        }
+    )
+    assert plane.count_volumes(_metadata()) == 1
+    assert plane.accepted_credential_versions(_metadata()) == (1,)
+    assert plane.helm_values(_metadata())["workloadMode"] == "restore"
+    assert plane.helm_values(_metadata())["vaultId"] == "tenant-alpha"
+    assert plane.is_initialized(_metadata()) is False
+    assert plane.runtime_admitted(_metadata()) is False
+    assert plane.routes_enabled(_metadata()) == (False, False)
 
 
 def test_provider_metadata_maximum_opaque_ids_round_trip_without_recovery_registry() -> None:

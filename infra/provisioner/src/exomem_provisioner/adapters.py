@@ -477,7 +477,29 @@ class KubernetesCellAdapter:
             "exomem-cell-credentials",
             metadata.resource_name,
         )
-        _require_annotations(getattr(secret.metadata, "annotations", None), metadata)
+        annotations = dict(getattr(secret.metadata, "annotations", None) or {})
+        _require_annotations(annotations, metadata)
+        if self._identity_verifier is not None:
+            try:
+                self._identity_verifier.authenticate(
+                    str(annotations.get("exomem.io/recovery-envelope", "")),
+                    provider="kubernetes",
+                    provider_reference=ProviderReference.kubernetes(
+                        provider="kubernetes",
+                        api_version="v1",
+                        kind="Secret",
+                        namespace=metadata.resource_name,
+                        name="exomem-cell-credentials",
+                    ),
+                    tenant_id=metadata.tenant_id,
+                    cell_id=metadata.subject_id,
+                    operation_id=metadata.operation_id,
+                    fence_generation=metadata.fence_generation,
+                )
+            except ProviderIdentityConflict as error:
+                raise MetadataConflict(
+                    "credential Secret provider recovery identity did not authenticate"
+                ) from error
         encoded = dict(getattr(secret, "data", None) or {}).get("credentials.json")
         if not isinstance(encoded, str):
             raise MetadataConflict("cell credential bundle is absent")
@@ -499,7 +521,7 @@ class KubernetesCellAdapter:
                 raise ValueError
         except ValueError as error:
             raise MetadataConflict("cell credential bundle is invalid") from error
-        return values, dict(getattr(secret.metadata, "annotations", None) or {})
+        return values, annotations
 
     async def scale(self, metadata: OpaqueProviderMetadata, replicas: int) -> None:
         if replicas not in {0, 1}:
@@ -782,7 +804,7 @@ class PrivateCellApiAdapter:
                 ),
                 ready=(
                     admission_admitted
-                    and ready["vault_id"] == metadata.subject_id
+                    and ready["vault_id"] == metadata.tenant_id
                     and ready["exomem_release"] == expected_release
                     and ready["hosted_protocol"] == protocol_version
                     and service_authenticated
@@ -1335,8 +1357,10 @@ class TraefikRoutingAdapter:
             control_url,
             {
                 "Authorization": f"Bearer {control_credential}",
-                "X-Exomem-Hosted-Cell": metadata.subject_id,
-                "X-Exomem-Hosted-Protocol": protocol_version,
+                "X-Exomem-Cell-Id": metadata.subject_id,
+                "X-Exomem-Protocol-Version": protocol_version,
+                "X-Exomem-Request-Id": str(uuid.uuid4()),
+                "X-Exomem-Principal-Scope": PrivateCellApiAdapter._PRINCIPAL_SCOPE,
             },
         )
         url = (

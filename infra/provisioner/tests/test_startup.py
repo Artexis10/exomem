@@ -5,6 +5,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
+from exomem_provisioner.durability_actions import run_durability_actions
 from exomem_provisioner.logging import ContentFreeFormatter
 from exomem_provisioner.main import _create_app, create_app_from_env, run_api
 from exomem_provisioner.production import run_worker
@@ -147,6 +148,7 @@ def test_directly_injected_settings_keep_sqlite_available_for_tests() -> None:
     [
         ("exomem-provisioner-api", run_api),
         ("exomem-provisioner-worker", run_worker),
+        ("exomem-durability-actions", run_durability_actions),
         ("exomem-volume-worker", run_volume_worker),
         ("exomem-provisioner-volume-rebind", run_volume_rebind),
     ],

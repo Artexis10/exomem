@@ -23,6 +23,7 @@ from .config import (
 )
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
+from .durability_driver import DurabilityActionDriver
 from .entrypoint import help_requested
 from .lifecycle import CellLifecycleDriver, LifecycleConfig
 from .live import (
@@ -35,6 +36,7 @@ from .main import _require_production_database
 from .provider_identity import ProviderRecoveryIdentityVerifier
 from .repository import OperationRepository
 from .worker import ProvisionerWorker
+from .worker_ownership import ROUTINE_OPERATION_ACTIONS
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,6 +44,43 @@ class LiveProviderComponents:
     release: HostedReleaseManifest
     plane: LiveLifecyclePlane
     driver: CellLifecycleDriver
+
+
+def build_routine_operation_worker(
+    *,
+    repository: OperationRepository,
+    driver: Any,
+    worker_id: str,
+) -> ProvisionerWorker:
+    """Build the routine owner for every non-destructive operation action."""
+
+    return ProvisionerWorker(
+        repository,
+        driver,
+        worker_id=worker_id,
+        exclude_checkpoints=frozenset({"volume-registration-required"}),
+        allowed_actions=ROUTINE_OPERATION_ACTIONS,
+    )
+
+
+def build_live_routine_action_driver(
+    *,
+    lifecycle_driver: Any,
+    durability_repository: Any,
+    export_workflow: Any,
+    restore_workflow: Any,
+    object_service: Any,
+) -> DurabilityActionDriver:
+    """Compose the live lifecycle and durability action owners without deletion authority."""
+
+    return DurabilityActionDriver(
+        delegate=lifecycle_driver,
+        repository=durability_repository,
+        export_workflow=export_workflow,
+        restore_workflow=restore_workflow,
+        object_service=object_service,
+        deletion_workflow=None,
+    )
 
 
 def build_live_provider_components(
@@ -174,11 +213,10 @@ async def _run_worker() -> None:
             requester=requester,
             external_probe=external_probe,
         )
-        worker = ProvisionerWorker(
-            repository,
-            components.driver,
+        worker = build_routine_operation_worker(
+            repository=repository,
+            driver=components.driver,
             worker_id=provider.worker_id,
-            exclude_checkpoints=frozenset({"volume-registration-required"}),
         )
         try:
             while True:

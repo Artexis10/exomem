@@ -31,9 +31,10 @@ from .models import (
     OperationState,
     TenantFence,
 )
-from .provider_recovery import ProviderRecoveryIdentityVerifier
+from .provider_identity import ProviderRecoveryIdentityVerifier
 from .repository import OperationRepository
 from .worker import ProvisionerWorker
+from .worker_ownership import DELETION_OPERATION_ACTIONS
 
 try:
     from .lifecycle import MetadataConflict
@@ -357,7 +358,7 @@ def build_deletion_operation_worker(
         repository,
         DeletionOnlyDriver(authority=authority, workflow=workflow),
         worker_id=worker_id,
-        allowed_actions=frozenset({OperationAction.DISCARD, OperationAction.DESTROY}),
+        allowed_actions=DELETION_OPERATION_ACTIONS,
     )
 
 
@@ -380,6 +381,39 @@ def _b2_client(
     )
 
 
+def build_live_deletion_provider(
+    *,
+    core_v1: Any,
+    apps_v1: Any,
+    custom_objects: Any,
+    hcloud_client: Any,
+    b2_client: Any,
+    recovery_bucket: str,
+    export_bucket: str,
+    provider_recovery_public_key: str,
+    authority: Any,
+    key_store: Any,
+) -> Any:
+    """Construct the live scanner with the provider lane's canonical verifier."""
+
+    from .provider_deletion import LiveDeletionProvider
+
+    return LiveDeletionProvider(
+        core_v1=core_v1,
+        apps_v1=apps_v1,
+        custom_objects=custom_objects,
+        hcloud_client=hcloud_client,
+        b2_client=b2_client,
+        recovery_bucket=recovery_bucket,
+        export_bucket=export_bucket,
+        identity_verifier=ProviderRecoveryIdentityVerifier.from_public_key(
+            provider_recovery_public_key
+        ),
+        authority=authority,
+        key_store=key_store,
+    )
+
+
 @asynccontextmanager
 async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
     """Build the verifier-only provider deletion process from its exact env."""
@@ -391,7 +425,7 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
     from kubernetes import client as kubernetes_client
     from kubernetes import config as kubernetes_config
 
-    from .provider_deletion import FencedOrderedDeletionWorkflow, LiveDeletionProvider
+    from .provider_deletion import FencedOrderedDeletionWorkflow
 
     settings = DeletionRuntimeSettings()  # type: ignore[call-arg]
     database = ProvisionerDatabase(settings)  # structurally supplies DB fields
@@ -424,7 +458,7 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
                 ),
             }
         )
-        provider = LiveDeletionProvider(
+        provider = build_live_deletion_provider(
             core_v1=kubernetes_client.CoreV1Api(),
             apps_v1=kubernetes_client.AppsV1Api(),
             custom_objects=kubernetes_client.CustomObjectsApi(),
@@ -432,9 +466,7 @@ async def live_deletion_worker() -> AsyncIterator[ProvisionerWorker]:
             b2_client=b2_client,
             recovery_bucket=settings.recovery_bucket,
             export_bucket=settings.user_export_bucket,
-            identity_verifier=ProviderRecoveryIdentityVerifier.from_public_key(
-                settings.provider_recovery_public_key.get_secret_value()
-            ),
+            provider_recovery_public_key=(settings.provider_recovery_public_key.get_secret_value()),
             authority=authority,
             key_store=RepositoryWrappedKeyStore(recovery_repository),
         )

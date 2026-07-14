@@ -27,6 +27,8 @@ exomem-durability-backup-worker = "exomem_provisioner.durability_jobs:run_durabi
 exomem-database-backup-worker = "exomem_provisioner.durability_jobs:run_database_backup"
 exomem-deletion-worker = "exomem_provisioner.durability_jobs:run_deletion_worker"
 exomem-export-gc = "exomem_provisioner.durability_jobs:run_export_gc"
+exomem-durability-actions = "exomem_provisioner.durability_actions:run_durability_actions"
+exomem-restore-fetch = "exomem_provisioner.restore_fetch:run_restore_fetch"
 
 [dependency-groups]
 dev = [

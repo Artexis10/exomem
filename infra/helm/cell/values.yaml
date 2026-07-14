@@ -2,6 +2,7 @@ resourceName: ""
 cellId: ""
 vaultId: ""
 workloadMode: serve
+provisionMode: serve
 image: ""
 expectedRelease: ""
 expectedProtocol: "1"

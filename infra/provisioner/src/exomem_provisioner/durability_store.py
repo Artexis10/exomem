@@ -215,6 +215,15 @@ class B2PortableDeliveryStore(_B2StoreBase):
         if retain_until is not None:
             raise ProviderObjectConflict("portable delivery must not use Object Lock")
         normalized = {name.lower(): value for name, value in metadata.items()}
+        existing = await self.head(key)
+        if existing is not None:
+            if (
+                existing.size != source.stat().st_size
+                or existing.metadata != normalized
+                or existing.retain_until is not None
+            ):
+                raise ProviderObjectConflict("portable delivery object identity differs")
+            return existing
         await asyncio.to_thread(
             self._client.upload_file,
             str(source),

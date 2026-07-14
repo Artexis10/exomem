@@ -1418,6 +1418,7 @@ def _fixed_helm_values(
         "initOperationId": metadata.operation_id,
         "initRequestId": _deterministic_uuid4(metadata.operation_id + ":init"),
         "pvcSize": "10Gi",
+        "provisionMode": request["provisionMode"],
         "providerIdentity": {
             "tenantId": metadata.tenant_id,
             "cellId": metadata.subject_id,
@@ -1435,10 +1436,12 @@ def _fixed_helm_values(
         "storageLimitBytes": 5 * 1024**3,
         "transferHostname": config.transfer_hostname,
         "uploadLimitBytes": 90 * 1024**2,
-        "vaultId": metadata.subject_id,
+        "vaultId": metadata.tenant_id,
         "workerLimit": 0,
         "workerPolicyDigest": hashlib.sha256(worker_policy).hexdigest(),
-        "workloadMode": "initialize",
+        "workloadMode": (
+            "restore" if request["provisionMode"] == "restore-candidate" else "initialize"
+        ),
     }
     recovery_envelopes = request.get("_providerRecoveryEnvelopes")
     if recovery_envelopes is not None:
@@ -1565,6 +1568,15 @@ class CellLifecycleDriver:
             "routes-open",
         }:
             return DriverPending("volume-registration-required", 1)
+        if request["provisionMode"] == "restore-candidate":
+            return DriverFinal(
+                {
+                    "providerRef": self._plane.provider_reference(metadata),
+                    "privateEndpoint": (
+                        f"https://{self._config.control_hostname}/cells/{metadata.subject_id}"
+                    ),
+                }
+            )
         if not self._plane.is_initialized(metadata):
             if not await self._plane.initialize(metadata, request, self._config):
                 return DriverPending("initializing", 2)

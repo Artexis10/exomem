@@ -80,6 +80,15 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
     assert 'UV_VERSION: "0.11.28"' in workflow
     assert 'PYTHON_VERSION: "3.13.5"' in workflow
     assert 'NODE_VERSION: "22.17.1"' in workflow
+    parsed = yaml.safe_load(workflow)
+    assert parsed["jobs"]["static"]["name"] == "Offline static validation (not release proof)"
+    release_job = parsed["jobs"]["release-proof"]
+    assert release_job["needs"] == "static"
+    assert "inputs.release_proof" in release_job["if"]
+    assert "--fetch-substrate-fixture" in workflow
+    assert "--probe-image" in workflow
+    assert "--require-published" in workflow
+    assert "substrate-gateway-contract-selection-v1.json" in workflow
     assert 'uvx --from "ruff==${RUFF_VERSION}"' in validator
     assert 'uvx --from "mypy==${MYPY_VERSION}"' in validator
     assert '(cd "${repo_root}" && uv lock --check)' in validator
@@ -87,6 +96,39 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         '"${helm_bin}" lint "${infra_dir}/helm/platform" --strict \\\n  --namespace exomem-platform'
     ) in validator
     assert '--skip-dirs charts "${repo_root}"' in validator
+    for action_line in (
+        line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
+    ):
+        assert len(action_line.rsplit("@", 1)[1].split()[0]) == 40
+
+
+def test_hosted_provisioner_publish_workflow_is_source_bound_and_smoke_verified() -> None:
+    workflow_path = ROOT / ".github/workflows/publish-hosted-provisioner.yml"
+    workflow = workflow_path.read_text(encoding="utf-8")
+    parsed = yaml.safe_load(workflow)
+    triggers = parsed.get("on", parsed.get(True))
+
+    assert triggers["push"]["branches"] == ["main"]
+    assert "workflow_dispatch" in triggers
+    job = parsed["jobs"]["publish"]
+    assert job["permissions"] == {
+        "contents": "read",
+        "id-token": "write",
+        "packages": "write",
+    }
+    assert "infra/provisioner/Dockerfile" in workflow
+    assert "ghcr.io/artexis10/exomem-provisioner:${{ github.sha }}" in workflow
+    assert "ghcr.io/artexis10/exomem-provisioner:latest" not in workflow
+    assert "push: true" in workflow
+    assert "provenance: mode=max" in workflow
+    assert "sbom: true" in workflow
+    assert "steps.build.outputs.digest" in workflow
+    assert "infra/scripts/verify_provisioner_image.py" in workflow
+    assert "--require-published" in workflow
+    assert "infra/scripts/verify_hosted_release.py" in workflow
+    assert "--fetch-substrate-fixture" in workflow
+    assert "--probe-image" in workflow
+    assert "substrate-gateway-contract-selection-v1.json" in workflow
     for action_line in (
         line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
     ):
@@ -1514,6 +1556,9 @@ def test_provisioner_image_smoke_checks_every_deployed_entrypoint_without_networ
     for command in (
         "exomem-provisioner-api",
         "exomem-provisioner-worker",
+        "exomem-provisioner-volume-rebind",
+        "exomem-durability-actions",
+        "exomem-restore-fetch",
         "exomem-export-gc",
         "exomem-durability-backup-worker",
         "exomem-database-backup-worker",
@@ -1537,6 +1582,44 @@ def test_provisioner_image_smoke_checks_every_deployed_entrypoint_without_networ
     with pytest.raises(module.ProvisionerImageVerificationError, match="smoke failed") as caught:
         module.verify(image=image, container_binary="docker", run=fail)
     assert "secret output" not in str(caught.value)
+
+
+def test_provisioner_release_proof_pulls_and_confirms_the_published_digest() -> None:
+    module = _load(
+        "infra/scripts/verify_provisioner_image.py",
+        "verify_published_provisioner_image_test",
+    )
+    image = "ghcr.io/artexis10/exomem-provisioner@sha256:" + "e" * 64
+    calls: list[list[str]] = []
+
+    def run(argv: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(argv)
+        stdout = json.dumps([image]) if argv[1:3] == ["image", "inspect"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    module.verify(
+        image=image,
+        container_binary="docker",
+        require_published=True,
+        run=run,
+    )
+    assert [call[1:3] for call in calls] == [
+        ["pull", image],
+        ["image", "inspect"],
+        ["run", "--rm"],
+    ]
+
+    def missing_digest(argv: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        stdout = "[]" if argv[1:3] == ["image", "inspect"] else ""
+        return subprocess.CompletedProcess(argv, 0, stdout=stdout, stderr="")
+
+    with pytest.raises(module.ProvisionerImageVerificationError, match="published digest"):
+        module.verify(
+            image=image,
+            container_binary="docker",
+            require_published=True,
+            run=missing_digest,
+        )
 
 
 def test_full_validation_runs_published_provisioner_image_smoke_when_selected() -> None:

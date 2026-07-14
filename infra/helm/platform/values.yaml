@@ -31,7 +31,6 @@ provisioner:
 admission:
   namespaceContractOperatorUsernames:
     - system:admin
-    - system:serviceaccount:exomem-platform:exomem-cell-provisioner
 
 scheduler:
   contractVersion: 1
@@ -56,7 +55,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: d3f32142323f64e540fc95c39dc2ca8c82ec060e7ebc84caeab6d6e7ed0fbe48
+  contractSha256: c1ff30978d21f6dd24177821f119dd44610b2dd8a012ea4dcec98aa1df62aa37
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""

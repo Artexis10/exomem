@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
@@ -26,6 +27,7 @@ from exomem_provisioner.durability_repository import (
     RunKind,
 )
 from exomem_provisioner.durability_store import ProviderObjectHead
+from exomem_provisioner.models import RecoveryObject
 from exomem_provisioner.provider_recovery import (
     ProviderRecoveryIdentityCodec,
     ProviderReference,
@@ -54,11 +56,15 @@ class RestoreStore:
         self.key = key
         self.source = source
         self.object_head = head
+        self.head_calls = 0
+        self.download_calls = 0
 
     async def head(self, key: str) -> ProviderObjectHead | None:
+        self.head_calls += 1
         return self.object_head if key == self.key else None
 
     async def download_file(self, key: str, destination: Path) -> None:
+        self.download_calls += 1
         assert key == self.key
         destination.write_bytes(self.source.read_bytes())
 
@@ -99,7 +105,10 @@ class RestoreRuntime:
         assert archive_path.is_file()
         assert helper_version == "1"
         assert release_version == "0.22.0"
-        assert operation_id == "restore-operation-alpha"
+        assert operation_id in {
+            "restore-operation-alpha-baseline-1",
+            "restore-operation-alpha-cleanup-1",
+        }
         assert fence_generation == 10
         assert source_cell_id == "cell-source-alpha"
         assert archive_sha256 == hashlib.sha256(archive_path.read_bytes()).hexdigest()
@@ -116,9 +125,19 @@ class RestoreRuntime:
             "recall": True,
             "review": True,
             "export": True,
+        }
+
+    async def finalize_candidate(self, candidate_cell_id: str) -> dict[str, bool]:
+        self.events.append(f"finalized:{candidate_cell_id}")
+        return {
             "restart": True,
             "candidateIdentity": candidate_cell_id == "cell-candidate-alpha",
         }
+
+
+class FailingProductCheckRuntime(RestoreRuntime):
+    async def product_checks(self, candidate_cell_id: str) -> dict[str, bool]:
+        raise RuntimeError("recall probe failed")
 
 
 @pytest.fixture
@@ -259,10 +278,88 @@ async def test_restore_decrypts_provider_object_and_publishes_only_after_product
     assert runtime.events == [
         "stopped:cell-candidate-alpha",
         "published:cell-candidate-alpha",
+        "stopped:cell-candidate-alpha",
+        "published:cell-candidate-alpha",
+        "finalized:cell-candidate-alpha",
         "ready:cell-candidate-alpha",
     ]
     final = await repository.get(claimed.id)
     assert final is not None and final.checkpoint == "complete"
+
+
+@pytest.mark.asyncio
+async def test_restore_resets_candidate_when_product_checks_fail(
+    tmp_path: Path,
+    restore_context,
+) -> None:
+    _, repository, key_wrapper, store = restore_context
+    claimed = await _claimed_restore(repository)
+    runtime = FailingProductCheckRuntime()
+    workflow = RestoreWorkflow(
+        repository=repository,
+        restore_store=store,
+        runtime=runtime,
+        cipher=ChunkedArchiveCipher(chunk_size=16 * 1024),
+        key_wrapper=key_wrapper,
+        provider_identity_verifier=_identity_signer().verifier(),
+        provider_bucket=PROVIDER_BUCKET,
+        scratch_root=tmp_path,
+        release_version="0.22.0",
+    )
+
+    with pytest.raises(RuntimeError, match="recall probe failed"):
+        await workflow.run(
+            claimed,
+            worker_id="restore-worker",
+            source_reference="recovery_opaque_source",
+        )
+
+    assert runtime.events == [
+        "stopped:cell-candidate-alpha",
+        "published:cell-candidate-alpha",
+        "stopped:cell-candidate-alpha",
+        "published:cell-candidate-alpha",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_restore_replay_after_candidate_publication_never_reads_or_rewrites_storage(
+    tmp_path: Path,
+    restore_context,
+) -> None:
+    _, repository, key_wrapper, store = restore_context
+    claimed = await _claimed_restore(repository)
+    published = await repository.checkpoint(
+        claimed.id,
+        "restore-worker",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        checkpoint="candidate-published",
+        state={"archive_sha256": "a" * 64},
+    )
+    runtime = RestoreRuntime()
+    workflow = RestoreWorkflow(
+        repository=repository,
+        restore_store=store,
+        runtime=runtime,
+        cipher=ChunkedArchiveCipher(chunk_size=16 * 1024),
+        key_wrapper=key_wrapper,
+        provider_identity_verifier=_identity_signer().verifier(),
+        provider_bucket=PROVIDER_BUCKET,
+        scratch_root=tmp_path,
+        release_version="0.22.0",
+    )
+
+    result = await workflow.run(
+        published,
+        worker_id="restore-worker",
+        source_reference="recovery_opaque_source",
+    )
+
+    assert result["restored"] is True
+    assert store.head_calls == 0
+    assert store.download_calls == 0
+    assert runtime.events == ["ready:cell-candidate-alpha"]
 
 
 @pytest.mark.asyncio
@@ -292,6 +389,39 @@ async def test_restore_rejects_source_binding_before_candidate_publication(
             source_reference="recovery_opaque_source",
         )
     assert not any(event.startswith("published:") for event in runtime.events)
+
+
+@pytest.mark.asyncio
+async def test_restore_rejects_expired_user_export_before_provider_read(
+    tmp_path: Path,
+    restore_context,
+) -> None:
+    database, repository, key_wrapper, store = restore_context
+    async with database.session_factory.begin() as session:
+        source = await session.scalar(select(RecoveryObject))
+        assert source is not None
+        source.kind = RunKind.USER_EXPORT
+        source.expires_at = datetime.now(UTC) - timedelta(seconds=1)
+    claimed = await _claimed_restore(repository)
+    workflow = RestoreWorkflow(
+        repository=repository,
+        restore_store=store,
+        runtime=RestoreRuntime(),
+        cipher=ChunkedArchiveCipher(chunk_size=16 * 1024),
+        key_wrapper=key_wrapper,
+        provider_identity_verifier=_identity_signer().verifier(),
+        provider_bucket=PROVIDER_BUCKET,
+        scratch_root=tmp_path,
+        release_version="0.22.0",
+    )
+
+    with pytest.raises(RestoreVerificationError, match="expired"):
+        await workflow.run(
+            claimed,
+            worker_id="restore-worker",
+            source_reference="recovery_opaque_source",
+        )
+    assert store.head_calls == 0
 
 
 @pytest.mark.asyncio

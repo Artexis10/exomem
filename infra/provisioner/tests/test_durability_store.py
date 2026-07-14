@@ -237,7 +237,13 @@ async def test_portable_delivery_uses_provider_encryption_and_fifteen_minute_url
     source = tmp_path / "portable.zip"
     source.write_bytes(b"portable plaintext")
 
-    await store.put_file(
+    first = await store.put_file(
+        "user-export-delivery/opaque.portable",
+        source,
+        metadata={"expires-at": "2030-01-01T00:15:00Z"},
+        retain_until=None,
+    )
+    replay = await store.put_file(
         "user-export-delivery/opaque.portable",
         source,
         metadata={"expires-at": "2030-01-01T00:15:00Z"},
@@ -247,4 +253,6 @@ async def test_portable_delivery_uses_provider_encryption_and_fifteen_minute_url
 
     assert client.upload_calls[0]["ServerSideEncryption"] == "AES256"
     assert client.upload_calls[0]["ContentType"] == "application/vnd.exomem.portable-export"
+    assert first == replay
+    assert len(client.upload_calls) == 1
     assert "ttl=900" in url

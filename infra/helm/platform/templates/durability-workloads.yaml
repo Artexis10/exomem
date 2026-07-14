@@ -14,6 +14,7 @@
 {{- $delivery := $workloads.workloads.deliveryGc -}}
 {{- $backup := $workloads.workloads.vaultBackup -}}
 {{- $database := $workloads.workloads.databaseBackup -}}
+{{- $actions := $workloads.workloads.durabilityActions -}}
 {{- $deletion := $workloads.workloads.deletion -}}
 {{- $volume := $workloads.workloads.volumeLifecycle -}}
 apiVersion: v1
@@ -69,6 +70,13 @@ automountServiceAccountToken: false
 apiVersion: v1
 kind: ServiceAccount
 metadata:
+  name: {{ $actions.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
   name: {{ $deletion.serviceAccount }}
   namespace: {{ .Release.Namespace }}
 automountServiceAccountToken: true
@@ -79,6 +87,64 @@ metadata:
   name: {{ $volume.serviceAccount }}
   namespace: {{ .Release.Namespace }}
 automountServiceAccountToken: true
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: exomem-durability-actions
+rules:
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "patch", "update", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["limitranges", "resourcequotas", "serviceaccounts"]
+    verbs: ["get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["delete", "get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/log"]
+    verbs: ["get"]
+  - apiGroups: ["apps"]
+    resources: ["statefulsets", "statefulsets/scale"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "delete", "get", "list"]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: ["create", "delete", "get", "patch", "update"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+  - apiGroups: ["traefik.io"]
+    resources: ["ingressroutes", "middlewares"]
+    verbs: ["create", "delete", "get", "list", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: exomem-durability-actions
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: exomem-durability-actions
+subjects:
+  - kind: ServiceAccount
+    name: {{ $actions.serviceAccount }}
+    namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -178,6 +244,157 @@ subjects:
   - kind: ServiceAccount
     name: {{ $volume.serviceAccount }}
     namespace: {{ .Release.Namespace }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: exomem-durability-actions
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-durability-actions
+    app.kubernetes.io/part-of: exomem-hosted-durability
+spec:
+  schedule: {{ $actions.schedule | quote }}
+  concurrencyPolicy: {{ $actions.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $actions.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $actions.activeDeadlineSeconds }}
+      backoffLimit: {{ $actions.backoffLimit }}
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: exomem-durability-actions
+            app.kubernetes.io/part-of: exomem-hosted-durability
+        spec:
+          serviceAccountName: {{ $actions.serviceAccount }}
+          automountServiceAccountToken: {{ $actions.automountServiceAccountToken }}
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: {type: RuntimeDefault}
+          containers:
+            - name: durability-actions
+              image: {{ .Values.provisioner.image }}
+              imagePullPolicy: IfNotPresent
+              command: {{ $actions.command | toJson }}
+              env:
+                - name: EXOMEM_DURABILITY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-database, key: url}
+                - name: EXOMEM_DURABILITY_DATABASE_SCHEMA
+                  value: {{ .Values.provisioner.databaseSchema | quote }}
+                - name: EXOMEM_DURABILITY_DATABASE_ROLE
+                  value: {{ .Values.provisioner.databaseRole | quote }}
+                - name: EXOMEM_DURABILITY_ENVELOPE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
+                - name: EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
+                      key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+                - name: EXOMEM_DURABILITY_B2_ENDPOINT_URL
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
+                - name: EXOMEM_DURABILITY_B2_REGION
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
+                - name: EXOMEM_DURABILITY_RECOVERY_BUCKET
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: recovery-bucket}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_BUCKET
+                  valueFrom:
+                    configMapKeyRef: {name: exomem-durability-storage, key: user-export-bucket}
+                - name: EXOMEM_DURABILITY_RECOVERY_RESTORE_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-recovery-restore-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_RECOVERY_RESTORE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-recovery-restore-key, key: application-key}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_UPLOAD_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-upload-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_UPLOAD_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-upload-key, key: application-key}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_RESTORE_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-restore-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_RESTORE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-restore-key, key: application-key}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELETE_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delete-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELETE_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delete-key, key: application-key}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELIVERY_KEY_ID
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delivery-key-id, key: application-key-id}
+                - name: EXOMEM_DURABILITY_USER_EXPORT_DELIVERY_KEY
+                  valueFrom:
+                    secretKeyRef: {name: exomem-user-export-delivery-key, key: application-key}
+                - name: EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH
+                  value: /etc/exomem/release/exomem-hosted-release-v1.json
+                - name: EXOMEM_DURABILITY_PROVISIONER_IMAGE
+                  value: {{ .Values.provisioner.image | quote }}
+                - name: EXOMEM_PROVISIONER_CELL_CHART_PATH
+                  value: {{ .Values.provisioner.cellChartPath | quote }}
+                - name: EXOMEM_PROVISIONER_CELL_CHART_VERSION
+                  value: {{ .Values.provisioner.cellChartVersion | quote }}
+                - name: EXOMEM_PROVISIONER_HELM_BINARY
+                  value: {{ .Values.provisioner.helmBinary | quote }}
+                - name: EXOMEM_PROVISIONER_HELM_VERSION
+                  value: {{ .Values.provisioner.helmVersion | quote }}
+                - name: EXOMEM_PROVISIONER_CONTROL_HOSTNAME
+                  value: {{ .Values.provisioner.controlHostname | quote }}
+                - name: EXOMEM_PROVISIONER_TRANSFER_HOSTNAME
+                  value: {{ .Values.provisioner.transferHostname | quote }}
+                - name: EXOMEM_PROVISIONER_BROWSER_ORIGIN
+                  value: {{ .Values.provisioner.browserOrigin | quote }}
+                - name: EXOMEM_PROVISIONER_LOCATION
+                  value: {{ .Values.provisioner.location | quote }}
+                - name: EXOMEM_PROVISIONER_INTERNAL_ORIGIN
+                  value: {{ .Values.provisioner.internalOrigin | quote }}
+                - name: EXOMEM_DURABILITY_WORKER_ID
+                  valueFrom: {fieldRef: {fieldPath: metadata.name}}
+                - name: EXOMEM_DURABILITY_MAX_OPERATIONS
+                  value: {{ $actions.maxOperations | quote }}
+                - name: EXOMEM_DURABILITY_SCRATCH_ROOT
+                  value: /var/lib/exomem-scratch
+                - name: HOME
+                  value: /tmp
+              resources:
+                requests: {cpu: 50m, memory: 128Mi}
+                limits: {cpu: 1, memory: 768Mi}
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                runAsUser: 10001
+                capabilities: {drop: [ALL]}
+              volumeMounts:
+                - {name: scratch, mountPath: /var/lib/exomem-scratch}
+                - {name: temporary, mountPath: /tmp}
+                - {name: hosted-release, mountPath: /etc/exomem/release, readOnly: true}
+          volumes:
+            - name: scratch
+              emptyDir: {sizeLimit: {{ $actions.scratchSize | quote }}}
+            - name: temporary
+              emptyDir: {sizeLimit: 64Mi}
+            - name: hosted-release
+              configMap:
+                name: exomem-hosted-release-v1
+                items:
+                  - {key: exomem-hosted-release-v1.json, path: exomem-hosted-release-v1.json}
 ---
 apiVersion: batch/v1
 kind: CronJob
