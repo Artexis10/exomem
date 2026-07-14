@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime as dt
 import hashlib
 import json
 import os
@@ -15,6 +16,18 @@ from exomem import (
     semantic_contract,
     semantic_writes,
     vault,
+)
+from exomem import (
+    edit as edit_module,
+)
+from exomem import (
+    multi_edit as multi_edit_module,
+)
+from exomem import (
+    set_frontmatter_field as set_frontmatter_module,
+)
+from exomem import (
+    set_take as set_take_module,
 )
 
 _ID = "00000000-0000-4000-8000-000000000061"
@@ -296,6 +309,231 @@ def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
         tmp_path, _ID, reviewed.after.review_fingerprint
     )
     assert loaded == reviewed.requested_decision
+
+
+def test_surgical_validate_only_adds_semantic_preflight_without_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="preview semantic lifecycle",
+        old_string="A",
+        new_string="B",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.match_count == 1
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is False
+    assert result.semantic["transition_token"]
+    assert page.read_text(encoding="utf-8") == source
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_surgical_edit_commits_through_existing_semantic_coordinator(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="exercise semantic lifecycle",
+        old_string="A",
+        new_string="B",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.path == _PAGE
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is True
+    assert "B" in page.read_text(encoding="utf-8")
+    assert activation_manifest.manifest_path(tmp_path).exists()
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert set(result.as_dict()) == {"path", "warnings", "semantic"}
+
+
+def test_multi_edit_validate_and_commit_preserve_shape_with_semantic_feedback(
+    tmp_path: Path,
+) -> None:
+    source = _source("A\n\nC")
+    _write(tmp_path, _PAGE, source)
+    edits = [
+        {"old_string": "A", "new_string": "B"},
+        {"old_string": "C", "new_string": "D"},
+    ]
+
+    preview = multi_edit_module.multi_edit(
+        tmp_path,
+        path=_PAGE,
+        why="preview batch",
+        edits=edits,
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert preview.edits == [
+        {"index": 0, "match_count": 1, "replace_all": False},
+        {"index": 1, "match_count": 1, "replace_all": False},
+    ]
+    assert preview.semantic is not None
+    assert preview.semantic["mutated"] is False
+
+    committed = multi_edit_module.multi_edit(
+        tmp_path,
+        path=_PAGE,
+        why="commit batch",
+        edits=edits,
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.edits_applied == 2
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert set(committed.as_dict()) == {
+        "path",
+        "edits_applied",
+        "warnings",
+        "semantic",
+    }
+
+
+def test_set_take_propagates_edit_semantic_feedback_unchanged(tmp_path: Path) -> None:
+    source = _source("- Film (2026) [take: ]")
+    _write(tmp_path, _PAGE, source)
+
+    result = set_take_module.set_take(
+        tmp_path,
+        path=_PAGE,
+        row_key="Film (2026)",
+        take="Sharp.",
+        why="record take",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "edit"
+    assert result.semantic["mutated"] is True
+    assert set(result.as_dict()) == {"path", "row", "warnings", "semantic"}
+
+
+def test_set_frontmatter_project_plan_is_pure_until_semantic_commit(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    registry_path = tmp_path / "Knowledge Base/_Schema/project-keys.yaml"
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+
+    preview = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="project",
+        value="new-domain",
+        why="preview project move",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert preview.validate_only is True
+    assert preview.semantic is not None
+    assert preview.semantic["mutated"] is False
+    assert page.read_text(encoding="utf-8") == source
+    assert not registry_path.exists()
+
+    committed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="project",
+        value="new-domain",
+        why="commit project move",
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert "project: new-domain" in page.read_text(encoding="utf-8")
+    assert "new-domain:" in registry_path.read_text(encoding="utf-8")
+
+
+def test_set_frontmatter_preliminary_block_does_not_register_project(
+    tmp_path: Path,
+) -> None:
+    source_path = "Knowledge Base/Sources/Articles/source.md"
+    _write(tmp_path, source_path, _source("Raw"))
+    registry_path = tmp_path / "Knowledge Base/_Schema/project-keys.yaml"
+
+    with pytest.raises(set_frontmatter_module.SetFrontmatterError) as exc:
+        set_frontmatter_module.set_frontmatter_field(
+            tmp_path,
+            path=source_path,
+            field="project",
+            value="blocked-domain",
+            why="must remain inert",
+        )
+
+    assert exc.value.code == "APPEND_ONLY"
+    assert not registry_path.exists()
+
+
+def test_set_frontmatter_draft_to_active_commits_exact_reviewed_none(
+    tmp_path: Path,
+) -> None:
+    draft = _source("Draft").replace("status: active", "status: draft")
+    page = _write(tmp_path, _PAGE, draft)
+    _write(tmp_path, _OTHER_PAGE, _source("Existing", page_id=_OTHER_ID))
+
+    preview = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="preview activation",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert preview.semantic is not None
+    assert preview.semantic["applicability"] == "full"
+    assert preview.semantic["contract_result"]["should_block"] is True
+
+    reviewed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="review and activate",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+        semantic_transition_token=preview.semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=preview.semantic["transition_hash"],
+        relation_review_reason="No honest relation exists for this activation",
+    )
+    assert reviewed.semantic is not None
+    assert reviewed.semantic["contract_result"]["should_block"] is False
+
+    committed = set_frontmatter_module.set_frontmatter_field(
+        tmp_path,
+        path=_PAGE,
+        field="status",
+        value="active",
+        why="review and activate",
+        today=dt.date(2026, 7, 14),
+        semantic_transition_token=reviewed.semantic["transition_token"],
+        relation_disposition="reviewed_none",
+        relation_review_hash=reviewed.semantic["transition_hash"],
+        relation_review_reason="No honest relation exists for this activation",
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["mutated"] is True
+    assert committed.semantic["lifecycle_state"] == "new"
+    assert "status: active" in page.read_text(encoding="utf-8")
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(

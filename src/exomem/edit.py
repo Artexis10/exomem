@@ -38,13 +38,12 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import corpus_aware, indexes
+from . import corpus_aware, indexes, semantic_writes
 from . import find as find_module
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
     WikilinkResolver,
-    batch_atomic_write,
     content_hash,
     escape_wikilinks_for_log,
     in_append_only_tree,
@@ -59,9 +58,13 @@ log = logging.getLogger(__name__)
 class EditResult:
     path: str  # vault-relative, with .md
     warnings: list[str]
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
-        return {"path": self.path, "warnings": self.warnings}
+        value = {"path": self.path, "warnings": self.warnings}
+        if self.semantic is not None:
+            value["semantic"] = self.semantic
+        return value
 
 
 @dataclass
@@ -73,15 +76,19 @@ class EditValidation:
     mode: str            # "surgical"
     match_count: int     # occurrences of old_string in the body
     matches: list[str]   # the line(s) around each occurrence (capped)
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
-        return {
+        value = {
             "path": self.path,
             "validate_only": self.validate_only,
             "mode": self.mode,
             "match_count": self.match_count,
             "matches": self.matches,
         }
+        if self.semantic is not None:
+            value["semantic"] = self.semantic
+        return value
 
 
 @dataclass
@@ -110,6 +117,10 @@ def edit(
     validate_only: bool = False,
     create_missing_section: bool = False,
     today: dt.date | None = None,
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
 ) -> EditResult | EditValidation:
     """Edit a compiled page in place. Bumps `updated:`.
 
@@ -225,12 +236,42 @@ def edit(
         if validate_only:
             # Preview only — report the count (don't raise on 0 or >1; seeing
             # the count is the whole point) and write nothing.
+            count = body.count(old_string)  # type: ignore[arg-type]
+            semantic: dict | None = None
+            if count >= 1 and (replace_all or count == 1):
+                resolver = find_module.writer_resolver_snapshot(vault_root)
+                rendered, _ = apply_surgical_replace(
+                    body,
+                    old_string,  # type: ignore[arg-type]
+                    new_string,  # type: ignore[arg-type]
+                    replace_all,
+                    vault_root,
+                    rel_path=rel_path,
+                    resolver=resolver,
+                )
+                rendered = rendered.rstrip() + "\n"
+                proposed = f"---\n{fm_text}\n---\n{rendered}"
+                try:
+                    semantic = semantic_writes.preflight_existing(
+                        vault_root,
+                        path=rel_path,
+                        after_source=proposed,
+                        operation="edit",
+                        expected_before_hash=content_hash(editable.original_text),
+                        transition_token=semantic_transition_token,
+                        relation_disposition=relation_disposition,
+                        relation_review_hash=relation_review_hash,
+                        relation_review_reason=relation_review_reason,
+                    ).as_dict()
+                except semantic_writes.SemanticWriteError as error:
+                    raise EditError(error.code, ["semantic"], error.reason) from error
             return EditValidation(
                 path=rel_path,
                 validate_only=True,
                 mode="surgical",
-                match_count=body.count(old_string),  # type: ignore[arg-type]
+                match_count=count,
                 matches=_match_contexts(body, old_string),  # type: ignore[arg-type]
+                semantic=semantic,
             )
         new_body_final, body_warnings = apply_surgical_replace(
             body,
@@ -296,7 +337,7 @@ def edit(
     if tags is not None:
         changed.append("tags")
 
-    warnings = commit_edit(
+    committed = commit_edit(
         vault_root,
         abs_path=abs_path,
         rel_path=rel_path,
@@ -305,8 +346,17 @@ def edit(
         why=why,
         changed=changed,
         extra_warnings=body_warnings,
+        expected_before_hash=content_hash(editable.original_text),
+        semantic_transition_token=semantic_transition_token,
+        relation_disposition=relation_disposition,
+        relation_review_hash=relation_review_hash,
+        relation_review_reason=relation_review_reason,
     )
-    return EditResult(path=rel_path, warnings=warnings)
+    return EditResult(
+        path=rel_path,
+        warnings=committed.warnings,
+        semantic=committed.semantic,
+    )
 
 
 # ---------------- path resolution ----------------
@@ -588,6 +638,12 @@ def apply_section_edit(
     return "\n".join(before + [head_line] + new_section + after), warnings
 
 
+@dataclass(frozen=True, slots=True)
+class CommitEditResult:
+    warnings: list[str]
+    semantic: dict
+
+
 def commit_edit(
     vault_root: Path,
     *,
@@ -599,7 +655,12 @@ def commit_edit(
     changed: list[str],
     op: str = "edit",
     extra_warnings: list[str] | None = None,
-) -> list[str]:
+    expected_before_hash: str | None = None,
+    semantic_transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> CommitEditResult:
     """Stage page write + opportunistic index refresh + ONE log entry; commit atomically.
 
     Shared by `edit` and `multi_edit` so both produce exactly one log entry and
@@ -608,7 +669,7 @@ def commit_edit(
     """
     kb = kb_root(vault_root)
     log_file = kb / "log.md"
-    writes: list[PlannedWrite] = [PlannedWrite(path=abs_path, content=new_text)]
+    writes: list[PlannedWrite] = []
     warnings: list[str] = list(extra_warnings or [])
 
     # Opportunistic sub-index refresh — surfacing any drift on every write
@@ -640,13 +701,31 @@ def commit_edit(
     else:
         warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
+    semantic_operation = "edit" if op in {"edit", "multi_edit"} else op
     try:
-        batch_atomic_write(writes, vault_root=vault_root)
+        preflight = semantic_writes.preflight_existing(
+            vault_root,
+            path=rel_path,
+            after_source=new_text,
+            operation=semantic_operation,  # type: ignore[arg-type]
+            expected_before_hash=expected_before_hash,
+            transition_token=semantic_transition_token,
+            relation_disposition=relation_disposition,
+            relation_review_hash=relation_review_hash,
+            relation_review_reason=relation_review_reason,
+        )
+        committed = semantic_writes.commit_existing(
+            vault_root,
+            preflight=preflight,
+            auxiliary_writes=tuple(writes),
+        )
+    except semantic_writes.SemanticWriteError as error:
+        raise EditError(error.code, ["semantic"], error.reason) from error
     except Exception as e:
         log.exception("partial write during edit(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
-    return warnings
+    return CommitEditResult(warnings, committed.as_dict())
 
 
 # ---------------- validate-only preview ----------------
