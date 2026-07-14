@@ -52,6 +52,7 @@ jobs:
           go install github.com/yannh/kubeconform/cmd/kubeconform@v${KUBECONFORM_VERSION}
           go install github.com/open-policy-agent/conftest@v${CONFTEST_VERSION}
           go install github.com/getsops/sops/v3/cmd/sops@v${SOPS_VERSION}
+          go install filippo.io/age/cmd/age-keygen@v${AGE_VERSION}
           go install github.com/aquasecurity/trivy/cmd/trivy@v${TRIVY_VERSION}
           curl --fail --silent --show-error --location \
             --output /tmp/shellcheck.tar.xz \
@@ -68,7 +69,12 @@ jobs:
           export PATH="$PWD/.venv-hosted-ci/bin:$PATH"
           ansible-galaxy collection install -r infra/ansible/collections/requirements.yml
       - name: Terraform, TFLint, Checkov, Ansible, Helm, policy, SOPS, types, tests, and secret scan
-        run: infra/scripts/validate.sh
+        run: |
+          EXOMEM_RUN_REAL_SOPS_TESTS=1 \
+          RUN_K3S_ADMISSION_TEST=1 \
+          SOPS_BIN="$(command -v sops)" \
+          AGE_KEYGEN_BIN="$(command -v age-keygen)" \
+          infra/scripts/validate.sh
       - name: Strict hosted OpenSpec
         run: |
           npm install --global @fission-ai/openspec
