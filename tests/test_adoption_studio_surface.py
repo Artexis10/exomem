@@ -52,6 +52,17 @@ def _post(client: TestClient, command: str, body: dict) -> dict:
     return payload["data"]
 
 
+def _post_error(client: TestClient, command: str, body: dict) -> tuple[int, dict]:
+    response = client.post(
+        f"/api/{command}",
+        json=body,
+        headers={"Authorization": "Bearer studio-key"},
+    )
+    payload = response.json()
+    assert payload["success"] is False, response.text
+    return response.status_code, payload["error"]
+
+
 # --- 25 ---
 def test_registry_entry_and_route_validation() -> None:
     names = {c.name for c in commands.PRODUCT_COMMANDS}
@@ -169,3 +180,55 @@ def test_golden_fixture_names_adoption_studio() -> None:
     assert "adoption_studio" in baseline
     schema = baseline["adoption_studio"]["inputSchema"]
     assert "action" in schema["properties"]
+
+
+# --- fix round: HTTP 409 mapping for stale-drift codes ---
+def test_rest_returns_409_for_stale_plan_apply(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_legacy(vault)
+    client = _client(vault, monkeypatch)
+
+    started = _post(client, "adoption_studio", {"action": "start", "path": "Old Notes"})
+    run_id = started["run_id"]
+    _post(client, "adoption_studio", {"action": "select", "run_id": run_id, "include": ["Old Notes"]})
+    _post(client, "adoption_studio", {"action": "plan", "run_id": run_id})
+
+    status, error = _post_error(
+        client,
+        "adoption_studio",
+        {"action": "apply", "run_id": run_id, "plan_id": "not-the-real-plan-id"},
+    )
+    assert status == 409
+    assert error["code"] == "PLAN_STALE"
+
+
+def test_rest_returns_409_for_adoption_source_changed(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_legacy(vault)
+    client = _client(vault, monkeypatch)
+
+    started = _post(client, "adoption_studio", {"action": "start", "path": "Old Notes"})
+    run_id = started["run_id"]
+    _post(
+        client,
+        "adoption_studio",
+        {"action": "select", "run_id": run_id, "include": ["Old Notes/quarterly-planning.md"]},
+    )
+    planned = _post(client, "adoption_studio", {"action": "plan", "run_id": run_id})
+    plan_id = planned["plan"]["plan_id"]
+
+    # Drift the sole selected original after plan; plan_id/selection_hash are
+    # both still current, so this is NOT a PLAN_STALE case.
+    (vault / "Old Notes/quarterly-planning.md").write_text(
+        "# Quarterly Planning Notes\n\nRewritten after plan.\n", encoding="utf-8"
+    )
+
+    status, error = _post_error(
+        client,
+        "adoption_studio",
+        {"action": "apply", "run_id": run_id, "plan_id": plan_id},
+    )
+    assert status == 409
+    assert error["code"] == "ADOPTION_SOURCE_CHANGED"

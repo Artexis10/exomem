@@ -64,6 +64,9 @@ _CONFLICT_CODES = frozenset(
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
         "MUTATION_BUSY",
+        "ADOPTION_SOURCE_CHANGED",
+        "PLAN_STALE",
+        "REVIEW_ITEM_CHANGED",
     }
 )
 

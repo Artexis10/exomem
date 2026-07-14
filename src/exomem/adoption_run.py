@@ -684,6 +684,23 @@ def apply(
                 continue
             validated.append(op)
 
+        # Run-level stale-conflict refusal, distinct from PLAN_STALE (a plan
+        # identity mismatch): a plain, whole-plan apply attempt whose write-time
+        # re-validation finds NOTHING left to commit, on a run that has never
+        # successfully applied anything, means every requested source drifted or
+        # vanished since the plan was captured. Refuse before any write so the
+        # still-valid selection survives a re-scan/re-plan (design.md's pinned
+        # ADOPTION_SOURCE_CHANGED vocabulary) — a scoped retry_failed/only_paths
+        # call that still fails one stubborn item (while others already applied)
+        # is NOT this case; that stays a normal partial response.
+        has_any_applied = any(o.get("status") in _APPLIED_STATUSES for o in outcomes.values())
+        if not retry_failed and not only_paths and target_items and not validated and not has_any_applied:
+            raise AdoptionRunError(
+                "ADOPTION_SOURCE_CHANGED",
+                "every requested source changed or is missing since the plan was captured; "
+                "re-scan and re-plan to continue",
+            )
+
         # Persist the transient `applying` phase BEFORE the first item write so a
         # crash mid-apply is visible to `status`.
         run["phase"] = "applying"
