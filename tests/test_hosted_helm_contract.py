@@ -301,6 +301,12 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
 
     scheduler_jobs = [item for item in documents if item.get("kind") == "CronJob"]
     scheduler_text = json.dumps(scheduler_jobs)
+    scheduler_commands = "\n".join(
+        item["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"][0]
+        for item in scheduler_jobs
+    )
+    assert 'if status="$(curl' in scheduler_commands
+    assert 'status="000"' in scheduler_commands
     for metric in (
         "exomem_hosted_scheduler_attempts_total",
         "exomem_hosted_scheduler_failures_total",
