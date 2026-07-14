@@ -46,6 +46,7 @@ _FEEDBACK_STRING_BYTE_LIMIT = 256
 _FEEDBACK_NESTED_ITEM_LIMIT = 8
 _FEEDBACK_BYTE_BUDGET = 120 * 1024
 _RECOVERY_REVIEW_LIMIT = 256
+_RECOVERY_FEEDBACK_ENTRY_LIMIT = 32
 _MOVE_WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(\|[^\]\n]*)?\]\]")
 
 
@@ -668,35 +669,7 @@ class RecoveryPreflight:
         return any(item.contract_result.should_block for item in self.evaluations)
 
     def as_dict(self) -> dict[str, Any]:
-        review_requests = [
-            {
-                "page_identity": item.after.identity,
-                "transition_token": item.transition_token,
-                "transition_hash": hashlib.sha256(
-                    item.transition_token.encode("utf-8")
-                ).hexdigest(),
-            }
-            for item in self.evaluations
-            if item.after.eligible_compiled
-            and item.after.identity_kind == "exomem_id"
-            and item.after_review is None
-            and item.requested_decision is None
-            and _recovery_result_reviewable(item.contract_result)
-            and self.after_corpus.identity_census.paths_by_identity.get(
-                item.after.identity
-            )
-            == (item.after.path,)
-        ][:_RECOVERY_REVIEW_LIMIT]
-        return {
-            "operation": "recover",
-            "mutated": self.mutated,
-            "restored_paths": [item.restore_path for item in self.entries],
-            "contract_results": {
-                item.after.identity: _bounded_semantic_feedback(item.contract_result)
-                for item in self.evaluations
-            },
-            "relation_review_requests": review_requests,
-        }
+        return _recovery_feedback(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -706,10 +679,87 @@ class RecoveryCommit:
     mutated: Literal[True] = True
 
     def as_dict(self) -> dict[str, Any]:
-        value = self.preflight.as_dict()
-        value["mutated"] = self.mutated
-        value["lifecycle_states"] = dict(self.lifecycle_states)
-        return value
+        return _recovery_feedback(
+            self.preflight,
+            mutated=self.mutated,
+            lifecycle_states=self.lifecycle_states,
+        )
+
+
+def _recovery_feedback(
+    preflight: RecoveryPreflight,
+    *,
+    mutated: bool = False,
+    lifecycle_states: tuple[tuple[str, str], ...] = (),
+) -> dict[str, Any]:
+    review_requests = [
+        {
+            "page_identity": item.after.identity,
+            "transition_token": item.transition_token,
+            "transition_hash": hashlib.sha256(
+                item.transition_token.encode("utf-8")
+            ).hexdigest(),
+        }
+        for item in preflight.evaluations
+        if item.after.eligible_compiled
+        and item.after.identity_kind == "exomem_id"
+        and item.after_review is None
+        and item.requested_decision is None
+        and _recovery_result_reviewable(item.contract_result)
+        and preflight.after_corpus.identity_census.paths_by_identity.get(
+            item.after.identity
+        )
+        == (item.after.path,)
+    ]
+    retained_entries = preflight.entries[:_RECOVERY_FEEDBACK_ENTRY_LIMIT]
+    retained_evaluations = preflight.evaluations[:_RECOVERY_FEEDBACK_ENTRY_LIMIT]
+    retained_states = lifecycle_states[:_RECOVERY_FEEDBACK_ENTRY_LIMIT]
+    omitted = {
+        "restored_paths": len(preflight.entries) - len(retained_entries),
+        "contract_results": len(preflight.evaluations) - len(retained_evaluations),
+        "lifecycle_states": len(lifecycle_states) - len(retained_states),
+    }
+    value: dict[str, Any] = {
+        "operation": "recover",
+        "mutated": mutated,
+        "restored_paths": [item.restore_path for item in retained_entries],
+        "contract_results": {
+            item.after.identity: _bounded_semantic_feedback(item.contract_result)
+            for item in retained_evaluations
+        },
+        "relation_review_requests": review_requests,
+        "lifecycle_states": dict(retained_states),
+        "omitted_counts": omitted,
+        "truncation": {
+            "byte_budget": _FEEDBACK_BYTE_BUDGET,
+            "budget_items_omitted": 0,
+        },
+    }
+    while _feedback_serialized_size(value) >= _FEEDBACK_BYTE_BUDGET:
+        removed = 0
+        for key in ("contract_results", "lifecycle_states"):
+            container = value[key]
+            if not container:
+                continue
+            retained = list(container)[: len(container) // 2]
+            removed_now = len(container) - len(retained)
+            value[key] = {item: container[item] for item in retained}
+            value["omitted_counts"][key] += removed_now
+            removed += removed_now
+        paths = value["restored_paths"]
+        if paths:
+            keep = len(paths) // 2
+            removed_now = len(paths) - keep
+            del paths[keep:]
+            value["omitted_counts"]["restored_paths"] += removed_now
+            removed += removed_now
+        value["truncation"]["budget_items_omitted"] += removed
+        if removed == 0:
+            raise SemanticWriteError(
+                "SEMANTIC_FEEDBACK_LIMIT",
+                "recovery review requests exceed the bounded feedback budget",
+            )
+    return value
 
 
 MoveMutation = Callable[
@@ -2072,7 +2122,7 @@ def preflight_recovery(
             "RELATION_REVIEW_HISTORY_LIMIT",
             "recovery requires too many reviewed-none decisions for one batch",
         )
-    return RecoveryPreflight(
+    preflight = RecoveryPreflight(
         bound_entries,
         tuple(evaluations),
         before_corpus,
@@ -2082,6 +2132,8 @@ def preflight_recovery(
         tuple(trash_census_guards),
         recovery_sidecar_guard,
     )
+    preflight.as_dict()
+    return preflight
 
 
 def _plan_recovery_lifecycle(

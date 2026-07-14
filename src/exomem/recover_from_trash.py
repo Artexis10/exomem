@@ -328,18 +328,37 @@ def recover_from_trash(
         else ([restore_abs] if restore_abs.suffix.lower() == ".md" else [])
     )
     if restored_markdown:
-        try:
-            from . import file_watcher, index_sync
+        from . import file_watcher, index_sync
 
+        try:
             file_watcher.register_self_write(vault_root, restored_markdown)
-            index_feedback = index_sync.upsert_after_write(
-                vault_root, restored_markdown
-            ).as_dict()
+        except Exception:  # noqa: BLE001 - suppression is independently observed
+            log.exception("restored watcher suppression failed for %s", restore_rel)
+            watcher_outcome = index_sync.IndexComponentOutcome(
+                "watcher", "degraded", "self_write_registration_failed"
+            )
+            warnings.append(
+                "recovery succeeded but watcher suppression degraded; run reconcile"
+            )
+        else:
+            watcher_outcome = index_sync.IndexComponentOutcome(
+                "watcher", "completed", "self_write_registered"
+            )
+        try:
+            report = index_sync.upsert_after_write(vault_root, restored_markdown)
         except Exception:  # noqa: BLE001 - restore remains authoritative
             log.exception("restored index refresh failed for %s", restore_rel)
             warnings.append(
                 "recovery succeeded but derived-index refresh failed; run reconcile"
             )
+            report = index_sync.failed_upsert_report(
+                vault_root,
+                restored_markdown,
+                watcher=watcher_outcome,
+            )
+        else:
+            report = index_sync.with_component(report, watcher_outcome)
+        index_feedback = report.as_dict()
 
     today = today or dt.date.today()
     date_iso = today.isoformat()

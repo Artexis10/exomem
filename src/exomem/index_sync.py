@@ -50,6 +50,7 @@ class IndexComponentOutcome:
             "resolver",
             "epistemic_graph",
             "embeddings",
+            "watcher",
         }:
             raise ValueError("unsupported index component")
         if type(self.outcome) is not str or self.outcome not in {
@@ -99,7 +100,7 @@ class IndexSyncReport:
             for path in (*self.requested_paths, *self.eligible_paths)
         ):
             raise ValueError("index sync report contains an unsafe path")
-        if len(self.components) > 5:
+        if len(self.components) > 6:
             raise ValueError("index sync component count exceeds report bound")
         if len({item.component for item in self.components}) != len(self.components):
             raise ValueError("index sync report contains duplicate components")
@@ -145,6 +146,45 @@ def _bounded_paths(paths: list[str]) -> tuple[tuple[str, ...], bool]:
     return (
         tuple(bounded[:_REPORT_PATH_LIMIT]),
         len(bounded) != len(paths) or len(bounded) > _REPORT_PATH_LIMIT,
+    )
+
+
+def with_component(
+    report: IndexSyncReport, outcome: IndexComponentOutcome
+) -> IndexSyncReport:
+    """Return one bounded report with an independently observed outer leaf."""
+    components = tuple(
+        item for item in report.components if item.component != outcome.component
+    ) + (outcome,)
+    return IndexSyncReport(
+        report.operation,
+        report.requested_paths,
+        report.eligible_paths,
+        components,
+        report.paths_truncated,
+    )
+
+
+def failed_upsert_report(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    watcher: IndexComponentOutcome,
+) -> IndexSyncReport:
+    """Bound an outer upsert failure without claiming any leaf completed."""
+    requested, truncated = _bounded_paths(_rel_md_paths(vault_root, written_paths))
+    components = tuple(
+        IndexComponentOutcome(component, "degraded", "dispatch_failed")
+        for component in (
+            "lexstore",
+            "memory_refs",
+            "resolver",
+            "epistemic_graph",
+            "embeddings",
+        )
+    ) + (watcher,)
+    return IndexSyncReport(
+        "upsert", requested, requested, components, truncated
     )
 
 

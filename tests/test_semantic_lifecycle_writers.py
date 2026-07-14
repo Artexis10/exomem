@@ -944,6 +944,9 @@ def test_directory_review_validation_does_not_truncate_actionable_pages(
 
     assert validation.semantic is not None
     assert len(validation.semantic["relation_review_requests"]) == 33
+    assert validation.semantic["truncation"]["byte_budget"] == 120 * 1024
+    assert validation.semantic["omitted_counts"]["contract_results"] == 1
+    assert len(json.dumps(validation.semantic).encode("utf-8")) < 120 * 1024
     assert (tmp_path / trashed.trash_path).is_dir()
 
 
@@ -988,6 +991,69 @@ def test_recovery_review_token_cannot_replay_at_another_destination(
     assert blocked.value.code == "LIFECYCLE_TRANSITION_REVIEW_MISMATCH"
     assert (tmp_path / trashed.trash_path).exists()
     assert not (tmp_path / _OTHER_PAGE).exists()
+
+
+def test_recovery_attempts_index_when_watcher_suppression_degrades(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import file_watcher
+
+    anchor = "Knowledge Base/Notes/Insights/fanout-anchor.md"
+    source = _source("Recover me").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/fanout-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 13, 0),
+    )
+    calls: list[list[str]] = []
+    report = index_sync.IndexSyncReport(
+        "upsert",
+        (_PAGE,),
+        (_PAGE,),
+        (
+            index_sync.IndexComponentOutcome(
+                "embeddings", "deferred", "deferred_durable"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        file_watcher,
+        "register_self_write",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("watcher down")),
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        calls.append([path.relative_to(root).as_posix() for path in paths])
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", capture_upsert)
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert calls[-1] == [_PAGE]
+    assert sum(_PAGE in batch for batch in calls) == 1
+    assert result.index is not None
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+    outcomes = {
+        item["component"]: (item["outcome"], item["code"])
+        for item in result.index["components"]
+    }
+    assert outcomes["watcher"] == ("degraded", "self_write_registration_failed")
+    assert outcomes["embeddings"] == ("deferred", "deferred_durable")
 
 
 def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:
