@@ -58,13 +58,18 @@ def test_single_file_edit_refreshes_affected_graph_rows(tmp_path: Path) -> None:
     idx.rebuild_all()
     b_before = next(n for n in idx.nodes(path=B) if n["kind"] == "file")["source_hash"]
 
-    a.write_text(a.read_text(encoding="utf-8").replace("A claim", "A changed claim"), encoding="utf-8")
+    a.write_text(
+        a.read_text(encoding="utf-8").replace("A claim", "A changed claim"),
+        encoding="utf-8",
+    )
     report = idx.refresh_paths([a])
 
     assert report["indexed_files"] == 1
     a_after = next(n for n in idx.nodes(path=A) if n["kind"] == "file")
     b_after = next(n for n in idx.nodes(path=B) if n["kind"] == "file")
-    assert a_after["source_hash"] == epistemic_graph.vault_module.content_hash(a.read_text(encoding="utf-8"))
+    assert a_after["source_hash"] == epistemic_graph.vault_module.content_hash(
+        a.read_text(encoding="utf-8")
+    )
     assert b_after["source_hash"] == b_before
 
 
@@ -74,7 +79,10 @@ def test_incremental_graph_update_matches_full_rebuild(tmp_path: Path) -> None:
     idx = epistemic_graph.EpistemicGraphIndex(vault)
     idx.rebuild_all()
 
-    a.write_text(a.read_text(encoding="utf-8") + "\n## Decision\n\nKeep it derived.\n", encoding="utf-8")
+    a.write_text(
+        a.read_text(encoding="utf-8") + "\n## Decision\n\nKeep it derived.\n",
+        encoding="utf-8",
+    )
     idx.refresh_paths([a])
     incremental = epistemic_graph.graph_context(vault, path=A, depth=1)
 
@@ -140,7 +148,10 @@ def test_relation_edges_follow_incremental_edit_move_and_delete(tmp_path: Path) 
     index.delete_paths([A])
     index.refresh_paths([moved])
     assert index.nodes(path=A) == []
-    assert any(edge["relation_type"] == "contradicts" for edge in index.edges(source_path=moved_rel))
+    assert any(
+        edge["relation_type"] == "contradicts"
+        for edge in index.edges(source_path=moved_rel)
+    )
 
     moved.unlink()
     index.delete_paths([moved_rel])
@@ -158,7 +169,11 @@ def test_target_refresh_preserves_inbound_relation_as_placeholder(tmp_path: Path
     )
     index = epistemic_graph.EpistemicGraphIndex(vault)
     index.rebuild_all()
-    before = next(edge for edge in index.edges(source_path=A) if edge["relation_type"] == "supports")
+    before = next(
+        edge
+        for edge in index.edges(source_path=A)
+        if edge["relation_type"] == "supports"
+    )
     target.write_text(target.read_text(encoding="utf-8") + "\nUpdated.\n", encoding="utf-8")
     index.refresh_paths([target])
     assert before in index.edges(source_path=A)

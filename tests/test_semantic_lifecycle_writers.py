@@ -351,6 +351,109 @@ def test_move_rewrites_self_link_at_destination_without_recreating_old_path(
     assert "[[Knowledge Base/Notes/Insights/lifecycle-renamed]]" in moved
 
 
+def test_move_out_of_trash_routes_through_recovery_lifecycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/move-recovery-anchor.md"
+    source = _source("Recover through move").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/move-recovery-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 11, 59, 0),
+    )
+    destination = "Knowledge Base/Notes/Insights/recovered-via-move.md"
+    upserts: list[list[str]] = []
+    report = index_sync.IndexSyncReport(
+        "upsert", (destination,), (destination,), ()
+    )
+
+    def capture_upsert(root: Path, paths: list[Path], **_kwargs):
+        upserts.append([path.relative_to(root).as_posix() for path in paths])
+        return report
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", capture_upsert)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=trashed.trash_path,
+        new_path=destination,
+    )
+
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.operation == "recover"
+    assert prepared.before_path == trashed.trash_path
+    assert prepared.after_path == destination
+    assert result.semantic is not None
+    assert result.index is not None
+    assert sum(destination in batch for batch in upserts) == 1
+    assert not (tmp_path / trashed.trash_path).exists()
+    assert (tmp_path / destination).read_text(encoding="utf-8") == source
+
+
+def test_move_returns_structured_index_degradation_and_attempts_both_leaves(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("Move feedback")
+    _write(tmp_path, _PAGE, source)
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    upserts: list[list[str]] = []
+    deletes: list[list[str]] = []
+
+    def degraded_upsert(root: Path, paths: list[Path], **_kwargs):
+        rels = [path.relative_to(root).as_posix() for path in paths]
+        upserts.append(rels)
+        return index_sync.IndexSyncReport(
+            "upsert",
+            tuple(rels),
+            tuple(rels),
+            (
+                index_sync.IndexComponentOutcome(
+                    "lexstore", "degraded", "dispatch_failed"
+                ),
+            ),
+        )
+
+    def completed_delete(_root: Path, paths: list[str]):
+        deletes.append(list(paths))
+        return index_sync.IndexSyncReport(
+            "delete", tuple(paths), tuple(paths), ()
+        )
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", degraded_upsert)
+    monkeypatch.setattr(index_sync, "delete_after_remove", completed_delete)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=_OTHER_PAGE,
+    )
+
+    assert sum(_OTHER_PAGE in batch for batch in upserts) == 1
+    assert deletes == [[_PAGE]]
+    assert result.index is not None
+    assert result.index["reconcile_required"] is True
+    assert result.index["reconcile_guidance"]
+    assert any(
+        item["reconcile_required"] for item in result.index["upsert_reports"]
+    )
+    assert result.index["delete_report"]["reconcile_required"] is False
+
+
 def test_trash_indebted_page_preserves_review_history_and_returns_exact_cleanup(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -477,6 +580,26 @@ def test_non_markdown_trash_does_not_register_markdown_self_delete(
     )
 
     assert watcher_calls == []
+
+
+def test_trash_legacy_none_is_accepted_unverified(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write(tmp_path, _PAGE, _source("Legacy index fanout"))
+    monkeypatch.setattr(index_sync, "delete_after_remove", lambda *_args: None)
+
+    result = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 2, 1),
+    )
+
+    assert result.index is not None
+    assert result.index["reconcile_required"] is False
+    assert {
+        item["code"] for item in result.index["components"]
+    } == {"accepted_unverified"}
 
 
 def test_recovery_reenters_stable_qualifying_page_and_indexes_once(
@@ -1054,6 +1177,237 @@ def test_recovery_attempts_index_when_watcher_suppression_degrades(
     }
     assert outcomes["watcher"] == ("degraded", "self_write_registration_failed")
     assert outcomes["embeddings"] == ("deferred", "deferred_durable")
+
+
+@pytest.mark.parametrize(
+    ("suffix", "source", "expects_semantic"),
+    [
+        (
+            "inactive.md",
+            _source("Inactive", page_id=_ID).replace(
+                "status: active", "status: superseded"
+            ),
+            True,
+        ),
+        (
+            "entity.md",
+            _source("Entity", page_id=_ID).replace(
+                "type: insight", "type: entity"
+            ),
+            True,
+        ),
+        ("arbitrary.md", "# Arbitrary Markdown\n", True),
+        ("raw.txt", "raw bytes", False),
+    ],
+)
+def test_recovery_structural_and_non_markdown_matrix(
+    tmp_path: Path,
+    suffix: str,
+    source: str,
+    expects_semantic: bool,
+) -> None:
+    path = f"Knowledge Base/Notes/Insights/{suffix}"
+    _write(tmp_path, path, source)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 14, 0),
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert (tmp_path / path).read_text(encoding="utf-8") == source
+    assert (result.semantic is not None) is expects_semantic
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_recovery_structural_failure_blocks_before_restore(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/malformed-inactive.md"
+    malformed = _source("Malformed inactive", page_id=_ID).replace(
+        "status: active", "status: inactive"
+    )
+    _write(tmp_path, path, malformed)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 14, 1),
+    )
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=trashed.trash_path
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / trashed.trash_path).exists()
+    assert not (tmp_path / path).exists()
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+
+def test_legacy_recovery_requires_current_contract_and_cannot_request_review(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/legacy-anchor.md"
+    qualifying = _source("Legacy qualifying", page_id=None).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/legacy-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, qualifying)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 15, 0),
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["relation_review_requests"] == []
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
+
+    indebted_path = "Knowledge Base/Notes/Insights/legacy-indebted.md"
+    _write(tmp_path, indebted_path, _source("Legacy debt", page_id=None))
+    indebted = delete_file_module.delete_file(
+        tmp_path,
+        path=indebted_path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 15, 1),
+    )
+    validation = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=indebted.trash_path,
+        validate_only=True,
+    )
+    assert validation.semantic is not None
+    assert validation.semantic["relation_review_requests"] == []
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=indebted.trash_path
+        )
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / indebted.trash_path).exists()
+
+
+def test_recovery_custom_destination_preserves_id_and_rejects_live_owner(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/custom-anchor.md"
+    source = _source("Custom destination").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/custom-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 16, 0),
+    )
+    custom = "Knowledge Base/Notes/Insights/custom-restored.md"
+
+    recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=custom,
+    )
+
+    prepared = relation_review.load_lifecycle_prepared(tmp_path, _ID)
+    assert prepared is not None
+    assert prepared.after_path == custom
+    assert semantic_contract.build_page_state(
+        tmp_path, custom, (tmp_path / custom).read_text(encoding="utf-8")
+    ).identity == _ID
+
+    second_path = "Knowledge Base/Notes/Insights/stolen.md"
+    _write(tmp_path, second_path, source)
+    second = delete_file_module.delete_file(
+        tmp_path,
+        path=second_path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 16, 1),
+    )
+    with pytest.raises(recover_module.RecoverError) as duplicate:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=second.trash_path
+        )
+    assert duplicate.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert (tmp_path / second.trash_path).exists()
+
+
+@pytest.mark.parametrize(
+    ("drift", "code"),
+    [
+        ("destination", "PATH_GUARD_CHANGED"),
+        ("trash", "PATH_GUARD_CONTENT"),
+        ("sidecar", "PATH_GUARD_CONTENT"),
+    ],
+)
+def test_recovery_commit_rejects_post_preflight_drift(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    drift: str,
+    code: str,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/race-anchor.md"
+    source = _source("Race").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/race-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 17, 0),
+    )
+    real_commit = semantic_writes.commit_recovery
+
+    def drift_then_commit(vault_root: Path, *, preflight, mutate):
+        if drift == "destination":
+            _write(vault_root, _PAGE, "racer")
+        elif drift == "trash":
+            (vault_root / trashed.trash_path).write_text(
+                f"{source}\nchanged", encoding="utf-8"
+            )
+        else:
+            (vault_root / trashed.trash_meta_path).write_text(
+                '{"original_path":"changed.md"}', encoding="utf-8"
+            )
+        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_recovery", drift_then_commit)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path, trash_path=trashed.trash_path
+        )
+
+    assert blocked.value.code == code
+    assert (tmp_path / trashed.trash_path).exists()
+    assert relation_review.load_lifecycle_prepared(tmp_path, _ID) is None
 
 
 def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:

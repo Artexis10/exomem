@@ -169,7 +169,7 @@ def failed_upsert_report(
     vault_root: Path,
     written_paths: list[Path],
     *,
-    watcher: IndexComponentOutcome,
+    watcher: IndexComponentOutcome | None = None,
 ) -> IndexSyncReport:
     """Bound an outer upsert failure without claiming any leaf completed."""
     requested, truncated = _bounded_paths(_rel_md_paths(vault_root, written_paths))
@@ -182,9 +182,55 @@ def failed_upsert_report(
             "epistemic_graph",
             "embeddings",
         )
-    ) + (watcher,)
+    )
+    if watcher is not None:
+        components += (watcher,)
     return IndexSyncReport(
         "upsert", requested, requested, components, truncated
+    )
+
+
+def unverified_upsert_report(
+    vault_root: Path, written_paths: list[Path]
+) -> IndexSyncReport:
+    """Represent a legacy outer upsert that returned no observable status."""
+    requested, truncated = _bounded_paths(_rel_md_paths(vault_root, written_paths))
+    components = tuple(
+        IndexComponentOutcome(component, "accepted", "accepted_unverified")
+        for component in (
+            "lexstore",
+            "memory_refs",
+            "resolver",
+            "epistemic_graph",
+            "embeddings",
+        )
+    )
+    return IndexSyncReport(
+        "upsert", requested, requested, components, truncated
+    )
+
+
+def observed_delete_report(
+    removed_paths: list[str], *, degraded: bool
+) -> IndexSyncReport:
+    """Bound a legacy or failed outer delete without inventing completion."""
+    requested, truncated = _bounded_paths(
+        [path for path in removed_paths if _safe_relative_path(path) is not None]
+    )
+    outcome = "degraded" if degraded else "accepted"
+    code = "dispatch_failed" if degraded else "accepted_unverified"
+    components = tuple(
+        IndexComponentOutcome(component, outcome, code)
+        for component in (
+            "lexstore",
+            "memory_refs",
+            "resolver",
+            "epistemic_graph",
+            "embeddings",
+        )
+    )
+    return IndexSyncReport(
+        "delete", requested, requested, components, truncated
     )
 
 

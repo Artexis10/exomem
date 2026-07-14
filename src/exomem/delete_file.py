@@ -253,14 +253,19 @@ def delete_file(
     index_feedback: dict | None = None
     try:
         from . import index_sync
-        index_feedback = index_sync.delete_after_remove(
-            vault_root, [rel_path]
-        ).as_dict()
+        raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
+        report = (
+            raw_report
+            if isinstance(raw_report, index_sync.IndexSyncReport)
+            else index_sync.observed_delete_report([rel_path], degraded=False)
+        )
     except Exception:  # noqa: BLE001 — sidecars are best-effort
         log.exception("index delete failed for %s; sidecar may be stale", rel_path)
         warnings.append(
             "trash succeeded but derived-index cleanup failed; run reconcile"
         )
+        report = index_sync.observed_delete_report([rel_path], degraded=True)
+    index_feedback = report.as_dict()
 
     # Write metadata sidecar capturing what we know at trash time.
     meta = {

@@ -234,9 +234,16 @@ def delete_directory(
     if md_rels_to_unindex:
         try:
             from . import index_sync
-            index_feedback = index_sync.delete_after_remove(
+            raw_report = index_sync.delete_after_remove(
                 vault_root, md_rels_to_unindex
-            ).as_dict()
+            )
+            report = (
+                raw_report
+                if isinstance(raw_report, index_sync.IndexSyncReport)
+                else index_sync.observed_delete_report(
+                    md_rels_to_unindex, degraded=False
+                )
+            )
         except Exception:  # noqa: BLE001 — sidecars are best-effort
             log.exception(
                 "index delete failed for trashed tree %s; sidecar may be stale",
@@ -245,6 +252,10 @@ def delete_directory(
             warnings.append(
                 "trash succeeded but derived-index cleanup failed; run reconcile"
             )
+            report = index_sync.observed_delete_report(
+                md_rels_to_unindex, degraded=True
+            )
+        index_feedback = report.as_dict()
 
     # Metadata sidecar.
     meta = {

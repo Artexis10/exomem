@@ -357,7 +357,14 @@ def recover_from_trash(
                 watcher=watcher_outcome,
             )
         else:
-            report = index_sync.with_component(report, watcher_outcome)
+            report = index_sync.with_component(
+                report
+                if isinstance(report, index_sync.IndexSyncReport)
+                else index_sync.unverified_upsert_report(
+                    vault_root, restored_markdown
+                ),
+                watcher_outcome,
+            )
         index_feedback = report.as_dict()
 
     today = today or dt.date.today()

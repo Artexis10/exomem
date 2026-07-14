@@ -46,6 +46,7 @@ class MoveFileResult:
     files_touched: list[str]
     warnings: list[str]
     semantic: dict | None = None
+    index: dict | None = None
 
     def as_dict(self) -> dict:
         return {
@@ -55,6 +56,7 @@ class MoveFileResult:
             "files_touched": self.files_touched,
             "warnings": self.warnings,
             "semantic": self.semantic,
+            "index": self.index,
         }
 
 
@@ -140,6 +142,41 @@ def move_file(
             ),
         )
 
+    old_parts = old_rel.split("/")
+    new_parts = new_rel.split("/")
+    moved_out_of_trash = (
+        len(old_parts) >= 2
+        and old_parts[0] == kb_dirname()
+        and old_parts[1] == "_trash"
+    )
+    moved_into_trash = (
+        len(new_parts) >= 2
+        and new_parts[0] == kb_dirname()
+        and new_parts[1] == "_trash"
+    )
+    if moved_out_of_trash and not moved_into_trash:
+        from . import recover_from_trash as recovery
+
+        try:
+            recovered = recovery.recover_from_trash(
+                vault_root,
+                trash_path=old_rel,
+                restore_path=new_rel,
+                allow_curated=allow_curated,
+                today=today,
+            )
+        except recovery.RecoverError as error:
+            raise MoveFileError(code=error.code, reason=error.reason) from error
+        return MoveFileResult(
+            old_path=old_rel,
+            new_path=new_rel,
+            wikilinks_updated=0,
+            files_touched=[],
+            warnings=recovered.warnings,
+            semantic=recovered.semantic,
+            index=recovered.index,
+        )
+
     # Scan inbound links BEFORE the move, while the old path still exists.
     inbound = find_inbound_wikilinks(vault_root, old_rel) if update_wikilinks else []
 
@@ -150,6 +187,8 @@ def move_file(
     # Stage inbound-link rewrites. The file itself moves with one filesystem
     # rename so bytes of any type are preserved without a copy/unlink window.
     writes: list[PlannedWrite] = []
+    batch_index_reports: list[object] = []
+    batch_fanout_paths: list[Path] = []
     if update_wikilinks and inbound:
         files_to_rewrite = sorted({hit.path for hit in inbound})
         for rel in files_to_rewrite:
@@ -221,10 +260,12 @@ def move_file(
                     )
                     combined = [*lifecycle_writes, *destination_writes, *writes]
                     if combined:
+                        batch_fanout_paths[:] = [write.path for write in combined]
                         batch_atomic_write(
                             combined,
                             vault_root=vault_root,
                             required_guards=required_guards,
+                            index_reports=batch_index_reports,
                         )
                 except Exception as error:
                     log.exception(
@@ -276,48 +317,83 @@ def move_file(
 
     # The filesystem transaction succeeded. Only now notify watcher/sidecars;
     # no derived index observes a move that was subsequently rolled back.
+    from . import file_watcher, index_sync
+
+    watcher_failures: list[str] = []
     try:
-        from . import file_watcher
         file_watcher.register_self_delete(vault_root, [old_rel])
-        if semantic is None or source == moved_source:
+    except Exception:  # noqa: BLE001 — suppression is independently observed
+        log.debug("move delete suppression registration failed", exc_info=True)
+        watcher_failures.append("self_delete_registration_failed")
+    if semantic is None or source == moved_source:
+        try:
             file_watcher.register_self_write(vault_root, [new_abs])
-    except Exception:  # noqa: BLE001 — suppression is best-effort
-        log.debug("move watcher suppression registration failed", exc_info=True)
+        except Exception:  # noqa: BLE001 — suppression is independently observed
+            log.debug("move write suppression registration failed", exc_info=True)
+            watcher_failures.append("self_write_registration_failed")
 
+    upsert_reports: list[index_sync.IndexSyncReport] = []
+    if batch_fanout_paths:
+        if batch_index_reports:
+            for report in batch_index_reports:
+                upsert_reports.append(
+                    report
+                    if isinstance(report, index_sync.IndexSyncReport)
+                    else index_sync.unverified_upsert_report(
+                        vault_root, batch_fanout_paths
+                    )
+                )
+        else:
+            upsert_reports.append(
+                index_sync.failed_upsert_report(vault_root, batch_fanout_paths)
+            )
+    if semantic is None or source == moved_source:
+        try:
+            report = index_sync.upsert_after_write(vault_root, [new_abs])
+        except Exception:  # noqa: BLE001 — move remains authoritative
+            log.exception("index upsert failed for moved destination %s", new_rel)
+            upsert_reports.append(
+                index_sync.failed_upsert_report(vault_root, [new_abs])
+            )
+        else:
+            upsert_reports.append(
+                report
+                if isinstance(report, index_sync.IndexSyncReport)
+                else index_sync.unverified_upsert_report(vault_root, [new_abs])
+            )
     try:
-        from . import index_sync
-        if semantic is None or source == moved_source:
-            index_sync.upsert_after_write(vault_root, [new_abs])
-        index_sync.delete_after_remove(vault_root, [old_rel])
-    except Exception:  # noqa: BLE001 — sidecars are best-effort
-        log.exception("index refresh failed for moved %s -> %s", old_rel, new_rel)
-
-    # If we just moved a file out of `_trash/`, its `.meta.json` sidecar (if
-    # any) is now an orphan. Drop the sidecar — recovery is "removed from
-    # trash," not "trash entry that points nowhere." For trash → trash
-    # moves we leave it alone (the sidecar is still valid).
-    parts = old_rel.split("/")
-    moved_out_of_trash = (
-        len(parts) >= 2 and parts[0] == kb_dirname() and parts[1] == "_trash"
+        raw_delete_report = index_sync.delete_after_remove(vault_root, [old_rel])
+    except Exception:  # noqa: BLE001 — move remains authoritative
+        log.exception("index delete failed for moved source %s", old_rel)
+        delete_report = index_sync.observed_delete_report(
+            [old_rel], degraded=True
+        )
+    else:
+        delete_report = (
+            raw_delete_report
+            if isinstance(raw_delete_report, index_sync.IndexSyncReport)
+            else index_sync.observed_delete_report([old_rel], degraded=False)
+        )
+    reconcile_required = bool(
+        watcher_failures
+        or delete_report.reconcile_required
+        or any(report.reconcile_required for report in upsert_reports)
     )
-    new_parts = new_rel.split("/")
-    moved_into_trash = (
-        len(new_parts) >= 2 and new_parts[0] == kb_dirname()
-        and new_parts[1] == "_trash"
-    )
-    if moved_out_of_trash and not moved_into_trash:
-        sidecar = old_abs.parent / f"{old_abs.name}.meta.json"
-        if sidecar.exists():
-            try:
-                sidecar.unlink()
-                warnings.append(
-                    f"removed orphan trash sidecar: {sidecar.name}"
-                )
-            except OSError as e:
-                warnings.append(
-                    f"recovered file but could not remove orphan sidecar "
-                    f"{sidecar.name!r}: {e}"
-                )
+    index_feedback = {
+        "operation": "move",
+        "upsert_reports": [report.as_dict() for report in upsert_reports],
+        "delete_report": delete_report.as_dict(),
+        "watcher": {
+            "outcome": "degraded" if watcher_failures else "completed",
+            "codes": watcher_failures or ["suppression_registered"],
+        },
+        "reconcile_required": reconcile_required,
+        "reconcile_guidance": (
+            "Run reconcile to repair observed move fan-out degradation."
+            if reconcile_required
+            else None
+        ),
+    }
 
     today = today or dt.date.today()
     date_iso = today.isoformat()
@@ -345,6 +421,7 @@ def move_file(
         files_touched=files_touched,
         warnings=warnings,
         semantic=semantic,
+        index=index_feedback,
     )
 
 

@@ -1811,6 +1811,23 @@ def _raw_findings(
             mode=mode,
         )
     findings = _diagnostic_findings(page)
+    if (
+        page.identity_kind == "exomem_id"
+        and corpus.identity_census.paths_by_identity.get(page.identity)
+        != (page.path,)
+    ):
+        findings.append(
+            ContractFinding(
+                code="SEMANTIC_IDENTITY_DUPLICATE",
+                severity="error",
+                path=page.path,
+                span=None,
+                detail="the stable page identity has another corpus owner",
+                remediation="Resolve the duplicate stable identity before writing.",
+                governed_element_identity=("identity", page.identity),
+                resolved_rule=("semantic_contract", "identity", "unique"),
+            )
+        )
     findings.extend(_conflict_findings(page, contracts))
     findings.extend(_registry_findings(page, corpus))
     findings.extend(_page_rule_findings(page, contracts, corpus))

@@ -237,6 +237,35 @@ def test_broad_identity_census_prevents_direct_review_state_bypass(
     assert result.should_block
 
 
+def test_shared_evaluator_blocks_duplicate_stable_identity_owner(
+    tmp_path: Path,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(exomem_id=_ID_A),
+    )
+    duplicate = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/duplicate.md",
+        _source(exomem_id=_ID_A),
+    )
+    corpus = _corpus(tmp_path, page, duplicate)
+
+    result = _evaluate(
+        before=None,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+        operation="recover",
+    )
+
+    assert "SEMANTIC_IDENTITY_DUPLICATE" in {
+        finding.code for finding in result.blocking_findings
+    }
+    assert result.should_block
+
+
 def test_page_state_preserves_non_string_frontmatter_key_identity(
     tmp_path: Path,
 ) -> None:
