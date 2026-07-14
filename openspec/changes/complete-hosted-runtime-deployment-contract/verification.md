@@ -43,6 +43,7 @@ succeeded inside its immutable build-relative deadline.
 ```text
 focused hosted/container tests: 306 passed, 2 skipped
 complete lean suite:            2572 passed, 21 skipped
+Python 3.11 replay stress:      50/50 iterations plus 2572 passed, 21 skipped
 privileged restore/device run:  5 passed
 latency gate:                   2 passed
 installed-wheel product E2E:    PASS (17.8s)
@@ -51,6 +52,11 @@ wheel/sdist build:              exomem 0.22.0 passed
 strict OpenSpec validation:     passed
 hosted Docker build/drill:      passed
 ```
+
+The selected runtime commit also closes a concurrent export-release replay
+race: disappearance of the exact artifact between `lstat` and removal is now
+an idempotent success, while symlink and non-regular artifact rejection remains
+fail-closed.
 
 The two focused hosted skips were separately covered by the privileged root
 container run. The 21 lean-suite skips are the intentional optional model,
@@ -62,7 +68,7 @@ format checking.
 ## Cross-repository release proof (2026-07-14)
 
 The companion infrastructure branch pins this exact runtime commit
-`c255ffb2dfcd7bc470372d4efa0e8a11b00f0640`, release `0.22.0`, hosted protocol
+`54618b931dec8f0ad053dce48dd80cc36c95c549`, release `0.22.0`, hosted protocol
 `1`, and operator-contract SHA-256
 `407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6`.
 Its exact K3s `v1.35.6+k3s1` gate builds the hosted target, imports only the
@@ -76,7 +82,7 @@ requires an unchanged Pod spec; routine removal and simultaneous
 reviewed gate passed 31 tests plus Terraform, Ansible, Helm, Kubeconform, Ruff,
 ShellCheck, strict OpenSpec, and the real runtime drill.
 
-Substrate PR #32 head `6d48e023f3c5a4780c212cef34fc784bf3b1f068`
+Substrate PR #32 head `6e45d60300796dd9781641492d3c15aead10bcb5`
 contains the generated semantic fixture from this exact commit. It pins release
 `0.22.0`, protocol `1`, and gateway-contract digest
 `49ac4d346991f0f1de5f692a78ad043de6020f9a1692cafc951ec84490f02940`;
