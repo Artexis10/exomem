@@ -24,8 +24,8 @@
 - [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
 - [x] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
 - [ ] 3.8 Grandfather existing pages into activation/review using stable finding keys and the mechanical after-errors-subset-of-before-errors rule while preventing invalidated accepted dispositions.
-- [ ] 3.9 Replace pathname-addressed atomic-batch backup authority with descriptor-owned private per-parent workspaces and in-memory prior-byte/supported-metadata rollback snapshots, preserving ordinary caught-failure semantics and auxiliary-first/primary-last ordering.
-- [ ] 3.10 Add cross-platform transactional regressions for workspace identity/census safety, exact staged bytes, metadata capture/restore, multi-destination rollback continuation, sanitized retained-state errors, abrupt residue non-authority, and the explicitly scoped final-syscall portability limit.
+- [x] 3.9 Replace pathname-addressed atomic-batch backup authority with descriptor-owned private per-parent workspaces and in-memory prior-byte/supported-metadata rollback snapshots, preserving ordinary caught-failure semantics and auxiliary-first/primary-last ordering.
+- [x] 3.10 Add cross-platform transactional regressions for workspace identity/census safety, exact staged bytes, metadata capture/restore, multi-destination rollback continuation, sanitized retained-state errors, abrupt residue non-authority, and the explicitly scoped final-syscall portability limit.
 
 ## 4. Derived Unit Indexes And Freshness
 
