@@ -844,6 +844,48 @@ class _WorkspaceArtifact:
             self.closed = True
 
 
+def _remove_created_workspace(
+    parent: Path,
+    name: str,
+    parent_descriptor: int,
+    parent_identity: PathIdentity,
+    workspace_identity: PathIdentity,
+) -> bool:
+    """Remove a newly-created empty workspace only while its binding is exact."""
+    path = parent / name
+    try:
+        parent_descriptor_info = os.fstat(parent_descriptor)
+        parent_path_info = parent.lstat()
+        if (
+            not _same_identity(parent_identity, parent_descriptor_info)
+            or not _same_identity(parent_identity, parent_path_info)
+            or not stat.S_ISDIR(parent_path_info.st_mode)
+            or stat.S_ISLNK(parent_path_info.st_mode)
+            or _is_reparse(parent_path_info)
+        ):
+            return False
+        if not os.path.lexists(path):
+            return True
+        if os.stat in getattr(os, "supports_dir_fd", set()):
+            info = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+        else:  # pragma: no cover - Windows fallback
+            info = path.lstat()
+        if (
+            not _same_identity(workspace_identity, info)
+            or not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            return False
+        if os.rmdir in getattr(os, "supports_dir_fd", set()):
+            os.rmdir(name, dir_fd=parent_descriptor)
+        else:  # pragma: no cover - Windows fallback
+            path.rmdir()
+        return not os.path.lexists(path)
+    except OSError:
+        return False
+
+
 @dataclass(slots=True)
 class _BatchWorkspace:
     parent: Path
@@ -868,6 +910,10 @@ class _BatchWorkspace:
             parent_descriptor = os.open(absolute_parent, _directory_flags())
         except OSError as error:
             raise PathGuardError("PATH_GUARD_IO", "batch parent is unavailable") from error
+        workspace: _BatchWorkspace | None = None
+        workspace_descriptor: int | None = None
+        workspace_identity: PathIdentity | None = None
+        created = False
         try:
             opened_parent = os.fstat(parent_descriptor)
             if (
@@ -886,43 +932,69 @@ class _BatchWorkspace:
                         os.mkdir(absolute_parent / name, 0o700)
                 except FileExistsError:
                     continue
+                created = True
                 break
             else:  # pragma: no cover - cryptographic collisions are not practical
                 raise PathGuardError("PATH_GUARD_IO", "batch workspace allocation failed")
             workspace_path = absolute_parent / name
+            if os.stat in getattr(os, "supports_dir_fd", set()):
+                workspace_path_info = os.stat(
+                    name, dir_fd=parent_descriptor, follow_symlinks=False
+                )
+            else:  # pragma: no cover - Windows fallback
+                workspace_path_info = workspace_path.lstat()
+            if (
+                not stat.S_ISDIR(workspace_path_info.st_mode)
+                or stat.S_ISLNK(workspace_path_info.st_mode)
+                or _is_reparse(workspace_path_info)
+            ):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "batch workspace is unsafe")
+            workspace_identity = _identity(name, workspace_path_info)
             if _SUPPORTS_DIRECTORY_FD:
                 workspace_descriptor = _open_directory_at(parent_descriptor, name)
             else:  # pragma: no cover - Windows fallback
                 workspace_descriptor = os.open(workspace_path, _directory_flags())
-            try:
-                if hasattr(os, "fchmod"):
-                    os.fchmod(workspace_descriptor, 0o700)
-                workspace_info = os.fstat(workspace_descriptor)
-                workspace_path_info = workspace_path.lstat()
-                if (
-                    not stat.S_ISDIR(workspace_info.st_mode)
-                    or _is_reparse(workspace_info)
-                    or not _same_identity(_identity(name, workspace_info), workspace_path_info)
-                    or stat.S_ISLNK(workspace_path_info.st_mode)
-                    or _is_reparse(workspace_path_info)
-                ):
-                    raise PathGuardError("PATH_GUARD_UNSAFE", "batch workspace is unsafe")
-                workspace = cls(
+            workspace_info = os.fstat(workspace_descriptor)
+            if (
+                not stat.S_ISDIR(workspace_info.st_mode)
+                or _is_reparse(workspace_info)
+                or not _same_identity(workspace_identity, workspace_info)
+            ):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "batch workspace is unsafe")
+            workspace = cls(
+                absolute_parent,
+                name,
+                parent_descriptor,
+                workspace_descriptor,
+                _identity(".", opened_parent),
+                workspace_identity,
+                {},
+            )
+            if hasattr(os, "fchmod"):
+                os.fchmod(workspace_descriptor, 0o700)
+            workspace.recheck()
+            return workspace
+        except BaseException as init_error:
+            if workspace is not None:
+                cleaned = workspace.cleanup()
+            elif created and workspace_identity is not None:
+                if workspace_descriptor is not None:
+                    os.close(workspace_descriptor)
+                cleaned = _remove_created_workspace(
                     absolute_parent,
                     name,
                     parent_descriptor,
-                    workspace_descriptor,
                     _identity(".", opened_parent),
-                    _identity(name, workspace_info),
-                    {},
+                    workspace_identity,
                 )
-                workspace.recheck()
-                return workspace
-            except Exception:
-                os.close(workspace_descriptor)
-                raise
-        except Exception:
-            os.close(parent_descriptor)
+                os.close(parent_descriptor)
+            else:
+                if workspace_descriptor is not None:
+                    os.close(workspace_descriptor)
+                os.close(parent_descriptor)
+                cleaned = False
+            if not cleaned:
+                _raise_cleanup_retained(init_error)
             raise
 
     def stat_child(self, name: str) -> os.stat_result:
@@ -994,22 +1066,24 @@ class _BatchWorkspace:
             descriptor = os.open(name, flags, 0o600, dir_fd=self.descriptor)
         else:  # pragma: no cover - Windows fallback
             descriptor = os.open(self.path / name, flags, 0o600)
+        artifact: _WorkspaceArtifact | None = None
         try:
             info = os.fstat(descriptor)
             if not stat.S_ISREG(info.st_mode) or _is_reparse(info):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "batch stage is unsafe")
             identity = _identity(name, info)
-            _write_all(descriptor, content)
             digest = hashlib.sha256(content).hexdigest()
-            if _descriptor_hash(descriptor, identity) != digest:
-                raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact = _WorkspaceArtifact(self, name, descriptor, identity, digest)
             self.artifacts[name] = artifact
+            _write_all(descriptor, content)
+            if _descriptor_hash(descriptor, identity) != digest:
+                raise PathGuardError("PATH_GUARD_CONTENT", "batch stage content changed")
             artifact.recheck()
             self.recheck()
             return artifact
         except Exception:
-            os.close(descriptor)
+            if artifact is None:
+                os.close(descriptor)
             raise
 
     def replace_artifact(self, artifact: _WorkspaceArtifact, final: Path) -> PathIdentity:
@@ -1064,7 +1138,7 @@ class _BatchWorkspace:
     def remove_artifact(self, artifact: _WorkspaceArtifact) -> bool:
         try:
             self.recheck()
-            artifact.recheck()
+            artifact.recheck(verify_content=False)
             if os.unlink in getattr(os, "supports_dir_fd", set()):
                 os.unlink(artifact.name, dir_fd=self.descriptor)
             else:  # pragma: no cover - Windows fallback
@@ -1140,29 +1214,35 @@ def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactG
     source_descriptor = _open_bound_artifact(stable_artifact)
     try:
         source_info = os.fstat(source_descriptor)
-        xattrs = _capture_descriptor_xattrs(source_descriptor)
-        content = _descriptor_bytes(source_descriptor, stable_artifact.identity)
-        content_hash = hashlib.sha256(content).hexdigest()
-        source_guard = _BatchArtifactGuard.capture(
-            absolute,
-            expected_content_hash=content_hash,
-            expected_identity=stable_artifact.identity,
-        )
-        source_guard.recheck()
-        if not _same_identity(source_guard.identity, os.fstat(source_descriptor)):
-            raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
-        if os.utime in getattr(os, "supports_fd", set()):
-            os.utime(
-                source_descriptor,
-                ns=(source_info.st_atime_ns, source_info.st_mtime_ns),
+        try:
+            xattrs = _capture_descriptor_xattrs(source_descriptor)
+            content = _descriptor_bytes(source_descriptor, stable_artifact.identity)
+            content_hash = hashlib.sha256(content).hexdigest()
+            source_guard = _BatchArtifactGuard.capture(
+                absolute,
+                expected_content_hash=content_hash,
+                expected_identity=stable_artifact.identity,
             )
-            restored_source = os.fstat(source_descriptor)
-            if (
-                not _same_identity(source_guard.identity, restored_source)
-                or restored_source.st_atime_ns != source_info.st_atime_ns
-                or restored_source.st_mtime_ns != source_info.st_mtime_ns
-            ):
-                raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata capture changed")
+            source_guard.recheck()
+            if not _same_identity(source_guard.identity, os.fstat(source_descriptor)):
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
+            _restore_bound_source_timestamps(
+                source_guard,
+                source_descriptor,
+                source_info.st_atime_ns,
+                source_info.st_mtime_ns,
+            )
+        except BaseException as capture_error:
+            try:
+                _restore_bound_source_timestamps(
+                    stable_artifact,
+                    source_descriptor,
+                    source_info.st_atime_ns,
+                    source_info.st_mtime_ns,
+                )
+            except BaseException as restore_error:
+                raise restore_error from capture_error
+            raise
         return (
             _BatchSnapshot(
                 content,
@@ -1178,15 +1258,88 @@ def _capture_batch_snapshot(path: Path) -> tuple[_BatchSnapshot, _BatchArtifactG
         os.close(source_descriptor)
 
 
+def _restore_bound_source_timestamps(
+    source: _BatchArtifactGuard,
+    descriptor: int,
+    atime_ns: int,
+    mtime_ns: int,
+) -> None:
+    source.recheck()
+    before = os.fstat(descriptor)
+    if not _same_identity(source.identity, before):
+        raise PathGuardError("PATH_GUARD_CHANGED", "batch source changed")
+    if os.utime in getattr(os, "supports_fd", set()):
+        os.utime(descriptor, ns=(atime_ns, mtime_ns))
+    elif os.utime in getattr(os, "supports_follow_symlinks", set()):
+        os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
+    else:  # pragma: no cover - supported Python platforms expose one safe form
+        raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
+    restored = os.fstat(descriptor)
+    restored_path = source.path.lstat()
+    if (
+        not _same_identity(source.identity, restored)
+        or not _same_identity(source.identity, restored_path)
+        or not stat.S_ISREG(restored_path.st_mode)
+        or stat.S_ISLNK(restored_path.st_mode)
+        or _is_reparse(restored_path)
+        or restored.st_atime_ns != atime_ns
+        or restored.st_mtime_ns != mtime_ns
+    ):
+        raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata capture changed")
+
+
+def _apply_workspace_mode(artifact: _WorkspaceArtifact, mode: int) -> None:
+    descriptor = artifact.descriptor
+    fchmod = getattr(os, "fchmod", None)
+    if callable(fchmod):
+        fchmod(descriptor, mode)
+        return
+    if os.chmod in getattr(os, "supports_fd", set()):  # pragma: no cover
+        os.chmod(descriptor, mode)
+        return
+    artifact.recheck(verify_content=False)
+    if os.chmod in getattr(os, "supports_dir_fd", set()):
+        kwargs: dict[str, Any] = {"dir_fd": artifact.workspace.descriptor}
+        if os.chmod in getattr(os, "supports_follow_symlinks", set()):
+            kwargs["follow_symlinks"] = False
+        os.chmod(artifact.name, mode, **kwargs)
+    elif os.chmod in getattr(os, "supports_follow_symlinks", set()):
+        os.chmod(artifact.path, mode, follow_symlinks=False)
+    else:  # pragma: no cover - platform has no exact path-based chmod
+        raise PathGuardError("PATH_GUARD_IO", "batch mode restore is unavailable")
+    artifact.refresh_identity()
+
+
+def _apply_workspace_timestamps(
+    artifact: _WorkspaceArtifact, atime_ns: int, mtime_ns: int
+) -> None:
+    descriptor = artifact.descriptor
+    if os.utime in getattr(os, "supports_fd", set()):
+        os.utime(descriptor, ns=(atime_ns, mtime_ns))
+        return
+    artifact.recheck(verify_content=False)
+    if os.utime in getattr(os, "supports_dir_fd", set()):
+        kwargs: dict[str, Any] = {"dir_fd": artifact.workspace.descriptor}
+        if os.utime in getattr(os, "supports_follow_symlinks", set()):
+            kwargs["follow_symlinks"] = False
+        os.utime(artifact.name, ns=(atime_ns, mtime_ns), **kwargs)
+    elif os.utime in getattr(os, "supports_follow_symlinks", set()):
+        os.utime(
+            artifact.path,
+            ns=(atime_ns, mtime_ns),
+            follow_symlinks=False,
+        )
+    else:  # pragma: no cover - platform has no exact path-based utime
+        raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
+    artifact.refresh_identity()
+
+
 def _apply_snapshot_metadata(
     artifact: _WorkspaceArtifact, snapshot: _BatchSnapshot
 ) -> None:
     artifact.recheck()
     descriptor = artifact.descriptor
-    if hasattr(os, "fchmod"):
-        os.fchmod(descriptor, snapshot.mode)
-    elif os.chmod in getattr(os, "supports_fd", set()):  # pragma: no cover
-        os.chmod(descriptor, snapshot.mode)
+    _apply_workspace_mode(artifact, snapshot.mode)
     artifact.refresh_identity()
     if snapshot.xattrs is not None:
         current = _capture_descriptor_xattrs(descriptor)
@@ -1199,12 +1352,11 @@ def _apply_snapshot_metadata(
             os.removexattr(descriptor, name)
         for name, value in snapshot.xattrs.items():
             os.setxattr(descriptor, name, value)
-    if os.utime in getattr(os, "supports_fd", set()):
-        os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+    _apply_workspace_timestamps(artifact, snapshot.atime_ns, snapshot.mtime_ns)
     info = os.fstat(descriptor)
-    if hasattr(os, "fchmod") and stat.S_IMODE(info.st_mode) != snapshot.mode:
+    if stat.S_IMODE(info.st_mode) != snapshot.mode:
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
-    if os.utime in getattr(os, "supports_fd", set()) and (
+    if (
         info.st_atime_ns != snapshot.atime_ns or info.st_mtime_ns != snapshot.mtime_ns
     ):
         raise PathGuardError("PATH_GUARD_CHANGED", "batch metadata restore changed")
@@ -1216,8 +1368,6 @@ def _apply_snapshot_metadata(
 def _reset_restored_timestamps(
     path: Path, expected_identity: PathIdentity, snapshot: _BatchSnapshot
 ) -> None:
-    if os.utime not in getattr(os, "supports_fd", set()):
-        return
     flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
     descriptor = os.open(path, flags)
     try:
@@ -1228,10 +1378,40 @@ def _reset_restored_timestamps(
             or not _same_identity(expected_identity, info)
         ):
             raise PathGuardError("PATH_GUARD_CHANGED", "restored batch artifact changed")
-        os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+        if os.utime in getattr(os, "supports_fd", set()):
+            os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+        elif os.utime in getattr(os, "supports_follow_symlinks", set()):
+            os.utime(
+                path,
+                ns=(snapshot.atime_ns, snapshot.mtime_ns),
+                follow_symlinks=False,
+            )
+        elif os.utime in getattr(os, "supports_dir_fd", set()):
+            parent_descriptor = os.open(path.parent, _directory_flags())
+            try:
+                parent_info = path.parent.lstat()
+                if not _same_identity(
+                    _identity(".", parent_info), os.fstat(parent_descriptor)
+                ):
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "restored batch parent changed"
+                    )
+                os.utime(
+                    path.name,
+                    ns=(snapshot.atime_ns, snapshot.mtime_ns),
+                    dir_fd=parent_descriptor,
+                )
+            finally:
+                os.close(parent_descriptor)
+        else:  # pragma: no cover - platform has no exact timestamp operation
+            raise PathGuardError(
+                "PATH_GUARD_IO", "batch timestamp restore is unavailable"
+            )
         restored = os.fstat(descriptor)
+        restored_path = path.lstat()
         if (
             not _same_identity(expected_identity, restored)
+            or not _same_identity(expected_identity, restored_path)
             or restored.st_atime_ns != snapshot.atime_ns
             or restored.st_mtime_ns != snapshot.mtime_ns
         ):
@@ -1253,6 +1433,21 @@ def _raise_cleanup_retained(primary_error: BaseException | None = None) -> None:
     if primary_error is None:
         raise error
     raise error from primary_error
+
+
+def _recheck_rollback_directory_guards(
+    guards: Iterable[DirectoryCensusGuard],
+    vault_root: Path,
+    final: Path,
+    *,
+    allowed_changes: Iterable[Path],
+) -> None:
+    """Recheck censuses whose guarded namespace contains this direct child."""
+    final_parent = os.path.abspath(final.parent)
+    for guard in guards:
+        guarded_directory = Path(vault_root) / guard.target
+        if final_parent == os.path.abspath(guarded_directory):
+            guard.recheck(vault_root, allowed_changes=allowed_changes)
 
 
 def _bounded_directory_entries(
@@ -1676,7 +1871,10 @@ def batch_atomic_write(
     Existing destinations are snapshotted into memory before the first flip. A
     caught mid-flip failure restores those bytes and supported metadata through
     fresh private restore stages, and removes unchanged destinations created by
-    the failed batch.
+    the failed batch. Ordinary caught ``Exception`` failures run that rollback;
+    ``BaseException`` is treated as abrupt interruption and may expose a partial
+    batch for exact higher-level retry. This does not claim cross-file power-loss
+    atomicity.
 
     When `vault_root` is supplied, the embedding sidecar at
     `<vault>/Knowledge Base/.embeddings.sqlite` is refreshed for every
@@ -1791,6 +1989,10 @@ def batch_atomic_write(
             _raise_cleanup_retained(stage_error)
         raise
 
+    allowed_census_changes = (
+        *(write.path for write in writes),
+        *(item.path for item in workspace_by_parent.values()),
+    )
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
@@ -1825,10 +2027,6 @@ def batch_atomic_write(
                 for guard in bound_guards[index:]:
                     if guard is not None:
                         guard.recheck(root)
-                allowed_census_changes = (
-                    *(write.path for write in writes),
-                    *(item.path for item in workspace_by_parent.values()),
-                )
                 for guard in directory_guards:
                     guard.recheck(root, allowed_changes=allowed_census_changes)
             if writes[index].create_only and os.path.lexists(final):
@@ -1861,10 +2059,6 @@ def batch_atomic_write(
             guard.recheck()
         if vault_root is not None:
             root = Path(vault_root)
-            allowed_census_changes = (
-                *(write.path for write in writes),
-                *(item.path for item in workspace_by_parent.values()),
-            )
             for guard in directory_guards:
                 guard.recheck(root, allowed_changes=allowed_census_changes)
         for guard in final_guards.values():
@@ -1883,6 +2077,13 @@ def batch_atomic_write(
                     )
                 final_guard.recheck()
                 workspace.recheck()
+                if vault_root is not None:
+                    _recheck_rollback_directory_guards(
+                        directory_guards,
+                        Path(vault_root),
+                        final,
+                        allowed_changes=allowed_census_changes,
+                    )
                 if snapshot is None:
                     if os.unlink in getattr(os, "supports_dir_fd", set()):
                         os.unlink(final.name, dir_fd=workspace.parent_descriptor)

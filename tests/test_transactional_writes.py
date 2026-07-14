@@ -21,6 +21,19 @@ def _workspaces(parent: Path) -> list[Path]:
     return sorted(parent.glob(".exomem-batch-*"))
 
 
+def _replace_capability_member(
+    monkeypatch: pytest.MonkeyPatch,
+    capability: str,
+    original: object,
+    replacement: object | None,
+) -> None:
+    members = set(getattr(os, capability, set()))
+    members.discard(original)
+    if replacement is not None:
+        members.add(replacement)
+    monkeypatch.setattr(os, capability, members)
+
+
 def _set_descriptor_xattr(path: Path, name: str, value: bytes) -> None:
     descriptor = os.open(path, os.O_RDONLY)
     try:
@@ -157,6 +170,116 @@ def test_batch_atomic_write_restores_exact_bytes_and_supported_metadata(
     assert _workspaces(tmp_path) == []
 
 
+def test_batch_atomic_write_uses_path_metadata_fallbacks_after_dir_fd_flip_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"first-old")
+    second.write_bytes(b"second-old")
+    os.chmod(first, 0o640)
+    first_times = (1_711_111_111_123_456_789, 1_712_222_222_987_654_321)
+    os.utime(first, ns=first_times)
+    real_chmod = os.chmod
+    real_replace = os.replace
+    descriptor_relative_flips: list[str] = []
+    flips = 0
+
+    def fail_after_second_kernel_flip(src, dst, *args, **kwargs):
+        nonlocal flips
+        if _leaf(src).startswith("stage-"):
+            flips += 1
+            assert kwargs.get("src_dir_fd") is not None
+            assert kwargs.get("dst_dir_fd") is not None
+            descriptor_relative_flips.append(_leaf(dst))
+            result = real_replace(src, dst, *args, **kwargs)
+            if flips == 2:
+                raise OSError("post-kernel descriptor-relative failure")
+            return result
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.delattr(vault_module.os, "fchmod")
+    _replace_capability_member(monkeypatch, "supports_fd", real_chmod, None)
+    _replace_capability_member(monkeypatch, "supports_fd", os.utime, None)
+    monkeypatch.setattr(vault_module.os, "replace", fail_after_second_kernel_flip)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_dir_fd",
+        real_replace,
+        fail_after_second_kernel_flip,
+    )
+
+    with pytest.raises(OSError, match="post-kernel descriptor-relative failure"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ]
+        )
+
+    first_info = first.stat()
+    assert descriptor_relative_flips == ["first.md", "second.md"]
+    assert first.read_bytes() == b"first-old"
+    assert second.read_bytes() == b"second-old"
+    assert stat.S_IMODE(first_info.st_mode) == 0o640
+    assert (first_info.st_atime_ns, first_info.st_mtime_ns) == first_times
+    assert _workspaces(tmp_path) == []
+
+
+def test_batch_atomic_write_detects_failed_path_mode_fallback(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"first-old")
+    second.write_bytes(b"second-old")
+    os.chmod(first, 0o640)
+    real_chmod = os.chmod
+    real_replace = os.replace
+    flips = 0
+
+    def ignore_restore_mode(path, mode, *args, **kwargs):
+        if _leaf(path).startswith("restore-"):
+            return None
+        return real_chmod(path, mode, *args, **kwargs)
+
+    def fail_second_flip(src, dst, *args, **kwargs):
+        nonlocal flips
+        if _leaf(src).startswith("stage-"):
+            flips += 1
+            if flips == 2:
+                raise OSError("commit failed")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.delattr(vault_module.os, "fchmod")
+    monkeypatch.setattr(vault_module.os, "chmod", ignore_restore_mode)
+    _replace_capability_member(
+        monkeypatch,
+        "supports_fd",
+        real_chmod,
+        None,
+    )
+    _replace_capability_member(
+        monkeypatch,
+        "supports_dir_fd",
+        real_chmod,
+        ignore_restore_mode,
+    )
+    monkeypatch.setattr(vault_module.os, "replace", fail_second_flip)
+
+    with pytest.raises(RuntimeError, match="rollback incomplete"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ]
+        )
+
+    assert first.read_bytes() == b"first-new"
+    assert second.read_bytes() == b"second-old"
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_atomic_write_removes_new_file_on_rollback(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -229,6 +352,43 @@ def test_batch_atomic_write_metadata_capture_error_precedes_every_flip(
     assert _workspaces(tmp_path) == []
 
 
+def test_batch_atomic_write_restores_source_times_when_snapshot_capture_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target.md"
+    target.write_bytes(b"old")
+    source_times = (1_701_111_111_123_456_789, 1_702_222_222_987_654_321)
+    changed_atime = source_times[0] + 123_456_789
+    os.utime(target, ns=source_times)
+    real_descriptor_bytes = vault_module._descriptor_bytes
+    real_replace = os.replace
+    flips: list[str] = []
+
+    def fail_after_read(descriptor: int, expected) -> bytes:
+        real_descriptor_bytes(descriptor, expected)
+        os.utime(descriptor, ns=(changed_atime, source_times[1]))
+        raise PermissionError("snapshot capture failed after read")
+
+    def observe_flip(src, dst, *args, **kwargs):
+        if _leaf(src).startswith("stage-"):
+            flips.append(_leaf(dst))
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module, "_descriptor_bytes", fail_after_read)
+    monkeypatch.setattr(vault_module.os, "replace", observe_flip)
+
+    with pytest.raises(PermissionError, match="capture failed after read"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "new")]
+        )
+
+    target_info = target.stat()
+    assert flips == []
+    assert (target_info.st_atime_ns, target_info.st_mtime_ns) == source_times
+    assert target.read_bytes() == b"old"
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_writes(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -277,6 +437,60 @@ def test_batch_atomic_write_retries_partial_and_interrupted_stage_and_restore_wr
     assert second.read_bytes() == b"second-old"
     assert any(name.startswith("stage-") for name in written_names)
     assert any(name.startswith("restore-") for name in written_names)
+    assert _workspaces(tmp_path) == []
+
+
+def test_batch_atomic_write_cleans_owned_workspace_when_fchmod_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_fchmod = os.fchmod
+
+    def fail_workspace_fchmod(descriptor: int, mode: int) -> None:
+        try:
+            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
+        except OSError:
+            name = ""
+        if _WORKSPACE_RE.fullmatch(name):
+            raise PermissionError("workspace fchmod failed")
+        real_fchmod(descriptor, mode)
+
+    monkeypatch.setattr(vault_module.os, "fchmod", fail_workspace_fchmod)
+
+    with pytest.raises(PermissionError, match="workspace fchmod failed"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(tmp_path / "target.md", "new")]
+        )
+
+    assert _workspaces(tmp_path) == []
+
+
+def test_batch_atomic_write_cleans_partially_initialized_stage(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_write = os.write
+    stage_writes = 0
+
+    def fail_after_partial_stage_write(descriptor: int, data) -> int:
+        nonlocal stage_writes
+        try:
+            name = Path(os.readlink(f"/proc/self/fd/{descriptor}")).name
+        except OSError:
+            name = ""
+        if name.startswith("stage-"):
+            stage_writes += 1
+            if stage_writes == 1:
+                return real_write(descriptor, bytes(data[:3]))
+            raise PermissionError("partial stage initialization failed")
+        return real_write(descriptor, data)
+
+    monkeypatch.setattr(vault_module.os, "write", fail_after_partial_stage_write)
+
+    with pytest.raises(PermissionError, match="partial stage initialization failed"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(tmp_path / "target.md", "new exact content")]
+        )
+
+    assert stage_writes == 2
     assert _workspaces(tmp_path) == []
 
 
@@ -340,7 +554,7 @@ def test_batch_atomic_write_preserves_create_only_conflict(tmp_path: Path) -> No
     assert _workspaces(tmp_path) == []
 
 
-def test_batch_atomic_write_rolls_back_when_required_directory_census_changes(
+def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     guarded = tmp_path / "guarded"
@@ -348,37 +562,49 @@ def test_batch_atomic_write_rolls_back_when_required_directory_census_changes(
     census = vault_module.DirectoryCensusGuard.capture(
         tmp_path, "guarded", max_entries=4
     )
-    first = tmp_path / "first.md"
-    second = tmp_path / "second.md"
-    first.write_bytes(b"first-old")
-    second.write_bytes(b"second-old")
+    safe = tmp_path / "safe.md"
+    guarded_target = guarded / "guarded.md"
+    pending = tmp_path / "pending.md"
+    safe.write_bytes(b"safe-old")
+    guarded_target.write_bytes(b"guarded-old")
+    pending.write_bytes(b"pending-old")
     real_replace = os.replace
     flips = 0
+    restore_targets: list[str] = []
+    concurrent = guarded / "concurrent"
 
     def inject_census_change(src, dst, *args, **kwargs):
         nonlocal flips
         result = real_replace(src, dst, *args, **kwargs)
         if _leaf(src).startswith("stage-"):
             flips += 1
-            if flips == 1:
-                (guarded / "concurrent").write_bytes(b"new")
+            if flips == 2:
+                concurrent.write_bytes(b"concurrent-owned")
+        elif _leaf(src).startswith("restore-"):
+            restore_targets.append(_leaf(dst))
         return result
 
     monkeypatch.setattr(vault_module.os, "replace", inject_census_change)
-    with pytest.raises(vault_module.PathGuardError) as changed:
+    with pytest.raises(RuntimeError, match="rollback incomplete") as incomplete:
         vault_module.batch_atomic_write(
             [
-                vault_module.PlannedWrite(first, "first-new"),
-                vault_module.PlannedWrite(second, "second-new"),
+                vault_module.PlannedWrite(safe, "safe-new"),
+                vault_module.PlannedWrite(guarded_target, "guarded-new"),
+                vault_module.PlannedWrite(pending, "pending-new"),
             ],
             vault_root=tmp_path,
             required_guards=(census,),
         )
 
-    assert changed.value.code == "PATH_GUARD_CHANGED"
-    assert first.read_bytes() == b"first-old"
-    assert second.read_bytes() == b"second-old"
+    assert isinstance(incomplete.value.__cause__, vault_module.PathGuardError)
+    assert incomplete.value.__cause__.code == "PATH_GUARD_CHANGED"
+    assert restore_targets == ["safe.md"]
+    assert safe.read_bytes() == b"safe-old"
+    assert guarded_target.read_bytes() == b"guarded-new"
+    assert pending.read_bytes() == b"pending-old"
+    assert concurrent.read_bytes() == b"concurrent-owned"
     assert _workspaces(tmp_path) == []
+    assert _workspaces(guarded) == []
 
 
 def test_directory_census_guard_enforces_its_raw_entry_bound(tmp_path: Path) -> None:
