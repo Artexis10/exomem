@@ -91,7 +91,6 @@ def test_size_change_with_preserved_mtime_invalidates_entry(tmp_path: Path) -> N
     _page(page, "A much longer updated title")
     os.utime(page, ns=(old_stat.st_atime_ns, old_stat.st_mtime_ns))
     assert page.stat().st_mtime_ns == old_stat.st_mtime_ns
-
     updated = cache.get(page, tmp_path)
 
     assert first is not updated

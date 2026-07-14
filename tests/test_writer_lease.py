@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import inspect
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -10,6 +11,7 @@ import pytest
 
 from exomem.cli_ops import OpError, http_status_for
 from exomem.lease_coordinator import SQLiteLeaseStore
+from exomem.mutation_lock import VaultMutationCoordinator
 from exomem.vault import PlannedWrite, batch_atomic_write
 from exomem.writer_lease import (
     LeaseConfig,
@@ -75,6 +77,7 @@ class FakeClient:
     def __init__(self, record: LeaseRecord | Exception):
         self.record = record
         self.releases: list[int] = []
+        self.acquisitions = 0
 
     def _get(self) -> LeaseRecord:
         if isinstance(self.record, Exception):
@@ -82,6 +85,7 @@ class FakeClient:
         return self.record
 
     def acquire(self) -> LeaseRecord:
+        self.acquisitions += 1
         record = self._get()
         return LeaseRecord(
             record.holder, record.expires_at, record.fencing_token, record.holder == "desktop"
@@ -161,6 +165,224 @@ def test_reads_bypass_unavailable_coordinator(tmp_path: Path) -> None:
     assert (
         manager.invoke(_command(writes=False, leaf=lambda value: value + 1), (), {"value": 2}) == 3
     )
+
+
+def test_hosted_reads_serialize_without_contacting_unavailable_coordinator(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    state_root = tmp_path / "state"
+    manager = _manager(state_root, OpError("WRITER_COORDINATOR_UNAVAILABLE", "down"))
+    coordinator = VaultMutationCoordinator(state_root, vault)
+    boundary_entered = threading.Event()
+    release_boundary = threading.Event()
+    read_finished = threading.Event()
+    result: list[str] = []
+
+    def hold_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            boundary_entered.set()
+            assert release_boundary.wait(2.0)
+
+    def read() -> None:
+        result.append(
+            manager.invoke(
+                _command(writes=False, leaf=lambda _vault: "read-ok"),
+                (vault,),
+                {},
+            )
+        )
+        read_finished.set()
+
+    writer = threading.Thread(target=hold_mutation)
+    reader = threading.Thread(target=read)
+    writer.start()
+    assert boundary_entered.wait(1.0)
+    reader.start()
+    assert not read_finished.wait(0.1)
+    release_boundary.set()
+    assert read_finished.wait(1.0)
+    writer.join(timeout=2.0)
+    reader.join(timeout=2.0)
+
+    assert result == ["read-ok"]
+
+
+def test_read_only_invocation_bypasses_held_mutation_boundary(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(state_root, vault)
+    entered = threading.Event()
+    release = threading.Event()
+
+    def hold_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    thread = threading.Thread(target=hold_mutation)
+    thread.start()
+    assert entered.wait(1.0)
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    try:
+        assert manager.invoke(
+            _command(writes=False, leaf=lambda _vault: "read"),
+            (vault,),
+            {},
+        ) == "read"
+    finally:
+        release.set()
+        thread.join(timeout=2.0)
+    assert not thread.is_alive()
+
+
+def test_hosted_read_waits_for_complete_multi_file_mutation_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_HOSTED_CELL", "true")
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    coordinator = VaultMutationCoordinator(state_root, vault)
+    entered = threading.Event()
+    release = threading.Event()
+    read_finished = threading.Event()
+    result: list[str] = []
+
+    def hold_mutation() -> None:
+        with coordinator.hold(timeout_seconds=2.0):
+            entered.set()
+            assert release.wait(2.0)
+
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+
+    def read() -> None:
+        result.append(
+            manager.invoke(
+                _command(writes=False, leaf=lambda _vault: "consistent"),
+                (vault,),
+                {},
+            )
+        )
+        read_finished.set()
+
+    writer = threading.Thread(target=hold_mutation)
+    reader = threading.Thread(target=read)
+    writer.start()
+    assert entered.wait(1.0)
+    reader.start()
+    assert not read_finished.wait(0.1)
+    release.set()
+    assert read_finished.wait(1.0)
+    writer.join(timeout=2.0)
+    reader.join(timeout=2.0)
+    assert result == ["consistent"]
+
+
+def test_write_leaf_is_serialized_for_entire_invocation(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    first_manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    second_manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    first_entered = threading.Event()
+    second_attempting = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+
+    def first_leaf(_vault: Path) -> str:
+        first_entered.set()
+        assert release_first.wait(2.0)
+        return "first"
+
+    def second_leaf(_vault: Path) -> str:
+        second_entered.set()
+        return "second"
+
+    def run_first() -> None:
+        first_manager.invoke(_command(writes=True, leaf=first_leaf), (vault,), {})
+
+    def run_second() -> None:
+        second_attempting.set()
+        second_manager.invoke(_command(writes=True, leaf=second_leaf), (vault,), {})
+
+    first_thread = threading.Thread(target=run_first)
+    second_thread = threading.Thread(target=run_second)
+    first_thread.start()
+    assert first_entered.wait(1.0)
+    second_thread.start()
+    assert second_attempting.wait(1.0)
+    assert not second_entered.wait(0.1)
+    release_first.set()
+    assert second_entered.wait(1.0)
+    first_thread.join(timeout=2.0)
+    second_thread.join(timeout=2.0)
+    assert not first_thread.is_alive()
+    assert not second_thread.is_alive()
+
+
+def test_mutation_guard_is_reentrant_and_revalidates_writer_authority(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    client = FakeClient(LeaseRecord("desktop", 99, 4))
+    manager = LeaseManager(
+        LeaseConfig(
+            url="https://lease.example",
+            vault_id="main",
+            replica_id="desktop",
+            state_dir=tmp_path / "state",
+        ),
+        client=client,
+    )
+
+    with manager.mutation_guard(vault) as outer:
+        with manager.mutation_guard(vault / ".") as inner:
+            assert outer.lock_path == inner.lock_path
+            assert outer.identity == inner.identity
+
+    assert client.acquisitions == 2
+
+
+def test_direct_mutation_guard_threads_fence_to_atomic_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    target = vault / "note.md"
+    manager = _manager(tmp_path / "state", LeaseRecord("desktop", 99, 4))
+    validated: list[int] = []
+    monkeypatch.setattr(manager, "validate_fencing_token", validated.append)
+
+    with manager.mutation_guard(vault):
+        batch_atomic_write([PlannedWrite(target, "fenced bytes")])
+
+    assert target.read_text(encoding="utf-8") == "fenced bytes"
+    assert validated == [4]
+
+
+def test_invoke_routes_writes_through_reusable_mutation_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manager = LeaseManager(LeaseConfig(state_dir=tmp_path / "state"))
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+
+    @contextmanager
+    def guard(subject: Path):
+        assert subject == vault
+        events.append("guard-enter")
+        yield SimpleNamespace(identity="vault:test")
+        events.append("guard-exit")
+
+    monkeypatch.setattr(manager, "mutation_guard", guard, raising=False)
+    command = _command(writes=True, leaf=lambda _vault: events.append("leaf") or "ok")
+
+    assert manager.invoke(command, (vault,), {}) == "ok"
+    assert events == ["guard-enter", "leaf", "guard-exit"]
 
 
 def _unreachable_coordinator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -477,6 +699,39 @@ def test_idempotency_returns_saved_result_and_rejects_mismatch(tmp_path: Path) -
     assert calls == [1]
 
 
+def test_explicit_idempotency_reclaims_orphaned_pending_after_process_abort(
+    tmp_path: Path,
+) -> None:
+    manager = _manager(tmp_path, LeaseRecord("desktop", 99, 4))
+    calls: list[str] = []
+
+    def aborted() -> str:
+        calls.append("aborted")
+        raise SystemExit(70)
+
+    with pytest.raises(SystemExit):
+        manager.invoke(
+            _command(writes=True, leaf=aborted),
+            (),
+            {},
+            idempotency_key="request-after-crash",
+        )
+
+    recovered = _command(
+        writes=True,
+        leaf=lambda: calls.append("recovered") or "ok",
+    )
+    assert (
+        manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
+        == "ok"
+    )
+    assert (
+        manager.invoke(recovered, (), {}, idempotency_key="request-after-crash")
+        == "ok"
+    )
+    assert calls == ["aborted", "recovered"]
+
+
 def test_implicit_idempotency_is_bounded_and_principal_scoped(tmp_path: Path) -> None:
     clock = Clock()
     calls: list[int] = []
@@ -537,6 +792,24 @@ def test_explicit_idempotency_also_works_without_writer_lease(tmp_path: Path) ->
     with pytest.raises(OpError, match="IDEMPOTENCY_KEY_REUSED"):
         manager.invoke(command, (), {"value": 2}, idempotency_key="standalone-1")
     assert calls == [1]
+
+
+def test_explicit_idempotency_key_is_independent_across_vaults(tmp_path: Path) -> None:
+    state_root = tmp_path / "state"
+    vault_a = tmp_path / "vault-a"
+    vault_b = tmp_path / "vault-b"
+    vault_a.mkdir()
+    vault_b.mkdir()
+    calls: list[str] = []
+    manager = LeaseManager(LeaseConfig(state_dir=state_root))
+    command = _command(
+        writes=True,
+        leaf=lambda vault: calls.append(vault.name) or vault.name,
+    )
+
+    assert manager.invoke(command, (vault_a,), {}, idempotency_key="request-1") == "vault-a"
+    assert manager.invoke(command, (vault_b,), {}, idempotency_key="request-1") == "vault-b"
+    assert calls == ["vault-a", "vault-b"]
 
 
 @dataclass

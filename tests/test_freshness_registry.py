@@ -39,12 +39,14 @@ def _fresh_walk_triple(vault_root: Path, scope: str) -> tuple[int, int, str]:
 def _seed_both_scopes(vault_root: Path) -> None:
     kb_dir = vault_root / "Knowledge Base"
     freshness.seed(
-        vault_root, "kb",
-        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+        vault_root,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
     )
     freshness.seed(
-        vault_root, "vault",
-        ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(vault_root)),
+        vault_root,
+        "vault",
+        ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault_root)),
     )
 
 
@@ -72,15 +74,17 @@ def test_registry_seeded_from_walk_equals_walk_triple_both_scopes(vault: Path) -
     kb_dir = vault / "Knowledge Base"
     kb_ground_truth = find_module._walk_freshness_key(find_module._walk_md(kb_dir))
     freshness.seed(
-        vault, "kb",
-        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir)),
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir)),
     )
     assert freshness.triple(vault, "kb") == kb_ground_truth
 
     vault_ground_truth = find_module._walk_freshness_key(vault_module.walk_vault_md(vault))
     freshness.seed(
-        vault, "vault",
-        ((str(p), p.stat().st_mtime_ns) for p in vault_module.walk_vault_md(vault)),
+        vault,
+        "vault",
+        ((str(p), freshness.stat_signature(p)) for p in vault_module.walk_vault_md(vault)),
     )
     assert freshness.triple(vault, "vault") == vault_ground_truth
 
@@ -151,6 +155,25 @@ def test_incremental_parity_modify_kb_note(vault: Path) -> None:
 
     assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
     assert freshness.triple(vault, "vault") == _fresh_walk_triple(vault, "vault")
+
+
+def test_incremental_parity_preserved_mtime_replacement(vault: Path) -> None:
+    _seed_both_scopes(vault)
+    target = next(find_module._walk_md(vault / "Knowledge Base"))
+    before = target.stat()
+    old_triple = freshness.triple(vault, "kb")
+    replacement = target.with_suffix(".replacement")
+    replacement.write_text(
+        target.read_text(encoding="utf-8") + "\nchanged-size\n", encoding="utf-8"
+    )
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, target)
+
+    freshness.on_files_changed(vault, changed=[target])
+
+    assert target.stat().st_mtime_ns == before.st_mtime_ns
+    assert freshness.triple(vault, "kb") != old_triple
+    assert freshness.triple(vault, "kb") == _fresh_walk_triple(vault, "kb")
 
 
 def test_incremental_parity_move_kb_note(vault: Path) -> None:
@@ -229,7 +252,7 @@ def test_reconcile_detects_and_heals_a_missed_event(vault: Path) -> None:
     assert freshness.triple(vault, "kb") == stale_triple  # still stale before reconcile
 
     kb_dir = vault / "Knowledge Base"
-    fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
+    fresh_entries = ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir))
     delta = freshness.reconcile(vault, "kb", fresh_entries)
 
     assert delta.drifted is True
@@ -243,7 +266,7 @@ def test_reconcile_with_no_drift_returns_false(vault: Path) -> None:
     _seed_both_scopes(vault)
 
     kb_dir = vault / "Knowledge Base"
-    fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
+    fresh_entries = ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir))
     delta = freshness.reconcile(vault, "kb", fresh_entries)
 
     assert delta.drifted is False
@@ -263,7 +286,7 @@ def test_reconcile_delta_reports_changed_and_deleted_paths(vault: Path) -> None:
     # No on_files_changed calls — both events are "missed".
 
     kb_dir = vault / "Knowledge Base"
-    fresh_entries = ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb_dir))
+    fresh_entries = ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb_dir))
     delta = freshness.reconcile(vault, "kb", fresh_entries)
 
     assert delta.drifted is True

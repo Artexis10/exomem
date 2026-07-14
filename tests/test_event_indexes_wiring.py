@@ -14,9 +14,8 @@ from pathlib import Path
 
 import pytest
 
-from exomem import file_watcher
+from exomem import file_watcher, freshness
 from exomem import find as find_module
-from exomem import freshness
 from exomem.vault import walk_vault_md
 
 
@@ -30,7 +29,7 @@ def _reset_registries():
 def _entries(paths):
     for p in paths:
         try:
-            yield (str(p), p.stat().st_mtime_ns)
+            yield (str(p), freshness.stat_signature(p))
         except OSError:
             continue
 

@@ -15,6 +15,7 @@ are returned to the host. Inline mode preserves a deterministic test/debug path.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import logging
 import os
 import queue
@@ -37,6 +38,7 @@ from .media_jobs import (
 from .media_jobs import (
     MediaJob as _Job,
 )
+from .writer_lease import get_manager
 
 log = logging.getLogger(__name__)
 
@@ -44,6 +46,39 @@ _MEDIA_TYPE_RE = re.compile(r"(?m)^media_type:\s*(\S+)\s*$")
 _EVIDENCE_FILE_RE = re.compile(r"(?m)^evidence_file:\s*(.+?)\s*$")
 _PENDING_MARKER = "extracted_by: pending"
 _PARENT_MEDIA_MARKER = "\nparent_media:"
+_MAX_IDENTITY_HASH_BYTES = 8 * 1024 * 1024
+
+
+def _content_digest(path: Path) -> str | None:
+    """Small-file optimistic identity used to protect a sidecar commit."""
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError:
+        return None
+
+
+def _stat_identity(path: Path) -> tuple[int, int, int, int, int] | None:
+    """Cheap parent-media identity that is safe to revalidate while locked."""
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+
+
+def _binary_identity(
+    path: Path,
+) -> tuple[tuple[int, int, int, int, int], str | None] | None:
+    """Stable media identity: bounded content hash, stat fallback for large files."""
+    before = _stat_identity(path)
+    if before is None:
+        return None
+    if before[2] > _MAX_IDENTITY_HASH_BYTES:
+        return (before, None)
+    digest = _content_digest(path)
+    if digest is None or _stat_identity(path) != before:
+        return None
+    return (before, digest)
 
 
 class MediaWorker:
@@ -185,12 +220,18 @@ class MediaWorker:
         earlier embed (transcript+speaker signals only) remains valid.
         """
         try:
-            index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
+            with get_manager().mutation_guard(self._vault_root):
+                index_sync.upsert_after_write(self._vault_root, [job.sidecar_path])
             log.info("re-embedded %s (post-frame-OCR segmentation)", job.sidecar_path.name)
         except Exception:  # noqa: BLE001 — enrichment, never fatal
             log.exception("re-embed failed for %s", job.sidecar_path.name)
 
     def _run_extraction(self, job: _Job) -> bool:
+        expected_sidecar = _content_digest(job.sidecar_path)
+        expected_binary = _binary_identity(job.binary_path)
+        if expected_sidecar is None or expected_binary is None:
+            log.warning("extraction skip %s: input identity unavailable", job.binary_path.name)
+            return True
         try:
             result = extract.extract_text(
                 job.binary_path, media_type=job.media_type, vault_root=self._vault_root
@@ -202,25 +243,68 @@ class MediaWorker:
             return False
         except Exception as e:  # noqa: BLE001 — a corrupt file shouldn't re-loop forever
             log.exception("extraction failed for %s", job.binary_path.name)
-            preserve.update_sidecar_extraction(
-                self._vault_root, job.sidecar_path, text="", engine=f"failed: {type(e).__name__}"
+            self._commit_sidecar_extraction(
+                job,
+                expected_sidecar=expected_sidecar,
+                expected_binary=expected_binary,
+                text="",
+                engine=f"failed: {type(e).__name__}",
             )
             return True
         text = result.text.strip() or "(no text detected)"
-        preserve.update_sidecar_extraction(
-            self._vault_root, job.sidecar_path, text=text, engine=result.engine,
+        committed = self._commit_sidecar_extraction(
+            job,
+            expected_sidecar=expected_sidecar,
+            expected_binary=expected_binary,
+            text=text,
+            engine=result.engine,
             speakers=result.speakers,
         )
+        if not committed:
+            return True
         log.info(
             "extracted %s via %s (%d chars)", job.binary_path.name, result.engine, len(result.text)
         )
         return True
+
+    def _commit_sidecar_extraction(
+        self,
+        job: _Job,
+        *,
+        expected_sidecar: str,
+        expected_binary: tuple[tuple[int, int, int, int, int], str | None],
+        text: str,
+        engine: str,
+        speakers: list[dict] | None = None,
+    ) -> bool:
+        with get_manager().mutation_guard(self._vault_root):
+            if (
+                _content_digest(job.sidecar_path) != expected_sidecar
+                or _binary_identity(job.binary_path) != expected_binary
+            ):
+                log.warning(
+                    "extraction result stale for %s; newer canonical input preserved",
+                    job.sidecar_path.name,
+                )
+                return False
+            preserve.update_sidecar_extraction(
+                self._vault_root,
+                job.sidecar_path,
+                text=text,
+                engine=engine,
+                speakers=speakers,
+            )
+            return True
 
     def _run_clip(self, job: _Job) -> None:
         """CLIP-embed an image (one vector) or a video (per-keyframe vectors) so it's
         findable by visual content — video at the specific moment, not as one blur."""
         is_video = job.media_type == "video"
         scene_pairs: list | None = None
+        expected_binary = _binary_identity(job.binary_path)
+        if expected_binary is None:
+            log.warning("CLIP skip %s: media identity unavailable", job.binary_path.name)
+            return
         try:
             if is_video and scene_frames.scene_frames_enabled():
                 # One decode pass yields both the per-scene vectors AND the full-res
@@ -236,22 +320,35 @@ class MediaWorker:
         except Exception:  # noqa: BLE001 — a bad image must not kill the worker
             log.exception("CLIP embedding failed for %s", job.binary_path.name)
             return
-        try:
-            rel = job.binary_path.resolve().relative_to(self._vault_root.resolve()).as_posix()
-            mtime = job.binary_path.stat().st_mtime
-        except (ValueError, OSError) as e:
-            log.warning("CLIP skip %s: %s", job.binary_path.name, e)
-            return
-        if is_video:
-            self._clip_index.upsert_frames(rel, frames, mtime)
-            log.info("CLIP-indexed %s (%d keyframes)", job.binary_path.name, len(frames))
-            if scene_pairs:
-                self._persist_scene_frames(job, scene_pairs)
-        else:
-            self._clip_index.upsert(rel, vec, mtime)
-            log.info("CLIP-indexed %s", job.binary_path.name)
+        with get_manager().mutation_guard(self._vault_root):
+            if _binary_identity(job.binary_path) != expected_binary:
+                log.warning(
+                    "CLIP result stale for %s; changed media was not indexed",
+                    job.binary_path.name,
+                )
+                return
+            try:
+                rel = job.binary_path.resolve().relative_to(self._vault_root.resolve()).as_posix()
+                mtime = job.binary_path.stat().st_mtime
+            except (ValueError, OSError) as e:
+                log.warning("CLIP skip %s: %s", job.binary_path.name, e)
+                return
+            if is_video:
+                self._clip_index.upsert_frames(rel, frames, mtime)
+                log.info("CLIP-indexed %s (%d keyframes)", job.binary_path.name, len(frames))
+                if scene_pairs:
+                    self._persist_scene_frames(job, scene_pairs, expected_binary=expected_binary)
+            else:
+                self._clip_index.upsert(rel, vec, mtime)
+                log.info("CLIP-indexed %s", job.binary_path.name)
 
-    def _persist_scene_frames(self, job: _Job, pairs: list) -> None:
+    def _persist_scene_frames(
+        self,
+        job: _Job,
+        pairs: list,
+        *,
+        expected_binary: tuple[tuple[int, int, int, int, int], str | None] | None = None,
+    ) -> None:
         """Write scene JPEGs + pending sidecars, then queue each frame for OCR only.
 
         Soft-fails entirely: the video's vectors are already upserted, so a frame
@@ -259,11 +356,18 @@ class MediaWorker:
         OCR jobs go through the normal queue (`do_clip=False` — frame children never
         get their own ClipIndex rows; the parent video's vectors own visual search).
         """
-        try:
-            written = scene_frames.write_scene_frames(self._vault_root, job.binary_path, pairs)
-        except Exception:  # noqa: BLE001 — persistence is strictly additive
-            log.exception("scene frame persistence failed for %s", job.binary_path.name)
-            return
+        with get_manager().mutation_guard(self._vault_root):
+            if expected_binary is not None and _binary_identity(job.binary_path) != expected_binary:
+                log.warning(
+                    "scene-frame result stale for %s; changed media was not persisted",
+                    job.binary_path.name,
+                )
+                return
+            try:
+                written = scene_frames.write_scene_frames(self._vault_root, job.binary_path, pairs)
+            except Exception:  # noqa: BLE001 — persistence is strictly additive
+                log.exception("scene frame persistence failed for %s", job.binary_path.name)
+                return
         for jpg, sidecar in written:
             self.enqueue(
                 binary_path=jpg,

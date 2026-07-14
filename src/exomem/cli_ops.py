@@ -41,6 +41,8 @@ _REMEDIATION: dict[str, str] = {
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
     "WRITER_LEASE_REQUIRED": "Send the mutation to the current writer or retry after its lease expires.",
     "WRITER_COORDINATOR_UNAVAILABLE": "Check the coordinator URL, credentials, and service health; reads remain available.",
+    "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
+    "MUTATION_LOCK_UNAVAILABLE": "Check that the runtime state root is writable and supports host file locking.",
 }
 
 # Error codes whose HTTP status is NOT the default 400.
@@ -61,6 +63,7 @@ _CONFLICT_CODES = frozenset(
         "WRITER_LEASE_REQUIRED",
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
+        "MUTATION_BUSY",
     }
 )
 
@@ -110,7 +113,7 @@ def http_status_for(code: str) -> int:
         return 404
     if code in _CONFLICT_CODES or code.endswith("_EXISTS"):
         return 409
-    if code == "WRITER_COORDINATOR_UNAVAILABLE":
+    if code in {"WRITER_COORDINATOR_UNAVAILABLE", "MUTATION_LOCK_UNAVAILABLE"}:
         return 503
     return 400
 

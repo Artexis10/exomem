@@ -34,7 +34,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
-from . import indexes, memory_refs
+from . import indexes, memory_refs, privacy_log
 from .kbdir import kb_prefix
 from .vault import (
     PlannedWrite,
@@ -358,7 +358,13 @@ def preserve(
             batch_atomic_write(writes, vault_root=vault_root)
 
     except Exception as e:
-        log.exception("preserve() failed mid-write; artifact_written=%s", written_artifact)
+        if privacy_log.content_private_logging_enabled():
+            log.error(
+                "hosted preserve failed code=HOSTED_PRESERVE_FAILED artifact_written=%s",
+                written_artifact,
+            )
+        else:
+            log.exception("preserve() failed mid-write; artifact_written=%s", written_artifact)
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
 

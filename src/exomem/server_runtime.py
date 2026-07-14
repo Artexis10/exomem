@@ -10,12 +10,20 @@ from __future__ import annotations
 
 import logging
 import os
+import sys
 from collections.abc import Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, project_keys, schema
+from . import env_compat, hosted_runtime, privacy_log, project_keys, schema
+from .hosted_runtime import (
+    HostedBindingV2,
+    HostedCellConfig,
+    HostedCellLifecycle,
+    hosted_mode_enabled,
+)
 from .vault import resolve_vault
 
 log = logging.getLogger(__name__)
@@ -29,6 +37,10 @@ class ServerRuntime:
     base_url: str
     media_worker: Any | None = None
     file_watcher: Any | None = None
+    hosted_config: HostedCellConfig | None = None
+    hosted_lifecycle: HostedCellLifecycle | None = None
+    hosted_security_authority: Any | None = None
+    hosted_lifetime_lock: AbstractContextManager[None] | None = None
 
 
 def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRuntime:
@@ -38,6 +50,9 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
     ``exomem.server.load_dotenv`` still neutralize dotenv loading exactly as they
     did before this extraction.
     """
+    if hosted_mode_enabled():
+        return _initialize_hosted_runtime()
+
     # An installed package lives under site-packages, so python-dotenv's implicit
     # caller-relative search misses the service working directory. The documented
     # repo-root .env is explicitly cwd-relative for both checkout and wheel installs.
@@ -62,6 +77,203 @@ def initialize_runtime(*, load_dotenv_func: Callable[..., object]) -> ServerRunt
         media_worker=media_worker,
         file_watcher=file_watcher,
     )
+
+
+def _initialize_hosted_runtime() -> ServerRuntime:
+    """Initialize one explicit hosted cell without reading any dotenv file."""
+    privacy_log.install_hosted_log_redaction()
+    config = HostedCellConfig.from_env(require_provisioned=True)
+    binding = None
+    if config.requires_dynamic_security:
+        assert config.vault_id is not None
+        binding = HostedBindingV2(
+            cell_id=config.cell_id,
+            vault_id=config.vault_id,
+            vault_root=config.vault_root,
+            state_root=config.state_root,
+            log_root=config.log_root,
+            runtime_uid=config.runtime_uid,
+            runtime_gid=config.runtime_gid,
+        )
+    from .hosted_restore import acquire_hosted_lifetime_lock
+
+    lifetime_lock = acquire_hosted_lifetime_lock(config.state_root, binding=binding)
+    lifetime_lock.__enter__()
+    try:
+        _cleanup_hosted_transfer_temp(config)
+        return _initialize_locked_hosted_runtime(config, lifetime_lock)
+    except BaseException:
+        lifetime_lock.__exit__(*sys.exc_info())
+        raise
+
+
+def _initialize_locked_hosted_runtime(
+    config: HostedCellConfig,
+    lifetime_lock: AbstractContextManager[None],
+) -> ServerRuntime:
+    """Finish hosted startup while retaining exclusive target-root ownership."""
+
+    config.apply_process_environment()
+    lifecycle = HostedCellLifecycle(config)
+    security_authority = _initialize_hosted_security(config)
+    vault_root = config.vault_root
+
+    source_schema = schema.load_source_schema(vault_root)
+    project_keys_hint = project_keys.keys_hint(vault_root)
+    log.info(
+        "hosted_cell=%s source_types=%s",
+        config.cell_id,
+        source_schema.source_types,
+    )
+
+    mutation_ready, mutation_reason = probe_hosted_mutation_authority(vault_root)
+
+    startup = lifecycle.complete_startup(
+        vault_ready=True,
+        mutation_authority_ready=mutation_ready,
+        service_auth_ready=(security_authority is not None or config.service_credential is not None),
+    )
+    if config.has_feature("diarization"):
+        lifecycle.set_worker_status(
+            "diarization",
+            ready=False,
+            reason_code="HOSTED_RUNTIME_TEMP_AUTHORITY_REQUIRED",
+        )
+    if not mutation_ready:
+        lifecycle.set_mutation_authority(False, reason_code=mutation_reason)
+
+    media_worker = None
+    file_watcher = None
+    if not mutation_ready:
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_MUTATION_AUTHORITY_UNAVAILABLE",
+                )
+    elif config.resource_limits.worker_count == 0:
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_WORKER_LIMIT_ZERO",
+                )
+    elif startup.phase == "quiesced":
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_CELL_NOT_ACTIVE",
+                )
+        if config.has_feature("media"):
+            media_worker = _create_media_worker(vault_root)
+            if media_worker is not None:
+                lifecycle.register_background_worker(
+                    stopper=media_worker.stop,
+                    starter=_worker_starter(lifecycle, "media", media_worker),
+                )
+        if config.has_feature("file-watcher"):
+            file_watcher = _create_file_watcher(vault_root)
+            if file_watcher is not None:
+                lifecycle.register_background_worker(
+                    stopper=file_watcher.stop,
+                    starter=_worker_starter(lifecycle, "file-watcher", file_watcher),
+                )
+    elif startup.phase != "active":
+        for feature in ("embeddings", "file-watcher", "media"):
+            if config.has_feature(feature):
+                lifecycle.set_worker_status(
+                    feature,
+                    ready=False,
+                    reason_code="HOSTED_CELL_NOT_ACTIVE",
+                )
+    else:
+        if config.has_feature("embeddings"):
+            _start_compute_runtime(vault_root)
+        if config.has_feature("media"):
+            media_worker = _start_media_worker(vault_root)
+            lifecycle.set_worker_status(
+                "media",
+                ready=media_worker is not None,
+                reason_code="HOSTED_WORKER_UNAVAILABLE",
+            )
+            if media_worker is not None:
+                lifecycle.register_background_worker(
+                    stopper=media_worker.stop, starter=media_worker.start
+                )
+        if config.has_feature("file-watcher"):
+            file_watcher = _start_file_watcher(vault_root)
+            lifecycle.set_worker_status(
+                "file-watcher",
+                ready=file_watcher is not None,
+                reason_code="HOSTED_WORKER_UNAVAILABLE",
+            )
+            if file_watcher is not None:
+                lifecycle.register_background_worker(
+                    stopper=file_watcher.stop, starter=file_watcher.start
+                )
+
+    return ServerRuntime(
+        vault_root=vault_root,
+        source_schema=source_schema,
+        project_keys_hint=project_keys_hint,
+        base_url="",
+        media_worker=media_worker,
+        file_watcher=file_watcher,
+        hosted_config=config,
+        hosted_lifecycle=lifecycle,
+        hosted_security_authority=security_authority,
+        hosted_lifetime_lock=lifetime_lock,
+    )
+
+
+def _cleanup_hosted_transfer_temp(config: HostedCellConfig) -> None:
+    from .hosted_runtime_temp import prepare_hosted_runtime_temp
+    from .hosted_transfer_routes import cleanup_hosted_transfer_temp
+
+    prepare_hosted_runtime_temp(
+        config.state_root,
+        expected_uid=config.runtime_uid,
+        expected_gid=config.runtime_gid,
+    )
+    cleanup_hosted_transfer_temp(config.state_root)
+
+
+def _initialize_hosted_security(config: HostedCellConfig) -> Any | None:
+    """Open and validate the v2 authority before the server becomes reachable."""
+
+    if not config.requires_dynamic_security:
+        return None
+    assert config.vault_id is not None
+    from .hosted_security import HostedSecurityAuthority
+
+    authority = HostedSecurityAuthority(
+        config.state_root,
+        cell_id=config.cell_id,
+        vault_id=config.vault_id,
+        expected_uid=config.runtime_uid,
+        expected_gid=config.runtime_gid,
+    )
+    authority.validate_ready()
+    return authority
+
+
+def probe_hosted_mutation_authority(vault_root: Path) -> tuple[bool, str]:
+    """Prove the shared mutation guard can be acquired and safely released."""
+
+    try:
+        with hosted_runtime.hosted_mutation_guard(vault_root):
+            pass
+    except Exception as exc:  # noqa: BLE001 - any uncertainty keeps hosted writes closed
+        log.warning(
+            "hosted mutation authority unavailable error=%s",
+            type(exc).__name__,
+        )
+        return False, "HOSTED_MUTATION_AUTHORITY_UNAVAILABLE"
+    return True, "HOSTED_READY"
 
 
 def _start_compute_runtime(vault_root: Path) -> None:
@@ -89,21 +301,16 @@ def _start_compute_runtime(vault_root: Path) -> None:
 
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
-    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+    worker = _create_media_worker(vault_root)
+    if worker is None:
         return None
-
-    from . import media_worker as media_worker_module
-
-    worker = None
     try:
-        worker = media_worker_module.MediaWorker(vault_root)
         worker.start()
     except Exception as exc:  # noqa: BLE001 - media must never deny the core service
-        if worker is not None:
-            try:
-                worker.stop()
-            except Exception:  # noqa: BLE001 - startup degradation must remain soft
-                pass
+        try:
+            worker.stop()
+        except Exception:  # noqa: BLE001 - startup degradation must remain soft
+            pass
         log.warning("media runtime unavailable; core service continuing: %s", exc)
         return None
     try:
@@ -113,16 +320,55 @@ def _start_media_worker(vault_root: Path) -> Any | None:
     return worker
 
 
-def _start_file_watcher(vault_root: Path) -> Any | None:
-    """Start the optional live file watcher."""
-    if os.environ.get("EXOMEM_DISABLE_FILE_WATCHER"):
+def _create_media_worker(vault_root: Path) -> Any | None:
+    """Construct a media worker without starting background execution."""
+    if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
         return None
 
-    from . import file_watcher as file_watcher_module
+    from . import media_worker as media_worker_module
 
-    watcher = file_watcher_module.FileWatcher(vault_root)
+    try:
+        return media_worker_module.MediaWorker(vault_root)
+    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        log.warning("media runtime unavailable; core service continuing: %s", exc)
+        return None
+
+
+def _start_file_watcher(vault_root: Path) -> Any | None:
+    """Start the optional live file watcher."""
+    watcher = _create_file_watcher(vault_root)
+    if watcher is None:
+        return None
     try:
         watcher.start()
     except Exception as exc:  # noqa: BLE001 - watcher must not break startup
         log.warning("file watcher start failed: %s", exc)
     return watcher
+
+
+def _create_file_watcher(vault_root: Path) -> Any | None:
+    """Construct a file watcher without starting background execution."""
+    if os.environ.get("EXOMEM_DISABLE_FILE_WATCHER"):
+        return None
+
+    from . import file_watcher as file_watcher_module
+
+    try:
+        return file_watcher_module.FileWatcher(vault_root)
+    except Exception as exc:  # noqa: BLE001 - watcher must not break startup
+        log.warning("file watcher unavailable; core service continuing: %s", exc)
+        return None
+
+
+def _worker_starter(
+    lifecycle: HostedCellLifecycle,
+    feature: str,
+    worker: Any,
+) -> Callable[[], None]:
+    """Start a dormant worker and make its resumed health explicit."""
+
+    def start() -> None:
+        worker.start()
+        lifecycle.set_worker_status(feature, ready=True)
+
+    return start

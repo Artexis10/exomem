@@ -12,12 +12,12 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import privacy_log
 from .vault import (
     VaultPathError,
     parse_frontmatter,
     resolve_under_vault,
 )
-
 
 log = logging.getLogger(__name__)
 
@@ -103,6 +103,8 @@ def _walk(directory: Path, *, recursive: bool, include_hidden: bool):
         return
     for child in children:
         name = child.name
+        if privacy_log.is_reserved_hosted_vault_path(name):
+            continue
         if not include_hidden and (name.startswith(".") or name == "_attachments"):
             continue
         yield child

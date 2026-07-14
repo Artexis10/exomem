@@ -1,0 +1,470 @@
+{
+  "artifact": "exomem-hosted-transfer-contract",
+  "grant_version": 2,
+  "audience": "exomem-hosted-transfer",
+  "header": {
+    "name": "X-Exomem-Transfer-Grant",
+    "max_ascii_bytes": 8192,
+    "encoding": "base64url-no-padding(canonical-claims-json).base64url-no-padding(hmac-sha256(signing-credential,ascii-payload))"
+  },
+  "canonical_json": {
+    "encoding": "utf-8",
+    "object_keys": "lexicographic",
+    "separators": [
+      ",",
+      ":"
+    ],
+    "ensure_ascii": false,
+    "allow_nan": false,
+    "duplicate_keys": false,
+    "input_must_equal_canonical_encoding": true
+  },
+  "claim_fields_exact": [
+    "v",
+    "aud",
+    "kid",
+    "origin",
+    "op",
+    "method",
+    "cell",
+    "principal",
+    "iat",
+    "nbf",
+    "exp",
+    "jti",
+    "limits",
+    "target"
+  ],
+  "claim_schema": {
+    "v": {
+      "const": 2
+    },
+    "aud": {
+      "const": "exomem-hosted-transfer"
+    },
+    "kid": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"
+    },
+    "origin": {
+      "type": "canonical-https-origin",
+      "max_ascii_bytes": 255,
+      "scheme": "https",
+      "userinfo": false,
+      "path": "",
+      "query": false,
+      "fragment": false,
+      "host": "lowercase-ascii-dns-name-with-no-trailing-dot",
+      "internationalized_host": false,
+      "nondefault_port": "decimal-1-through-65535",
+      "default_port_omitted": true,
+      "wildcard_or_null": false
+    },
+    "op": {
+      "enum": [
+        "upload",
+        "download"
+      ]
+    },
+    "method": {
+      "enum": [
+        "PUT",
+        "GET"
+      ]
+    },
+    "cell": {
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"
+    },
+    "principal": {
+      "pattern": "^[A-Za-z0-9_-]{43}$",
+      "decoded_bytes": 32
+    },
+    "iat": {
+      "type": "integer-unix-seconds"
+    },
+    "nbf": {
+      "type": "integer-unix-seconds"
+    },
+    "exp": {
+      "type": "integer-unix-seconds"
+    },
+    "jti": {
+      "type": "canonical-rfc4122-uuid-v4"
+    },
+    "limits": {
+      "fields_exact": [
+        "max_bytes"
+      ],
+      "max_bytes": {
+        "type": "integer",
+        "minimum": 1
+      }
+    },
+    "target": {
+      "one_of": [
+        "upload-target-v1",
+        "download-target-v1"
+      ]
+    }
+  },
+  "cross_field_constraints": [
+    "op=upload iff method=PUT iff target.kind=upload-v1",
+    "op=download iff method=GET iff target.kind=download-v1",
+    "iat <= nbf < exp",
+    "exp-iat <= 900",
+    "iat <= verifier_now+30",
+    "nbf <= verifier_now+30",
+    "verifier_now < exp with no expiration grace",
+    "expiry is checked before JTI lookup; deletion after exp+86400 cannot resurrect a grant",
+    "after an unexpired grant is admitted and consumed, exp is not rechecked during that transfer",
+    "kid must name a currently accepted recorded credential version",
+    "origin must equal the cell configured browser origin",
+    "cell must equal the immutable configured cell",
+    "limits.max_bytes <= 94371840 for upload",
+    "limits.max_bytes <= configured storage entitlement for download"
+  ],
+  "upload-target-v1": {
+    "fields_exact": [
+      "kind",
+      "metadata",
+      "metadata_sha256"
+    ],
+    "kind": {
+      "const": "upload-v1"
+    },
+    "metadata_sha256": {
+      "type": "lowercase-sha256-of-canonical-metadata-json"
+    },
+    "metadata": {
+      "fields_exact": [
+        "category",
+        "content_type",
+        "description",
+        "filename",
+        "scope",
+        "sha256",
+        "size"
+      ],
+      "category": {
+        "type": [
+          "nfc-string",
+          "null"
+        ],
+        "max_utf8_bytes": 512,
+        "empty_normalizes_to_null": true
+      },
+      "content_type": {
+        "type": "visible-ascii-media-type",
+        "min_ascii_bytes": 1,
+        "max_ascii_bytes": 255,
+        "no_crlf": true
+      },
+      "description": {
+        "type": [
+          "nfc-string",
+          "null"
+        ],
+        "max_utf8_bytes": 2048,
+        "empty_normalizes_to_null": true
+      },
+      "filename": {
+        "type": "nfc-string",
+        "min_utf8_bytes": 1,
+        "max_utf8_bytes": 512,
+        "basename_only": true,
+        "slash_or_backslash": false,
+        "dot_or_dotdot": false,
+        "no_nul_or_control": true
+      },
+      "scope": {
+        "type": [
+          "nfc-string",
+          "null"
+        ],
+        "max_utf8_bytes": 512,
+        "empty_normalizes_to_null": true
+      },
+      "sha256": {
+        "pattern": "^[0-9a-f]{64}$"
+      },
+      "size": {
+        "type": "integer",
+        "minimum": 0,
+        "maximum": 94371840
+      }
+    },
+    "constraints": [
+      "metadata_sha256 equals sha256(canonical_json(metadata))",
+      "metadata.size <= limits.max_bytes",
+      "request Content-Type equals metadata.content_type exactly",
+      "streamed body byte count equals metadata.size",
+      "streamed body sha256 equals metadata.sha256"
+    ]
+  },
+  "download-target-v1": {
+    "fields_exact": [
+      "kind",
+      "path"
+    ],
+    "kind": {
+      "const": "download-v1"
+    },
+    "path": {
+      "type": "nfc-posix-vault-relative-path",
+      "min_utf8_bytes": 1,
+      "max_utf8_bytes": 4096,
+      "basename_max_utf8_bytes": 512,
+      "absolute": false,
+      "dot_segments": false,
+      "backslash": false,
+      "nul_or_control": false,
+      "symlink_resolution_outside_vault": false
+    }
+  },
+  "routes": {
+    "upload": {
+      "method": "PUT",
+      "preflight_method": "OPTIONS",
+      "path": "/public/exomem/v2/transfers/upload",
+      "body": "raw-file-bytes",
+      "query": false,
+      "range": false,
+      "authorization_header": false,
+      "cookies": false
+    },
+    "download": {
+      "method": "GET",
+      "preflight_method": "OPTIONS",
+      "path": "/public/exomem/v2/transfers/download",
+      "body": false,
+      "query": false,
+      "range": false,
+      "authorization_header": false,
+      "cookies": false
+    },
+    "preflight": {
+      "method": "OPTIONS",
+      "paths_exact": [
+        "/public/exomem/v2/transfers/upload",
+        "/public/exomem/v2/transfers/download"
+      ],
+      "body": false,
+      "grant": false,
+      "jti_consumption": false,
+      "other_paths_public": false
+    }
+  },
+  "upload_request_framing": {
+    "signed_size": "target.metadata.size",
+    "signed_size_and_limits_validate_before_consumption": true,
+    "content_length": {
+      "required": false,
+      "when_present": "one canonical nonnegative decimal equal to target.metadata.size",
+      "duplicate_or_comma_joined": false
+    },
+    "absent_content_length_or_chunked": "allowed",
+    "content_length_transfer_encoding_conflict": "reject-before-consumption",
+    "streamed_count_and_sha256": "authoritative-after-consumption",
+    "streamed_mismatch_or_overflow": "abort-delete-temp-and-burn-jti"
+  },
+  "cors": {
+    "allow_origin": "exact configured grant-bound HTTPS origin",
+    "allow_credentials": false,
+    "route_policy": {
+      "/public/exomem/v2/transfers/upload": {
+        "allow_methods_exact": [
+          "PUT"
+        ],
+        "allow_headers_exact": [
+          "Content-Type",
+          "X-Exomem-Transfer-Grant"
+        ]
+      },
+      "/public/exomem/v2/transfers/download": {
+        "allow_methods_exact": [
+          "GET"
+        ],
+        "allow_headers_exact": [
+          "X-Exomem-Transfer-Grant"
+        ]
+      }
+    },
+    "max_age_seconds": 300,
+    "vary": "Origin",
+    "cache_control": "private, no-store",
+    "download_expose_headers": [
+      "Content-Disposition",
+      "Content-Length",
+      "Content-Type"
+    ]
+  },
+  "responses": {
+    "upload_success": {
+      "status": 201,
+      "content_type": "application/json",
+      "envelope_fields_exact": [
+        "success",
+        "data"
+      ],
+      "success": true,
+      "data_fields_exact": [
+        "operation",
+        "bytes",
+        "sha256",
+        "committed"
+      ],
+      "data": {
+        "operation": {
+          "const": "upload"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 94371840
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "committed": {
+          "const": true
+        }
+      },
+      "forbidden": [
+        "governed path",
+        "filename",
+        "scope/category/description",
+        "grant or JTI"
+      ]
+    },
+    "download_success": {
+      "status": 200,
+      "body": "exact-grant-bound-file-bytes",
+      "content_type": "application/octet-stream",
+      "content_length": "exact-opened-file-size",
+      "content_disposition": {
+        "ascii_fallback": "attachment; filename=\"exomem-download\"",
+        "extended_parameter": "filename*=UTF-8'' plus RFC8187 attr-char encoding of NFC basename",
+        "percent_encoding": "uppercase hex of each non-attr-char UTF-8 byte",
+        "source": "validated final path segment",
+        "source_max_utf8_bytes": 512,
+        "header_max_ascii_bytes": 2048,
+        "crlf_or_control": false
+      },
+      "json_envelope": false
+    },
+    "error": {
+      "content_type": "application/json",
+      "envelope_fields_exact": [
+        "success",
+        "error"
+      ],
+      "success": false,
+      "error_fields_exact": [
+        "code",
+        "message",
+        "retryable",
+        "requires_new_grant"
+      ],
+      "forbidden": [
+        "target path or filename",
+        "target existence detail",
+        "user metadata or content",
+        "grant, JTI, credential, or private address"
+      ],
+      "catalog": {
+        "TRANSFER_REQUEST_INVALID": {
+          "status": 400,
+          "message": "transfer request is invalid",
+          "retryable": false,
+          "requires_new_grant": false,
+          "consumption": "before"
+        },
+        "TRANSFER_GRANT_REJECTED": {
+          "status": 401,
+          "message": "transfer authorization failed",
+          "retryable": false,
+          "requires_new_grant": true,
+          "consumption": "before"
+        },
+        "TRANSFER_ORIGIN_REJECTED": {
+          "status": 403,
+          "message": "transfer origin is not allowed",
+          "retryable": false,
+          "requires_new_grant": false,
+          "consumption": "before",
+          "cors_authority": false
+        },
+        "TRANSFER_ADMISSION_CLOSED": {
+          "status": 409,
+          "message": "transfer admission is closed",
+          "retryable": true,
+          "requires_new_grant": false,
+          "consumption": "before"
+        },
+        "TRANSFER_SECURITY_UNAVAILABLE": {
+          "status": 503,
+          "message": "transfer security state is unavailable",
+          "retryable": true,
+          "requires_new_grant": false,
+          "consumption": "before"
+        },
+        "TRANSFER_TARGET_UNAVAILABLE": {
+          "status": 404,
+          "message": "transfer target is unavailable",
+          "retryable": false,
+          "requires_new_grant": true,
+          "consumption": "after"
+        },
+        "TRANSFER_TOO_LARGE": {
+          "status": 413,
+          "message": "transfer exceeded its byte allowance",
+          "retryable": false,
+          "requires_new_grant": true,
+          "consumption": "after"
+        },
+        "TRANSFER_INTEGRITY_FAILED": {
+          "status": 422,
+          "message": "transfer integrity verification failed",
+          "retryable": false,
+          "requires_new_grant": true,
+          "consumption": "after"
+        },
+        "TRANSFER_COMMIT_UNAVAILABLE": {
+          "status": 503,
+          "message": "transfer commit is temporarily unavailable",
+          "retryable": true,
+          "requires_new_grant": true,
+          "consumption": "after"
+        },
+        "TRANSFER_INTERNAL": {
+          "status": 500,
+          "message": "transfer failed safely",
+          "retryable": false,
+          "requires_new_grant": true,
+          "consumption": "after"
+        }
+      }
+    }
+  },
+  "private_v1_compatibility": {
+    "default": "disabled",
+    "configuration": "EXOMEM_HOSTED_TRANSFER_V1_COMPAT_UNTIL",
+    "format": "canonical-utc-rfc3339",
+    "maximum": "signed-image-release-build-time-plus-7-days",
+    "checked_on_every_request": true,
+    "invalid_absent_or_expired": "both-private-v1-routes-disabled",
+    "authentication": "private-service-bearer-required",
+    "upload_body_max_bytes": 4194304,
+    "active_uploads_maximum": 1,
+    "temp_authority": "state_root/tmp/runtime-16MiB-general-quota"
+  },
+  "validation_order": [
+    "route-host-method",
+    "origin",
+    "forbidden-query-authorization-cookie-range",
+    "grant-header-length-and-canonical-signature-claims-time-equations",
+    "upload-signed-metadata-limit-content-type-optional-content-length-and-framing",
+    "lifecycle-transfer-admission",
+    "durable-jti-consumption",
+    "upload-body-read-or-download-file-resolution-open"
+  ]
+}

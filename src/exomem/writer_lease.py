@@ -19,13 +19,16 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from contextlib import contextmanager
 from contextvars import ContextVar, Token
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from .cli_ops import OpError
+from .mutation_lock import VaultMutationCoordinator
+from .privacy_log import content_private_logging_enabled
 
 _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
@@ -212,6 +215,7 @@ class IdempotencyStore:
         *,
         expires_after: float | None = None,
         on_replay=None,  # noqa: ANN001
+        reclaim_pending: bool = False,
     ) -> Any:
         if not key:
             return operation()
@@ -240,14 +244,22 @@ class IdempotencyStore:
                     if on_replay is not None:
                         on_replay()
                     return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
-                raise OpError(
-                    "IDEMPOTENCY_IN_PROGRESS",
-                    "an identical mutation with this key is already in progress",
+                if not reclaim_pending:
+                    raise OpError(
+                        "IDEMPOTENCY_IN_PROGRESS",
+                        "an identical mutation with this key is already in progress",
+                    )
+                conn.execute(
+                    "UPDATE mutations SET updated_at = ? "
+                    "WHERE key = ? AND digest = ? AND state = 'pending'",
+                    (now, key, digest),
                 )
-            conn.execute(
-                "INSERT INTO mutations(key, digest, state, updated_at) VALUES (?, ?, 'pending', ?)",
-                (key, digest, now),
-            )
+            else:
+                conn.execute(
+                    "INSERT INTO mutations(key, digest, state, updated_at) "
+                    "VALUES (?, ?, 'pending', ?)",
+                    (key, digest, now),
+                )
         try:
             result = operation()
         except Exception:
@@ -266,6 +278,11 @@ class IdempotencyStore:
         return result
 
 
+def _namespaced_idempotency_key(kind: str, identity: str, public_key: str) -> str:
+    digest = hashlib.sha256(f"{identity}\0{public_key}".encode()).hexdigest()
+    return f"{kind}:{digest}"
+
+
 class LeaseManager:
     def __init__(
         self,
@@ -273,6 +290,8 @@ class LeaseManager:
         *,
         client: LeaseCoordinatorClient | None = None,
         clock=time.time,  # noqa: ANN001
+        mutation_timeout_seconds: float = 5.0,
+        mutation_poll_interval_seconds: float = 0.025,
     ):
         self.config = config
         self.client = (
@@ -291,6 +310,8 @@ class LeaseManager:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._renewer: threading.Thread | None = None
+        self._mutation_timeout_seconds = mutation_timeout_seconds
+        self._mutation_poll_interval_seconds = mutation_poll_interval_seconds
 
     def ensure_writer(self) -> LeaseRecord:
         if not self.config.enabled:
@@ -308,6 +329,36 @@ class LeaseManager:
             self._expires_at = record.expires_at
             return record
 
+    @contextmanager
+    def consistency_guard(
+        self, vault_root: os.PathLike[str] | str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Serialize hosted reads with mutations without requiring writer authority."""
+        mutation = VaultMutationCoordinator(
+            self.config.state_dir,
+            vault_root,
+            timeout_seconds=self._mutation_timeout_seconds,
+            poll_interval_seconds=self._mutation_poll_interval_seconds,
+        )
+        with mutation.hold():
+            yield mutation
+
+    @contextmanager
+    def mutation_guard(
+        self, vault_root: os.PathLike[str] | str
+    ) -> Iterator[VaultMutationCoordinator]:
+        """Hold the shared vault mutation boundary and revalidate writer authority."""
+        with self.consistency_guard(vault_root) as mutation:
+            fence_context: Token[tuple[Any, int] | None] | None = None
+            if self.config.enabled:
+                lease = self.ensure_writer()
+                fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
+            try:
+                yield mutation
+            finally:
+                if fence_context is not None:
+                    _ACTIVE_WRITE_FENCE.reset(fence_context)
+
     def invoke(
         self,
         command: Any,
@@ -320,44 +371,62 @@ class LeaseManager:
     ) -> Any:
         invocation_read_only = command.read_only if read_only is None else read_only
         if invocation_read_only:
+            if content_private_logging_enabled():
+                with self.consistency_guard(self._mutation_subject(injected)):
+                    return command.leaf(*injected, **kwargs)
             return command.leaf(*injected, **kwargs)
-        lease = self.ensure_writer() if self.config.enabled else None
-        digest = hashlib.sha256(
-            json.dumps(
-                {"command": command.name, "kwargs": kwargs},
-                sort_keys=True,
-                separators=(",", ":"),
-                default=str,
-            ).encode("utf-8")
-        ).hexdigest()
-        key = idempotency_key
-        expires_after = None
-        on_replay = None
-        if key is None and implicit_idempotency_scope:
-            scoped = hashlib.sha256(
-                f"{implicit_idempotency_scope}\0{digest}".encode()
+        mutation_subject = self._mutation_subject(injected)
+        with self.mutation_guard(mutation_subject) as mutation:
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"command": command.name, "kwargs": kwargs},
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    default=str,
+                ).encode("utf-8")
             ).hexdigest()
-            key = f"implicit:{scoped}"
-            expires_after = _IMPLICIT_RETRY_TTL_SECONDS
+            key = None
+            expires_after = None
+            on_replay = None
+            idempotency_namespace = (
+                f"cell:{self.config.vault_id}" if self.config.vault_id else mutation.identity
+            )
+            if idempotency_key:
+                key = _namespaced_idempotency_key(
+                    "explicit", idempotency_namespace, idempotency_key
+                )
+            elif implicit_idempotency_scope:
+                key = _namespaced_idempotency_key(
+                    "implicit",
+                    idempotency_namespace,
+                    f"{implicit_idempotency_scope}\0{digest}",
+                )
+                expires_after = _IMPLICIT_RETRY_TTL_SECONDS
 
-            def log_replay() -> None:
-                logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
+                def log_replay() -> None:
+                    logger.info("Replayed retry-safe MCP mutation command=%s", command.name)
 
-            on_replay = log_replay
-        fence_context: Token[tuple[Any, int] | None] | None = None
-        if lease is not None:
-            fence_context = _ACTIVE_WRITE_FENCE.set((self, lease.fencing_token))
-        try:
+                on_replay = log_replay
             return self.idempotency.run(
                 key,
                 digest,
                 lambda: command.leaf(*injected, **kwargs),
                 expires_after=expires_after,
                 on_replay=on_replay,
+                # The vault mutation guard encloses this call. Once acquired,
+                # no earlier process/thread can still own a pending mutation;
+                # an identical row is therefore an orphan from an aborted
+                # process and is safe to retry under the documented
+                # at-least-once crash boundary.
+                reclaim_pending=True,
             )
-        finally:
-            if fence_context is not None:
-                _ACTIVE_WRITE_FENCE.reset(fence_context)
+
+    def _mutation_subject(self, injected: tuple[Any, ...]) -> os.PathLike[str] | str:
+        if injected and isinstance(injected[0], os.PathLike):
+            return injected[0]
+        if self.config.vault_id:
+            return self.config.vault_id
+        return "standalone"
 
     def validate_fencing_token(self, fencing_token: int) -> None:
         """Fail closed unless the command's token is still locally and remotely current."""

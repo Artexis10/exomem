@@ -54,13 +54,15 @@ def _seed_freshness_live(vault: Path) -> None:
     """Seed the event-maintained freshness registry the way the watcher does,
     so `freshness.triple()` is live and `on_files_changed` can patch it."""
     freshness.seed(
-        vault, "vault",
-        ((str(p), p.stat().st_mtime_ns) for p in walk_vault_md(vault)),
+        vault,
+        "vault",
+        ((str(p), freshness.stat_signature(p)) for p in walk_vault_md(vault)),
     )
     kb = vault / "Knowledge Base"
     freshness.seed(
-        vault, "kb",
-        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb)),
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb)),
     )
 
 
@@ -156,9 +158,7 @@ def test_graph_stage_stays_under_budget_after_edit(dense_vault) -> None:
     # pages via a real query, and the resolver explicitly (so the test never
     # hinges on the graph seed-gate firing for this particular warm query).
     find_module.find(vault, query="topic", limit=10)
-    find_module._get_query_resolver(
-        vault, freshness=find_module.FreshnessSnapshot(vault).vault()
-    )
+    find_module._get_query_resolver(vault, freshness=find_module.FreshnessSnapshot(vault).vault())
 
     # Edit a note and publish the change through the watcher path.
     edited = rels[3]
@@ -197,9 +197,7 @@ def test_graph_stage_exposes_sub_spans(dense_vault, monkeypatch) -> None:
     assert "ms" in stages.get("graph", {}), f"graph lane did not run: {stages}"
     for sub in ("graph.seeds", "graph.resolver", "graph.expand"):
         assert "ms" in stages.get(sub, {}), f"missing sub-span {sub}: {stages}"
-    parts = sum(
-        stages[s]["ms"] for s in ("graph.seeds", "graph.resolver", "graph.expand")
-    )
+    parts = sum(stages[s]["ms"] for s in ("graph.seeds", "graph.resolver", "graph.expand"))
     assert parts <= stages["graph"]["ms"] + 1.0, "sub-spans exceed the stage total"
 
     off = find_module.FindTimings()
@@ -257,9 +255,7 @@ def test_kill_switch_falls_back_to_rebuild(dense_vault, monkeypatch) -> None:
     r_before = find_module._get_query_resolver(vault, freshness=snap.vault())
 
     monkeypatch.setenv("EXOMEM_DISABLE_EVENT_INDEXES", "1")
-    (vault / rels[1]).write_text(
-        "---\ntitle: kill switch edit\n---\n\n# k\n", encoding="utf-8"
-    )
+    (vault / rels[1]).write_text("---\ntitle: kill switch edit\n---\n\n# k\n", encoding="utf-8")
     # Patch is a no-op under the kill switch...
     find_module.on_resolver_files_changed(vault, [rels[1]], [])
     # ...so a fresh freshness key forces a rebuild (new instance).

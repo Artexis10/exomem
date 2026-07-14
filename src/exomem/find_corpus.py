@@ -12,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from . import freshness
+from . import freshness, privacy_log
 from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
@@ -97,7 +97,7 @@ CACHE = FrontmatterCache()
 
 
 def walk_freshness_key(paths) -> tuple[int, int, str]:
-    """(file count, max st_mtime_ns, digest of sorted path+mtime pairs).
+    """(file count, max mtime_ns, digest of sorted path+metadata records).
 
     Digest-strength on purpose: count/max-mtime alone miss a delete paired
     with a create, a rename (mtime preserved), and a replacement carrying an
@@ -105,10 +105,10 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     find cache, BM25, the wikilink resolver, the inbound-link index) compares
     the whole triple, so those histories now invalidate correctly.
     """
-    entries: list[tuple[str, int]] = []
+    entries: list[tuple[str, freshness.FileSignature]] = []
     for p in paths:
         try:
-            entries.append((str(p), p.stat().st_mtime_ns))
+            entries.append((str(p), freshness.stat_signature(p)))
         except OSError:
             continue
     return freshness.triple_from_entries(entries)
@@ -137,7 +137,10 @@ def _read_page_bytes(path: Path) -> bytes | None:
     try:
         return path.read_bytes()
     except OSError as e:
-        log.warning("could not read %s: %s", path, e)
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
         return None
 
 
@@ -155,7 +158,10 @@ def parse_page(
     try:
         text = content.decode("utf-8")
     except UnicodeDecodeError as e:
-        log.warning("could not read %s: %s", path, e)
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
         return None
 
     fm_match = FRONTMATTER_PATTERN.match(text)
@@ -164,11 +170,15 @@ def parse_page(
             # Hot path: every page-cache miss parses here (warm-up walks the
             # whole vault through it). libyaml loader via the vault seam.
             from .vault import yaml_safe_load
+
             frontmatter = yaml_safe_load(fm_match.group(1)) or {}
             if not isinstance(frontmatter, dict):
                 frontmatter = {}
         except yaml.YAMLError as e:
-            log.warning("YAML parse error in %s: %s", path, e)
+            if privacy_log.content_private_logging_enabled():
+                log.warning("hosted content parse failed code=HOSTED_CONTENT_PARSE_FAILED")
+            else:
+                log.warning("YAML parse error in %s: %s", path, e)
             frontmatter = {}
         body = fm_match.group(2)
         # The FRONTMATTER_PATTERN consumes the closing `\n---\n` but not the
@@ -182,6 +192,7 @@ def parse_page(
         body = text
 
     from .vault import resolve_display_title
+
     title = resolve_display_title(frontmatter, body, path)
 
     try:
@@ -215,6 +226,7 @@ def passes_filters(
     # unit tests -> skip; real find paths always pass it.)
     if vault_root is not None:
         from . import access
+
         if not access.is_indexable(vault_root, page.rel_path):
             return False
     if types and page.page_type not in types:
@@ -244,9 +256,9 @@ def passes_filters(
 
 def all_projects(fm: dict) -> set[str]:
     out: set[str] = set()
-    if (p := fm.get("project")):
+    if p := fm.get("project"):
         out.add(str(p))
-    if (ps := fm.get("projects")):
+    if ps := fm.get("projects"):
         if isinstance(ps, list):
             out.update(str(x) for x in ps)
         else:
