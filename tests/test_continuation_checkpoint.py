@@ -2875,6 +2875,365 @@ def test_directory_window_cursor_is_bounded_and_eventually_visits_every_entry(
     assert exhausted is True and cursor == 0
 
 
+def test_portable_directory_window_cursor_never_replays_a_growing_prefix(
+    tmp_path: Path,
+) -> None:
+    root_path = tmp_path / "portable-root"
+    root_path.mkdir(mode=0o700)
+    expected = {f"entry-{number:04d}" for number in range(257)}
+    for name in expected:
+        (root_path / name).touch()
+    cursor = 0
+    seen: set[str] = set()
+    inspected_windows: list[int] = []
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        for _ in range(40):
+            started = time.monotonic()
+            names, cursor, exhausted, inspected = checkpoint._directory_window(
+                root,
+                cursor=cursor,
+                limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
+                deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
+                force_portable=True,
+            )
+            inspected_windows.append(inspected)
+            assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
+            assert time.monotonic() - started < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.05
+            seen.update(names)
+            if exhausted:
+                break
+
+    assert seen == expected
+    assert exhausted is True and cursor == 0
+    assert inspected_windows[1] <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
+
+
+def test_portable_catalog_cursor_is_bounded_persisted_and_fixed_size(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    root_path = checkpoint.client_state_root(home, client)
+    root_path.mkdir(parents=True, mode=0o700)
+    expected = {
+        checkpoint.session_state_dir(home, client, f"catalog-{number:04d}").name
+        for number in range(257)
+    }
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+            for name in sorted(expected):
+                checkpoint._register_prune_catalog_entry(root, root_lock, name)
+    catalog = root_path / checkpoint._PRUNE_CATALOG_NAME
+    initial_size = catalog.stat().st_size
+    seen: set[str] = set()
+
+    for _ in range(40):
+        with checkpoint._open_secure_directory(root_path, create=False) as root:
+            with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+                cursor = checkpoint._read_prune_sequence(root_lock, offset=17)
+                names, next_cursor, exhausted, inspected = (
+                    checkpoint._prune_catalog_window(
+                        root,
+                        cursor=cursor,
+                        limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
+                        deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
+                    )
+                )
+                checkpoint._write_prune_sequence(root_lock, next_cursor, offset=17)
+        assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
+        assert catalog.stat().st_size == initial_size == checkpoint._prune_catalog_size()
+        seen.update(names)
+        if exhausted:
+            break
+
+    assert seen == expected
+    assert exhausted is True and next_cursor == 0
+    assert (root_path / ".root.lock").stat().st_size <= 25
+
+
+def test_portable_catalog_cursor_progress_survives_fresh_processes(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    root_path = checkpoint.client_state_root(home, client)
+    root_path.mkdir(parents=True, mode=0o700)
+    expected = {
+        checkpoint.session_state_dir(home, client, f"process-{number:04d}").name
+        for number in range(33)
+    }
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+            for name in sorted(expected):
+                checkpoint._register_prune_catalog_entry(root, root_lock, name)
+    code = "\n".join(
+        [
+            "import json,sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "with c._open_secure_directory(Path(sys.argv[1]),create=False) as root:",
+            "  with c._advisory_lock_at(root,'.root.lock') as lock:",
+            "    cursor=c._read_prune_sequence(lock,offset=17)",
+            "    names,nxt,done,count=c._prune_catalog_window(",
+            "      root,cursor=cursor,limit=c.MAX_PRUNE_ENUM_ENTRIES,",
+            "      deadline=time.monotonic()+c.MAX_PRUNE_LOCK_SECONDS,",
+            "    )",
+            "    c._write_prune_sequence(lock,nxt,offset=17)",
+            "print(json.dumps([names,nxt,done,count]))",
+        ]
+    )
+    seen: set[str] = set()
+
+    for _ in range(40):
+        result = subprocess.run(
+            [sys.executable, "-c", code, str(root_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        )
+        names, cursor, exhausted, inspected = json.loads(result.stdout)
+        assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES
+        seen.update(names)
+        if exhausted:
+            break
+
+    assert seen == expected
+    assert exhausted is True and cursor == 0
+
+
+def test_portable_catalog_prune_reaches_owned_state_and_ignores_foreign_copy(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "portable-expired"
+    checkpoint.write_checkpoint(
+        _event(client=client, session_id=session),
+        home,
+        observed_at_ns=100,
+    )
+    root = checkpoint.client_state_root(home, client)
+    state = checkpoint.session_state_dir(home, client, session)
+    foreign = root / "foreign-unregistered"
+    shutil.copytree(state, foreign)
+
+    removed = sum(
+        checkpoint.prune_expired(
+            home,
+            client,
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+            force_portable_catalog=True,
+        )
+        for _ in range(40)
+    )
+
+    assert removed == 1
+    assert not state.exists()
+    assert foreign.is_dir()
+
+
+def test_valid_legacy_current_access_registers_only_the_bound_state(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "legacy-current"
+    event = _event(client=client, session_id=session)
+    checkpoint.write_checkpoint(event, home, observed_at_ns=100)
+    root_path = checkpoint.client_state_root(home, client)
+    state = checkpoint.session_state_dir(home, client, session)
+    foreign = root_path / "foreign-pre-catalog"
+    shutil.copytree(state, foreign)
+    (root_path / checkpoint._PRUNE_CATALOG_NAME).unlink()
+
+    checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        assert checkpoint._prune_catalog_contains(root, state.name)
+        assert not checkpoint._prune_catalog_contains(root, foreign.name)
+
+
+def test_corrupt_portable_catalog_fails_closed_without_deleting_state(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    session = "catalog-corrupt"
+    checkpoint.write_checkpoint(
+        _event(client=client, session_id=session),
+        home,
+        observed_at_ns=100,
+    )
+    root_path = checkpoint.client_state_root(home, client)
+    state = checkpoint.session_state_dir(home, client, session)
+    catalog = root_path / checkpoint._PRUNE_CATALOG_NAME
+    with catalog.open("r+b") as handle:
+        handle.seek(checkpoint._PRUNE_CATALOG_HEADER_BYTES - 1)
+        byte = handle.read(1)
+        handle.seek(checkpoint._PRUNE_CATALOG_HEADER_BYTES - 1)
+        handle.write(bytes([byte[0] ^ 0xFF]))
+
+    removals = [
+        checkpoint.prune_expired(
+            home,
+            client,
+            current_session="other",
+            now_ns=100 + checkpoint.RETENTION_NS + 1,
+            force_portable_catalog=True,
+        )
+        for _ in range(40)
+    ]
+
+    assert removals == [0] * 40
+    assert state.is_dir()
+
+
+@pytest.mark.parametrize("stage", ["before_catalog", "after_catalog"])
+def test_true_kill_around_portable_catalog_publication_is_recoverable(
+    tmp_path: Path,
+    stage: str,
+) -> None:
+    home = tmp_path / "home"
+    session = f"catalog-kill-{stage}"
+    event = _event(client="codex", session_id=session)
+    code = "\n".join(
+        [
+            "import json,sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "stage=sys.argv[4]",
+            "real=c._register_prune_catalog_entry",
+            "def stop(root,lock,name):",
+            "    target=name.startswith('.pending-') and '.tmp-' in name",
+            "    if target and stage=='before_catalog':",
+            "        print('before-catalog',flush=True); time.sleep(60)",
+            "    real(root,lock,name)",
+            "    if target and stage=='after_catalog':",
+            "        print('after-catalog',flush=True); time.sleep(60)",
+            "c._register_prune_catalog_entry=stop",
+            "c.write_checkpoint(json.loads(sys.argv[3]),Path(sys.argv[1]),observed_at_ns=100)",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), session, json.dumps(event), stage],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == stage.replace("_", "-")
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    root_path = checkpoint.client_state_root(home, "codex")
+    state = checkpoint.session_state_dir(home, "codex", session)
+    assert not state.exists()
+
+    for _ in range(40):
+        checkpoint.prune_expired(
+            home,
+            "codex",
+            current_session="other",
+            now_ns=checkpoint.RETENTION_NS + 1,
+            force_portable_catalog=True,
+        )
+
+    assert not list(root_path.glob(".pending-*.tmp-*"))
+
+
+def test_true_kill_before_catalog_publish_resumes_one_bounded_catalog(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    session = "catalog-init-kill"
+    event = _event(client="codex", session_id=session)
+    code = "\n".join(
+        [
+            "import json,sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "real=c._replace_at",
+            "def stop(root,source,destination):",
+            "    if source==c._PRUNE_CATALOG_TEMP and destination==c._PRUNE_CATALOG_NAME:",
+            "        print('catalog-ready',flush=True); time.sleep(60)",
+            "    return real(root,source,destination)",
+            "c._replace_at=stop",
+            "c.write_checkpoint(json.loads(sys.argv[2]),Path(sys.argv[1]),observed_at_ns=100)",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), json.dumps(event)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None and child.stdout.readline().strip() == "catalog-ready"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+    root = checkpoint.client_state_root(home, "codex")
+    assert (root / checkpoint._PRUNE_CATALOG_TEMP).is_file()
+
+    checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+
+    assert (root / checkpoint._PRUNE_CATALOG_NAME).stat().st_size == (
+        checkpoint._prune_catalog_size()
+    )
+    assert not (root / checkpoint._PRUNE_CATALOG_TEMP).exists()
+    assert not list(root.glob(f"{checkpoint._PRUNE_CATALOG_NAME}.tmp-*"))
+
+
+def test_catalog_capacity_exhaustion_soft_fails_without_unregistered_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    client = "codex"
+    root_path = checkpoint.client_state_root(home, client)
+    root_path.mkdir(parents=True, mode=0o700)
+    with checkpoint._open_secure_directory(root_path, create=False) as root:
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
+            for number in range(checkpoint.MAX_PRUNE_CATALOG_ENTRIES):
+                checkpoint._register_prune_catalog_entry(
+                    root,
+                    root_lock,
+                    checkpoint.session_state_dir(home, client, f"full-{number:04d}").name,
+                )
+    records: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(
+        checkpoint,
+        "_metadata_log",
+        lambda *args, **kwargs: records.append((args, kwargs)),
+    )
+    session = "must-not-publish"
+    event = checkpoint.normalize_event(
+        client,
+        {
+            "hook_event_name": "PreCompact",
+            "session_id": session,
+            "trigger": "manual",
+        },
+    )
+    assert event is not None
+
+    assert checkpoint._dispatch_core(event, home, expected_client=client) is None
+
+    state = checkpoint.session_state_dir(home, client, session)
+    assert not state.exists()
+    assert not list(root_path.glob(".pending-*"))
+    assert records and records[-1][0][3] == "error"
+    assert records[-1][1]["error_class"] == "OSError"
+
+
 def test_prune_rotates_bounded_candidates_beyond_sorted_prefix(tmp_path: Path) -> None:
     home = tmp_path / "home"
     now = checkpoint.RETENTION_NS + 1_000
@@ -3017,9 +3376,10 @@ def test_prune_recovers_authorized_crash_tombstone_only(tmp_path: Path) -> None:
     root_path = checkpoint.client_state_root(home, client)
     state_name = checkpoint.session_state_dir(home, client, session).name
     with checkpoint._open_secure_directory(root_path, create=False) as root:
-        with checkpoint._advisory_lock_at(root, ".root.lock"):
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
             tombstone = checkpoint._tombstone_expired_candidate(
                 root,
+                root_lock,
                 home,
                 client,
                 state_name,
@@ -3073,9 +3433,10 @@ def test_crash_tombstone_recovery_rotates_past_unauthorized_prefix(
     root_path = checkpoint.client_state_root(home, client)
     state_name = checkpoint.session_state_dir(home, client, session).name
     with checkpoint._open_secure_directory(root_path, create=False) as root:
-        with checkpoint._advisory_lock_at(root, ".root.lock"):
+        with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
             recovered = checkpoint._tombstone_expired_candidate(
                 root,
+                root_lock,
                 home,
                 client,
                 state_name,
@@ -3257,6 +3618,73 @@ def test_true_kill_after_pending_publish_before_directory_is_pruned(
             now_ns=100 + checkpoint.RETENTION_NS + 1,
         )
 
+    assert not pending.exists()
+
+
+@pytest.mark.parametrize("cleanup", ["retry", "active_prune"])
+def test_true_kill_after_session_manifest_publish_cleans_redundant_pending(
+    tmp_path: Path,
+    cleanup: str,
+) -> None:
+    home = tmp_path / "home"
+    session = "manifest-published-pending"
+    event = _event(client="codex", session_id=session)
+    code = "\n".join(
+        [
+            "import json,sys,time",
+            "from pathlib import Path",
+            "from exomem._hooks import exomem_continuation_checkpoint as c",
+            "real=c._unlink_at",
+            "def stop(d,n):",
+            "    if n.startswith('.pending-') and n.endswith('.json'):",
+            "        print('manifest-published',flush=True)",
+            "        time.sleep(60)",
+            "    return real(d,n)",
+            "c._unlink_at=stop",
+            "c.write_checkpoint(json.loads(sys.argv[3]),Path(sys.argv[1]),observed_at_ns=100)",
+        ]
+    )
+    child = subprocess.Popen(
+        [sys.executable, "-c", code, str(home), session, json.dumps(event)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert child.stdout is not None
+        assert child.stdout.readline().strip() == "manifest-published"
+        child.kill()
+        child.wait(timeout=5)
+    finally:
+        if child.poll() is None:
+            child.kill()
+
+    root = checkpoint.client_state_root(home, "codex")
+    state = checkpoint.session_state_dir(home, "codex", session)
+    pending = root / checkpoint._pending_session_name(state.name)
+    assert state.is_dir() and pending.is_file()
+    with checkpoint._open_secure_directory(state, create=False) as state_handle:
+        manifest, status_value = checkpoint.load_session_manifest_at(
+            state_handle,
+            home,
+            "codex",
+            state.name,
+        )
+    assert manifest is not None and status_value == "valid"
+
+    if cleanup == "retry":
+        checkpoint.write_checkpoint(event, home, observed_at_ns=200)
+    else:
+        for _ in range(40):
+            checkpoint.prune_expired(
+                home,
+                "codex",
+                current_session=session,
+                now_ns=checkpoint.RETENTION_NS + 1_000,
+                force_portable_catalog=True,
+            )
+
+    assert state.is_dir()
     assert not pending.exists()
 
 

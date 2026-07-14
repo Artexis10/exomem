@@ -42,6 +42,7 @@ MAX_PRUNE_CANDIDATES = 16
 MAX_PRUNE_LOCK_SECONDS = 0.05
 MAX_PRUNE_ENUM_ENTRIES = 16
 MAX_STATE_ENUM_ENTRIES = 32
+MAX_PRUNE_CATALOG_ENTRIES = 512
 MAX_METADATA_LOG_BYTES = 1024 * 1024
 MAX_METADATA_DURATION_MS = 60_000
 TRANSCRIPT_SLICE_BYTES = 64 * 1024
@@ -88,6 +89,11 @@ _ALIASES = {
 }
 _CHECKBOX = re.compile(r"^\s*[-*]\s+\[([ xX])\]")
 _HEX_64 = re.compile(r"^[0-9a-f]{64}$")
+_PRUNE_CATALOG_NAME = ".prune-catalog.v1"
+_PRUNE_CATALOG_TEMP = ".prune-catalog.v1.tmp"
+_PRUNE_CATALOG_MAGIC = b"EXOMEM-PRUNE-V1\0"
+_PRUNE_CATALOG_HEADER_BYTES = 64
+_PRUNE_CATALOG_RECORD_BYTES = 579
 _HEX_40 = re.compile(r"^[0-9a-f]{40}$")
 _ERROR_CLASS = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,127}$")
 _METADATA_EVENTS = {"PreCompact", "SessionEnd", "SessionStart"}
@@ -1727,6 +1733,7 @@ def _regular_file_info_at(directory: _SecureDirectory, name: str) -> os.stat_res
 
 def _cleanup_pending_root_entry(
     root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
     home: Path,
     client: str,
     name: str,
@@ -1744,6 +1751,8 @@ def _cleanup_pending_root_entry(
         if target_match or expired:
             try:
                 _unlink_at(root, name)
+                if _existing_kind(root, name) is None:
+                    _unregister_prune_catalog_entry(root, root_lock, name)
             except OSError:
                 pass
         return
@@ -1751,22 +1760,71 @@ def _cleanup_pending_root_entry(
     if canonical is None or target_state_name is not None:
         return
     state_name = canonical.group("state")
-    if _existing_kind(root, state_name) is not None:
-        return
     pending, status_value = _load_pending_session_at(root, home, client, state_name)
+    if status_value != "valid" or pending is None:
+        return
+    if _existing_kind(root, state_name) is not None:
+        if not _published_session_matches_pending(
+            root,
+            home,
+            client,
+            state_name,
+            pending,
+        ):
+            return
+        try:
+            _unlink_at(root, name)
+            if _existing_kind(root, name) is None:
+                _unregister_prune_catalog_entry(root, root_lock, name)
+        except OSError:
+            pass
+        return
     if (
-        status_value == "valid"
-        and pending is not None
-        and now_ns - int(pending["created_at_ns"]) > RETENTION_NS
+        now_ns - int(pending["created_at_ns"]) > RETENTION_NS
     ):
         try:
             _unlink_at(root, name)
+            if _existing_kind(root, name) is None:
+                _unregister_prune_catalog_entry(root, root_lock, name)
         except OSError:
             pass
 
 
+def _published_session_matches_pending(
+    root: _SecureDirectory,
+    home: Path,
+    client: str,
+    state_name: str,
+    pending: Mapping[str, Any],
+) -> bool:
+    """Prove a canonical pending record is redundant, without trusting its path."""
+    try:
+        context = _open_secure_child_directory(root, state_name, create=False)
+        state = context.__enter__()
+    except OSError:
+        return False
+    try:
+        _require_private_state_directory(state)
+        manifest, status_value = load_session_manifest_at(
+            state,
+            home,
+            client,
+            state_name,
+        )
+        return (
+            status_value == "valid"
+            and manifest == dict(pending)
+            and _same_directory_entry(root, state_name, state)
+        )
+    except OSError:
+        return False
+    finally:
+        context.__exit__(None, None, None)
+
+
 def _cleanup_pending_temporaries_for_state(
     root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
     home: Path,
     client: str,
     state_name: str,
@@ -1787,6 +1845,7 @@ def _cleanup_pending_temporaries_for_state(
             return
         _cleanup_pending_root_entry(
             root,
+            root_lock,
             home,
             client,
             name,
@@ -1828,13 +1887,14 @@ def _load_pending_session_at(
 
 def _ensure_pending_session_at(
     root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
     home: Path,
     client: str,
     session_id: str,
     created_at_ns: int,
 ) -> dict[str, Any]:
     state_name = session_state_dir(home, client, session_id).name
-    _cleanup_pending_temporaries_for_state(root, home, client, state_name)
+    _cleanup_pending_temporaries_for_state(root, root_lock, home, client, state_name)
     existing, status_value = _load_pending_session_at(root, home, client, state_name)
     if status_value == "valid" and existing is not None:
         return existing
@@ -1843,6 +1903,7 @@ def _ensure_pending_session_at(
     value = _session_manifest(home, client, session_id, created_at_ns)
     raw = _canonical_bytes(value)
     temporary = f".pending-{state_name}.tmp-{os.getpid()}-{secrets.token_hex(8)}"
+    _register_prune_catalog_entry(root, root_lock, temporary)
     fd = _open_secure_file_at(
         root,
         temporary,
@@ -1855,10 +1916,18 @@ def _ensure_pending_session_at(
     finally:
         os.close(fd)
     try:
+        _register_prune_catalog_entry(
+            root,
+            root_lock,
+            _pending_session_name(state_name),
+        )
         _replace_at(root, temporary, _pending_session_name(state_name))
+        _unregister_prune_catalog_entry(root, root_lock, temporary)
     except BaseException:
         try:
             _unlink_at(root, temporary)
+            if _existing_kind(root, temporary) is None:
+                _unregister_prune_catalog_entry(root, root_lock, temporary)
         except OSError:
             pass
         raise
@@ -1926,7 +1995,7 @@ def _session_lock(
     state_name = session_state_dir(home, client, session_id).name
     with _open_secure_directory(root, create=create) as root_handle:
         _require_private_state_directory(root_handle)
-        with _advisory_lock_at(root_handle, ".root.lock"):
+        with _advisory_lock_at(root_handle, ".root.lock") as root_lock:
             state_existed = _existing_kind(root_handle, state_name) is not None
             pending: dict[str, Any] | None = None
             if create:
@@ -1937,11 +2006,14 @@ def _session_lock(
                 else:
                     pending = _ensure_pending_session_at(
                         root_handle,
+                        root_lock,
                         home,
                         client,
                         session_id,
                         time.time_ns() if created_at_ns is None else int(created_at_ns),
                     )
+            if create and not state_existed:
+                _register_prune_catalog_entry(root_handle, root_lock, state_name)
             state_context = _open_secure_child_directory(
                 root_handle,
                 state_name,
@@ -1953,6 +2025,21 @@ def _session_lock(
                 _manifest, manifest_status = load_session_manifest_at(
                     state_handle, home, client, state_name
                 )
+                if (
+                    state_existed
+                    and manifest_status == "valid"
+                    and not _prune_catalog_contains(root_handle, state_name)
+                ):
+                    _register_prune_catalog_entry(root_handle, root_lock, state_name)
+                if pending is not None and not _prune_catalog_contains(
+                    root_handle,
+                    _pending_session_name(state_name),
+                ):
+                    _register_prune_catalog_entry(
+                        root_handle,
+                        root_lock,
+                        _pending_session_name(state_name),
+                    )
                 if create and manifest_status != "valid" and pending is not None:
                     _ensure_session_manifest(
                         state_handle,
@@ -1968,6 +2055,33 @@ def _session_lock(
                         raise OSError("continuation session manifest was not published")
                     try:
                         _unlink_at(root_handle, _pending_session_name(state_name))
+                        if _existing_kind(
+                            root_handle, _pending_session_name(state_name)
+                        ) is None:
+                            _unregister_prune_catalog_entry(
+                                root_handle,
+                                root_lock,
+                                _pending_session_name(state_name),
+                            )
+                    except OSError:
+                        pass
+                elif (
+                    create
+                    and manifest_status == "valid"
+                    and pending is not None
+                    and _manifest == pending
+                    and _same_directory_entry(root_handle, state_name, state_handle)
+                ):
+                    try:
+                        _unlink_at(root_handle, _pending_session_name(state_name))
+                        if _existing_kind(
+                            root_handle, _pending_session_name(state_name)
+                        ) is None:
+                            _unregister_prune_catalog_entry(
+                                root_handle,
+                                root_lock,
+                                _pending_session_name(state_name),
+                            )
                     except OSError:
                         pass
                 session = _advisory_lock_at(state_handle, ".lock")
@@ -2384,15 +2498,119 @@ def _linux_directory_window(
         os.close(scan_fd)
 
 
+def _posix_directory_window(
+    directory: _SecureDirectory,
+    cursor: int,
+    limit: int,
+    deadline: float,
+) -> tuple[list[str], int, bool, int]:
+    """Read a bounded POSIX directory stream using seekdir/telldir cookies."""
+    import ctypes
+
+    if sys.platform == "darwin":
+
+        class _Dirent(ctypes.Structure):
+            _fields_ = [
+                ("d_ino", ctypes.c_uint64),
+                ("d_seekoff", ctypes.c_uint64),
+                ("d_reclen", ctypes.c_uint16),
+                ("d_namlen", ctypes.c_uint16),
+                ("d_type", ctypes.c_uint8),
+                ("d_name", ctypes.c_char * 1024),
+            ]
+
+    elif sys.platform.startswith("freebsd"):
+
+        class _Dirent(ctypes.Structure):
+            _fields_ = [
+                ("d_fileno", ctypes.c_uint64),
+                ("d_off", ctypes.c_int64),
+                ("d_reclen", ctypes.c_uint16),
+                ("d_type", ctypes.c_uint8),
+                ("d_pad0", ctypes.c_uint8),
+                ("d_namlen", ctypes.c_uint16),
+                ("d_pad1", ctypes.c_uint16),
+                ("d_name", ctypes.c_char * 256),
+            ]
+
+    else:
+
+        class _Dirent(ctypes.Structure):
+            _fields_ = [
+                ("d_ino", ctypes.c_ulong),
+                ("d_off", ctypes.c_long),
+                ("d_reclen", ctypes.c_ushort),
+                ("d_type", ctypes.c_ubyte),
+                ("d_name", ctypes.c_char * 256),
+            ]
+
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_CLOEXEC", 0)
+    scan_fd = os.open(".", flags, dir_fd=directory.fd)
+    libc = ctypes.CDLL(None, use_errno=True)
+    fdopendir = libc.fdopendir
+    fdopendir.argtypes = [ctypes.c_int]
+    fdopendir.restype = ctypes.c_void_p
+    readdir = libc.readdir
+    readdir.argtypes = [ctypes.c_void_p]
+    readdir.restype = ctypes.POINTER(_Dirent)
+    telldir = libc.telldir
+    telldir.argtypes = [ctypes.c_void_p]
+    telldir.restype = ctypes.c_long
+    seekdir = libc.seekdir
+    seekdir.argtypes = [ctypes.c_void_p, ctypes.c_long]
+    seekdir.restype = None
+    closedir = libc.closedir
+    closedir.argtypes = [ctypes.c_void_p]
+    closedir.restype = ctypes.c_int
+    stream = fdopendir(scan_fd)
+    if not stream:
+        error = ctypes.get_errno()
+        os.close(scan_fd)
+        raise OSError(error, os.strerror(error))
+    try:
+        if cursor:
+            signed_cursor = cursor - (1 << 64) if cursor >= (1 << 63) else cursor
+            seekdir(stream, signed_cursor)
+        names: list[str] = []
+        inspected = 0
+        next_cursor = cursor
+        while inspected < limit and time.monotonic() < deadline:
+            ctypes.set_errno(0)
+            entry = readdir(stream)
+            if not entry:
+                error = ctypes.get_errno()
+                if error:
+                    raise OSError(error, os.strerror(error))
+                return names, 0, True, inspected
+            cookie = int(telldir(stream))
+            if cookie == -1:
+                error = ctypes.get_errno()
+                raise OSError(error or errno.EIO, os.strerror(error or errno.EIO))
+            next_cursor = cookie % (1 << 64)
+            name = os.fsdecode(bytes(entry.contents.d_name).split(b"\0", 1)[0])
+            if name in {".", ".."}:
+                continue
+            inspected += 1
+            names.append(name)
+        return names, next_cursor, False, inspected
+    finally:
+        closedir(stream)
+
+
 def _directory_window(
     directory: _SecureDirectory,
     *,
     cursor: int,
     limit: int,
     deadline: float,
+    force_portable: bool = False,
 ) -> tuple[list[str], int, bool, int]:
-    if sys.platform.startswith("linux") and os.name != "nt":
+    if sys.platform.startswith("linux") and os.name != "nt" and not force_portable:
         return _linux_directory_window(directory, cursor, limit, deadline)
+    if os.name != "nt":
+        return _posix_directory_window(directory, cursor, limit, deadline)
+    if cursor:
+        raise OSError("Windows root resumption requires the durable prune catalog")
     target: object = directory.path if os.name == "nt" else directory.fd
     names: list[str] = []
     inspected = 0
@@ -2733,6 +2951,7 @@ def _delete_tombstone_at(
 
 def _tombstone_expired_candidate(
     root_handle: _SecureDirectory,
+    root_lock: _AdvisoryLock,
     home: Path,
     client: str,
     name: str,
@@ -2801,6 +3020,14 @@ def _tombstone_expired_candidate(
                     if manifest_status == "valid":
                         try:
                             _unlink_at(root_handle, _pending_session_name(name))
+                            if _existing_kind(
+                                root_handle, _pending_session_name(name)
+                            ) is None:
+                                _unregister_prune_catalog_entry(
+                                    root_handle,
+                                    root_lock,
+                                    _pending_session_name(name),
+                                )
                         except OSError:
                             pass
             if (
@@ -2813,6 +3040,7 @@ def _tombstone_expired_candidate(
         if _directory_entry_identity(root_handle, name) != state_identity:
             return None
         tombstone = f".tombstone-{name}-{secrets.token_hex(8)}"
+        _register_prune_catalog_entry(root_handle, root_lock, tombstone)
         if force_fallback:
             lock.__exit__(None, None, None)
             locked = False
@@ -2828,10 +3056,13 @@ def _tombstone_expired_candidate(
                 state_context.__exit__(None, None, None)
                 state_open = False
             _rename_directory_at(root_handle, name, tombstone)
+        _unregister_prune_catalog_entry(root_handle, root_lock, name)
         if _directory_entry_identity(root_handle, tombstone) != state_identity:
             if _existing_kind(root_handle, name) is None:
                 try:
                     _rename_directory_at(root_handle, tombstone, name)
+                    _register_prune_catalog_entry(root_handle, root_lock, name)
+                    _unregister_prune_catalog_entry(root_handle, root_lock, tombstone)
                 except OSError:
                     pass
             return None
@@ -2841,6 +3072,299 @@ def _tombstone_expired_candidate(
             lock.__exit__(None, None, None)
         if state_open:
             state_context.__exit__(None, None, None)
+
+
+def _prune_catalog_header() -> bytes:
+    prefix = (
+        _PRUNE_CATALOG_MAGIC
+        + MAX_PRUNE_CATALOG_ENTRIES.to_bytes(4, "big")
+        + _PRUNE_CATALOG_RECORD_BYTES.to_bytes(4, "big")
+        + b"\0" * 8
+    )
+    return prefix + hashlib.sha256(prefix).digest()
+
+
+def _prune_catalog_size() -> int:
+    return (
+        _PRUNE_CATALOG_HEADER_BYTES
+        + MAX_PRUNE_CATALOG_ENTRIES * _PRUNE_CATALOG_RECORD_BYTES
+    )
+
+
+def _read_exact_at(fd: int, offset: int, size: int) -> bytes:
+    os.lseek(fd, offset, os.SEEK_SET)
+    chunks: list[bytes] = []
+    remaining = size
+    while remaining:
+        chunk = os.read(fd, remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _write_exact_at(fd: int, offset: int, value: bytes) -> None:
+    os.lseek(fd, offset, os.SEEK_SET)
+    _write_all(fd, value)
+
+
+def _initialize_prune_catalog(root: _SecureDirectory) -> None:
+    if _existing_kind(root, _PRUNE_CATALOG_TEMP) is not None:
+        try:
+            fd = _open_secure_file_at(root, _PRUNE_CATALOG_TEMP, os.O_RDWR, 0o600)
+            try:
+                info = os.fstat(fd)
+                valid = (
+                    stat.S_ISREG(info.st_mode)
+                    and (os.name == "nt" or stat.S_IMODE(info.st_mode) == 0o600)
+                    and info.st_size == _prune_catalog_size()
+                    and _read_exact_at(fd, 0, _PRUNE_CATALOG_HEADER_BYTES)
+                    == _prune_catalog_header()
+                )
+            finally:
+                os.close(fd)
+            if valid:
+                _replace_at(root, _PRUNE_CATALOG_TEMP, _PRUNE_CATALOG_NAME)
+                return
+        except OSError:
+            pass
+        _unlink_at(root, _PRUNE_CATALOG_TEMP)
+    fd = _open_secure_file_at(
+        root,
+        _PRUNE_CATALOG_TEMP,
+        os.O_RDWR | os.O_CREAT | os.O_EXCL,
+        0o600,
+    )
+    try:
+        _write_all(fd, _prune_catalog_header())
+        os.ftruncate(fd, _prune_catalog_size())
+        os.fsync(fd)
+    except BaseException:
+        os.close(fd)
+        try:
+            _unlink_at(root, _PRUNE_CATALOG_TEMP)
+        except OSError:
+            pass
+        raise
+    os.close(fd)
+    try:
+        _replace_at(root, _PRUNE_CATALOG_TEMP, _PRUNE_CATALOG_NAME)
+    except BaseException:
+        try:
+            _unlink_at(root, _PRUNE_CATALOG_TEMP)
+        except OSError:
+            pass
+        raise
+
+
+def _open_prune_catalog(root: _SecureDirectory, *, create: bool) -> int:
+    if _existing_kind(root, _PRUNE_CATALOG_NAME) is None:
+        if not create:
+            raise FileNotFoundError(_PRUNE_CATALOG_NAME)
+        _initialize_prune_catalog(root)
+    fd = _open_secure_file_at(root, _PRUNE_CATALOG_NAME, os.O_RDWR, 0o600)
+    try:
+        info = os.fstat(fd)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or (os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600)
+            or info.st_size != _prune_catalog_size()
+            or _read_exact_at(fd, 0, _PRUNE_CATALOG_HEADER_BYTES)
+            != _prune_catalog_header()
+        ):
+            raise OSError("invalid prune catalog")
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _prune_catalog_record_offset(slot: int) -> int:
+    return _PRUNE_CATALOG_HEADER_BYTES + slot * _PRUNE_CATALOG_RECORD_BYTES
+
+
+def _prune_catalog_key(name: str) -> bytes:
+    return hashlib.sha256(name.casefold().encode("utf-8")).digest()
+
+
+def _encode_prune_catalog_record(name: str) -> bytes:
+    _validate_child_name(name)
+    encoded = name.encode("utf-8")
+    if not encoded or len(encoded) > MAX_IDENTIFIER_BYTES:
+        raise OSError("prune catalog name is outside the bounded schema")
+    prefix = (
+        b"\1"
+        + len(encoded).to_bytes(2, "big")
+        + encoded.ljust(MAX_IDENTIFIER_BYTES, b"\0")
+        + _prune_catalog_key(name)
+    )
+    return prefix + hashlib.sha256(prefix).digest()
+
+
+def _prune_catalog_tombstone() -> bytes:
+    prefix = b"\2" + b"\0" * (2 + MAX_IDENTIFIER_BYTES + 32)
+    return prefix + hashlib.sha256(prefix).digest()
+
+
+def _decode_prune_catalog_record(raw: bytes) -> tuple[str, str | None]:
+    if len(raw) != _PRUNE_CATALOG_RECORD_BYTES:
+        raise OSError("invalid prune catalog record size")
+    if raw == b"\0" * _PRUNE_CATALOG_RECORD_BYTES:
+        return "empty", None
+    prefix, checksum = raw[:-32], raw[-32:]
+    if not secrets.compare_digest(hashlib.sha256(prefix).digest(), checksum):
+        raise OSError("invalid prune catalog record checksum")
+    if raw[0] == 2 and raw == _prune_catalog_tombstone():
+        return "tombstone", None
+    if raw[0] != 1:
+        raise OSError("invalid prune catalog record status")
+    length = int.from_bytes(raw[1:3], "big")
+    encoded = raw[3 : 3 + MAX_IDENTIFIER_BYTES]
+    if (
+        length < 1
+        or length > MAX_IDENTIFIER_BYTES
+        or any(encoded[length:])
+    ):
+        raise OSError("invalid prune catalog record name")
+    try:
+        name = encoded[:length].decode("utf-8")
+        _validate_child_name(name)
+    except (UnicodeDecodeError, OSError) as error:
+        raise OSError("invalid prune catalog record name") from error
+    key = raw[3 + MAX_IDENTIFIER_BYTES : 3 + MAX_IDENTIFIER_BYTES + 32]
+    if not secrets.compare_digest(key, _prune_catalog_key(name)):
+        raise OSError("invalid prune catalog record key")
+    return "live", name
+
+
+def _read_prune_catalog_slot(fd: int, slot: int) -> tuple[str, str | None]:
+    return _decode_prune_catalog_record(
+        _read_exact_at(
+            fd,
+            _prune_catalog_record_offset(slot),
+            _PRUNE_CATALOG_RECORD_BYTES,
+        )
+    )
+
+
+def _prune_catalog_probe(name: str) -> tuple[int, ...]:
+    start = int.from_bytes(_prune_catalog_key(name)[:8], "big")
+    return tuple(
+        (start + offset) % MAX_PRUNE_CATALOG_ENTRIES
+        for offset in range(MAX_PRUNE_CATALOG_ENTRIES)
+    )
+
+
+def _register_prune_catalog_entry(
+    root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
+    name: str,
+) -> None:
+    if root_lock.fd is None:
+        raise OSError("prune catalog registration requires the root lock")
+    record = _encode_prune_catalog_record(name)
+    fd = _open_prune_catalog(root, create=True)
+    try:
+        reusable: int | None = None
+        for slot in _prune_catalog_probe(name):
+            status_value, existing = _read_prune_catalog_slot(fd, slot)
+            if status_value == "live" and existing is not None:
+                if existing == name:
+                    return
+                if existing.casefold() == name.casefold():
+                    raise OSError("prune catalog contains a portable name alias")
+                continue
+            if status_value == "tombstone" and reusable is None:
+                reusable = slot
+                continue
+            if status_value == "empty":
+                target = slot if reusable is None else reusable
+                _write_exact_at(fd, _prune_catalog_record_offset(target), record)
+                os.fsync(fd)
+                return
+        if reusable is not None:
+            _write_exact_at(fd, _prune_catalog_record_offset(reusable), record)
+            os.fsync(fd)
+            return
+        raise OSError("prune catalog capacity is exhausted")
+    finally:
+        os.close(fd)
+
+
+def _unregister_prune_catalog_entry(
+    root: _SecureDirectory,
+    root_lock: _AdvisoryLock,
+    name: str,
+) -> None:
+    if root_lock.fd is None:
+        raise OSError("prune catalog removal requires the root lock")
+    try:
+        fd = _open_prune_catalog(root, create=False)
+    except FileNotFoundError:
+        return
+    try:
+        for slot in _prune_catalog_probe(name):
+            status_value, existing = _read_prune_catalog_slot(fd, slot)
+            if status_value == "empty":
+                return
+            if status_value == "live" and existing == name:
+                _write_exact_at(
+                    fd,
+                    _prune_catalog_record_offset(slot),
+                    _prune_catalog_tombstone(),
+                )
+                os.fsync(fd)
+                return
+    finally:
+        os.close(fd)
+
+
+def _prune_catalog_contains(root: _SecureDirectory, name: str) -> bool:
+    try:
+        fd = _open_prune_catalog(root, create=False)
+    except FileNotFoundError:
+        return False
+    try:
+        for slot in _prune_catalog_probe(name):
+            status_value, existing = _read_prune_catalog_slot(fd, slot)
+            if status_value == "empty":
+                return False
+            if status_value == "live" and existing == name:
+                return True
+        return False
+    finally:
+        os.close(fd)
+
+
+def _prune_catalog_window(
+    root: _SecureDirectory,
+    *,
+    cursor: int,
+    limit: int,
+    deadline: float,
+) -> tuple[list[str], int, bool, int]:
+    try:
+        fd = _open_prune_catalog(root, create=False)
+    except FileNotFoundError:
+        return [], 0, True, 0
+    try:
+        position = cursor if 0 <= cursor < MAX_PRUNE_CATALOG_ENTRIES else 0
+        names: list[str] = []
+        inspected = 0
+        while inspected < limit and position < MAX_PRUNE_CATALOG_ENTRIES:
+            if time.monotonic() >= deadline:
+                return names, position, False, inspected
+            status_value, name = _read_prune_catalog_slot(fd, position)
+            inspected += 1
+            position += 1
+            if status_value == "live" and name is not None:
+                names.append(name)
+        if position >= MAX_PRUNE_CATALOG_ENTRIES:
+            return names, 0, True, inspected
+        return names, position, False, inspected
+    finally:
+        os.close(fd)
 
 
 def _read_prune_sequence(lock: _AdvisoryLock, *, offset: int = 1) -> int:
@@ -2861,6 +3385,7 @@ def _write_prune_sequence(
         return
     os.lseek(lock.fd, offset, os.SEEK_SET)
     _write_all(lock.fd, (value % (1 << 64)).to_bytes(8, "big"))
+    os.fsync(lock.fd)
 
 
 _TOMBSTONE = re.compile(r"^\.tombstone-(.+)-[0-9a-f]{16}$")
@@ -2985,6 +3510,7 @@ def prune_expired(
     current_session: str,
     now_ns: int | None = None,
     force_fallback: bool = False,
+    force_portable_catalog: bool = False,
 ) -> int:
     root = client_state_root(home, client)
     now = time.time_ns() if now_ns is None else int(now_ns)
@@ -3011,25 +3537,54 @@ def prune_expired(
                         deadline=lock_deadline,
                     )
                 scan_cursor = _read_prune_sequence(root_lock, offset=17)
-                scanned_names, next_cursor, _exhausted, _inspected = _directory_window(
-                    root_handle,
-                    cursor=scan_cursor,
-                    limit=MAX_PRUNE_ENUM_ENTRIES,
-                    deadline=lock_deadline,
-                )
+                if os.name == "nt" or force_portable_catalog:
+                    scanned_names, next_cursor, _exhausted, _inspected = (
+                        _prune_catalog_window(
+                            root_handle,
+                            cursor=scan_cursor,
+                            limit=MAX_PRUNE_ENUM_ENTRIES,
+                            deadline=lock_deadline,
+                        )
+                    )
+                else:
+                    scanned_names, next_cursor, _exhausted, _inspected = (
+                        _directory_window(
+                            root_handle,
+                            cursor=scan_cursor,
+                            limit=MAX_PRUNE_ENUM_ENTRIES,
+                            deadline=lock_deadline,
+                        )
+                    )
                 _write_prune_sequence(root_lock, next_cursor, offset=17)
+                for scanned_name in tuple(scanned_names):
+                    if _existing_kind(root_handle, scanned_name) is None:
+                        _unregister_prune_catalog_entry(
+                            root_handle,
+                            root_lock,
+                            scanned_name,
+                        )
                 entries = [
                     name
                     for name in scanned_names
-                    if name != current_name and not name.startswith(".")
+                    if (
+                        _existing_kind(root_handle, name) is not None
+                        and name != current_name
+                        and not name.startswith(".")
+                    )
                 ]
-                recovery_names = [name for name in scanned_names if name.startswith(".tombstone-")]
+                recovery_names = [
+                    name
+                    for name in scanned_names
+                    if _existing_kind(root_handle, name) is not None
+                    and name.startswith(".tombstone-")
+                ]
                 for scanned_name in scanned_names:
                     if time.monotonic() >= lock_deadline:
                         break
                     if scanned_name.startswith(".pending-"):
                         _cleanup_pending_root_entry(
                             root_handle,
+                            root_lock,
                             home,
                             client,
                             scanned_name,
@@ -3055,9 +3610,12 @@ def prune_expired(
                 break
             try:
                 remaining = max(0.0, lock_deadline - time.monotonic())
-                with _advisory_lock_at(root_handle, ".root.lock", timeout=remaining):
+                with _advisory_lock_at(
+                    root_handle, ".root.lock", timeout=remaining
+                ) as root_lock:
                     tombstone = _tombstone_expired_candidate(
                         root_handle,
+                        root_lock,
                         home,
                         client,
                         name,
@@ -3076,14 +3634,24 @@ def prune_expired(
         for item, identity in tombstones:
             if time.monotonic() >= lock_deadline:
                 break
-            removed += int(
-                _delete_tombstone_at(
-                    root_handle,
-                    item,
-                    identity,
-                    deadline=lock_deadline,
-                )
+            deleted = _delete_tombstone_at(
+                root_handle,
+                item,
+                identity,
+                deadline=lock_deadline,
             )
+            removed += int(deleted)
+            if deleted and time.monotonic() < lock_deadline:
+                try:
+                    remaining = max(0.0, lock_deadline - time.monotonic())
+                    with _advisory_lock_at(
+                        root_handle,
+                        ".root.lock",
+                        timeout=remaining,
+                    ) as root_lock:
+                        _unregister_prune_catalog_entry(root_handle, root_lock, item)
+                except (OSError, TimeoutError):
+                    pass
         return removed
     finally:
         root_context.__exit__(None, None, None)
