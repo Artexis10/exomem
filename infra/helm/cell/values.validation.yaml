@@ -10,13 +10,22 @@ runtimeUid: 10001
 runtimeGid: 10001
 storageClassName: exomem-hcloud-encrypted-retain
 pvcSize: 10Gi
+providerIdentity:
+  tenantId: tenant-alpha
+  cellId: cell-alpha
+  operationId: operation-alpha
+  tenantDigest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  subjectDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  operationDigest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  fence: "7"
 storageLimitBytes: 5368709120
 uploadLimitBytes: 94371840
 workerLimit: 0
 featureGrants: ""
 browserOrigin: https://substratesystems.io
 transferHostname: transfer.example.test
-credentialsSecretName: cell-alpha-credentials
+credentialsSecretName: exomem-cell-credentials
+credentialsManagedExternally: true
 activeCredentialVersion: active-v1
 initRequestId: 123e4567-e89b-42d3-a456-426614174000
 initOperationId: provision-alpha-1

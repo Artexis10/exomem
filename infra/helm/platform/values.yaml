@@ -4,12 +4,28 @@ cloudflared:
   tokenSecretName: exomem-cloudflared-token
   tokenSecretKey: token
 
-runtime:
+provisioner:
   image: ""
+  replicas: 1
+  databaseSchema: exomem_provisioner
+  databaseRole: exomem_provisioner_runtime
+  trustedProxyIps: 10.0.0.0/8
+  cellChartPath: /opt/exomem/charts/cell
+  cellChartVersion: 0.1.0
+  helmBinary: /opt/exomem/bin/helm
+  helmVersion: 3.19.4
+  controlHostname: ""
+  transferHostname: ""
+  browserOrigin: https://substratesystems.io
+  releaseManifestJson: ""
+  location: fsn1
+  internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
+  pollSeconds: "1"
 
 admission:
   namespaceContractOperatorUsernames:
     - system:admin
+    - system:serviceaccount:exomem-platform:exomem-cell-provisioner
 
 scheduler:
   contractVersion: 1

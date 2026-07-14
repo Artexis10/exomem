@@ -8,6 +8,7 @@ from typing import Annotated, Literal
 from urllib.parse import urlsplit
 
 from pydantic import (
+    AfterValidator,
     BaseModel,
     ConfigDict,
     Field,
@@ -16,6 +17,8 @@ from pydantic import (
     field_validator,
     model_validator,
 )
+
+from .credentials import validate_machine_credential
 
 OpaqueId = Annotated[
     str,
@@ -45,8 +48,20 @@ ShortLabel = Annotated[
     ),
 ]
 Sha256 = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
-SecretValue = Annotated[SecretStr, Field(min_length=32, max_length=4096)]
+
+
+def _validate_secret_value(value: SecretStr) -> SecretStr:
+    validate_machine_credential(value.get_secret_value())
+    return value
+
+
+SecretValue = Annotated[
+    SecretStr,
+    Field(min_length=43, max_length=43),
+    AfterValidator(_validate_secret_value),
+]
 _OPAQUE_REFERENCE = re.compile(r"^[A-Za-z0-9_.:-]{1,256}$")
+_CANONICAL_RFC3339_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 
 
 class StrictSchema(BaseModel):
@@ -76,6 +91,24 @@ class ProvisionRequest(ContextRequest):
 
 class TargetRequest(ProvisionRequest):
     providerRef: OpaqueReference
+
+
+class ExportRequest(TargetRequest):
+    expiresAt: str = Field(min_length=20, max_length=40)
+
+    @field_validator("expiresAt")
+    @classmethod
+    def validate_expiry(cls, value: str) -> str:
+        if not _CANONICAL_RFC3339_UTC.fullmatch(value):
+            raise ValueError("export expiry must be canonical RFC3339 UTC")
+        try:
+            expires_at = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as error:
+            raise ValueError("export expiry must be canonical RFC3339 UTC") from error
+        ttl = expires_at.astimezone(UTC) - datetime.now(UTC)
+        if ttl <= timedelta(0) or ttl > timedelta(days=30):
+            raise ValueError("export expiry must be future and no more than 30 days")
+        return value
 
 
 class RotateCredentialRequest(TargetRequest):
@@ -220,7 +253,7 @@ REQUEST_MODELS: dict[str, type[StrictSchema]] = {
     "quiesce": TargetRequest,
     "resume": TargetRequest,
     "stop": TargetRequest,
-    "export": TargetRequest,
+    "export": ExportRequest,
     "export-release": ReleaseExportRequest,
     "export-delete": ExportReferenceRequest,
     "restore": RestoreRequest,

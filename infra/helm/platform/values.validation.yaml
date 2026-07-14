@@ -1,6 +1,45 @@
 cloudflared:
   replicas: 1
-runtime:
-  image: ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+provisioner:
+  image: ghcr.io/artexis10/exomem-provisioner@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  controlHostname: control.example.test
+  transferHostname: transfer.example.test
+  releaseManifestJson: |-
+    {
+      "artifact": "exomem-hosted-release",
+      "schemaVersion": 1,
+      "sourceRepository": "https://github.com/Artexis10/exomem",
+      "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
+      "release": "0.22.0",
+      "hostedProtocol": "1",
+      "releaseBuildTime": "2026-07-14T03:50:34Z",
+      "runtimeImage": "ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "publishedTag": "ghcr.io/artexis10/exomem:54618b931dec8f0ad053dce48dd80cc36c95c549-hosted",
+      "operatorContractSha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "gatewayContractSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "commandRegistry": [
+        {"name": "coordination_status", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "bootstrap", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "ask_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "read_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "browse_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "remember", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "edit_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "replace_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "capture_source", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "compile_source", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "preserve_evidence", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "transfer_artifact", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "review_memory", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "review_item_context", "readOnly": true, "mode": "read", "tier": 1, "capability": "core"},
+        {"name": "triage_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "connect_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "adopt_vault", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "maintain_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "schema_memory", "readOnly": false, "mode": "write", "tier": 1, "capability": "core"},
+        {"name": "manage_memory_file", "readOnly": false, "mode": "write", "tier": 2, "capability": "tier-2"},
+        {"name": "query_dataset", "readOnly": true, "mode": "read", "tier": 2, "capability": "tier-2"}
+      ]
+    }
 scheduler:
   contractVersion: 1

@@ -69,14 +69,18 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     validation_values = yaml.safe_load(
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
-    assert values["runtime"]["image"] == ""
-    assert validation_values["runtime"]["image"] == (
-        "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
-    )
+    assert "runtime" not in values
+    release = json.loads(validation_values["provisioner"]["releaseManifestJson"])
+    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    assert len(release["commandRegistry"]) == 21
     platform_schema = json.loads(
         (PLATFORM / "values.schema.json").read_text(encoding="utf-8")
     )
-    assert "@sha256:" in json.dumps(platform_schema["properties"]["runtime"])
+    assert platform_schema["properties"]["runtime"] is False
+    assert "releaseManifestJson" in platform_schema["properties"]["provisioner"]["required"]
+    assert "contractDigest" not in platform_schema["properties"]["provisioner"]["properties"]
+    assert "apiSecretName" not in platform_schema["properties"]["provisioner"]["properties"]
+    assert "workerSecretName" not in platform_schema["properties"]["provisioner"]["properties"]
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
@@ -276,7 +280,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     values_name: str, expected_kind: str
 ) -> None:
     documents = _render(CELL, CELL / values_name, namespace="cell-alpha-test")
-    assert _find(documents, "PersistentVolumeClaim", "cell-alpha-data")
+    pvc = _find(documents, "PersistentVolumeClaim", "cell-alpha-data")
+    assert not any(document.get("kind") == "Secret" for document in documents)
     quota = _find(documents, "ResourceQuota", "cell-alpha-quota")
     assert quota["spec"]["hard"]["persistentvolumeclaims"] == "1"
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
@@ -297,8 +302,35 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         "helm.sh/resource-policy": "keep",
         "exomem.io/resource-name": "cell-alpha",
         "exomem.io/pvc-name": "cell-alpha-data",
-        "exomem.io/credentials-secret-name": "cell-alpha-credentials",
+        "exomem.io/credentials-secret-name": "exomem-cell-credentials",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
+        "exomem.io/tenant-id": "tenant-alpha",
+        "exomem.io/cell-id": "cell-alpha",
+        "exomem.io/operation-id": "operation-alpha",
+        "exomem.io/tenant-digest": "a" * 64,
+        "exomem.io/subject-digest": "b" * 64,
+        "exomem.io/operation-digest": "c" * 64,
+        "exomem.io/fence": "7",
+    }
+    assert {
+        key: pvc["metadata"]["annotations"][key]
+        for key in (
+            "exomem.io/tenant-id",
+            "exomem.io/cell-id",
+            "exomem.io/operation-id",
+            "exomem.io/tenant-digest",
+            "exomem.io/subject-digest",
+            "exomem.io/operation-digest",
+            "exomem.io/fence",
+        )
+    } == {
+        "exomem.io/tenant-id": "tenant-alpha",
+        "exomem.io/cell-id": "cell-alpha",
+        "exomem.io/operation-id": "operation-alpha",
+        "exomem.io/tenant-digest": "a" * 64,
+        "exomem.io/subject-digest": "b" * 64,
+        "exomem.io/operation-digest": "c" * 64,
+        "exomem.io/fence": "7",
     }
     if expected_kind == "Job":
         pod = workload["spec"]["template"]["spec"]
@@ -352,7 +384,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
             volume for volume in pod["volumes"] if volume["name"] == "credentials"
         )
         assert credentials["secret"]["defaultMode"] == 0o444
-        assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
+        assert credentials["secret"]["secretName"] == "exomem-cell-credentials"
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
         assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 
@@ -459,3 +491,311 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
         encoding="utf-8"
     )
     assert cloudflare.count(target) == 2
+
+
+def test_live_provisioner_worker_has_bounded_volume_lifecycle_rbac() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    routine = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    routine_rules = json.dumps(routine["rules"], sort_keys=True)
+
+    assert '"persistentvolumes"' in routine_rules
+    pv_rule = next(
+        rule
+        for rule in routine["rules"]
+        if "persistentvolumes" in rule.get("resources", [])
+    )
+    assert pv_rule["verbs"] == ["create", "delete", "get", "list", "patch", "update", "watch"]
+    assert all(
+        forbidden not in routine_rules
+        for forbidden in (
+            '"nodes"',
+            '"customresourcedefinitions"',
+            '"clusterroles"',
+            '"clusterrolebindings"',
+            '"validatingadmissionpolicies"',
+        )
+    )
+    assert not any(
+        document.get("metadata", {}).get("name") == "exomem-volume-lifecycle"
+        for document in documents
+    )
+    secret_rules = [
+        rule for rule in routine["rules"] if "secrets" in rule.get("resources", [])
+    ]
+    assert secret_rules == [
+        {
+            "apiGroups": [""],
+            "resources": ["secrets"],
+            "verbs": ["create"],
+        },
+        {
+            "apiGroups": [""],
+            "resourceNames": ["exomem-cell-credentials"],
+            "resources": ["secrets"],
+            "verbs": ["delete", "get", "patch", "update"],
+        },
+    ]
+    assert all(
+        "list" not in rule["verbs"] and "watch" not in rule["verbs"]
+        for rule in secret_rules
+    )
+    assert next(
+        rule for rule in routine["rules"] if "pods/exec" in rule.get("resources", [])
+    ) == {"apiGroups": [""], "resources": ["pods/exec"], "verbs": ["create"]}
+    assert next(
+        rule for rule in routine["rules"] if "leases" in rule.get("resources", [])
+    ) == {
+        "apiGroups": ["coordination.k8s.io"],
+        "resources": ["leases"],
+        "verbs": ["create", "delete", "get", "patch", "update"],
+    }
+
+    bindings = {
+        document["metadata"]["name"]: document
+        for document in documents
+        if document.get("kind") == "ClusterRoleBinding"
+        and document.get("metadata", {}).get("name", "").startswith("exomem-")
+    }
+    assert bindings["exomem-cell-provisioner"]["subjects"] == [
+        {
+            "kind": "ServiceAccount",
+            "name": "exomem-cell-provisioner",
+            "namespace": "exomem-platform",
+        }
+    ]
+    assert "exomem-volume-lifecycle" not in bindings
+
+    scope = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-provisioner-scope",
+    )
+    scope_text = json.dumps(scope, sort_keys=True)
+    assert "system:serviceaccount:exomem-platform:exomem-cell-provisioner" in scope_text
+    assert "request.namespace.startsWith('exo-')" in scope_text
+    assert "object.metadata.name.startsWith('exo-')" in scope_text
+    assert "exomem-cell-credentials" in scope_text
+
+    volume_scope = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-volume-lifecycle-scope",
+    )
+    volume_scope_text = json.dumps(volume_scope, sort_keys=True)
+    assert "system:serviceaccount:exomem-platform:exomem-cell-provisioner" in (
+        volume_scope_text
+    )
+    assert "oldObject.spec == object.spec" in volume_scope_text
+    assert "oldObject.metadata.annotations" in volume_scope_text
+    assert "dyn(object.spec).claimRef.namespace.startsWith('exo-')" in volume_scope_text
+    assert "dyn(object.spec).csi.driver == 'csi.hetzner.cloud'" in volume_scope_text
+    assert "object.metadata.name == request.namespace + '-data'" in volume_scope_text
+    for identity_key in (
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/tenant-digest",
+        "exomem.io/subject-digest",
+        "exomem.io/operation-digest",
+        "exomem.io/fence",
+    ):
+        assert identity_key in volume_scope_text
+
+
+def test_platform_deploys_separate_api_and_single_live_provider_worker() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    api = _find(documents, "Deployment", "exomem-provisioner-api")
+    worker = _find(documents, "Deployment", "exomem-provisioner-worker")
+    service = _find(documents, "Service", "exomem-provisioner")
+    release_config = _find(documents, "ConfigMap", "exomem-hosted-release-v1")
+
+    assert api["spec"]["template"]["spec"]["serviceAccountName"] == (
+        "exomem-provisioner-api"
+    )
+    assert api["spec"]["template"]["spec"]["automountServiceAccountToken"] is False
+    assert service["spec"]["type"] == "ClusterIP"
+    assert worker["spec"]["replicas"] == 1
+    assert worker["spec"]["strategy"] == {"type": "Recreate"}
+    api_container = api["spec"]["template"]["spec"]["containers"][0]
+    assert "envFrom" not in api_container
+    pod = worker["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "exomem-cell-provisioner"
+    container = pod["containers"][0]
+    assert container["command"] == ["exomem-provisioner-worker"]
+    assert container["image"].endswith("@sha256:" + "b" * 64)
+    assert "envFrom" not in container
+    api_secret_env = {
+        item["name"]: item["valueFrom"]["secretKeyRef"]
+        for item in api_container["env"]
+        if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
+    }
+    assert api_secret_env == {
+        "EXOMEM_PROVISIONER_BEARER": {
+            "name": "exomem-provisioner-auth",
+            "key": "credential",
+        },
+        "EXOMEM_PROVISIONER_DATABASE_URL": {
+            "name": "exomem-provisioner-database",
+            "key": "url",
+        },
+        "EXOMEM_PROVISIONER_ENVELOPE_KEY": {
+            "name": "exomem-provisioner-wrapping-key",
+            "key": "key-material",
+        },
+    }
+    worker_secret_env = {
+        item["name"]: item["valueFrom"]["secretKeyRef"]
+        for item in container["env"]
+        if "valueFrom" in item and "secretKeyRef" in item["valueFrom"]
+    }
+    assert worker_secret_env == {
+        **api_secret_env,
+        "EXOMEM_PROVISIONER_HCLOUD_TOKEN": {
+            "name": "exomem-provisioner-hcloud-token",
+            "key": "token",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_UPLOAD_KEY_ID": {
+            "name": "exomem-recovery-upload-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_UPLOAD_KEY": {
+            "name": "exomem-recovery-upload-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_RESTORE_KEY_ID": {
+            "name": "exomem-recovery-restore-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_RESTORE_KEY": {
+            "name": "exomem-recovery-restore-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID": {
+            "name": "exomem-recovery-delete-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY": {
+            "name": "exomem-recovery-delete-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_UPLOAD_KEY_ID": {
+            "name": "exomem-user-export-upload-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_UPLOAD_KEY": {
+            "name": "exomem-user-export-upload-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_RESTORE_KEY_ID": {
+            "name": "exomem-user-export-restore-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_RESTORE_KEY": {
+            "name": "exomem-user-export-restore-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID": {
+            "name": "exomem-user-export-delete-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY": {
+            "name": "exomem-user-export-delete-key",
+            "key": "application-key",
+        },
+        "EXOMEM_PROVISIONER_DATABASE_BACKUP_KEY_ID": {
+            "name": "exomem-database-backup-key-id",
+            "key": "application-key-id",
+        },
+        "EXOMEM_PROVISIONER_DATABASE_BACKUP_KEY": {
+            "name": "exomem-database-backup-key",
+            "key": "application-key",
+        },
+    }
+    worker_config_env = {
+        item["name"]: item["valueFrom"]["configMapKeyRef"]
+        for item in container["env"]
+        if "valueFrom" in item and "configMapKeyRef" in item["valueFrom"]
+    }
+    assert worker_config_env == {
+        "EXOMEM_PROVISIONER_RECOVERY_BUCKET": {
+            "name": "exomem-durability-storage",
+            "key": "recovery-bucket",
+        },
+        "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET": {
+            "name": "exomem-durability-storage",
+            "key": "user-export-bucket",
+        },
+        "EXOMEM_PROVISIONER_DATABASE_BACKUP_BUCKET": {
+            "name": "exomem-durability-storage",
+            "key": "database-backup-bucket",
+        },
+    }
+    rendered = json.dumps(container)
+    assert "HighFidelity" not in rendered
+    assert "EXOMEM_PROVISIONER_CELL_IMAGE" not in rendered
+    assert "EXOMEM_PROVISIONER_CONTRACT_DIGEST" not in rendered
+    assert {
+        "name": "EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH",
+        "value": "/etc/exomem/release/exomem-hosted-release-v1.json",
+    } in container["env"]
+    assert {"name": "hosted-release", "mountPath": "/etc/exomem/release", "readOnly": True} in (
+        container["volumeMounts"]
+    )
+    assert {
+        "name": "hosted-release",
+        "configMap": {
+            "name": "exomem-hosted-release-v1",
+            "items": [
+                {
+                    "key": "exomem-hosted-release-v1.json",
+                    "path": "exomem-hosted-release-v1.json",
+                }
+            ],
+        },
+    } in pod["volumes"]
+    assert release_config["immutable"] is True
+    assert set(release_config["data"]) == {"exomem-hosted-release-v1.json"}
+    release = json.loads(release_config["data"]["exomem-hosted-release-v1.json"])
+    assert release["runtimeImage"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+    assert release["gatewayContractSha256"] == "b" * 64
+    assert release["operatorContractSha256"] == "c" * 64
+    assert "EXOMEM_PROVISIONER_HCLOUD_TOKEN" in rendered
+    assert "EXOMEM_PROVISIONER_ACCESS_CLIENT_SECRET" not in rendered
+    assert "CF-Access-Client" not in rendered
+
+
+def test_platform_rejects_independent_runtime_release_overrides() -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    for arguments in (
+        ("--set", "runtime.image=ghcr.io/artexis10/exomem@sha256:" + "d" * 64),
+        ("--set", "provisioner.contractDigest=" + "d" * 64),
+    ):
+        result = subprocess.run(
+            [
+                str(HELM),
+                "template",
+                "exomem-platform",
+                str(PLATFORM),
+                "--namespace",
+                "exomem-platform",
+                "--values",
+                str(PLATFORM / "values.validation.yaml"),
+                *arguments,
+            ],
+            cwd=ROOT,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0

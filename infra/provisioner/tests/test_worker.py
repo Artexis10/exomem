@@ -10,7 +10,13 @@ import pytest
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
-from exomem_provisioner.driver import DriverFinal, DriverRetryable, EffectContext, FakeDriver
+from exomem_provisioner.driver import (
+    DriverFinal,
+    DriverPending,
+    DriverRetryable,
+    EffectContext,
+    FakeDriver,
+)
 from exomem_provisioner.models import OperationState
 from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
@@ -105,6 +111,47 @@ async def test_worker_checkpoints_before_and_after_effect(
     assert final is not None
     assert final.state is OperationState.FINAL
     assert final.checkpoint == "complete"
+
+
+@pytest.mark.asyncio
+async def test_worker_preserves_provider_checkpoint_across_pending_reclaim(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    _, repository, _ = worker_context
+    operation = await repository.submit("provision", "multi-step", _request())
+
+    class MultiStepDriver:
+        checkpoints: list[str] = []
+
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(
+            self,
+            _action: str,
+            _request_data: dict[str, object],
+            context: EffectContext,
+        ) -> DriverFinal | DriverPending:
+            self.checkpoints.append(context.checkpoint)
+            if context.checkpoint == "effect-prepared":
+                return DriverPending("volume-owned", 2)
+            return DriverFinal(
+                {
+                    "providerRef": "provider-cell-worker-alpha",
+                    "privateEndpoint": "https://cell-worker-alpha.cells.internal",
+                }
+            )
+
+    driver = MultiStepDriver()
+    worker = ProvisionerWorker(repository, driver, worker_id="multi-step-worker")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    assert await worker.run_once(now=now) is True
+    assert await worker.run_once(now=now + timedelta(seconds=3)) is True
+
+    final = await repository.get_by_id(operation.id)
+    assert driver.checkpoints == ["effect-prepared", "volume-owned"]
+    assert final is not None and final.state is OperationState.FINAL
 
 
 @pytest.mark.asyncio

@@ -107,6 +107,8 @@ class ProvisionerWorker:
             tenant_id=operation.tenant_id,
             cell_id=operation.cell_id,
             fence_generation=operation.fence_generation,
+            checkpoint=operation.checkpoint,
+            operation_created_at=operation.created_at.isoformat().replace("+00:00", "Z"),
         )
         try:
             outcome = await self._driver.execute(operation.action.value, request, context)
@@ -138,6 +140,18 @@ class ProvisionerWorker:
         if claim_lost.is_set():
             return True
         if isinstance(outcome, DriverPending):
+            for resource in outcome.resources:
+                await self._repository.record_resource(
+                    operation_id=operation.id,
+                    worker_id=self._worker_id,
+                    tenant_id=operation.tenant_id,
+                    cell_id=operation.cell_id,
+                    kind=resource.kind,
+                    recoverable_reference=resource.recoverable_reference,
+                    provider_operation_id=operation.external_operation_id,
+                    provider_fence_generation=operation.fence_generation,
+                    **claim,
+                )
             await self._repository.mark_pending(
                 operation.id,
                 self._worker_id,

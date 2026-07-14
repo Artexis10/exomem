@@ -301,6 +301,9 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
         provider_fence_generation=7,
     )
     assert resource.id == same.id
+    assert await repository.load_resource_reference(resource.id) == "namespace-provider-sentinel"
+    listed = await repository.list_resources(tenant_id="tenant-alpha", cell_id="cell-alpha")
+    assert listed == (resource,)
 
     with pytest.raises(ImmutableMetadataConflict):
         await repository.record_resource(

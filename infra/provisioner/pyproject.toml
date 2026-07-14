@@ -9,6 +9,9 @@ dependencies = [
     "asyncpg>=0.30,<1",
     "cryptography>=45,<47",
     "fastapi>=0.116,<1",
+    "hcloud>=2.22,<3",
+    "httpx>=0.28,<1",
+    "kubernetes>=35.0,<36",
     "pydantic-settings>=2.10,<3",
     "sqlalchemy[asyncio]>=2.0.41,<3",
     "uvicorn>=0.35,<1",
@@ -16,10 +19,10 @@ dependencies = [
 
 [project.scripts]
 exomem-provisioner-api = "exomem_provisioner.main:run_api"
+exomem-provisioner-worker = "exomem_provisioner.production:run_worker"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28,<1",
     "pytest>=8,<10",
     "pytest-asyncio>=1,<2",
     "ruff>=0.12,<1",

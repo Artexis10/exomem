@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import base64
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,8 +18,15 @@ from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
 
 _BEARER = "provisioner-bearer-sentinel-000000000000"
-_SERVICE_CREDENTIAL = "service-credential-sentinel-000000000"
-_NEXT_CREDENTIAL = "next-credential-sentinel-0000000000000"
+
+
+def _credential(offset: int = 0) -> str:
+    raw = bytes((index + offset) % 256 for index in range(32))
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
+
+
+_SERVICE_CREDENTIAL = _credential()
+_NEXT_CREDENTIAL = _credential(32)
 _RESTORE_REF = "restore-ref-sentinel"
 _EXPORT_REF = "export-ref-sentinel"
 _RELEASE_REF = "release-ref-sentinel"
@@ -74,6 +83,12 @@ def _body_for(action: str) -> dict[str, Any]:
         )
     if action == "export-release":
         return _target_body(releaseRef=_RELEASE_REF)
+    if action == "export":
+        return _target_body(
+            expiresAt=(datetime.now(UTC) + timedelta(days=7))
+            .isoformat(timespec="seconds")
+            .replace("+00:00", "Z")
+        )
     if action in {"export-delete", "export-download"}:
         return {
             "operationId": "operation-api-alpha",
@@ -90,6 +105,46 @@ def _body_for(action: str) -> dict[str, Any]:
             "tenantId": "tenant-api-alpha",
         }
     return _target_body()
+
+
+@pytest.mark.asyncio
+async def test_export_requires_canonical_bounded_expiry(
+    api: tuple[httpx.AsyncClient, OperationRepository, Path],
+) -> None:
+    client, _, _ = api
+    valid = _body_for("export")
+    response = await client.post(
+        "/cells/export", headers=_headers("valid-export-expiry"), json=valid
+    )
+    assert response.status_code == 202
+    changed = {
+        **valid,
+        "expiresAt": (datetime.now(UTC) + timedelta(days=8))
+        .isoformat(timespec="seconds")
+        .replace("+00:00", "Z"),
+    }
+    conflict = await client.post(
+        "/cells/export", headers=_headers("valid-export-expiry"), json=changed
+    )
+    assert conflict.status_code == 409
+
+    for index, expires_at in enumerate(
+        (
+            None,
+            (datetime.now(UTC) - timedelta(seconds=1)).isoformat().replace("+00:00", "Z"),
+            (datetime.now(UTC) + timedelta(days=30, seconds=5)).isoformat().replace("+00:00", "Z"),
+            (datetime.now(UTC) + timedelta(days=1)).isoformat(),
+        )
+    ):
+        body = _target_body()
+        if expires_at is not None:
+            body["expiresAt"] = expires_at
+        rejected = await client.post(
+            "/cells/export",
+            headers=_headers(f"invalid-export-expiry-{index}"),
+            json=body,
+        )
+        assert rejected.status_code == 422
 
 
 def _headers(idempotency_key: str = "idempotency-api-alpha") -> dict[str, str]:

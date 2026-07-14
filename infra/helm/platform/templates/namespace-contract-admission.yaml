@@ -1,6 +1,6 @@
 {{- $operatorUsernames := .Values.admission.namespaceContractOperatorUsernames | toJson -}}
 {{- $protectedLabels := list "exomem.io/tenant-cell" "exomem.io/cell-resource" "pod-security.kubernetes.io/enforce" "pod-security.kubernetes.io/enforce-version" "pod-security.kubernetes.io/audit" "pod-security.kubernetes.io/audit-version" "pod-security.kubernetes.io/warn" "pod-security.kubernetes.io/warn-version" -}}
-{{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/init-request-configmap-name" -}}
+{{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/init-request-configmap-name" "exomem.io/tenant-id" "exomem.io/cell-id" "exomem.io/operation-id" "exomem.io/tenant-digest" "exomem.io/subject-digest" "exomem.io/operation-digest" "exomem.io/fence" -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -62,7 +62,21 @@ spec:
         'exomem.io/credentials-secret-name' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/credentials-secret-name'].matches('^[a-z0-9][a-z0-9-]{2,62}$') &&
         'exomem.io/init-request-configmap-name' in variables.newAnnotations &&
-        variables.newAnnotations['exomem.io/init-request-configmap-name'] == variables.newAnnotations['exomem.io/resource-name'] + '-init-request'
+        variables.newAnnotations['exomem.io/init-request-configmap-name'] == variables.newAnnotations['exomem.io/resource-name'] + '-init-request' &&
+        'exomem.io/tenant-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/cell-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/operation-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/tenant-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/subject-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/subject-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/operation-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/fence' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
         )
       message: Tenant namespaces must keep the exact restricted-v1.35 tenant namespace contract.
     - expression: >-

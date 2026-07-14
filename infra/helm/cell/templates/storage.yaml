@@ -6,6 +6,7 @@ metadata:
     {{- include "exomem-cell.labels" . | nindent 4 }}
   annotations:
     helm.sh/resource-policy: keep
+    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
 spec:
   accessModes:
     - ReadWriteOnce

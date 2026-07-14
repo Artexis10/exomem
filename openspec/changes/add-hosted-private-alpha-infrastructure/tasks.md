@@ -37,7 +37,7 @@
 - [ ] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
 - [ ] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
 - [ ] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
-- [ ] 4.4 Pin the release manifest in infrastructure values and reject mutable tags or partial version overrides.
+- [x] 4.4 Pin the release manifest in infrastructure values and reject mutable tags or partial version overrides.
 
 ## 5. Scaffold and statically validate the IaC surfaces
 
@@ -84,26 +84,26 @@
 
 ## 10. Implement HCloud retained-volume ownership and recovery
 
-- [ ] 10.1 Add fake-provider tests for PV handle discovery, immutable tenant/cell/operation/fence HCloud labels, encrypted provider reference storage, released-PV/provider absence proof, and credential redaction.
-- [ ] 10.2 Implement the privileged volume lifecycle worker and narrowly scoped HCloud/Kubernetes recovery permissions.
-- [ ] 10.3 Add a clean-cluster test that reconstructs a static PV/PVC for the original recorded `volumeHandle` and rejects location/cell mismatches.
-- [ ] 10.4 Implement provider orphan discovery/quarantine, released-PV cleanup, and require Kubernetes PV plus HCloud volume absence before `storageDestroyed`.
+- [x] 10.1 Add fake-provider tests for PV handle discovery, immutable tenant/cell/operation/fence HCloud labels, encrypted provider reference storage, released-PV/provider absence proof, and credential redaction.
+- [x] 10.2 Implement the privileged volume lifecycle worker and narrowly scoped HCloud/Kubernetes recovery permissions.
+- [x] 10.3 Add a clean-cluster test that reconstructs a static PV/PVC for the original recorded `volumeHandle` and rejects location/cell mismatches.
+- [x] 10.4 Implement provider orphan discovery/quarantine, released-PV cleanup, and require Kubernetes PV plus HCloud volume absence before `storageDestroyed`.
 
 ## 11. Implement cell provisioning, health, and lifecycle
 
-- [ ] 11.1 Add failing reconciliation tests for deterministic opaque names, fixed Helm values, partial-attempt adoption, no PII labels, readiness gating, and crash/replay between CSI bind and HCloud registration.
-- [ ] 11.2 Implement provision through namespace/policy/Secret/PVC/Helm/volume-handle-registration/provider-label-verification/init/readiness/route checkpoints and return one stable provider reference/endpoint only after volume ownership is durable.
-- [ ] 11.3 Add failing health tests for authenticated live/ready/contract flattening and mismatched identity/release/protocol/policy/admission.
-- [ ] 11.4 Implement exact Substrate health responses and fail closed on every mismatch.
-- [ ] 11.5 Add failing lifecycle tests for quiesce, safe stop, resume, overlap rotation, seal, and serialization with maintenance operations.
-- [ ] 11.6 Implement lifecycle actions through the authenticated internal cell API and Kubernetes scaling with durable checkpoints.
+- [x] 11.1 Add failing reconciliation tests for deterministic opaque names, fixed Helm values, partial-attempt adoption, no PII labels, readiness gating, and crash/replay between CSI bind and HCloud registration.
+- [x] 11.2 Implement provision through namespace/policy/Secret/PVC/Helm/volume-handle-registration/provider-label-verification/init/readiness/route checkpoints and return one stable provider reference/endpoint only after volume ownership is durable.
+- [x] 11.3 Add failing health tests for authenticated live/ready/contract flattening and mismatched identity/release/protocol/policy/admission.
+- [x] 11.4 Implement exact Substrate health responses and fail closed on every mismatch.
+- [x] 11.5 Add failing lifecycle tests for quiesce, safe stop, resume, overlap rotation, seal, and serialization with maintenance operations.
+- [x] 11.6 Implement lifecycle actions through the authenticated internal cell API and Kubernetes scaling with durable checkpoints.
 
 ## 12. Implement control, transfer, and maintenance routing
 
 - [x] 12.1 Add rendered-route tests for the Access-protected control hostname, public transfer hostname, exact allowed paths, prefix stripping, and rejection of personal routes/upstream selectors.
 - [x] 12.2 Implement per-cell Traefik routes and Cloudflare configuration with no direct public cell Service.
 - [ ] 12.3 Add real-browser/preflight tests for canonical CORS, exact headers/methods, 90 MiB streaming, large download, abort/new-ticket, replay, path/operation alteration, and hostile origin.
-- [ ] 12.4 Add failing maintenance tests that close both routes, externally verify rejection of an unused ticket, drain in-flight work, serialize actions, and reopen only after release/resume.
+- [x] 12.4 Add failing maintenance tests that close both routes, externally verify rejection of an unused ticket, drain in-flight work, serialize actions, and reopen only after release/resume.
 - [ ] 12.5 Implement the durable maintenance gate and prove control/transfer behavior through the real Cloudflare Tunnel.
 
 ## 13. Implement export, backup, restore, and database durability

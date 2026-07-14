@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -119,6 +119,7 @@ class OperationSnapshot:
     claim_token: str | None
     claim_generation: int
     claim_expires_at: datetime | None
+    created_at: datetime
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,6 +151,7 @@ def _operation_snapshot(operation: Operation) -> OperationSnapshot:
         claim_token=operation.claim_token,
         claim_generation=operation.claim_generation,
         claim_expires_at=operation.claim_expires_at,
+        created_at=operation.created_at,
     )
 
 
@@ -277,6 +279,42 @@ class OperationRepository:
             operation = await session.get(Operation, operation_id)
             return _operation_snapshot(operation) if operation is not None else None
 
+    async def load_resource_reference(self, resource_id: str) -> str:
+        async with self._sessions() as session:
+            resource = await session.get(Resource, resource_id)
+            if resource is None:
+                raise KeyError(resource_id)
+            decoded = self._codec.decrypt_json(
+                resource.reference_ciphertext,
+                purpose=f"resource-reference:{resource.operation_id}:{resource.kind.value}",
+            )
+            reference = decoded.get("reference")
+            if not isinstance(reference, str):
+                raise ValueError("encrypted provider reference is invalid")
+            return reference
+
+    async def list_resources(
+        self,
+        *,
+        tenant_id: str,
+        cell_id: str | None = None,
+    ) -> tuple[ResourceSnapshot, ...]:
+        async with self._sessions() as session:
+            statement = select(Resource).where(Resource.tenant_id == tenant_id)
+            if cell_id is not None:
+                statement = statement.where(Resource.cell_id == cell_id)
+            resources = await session.scalars(statement.order_by(Resource.created_at, Resource.id))
+            return tuple(
+                ResourceSnapshot(
+                    resource.id,
+                    resource.operation_id,
+                    resource.kind,
+                    resource.provider_operation_id,
+                    resource.provider_fence_generation,
+                )
+                for resource in resources
+            )
+
     async def submit(
         self,
         action: str,
@@ -395,7 +433,10 @@ class OperationRepository:
                     .where(Operation.id == candidate)
                     .values(
                         state=OperationState.CLAIMED,
-                        checkpoint="effect-prepared",
+                        checkpoint=case(
+                            (Operation.checkpoint == "queued", "effect-prepared"),
+                            else_=Operation.checkpoint,
+                        ),
                         claim_owner=worker_id,
                         claim_token=claim_token,
                         claim_generation=Operation.claim_generation + 1,
@@ -424,7 +465,8 @@ class OperationRepository:
             if fence is None or fence.fence_generation != operation.fence_generation:
                 return None
             operation.state = OperationState.CLAIMED
-            operation.checkpoint = "effect-prepared"
+            if operation.checkpoint == "queued":
+                operation.checkpoint = "effect-prepared"
             operation.claim_owner = worker_id
             operation.claim_token = claim_token
             operation.claim_generation += 1

@@ -17,6 +17,18 @@ class EffectContext:
     tenant_id: str
     cell_id: str | None
     fence_generation: int
+    checkpoint: str = "effect-prepared"
+    operation_created_at: str = "1970-01-01T00:00:00Z"
+
+    @property
+    def provider_identity(self) -> tuple[str, str, str, str | None, int]:
+        return (
+            self.operation_id,
+            self.provider_operation_id,
+            self.tenant_id,
+            self.cell_id,
+            self.fence_generation,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +41,7 @@ class DriverResource:
 class DriverPending:
     checkpoint: str
     retry_after_seconds: int
+    resources: tuple[DriverResource, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -98,7 +111,7 @@ class FakeDriver:
     ) -> DriverPending | DriverFinal:
         key = (action, context.operation_id)
         recorded = self._effect_metadata.get(key)
-        if recorded is not None and recorded != context:
+        if recorded is not None and recorded.provider_identity != context.provider_identity:
             raise DriverTerminal("PROVISIONER_PROVIDER_METADATA_CONFLICT")
         if context.fence_generation < self._tenant_fences.get(context.tenant_id, 0):
             raise DriverTerminal("PROVISIONER_STALE_FENCE")

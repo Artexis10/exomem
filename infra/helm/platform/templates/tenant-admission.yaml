@@ -1,3 +1,4 @@
+{{- $hostedRelease := include "exomem.hostedReleaseJson" . | mustFromJson -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -76,7 +77,7 @@ spec:
         !variables.inScope ||
         (
         object.spec.containers[0].name == 'exomem' &&
-        object.spec.containers[0].image == {{ .Values.runtime.image | quote }} &&
+        object.spec.containers[0].image == {{ $hostedRelease.runtimeImage | quote }} &&
         object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
         object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&

@@ -3,6 +3,8 @@ apiVersion: traefik.io/v1alpha1
 kind: Middleware
 metadata:
   name: {{ .Values.resourceName }}-strip-cell
+  annotations:
+    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:
@@ -14,6 +16,8 @@ apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: {{ .Values.resourceName }}-control
+  annotations:
+    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:
@@ -31,6 +35,8 @@ apiVersion: traefik.io/v1alpha1
 kind: IngressRoute
 metadata:
   name: {{ .Values.resourceName }}-transfer
+  annotations:
+    {{- include "exomem-cell.providerAnnotations" . | nindent 4 }}
   labels:
     {{- include "exomem-cell.labels" . | nindent 4 }}
 spec:

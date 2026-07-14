@@ -1,0 +1,165 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-provisioner-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["", "apps", "batch", "coordination.k8s.io", "networking.k8s.io", "traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*"]
+        scope: "*"
+  matchConditions:
+    - name: provisioner-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-cell-provisioner'
+  validations:
+    - expression: >-
+        request.resource.resource == 'persistentvolumes'
+          ? true
+          : request.resource.resource == 'namespaces'
+          ? (object != null
+              ? object.metadata.name.startsWith('exo-')
+              : oldObject.metadata.name.startsWith('exo-'))
+          : (request.namespace.startsWith('exo-') &&
+              (request.resource.resource != 'secrets' ||
+                (object != null
+                  ? object.metadata.name == 'exomem-cell-credentials'
+                  : oldObject.metadata.name == 'exomem-cell-credentials')))
+      message: The hosted provisioner may mutate only opaque exo-* tenant namespaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-provisioner-scope
+spec:
+  policyName: exomem-provisioner-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-volume-lifecycle-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["persistentvolumes", "persistentvolumeclaims"]
+        scope: "*"
+  matchConditions:
+    - name: live-provider-worker-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-cell-provisioner'
+  variables:
+    - name: newAnnotations
+      expression: >-
+        object != null && has(object.metadata.annotations)
+          ? object.metadata.annotations
+          : {}
+    - name: oldAnnotations
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations)
+          ? oldObject.metadata.annotations
+          : {}
+    - name: newIdentity
+      expression: >-
+        'exomem.io/tenant-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/cell-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/operation-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/tenant-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/subject-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/subject-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/operation-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/fence' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
+    - name: oldIdentity
+      expression: >-
+        'exomem.io/tenant-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/cell-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/operation-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/tenant-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/tenant-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/subject-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/subject-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/operation-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/fence' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
+    - name: identityUnchanged
+      expression: >-
+        variables.oldIdentity && variables.newIdentity &&
+        variables.oldAnnotations['exomem.io/tenant-id'] == variables.newAnnotations['exomem.io/tenant-id'] &&
+        variables.oldAnnotations['exomem.io/cell-id'] == variables.newAnnotations['exomem.io/cell-id'] &&
+        variables.oldAnnotations['exomem.io/operation-id'] == variables.newAnnotations['exomem.io/operation-id'] &&
+        variables.oldAnnotations['exomem.io/tenant-digest'] == variables.newAnnotations['exomem.io/tenant-digest'] &&
+        variables.oldAnnotations['exomem.io/subject-digest'] == variables.newAnnotations['exomem.io/subject-digest'] &&
+        variables.oldAnnotations['exomem.io/operation-digest'] == variables.newAnnotations['exomem.io/operation-digest'] &&
+        variables.oldAnnotations['exomem.io/fence'] == variables.newAnnotations['exomem.io/fence']
+  validations:
+    - expression: >-
+        request.resource.resource == 'persistentvolumeclaims'
+          ? (
+              request.namespace.startsWith('exo-') &&
+              (request.operation == 'DELETE'
+                ? oldObject.metadata.name == request.namespace + '-data'
+                : object.metadata.name == request.namespace + '-data') &&
+              (request.operation == 'DELETE'
+                ? variables.oldIdentity
+                : variables.newIdentity) &&
+              (request.operation != 'UPDATE' ||
+                (variables.identityUnchanged && oldObject.spec == object.spec)) &&
+              (request.operation == 'DELETE'
+                ? oldObject.spec.storageClassName == 'exomem-hcloud-encrypted-retain'
+                : object.spec.storageClassName == 'exomem-hcloud-encrypted-retain')
+            )
+          : (
+              (request.operation == 'DELETE'
+                ? variables.oldIdentity
+                : variables.newIdentity) &&
+              (request.operation != 'UPDATE' ||
+                (oldObject.spec == object.spec &&
+                  (!variables.oldIdentity || variables.identityUnchanged))) &&
+              (request.operation == 'DELETE'
+                ? (
+                    has(dyn(oldObject.spec).csi) &&
+                    dyn(oldObject.spec).csi.driver == 'csi.hetzner.cloud' &&
+                    dyn(oldObject.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+                    oldObject.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
+                    has(dyn(oldObject.spec).claimRef) &&
+                    dyn(oldObject.spec).claimRef.namespace.startsWith('exo-') &&
+                    dyn(oldObject.spec).claimRef.name == dyn(oldObject.spec).claimRef.namespace + '-data'
+                  )
+                : (
+                    has(dyn(object.spec).csi) &&
+                    dyn(object.spec).csi.driver == 'csi.hetzner.cloud' &&
+                    dyn(object.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+                    object.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
+                    has(dyn(object.spec).claimRef) &&
+                    dyn(object.spec).claimRef.namespace.startsWith('exo-') &&
+                    dyn(object.spec).claimRef.name == dyn(object.spec).claimRef.namespace + '-data'
+                  ))
+            )
+      message: The volume worker may mutate only immutable tagged hosted HCloud PV/PVC bindings.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-volume-lifecycle-scope
+spec:
+  policyName: exomem-volume-lifecycle-scope
+  validationActions: [Deny]

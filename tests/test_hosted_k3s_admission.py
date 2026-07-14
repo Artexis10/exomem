@@ -199,8 +199,10 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     _kubectl(k3s, ["apply", "--filename=-"], documents=platform_admission)
 
     for policy_name in (
+        "exomem-provisioner-scope",
         "exomem-tenant-boundary",
         "exomem-tenant-namespace-contract",
+        "exomem-volume-lifecycle-scope",
     ):
         for _ in range(30):
             policy = _kubectl(
@@ -526,3 +528,157 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         helper.pop(field, None)
     side_init["spec"]["initContainers"] = [helper]
     _assert_denied(k3s, side_init, message="sidecars or init containers")
+
+    provider_rbac = [
+        item
+        for item in platform
+        if item.get("kind")
+        in {"ServiceAccount", "ClusterRole", "ClusterRoleBinding"}
+        and item.get("metadata", {}).get("name")
+        in {
+            "exomem-cell-provisioner",
+        }
+    ]
+    _kubectl(k3s, ["apply", "--filename=-"], documents=provider_rbac)
+    provisioner = "system:serviceaccount:exomem-platform:exomem-cell-provisioner"
+    volume_worker = provisioner
+    provider_namespace = "exo-admission-alpha"
+    provider_namespace_document = copy.deepcopy(namespace_document)
+    provider_namespace_document["metadata"]["name"] = provider_namespace
+    provider_namespace_document["metadata"]["labels"][
+        "exomem.io/cell-resource"
+    ] = provider_namespace
+    provider_namespace_document["metadata"]["annotations"].update(
+        {
+            "exomem.io/resource-name": provider_namespace,
+            "exomem.io/pvc-name": provider_namespace + "-data",
+            "exomem.io/init-request-configmap-name": provider_namespace + "-init-request",
+        }
+    )
+    _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[provider_namespace_document],
+    )
+
+    cannot_list_secrets = _kubectl(
+        k3s,
+        [
+            "auth",
+            "can-i",
+            "list",
+            "secrets",
+            "--namespace",
+            provider_namespace,
+            f"--as={provisioner}",
+        ],
+        check=False,
+    )
+    assert cannot_list_secrets.stdout.strip() == "no"
+    fixed_secret = {
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "exomem-cell-credentials",
+            "namespace": provider_namespace,
+        },
+        "type": "Opaque",
+        "stringData": {"credentials.json": "{}"},
+    }
+    fixed_secret_result = _kubectl(
+        k3s,
+        ["create", "--filename=-", f"--as={provisioner}"],
+        documents=[fixed_secret],
+        check=False,
+    )
+    assert fixed_secret_result.returncode == 0, fixed_secret_result.stderr
+    foreign_secret = copy.deepcopy(fixed_secret)
+    foreign_secret["metadata"]["name"] = "foreign-secret"
+    foreign_secret_result = _kubectl(
+        k3s,
+        ["create", "--filename=-", f"--as={provisioner}"],
+        documents=[foreign_secret],
+        check=False,
+    )
+    assert foreign_secret_result.returncode != 0
+    assert "only opaque exo-* tenant namespaces" in foreign_secret_result.stderr
+
+    identity = {
+        key: provider_namespace_document["metadata"]["annotations"][key]
+        for key in (
+            "exomem.io/tenant-id",
+            "exomem.io/cell-id",
+            "exomem.io/operation-id",
+            "exomem.io/tenant-digest",
+            "exomem.io/subject-digest",
+            "exomem.io/operation-digest",
+            "exomem.io/fence",
+        )
+    }
+    pv = {
+        "apiVersion": "v1",
+        "kind": "PersistentVolume",
+        "metadata": {"name": "pv-admission-alpha", "annotations": identity},
+        "spec": {
+            "accessModes": ["ReadWriteOnce"],
+            "capacity": {"storage": "10Gi"},
+            "claimRef": {
+                "name": provider_namespace + "-data",
+                "namespace": provider_namespace,
+            },
+            "csi": {
+                "driver": "csi.hetzner.cloud",
+                "fsType": "ext4",
+                "volumeHandle": "4242",
+            },
+            "persistentVolumeReclaimPolicy": "Retain",
+            "storageClassName": "exomem-hcloud-encrypted-retain",
+            "volumeMode": "Filesystem",
+        },
+    }
+    pv_create = _kubectl(
+        k3s,
+        ["apply", "--filename=-", f"--as={volume_worker}"],
+        documents=[pv],
+        check=False,
+    )
+    assert pv_create.returncode == 0, pv_create.stderr
+    pv_retag = _kubectl(
+        k3s,
+        [
+            "annotate",
+            "persistentvolume",
+            "pv-admission-alpha",
+            "exomem.io/fence=8",
+            "--overwrite",
+            f"--as={volume_worker}",
+        ],
+        check=False,
+    )
+    assert pv_retag.returncode != 0
+    assert "immutable tagged hosted HCloud PV/PVC bindings" in pv_retag.stderr
+    pv_spec_change = _kubectl(
+        k3s,
+        [
+            "patch",
+            "persistentvolume",
+            "pv-admission-alpha",
+            "--type=merge",
+            "--patch",
+            '{"spec":{"persistentVolumeReclaimPolicy":"Delete"}}',
+            f"--as={volume_worker}",
+        ],
+        check=False,
+    )
+    assert pv_spec_change.returncode != 0
+    arbitrary_pv = copy.deepcopy(pv)
+    arbitrary_pv["metadata"] = {"name": "pv-arbitrary"}
+    arbitrary_pv["spec"]["csi"]["driver"] = "example.invalid"
+    arbitrary_pv_result = _kubectl(
+        k3s,
+        ["apply", "--filename=-", f"--as={volume_worker}"],
+        documents=[arbitrary_pv],
+        check=False,
+    )
+    assert arbitrary_pv_result.returncode != 0
+    assert "immutable tagged hosted HCloud PV/PVC bindings" in arbitrary_pv_result.stderr
