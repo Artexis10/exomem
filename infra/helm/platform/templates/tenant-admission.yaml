@@ -82,9 +82,16 @@ spec:
         object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
         (!has(object.spec.containers[0].securityContext.privileged) ||
           object.spec.containers[0].securityContext.privileged == false) &&
+        !has(object.spec.containers[0].securityContext.seccompProfile) &&
         size(object.spec.containers[0].securityContext.capabilities.drop) == 1 &&
         object.spec.containers[0].securityContext.capabilities.drop[0] == 'ALL')
       message: Tenant pods must use the exact approved immutable image and base security context.
+    - expression: >-
+        !variables.inScope ||
+        (
+        object.spec.containers[0].terminationMessagePath == '/dev/termination-log' &&
+        object.spec.containers[0].terminationMessagePolicy == 'File')
+      message: Tenant pods must use the safe termination message path and policy.
     - expression: >-
         !variables.inScope ||
         (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||

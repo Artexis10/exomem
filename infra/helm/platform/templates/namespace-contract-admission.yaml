@@ -11,23 +11,62 @@ spec:
     resourceRules:
       - apiGroups: [""]
         apiVersions: ["v1"]
-        operations: ["UPDATE"]
+        operations: ["CREATE", "UPDATE"]
         resources: ["namespaces"]
   variables:
     - name: oldLabels
       expression: >-
-        has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}
+        request.operation == 'UPDATE' && has(oldObject.metadata.labels) ? oldObject.metadata.labels : {}
     - name: newLabels
       expression: >-
         has(object.metadata.labels) ? object.metadata.labels : {}
     - name: oldAnnotations
       expression: >-
-        has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+        request.operation == 'UPDATE' && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
     - name: newAnnotations
       expression: >-
         has(object.metadata.annotations) ? object.metadata.annotations : {}
+    - name: oldTenant
+      expression: >-
+        'exomem.io/tenant-cell' in variables.oldLabels &&
+        variables.oldLabels['exomem.io/tenant-cell'] == 'true'
+    - name: newTenant
+      expression: >-
+        'exomem.io/tenant-cell' in variables.newLabels &&
+        variables.newLabels['exomem.io/tenant-cell'] == 'true'
   validations:
     - expression: >-
+        !(variables.oldTenant || variables.newTenant) ||
+        (
+        variables.newTenant &&
+        'exomem.io/cell-resource' in variables.newLabels &&
+        'pod-security.kubernetes.io/enforce' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
+        'pod-security.kubernetes.io/enforce-version' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/enforce-version'] == 'v1.35' &&
+        'pod-security.kubernetes.io/audit' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/audit'] == 'restricted' &&
+        'pod-security.kubernetes.io/audit-version' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/audit-version'] == 'v1.35' &&
+        'pod-security.kubernetes.io/warn' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/warn'] == 'restricted' &&
+        'pod-security.kubernetes.io/warn-version' in variables.newLabels &&
+        variables.newLabels['pod-security.kubernetes.io/warn-version'] == 'v1.35' &&
+        'helm.sh/resource-policy' in variables.newAnnotations &&
+        variables.newAnnotations['helm.sh/resource-policy'] == 'keep' &&
+        'exomem.io/resource-name' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/resource-name'].matches('^[a-z0-9][a-z0-9-]{2,62}$') &&
+        variables.newLabels['exomem.io/cell-resource'] == variables.newAnnotations['exomem.io/resource-name'] &&
+        'exomem.io/pvc-name' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/pvc-name'] == variables.newAnnotations['exomem.io/resource-name'] + '-data' &&
+        'exomem.io/credentials-secret-name' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/credentials-secret-name'].matches('^[a-z0-9][a-z0-9-]{2,62}$') &&
+        'exomem.io/init-request-configmap-name' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/init-request-configmap-name'] == variables.newAnnotations['exomem.io/resource-name'] + '-init-request'
+        )
+      message: Tenant namespaces must keep the exact restricted-v1.35 tenant namespace contract.
+    - expression: >-
+        request.operation != 'UPDATE' ||
         request.userInfo.username in {{ $operatorUsernames }} ||
         (
 {{- range $field := $protectedLabels }}

@@ -63,8 +63,16 @@ def _yaml(documents: list[dict[str, Any]]) -> str:
     return "---\n".join(yaml.safe_dump(item, sort_keys=False) for item in documents)
 
 
+def _retain_k3s_logs(name: str, path: Path) -> None:
+    logs = _run(["docker", "logs", name], check=False)
+    path.write_text(logs.stdout + logs.stderr, encoding="utf-8")
+    print(f"Retained exact-K3s failure logs at {path}")
+
+
 @pytest.fixture(scope="module")
-def k3s() -> Iterator[str]:
+def k3s(
+    request: pytest.FixtureRequest, tmp_path_factory: pytest.TempPathFactory
+) -> Iterator[str]:
     if not RUN_LIVE:
         pytest.skip("set RUN_K3S_ADMISSION_TEST=1 to run exact K3s API admission tests")
     if HELM is None:
@@ -73,6 +81,9 @@ def k3s() -> Iterator[str]:
         pytest.skip("Docker is required for exact K3s API admission tests")
 
     name = f"exomem-admission-{uuid.uuid4().hex[:12]}"
+    log_path = tmp_path_factory.mktemp("k3s-admission") / f"{name}.log"
+    failures_before = request.session.testsfailed
+    logs_retained = False
     _run(
         [
             "docker",
@@ -93,19 +104,32 @@ def k3s() -> Iterator[str]:
         ]
     )
     try:
+        consecutive_ready = 0
         for _ in range(90):
             ready = _run(
                 ["docker", "exec", name, "kubectl", "get", "--raw=/readyz"],
                 check=False,
             )
             if ready.returncode == 0 and ready.stdout.strip() == "ok":
-                break
+                consecutive_ready += 1
+                if consecutive_ready == 3:
+                    break
+            else:
+                consecutive_ready = 0
             time.sleep(1)
         else:
-            logs = _run(["docker", "logs", name], check=False)
-            raise AssertionError(f"K3s did not become ready:\n{logs.stdout}{logs.stderr}")
+            _retain_k3s_logs(name, log_path)
+            logs_retained = True
+            raise AssertionError(f"K3s did not become ready; logs retained at {log_path}")
         yield name
+    except BaseException:
+        if not logs_retained:
+            _retain_k3s_logs(name, log_path)
+            logs_retained = True
+        raise
     finally:
+        if not logs_retained and request.session.testsfailed > failures_before:
+            _retain_k3s_logs(name, log_path)
         _run(["docker", "rm", "--force", name], check=False)
 
 
@@ -174,6 +198,53 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     ]
     _kubectl(k3s, ["apply", "--filename=-"], documents=platform_admission)
 
+    for policy_name in (
+        "exomem-tenant-boundary",
+        "exomem-tenant-namespace-contract",
+    ):
+        for _ in range(30):
+            policy = _kubectl(
+                k3s,
+                ["get", "validatingadmissionpolicy", policy_name, "--output=json"],
+            )
+            policy_document = json.loads(policy.stdout)
+            status = policy_document.get("status", {})
+            if status.get("observedGeneration") == policy_document["metadata"]["generation"]:
+                assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
+                break
+            time.sleep(1)
+        else:
+            raise AssertionError(f"K3s did not type-check {policy_name}")
+
+    insecure_namespace = {
+        "apiVersion": "v1",
+        "kind": "Namespace",
+        "metadata": {
+            "name": "cell-insecure-contract",
+            "labels": {
+                "exomem.io/tenant-cell": "true",
+                "exomem.io/cell-resource": "cell-insecure",
+                "pod-security.kubernetes.io/enforce": "privileged",
+                "pod-security.kubernetes.io/enforce-version": "latest",
+            },
+            "annotations": {
+                "helm.sh/resource-policy": "keep",
+                "exomem.io/resource-name": "cell-insecure",
+                "exomem.io/pvc-name": "cell-insecure-data",
+                "exomem.io/credentials-secret-name": "cell-insecure-credentials",
+                "exomem.io/init-request-configmap-name": "cell-insecure-init-request",
+            },
+        },
+    }
+    insecure_create = _kubectl(
+        k3s,
+        ["apply", "--filename=-"],
+        documents=[insecure_namespace],
+        check=False,
+    )
+    assert insecure_create.returncode != 0
+    assert "restricted-v1.35 tenant namespace contract" in insecure_create.stderr
+
     initialize = _render(CELL, CELL / "values.initialize.yaml", namespace)
     namespace_document = next(item for item in initialize if item.get("kind") == "Namespace")
     service_account = next(item for item in initialize if item.get("kind") == "ServiceAccount")
@@ -210,7 +281,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                     {
                         "apiGroups": [""],
                         "resources": ["namespaces"],
-                        "verbs": ["get", "patch", "update"],
+                        "verbs": ["create", "get", "patch", "update"],
                     }
                 ],
             },
@@ -234,22 +305,24 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
         ],
     )
 
-    for policy_name in (
-        "exomem-tenant-boundary",
-        "exomem-tenant-namespace-contract",
-    ):
-        for _ in range(30):
-            policy = _kubectl(
-                k3s,
-                ["get", "validatingadmissionpolicy", policy_name, "--output=json"],
-            )
-            status = json.loads(policy.stdout).get("status", {})
-            if status.get("observedGeneration") == 1:
-                assert status.get("typeChecking", {}).get("expressionWarnings", []) == []
-                break
-            time.sleep(1)
-        else:
-            raise AssertionError(f"K3s did not type-check {policy_name}")
+    routine_namespace = copy.deepcopy(namespace_document)
+    routine_namespace["metadata"]["name"] = "cell-routine-create"
+    routine_namespace["metadata"]["labels"]["exomem.io/cell-resource"] = "cell-routine"
+    routine_namespace["metadata"]["annotations"].update(
+        {
+            "exomem.io/resource-name": "cell-routine",
+            "exomem.io/pvc-name": "cell-routine-data",
+            "exomem.io/credentials-secret-name": "cell-routine-credentials",
+            "exomem.io/init-request-configmap-name": "cell-routine-init-request",
+        }
+    )
+    routine_create = _kubectl(
+        k3s,
+        ["apply", "--filename=-", f"--as={routine_username}"],
+        documents=[routine_namespace],
+        check=False,
+    )
+    assert routine_create.returncode == 0, routine_create.stderr
 
     init_job = next(item for item in initialize if item.get("kind") == "Job")
     init_pod = _pod(init_job, name="cell-alpha-init-positive", namespace=namespace)
@@ -261,7 +334,7 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             "annotate",
             "namespace",
             namespace,
-            "exomem.io/resource-name=cell-foreign",
+            "exomem.io/credentials-secret-name=cell-rotated-credentials",
             "--overwrite",
             f"--as={routine_username}",
         ],
@@ -380,6 +453,16 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
             "executable or interactive surfaces",
         ),
         ("workingDir", "/tmp", "executable or interactive surfaces"),
+        (
+            "terminationMessagePath",
+            "/run/exomem/credentials/service-credential",
+            "safe termination message",
+        ),
+        (
+            "terminationMessagePolicy",
+            "FallbackToLogsOnError",
+            "safe termination message",
+        ),
     )
     for index, (field, value, message) in enumerate(surface_mutations):
         shape_drift = copy.deepcopy(init_pod)
@@ -392,6 +475,13 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     unmasked_proc["spec"]["hostUsers"] = False
     unmasked_proc["spec"]["containers"][0]["securityContext"]["procMount"] = "Unmasked"
     _assert_denied(k3s, unmasked_proc, message="exact approved operator command")
+
+    init_unconfined = copy.deepcopy(init_pod)
+    init_unconfined["metadata"]["name"] = "cell-alpha-init-unconfined"
+    init_unconfined["spec"]["containers"][0]["securityContext"]["seccompProfile"] = {
+        "type": "Unconfined"
+    }
+    _assert_denied(k3s, init_unconfined, message="base security context")
 
     for volume_name, source, key, message in (
         ("data", "persistentVolumeClaim", "claimName", "exact tenant PVC"),
@@ -411,6 +501,13 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     serving_pod = _pod(stateful_set, name="cell-alpha-serve-positive", namespace=namespace)
     assert "initContainers" not in serving_pod["spec"]
     assert _server_dry_run(k3s, serving_pod).returncode == 0
+
+    serving_unconfined = copy.deepcopy(serving_pod)
+    serving_unconfined["metadata"]["name"] = "cell-alpha-serve-unconfined"
+    serving_unconfined["spec"]["containers"][0]["securityContext"][
+        "seccompProfile"
+    ] = {"type": "Unconfined"}
+    _assert_denied(k3s, serving_unconfined, message="seccompProfile")
 
     unbounded_tmp = copy.deepcopy(serving_pod)
     unbounded_tmp["metadata"]["name"] = "cell-alpha-serve-unbounded-tmp"

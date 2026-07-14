@@ -136,6 +136,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "has(object.spec.initContainers)" in admission_text
     assert "has(dyn(volume.emptyDir).sizeLimit)" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
+    assert "securityContext.seccompProfile" in admission_text
+    assert "terminationMessagePath == '/dev/termination-log'" in admission_text
+    assert "terminationMessagePolicy == 'File'" in admission_text
     for forbidden_surface in (
         "lifecycle",
         "livenessProbe",
@@ -154,8 +157,24 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         documents, "ValidatingAdmissionPolicy", "exomem-tenant-namespace-contract"
     )
     namespace_policy_text = json.dumps(namespace_policy)
+    namespace_operations = namespace_policy["spec"]["matchConstraints"]["resourceRules"][0][
+        "operations"
+    ]
+    assert namespace_operations == ["CREATE", "UPDATE"]
     assert "request.userInfo.username" in namespace_policy_text
     assert "system:admin" in namespace_policy_text
+    assert "restricted-v1.35 tenant namespace contract" in namespace_policy_text
+    for exact_value in (
+        "pod-security.kubernetes.io/enforce",
+        "pod-security.kubernetes.io/enforce-version",
+        "pod-security.kubernetes.io/audit",
+        "pod-security.kubernetes.io/audit-version",
+        "pod-security.kubernetes.io/warn",
+        "pod-security.kubernetes.io/warn-version",
+        "restricted",
+        "v1.35",
+    ):
+        assert exact_value in namespace_policy_text
     for protected_field in (
         "exomem.io/resource-name",
         "exomem.io/approved-image",
@@ -287,6 +306,9 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         container = pod["containers"][0]
         assert container["name"] == "exomem"
         assert container["securityContext"]["runAsUser"] == 0
+        assert "seccompProfile" not in container["securityContext"]
+        assert container["terminationMessagePath"] == "/dev/termination-log"
+        assert container["terminationMessagePolicy"] == "File"
         assert container["args"] == [
             "hosted",
             "init",
@@ -301,6 +323,9 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert len(pod.get("initContainers", [])) == 0
         container = pod["containers"][0]
         security = container["securityContext"]
+        assert "seccompProfile" not in security
+        assert container["terminationMessagePath"] == "/dev/termination-log"
+        assert container["terminationMessagePolicy"] == "File"
         assert security["runAsNonRoot"] is True
         assert security["runAsUser"] == 10001
         assert security["readOnlyRootFilesystem"] is True
