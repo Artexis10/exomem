@@ -222,8 +222,16 @@ async def test_production_deletion_builder_performs_a_canonical_empty_provider_s
 
     class B2:
         def list_object_versions(self, **arguments):
-            assert arguments["Bucket"] in {"recovery-bucket", "export-bucket"}
-            return {"Versions": [], "DeleteMarkers": [], "IsTruncated": False}
+            raise AssertionError(f"empty durable ledger must not scan B2: {arguments}")
+
+    class Ledger:
+        async def tenant_recovery_objects(self, tenant_id):
+            assert tenant_id == "tenant-alpha"
+            return []
+
+        async def tenant_export_deliveries(self, tenant_id):
+            assert tenant_id == "tenant-alpha"
+            return []
 
     class Authority:
         async def current_fence(self, tenant_id):
@@ -251,7 +259,7 @@ async def test_production_deletion_builder_performs_a_canonical_empty_provider_s
         export_bucket="export-bucket",
         provider_recovery_public_key=codec.public_key(),
         authority=Authority(),
-        key_store=SimpleNamespace(),
+        key_store=Ledger(),
     )
     context = EffectContext(
         "operation-alpha",

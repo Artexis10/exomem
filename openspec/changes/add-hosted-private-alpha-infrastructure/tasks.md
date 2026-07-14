@@ -122,7 +122,7 @@
 - [x] 14.1 Add failing discard tests proving only the failed candidate is removed while the active cell and exports remain.
 - [x] 14.2 Implement candidate discard with independent compute/storage/key absence proofs.
 - [x] 14.3 Add failing tenant-destroy tests covering active/orphan compute, retained volumes, routes, credentials, exports, backups, provider rediscovery, and seven-day pending retention.
-- [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, exact-version and delete-marker removal after lock expiry without governance bypass, provider absence checks, wrapped-key destruction, and all four exact final booleans.
+- [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, tenant-ledger-driven bounded exact-version and associated-marker removal after lock expiry without governance bypass, crash-safe provider-absence/key-erasure proof with a final ledger re-read, durable plaintext-delivery deletion, a credential-free dispatcher creating admission-scoped short-lived privileged Jobs only when work exists, and all four exact final booleans.
 
 ## 15. Add secret handoff, observability, and runbooks
 

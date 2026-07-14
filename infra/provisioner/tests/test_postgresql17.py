@@ -19,7 +19,7 @@ from sqlalchemy import func, select, text, update
 import exomem_provisioner.repository as repository_module
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
-from exomem_provisioner.database import ProvisionerDatabase
+from exomem_provisioner.database import DATABASE_REVISION, ProvisionerDatabase
 from exomem_provisioner.models import Operation, TenantFence
 from exomem_provisioner.repository import OperationRepository, StaleFence
 
@@ -238,7 +238,7 @@ async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_
             )
         assert str(version).startswith("17")
         assert owner == target.role
-        assert revisions == ["0003_cell_operation_lock"]
+        assert revisions == [DATABASE_REVISION]
         assert {"operations", "tenant_fences", "resources", "credential_metadata"} <= tables
         assert await database.ready() is True
 

@@ -19,6 +19,7 @@ from .models import (
     DurabilityRun,
     DurabilityRunKind,
     DurabilityRunState,
+    ExportDelivery,
     Operation,
     OperationState,
     ProviderDisposition,
@@ -97,7 +98,7 @@ class RecoveryObjectSnapshot:
     fence_generation: int
     opaque_reference: str
     provider_reference: str
-    wrapped_data_key: str
+    wrapped_data_key: str | None
     archive_sha256: str
     manifest_sha256: str
     archive_size: int
@@ -109,6 +110,20 @@ class RecoveryObjectSnapshot:
     verified_at: datetime
     deleted_at: datetime | None
     key_destroyed_at: datetime | None
+
+
+@dataclass(frozen=True, slots=True)
+class ExportDeliverySnapshot:
+    id: str
+    source_object_id: str
+    tenant_id: str
+    cell_id: str
+    operation_id: str
+    fence_generation: int
+    provider_reference: str
+    expires_at: datetime
+    verified_at: datetime
+    deleted_at: datetime | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -617,6 +632,119 @@ class DurabilityRepository:
             ).all()
             return [self._object_snapshot(record) for record in records]
 
+    async def record_export_delivery(
+        self,
+        *,
+        source_object_id: str,
+        tenant_id: str,
+        provider_reference: str,
+        expires_at: datetime,
+        verified_at: datetime | None = None,
+    ) -> ExportDeliverySnapshot:
+        async with self._sessions.begin() as session:
+            checked_at = await _database_now(session, verified_at)
+            source = await session.get(RecoveryObject, source_object_id, with_for_update=True)
+            if (
+                source is None
+                or source.tenant_id != tenant_id
+                or source.kind is not RunKind.USER_EXPORT
+                or source.deleted_at is not None
+                or source.key_destroyed_at is not None
+            ):
+                raise ImmutableRecoveryConflict("export delivery source is unavailable")
+            expiry = _utc(expires_at)
+            if expiry <= checked_at or expiry > _utc(source.expires_at):
+                raise ImmutableRecoveryConflict("export delivery expiry is outside source bounds")
+            reference_digest = _digest(provider_reference)
+            existing = await session.scalar(
+                select(ExportDelivery).where(
+                    ExportDelivery.provider_reference_digest == reference_digest
+                )
+            )
+            if existing is not None:
+                snapshot = self._delivery_snapshot(existing)
+                if (
+                    snapshot.source_object_id != source.id
+                    or snapshot.tenant_id != source.tenant_id
+                    or snapshot.cell_id != source.cell_id
+                    or snapshot.operation_id != source.operation_id
+                    or snapshot.fence_generation != source.fence_generation
+                    or snapshot.provider_reference != provider_reference
+                    or snapshot.expires_at != expiry
+                ):
+                    raise ImmutableRecoveryConflict("export delivery identity is immutable")
+                return snapshot
+            record_id = str(uuid.uuid4())
+            record = ExportDelivery(
+                id=record_id,
+                source_object_id=source.id,
+                tenant_id=source.tenant_id,
+                cell_id=source.cell_id,
+                operation_id=source.operation_id,
+                fence_generation=source.fence_generation,
+                provider_reference_digest=reference_digest,
+                provider_reference_ciphertext=self._codec.encrypt_json(
+                    {"provider_reference": provider_reference},
+                    purpose=f"export-delivery:{record_id}",
+                ),
+                expires_at=expiry,
+                verified_at=checked_at,
+            )
+            session.add(record)
+            await session.flush()
+            return self._delivery_snapshot(record)
+
+    async def tenant_export_deliveries(self, tenant_id: str) -> list[ExportDeliverySnapshot]:
+        async with self._sessions() as session:
+            records = (
+                await session.scalars(
+                    select(ExportDelivery)
+                    .where(ExportDelivery.tenant_id == tenant_id)
+                    .order_by(ExportDelivery.verified_at, ExportDelivery.id)
+                )
+            ).all()
+            return [self._delivery_snapshot(record) for record in records]
+
+    async def expired_export_deliveries(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 1000,
+    ) -> list[ExportDeliverySnapshot]:
+        if not 1 <= limit <= 10_000:
+            raise ValueError("expired delivery batch size is invalid")
+        async with self._sessions() as session:
+            checked_at = await _database_now(session, now)
+            records = (
+                await session.scalars(
+                    select(ExportDelivery)
+                    .where(
+                        ExportDelivery.expires_at <= checked_at,
+                        ExportDelivery.deleted_at.is_(None),
+                    )
+                    .order_by(ExportDelivery.expires_at, ExportDelivery.id)
+                    .limit(limit)
+                )
+            ).all()
+            return [self._delivery_snapshot(record) for record in records]
+
+    async def mark_export_delivery_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+        deleted_at: datetime | None = None,
+    ) -> ExportDeliverySnapshot:
+        async with self._sessions.begin() as session:
+            checked_at = await _database_now(session, deleted_at)
+            record = await session.get(ExportDelivery, reference, with_for_update=True)
+            if record is None or record.tenant_id != tenant_id:
+                raise KeyError(reference)
+            if record.deleted_at is None:
+                record.deleted_at = checked_at
+                await session.flush()
+            return self._delivery_snapshot(record)
+
     async def destroy_recovery_wrapped_key(
         self,
         opaque_reference: str,
@@ -922,6 +1050,24 @@ class DurabilityRepository:
             key_destroyed_at=(
                 _utc(record.key_destroyed_at) if record.key_destroyed_at is not None else None
             ),
+        )
+
+    def _delivery_snapshot(self, record: ExportDelivery) -> ExportDeliverySnapshot:
+        secret = self._codec.decrypt_json(
+            record.provider_reference_ciphertext,
+            purpose=f"export-delivery:{record.id}",
+        )
+        return ExportDeliverySnapshot(
+            id=record.id,
+            source_object_id=record.source_object_id,
+            tenant_id=record.tenant_id,
+            cell_id=record.cell_id,
+            operation_id=record.operation_id,
+            fence_generation=record.fence_generation,
+            provider_reference=str(secret["provider_reference"]),
+            expires_at=_utc(record.expires_at),
+            verified_at=_utc(record.verified_at),
+            deleted_at=_utc(record.deleted_at) if record.deleted_at is not None else None,
         )
 
     def _expected_object_snapshot(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from importlib.metadata import entry_points
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,6 +8,10 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from exomem_provisioner import durability_jobs
+from exomem_provisioner.config import ProvisionerSettings
+from exomem_provisioner.crypto import AesGcmEnvelopeCodec
+from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.durability_jobs import (
     DatabaseBackupSettings,
     DeletionJobSettings,
@@ -15,6 +20,7 @@ from exomem_provisioner.durability_jobs import (
     run_bounded_operation_batch,
     run_verified_backup_sweep,
 )
+from exomem_provisioner.repository import OperationRepository
 
 
 def _settings(**overrides: object) -> ExportGcSettings:
@@ -128,6 +134,40 @@ def test_vault_backup_and_deletion_console_entrypoints_are_packaged() -> None:
         assert dependency in pyproject
 
 
+def test_deletion_dispatcher_settings_and_entrypoint_are_credential_free(tmp_path: Path) -> None:
+    template = tmp_path / "deletion-job.json"
+    template.write_text("{}", encoding="utf-8")
+    settings = durability_jobs.DeletionDispatcherSettings(
+        database_url="postgresql+asyncpg://exomem_provisioner_runtime:secret@db.invalid/app",
+        database_schema="exomem_provisioner",
+        database_role="exomem_provisioner_runtime",
+        namespace="exomem-platform",
+        job_template_path=template,
+    )
+
+    assert set(settings.model_dump()) == {
+        "database_url",
+        "database_schema",
+        "database_role",
+        "namespace",
+        "job_template_path",
+    }
+    assert not {
+        "envelope_key",
+        "hcloud_token",
+        "recovery_delete_key",
+        "user_export_delete_key",
+        "provider_recovery_public_key",
+    } & set(type(settings).model_fields)
+    pyproject = (Path(__file__).resolve().parents[1] / "pyproject.toml").read_text(
+        encoding="utf-8"
+    )
+    assert (
+        'exomem-deletion-dispatcher = '
+        '"exomem_provisioner.durability_jobs:run_deletion_dispatcher"'
+    ) in pyproject
+
+
 @pytest.mark.asyncio
 async def test_operation_batch_is_bounded_and_stops_when_queue_is_empty() -> None:
     class Worker:
@@ -173,6 +213,142 @@ async def test_deletion_entrypoint_runs_one_bounded_batch_and_exits(monkeypatch)
     await _run_live_deletion_worker(DeletionJobSettings(batch_size=5))
 
     assert worker.calls == 3
+
+
+@pytest.mark.asyncio
+async def test_deletion_dispatcher_creates_only_one_claimed_job_and_no_work_creates_none() -> None:
+    class Source:
+        def __init__(self, operation_id: str | None) -> None:
+            self.operation_id = operation_id
+            self.calls = 0
+
+        async def next_dispatchable_deletion(self) -> str | None:
+            self.calls += 1
+            return self.operation_id
+
+    class Launcher:
+        def __init__(self, *, active: bool = False) -> None:
+            self.active = active
+            self.created: list[str] = []
+
+        async def has_active_job(self) -> bool:
+            return self.active
+
+        async def create_scoped_job(self, operation_id: str) -> None:
+            self.created.append(operation_id)
+
+    empty_source = Source(None)
+    empty_launcher = Launcher()
+    assert (
+        await durability_jobs.dispatch_one_deletion_job(empty_source, empty_launcher) is False
+    )
+    assert empty_launcher.created == []
+
+    active_source = Source("operation-ignored")
+    active_launcher = Launcher(active=True)
+    assert (
+        await durability_jobs.dispatch_one_deletion_job(active_source, active_launcher) is False
+    )
+    assert active_source.calls == 0
+    assert active_launcher.created == []
+
+    ready_source = Source("operation-ready")
+    ready_launcher = Launcher()
+    assert await durability_jobs.dispatch_one_deletion_job(ready_source, ready_launcher) is True
+    assert ready_launcher.created == ["operation-ready"]
+
+
+@pytest.mark.asyncio
+async def test_deletion_dispatch_source_reads_only_eligible_destroy_or_discard(tmp_path: Path) -> None:
+    settings = ProvisionerSettings(
+        bearer="b" * 32,
+        envelope_key="k" * 32,
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'dispatcher.sqlite'}",
+        database_schema="exomem_provisioner",
+        database_role="exomem_provisioner_runtime",
+        trusted_proxy_ips="127.0.0.1",
+    )
+    database = ProvisionerDatabase(settings)
+    await database.create_for_tests()
+    repository = OperationRepository(
+        database.session_factory,
+        codec=AesGcmEnvelopeCodec.from_secret("k" * 32),
+    )
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    request = {
+        "operationId": "operation-ready",
+        "tenantId": "tenant-alpha",
+        "cellId": "cell-alpha",
+        "fenceGeneration": 8,
+        "checkpoint": "requested",
+    }
+    try:
+        await repository.submit("provision", "provision-first", request)
+        destroy = await repository.submit("destroy", "destroy-ready", request)
+        source = durability_jobs.RepositoryDeletionDispatchSource(database.session_factory)
+
+        assert await source.next_dispatchable_deletion(now=now) == destroy.id
+        unchanged = await repository.get_by_id(destroy.id)
+        assert unchanged is not None and unchanged.state.value == "pending"
+        assert unchanged.claim_token is None and unchanged.claim_generation == 0
+    finally:
+        await database.dispose()
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_deletion_launcher_uses_scoped_template_and_content_free_receipt() -> None:
+    class Batch:
+        def __init__(self) -> None:
+            self.items: list[object] = []
+            self.created: list[tuple[str, dict[str, object]]] = []
+
+        def list_namespaced_job(self, namespace: str, *, label_selector: str):
+            assert namespace == "exomem-platform"
+            assert label_selector == "exomem.io/deletion-job=true"
+            return SimpleNamespace(items=self.items)
+
+        def create_namespaced_job(self, namespace: str, body: dict[str, object]):
+            self.created.append((namespace, body))
+
+    template = {
+        "apiVersion": "batch/v1",
+        "kind": "Job",
+        "metadata": {
+            "generateName": "exomem-deletion-",
+            "labels": {"exomem.io/deletion-job": "true"},
+        },
+        "spec": {
+            "activeDeadlineSeconds": 240,
+            "backoffLimit": 0,
+            "ttlSecondsAfterFinished": 300,
+            "template": {
+                "spec": {
+                    "serviceAccountName": "exomem-deletion-worker",
+                    "restartPolicy": "Never",
+                    "containers": [
+                        {"name": "deletion-worker", "command": ["exomem-deletion-worker"]}
+                    ],
+                }
+            },
+        },
+    }
+    batch = Batch()
+    launcher = durability_jobs.KubernetesDeletionJobLauncher(
+        batch_v1=batch,
+        namespace="exomem-platform",
+        job_template=template,
+    )
+
+    assert await launcher.has_active_job() is False
+    await launcher.create_scoped_job("operation-sensitive-opaque")
+
+    assert len(batch.created) == 1
+    namespace, body = batch.created[0]
+    assert namespace == "exomem-platform"
+    annotations = body["metadata"]["annotations"]
+    assert set(annotations) == {"exomem.io/deletion-operation-sha256"}
+    assert annotations["exomem.io/deletion-operation-sha256"] != "operation-sensitive-opaque"
+    assert "operation-sensitive-opaque" not in str(body)
 
 
 @pytest.mark.asyncio

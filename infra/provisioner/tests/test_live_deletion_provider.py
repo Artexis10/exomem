@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 
 from exomem_provisioner.driver import DriverFinal, DriverPending, EffectContext
+from exomem_provisioner.durability_repository import RunKind
 from exomem_provisioner.lifecycle import OpaqueProviderMetadata
 from exomem_provisioner.provider_deletion import (
     DeletionLeaseBusy,
@@ -311,6 +312,23 @@ class VersionedB2:
         self.delete_markers.discard(identity)
 
 
+class PrefixRequiredB2(VersionedB2):
+    def __init__(self, retained_until: datetime) -> None:
+        super().__init__(retained_until)
+        self.prefixes: list[tuple[str, str]] = []
+        self.heads: list[tuple[str, str, str]] = []
+
+    def list_object_versions(self, **arguments):
+        prefix = arguments.get("Prefix")
+        assert isinstance(prefix, str) and prefix, "routine deletion used an unbounded B2 scan"
+        self.prefixes.append((str(arguments["Bucket"]), prefix))
+        return super().list_object_versions(**arguments)
+
+    def head_object(self, *, Bucket: str, Key: str, VersionId: str):
+        self.heads.append((Bucket, Key, VersionId))
+        return super().head_object(Bucket=Bucket, Key=Key, VersionId=VersionId)
+
+
 class Authority:
     def __init__(self, fence: int) -> None:
         self.fence = fence
@@ -335,12 +353,129 @@ class Authority:
 class Keys:
     def __init__(self) -> None:
         self.deleted: set[tuple[str, str]] = set()
+        self.records: list[object] = []
+        self.deliveries: list[object] = []
+
+    def add_recovery(
+        self,
+        *,
+        bucket: str,
+        key: str,
+        kind: str,
+        version_id: str,
+        retained_until: datetime,
+    ) -> None:
+        self.records.append(
+            SimpleNamespace(
+                tenant_id="tenant-alpha",
+                cell_id="cell-active",
+                operation_id=f"{kind}-operation",
+                fence_generation=8,
+                kind=(RunKind.USER_EXPORT if kind == "export" else RunKind.VAULT_BACKUP),
+                opaque_reference=f"wrapped:{kind}",
+                provider_reference=ProviderReference.b2(
+                    bucket=bucket,
+                    key=key,
+                    version_id=version_id,
+                ),
+                wrapped_data_key=f"wrapped-material:{kind}",
+                object_lock_until=retained_until,
+                deleted_at=None,
+                key_destroyed_at=None,
+            )
+        )
+
+    async def tenant_recovery_objects(self, tenant_id: str):
+        return [record for record in self.records if record.tenant_id == tenant_id]
+
+    async def tenant_export_deliveries(self, tenant_id: str):
+        return [record for record in self.deliveries if record.tenant_id == tenant_id]
+
+    async def mark_recovery_object_deleted(self, reference: str, *, tenant_id: str):
+        record = next(
+            item
+            for item in self.records
+            if item.tenant_id == tenant_id and item.opaque_reference == reference
+        )
+        record.deleted_at = datetime(2030, 1, 1, tzinfo=UTC)
+
+    async def mark_export_delivery_deleted(self, reference: str, *, tenant_id: str):
+        record = next(
+            item for item in self.deliveries if item.tenant_id == tenant_id and item.id == reference
+        )
+        record.deleted_at = datetime(2030, 1, 1, tzinfo=UTC)
 
     async def destroy(self, reference: str, *, tenant_id: str):
         self.deleted.add((tenant_id, reference))
+        record = next(
+            (
+                item
+                for item in self.records
+                if item.tenant_id == tenant_id and item.opaque_reference == reference
+            ),
+            None,
+        )
+        if record is not None:
+            record.wrapped_data_key = None
+            record.key_destroyed_at = datetime(2030, 1, 1, tzinfo=UTC)
 
     async def absent(self, reference: str, *, tenant_id: str):
         return (tenant_id, reference) in self.deleted
+
+    async def deletion_complete(self, tenant_id: str) -> bool:
+        return all(
+            record.deleted_at is not None
+            and record.wrapped_data_key is None
+            and record.key_destroyed_at is not None
+            for record in self.records
+            if record.tenant_id == tenant_id
+        ) and all(
+            delivery.deleted_at is not None
+            for delivery in self.deliveries
+            if delivery.tenant_id == tenant_id
+        )
+
+
+class CrashOnceLedger(Keys):
+    """Durable recovery rows survive a worker crash after provider deletion."""
+
+    def __init__(self, retained_until: datetime) -> None:
+        super().__init__()
+        self.fail_next_destroy = True
+        for bucket, key, kind in (
+            ("exports", "tenant/export.enc", "export"),
+            ("recovery", "tenant/backup.enc", "backup"),
+        ):
+            self.add_recovery(
+                bucket=bucket,
+                key=key,
+                kind=kind,
+                version_id=f"{kind}-current",
+                retained_until=retained_until,
+            )
+
+    async def destroy(self, reference: str, *, tenant_id: str):
+        if self.fail_next_destroy:
+            self.fail_next_destroy = False
+            raise RuntimeError("worker crashed after provider deletion")
+        await super().destroy(reference, tenant_id=tenant_id)
+        record = next(item for item in self.records if item.opaque_reference == reference)
+        record.wrapped_data_key = None
+        record.deleted_at = datetime(2030, 1, 1, tzinfo=UTC)
+        record.key_destroyed_at = datetime(2030, 1, 1, tzinfo=UTC)
+
+    async def deletion_complete(self, tenant_id: str) -> bool:
+        return all(
+            record.deleted_at is not None
+            and record.wrapped_data_key is None
+            and record.key_destroyed_at is not None
+            for record in self.records
+            if record.tenant_id == tenant_id
+        ) and all(
+            delivery.deleted_at is not None
+            for delivery in self.deliveries
+            if delivery.tenant_id == tenant_id
+        )
 
 
 def build(now: datetime):
@@ -352,6 +487,20 @@ def build(now: datetime):
     b2 = B2(now + timedelta(days=7))
     authority = Authority(9)
     keys = Keys()
+    keys.add_recovery(
+        bucket="exports",
+        key="tenant/export.enc",
+        kind="export",
+        version_id="version-current",
+        retained_until=now,
+    )
+    keys.add_recovery(
+        bucket="recovery",
+        key="tenant/backup.enc",
+        kind="backup",
+        version_id="version-current",
+        retained_until=now + timedelta(days=7),
+    )
     provider = LiveDeletionProvider(
         core_v1=core,
         apps_v1=Apps(core),
@@ -457,7 +606,8 @@ async def test_live_tenant_destroy_deletes_every_exact_version_and_marker_withou
     custom = Custom([active, candidate])
     hcloud = HCloudVolumes([active, candidate])
     b2 = VersionedB2(now)
-    keys = Keys()
+    keys = CrashOnceLedger(now)
+    keys.fail_next_destroy = False
     provider = LiveDeletionProvider(
         core_v1=core,
         apps_v1=Apps(core),
@@ -506,6 +656,208 @@ async def test_live_tenant_destroy_deletes_every_exact_version_and_marker_withou
         ("tenant-alpha", "wrapped:export"),
         ("tenant-alpha", "wrapped:backup"),
     }
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_restart_erases_ledger_key_after_object_was_deleted():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    b2 = VersionedB2(now)
+    ledger = CrashOnceLedger(now)
+
+    def provider() -> LiveDeletionProvider:
+        core = Core([])
+        return LiveDeletionProvider(
+            core_v1=core,
+            apps_v1=Apps(core),
+            custom_objects=Custom([]),
+            hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+            b2_client=b2,
+            recovery_bucket="recovery",
+            export_bucket="exports",
+            identity_verifier=CODEC.verifier(),
+            authority=Authority(9),
+            key_store=ledger,
+        )
+
+    with pytest.raises(RuntimeError, match="worker crashed"):
+        await FencedOrderedDeletionWorkflow(provider(), clock=lambda: now).destroy_tenant(
+            context(None)
+        )
+    assert not b2.versions and not b2.delete_markers
+
+    result = await FencedOrderedDeletionWorkflow(provider(), clock=lambda: now).destroy_tenant(
+        context(None, checkpoint="key-absence-verification")
+    )
+
+    assert isinstance(result, DriverFinal)
+    assert ledger.deleted == {
+        ("tenant-alpha", "wrapped:export"),
+        ("tenant-alpha", "wrapped:backup"),
+    }
+    assert await ledger.deletion_complete("tenant-alpha") is True
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_uses_only_ledger_bounded_exact_key_scans():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    b2 = PrefixRequiredB2(now)
+    sibling = metadata("cell-other", operation="other-operation", fence=8)
+    sibling_key = "tenant/backup.enc-sibling"
+    sibling_version = "other-version"
+    sibling_reference = ProviderReference.b2(bucket="recovery", key=sibling_key)
+    b2.versions[("recovery", sibling_key, sibling_version)] = {
+        "Metadata": {
+            "identity-envelope": envelope("b2", sibling_reference, sibling),
+            "wrapped-key-reference": "wrapped:other",
+        },
+        "ObjectLockRetainUntilDate": now,
+        "VersionId": sibling_version,
+    }
+    ledger = CrashOnceLedger(now)
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    await provider.bind(context(None))
+    inventory = await provider.scan_tenant("tenant-alpha")
+
+    assert {prefix for _, prefix in b2.prefixes} == {
+        "tenant/export.enc",
+        "tenant/backup.enc",
+    }
+    assert ("recovery", sibling_key, sibling_version) not in b2.heads
+    assert all(
+        ProviderReference.parse(resource.reference).get("key") != sibling_key
+        for resource in inventory
+        if resource.provider == "b2"
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_keeps_marker_while_its_recovery_version_is_locked():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    locked_until = now + timedelta(days=7)
+    b2 = VersionedB2(locked_until)
+    ledger = CrashOnceLedger(locked_until)
+    ledger.fail_next_destroy = False
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    result = await FencedOrderedDeletionWorkflow(provider, clock=lambda: now).destroy_tenant(
+        context(None)
+    )
+
+    assert isinstance(result, DriverPending)
+    assert result.checkpoint == "retained-wait"
+    assert ("recovery", "tenant/backup.enc", "backup-marker") in b2.delete_markers
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_attributes_marker_only_key_from_durable_ledger():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    b2 = VersionedB2(now)
+    for identity in tuple(b2.versions):
+        if identity[0] == "recovery":
+            b2.versions.pop(identity)
+    ledger = CrashOnceLedger(now)
+    ledger.fail_next_destroy = False
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    await provider.bind(context(None))
+    inventory = await provider.scan_tenant("tenant-alpha")
+
+    assert any(
+        resource.delete_marker
+        and ProviderReference.parse(resource.reference).get("key") == "tenant/backup.enc"
+        for resource in inventory
+    )
+
+
+@pytest.mark.asyncio
+async def test_live_tenant_destroy_deletes_recent_plaintext_delivery_from_durable_ledger():
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+    b2 = VersionedB2(now)
+    delivery_key = "user-export-delivery/aa/recent.portable"
+    delivery_version = "recent-delivery-v1"
+    b2.versions[("exports", delivery_key, delivery_version)] = {
+        "Metadata": {"expires-at": (now + timedelta(minutes=15)).isoformat()},
+        "ObjectLockRetainUntilDate": None,
+        "VersionId": delivery_version,
+    }
+    ledger = CrashOnceLedger(now)
+    ledger.fail_next_destroy = False
+    ledger.deliveries.append(
+        SimpleNamespace(
+            id="delivery-ledger-row",
+            source_object_id="source-export-row",
+            tenant_id="tenant-alpha",
+            cell_id="cell-active",
+            operation_id="export-operation",
+            fence_generation=8,
+            provider_reference=ProviderReference.b2(
+                bucket="exports",
+                key=delivery_key,
+                version_id=delivery_version,
+            ),
+            expires_at=now + timedelta(minutes=15),
+            verified_at=now,
+            deleted_at=None,
+        )
+    )
+    core = Core([])
+    provider = LiveDeletionProvider(
+        core_v1=core,
+        apps_v1=Apps(core),
+        custom_objects=Custom([]),
+        hcloud_client=SimpleNamespace(volumes=HCloudVolumes([])),
+        b2_client=b2,
+        recovery_bucket="recovery",
+        export_bucket="exports",
+        identity_verifier=CODEC.verifier(),
+        authority=Authority(9),
+        key_store=ledger,
+    )
+
+    result = await FencedOrderedDeletionWorkflow(provider, clock=lambda: now).destroy_tenant(
+        context(None)
+    )
+
+    assert isinstance(result, DriverFinal)
+    assert ("exports", delivery_key, delivery_version) not in b2.versions
+    assert ledger.deliveries[0].deleted_at is not None
 
 
 @pytest.mark.asyncio

@@ -71,13 +71,24 @@
       "privateKey": "exomem-provider-recovery-signer/private-key",
       "publicVerifier": false
     },
-    "deletion": {
+    "deletionDispatcher": {
       "kind": "CronJob",
-      "command": ["exomem-deletion-worker"],
-      "serviceAccount": "exomem-deletion-worker",
+      "command": ["exomem-deletion-dispatcher"],
+      "serviceAccount": "exomem-deletion-dispatcher",
       "schedule": "* * * * *",
       "concurrencyPolicy": "Forbid",
       "startingDeadlineSeconds": 45,
+      "activeDeadlineSeconds": 30,
+      "backoffLimit": 0,
+      "automountServiceAccountToken": true,
+      "providerPermissions": ["kubernetes:scoped-deletion-job-create"],
+      "privateKey": null,
+      "publicVerifier": false
+    },
+    "deletion": {
+      "kind": "JobTemplate",
+      "command": ["exomem-deletion-worker"],
+      "serviceAccount": "exomem-deletion-worker",
       "activeDeadlineSeconds": 240,
       "backoffLimit": 0,
       "ttlSecondsAfterFinished": 300,

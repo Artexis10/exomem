@@ -55,7 +55,7 @@ capacityCollector:
     key: token
 
 durability:
-  contractSha256: 81cdcfe87a8950a561a76751df61ad8ac3cafd1deefa7d4fdf522bb402ef03be
+  contractSha256: 1e51097d5ff2570cb1c523916c1827e17bd285cc4f6499b0b09d019f0f424975
   storageContractSha256: 68e26665af9a48c831c975bc96afb03fbf47e229f89a3c13bc852809787de0f5
   b2Endpoint: ""
   b2Region: ""

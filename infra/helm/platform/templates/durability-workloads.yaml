@@ -15,6 +15,7 @@
 {{- $backup := $workloads.workloads.vaultBackup -}}
 {{- $database := $workloads.workloads.databaseBackup -}}
 {{- $actions := $workloads.workloads.durabilityActions -}}
+{{- $dispatcher := $workloads.workloads.deletionDispatcher -}}
 {{- $deletion := $workloads.workloads.deletion -}}
 {{- $volume := $workloads.workloads.volumeLifecycle -}}
 apiVersion: v1
@@ -71,6 +72,13 @@ apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: {{ $actions.serviceAccount }}
+  namespace: {{ .Release.Namespace }}
+automountServiceAccountToken: true
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $dispatcher.serviceAccount }}
   namespace: {{ .Release.Namespace }}
 automountServiceAccountToken: true
 ---
@@ -209,6 +217,30 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: {{ $deletion.serviceAccount }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: exomem-deletion-dispatcher
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["create", "get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: exomem-deletion-dispatcher
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: exomem-deletion-dispatcher
+subjects:
+  - kind: ServiceAccount
+    name: {{ $dispatcher.serviceAccount }}
     namespace: {{ .Release.Namespace }}
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -740,33 +772,104 @@ spec:
             - name: temporary
               emptyDir: {sizeLimit: 64Mi}
 ---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-deletion-job-template
+  namespace: {{ .Release.Namespace }}
+data:
+  job-template.json: |-
+    {
+      "apiVersion": "batch/v1",
+      "kind": "Job",
+      "metadata": {
+        "generateName": "exomem-deletion-",
+        "labels": {"exomem.io/deletion-job": "true"}
+      },
+      "spec": {
+        "activeDeadlineSeconds": {{ $deletion.activeDeadlineSeconds }},
+        "backoffLimit": {{ $deletion.backoffLimit }},
+        "ttlSecondsAfterFinished": {{ $deletion.ttlSecondsAfterFinished }},
+        "template": {
+          "metadata": {"labels": {"exomem.io/deletion-job": "true"}},
+          "spec": {
+            "serviceAccountName": {{ $deletion.serviceAccount | quote }},
+            "automountServiceAccountToken": {{ $deletion.automountServiceAccountToken }},
+            "restartPolicy": "Never",
+            "securityContext": {
+              "runAsNonRoot": true,
+              "runAsUser": 10001,
+              "fsGroup": 10001,
+              "fsGroupChangePolicy": "OnRootMismatch",
+              "seccompProfile": {"type": "RuntimeDefault"}
+            },
+            "containers": [{
+              "name": "deletion-worker",
+              "image": {{ .Values.provisioner.image | quote }},
+              "imagePullPolicy": "IfNotPresent",
+              "command": {{ $deletion.command | toJson }},
+              "env": [
+                {"name": "EXOMEM_PROVISIONER_DATABASE_URL", "valueFrom": {"secretKeyRef": {"name": "exomem-provisioner-database", "key": "url"}}},
+                {"name": "EXOMEM_PROVISIONER_DATABASE_SCHEMA", "value": {{ .Values.provisioner.databaseSchema | quote }}},
+                {"name": "EXOMEM_PROVISIONER_DATABASE_ROLE", "value": {{ .Values.provisioner.databaseRole | quote }}},
+                {"name": "EXOMEM_PROVISIONER_ENVELOPE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-provisioner-wrapping-key", "key": "key-material"}}},
+                {"name": "EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY", "valueFrom": {"secretKeyRef": {"name": {{ .Values.provisioner.providerRecoveryPublicKeySecret.name | quote }}, "key": {{ .Values.provisioner.providerRecoveryPublicKeySecret.key | quote }}}}},
+                {"name": "EXOMEM_PROVISIONER_HCLOUD_TOKEN", "valueFrom": {"secretKeyRef": {"name": "exomem-provisioner-hcloud-token", "key": "token"}}},
+                {"name": "EXOMEM_PROVISIONER_B2_ENDPOINT_URL", "valueFrom": {"configMapKeyRef": {"name": "exomem-durability-storage", "key": "s3-endpoint"}}},
+                {"name": "EXOMEM_PROVISIONER_B2_REGION", "valueFrom": {"configMapKeyRef": {"name": "exomem-durability-storage", "key": "s3-region"}}},
+                {"name": "EXOMEM_PROVISIONER_RECOVERY_BUCKET", "valueFrom": {"configMapKeyRef": {"name": "exomem-durability-storage", "key": "recovery-bucket"}}},
+                {"name": "EXOMEM_PROVISIONER_USER_EXPORT_BUCKET", "valueFrom": {"configMapKeyRef": {"name": "exomem-durability-storage", "key": "user-export-bucket"}}},
+                {"name": "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-recovery-delete-key-id", "key": "application-key-id"}}},
+                {"name": "EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-recovery-delete-key", "key": "application-key"}}},
+                {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key-id", "key": "application-key-id"}}},
+                {"name": "EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY", "valueFrom": {"secretKeyRef": {"name": "exomem-user-export-delete-key", "key": "application-key"}}},
+                {"name": "EXOMEM_DELETION_BATCH_SIZE", "value": {{ $deletion.maxOperations | quote }}},
+                {"name": "EXOMEM_PROVISIONER_WORKER_ID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}},
+                {"name": "HOME", "value": "/tmp"}
+              ],
+              "resources": {"requests": {"cpu": "25m", "memory": "96Mi"}, "limits": {"cpu": "500m", "memory": "384Mi"}},
+              "securityContext": {
+                "allowPrivilegeEscalation": false,
+                "readOnlyRootFilesystem": true,
+                "runAsNonRoot": true,
+                "runAsUser": 10001,
+                "capabilities": {"drop": ["ALL"]}
+              },
+              "volumeMounts": [{"name": "temporary", "mountPath": "/tmp"}]
+            }],
+            "volumes": [{"name": "temporary", "emptyDir": {"sizeLimit": "64Mi"}}]
+          }
+        }
+      }
+    }
+---
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: exomem-deletion-worker
+  name: exomem-deletion-dispatcher
   namespace: {{ .Release.Namespace }}
   labels:
-    app.kubernetes.io/name: exomem-deletion-worker
+    app.kubernetes.io/name: exomem-deletion-dispatcher
     app.kubernetes.io/part-of: exomem-hosted-durability
 spec:
-  schedule: {{ $deletion.schedule | quote }}
-  concurrencyPolicy: {{ $deletion.concurrencyPolicy }}
-  startingDeadlineSeconds: {{ $deletion.startingDeadlineSeconds }}
+  schedule: {{ $dispatcher.schedule | quote }}
+  concurrencyPolicy: {{ $dispatcher.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $dispatcher.startingDeadlineSeconds }}
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
-      activeDeadlineSeconds: {{ $deletion.activeDeadlineSeconds }}
-      backoffLimit: {{ $deletion.backoffLimit }}
-      ttlSecondsAfterFinished: {{ $deletion.ttlSecondsAfterFinished }}
+      activeDeadlineSeconds: {{ $dispatcher.activeDeadlineSeconds }}
+      backoffLimit: {{ $dispatcher.backoffLimit }}
+      ttlSecondsAfterFinished: 300
       template:
         metadata:
           labels:
-            app.kubernetes.io/name: exomem-deletion-worker
+            app.kubernetes.io/name: exomem-deletion-dispatcher
             app.kubernetes.io/part-of: exomem-hosted-durability
         spec:
-          serviceAccountName: {{ $deletion.serviceAccount }}
-          automountServiceAccountToken: {{ $deletion.automountServiceAccountToken }}
+          serviceAccountName: {{ $dispatcher.serviceAccount }}
+          automountServiceAccountToken: {{ $dispatcher.automountServiceAccountToken }}
           restartPolicy: Never
           securityContext:
             runAsNonRoot: true
@@ -775,62 +878,27 @@ spec:
             fsGroupChangePolicy: OnRootMismatch
             seccompProfile: {type: RuntimeDefault}
           containers:
-            - name: deletion-worker
+            - name: deletion-dispatcher
               image: {{ .Values.provisioner.image }}
               imagePullPolicy: IfNotPresent
-              command: {{ $deletion.command | toJson }}
+              command: {{ $dispatcher.command | toJson }}
               env:
-                - name: EXOMEM_PROVISIONER_DATABASE_URL
+                - name: EXOMEM_DELETION_DISPATCHER_DATABASE_URL
                   valueFrom:
                     secretKeyRef: {name: exomem-provisioner-database, key: url}
-                - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+                - name: EXOMEM_DELETION_DISPATCHER_DATABASE_SCHEMA
                   value: {{ .Values.provisioner.databaseSchema | quote }}
-                - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+                - name: EXOMEM_DELETION_DISPATCHER_DATABASE_ROLE
                   value: {{ .Values.provisioner.databaseRole | quote }}
-                - name: EXOMEM_PROVISIONER_ENVELOPE_KEY
-                  valueFrom:
-                    secretKeyRef: {name: exomem-provisioner-wrapping-key, key: key-material}
-                - name: EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY
-                  valueFrom:
-                    secretKeyRef:
-                      name: {{ .Values.provisioner.providerRecoveryPublicKeySecret.name }}
-                      key: {{ .Values.provisioner.providerRecoveryPublicKeySecret.key }}
-                - name: EXOMEM_PROVISIONER_HCLOUD_TOKEN
-                  valueFrom:
-                    secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
-                - name: EXOMEM_PROVISIONER_B2_ENDPOINT_URL
-                  valueFrom:
-                    configMapKeyRef: {name: exomem-durability-storage, key: s3-endpoint}
-                - name: EXOMEM_PROVISIONER_B2_REGION
-                  valueFrom:
-                    configMapKeyRef: {name: exomem-durability-storage, key: s3-region}
-                - name: EXOMEM_PROVISIONER_RECOVERY_BUCKET
-                  valueFrom:
-                    configMapKeyRef: {name: exomem-durability-storage, key: recovery-bucket}
-                - name: EXOMEM_PROVISIONER_USER_EXPORT_BUCKET
-                  valueFrom:
-                    configMapKeyRef: {name: exomem-durability-storage, key: user-export-bucket}
-                - name: EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY_ID
-                  valueFrom:
-                    secretKeyRef: {name: exomem-recovery-delete-key-id, key: application-key-id}
-                - name: EXOMEM_PROVISIONER_RECOVERY_DELETE_KEY
-                  valueFrom:
-                    secretKeyRef: {name: exomem-recovery-delete-key, key: application-key}
-                - name: EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY_ID
-                  valueFrom:
-                    secretKeyRef: {name: exomem-user-export-delete-key-id, key: application-key-id}
-                - name: EXOMEM_PROVISIONER_USER_EXPORT_DELETE_KEY
-                  valueFrom:
-                    secretKeyRef: {name: exomem-user-export-delete-key, key: application-key}
-                - name: EXOMEM_DELETION_BATCH_SIZE
-                  value: {{ $deletion.maxOperations | quote }}
-                - name: EXOMEM_PROVISIONER_WORKER_ID
-                  valueFrom: {fieldRef: {fieldPath: metadata.name}}
+                - name: EXOMEM_DELETION_DISPATCHER_NAMESPACE
+                  valueFrom: {fieldRef: {fieldPath: metadata.namespace}}
+                - name: EXOMEM_DELETION_DISPATCHER_JOB_TEMPLATE_PATH
+                  value: /etc/exomem/deletion-job/job-template.json
                 - name: HOME
                   value: /tmp
               resources:
-                requests: {cpu: 25m, memory: 96Mi}
-                limits: {cpu: 500m, memory: 384Mi}
+                requests: {cpu: 10m, memory: 64Mi}
+                limits: {cpu: 100m, memory: 128Mi}
               securityContext:
                 allowPrivilegeEscalation: false
                 readOnlyRootFilesystem: true
@@ -838,10 +906,14 @@ spec:
                 runAsUser: 10001
                 capabilities: {drop: [ALL]}
               volumeMounts:
+                - {name: deletion-job-template, mountPath: /etc/exomem/deletion-job, readOnly: true}
                 - {name: temporary, mountPath: /tmp}
           volumes:
+            - name: deletion-job-template
+              configMap:
+                name: exomem-deletion-job-template
             - name: temporary
-              emptyDir: {sizeLimit: 64Mi}
+              emptyDir: {sizeLimit: 16Mi}
 ---
 apiVersion: apps/v1
 kind: Deployment

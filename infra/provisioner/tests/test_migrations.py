@@ -50,10 +50,11 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "backups",
         "durability_runs",
         "recovery_objects",
+        "export_deliveries",
         "provider_observations",
         "cell_operation_locks",
     } <= tables
-    assert revision == ("0003_cell_operation_lock",)
+    assert revision == ("0004_export_delivery_ledger",)
     assert {
         "caller_checkpoint",
         "checkpoint",

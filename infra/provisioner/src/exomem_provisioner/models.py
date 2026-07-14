@@ -346,6 +346,29 @@ class RecoveryObject(Base):
     key_destroyed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ExportDelivery(Base):
+    __tablename__ = "export_deliveries"
+    __table_args__ = (
+        UniqueConstraint("provider_reference_digest", name="uq_export_delivery_provider_ref"),
+        CheckConstraint("fence_generation >= 1", name="ck_export_delivery_fence"),
+        Index("ix_export_delivery_tenant_deleted", "tenant_id", "deleted_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    source_object_id: Mapped[str] = mapped_column(
+        ForeignKey("recovery_objects.id", ondelete="RESTRICT"), nullable=False
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    provider_reference_digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider_reference_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    verified_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
 class ProviderDisposition(StrEnum):
     ADOPTED = "adopted"
     QUARANTINED = "quarantined"

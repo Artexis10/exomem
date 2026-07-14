@@ -107,7 +107,8 @@
       "delivery_gc": "exomem-export-gc",
       "vault_backup": "exomem-durability-backup",
       "database_backup": "exomem-database-backup",
-      "deletion": "exomem-deletion-worker",
+      "deletion_dispatcher": "exomem-deletion-dispatcher",
+      "deletion_job_template": "exomem-deletion-job-template",
       "volume_lifecycle": "exomem-volume-worker"
     },
     "private_signers": ["exomem-provider-recovery-signer/private-key"],

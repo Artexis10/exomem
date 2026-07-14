@@ -1259,7 +1259,8 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "delivery_gc": "exomem-export-gc",
             "vault_backup": "exomem-durability-backup",
             "database_backup": "exomem-database-backup",
-            "deletion": "exomem-deletion-worker",
+                "deletion_dispatcher": "exomem-deletion-dispatcher",
+                "deletion_job_template": "exomem-deletion-job-template",
             "volume_lifecycle": "exomem-volume-worker",
         },
         "private_signers": ["exomem-provider-recovery-signer/private-key"],
@@ -1304,11 +1305,12 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
             "exomem-export-gc",
             "exomem-durability-storage",
         ],
-        "deletion.md": [
-            "/cells/destroy",
-            "X-Exomem-Provisioner-Protocol",
-            "exomem-deletion-worker",
-        ],
+            "deletion.md": [
+                "/cells/destroy",
+                "X-Exomem-Provisioner-Protocol",
+                "exomem-deletion-dispatcher",
+                "exomem-deletion-worker",
+            ],
         "volume-rebind.md": [
             "/cells/restore",
             "VolumeLifecycleWorker.rebind_static",

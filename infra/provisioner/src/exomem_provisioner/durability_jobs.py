@@ -3,13 +3,19 @@
 from __future__ import annotations
 
 import asyncio
+import copy
+import hashlib
+import json
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Protocol, TypeVar
 from urllib.parse import unquote, urlsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from sqlalchemy import and_, func, or_, select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from .crypto import AesGcmEnvelopeCodec
 from .database import ProvisionerDatabase
@@ -28,6 +34,7 @@ from .durability_crypto import (
 from .durability_repository import DurabilityRepository, RunKind
 from .durability_store import B2DeletionObjectStore, B2UploadOnlyObjectStore
 from .logging import configure_content_free_logging
+from .models import Operation, OperationAction, OperationState
 from .provider_recovery import ProviderRecoveryIdentityCodec
 
 _ReportT = TypeVar("_ReportT")
@@ -39,6 +46,148 @@ class OperationBatchWorker(Protocol):
 
 class BackupSweep(Protocol[_ReportT]):
     async def run_once(self) -> _ReportT: ...
+
+
+class DeletionDispatchSource(Protocol):
+    async def next_dispatchable_deletion(self) -> str | None: ...
+
+
+class DeletionJobLauncher(Protocol):
+    async def has_active_job(self) -> bool: ...
+
+    async def create_scoped_job(self, operation_id: str) -> None: ...
+
+
+class RepositoryDeletionDispatchSource:
+    """Read eligible destructive work without claiming or decrypting it."""
+
+    def __init__(self, sessions: async_sessionmaker[AsyncSession]) -> None:
+        self._sessions = sessions
+
+    async def next_dispatchable_deletion(self, *, now: datetime | None = None) -> str | None:
+        async with self._sessions() as session:
+            if now is not None:
+                checked_at = now if now.tzinfo is not None else now.replace(tzinfo=UTC)
+            elif session.get_bind().dialect.name == "postgresql":
+                checked_at = await session.scalar(select(func.clock_timestamp()))
+                if not isinstance(checked_at, datetime):
+                    raise RuntimeError("dispatcher database clock is unavailable")
+            else:
+                checked_at = datetime.now(UTC)
+            operation_id = await session.scalar(
+                select(Operation.id)
+                .where(
+                    Operation.action.in_((OperationAction.DISCARD, OperationAction.DESTROY)),
+                    Operation.available_at <= checked_at,
+                    or_(
+                        Operation.state == OperationState.PENDING,
+                        and_(
+                            Operation.state == OperationState.CLAIMED,
+                            Operation.claim_expires_at <= checked_at,
+                        ),
+                    ),
+                )
+                .order_by(Operation.created_at, Operation.id)
+                .limit(1)
+            )
+            return str(operation_id) if operation_id is not None else None
+
+
+class KubernetesDeletionJobLauncher:
+    """Instantiate only the reviewed privileged Job template."""
+
+    def __init__(
+        self,
+        *,
+        batch_v1: object,
+        namespace: str,
+        job_template: dict[str, object],
+    ) -> None:
+        if not namespace:
+            raise ValueError("deletion dispatcher namespace is required")
+        self._validate_template(job_template)
+        self._batch = batch_v1
+        self._namespace = namespace
+        self._template = copy.deepcopy(job_template)
+
+    async def has_active_job(self) -> bool:
+        result = await asyncio.to_thread(
+            self._batch.list_namespaced_job,  # type: ignore[attr-defined]
+            self._namespace,
+            label_selector="exomem.io/deletion-job=true",
+        )
+        for item in getattr(result, "items", ()) or ():
+            status = getattr(item, "status", None)
+            if getattr(status, "completion_time", None) is None and not getattr(
+                status, "failed", 0
+            ):
+                return True
+        return False
+
+    async def create_scoped_job(self, operation_id: str) -> None:
+        if not operation_id:
+            raise ValueError("deletion operation identity is required")
+        body = copy.deepcopy(self._template)
+        metadata = body.setdefault("metadata", {})
+        if not isinstance(metadata, dict):
+            raise ValueError("deletion Job metadata is invalid")
+        annotations = metadata.setdefault("annotations", {})
+        if not isinstance(annotations, dict):
+            raise ValueError("deletion Job annotations are invalid")
+        annotations["exomem.io/deletion-operation-sha256"] = hashlib.sha256(
+            operation_id.encode("utf-8")
+        ).hexdigest()
+        await asyncio.to_thread(
+            self._batch.create_namespaced_job,  # type: ignore[attr-defined]
+            self._namespace,
+            body,
+        )
+
+    @staticmethod
+    def _validate_template(template: dict[str, object]) -> None:
+        metadata = template.get("metadata")
+        spec = template.get("spec")
+        if (
+            template.get("apiVersion") != "batch/v1"
+            or template.get("kind") != "Job"
+            or not isinstance(metadata, dict)
+            or metadata.get("generateName") != "exomem-deletion-"
+            or metadata.get("labels") != {"exomem.io/deletion-job": "true"}
+            or not isinstance(spec, dict)
+        ):
+            raise ValueError("deletion Job template identity differs")
+        pod_template = spec.get("template")
+        pod_spec = pod_template.get("spec") if isinstance(pod_template, dict) else None
+        containers = pod_spec.get("containers") if isinstance(pod_spec, dict) else None
+        if (
+            spec.get("activeDeadlineSeconds") != 240
+            or spec.get("backoffLimit") != 0
+            or spec.get("ttlSecondsAfterFinished") != 300
+            or not isinstance(pod_spec, dict)
+            or pod_spec.get("serviceAccountName") != "exomem-deletion-worker"
+            or pod_spec.get("restartPolicy") != "Never"
+            or not isinstance(containers, list)
+            or len(containers) != 1
+            or not isinstance(containers[0], dict)
+            or containers[0].get("name") != "deletion-worker"
+            or containers[0].get("command") != ["exomem-deletion-worker"]
+        ):
+            raise ValueError("deletion Job template privilege boundary differs")
+
+
+async def dispatch_one_deletion_job(
+    source: DeletionDispatchSource,
+    launcher: DeletionJobLauncher,
+) -> bool:
+    """Create one privileged Job only when durable deletion work is eligible."""
+
+    if await launcher.has_active_job():
+        return False
+    operation_id = await source.next_dispatchable_deletion()
+    if operation_id is None:
+        return False
+    await launcher.create_scoped_job(operation_id)
+    return True
 
 
 async def run_bounded_operation_batch(
@@ -257,6 +406,43 @@ class DeletionJobSettings(BaseSettings):
     batch_size: int = Field(default=25, ge=1, le=1000)
 
 
+class DeletionDispatcherSettings(BaseSettings):
+    """Credential-free dispatcher configuration for one reviewed Job template."""
+
+    model_config = SettingsConfigDict(
+        env_prefix="EXOMEM_DELETION_DISPATCHER_",
+        extra="ignore",
+        case_sensitive=False,
+    )
+
+    database_url: SecretStr = Field(min_length=1, max_length=4096)
+    database_schema: str = Field(pattern=r"^[a-z][a-z0-9_]{2,62}$")
+    database_role: str = Field(pattern=r"^[a-z][a-z0-9_]{2,62}$")
+    namespace: str = Field(pattern=r"^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$")
+    job_template_path: Path
+
+    @field_validator("database_url")
+    @classmethod
+    def require_postgres(cls, value: SecretStr) -> SecretStr:
+        if not value.get_secret_value().startswith("postgresql+asyncpg://"):
+            raise ValueError("deletion dispatcher requires PostgreSQL")
+        return value
+
+    @field_validator("job_template_path")
+    @classmethod
+    def require_absolute_template(cls, value: Path) -> Path:
+        if not value.is_absolute():
+            raise ValueError("deletion Job template path must be absolute")
+        return value
+
+    @model_validator(mode="after")
+    def require_dedicated_database_role(self) -> DeletionDispatcherSettings:
+        parsed = urlsplit(self.database_url.get_secret_value())
+        if unquote(parsed.username or "") != self.database_role:
+            raise ValueError("dispatcher database URL must use its declared role")
+        return self
+
+
 def _b2_client(settings, *, key_id: SecretStr, application_key: SecretStr):
     import boto3
     from botocore.config import Config
@@ -426,4 +612,45 @@ def run_deletion_worker() -> None:
         settings = DeletionJobSettings()
         asyncio.run(_run_live_deletion_worker(settings))
     except Exception:  # noqa: BLE001 - one-shot deletion Job output remains content-free
+        raise SystemExit(1) from None
+
+
+async def _run_deletion_dispatcher(settings: DeletionDispatcherSettings) -> None:
+    from kubernetes import client as kubernetes_client
+    from kubernetes import config as kubernetes_config
+
+    template = json.loads(settings.job_template_path.read_text(encoding="utf-8"))
+    if not isinstance(template, dict):
+        raise ValueError("deletion Job template must be a JSON object")
+    engine = create_async_engine(
+        settings.database_url.get_secret_value(),
+        pool_pre_ping=True,
+        connect_args={
+            "server_settings": {
+                "search_path": f"{settings.database_schema},pg_catalog",
+                "application_name": "exomem-deletion-dispatcher",
+            }
+        },
+    )
+    sessions = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    try:
+        kubernetes_config.load_incluster_config()
+        await dispatch_one_deletion_job(
+            RepositoryDeletionDispatchSource(sessions),
+            KubernetesDeletionJobLauncher(
+                batch_v1=kubernetes_client.BatchV1Api(),
+                namespace=settings.namespace,
+                job_template=template,
+            ),
+        )
+    finally:
+        await engine.dispose()
+
+
+def run_deletion_dispatcher() -> None:
+    configure_content_free_logging()
+    try:
+        settings = DeletionDispatcherSettings()  # type: ignore[call-arg]
+        asyncio.run(_run_deletion_dispatcher(settings))
+    except Exception:  # noqa: BLE001 - dispatcher output remains content-free
         raise SystemExit(1) from None

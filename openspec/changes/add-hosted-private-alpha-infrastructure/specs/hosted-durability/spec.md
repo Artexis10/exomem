@@ -37,7 +37,7 @@ Every recovery archive SHALL use envelope AES-256-GCM with a unique data key and
 - **THEN** the worker confirms provider object identity/size and records success only with matching encrypted metadata
 
 ### Requirement: User exports remain opaque and short-lived
-User export SHALL use the same verified portable/encrypted provider path but SHALL retain its product-specific TTL. Substrate and the browser SHALL receive only opaque export/release references and a presigned HTTPS download URL valid for at most 15 minutes; they MUST NOT receive cell-local paths, B2 credentials, or unwrapped keys.
+User export SHALL use the same verified portable/encrypted provider path but SHALL retain its product-specific TTL. Before returning a presigned URL, the service SHALL durably associate the plaintext portable delivery with its tenant/source and exact B2 bucket, key, and object version ID. Routine expiry and tenant deletion SHALL drive bounded exact-version removal from that ledger without provider-wide listing. Substrate and the browser SHALL receive only opaque export/release references and a presigned HTTPS download URL valid for at most 15 minutes; they MUST NOT receive cell-local paths, B2 credentials, or unwrapped keys.
 
 An export `expiresAt` SHALL be canonical RFC3339 UTC, future, and no more than 30 days away when its idempotency key is first accepted. An exact replay of an already accepted key and canonical input SHALL continue or return its stored result after that time passes. A brand-new expired request SHALL be rejected before an operation or provider artifact is created.
 
@@ -84,7 +84,7 @@ Every 30 minutes, a dedicated read-only backup job SHALL take a transactionally 
 - **THEN** the owner can authenticate, resolve the same tenant and cell, and complete representative capture and recall after reconciliation
 
 ### Requirement: Deletion separates immediate service revocation from retained recovery expiry
-Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. At lock expiry, a short-lived privileged deletion Job SHALL delete every exact tenant object version and delete marker without governance bypass, independently verify that none remain, destroy wrapped keys, and only then return final destroy proofs and permit `deleted`.
+Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, optionally prepare the promised final export, and destroy online compute, writable volume, active route, and application credentials. The lifecycle SHALL remain deleting/retained while Object Lock prevents backup deletion. A recurring credential-free dispatcher SHALL create no Job when no destructive work is eligible and SHALL create at most one admission-scoped short-lived Job when work is eligible; only that Job may receive the deletion, HCloud, wrapping-key, and public-verifier credentials. At lock expiry, the Job SHALL load tenant recovery and plaintext-delivery rows from the durable ledger, perform bounded exact-key provider checks, delete every recorded exact tenant object version and associated delete marker without governance bypass, independently verify absence, erase every wrapped key, and re-read the durable ledger before returning final destroy proofs and permitting `deleted`. Routine tenant deletion MUST NOT scan a whole provider bucket.
 
 #### Scenario: Delete request arrives with locked backup
 - **WHEN** a tenant has a recovery object with unexpired seven-day lock
@@ -93,6 +93,14 @@ Deletion SHALL immediately revoke sessions/routes, stop billing, quiesce, option
 #### Scenario: Lock expires before 30-day lifecycle
 - **WHEN** the last tenant recovery lock expires during deletion
 - **THEN** a short-lived deletion Job removes every exact object version and delete marker without governance bypass rather than waiting for normal 30-day lifecycle, verifies absence, destroys its wrapped key, and completes proof
+
+#### Scenario: Process crashes after exact object deletion
+- **WHEN** the short-lived Job deletes the last exact provider version and exits before erasing the durable wrapped key
+- **THEN** the next Job resumes from the ledger, proves provider absence, erases the remaining wrapped key, and refuses final proof until the ledger re-read is complete
+
+#### Scenario: Tenant has a recent plaintext delivery
+- **WHEN** deletion encounters a recorded `user-export-delivery` object without a recovery identity envelope
+- **THEN** it authenticates ownership through the durable delivery/source association, removes the exact recorded version, and does not treat the ordinary plaintext delivery as poisoned recovery metadata
 
 ### Requirement: Recovery objectives are explicit and demonstrated
 The private alpha SHALL target RPO 0/RTO 5 minutes for pod failure, RPO 0/RTO 60 minutes for node loss with intact volume, and RPO at most one hour/RTO four hours for volume or operational-database loss. Measurements SHALL be retained as release evidence; failure SHALL block invitations.

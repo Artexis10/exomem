@@ -23,6 +23,7 @@ class DeletionResourceKind(StrEnum):
     VOLUME = "volume"
     EXPORT = "export"
     BACKUP = "backup"
+    DELIVERY = "delivery"
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,6 +35,7 @@ class DeletionResource:
     cell_id: str | None
     retained_until: datetime | None = None
     wrapped_key_reference: str | None = None
+    ledger_reference: str | None = None
     delete_marker: bool = False
 
     def __post_init__(self) -> None:
@@ -53,9 +55,13 @@ class DeletionProvider(Protocol):
 
     async def resource_absent(self, resource: DeletionResource) -> bool: ...
 
+    async def record_resource_absence(self, resource: DeletionResource) -> None: ...
+
     async def destroy_wrapped_key(self, resource: DeletionResource) -> None: ...
 
     async def wrapped_key_absent(self, resource: DeletionResource) -> bool: ...
+
+    async def tenant_deletion_complete(self, tenant_id: str) -> bool: ...
 
     async def active_cells_ready_excluding(self, tenant_id: str, excluded_cell_id: str) -> bool: ...
 
@@ -138,11 +144,14 @@ class OrderedDeletionWorkflow:
         )
         deletable = tuple(resource for resource in inventory if resource not in locked)
         for resource in deletable:
-            await self._provider.delete_resource(resource)
+            if not await self._provider.resource_absent(resource):
+                await self._provider.delete_resource(resource)
         if not all(
             [await self._provider.resource_absent(resource) for resource in deletable]
         ):
             return DriverPending("absence-verification", 2)
+        for resource in deletable:
+            await self._provider.record_resource_absence(resource)
         remaining_references = {
             resource.wrapped_key_reference
             for resource in locked
@@ -179,6 +188,8 @@ class OrderedDeletionWorkflow:
         remaining = await self._provider.scan_tenant(tenant_id)
         if remaining:
             return DriverPending("provider-rediscovery", 2)
+        if not await self._provider.tenant_deletion_complete(tenant_id):
+            return DriverPending("ledger-absence-verification", 2)
         return DriverFinal(
             {
                 "computeDestroyed": True,

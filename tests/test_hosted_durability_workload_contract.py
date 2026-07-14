@@ -20,17 +20,21 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
         ("exomem-durability-backup-worker",),
         ("exomem-database-backup-worker",),
         ("exomem-durability-actions",),
+        ("exomem-deletion-dispatcher",),
         ("exomem-deletion-worker",),
         ("exomem-volume-worker",),
     }
     assert workloads["deletion"]["claimActions"] == ["discard", "destroy"]
-    assert workloads["deletion"]["kind"] == "CronJob"
-    assert workloads["deletion"]["schedule"] == "* * * * *"
-    assert workloads["deletion"]["concurrencyPolicy"] == "Forbid"
+    assert workloads["deletion"]["kind"] == "JobTemplate"
+    assert "schedule" not in workloads["deletion"]
+    assert workloads["deletionDispatcher"]["kind"] == "CronJob"
+    assert workloads["deletionDispatcher"]["schedule"] == "* * * * *"
+    assert workloads["deletionDispatcher"]["concurrencyPolicy"] == "Forbid"
     assert workloads["deletion"]["maxOperations"] == 1
     assert workloads["deliveryGc"]["automountServiceAccountToken"] is False
     assert workloads["databaseBackup"]["automountServiceAccountToken"] is False
     assert workloads["deletion"]["privateKey"] is None
+    assert workloads["deletionDispatcher"]["privateKey"] is None
     assert workloads["deliveryGc"]["privateKey"] is None
     assert workloads["databaseBackup"]["privateKey"].endswith("/private-key")
     signer = "exomem-provider-recovery-signer/private-key"
@@ -43,6 +47,7 @@ def test_durability_workload_commands_and_privileges_are_disjoint() -> None:
     assert workloads["databaseBackup"]["publicVerifier"] is False
     assert workloads["durabilityActions"]["publicVerifier"] is False
     assert workloads["deletion"]["publicVerifier"] is True
+    assert workloads["deletionDispatcher"]["publicVerifier"] is False
     assert workloads["deliveryGc"]["publicVerifier"] is False
     assert not any(
         "database-backup" in permission
@@ -87,3 +92,28 @@ def test_no_hosted_durability_identity_can_bypass_governance() -> None:
     assert "bypassGovernance" not in (
         ROOT / "infra" / "terraform" / "durability" / "storage.tf"
     ).read_text(encoding="utf-8")
+
+
+def test_recurring_deletion_dispatcher_has_no_privileged_provider_or_key_material() -> None:
+    contract = _document("durability-workloads-v1.json")
+    dispatcher = contract["workloads"]["deletionDispatcher"]
+    deletion = contract["workloads"]["deletion"]
+
+    assert dispatcher == {
+        "kind": "CronJob",
+        "command": ["exomem-deletion-dispatcher"],
+        "serviceAccount": "exomem-deletion-dispatcher",
+        "schedule": "* * * * *",
+        "concurrencyPolicy": "Forbid",
+        "startingDeadlineSeconds": 45,
+        "activeDeadlineSeconds": 30,
+        "backoffLimit": 0,
+        "automountServiceAccountToken": True,
+        "providerPermissions": ["kubernetes:scoped-deletion-job-create"],
+        "privateKey": None,
+        "publicVerifier": False,
+    }
+    assert deletion["kind"] == "JobTemplate"
+    assert "schedule" not in deletion
+    assert deletion["command"] == ["exomem-deletion-worker"]
+    assert deletion["claimActions"] == ["discard", "destroy"]

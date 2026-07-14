@@ -410,9 +410,9 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "*/30 * * * *",
             False,
         ),
-        "exomem-deletion-worker": (
+        "exomem-deletion-dispatcher": (
             "CronJob",
-            ["exomem-deletion-worker"],
+            ["exomem-deletion-dispatcher"],
             "* * * * *",
             True,
         ),
@@ -468,15 +468,8 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "exomem-database-backup-pg-service/pg_service.conf",
             "exomem-database-backup-pgpass/pgpass",
         },
-        "exomem-deletion-worker": {
+        "exomem-deletion-dispatcher": {
             "exomem-provisioner-database/url",
-            "exomem-provisioner-wrapping-key/key-material",
-            "exomem-provider-recovery-verifier/public-key",
-            "exomem-provisioner-hcloud-token/token",
-            "exomem-recovery-delete-key-id/application-key-id",
-            "exomem-recovery-delete-key/application-key",
-            "exomem-user-export-delete-key-id/application-key-id",
-            "exomem-user-export-delete-key/application-key",
         },
         "exomem-volume-worker": {
             "exomem-provisioner-auth/credential",
@@ -529,16 +522,21 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
         "exomem-platform"
     )
 
-    deletion_job = _find(documents, "CronJob", "exomem-deletion-worker")
+    deletion_job = json.loads(
+        _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
+            "job-template.json"
+        ]
+    )
     assert not any(
         item.get("kind") == "Deployment"
         and item.get("metadata", {}).get("name") == "exomem-deletion-worker"
         for item in documents
     )
-    assert deletion_job["spec"]["concurrencyPolicy"] == "Forbid"
-    assert deletion_job["spec"]["jobTemplate"]["spec"]["backoffLimit"] == 0
-    assert deletion_job["spec"]["jobTemplate"]["spec"]["ttlSecondsAfterFinished"] == 300
-    deletion_pod = pod_spec(deletion_job)
+    assert deletion_job["kind"] == "Job"
+    assert deletion_job["metadata"]["generateName"] == "exomem-deletion-"
+    assert deletion_job["spec"]["backoffLimit"] == 0
+    assert deletion_job["spec"]["ttlSecondsAfterFinished"] == 300
+    deletion_pod = deletion_job["spec"]["template"]["spec"]
     deletion_env_names = {item["name"] for item in deletion_pod["containers"][0]["env"]}
     assert {
         "EXOMEM_PROVISIONER_HCLOUD_TOKEN",
@@ -699,6 +697,73 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     ):
         assert required_guard in rendered_deletion_scope
     assert "middlewares" not in rendered_deletion_scope
+
+
+def test_platform_deletion_dispatcher_is_credential_free_and_worker_is_job_only() -> None:
+    documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
+    dispatcher = _find(documents, "CronJob", "exomem-deletion-dispatcher")
+    dispatcher_pod = dispatcher["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    dispatcher_container = dispatcher_pod["containers"][0]
+    dispatcher_secret_refs = {
+        f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
+        for item in dispatcher_container["env"]
+        if item.get("valueFrom", {}).get("secretKeyRef")
+    }
+
+    assert dispatcher_pod["serviceAccountName"] == "exomem-deletion-dispatcher"
+    assert dispatcher_container["command"] == ["exomem-deletion-dispatcher"]
+    assert dispatcher_secret_refs == {"exomem-provisioner-database/url"}
+    assert not any(
+        fragment in item["name"]
+        for item in dispatcher_container["env"]
+        for fragment in ("ENVELOPE", "WRAPPING", "HCLOUD", "B2", "DELETE", "RECOVERY")
+    )
+    assert not any(
+        item.get("kind") == "CronJob"
+        and item.get("metadata", {}).get("name") == "exomem-deletion-worker"
+        for item in documents
+    )
+
+    template_config = _find(documents, "ConfigMap", "exomem-deletion-job-template")
+    job = json.loads(template_config["data"]["job-template.json"])
+    assert job["kind"] == "Job"
+    assert job["metadata"]["generateName"] == "exomem-deletion-"
+    worker_pod = job["spec"]["template"]["spec"]
+    assert worker_pod["serviceAccountName"] == "exomem-deletion-worker"
+    assert worker_pod["containers"][0]["command"] == ["exomem-deletion-worker"]
+    worker_secret_refs = {
+        f"{item['valueFrom']['secretKeyRef']['name']}/{item['valueFrom']['secretKeyRef']['key']}"
+        for item in worker_pod["containers"][0]["env"]
+        if item.get("valueFrom", {}).get("secretKeyRef")
+    }
+    assert worker_secret_refs == {
+        "exomem-provisioner-database/url",
+        "exomem-provisioner-wrapping-key/key-material",
+        "exomem-provider-recovery-verifier/public-key",
+        "exomem-provisioner-hcloud-token/token",
+        "exomem-recovery-delete-key-id/application-key-id",
+        "exomem-recovery-delete-key/application-key",
+        "exomem-user-export-delete-key-id/application-key-id",
+        "exomem-user-export-delete-key/application-key",
+    }
+
+    dispatcher_role = _find(documents, "Role", "exomem-deletion-dispatcher")
+    assert dispatcher_role["rules"] == [
+        {
+            "apiGroups": ["batch"],
+            "resources": ["jobs"],
+            "verbs": ["create", "get", "list", "watch"],
+        }
+    ]
+    admission = _find(
+        documents,
+        "ValidatingAdmissionPolicy",
+        "exomem-deletion-dispatcher-job-scope",
+    )
+    rendered_admission = json.dumps(admission)
+    assert "system:serviceaccount:exomem-platform:exomem-deletion-dispatcher" in rendered_admission
+    assert "exomem.io/deletion-job" in rendered_admission
+    assert "exomem-deletion-worker" in rendered_admission
 
 
 def test_platform_renders_one_shot_durability_actions_and_exact_restore_scope() -> None:
