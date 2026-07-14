@@ -28,7 +28,8 @@ spec:
         variables.storageInit &&
         has(oldObject.spec.nodeName) &&
         has(object.spec.nodeName) &&
-        object.spec.nodeName == oldObject.spec.nodeName
+        object.spec.nodeName == oldObject.spec.nodeName &&
+        object.spec == oldObject.spec
     - name: controllerJobFinalizerRemoval
       expression: >-
         has(oldObject.metadata.finalizers) &&

@@ -156,6 +156,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "has(dyn(volume.emptyDir).sizeLimit)" not in admission_text
     assert "request.operation == 'UPDATE'" in admission_text
     assert "object.spec.nodeName == oldObject.spec.nodeName" in admission_text
+    assert "object.spec == oldObject.spec" in admission_text
     assert (
         "object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', "
         "'--request-file', '/run/exomem/operator-requests/init.json']"

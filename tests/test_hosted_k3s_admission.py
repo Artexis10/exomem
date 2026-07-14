@@ -935,47 +935,11 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
     assert finalizer_escape.returncode != 0
     assert "controller-owned Job finalizer transition" in finalizer_escape.stderr
 
-    scheduled_init = copy.deepcopy(init_pod)
-    scheduled_init["metadata"]["name"] = "cell-alpha-init-scheduled"
-    scheduled_init["metadata"]["finalizers"] = ["batch.kubernetes.io/job-tracking"]
-    _kubectl(k3s, ["apply", "--filename=-"], documents=[scheduled_init])
+    scheduled_init_job = copy.deepcopy(init_job)
+    scheduled_init_job["metadata"]["name"] = "cell-alpha-init-finalizer-control"
+    scheduled_init_job["metadata"]["namespace"] = namespace
+    _kubectl(k3s, ["apply", "--filename=-"], documents=[scheduled_init_job])
     for _ in range(30):
-        scheduled_init_result = _kubectl(
-            k3s,
-            ["get", "pod", "--namespace", namespace, "cell-alpha-init-scheduled", "-o=json"],
-        )
-        scheduled_init_document = json.loads(scheduled_init_result.stdout)
-        if scheduled_init_document["spec"].get("nodeName"):
-            break
-        time.sleep(1)
-    else:
-        raise AssertionError("K3s did not schedule the Job finalizer control pod")
-    controller_command_escape = copy.deepcopy(scheduled_init)
-    controller_command_escape["metadata"].pop("finalizers")
-    controller_command_escape["spec"]["containers"][0]["command"] = ["/bin/sh"]
-    controller_command_result = _kubectl(
-        k3s,
-        [
-            "apply",
-            "--dry-run=server",
-            "--filename=-",
-            "--as=system:serviceaccount:kube-system:job-controller",
-            "--as-group=system:masters",
-        ],
-        documents=[controller_command_escape],
-        check=False,
-    )
-    assert controller_command_result.returncode != 0
-    assert any(
-        message in controller_command_result.stderr
-        for message in (
-            "pod updates may not change fields",
-            "controller-owned Job finalizer transition",
-        )
-    )
-    controller_finalizer_removed = False
-    controller_finalizer_update = None
-    for _ in range(5):
         scheduled_init_result = _kubectl(
             k3s,
             [
@@ -983,35 +947,123 @@ def test_exact_k3s_api_admits_only_the_rendered_tenant_shapes(k3s: str) -> None:
                 "pod",
                 "--namespace",
                 namespace,
-                "cell-alpha-init-scheduled",
+                "--selector=job-name=cell-alpha-init-finalizer-control",
                 "-o=json",
             ],
         )
-        controller_finalizer_document = json.loads(scheduled_init_result.stdout)
-        if not controller_finalizer_document["metadata"].get("finalizers"):
-            controller_finalizer_removed = True
+        scheduled_init_items = json.loads(scheduled_init_result.stdout)["items"]
+        scheduled_init_document = next(
+            (
+                item
+                for item in scheduled_init_items
+                if item["spec"].get("nodeName")
+                and item["metadata"].get("finalizers")
+                == ["batch.kubernetes.io/job-tracking"]
+            ),
+            None,
+        )
+        if scheduled_init_document is not None:
             break
-        controller_finalizer_document["metadata"].pop("finalizers")
-        controller_finalizer_update = _kubectl(
+        time.sleep(1)
+    else:
+        raise AssertionError("K3s did not retain a scheduled Job finalizer control pod")
+
+    def fresh_scheduled_init() -> dict[str, Any]:
+        result = _kubectl(
             k3s,
             [
-                "replace",
+                "get",
+                "pod",
+                "--namespace",
+                namespace,
+                scheduled_init_document["metadata"]["name"],
+                "-o=json",
+            ],
+        )
+        document = json.loads(result.stdout)
+        assert document["spec"].get("nodeName")
+        assert document["metadata"].get("finalizers") == [
+            "batch.kubernetes.io/job-tracking"
+        ]
+        return document
+
+    exact_controller_source = fresh_scheduled_init()
+    exact_controller_removal = _kubectl(
+        k3s,
+        [
+            "patch",
+            "pod",
+            "--namespace",
+            namespace,
+            exact_controller_source["metadata"]["name"],
+            "--type=json",
+            "--patch",
+            '[{"op":"remove","path":"/metadata/finalizers/0"}]',
+            "--dry-run=server",
+            "--as=system:serviceaccount:kube-system:job-controller",
+            "--as-group=system:masters",
+        ],
+        check=False,
+    )
+    assert exact_controller_removal.returncode == 0, exact_controller_removal.stderr
+
+    routine_controller_source = fresh_scheduled_init()
+    routine_finalizer_removal = _kubectl(
+        k3s,
+        [
+            "patch",
+            "pod",
+            "--namespace",
+            namespace,
+            routine_controller_source["metadata"]["name"],
+            "--type=json",
+            "--patch",
+            '[{"op":"remove","path":"/metadata/finalizers/0"}]',
+            "--dry-run=server",
+            f"--as={routine_username}",
+        ],
+        check=False,
+    )
+    assert routine_finalizer_removal.returncode != 0
+    assert "controller-owned Job finalizer transition" in routine_finalizer_removal.stderr
+
+    for patch_operation in (
+        {"op": "add", "path": "/spec/activeDeadlineSeconds", "value": 1},
+        {
+            "op": "add",
+            "path": "/spec/tolerations/-",
+            "value": {
+                "key": "attacker.example/spec-drift",
+                "operator": "Exists",
+                "effect": "NoSchedule",
+            },
+        },
+    ):
+        drift_source = fresh_scheduled_init()
+        controller_spec_drift = _kubectl(
+            k3s,
+            [
+                "patch",
+                "pod",
+                "--namespace",
+                namespace,
+                drift_source["metadata"]["name"],
+                "--type=json",
+                "--patch",
+                json.dumps(
+                    [
+                        {"op": "remove", "path": "/metadata/finalizers/0"},
+                        patch_operation,
+                    ]
+                ),
                 "--dry-run=server",
-                "--filename=-",
                 "--as=system:serviceaccount:kube-system:job-controller",
                 "--as-group=system:masters",
             ],
-            documents=[controller_finalizer_document],
             check=False,
         )
-        if controller_finalizer_update.returncode == 0:
-            controller_finalizer_removed = True
-            break
-        if "the object has been modified" not in controller_finalizer_update.stderr:
-            break
-    assert controller_finalizer_removed, (
-        controller_finalizer_update.stderr if controller_finalizer_update else ""
-    )
+        assert controller_spec_drift.returncode != 0
+        assert "controller-owned Job finalizer transition" in controller_spec_drift.stderr
 
     serving_unconfined = copy.deepcopy(serving_pod)
     serving_unconfined["metadata"]["name"] = "cell-alpha-serve-unconfined"
