@@ -32,15 +32,23 @@ _CODE_PREFIX = re.compile(r"^([A-Z][A-Z0-9_]+):\s*(.*)$", re.DOTALL)
 # Stable, machine-readable codes → a one-line remediation. Only the codes worth a
 # pointer are listed; everything else carries `remediation: null`.
 _REMEDIATION: dict[str, str] = {
-    "UNKNOWN_PARAM": "Remove the unknown field; run with --help or see /api/openapi.json for the accepted params.",
+    "UNKNOWN_PARAM": (
+        "Remove the unknown field; run with --help or see /api/openapi.json for the "
+        "accepted params."
+    ),
     "MISSING_ARGUMENT": "Provide the required argument; run the subcommand with --help.",
     "BAD_INT": "Pass an integer.",
     "BAD_BOOL": "Pass a boolean (true/false).",
     "BAD_JSON": "Pass valid JSON for this field.",
     "BINARY_BLOB_REJECTED": "Don't push binaries through text fields; use the /upload endpoint.",
     "NOT_FOUND": "Check the path; try `ask_memory` to locate it.",
-    "WRITER_LEASE_REQUIRED": "Send the mutation to the current writer or retry after its lease expires.",
-    "WRITER_COORDINATOR_UNAVAILABLE": "Check the coordinator URL, credentials, and service health; reads remain available.",
+    "WRITER_LEASE_REQUIRED": (
+        "Send the mutation to the current writer or retry after its lease expires."
+    ),
+    "WRITER_COORDINATOR_UNAVAILABLE": (
+        "Check the coordinator URL, credentials, and service health; reads remain "
+        "available."
+    ),
 }
 
 # Error codes whose HTTP status is NOT the default 400.
@@ -61,6 +69,8 @@ _CONFLICT_CODES = frozenset(
         "WRITER_LEASE_REQUIRED",
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
+        "BATCH_ROLLBACK_INCOMPLETE",
+        "BATCH_CLEANUP_INCOMPLETE",
     }
 )
 
@@ -92,6 +102,14 @@ def error_dict(exc: Exception) -> dict:
     `OpError` carries its fields directly; a leaf-contract `ValueError`
     ("CODE: reason") is parsed into {code, message}; anything else is `INTERNAL`.
     """
+    public_dict = getattr(exc, "as_public_dict", None)
+    if callable(public_dict):
+        try:
+            public_payload = public_dict()
+        except Exception:  # noqa: BLE001 - fall through to the shared parser
+            public_payload = None
+        if isinstance(public_payload, dict):
+            return public_payload
     if isinstance(exc, OpError):
         return {"code": exc.code, "message": exc.message, "remediation": exc.remediation}
     text = str(exc)

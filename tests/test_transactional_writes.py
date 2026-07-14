@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 import os
+import pickle
 import re
 import stat
 from collections.abc import Callable
@@ -8,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import cli_ops
 from exomem import move_file as move_module
 from exomem import vault as vault_module
 
@@ -219,6 +222,167 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert not [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
 
 
+def test_batch_target_summary_is_bounded_safe_and_vault_relative(
+    tmp_path: Path,
+) -> None:
+    safe = [vault_module.PlannedWrite(tmp_path / f"safe-{index}.md", "x") for index in range(18)]
+    writes = [
+        vault_module.PlannedWrite(tmp_path.parent / "outside.md", "x"),
+        vault_module.PlannedWrite(tmp_path / "unsafe\0name.md", "x"),
+        vault_module.PlannedWrite(tmp_path / f"{'x' * 1025}.md", "x"),
+        vault_module.PlannedWrite(tmp_path / "bad-\udcff.md", "x"),
+        *safe,
+    ]
+
+    summary = vault_module._summarize_batch_targets(writes, tmp_path)
+
+    assert summary == vault_module.BatchTargetSummary(
+        affected_count=22,
+        targets=tuple(f"safe-{index}.md" for index in range(16)),
+        omitted_target_count=6,
+    )
+    with pytest.raises(AttributeError):
+        summary.affected_count = 0
+
+    no_root = vault_module._summarize_batch_targets(safe[:2], None)
+    assert no_root == vault_module.BatchTargetSummary(2, (), 2)
+
+
+@pytest.mark.parametrize(
+    ("code", "committed", "kind", "message", "remediation"),
+    [
+        (
+            "BATCH_ROLLBACK_INCOMPLETE",
+            False,
+            "rollback_incomplete",
+            "The batch could not be fully rolled back.",
+            "Reconcile retained workspace state, then retry with fresh guards if the "
+            "intended write is still needed.",
+        ),
+        (
+            "BATCH_CLEANUP_INCOMPLETE",
+            True,
+            "cleanup_incomplete",
+            "The batch workspace cleanup is incomplete.",
+            "Do not retry the write; committed destinations are preserved. Reconcile "
+            "retained workspace state.",
+        ),
+    ],
+)
+def test_batch_write_error_public_payload_and_pickle_are_sanitized(
+    tmp_path: Path,
+    code: str,
+    committed: bool,
+    kind: str,
+    message: str,
+    remediation: str,
+) -> None:
+    summary = vault_module.BatchTargetSummary(
+        affected_count=18,
+        targets=tuple(f"safe-{index}.md" for index in range(16)),
+        omitted_target_count=2,
+    )
+    raw_text = (
+        f"{tmp_path}/.exomem-batch-{'a' * 32}/stage-0.tmp: "
+        "low-level permission detail"
+    )
+    raw = PermissionError(raw_text)
+    error = vault_module.BatchWriteError(
+        code,
+        summary,
+        committed=committed,
+        diagnostics=(raw,),
+    )
+    try:
+        raise error from raw
+    except vault_module.BatchWriteError as raised:
+        error = raised
+
+    expected = {
+        "code": code,
+        "message": message,
+        "remediation": remediation,
+        "outcome": {
+            "kind": kind,
+            "committed": committed,
+            "incomplete": True,
+            "affected_count": 18,
+            "targets": [f"safe-{index}.md" for index in range(16)],
+            "omitted_target_count": 2,
+        },
+    }
+    assert error.as_public_dict() == expected
+    assert error.code == code
+    assert error.outcome_kind == kind
+    assert error.committed is committed
+    assert error.incomplete is True
+    assert str(error) == json.dumps(
+        expected,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    assert error.__cause__ is raw
+    assert error._diagnostics == (raw,)
+    for secret in (str(tmp_path), ".exomem-batch-", "stage-0.tmp", "permission detail"):
+        assert secret not in str(error)
+        assert secret not in json.dumps(error.as_public_dict())
+        assert secret not in json.dumps(cli_ops.error_dict(error))
+
+    serialized = pickle.dumps(error)
+    for secret in (os.fsencode(tmp_path), b".exomem-batch-", b"stage-0.tmp", b"permission detail"):
+        assert secret not in serialized
+    restored = pickle.loads(serialized)
+    assert restored.as_public_dict() == expected
+    assert str(restored) == str(error)
+    assert restored.__cause__ is None
+    assert restored._diagnostics == ()
+
+
+def test_batch_cleanup_outcome_summarizes_deduped_commit_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    raw = PermissionError("private workspace initialization failure")
+
+    def fail_workspace_create(cls, parent: Path):
+        raise raw
+
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "create",
+        classmethod(fail_workspace_create),
+    )
+    monkeypatch.setattr(
+        vault_module,
+        "_cleanup_batch_workspaces",
+        lambda workspaces: True,
+    )
+
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first draft"),
+                vault_module.PlannedWrite(second, "second"),
+                vault_module.PlannedWrite(first, "first final"),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert incomplete.value.committed is False
+    assert incomplete.value.as_public_dict()["outcome"] == {
+        "kind": "cleanup_incomplete",
+        "committed": False,
+        "incomplete": True,
+        "affected_count": 2,
+        "targets": ["first.md", "second.md"],
+        "omitted_target_count": 0,
+    }
+    assert incomplete.value.__cause__ is raw
+
+
 def test_batch_atomic_write_restores_exact_bytes_and_supported_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -362,7 +526,7 @@ def test_batch_atomic_write_detects_failed_path_mode_fallback(
     )
     monkeypatch.setattr(vault_module.os, "replace", fail_second_flip)
 
-    with pytest.raises(RuntimeError, match="rollback incomplete"):
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
         vault_module.batch_atomic_write(
             [
                 vault_module.PlannedWrite(first, "first-new"),
@@ -370,9 +534,16 @@ def test_batch_atomic_write_detects_failed_path_mode_fallback(
             ]
         )
 
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert incomplete.value.committed is False
     assert first.read_bytes() == b"first-new"
     assert second.read_bytes() == b"second-old"
-    assert _workspaces(tmp_path) == []
+    retained = _workspaces(tmp_path)
+    assert len(retained) == 1
+    assert sorted(path.name for path in retained[0].iterdir()) == [
+        "restore-0.tmp",
+        "stage-1.tmp",
+    ]
 
 
 def test_batch_atomic_write_removes_new_file_on_rollback(
@@ -632,12 +803,17 @@ def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
     target = tmp_path / "target.md"
     target.write_bytes(b"old")
     drifted = b"same-owner drift must not be deleted"
+    raw_errors: list[PermissionError] = []
 
     def drift_stage_then_fail(_path: Path):
         workspace = _workspaces(tmp_path)[0]
         stage = next(workspace.glob("stage-*.tmp"))
         stage.write_bytes(drifted)
-        raise PermissionError("snapshot failed after stage drift")
+        error = PermissionError(
+            f"{stage}: low-level snapshot failure after stage drift"
+        )
+        raw_errors.append(error)
+        raise error
 
     monkeypatch.setattr(
         vault_module,
@@ -645,16 +821,155 @@ def test_batch_atomic_write_retains_fully_bound_stage_when_content_drifts(
         drift_stage_then_fail,
     )
 
-    with pytest.raises(RuntimeError, match="cleanup retained changed artifacts") as retained:
+    with pytest.raises(vault_module.BatchWriteError) as retained:
         vault_module.batch_atomic_write(
-            [vault_module.PlannedWrite(target, "new exact content")]
+            [vault_module.PlannedWrite(target, "new exact content")],
+            vault_root=tmp_path,
         )
 
-    assert isinstance(retained.value.__cause__, PermissionError)
+    assert retained.value.code == "BATCH_CLEANUP_INCOMPLETE"
+    assert retained.value.committed is False
+    assert retained.value.as_public_dict()["outcome"] == {
+        "kind": "cleanup_incomplete",
+        "committed": False,
+        "incomplete": True,
+        "affected_count": 1,
+        "targets": ["target.md"],
+        "omitted_target_count": 0,
+    }
+    assert retained.value.__cause__ is raw_errors[0]
+    assert str(tmp_path) not in str(retained.value)
+    assert ".exomem-batch-" not in str(retained.value)
+    assert "stage-0.tmp" not in str(retained.value)
+    assert "snapshot failure" not in str(retained.value)
     workspace = _workspaces(tmp_path)[0]
     stage = next(workspace.glob("stage-*.tmp"))
     assert stage.read_bytes() == drifted
     assert target.read_bytes() == b"old"
+
+
+def test_batch_atomic_write_reports_cleanup_incomplete_after_complete_rollback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"first-old")
+    second.write_bytes(b"second-old")
+    real_replace = os.replace
+    real_cleanup = vault_module._BatchWorkspace.cleanup
+    stage_flips = 0
+    cleanup_calls = 0
+    replacements: list[tuple[str, str]] = []
+
+    def fail_second_stage(src, dst, *args, **kwargs):
+        nonlocal stage_flips
+        source = _leaf(src)
+        if source.startswith("stage-"):
+            stage_flips += 1
+            if stage_flips == 2:
+                raise OSError("raw commit failure")
+        replacements.append((source, _leaf(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    def retain_workspace_during_cleanup(self):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        (self.path / "unexpected.tmp").write_bytes(b"retain for reconcile")
+        return real_cleanup(self)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_second_stage)
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "cleanup",
+        retain_workspace_during_cleanup,
+    )
+
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ],
+            vault_root=tmp_path,
+        )
+
+    assert incomplete.value.code == "BATCH_CLEANUP_INCOMPLETE"
+    assert incomplete.value.committed is False
+    assert isinstance(incomplete.value.__cause__, OSError)
+    assert first.read_bytes() == b"first-old"
+    assert second.read_bytes() == b"second-old"
+    assert cleanup_calls == 1
+    assert replacements == [("stage-0.tmp", "first.md"), ("restore-0.tmp", "first.md")]
+    workspace = _workspaces(tmp_path)[0]
+    assert (workspace / "unexpected.tmp").read_bytes() == b"retain for reconcile"
+
+
+def test_batch_atomic_write_fans_out_once_before_committed_cleanup_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_bytes(b"first-old")
+    second.write_bytes(b"second-old")
+    real_replace = os.replace
+    real_cleanup = vault_module._BatchWorkspace.cleanup
+    cleanup_calls = 0
+    replacements: list[tuple[str, str]] = []
+    watcher_calls: list[tuple[Path, ...]] = []
+    index_calls: list[tuple[Path, ...]] = []
+    reports: list[object] = []
+    report = object()
+
+    def observe_replace(src, dst, *args, **kwargs):
+        replacements.append((_leaf(src), _leaf(dst)))
+        return real_replace(src, dst, *args, **kwargs)
+
+    def retain_workspace_during_cleanup(self):
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+        (self.path / "unexpected.tmp").write_bytes(b"post-commit residue")
+        return real_cleanup(self)
+
+    def register(_root: Path, paths: list[Path]) -> None:
+        watcher_calls.append(tuple(paths))
+
+    def index(_root: Path, paths: list[Path]) -> object:
+        index_calls.append(tuple(paths))
+        return report
+
+    monkeypatch.setattr(vault_module.os, "replace", observe_replace)
+    monkeypatch.setattr(
+        vault_module._BatchWorkspace,
+        "cleanup",
+        retain_workspace_during_cleanup,
+    )
+    monkeypatch.setattr("exomem.file_watcher.register_self_write", register)
+    monkeypatch.setattr("exomem.index_sync.upsert_after_write", index)
+
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ],
+            vault_root=tmp_path,
+            index_reports=reports,
+        )
+
+    assert incomplete.value.code == "BATCH_CLEANUP_INCOMPLETE"
+    assert incomplete.value.committed is True
+    assert incomplete.value.__cause__ is None
+    assert first.read_bytes() == b"first-new"
+    assert second.read_bytes() == b"second-new"
+    assert cleanup_calls == 1
+    assert replacements == [("stage-0.tmp", "first.md"), ("stage-1.tmp", "second.md")]
+    assert watcher_calls == [(first, second)]
+    assert index_calls == [(first, second)]
+    assert reports == [report]
+    workspace = _workspaces(tmp_path)[0]
+    assert (workspace / "unexpected.tmp").read_bytes() == b"post-commit residue"
 
 
 def test_batch_atomic_write_never_uses_preexisting_user_backup(
@@ -748,7 +1063,7 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
         return result
 
     monkeypatch.setattr(vault_module.os, "replace", inject_census_change)
-    with pytest.raises(RuntimeError, match="rollback incomplete") as incomplete:
+    with pytest.raises(vault_module.BatchWriteError) as incomplete:
         vault_module.batch_atomic_write(
             [
                 vault_module.PlannedWrite(safe, "safe-new"),
@@ -759,6 +1074,16 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
             required_guards=(census,),
         )
 
+    assert incomplete.value.code == "BATCH_ROLLBACK_INCOMPLETE"
+    assert incomplete.value.committed is False
+    assert incomplete.value.as_public_dict()["outcome"] == {
+        "kind": "rollback_incomplete",
+        "committed": False,
+        "incomplete": True,
+        "affected_count": 3,
+        "targets": ["safe.md", "guarded/guarded.md", "pending.md"],
+        "omitted_target_count": 0,
+    }
     assert isinstance(incomplete.value.__cause__, vault_module.PathGuardError)
     assert incomplete.value.__cause__.code == "PATH_GUARD_CHANGED"
     assert restore_targets == ["safe.md"]
@@ -767,7 +1092,9 @@ def test_batch_atomic_write_blocks_drifted_census_rollback_but_continues_safely(
     assert pending.read_bytes() == b"pending-old"
     assert concurrent.read_bytes() == b"concurrent-owned"
     assert _workspaces(tmp_path) == []
-    assert _workspaces(guarded) == []
+    retained = _workspaces(guarded)
+    assert len(retained) == 1
+    assert list(retained[0].iterdir()) == []
 
 
 def test_directory_census_ignores_exact_valid_residue_without_touching_it(

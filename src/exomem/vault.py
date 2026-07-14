@@ -395,6 +395,118 @@ class CreateOnlyConflict(ValueError):
         ValueError.__init__(self, f"{self.code}: {self.target}")
 
 
+@dataclass(frozen=True, slots=True)
+class BatchTargetSummary:
+    """Bounded public summary of the logical targets in one batch."""
+
+    affected_count: int
+    targets: tuple[str, ...]
+    omitted_target_count: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.affected_count) is not int
+            or self.affected_count < 0
+            or type(self.omitted_target_count) is not int
+            or self.omitted_target_count < 0
+            or type(self.targets) is not tuple
+            or len(self.targets) > 16
+            or self.omitted_target_count != self.affected_count - len(self.targets)
+        ):
+            raise ValueError("invalid batch target summary")
+        for target in self.targets:
+            if (
+                type(target) is not str
+                or not target
+                or target.startswith("/")
+                or "\\" in target
+                or "\0" in target
+                or any(part in {"", ".", ".."} for part in target.split("/"))
+                or len(target.encode("utf-8")) > 1024
+            ):
+                raise ValueError("invalid batch target summary")
+
+
+_BATCH_WRITE_ERROR_FIELDS = {
+    "BATCH_ROLLBACK_INCOMPLETE": (
+        "rollback_incomplete",
+        "The batch could not be fully rolled back.",
+    ),
+    "BATCH_CLEANUP_INCOMPLETE": (
+        "cleanup_incomplete",
+        "The batch workspace cleanup is incomplete.",
+    ),
+}
+_BATCH_RETRY_REMEDIATION = (
+    "Reconcile retained workspace state, then retry with fresh guards if the intended "
+    "write is still needed."
+)
+_BATCH_COMMITTED_REMEDIATION = (
+    "Do not retry the write; committed destinations are preserved. Reconcile retained "
+    "workspace state."
+)
+
+
+class BatchWriteError(RuntimeError):
+    """Sanitized public outcome for a batch that retained workspace state."""
+
+    def __init__(
+        self,
+        code: str,
+        summary: BatchTargetSummary,
+        committed: bool,
+        *,
+        diagnostics: Iterable[BaseException] = (),
+    ) -> None:
+        if (
+            code not in _BATCH_WRITE_ERROR_FIELDS
+            or not isinstance(summary, BatchTargetSummary)
+            or type(committed) is not bool
+        ):
+            raise ValueError("invalid batch write outcome")
+        if code == "BATCH_ROLLBACK_INCOMPLETE" and committed:
+            raise ValueError("rollback-incomplete outcome cannot be committed")
+        self.code = code
+        self.summary = summary
+        self.outcome_kind, self.message = _BATCH_WRITE_ERROR_FIELDS[code]
+        self.committed = committed
+        self.incomplete = True
+        self.affected_count = summary.affected_count
+        self.targets = summary.targets
+        self.omitted_target_count = summary.omitted_target_count
+        self.remediation = (
+            _BATCH_COMMITTED_REMEDIATION if committed else _BATCH_RETRY_REMEDIATION
+        )
+        self._diagnostics = tuple(diagnostics)
+        RuntimeError.__init__(self, self.__str__())
+
+    def as_public_dict(self) -> dict[str, Any]:
+        return {
+            "code": self.code,
+            "message": self.message,
+            "remediation": self.remediation,
+            "outcome": {
+                "kind": self.outcome_kind,
+                "committed": self.committed,
+                "incomplete": self.incomplete,
+                "affected_count": self.affected_count,
+                "targets": list(self.targets),
+                "omitted_target_count": self.omitted_target_count,
+            },
+        }
+
+    def __str__(self) -> str:
+        return json.dumps(
+            self.as_public_dict(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+
+    def __reduce__(self) -> tuple[Any, tuple[str, BatchTargetSummary, bool]]:
+        return type(self), (self.code, self.summary, self.committed)
+
+
 @dataclass
 class PathGuardError(ValueError):
     code: str
@@ -1464,16 +1576,36 @@ def _reset_restored_timestamps(
         os.close(descriptor)
 
 
-def _cleanup_batch_workspaces(workspaces: Iterable[_BatchWorkspace]) -> bool:
-    retained = False
+def _cleanup_batch_workspaces(
+    workspaces: Iterable[_BatchWorkspace],
+    *,
+    retained: Iterable[_BatchWorkspace] = (),
+) -> bool:
+    retained_ids = {id(workspace) for workspace in retained}
+    cleanup_retained = False
     for workspace in workspaces:
-        if not workspace.cleanup():
-            retained = True
-    return retained
+        try:
+            if id(workspace) in retained_ids:
+                workspace.close()
+                cleanup_retained = True
+                continue
+            if not workspace.cleanup():
+                cleanup_retained = True
+        except Exception:  # noqa: BLE001 - continue every independent cleanup
+            cleanup_retained = True
+            try:
+                workspace.close()
+            except Exception:  # noqa: BLE001 - the public outcome remains bounded
+                pass
+    return cleanup_retained
+
+
+class _BatchCleanupRetained(RuntimeError):
+    """Private marker for initialization paths that could not clean safely."""
 
 
 def _raise_cleanup_retained(primary_error: BaseException | None = None) -> None:
-    error = RuntimeError("batch cleanup retained changed artifacts")
+    error = _BatchCleanupRetained("batch cleanup retained changed artifacts")
     if primary_error is None:
         raise error
     raise error from primary_error
@@ -2006,6 +2138,41 @@ class PlannedWrite:
     guard: PathGuard | None = None
 
 
+def _summarize_batch_targets(
+    writes: Iterable[PlannedWrite], vault_root: Path | None
+) -> BatchTargetSummary:
+    planned = tuple(writes)
+    affected_count = len(planned)
+    if vault_root is None:
+        return BatchTargetSummary(affected_count, (), affected_count)
+    root = Path(os.path.abspath(vault_root))
+    targets: list[str] = []
+    for write in planned:
+        try:
+            relative = Path(os.path.abspath(write.path)).relative_to(root)
+            parts = relative.parts
+            logical_target = relative.as_posix()
+            encoded = logical_target.encode("utf-8")
+        except (UnicodeEncodeError, ValueError):
+            continue
+        if (
+            not parts
+            or logical_target.startswith("/")
+            or "\\" in logical_target
+            or "\0" in logical_target
+            or any(part in {"", ".", ".."} for part in parts)
+            or len(encoded) > 1024
+        ):
+            continue
+        if len(targets) < 16:
+            targets.append(logical_target)
+    return BatchTargetSummary(
+        affected_count,
+        tuple(targets),
+        affected_count - len(targets),
+    )
+
+
 def _safe_write_target(path: Path, vault_root: Path | None) -> str:
     if vault_root is None:
         return path.name
@@ -2140,6 +2307,36 @@ def _create_missing_guard_parents(
         os.close(root_descriptor)
 
 
+def _post_commit_batch_fanout(
+    vault_root: Path | None,
+    replaced: list[Path],
+    index_reports: list[Any] | None,
+) -> None:
+    if vault_root is None or not replaced:
+        return
+    # Register the self-authored replacements so the live watcher drops
+    # their echo instead of re-embedding the same files a second time.
+    try:
+        from . import file_watcher
+
+        file_watcher.register_self_write(vault_root, replaced)
+    except Exception:  # noqa: BLE001 — suppression is best-effort
+        logging.getLogger(__name__).debug(
+            "self-write suppression registration failed", exc_info=True
+        )
+    try:
+        from . import index_sync
+
+        report = index_sync.upsert_after_write(vault_root, replaced)
+        if index_reports is not None:
+            index_reports.append(report)
+    except Exception:  # noqa: BLE001 — embeddings are best-effort
+        logging.getLogger(__name__).exception(
+            "embedding upsert failed after batch_atomic_write; "
+            "sidecar may be stale until audit_fix(rebuild_embeddings=True)"
+        )
+
+
 def batch_atomic_write(
     writes: Iterable[PlannedWrite],
     *,
@@ -2210,6 +2407,7 @@ def batch_atomic_write(
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+    target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
         or directory_guards
@@ -2270,8 +2468,20 @@ def batch_atomic_write(
             snapshots.append(snapshot)
             source_guards.append(source_guard)
     except Exception as stage_error:
-        if _cleanup_batch_workspaces(workspace_by_parent.values()):
-            _raise_cleanup_retained(stage_error)
+        retained_during_init = isinstance(stage_error, _BatchCleanupRetained)
+        cause = stage_error.__cause__ if retained_during_init else stage_error
+        if cause is not None and not isinstance(cause, Exception):
+            _cleanup_batch_workspaces(workspace_by_parent.values())
+            raise cause from None
+        cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
+        if retained_during_init or cleanup_retained:
+            public_cause = cause or stage_error
+            raise BatchWriteError(
+                "BATCH_CLEANUP_INCOMPLETE",
+                target_summary,
+                False,
+                diagnostics=(public_cause,),
+            ) from public_cause
         raise
 
     allowed_census_changes = (
@@ -2350,6 +2560,7 @@ def batch_atomic_write(
             guard.recheck()
     except Exception as commit_error:
         rollback_errors: list[BaseException] = []
+        implicated_workspaces: list[_BatchWorkspace] = []
         replaced_indexes = range(len(replaced) - 1, -1, -1)
         for replaced_index in replaced_indexes:
             final, workspace, _artifact = staged[replaced_index]
@@ -2396,53 +2607,38 @@ def batch_atomic_write(
                 final_guards.pop(final, None)
             except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
                 rollback_errors.append(rollback_error)
-        cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
+                if all(workspace is not item for item in implicated_workspaces):
+                    implicated_workspaces.append(workspace)
+        cleanup_retained = _cleanup_batch_workspaces(
+            workspace_by_parent.values(), retained=implicated_workspaces
+        )
         if rollback_errors:
-            rollback_failure = RuntimeError(
-                "batch commit failed; rollback incomplete; reconcile retained state"
-            )
-            if cleanup_retained:
-                try:
-                    raise rollback_failure from commit_error
-                except RuntimeError as chained_failure:
-                    _raise_cleanup_retained(chained_failure)
-            raise rollback_failure from commit_error
+            raise BatchWriteError(
+                "BATCH_ROLLBACK_INCOMPLETE",
+                target_summary,
+                False,
+                diagnostics=rollback_errors,
+            ) from commit_error
         if cleanup_retained:
-            _raise_cleanup_retained(commit_error)
+            raise BatchWriteError(
+                "BATCH_CLEANUP_INCOMPLETE",
+                target_summary,
+                False,
+            ) from commit_error
         raise
     except BaseException:
         _cleanup_batch_workspaces(workspace_by_parent.values())
         raise
     else:
-        if _cleanup_batch_workspaces(workspace_by_parent.values()):
-            _raise_cleanup_retained()
+        cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
-    if vault_root is not None and replaced:
-        # Register the self-authored replacements so the live watcher drops
-        # their echo instead of re-embedding the same files a second time.
-        try:
-            from . import file_watcher
-
-            file_watcher.register_self_write(vault_root, replaced)
-        except Exception:  # noqa: BLE001 — suppression is best-effort
-            import logging
-
-            logging.getLogger(__name__).debug(
-                "self-write suppression registration failed", exc_info=True
-            )
-        try:
-            from . import index_sync
-
-            report = index_sync.upsert_after_write(vault_root, replaced)
-            if index_reports is not None:
-                index_reports.append(report)
-        except Exception:  # noqa: BLE001 — embeddings are best-effort
-            import logging
-
-            logging.getLogger(__name__).exception(
-                "embedding upsert failed after batch_atomic_write; "
-                "sidecar may be stale until audit_fix(rebuild_embeddings=True)"
-            )
+    _post_commit_batch_fanout(vault_root, replaced, index_reports)
+    if cleanup_retained:
+        raise BatchWriteError(
+            "BATCH_CLEANUP_INCOMPLETE",
+            target_summary,
+            True,
+        )
     return replaced
 
 
