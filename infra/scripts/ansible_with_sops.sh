@@ -42,7 +42,7 @@ done
 
 for argument in "${ansible_args[@]}"; do
   case "${argument}" in
-    -e | -e?* | --extra-vars | --extra-vars=*)
+    -e | -e?* | --extra*)
       echo "Ansible passthrough must not include extra vars" >&2
       exit 2
       ;;

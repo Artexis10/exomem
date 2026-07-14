@@ -39,7 +39,37 @@ def test_ansible_secret_runner_requires_tmpfs_before_decrypting(tmp_path: Path) 
     assert "must be tmpfs or ramfs" in result.stderr
 
 
-def test_ansible_secret_runner_rejects_extra_vars_passthrough(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    "passthrough",
+    [
+        ("--extra", "k3s_server_token=must-not-reach-argv"),
+        ("--extra-v", "k3s_server_token=must-not-reach-argv"),
+        ("--extra-var", "k3s_server_token=must-not-reach-argv"),
+        ("--extra-vars", "k3s_server_token=must-not-reach-argv"),
+        ("--extra=k3s_server_token=must-not-reach-argv",),
+        ("--extra-v=k3s_server_token=must-not-reach-argv",),
+        ("--extra-var=k3s_server_token=must-not-reach-argv",),
+        ("--extra-vars=k3s_server_token=must-not-reach-argv",),
+        ("-e", "k3s_server_token=must-not-reach-argv"),
+        ("-ek3s_server_token=must-not-reach-argv",),
+    ],
+    ids=[
+        "extra",
+        "extra-v",
+        "extra-var",
+        "extra-vars",
+        "extra-equals",
+        "extra-v-equals",
+        "extra-var-equals",
+        "extra-vars-equals",
+        "short-separate",
+        "short-attached",
+    ],
+)
+def test_ansible_secret_runner_rejects_extra_vars_passthrough(
+    tmp_path: Path,
+    passthrough: tuple[str, ...],
+) -> None:
     encrypted = tmp_path / "secret.v1.sops.json"
     encrypted.write_text('{"sops":{}}', encoding="utf-8")
     inventory = tmp_path / "inventory.yml"
@@ -52,8 +82,7 @@ def test_ansible_secret_runner_rejects_extra_vars_passthrough(tmp_path: Path) ->
             "--vars",
             str(encrypted),
             "--",
-            "--extra-vars",
-            "k3s_server_token=must-not-reach-argv",
+            *passthrough,
         ],
         capture_output=True,
         text=True,
