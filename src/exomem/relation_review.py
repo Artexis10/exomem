@@ -1248,15 +1248,13 @@ def _validate_lifecycle_trash_proof(
     proof: LifecycleTrashProof,
 ) -> None:
     try:
-        sidecar = json.loads(
-            proof.sidecar_source, object_pairs_hook=_object_no_duplicates
-        )
-    except (json.JSONDecodeError, _DuplicateJsonKey) as error:
+        sidecar = parse_exact_json_object(proof.sidecar_source)
+    except ValueError as error:
         raise RelationReviewError(
             "LIFECYCLE_TRANSITION_MISMATCH",
             "trash proof sidecar is not an exact JSON object",
         ) from error
-    sidecar_object = sidecar if type(sidecar) is dict else {}
+    sidecar_object = sidecar
     snapshot = sidecar_object.get("frontmatter_snapshot")
     sidecar_identity = snapshot.get(ID_FIELD) if type(snapshot) is dict else None
     sidecar_target = proof.sidecar_guard.target
@@ -1676,6 +1674,14 @@ def _object_no_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             raise _DuplicateJsonKey
         result[key] = value
     return result
+
+
+def parse_exact_json_object(text: str) -> dict[str, Any]:
+    """Parse one strict JSON object, rejecting duplicate keys at every depth."""
+    value = json.loads(text, object_pairs_hook=_object_no_duplicates)
+    if type(value) is not dict:
+        raise ValueError("JSON root must be an object")
+    return value
 
 
 def _safe_record_path(value: str) -> bool:

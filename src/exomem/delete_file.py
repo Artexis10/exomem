@@ -248,24 +248,25 @@ def delete_file(
             reason=f"could not move {rel_path} to trash: {e}",
         ) from e
 
-    # Drop the file's rows from the index sidecars (embedding + lexical).
-    # Soft no-op wherever a backend is unavailable.
+    # Drop Markdown rows from the semantic index sidecars. Non-Markdown files
+    # have an exact affected Markdown set of zero and must not enter fan-out.
     index_feedback: dict | None = None
-    try:
-        from . import index_sync
-        raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
-        report = (
-            raw_report
-            if isinstance(raw_report, index_sync.IndexSyncReport)
-            else index_sync.observed_delete_report([rel_path], degraded=False)
-        )
-    except Exception:  # noqa: BLE001 — sidecars are best-effort
-        log.exception("index delete failed for %s; sidecar may be stale", rel_path)
-        warnings.append(
-            "trash succeeded but derived-index cleanup failed; run reconcile"
-        )
-        report = index_sync.observed_delete_report([rel_path], degraded=True)
-    index_feedback = report.as_dict()
+    if rel_path.lower().endswith(".md"):
+        try:
+            from . import index_sync
+            raw_report = index_sync.delete_after_remove(vault_root, [rel_path])
+            report = (
+                raw_report
+                if isinstance(raw_report, index_sync.IndexSyncReport)
+                else index_sync.observed_delete_report([rel_path], degraded=False)
+            )
+        except Exception:  # noqa: BLE001 — sidecars are best-effort
+            log.exception("index delete failed for %s; sidecar may be stale", rel_path)
+            warnings.append(
+                "trash succeeded but derived-index cleanup failed; run reconcile"
+            )
+            report = index_sync.observed_delete_report([rel_path], degraded=True)
+        index_feedback = report.as_dict()
 
     # Write metadata sidecar capturing what we know at trash time.
     meta = {

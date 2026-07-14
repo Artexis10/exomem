@@ -205,6 +205,17 @@ def move_file(
                 continue
             new_text, n_changed = _rewrite_wikilinks(text, old_rel, new_rel)
             if n_changed > 0:
+                append_tree = in_append_only_tree(rel)
+                if append_tree:
+                    raise MoveFileError(
+                        code="APPEND_ONLY",
+                        reason=(
+                            f"updating inbound wikilinks would rewrite {rel} in "
+                            f"append-only {append_tree}/. Retry with "
+                            f"`update_wikilinks=false` to preserve exact bytes "
+                            f"and run final-corpus semantic evaluation."
+                        ),
+                    )
                 writes.append(
                     PlannedWrite(path=abs_file, content=new_text, guard=guard)
                 )
@@ -221,6 +232,16 @@ def move_file(
                     source, old_rel, new_rel
                 )
                 if source_changes:
+                    if src_append:
+                        raise MoveFileError(
+                            code="APPEND_ONLY",
+                            reason=(
+                                f"updating self-links would rewrite moved source "
+                                f"{old_rel} in append-only {src_append}/. Retry "
+                                f"with `update_wikilinks=false` to preserve exact "
+                                f"bytes and run final-corpus semantic evaluation."
+                            ),
+                        )
                     files_touched.append(old_rel)
                     wikilinks_updated += source_changes
             destination_guard = PathGuard.capture(

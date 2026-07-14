@@ -237,6 +237,152 @@ def test_move_without_wikilink_updates_blocks_unchanged_referrer_in_final_corpus
     assert not (tmp_path / new_path).exists()
 
 
+@pytest.mark.parametrize("append_tree", ["Sources", "Evidence"])
+def test_move_blocks_append_only_inbound_rewrite_before_any_mutation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    append_tree: str,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    referrer_path = (
+        f"Knowledge Base/{append_tree}/Articles/lifecycle-referrer.md"
+    )
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Append-only referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    old = _write(tmp_path, _PAGE, target)
+    referrer_file = _write(tmp_path, referrer_path, referrer)
+    _write(
+        tmp_path,
+        anchor_path,
+        _source("Anchor", page_id="00000000-0000-4000-8000-000000000063"),
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    lifecycle_before = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "Knowledge Base/_Schema").rglob("*")
+        if path.is_file()
+    }
+    index_calls: list[tuple[str, tuple[str, ...]]] = []
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda _root, paths, **_kwargs: index_calls.append(
+            ("upsert", tuple(str(path) for path in paths))
+        ),
+    )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: index_calls.append(("delete", tuple(paths))),
+    )
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=_PAGE,
+            new_path=new_path,
+        )
+
+    assert blocked.value.code == "APPEND_ONLY"
+    assert "update_wikilinks=false" in blocked.value.reason
+    assert old.read_bytes() == target.encode()
+    assert referrer_file.read_bytes() == referrer.encode()
+    assert not (tmp_path / new_path).exists()
+    assert index_calls == []
+    assert {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in (tmp_path / "Knowledge Base/_Schema").rglob("*")
+        if path.is_file()
+    } == lifecycle_before
+
+
+def test_move_without_rewrites_still_runs_final_corpus_for_append_only_referrer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    new_path = "Knowledge Base/Notes/Insights/lifecycle-renamed.md"
+    anchor_path = "Knowledge Base/Notes/Insights/lifecycle-anchor.md"
+    referrer_path = "Knowledge Base/Sources/Articles/lifecycle-referrer.md"
+    target = _source("Target", page_id=_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle-anchor]]\n",
+    )
+    referrer = _source("Append-only referrer", page_id=_OTHER_ID).replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/lifecycle]]\n",
+    )
+    _write(tmp_path, _PAGE, target)
+    referrer_file = _write(tmp_path, referrer_path, referrer)
+    _write(
+        tmp_path,
+        anchor_path,
+        _source("Anchor", page_id="00000000-0000-4000-8000-000000000063"),
+    )
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    calls: list[tuple[str, str]] = []
+    real_preflight = semantic_writes.preflight_move
+
+    def capture_preflight(*args, **kwargs):
+        calls.append((kwargs["old_path"], kwargs["new_path"]))
+        return real_preflight(*args, **kwargs)
+
+    monkeypatch.setattr(semantic_writes, "preflight_move", capture_preflight)
+
+    result = move_module.move_file(
+        tmp_path,
+        old_path=_PAGE,
+        new_path=new_path,
+        update_wikilinks=False,
+    )
+
+    assert calls == [(_PAGE, new_path)]
+    assert referrer_file.read_bytes() == referrer.encode()
+    assert result.semantic is not None
+    assert not (tmp_path / _PAGE).exists()
+    assert (tmp_path / new_path).read_text(encoding="utf-8") == target
+
+
+def test_intra_append_only_move_never_rewrites_moved_source_bytes(
+    tmp_path: Path,
+) -> None:
+    old_path = "Knowledge Base/Sources/Articles/self-linked.md"
+    new_path = "Knowledge Base/Sources/Archive/self-linked.md"
+    source = (
+        "# Raw source\n\n"
+        "See [[Knowledge Base/Sources/Articles/self-linked]].\n"
+    )
+    old = _write(tmp_path, old_path, source)
+
+    with pytest.raises(move_module.MoveFileError) as blocked:
+        move_module.move_file(
+            tmp_path,
+            old_path=old_path,
+            new_path=new_path,
+        )
+
+    assert blocked.value.code == "APPEND_ONLY"
+    assert "update_wikilinks=false" in blocked.value.reason
+    assert old.read_bytes() == source.encode()
+    assert not (tmp_path / new_path).exists()
+
+
 def test_path_only_inbound_rewrite_carries_current_reviewed_none(
     tmp_path: Path,
 ) -> None:
@@ -566,13 +712,19 @@ def test_non_markdown_trash_does_not_register_markdown_self_delete(
     path = "Knowledge Base/Notes/Insights/raw.txt"
     _write(tmp_path, path, "raw")
     watcher_calls: list[list[str]] = []
+    cleanup_calls: list[list[str]] = []
     monkeypatch.setattr(
         file_watcher,
         "register_self_delete",
         lambda _root, paths: watcher_calls.append(list(paths)),
     )
+    monkeypatch.setattr(
+        index_sync,
+        "delete_after_remove",
+        lambda _root, paths: cleanup_calls.append(list(paths)),
+    )
 
-    delete_file_module.delete_file(
+    result = delete_file_module.delete_file(
         tmp_path,
         path=path,
         confirm=True,
@@ -580,6 +732,8 @@ def test_non_markdown_trash_does_not_register_markdown_self_delete(
     )
 
     assert watcher_calls == []
+    assert cleanup_calls == []
+    assert result.index is None
 
 
 def test_trash_legacy_none_is_accepted_unverified(
@@ -655,6 +809,226 @@ def test_recovery_reenters_stable_qualifying_page_and_indexes_once(
     assert getattr(result, "semantic", None) is not None
     assert result.semantic["relation_review_requests"] == []
     assert sum(path == _PAGE for batch in upserts for path in batch) == 1
+
+
+def test_recovery_to_missing_parent_tree_rebinds_destination_guards(
+    tmp_path: Path,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-parent-anchor.md"
+    source = _source("Recover into new parents").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-parent-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 1),
+    )
+    restored = "Knowledge Base/Notes/Insights/new-parent/deeper/page.md"
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=restored,
+    )
+
+    assert result.restored_path == restored
+    assert (tmp_path / restored).read_text(encoding="utf-8") == source
+    assert not (tmp_path / trashed.trash_path).exists()
+
+
+def test_semantically_blocked_recovery_creates_no_destination_parents(
+    tmp_path: Path,
+) -> None:
+    empty = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=empty.activation_census
+    )
+    source = _source("New semantic debt")
+    _write(tmp_path, _PAGE, source)
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 2),
+    )
+    restored = "Knowledge Base/Notes/Insights/blocked-parent/deeper/page.md"
+    new_parent = tmp_path / "Knowledge Base/Notes/Insights/blocked-parent"
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert not new_parent.exists()
+    assert (tmp_path / trashed.trash_path).exists()
+
+
+def test_recovery_missing_parent_external_race_still_blocks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-race-anchor.md"
+    source = _source("Recover with parent race").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-race-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 3),
+    )
+    restored = "Knowledge Base/Notes/Insights/raced-parent/deeper/page.md"
+    raced_parent = tmp_path / "Knowledge Base/Notes/Insights/raced-parent"
+    real_commit = semantic_writes.commit_recovery
+
+    def race_then_commit(vault_root: Path, *, preflight, mutate):
+        raced_parent.mkdir()
+        return real_commit(vault_root, preflight=preflight, mutate=mutate)
+
+    monkeypatch.setattr(semantic_writes, "commit_recovery", race_then_commit)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "PATH_GUARD_CHANGED"
+    assert raced_parent.is_dir()
+    assert not (tmp_path / restored).exists()
+    assert (tmp_path / trashed.trash_path).exists()
+
+
+@pytest.mark.parametrize(
+    "invalid_sidecar",
+    [
+        b"\xff",
+        b"{",
+        b"[]",
+        b'{"original_path":"first.md","original_path":"second.md"}',
+    ],
+    ids=["invalid-utf8", "invalid-json", "non-object", "duplicate-key"],
+)
+def test_recovery_rejects_invalid_sidecar_without_mutation(
+    tmp_path: Path,
+    invalid_sidecar: bytes,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    restored = "Knowledge Base/Notes/Insights/restored-raw.txt"
+    _write(tmp_path, path, "raw")
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 4),
+    )
+    trash = tmp_path / trashed.trash_path
+    sidecar = tmp_path / trashed.trash_meta_path
+    trash_before = trash.read_bytes()
+    sidecar.write_bytes(invalid_sidecar)
+
+    with pytest.raises(recover_module.RecoverError) as blocked:
+        recover_module.recover_from_trash(
+            tmp_path,
+            trash_path=trashed.trash_path,
+            restore_path=restored,
+        )
+
+    assert blocked.value.code == "TRASH_SIDECAR_INVALID"
+    assert trash.read_bytes() == trash_before
+    assert sidecar.read_bytes() == invalid_sidecar
+    assert not (tmp_path / restored).exists()
+
+
+def test_recovery_never_unlinks_sidecar_replaced_after_preflight(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    anchor = "Knowledge Base/Notes/Insights/recovery-sidecar-anchor.md"
+    source = _source("Recover with replaced sidecar").replace(
+        "## Relations\n",
+        "## Relations\n"
+        "- supports [[Knowledge Base/Notes/Insights/recovery-sidecar-anchor]]\n",
+    )
+    _write(tmp_path, _PAGE, source)
+    _write(tmp_path, anchor, _source("Anchor", page_id=_OTHER_ID))
+    corpus = semantic_contract.build_corpus_context(tmp_path)
+    activation_manifest.ensure_manifest(
+        tmp_path, census=corpus.activation_census
+    )
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=_PAGE,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 5),
+    )
+    sidecar = tmp_path / trashed.trash_meta_path
+    replacement = b'{"replacement":"belongs to another writer"}'
+    real_commit = semantic_writes.commit_recovery
+
+    def replace_after_commit(vault_root: Path, *, preflight, mutate):
+        committed = real_commit(vault_root, preflight=preflight, mutate=mutate)
+        sidecar.write_bytes(replacement)
+        return committed
+
+    monkeypatch.setattr(
+        semantic_writes, "commit_recovery", replace_after_commit
+    )
+
+    result = recover_module.recover_from_trash(
+        tmp_path, trash_path=trashed.trash_path
+    )
+
+    assert (tmp_path / _PAGE).read_text(encoding="utf-8") == source
+    assert sidecar.read_bytes() == replacement
+    assert any("sidecar changed" in warning for warning in result.warnings)
+
+
+def test_explicit_legacy_recovery_allows_truly_absent_sidecar(
+    tmp_path: Path,
+) -> None:
+    path = "Knowledge Base/Notes/Insights/raw.txt"
+    restored = "Knowledge Base/Notes/Insights/restored-raw.txt"
+    _write(tmp_path, path, "raw")
+    trashed = delete_file_module.delete_file(
+        tmp_path,
+        path=path,
+        confirm=True,
+        now=dt.datetime(2026, 7, 14, 12, 3, 6),
+    )
+    sidecar = tmp_path / trashed.trash_meta_path
+    sidecar.unlink()
+
+    result = recover_module.recover_from_trash(
+        tmp_path,
+        trash_path=trashed.trash_path,
+        restore_path=restored,
+    )
+
+    assert result.restored_path == restored
+    assert (tmp_path / restored).read_text(encoding="utf-8") == "raw"
+    assert not sidecar.exists()
 
 
 def test_recovery_replaces_committed_review_with_exact_trash_proof(

@@ -2232,19 +2232,6 @@ def commit_recovery(
                 if item.sidecar_guard is not None:
                     item.sidecar_guard.recheck(root)
                 item.destination_guard.recheck(root)
-            destination_root_guard = (
-                preflight.destination_root_guard.prepare_and_bind_parents(root)
-            )
-            destination_root_guard.recheck(root)
-            for item in preflight.entries:
-                item.source_guard.recheck(root)
-                item.destination_guard.recheck(root)
-                if item.sidecar_guard is not None:
-                    item.sidecar_guard.recheck(root)
-            for census_guard in preflight.trash_census_guards:
-                census_guard.recheck(root)
-            if preflight.recovery_sidecar_guard is not None:
-                preflight.recovery_sidecar_guard.recheck(root)
             lifecycle_writes, required_guards, lifecycle_states = (
                 _plan_recovery_lifecycle(root, preflight)
             )
@@ -2253,12 +2240,37 @@ def commit_recovery(
                     "SEMANTIC_CONTRACT_BLOCKED",
                     "semantic contract has blocking findings",
                 )
+            destination_root_guard = (
+                preflight.destination_root_guard.prepare_and_bind_parents(root)
+            )
+            destination_root_guard.recheck(root)
+            destination_guards = tuple(
+                vault.PathGuard.capture(
+                    root, item.restore_path, leaf_policy="absent"
+                )
+                for item in preflight.entries
+            )
+            destination_root_guard.recheck(root)
+            for item, destination_guard in zip(
+                preflight.entries, destination_guards, strict=True
+            ):
+                item.source_guard.recheck(root)
+                destination_guard.recheck(root)
+                if item.sidecar_guard is not None:
+                    item.sidecar_guard.recheck(root)
+            for census_guard in preflight.trash_census_guards:
+                census_guard.recheck(root)
+            if preflight.recovery_sidecar_guard is not None:
+                preflight.recovery_sidecar_guard.recheck(root)
             if lifecycle_writes:
                 vault.batch_atomic_write(
                     lifecycle_writes,
                     vault_root=root,
-                    required_guards=required_guards,
+                    required_guards=(*required_guards, destination_root_guard),
                 )
+            destination_root_guard.recheck(root)
+            for destination_guard in destination_guards:
+                destination_guard.recheck(root)
             mutate()
     except vault.VaultLockTimeout as error:
         raise SemanticWriteError(

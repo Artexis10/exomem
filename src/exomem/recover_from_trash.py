@@ -12,14 +12,13 @@ a different `restore_path` if the original location is now occupied.
 from __future__ import annotations
 
 import datetime as dt
-import json
 import logging
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import semantic_writes
+from . import relation_review, semantic_writes
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     DirectoryCensusGuard,
@@ -101,15 +100,29 @@ def recover_from_trash(
     # Determine restore_path: explicit > sidecar's original_path.
     sidecar = trash_abs.parent / f"{trash_abs.name}.meta.json"
     meta: dict = {}
-    sidecar_guard: PathGuard | None = None
+    sidecar_guard: PathGuard
+    sidecar_proof_guard: PathGuard | None = None
     sidecar_source: str | None = None
-    if sidecar.exists():
+    sidecar_rel = sidecar.relative_to(vault_root).as_posix()
+    try:
+        sidecar_source, sidecar_guard = read_guarded_text(vault_root, sidecar)
+        meta = relation_review.parse_exact_json_object(sidecar_source)
+        sidecar_proof_guard = sidecar_guard
+    except FileNotFoundError:
         try:
-            sidecar_source, sidecar_guard = read_guarded_text(vault_root, sidecar)
-            meta = json.loads(sidecar_source)
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, PathGuardError):
-            meta = {}
-            sidecar_guard = None
+            sidecar_guard = PathGuard.capture(
+                vault_root, sidecar_rel, leaf_policy="absent"
+            )
+        except PathGuardError as error:
+            raise RecoverError(
+                code="TRASH_SIDECAR_INVALID",
+                reason="trash sidecar absence could not be bound safely",
+            ) from error
+    except (OSError, ValueError) as error:
+        raise RecoverError(
+            code="TRASH_SIDECAR_INVALID",
+            reason="trash sidecar must be one exact strict UTF-8 JSON object",
+        ) from error
 
     if restore_path is None or not str(restore_path).strip():
         original = meta.get("original_path")
@@ -189,7 +202,7 @@ def recover_from_trash(
                     source,
                     source_guard,
                     destination_guard,
-                    sidecar_guard,
+                    sidecar_proof_guard,
                     sidecar_source,
                 )
             )
@@ -242,7 +255,7 @@ def recover_from_trash(
                                 destination_path,
                                 leaf_policy="absent",
                             ),
-                            sidecar_guard,
+                            sidecar_proof_guard,
                             sidecar_source,
                         )
                     )
@@ -312,13 +325,22 @@ def recover_from_trash(
             ) from e
 
     warnings: list[str] = []
-    if sidecar.exists():
+    if sidecar_guard.leaf_policy == "content":
         try:
+            sidecar_guard.recheck(vault_root)
             sidecar.unlink()
-        except OSError as e:
+        except (OSError, PathGuardError) as e:
             warnings.append(
-                f"recovered file ok but could not remove trash sidecar "
-                f"{sidecar.name!r}: {e}"
+                f"recovered file ok but trash sidecar changed or could not be "
+                f"removed safely: {sidecar.name!r}: {e}"
+            )
+    else:
+        try:
+            sidecar_guard.recheck(vault_root)
+        except PathGuardError as e:
+            warnings.append(
+                f"recovered file ok but absent trash sidecar changed; retained "
+                f"the new path occupant {sidecar.name!r}: {e}"
             )
 
     index_feedback: dict | None = None
