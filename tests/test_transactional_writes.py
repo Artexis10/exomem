@@ -9,7 +9,9 @@ from exomem import move_file as move_module
 from exomem import vault as vault_module
 
 
-def test_batch_atomic_write_rolls_back_mid_flip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_batch_atomic_write_rolls_back_mid_flip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     first = tmp_path / "first.md"
     second = tmp_path / "second.md"
     first.write_text("first-old", encoding="utf-8")

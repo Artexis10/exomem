@@ -9,24 +9,33 @@ list_directory, etc.).
 from __future__ import annotations
 
 import datetime as _dt
+import errno
 import hashlib
 import json
 import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
+import threading
+import time
 from collections.abc import Iterable
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO, Literal
 
 import yaml
 from slugify import slugify as _slugify
 
 from . import freshness
 from .kbdir import kb_dirname, kb_prefix
+
+if os.name == "nt":  # pragma: no cover - imported only on Windows
+    import msvcrt
+else:  # pragma: no cover - platform branch exercised on POSIX
+    import fcntl
 
 log = logging.getLogger(__name__)
 
@@ -102,6 +111,10 @@ def in_excluded_scan_dir(rel_path: str) -> bool:
 # `[[Target]]` or `[[Target|Alias]]`.
 _WIKILINK_PATTERN = re.compile(r"\[\[([^\]\|\n]+?)(?:\|[^\]\n]*)?\]\]")
 _FM_PATTERN = re.compile(r"^---\n(.*?)\n---\n?(.*)", re.DOTALL)
+_LOCK_NAMESPACES = frozenset({"activation-manifest", "semantic-creation"})
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+_HELD_LOCKS = threading.local()
 
 
 def resolve_vault(env_var: str = "EXOMEM_VAULT_PATH") -> Path:
@@ -241,15 +254,426 @@ def unique_path(directory: Path, stem: str, suffix: str = ".md") -> Path:
 
 
 @dataclass
+class VaultLockError(ValueError):
+    code: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+class VaultLockTimeout(VaultLockError):
+    pass
+
+
+def _lock_key(vault_root: Path, namespace: str) -> tuple[str, str]:
+    if namespace not in _LOCK_NAMESPACES:
+        raise VaultLockError("VAULT_LOCK_NAMESPACE", "unsupported vault lock namespace")
+    try:
+        root = str(Path(vault_root).resolve(strict=True))
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_ROOT", "vault root is not safely resolvable") from error
+    return root, hashlib.sha256(f"{root}\0{namespace}".encode()).hexdigest()
+
+
+def _private_lock_directory() -> Path:
+    owner = os.getuid() if hasattr(os, "getuid") else None
+    suffix = str(owner) if owner is not None else os.environ.get("USERNAME", "user")
+    directory = Path(tempfile.gettempdir()).resolve() / f"exomem-locks-{suffix}"
+    try:
+        info = directory.lstat()
+    except FileNotFoundError:
+        try:
+            directory.mkdir(mode=0o700)
+        except FileExistsError:
+            pass
+        info = directory.lstat()
+    except OSError as error:
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unreadable") from error
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode) or _is_reparse(info):
+        raise VaultLockError("VAULT_LOCK_DIRECTORY", "lock directory is unsafe")
+    if owner is not None:
+        if info.st_uid != owner or stat.S_IMODE(info.st_mode) != 0o700:
+            raise VaultLockError(
+                "VAULT_LOCK_DIRECTORY",
+                "lock directory must be private and owned by the current user",
+            )
+    return directory
+
+
+class _InterprocessFileLock:
+    def __init__(self, path: Path, *, deadline: float):
+        self.path = path
+        self.deadline = deadline
+        self._handle: BinaryIO | None = None
+
+    def __enter__(self) -> _InterprocessFileLock:
+        while True:
+            try:
+                handle = self.path.open("a+b")
+            except OSError as error:
+                raise VaultLockError("VAULT_LOCK_IO", "could not open vault lock") from error
+            try:
+                if os.name == "nt":  # pragma: no cover - Windows deployment
+                    handle.seek(0)
+                    if not handle.read(1):
+                        handle.write(b"\0")
+                        handle.flush()
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                handle.close()
+                if error.errno not in {errno.EACCES, errno.EAGAIN}:
+                    raise VaultLockError("VAULT_LOCK_IO", "could not acquire vault lock") from error
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise VaultLockTimeout(
+                        "VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock"
+                    ) from error
+                time.sleep(min(0.01, remaining))
+                continue
+            self._handle = handle
+            return self
+
+    def __exit__(self, *_: object) -> None:
+        if self._handle is None:
+            return
+        if os.name == "nt":  # pragma: no cover - Windows deployment
+            self._handle.seek(0)
+            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
+        self._handle.close()
+        self._handle = None
+
+
+@contextmanager
+def vault_creation_lock(
+    vault_root: Path,
+    namespace: Literal["activation-manifest", "semantic-creation"],
+    *,
+    timeout: float = 30.0,
+):
+    """Serialize one vault-scoped creation namespace under one shared deadline."""
+    if type(timeout) not in {int, float} or isinstance(timeout, bool) or timeout < 0:
+        raise VaultLockError("VAULT_LOCK_TIMEOUT_VALUE", "lock timeout must be nonnegative")
+    root, digest = _lock_key(Path(vault_root), namespace)
+    held = getattr(_HELD_LOCKS, "keys", set())
+    if held:
+        raise VaultLockError("VAULT_LOCK_NESTED", "nested vault creation locks are forbidden")
+    key = f"{root}\0{namespace}"
+    with _THREAD_LOCKS_GUARD:
+        thread_lock = _THREAD_LOCKS.setdefault(key, threading.Lock())
+    deadline = time.monotonic() + float(timeout)
+    remaining = max(0.0, deadline - time.monotonic())
+    if not thread_lock.acquire(timeout=remaining):
+        raise VaultLockTimeout("VAULT_LOCK_TIMEOUT", "timed out acquiring vault lock")
+    _HELD_LOCKS.keys = {key}
+    try:
+        lock_path = _private_lock_directory() / f"{digest}.lock"
+        with _InterprocessFileLock(lock_path, deadline=deadline):
+            yield lock_path
+    finally:
+        _HELD_LOCKS.keys = set()
+        thread_lock.release()
+
+
+@dataclass
+class CreateOnlyConflict(ValueError):
+    target: str
+    code: str = "CREATE_ONLY_CONFLICT"
+
+    def __post_init__(self) -> None:
+        ValueError.__init__(self, f"{self.code}: {self.target}")
+
+
+@dataclass
+class PathGuardError(ValueError):
+    code: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
+@dataclass(frozen=True, slots=True)
+class PathIdentity:
+    relative_path: str
+    device: int | None
+    inode: int | None
+    mode: int
+
+
+def _is_reparse(info: os.stat_result) -> bool:
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(info, "st_file_attributes", 0) & marker)
+
+
+def _identity(relative_path: str, info: os.stat_result) -> PathIdentity:
+    return PathIdentity(
+        relative_path,
+        getattr(info, "st_dev", None),
+        getattr(info, "st_ino", None),
+        info.st_mode,
+    )
+
+
+def _same_identity(expected: PathIdentity, actual: os.stat_result) -> bool:
+    return (
+        expected.device == getattr(actual, "st_dev", None)
+        and expected.inode == getattr(actual, "st_ino", None)
+        and expected.mode == actual.st_mode
+    )
+
+
+def _safe_guard_target(target: str) -> tuple[str, ...]:
+    if type(target) is not str or not target or "\\" in target or "\0" in target:
+        raise PathGuardError("PATH_GUARD_INVALID", "guard target must be a safe relative path")
+    posix = Path(target)
+    parts = tuple(target.split("/"))
+    if posix.is_absolute() or any(part in {"", ".", ".."} for part in parts):
+        raise PathGuardError("PATH_GUARD_INVALID", "guard target must be a safe relative path")
+    if re.match(r"^[A-Za-z]:", target):
+        raise PathGuardError("PATH_GUARD_INVALID", "guard target must be a safe relative path")
+    return parts
+
+
+def _leaf_hash(path: Path, expected: PathIdentity) -> str:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(path, flags)
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_IO", "guarded content could not be opened") from error
+    digest = hashlib.sha256()
+    try:
+        info = os.fstat(descriptor)
+        if not stat.S_ISREG(info.st_mode) or not _same_identity(expected, info):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded content identity changed")
+        while chunk := os.read(descriptor, 65536):
+            digest.update(chunk)
+    finally:
+        os.close(descriptor)
+    try:
+        current = path.lstat()
+    except OSError as error:
+        raise PathGuardError("PATH_GUARD_CHANGED", "guarded content identity changed") from error
+    if not _same_identity(expected, current):
+        raise PathGuardError("PATH_GUARD_CHANGED", "guarded content identity changed")
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class PathGuard:
+    target: str
+    ancestors: tuple[PathIdentity, ...]
+    missing_parents: tuple[str, ...]
+    leaf_identity: PathIdentity | None
+    leaf_policy: Literal["absent", "stable", "content"]
+    expected_content_hash: str | None
+
+    @classmethod
+    def capture(
+        cls,
+        vault_root: Path,
+        target: str,
+        *,
+        leaf_policy: Literal["absent", "stable", "content"],
+        expected_content_hash: str | None = None,
+    ) -> PathGuard:
+        parts = _safe_guard_target(target)
+        if leaf_policy not in {"absent", "stable", "content"}:
+            raise PathGuardError("PATH_GUARD_INVALID", "unsupported leaf policy")
+        if leaf_policy == "content" and not re.fullmatch(
+            r"[0-9a-f]{64}", expected_content_hash or ""
+        ):
+            raise PathGuardError("PATH_GUARD_INVALID", "content guard requires a lowercase SHA-256")
+        if leaf_policy != "content" and expected_content_hash is not None:
+            raise PathGuardError("PATH_GUARD_INVALID", "content hash requires content leaf policy")
+        root = Path(vault_root)
+        try:
+            root_info = root.lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root is unavailable") from error
+        if (
+            not stat.S_ISDIR(root_info.st_mode)
+            or stat.S_ISLNK(root_info.st_mode)
+            or _is_reparse(root_info)
+        ):
+            raise PathGuardError("PATH_GUARD_ROOT", "vault root is unsafe")
+        ancestors = [_identity(".", root_info)]
+        parent = root
+        missing: list[str] = []
+        for index, part in enumerate(parts[:-1]):
+            parent /= part
+            relative = "/".join(parts[: index + 1])
+            if missing:
+                missing.append(relative)
+                continue
+            try:
+                info = parent.lstat()
+            except FileNotFoundError:
+                missing.append(relative)
+                continue
+            except OSError as error:
+                raise PathGuardError("PATH_GUARD_IO", "guard ancestor is unreadable") from error
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "guard ancestor is unsafe")
+            ancestors.append(_identity(relative, info))
+        leaf = root.joinpath(*parts)
+        try:
+            leaf_info = leaf.lstat()
+        except FileNotFoundError:
+            leaf_info = None
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_IO", "guard leaf is unreadable") from error
+        if leaf_info is not None and (
+            stat.S_ISLNK(leaf_info.st_mode)
+            or _is_reparse(leaf_info)
+            or not stat.S_ISREG(leaf_info.st_mode)
+        ):
+            raise PathGuardError("PATH_GUARD_UNSAFE", "guard leaf is unsafe")
+        if leaf_policy == "absent" and leaf_info is not None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must be absent")
+        if leaf_policy in {"stable", "content"} and leaf_info is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf must exist")
+        guard = cls(
+            target,
+            tuple(ancestors),
+            tuple(missing),
+            _identity(target, leaf_info) if leaf_info is not None else None,
+            leaf_policy,
+            expected_content_hash,
+        )
+        guard.recheck(root)
+        return guard
+
+    def prepare_and_bind_parents(self, vault_root: Path) -> PathGuard:
+        self.recheck(vault_root)
+        root = Path(vault_root)
+        for relative in self.missing_parents:
+            path = root / relative
+            try:
+                path.mkdir()
+            except FileExistsError as error:
+                raise PathGuardError(
+                    "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
+                ) from error
+            info = path.lstat()
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
+                raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
+        return PathGuard.capture(
+            root,
+            self.target,
+            leaf_policy=self.leaf_policy,
+            expected_content_hash=self.expected_content_hash,
+        )
+
+    def recheck(self, vault_root: Path) -> None:
+        root = Path(vault_root)
+        for expected in self.ancestors:
+            path = root if expected.relative_path == "." else root / expected.relative_path
+            try:
+                info = path.lstat()
+            except OSError as error:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed") from error
+            if (
+                not _same_identity(expected, info)
+                or not stat.S_ISDIR(info.st_mode)
+                or stat.S_ISLNK(info.st_mode)
+                or _is_reparse(info)
+            ):
+                raise PathGuardError("PATH_GUARD_CHANGED", "guard ancestor changed")
+        for relative in self.missing_parents:
+            if os.path.lexists(root / relative):
+                raise PathGuardError("PATH_GUARD_CHANGED", "missing guard ancestor appeared")
+        leaf = root / self.target
+        exists = os.path.lexists(leaf)
+        if self.leaf_policy == "absent":
+            if exists:
+                raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf appeared")
+            return
+        if not exists or self.leaf_identity is None:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf disappeared")
+        try:
+            info = leaf.lstat()
+        except OSError as error:
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed") from error
+        if (
+            not _same_identity(self.leaf_identity, info)
+            or not stat.S_ISREG(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "guarded leaf changed")
+        if (
+            self.leaf_policy == "content"
+            and _leaf_hash(leaf, self.leaf_identity) != self.expected_content_hash
+        ):
+            raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+@dataclass
 class PlannedWrite:
     """One target file in a batch write: destination path + final content."""
 
     path: Path
     content: str
+    create_only: bool = False
+    guard: PathGuard | None = None
 
 
+def _safe_write_target(path: Path, vault_root: Path | None) -> str:
+    if vault_root is None:
+        return path.name
+    try:
+        return Path(os.path.abspath(path)).relative_to(
+            Path(os.path.abspath(vault_root))
+        ).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _prepare_path_guards(
+    vault_root: Path, guards: Iterable[PathGuard]
+) -> tuple[PathGuard, ...]:
+    original = tuple(guards)
+    for guard in original:
+        guard.recheck(vault_root)
+    missing = sorted(
+        {relative for guard in original for relative in guard.missing_parents},
+        key=lambda value: (len(Path(value).parts), value),
+    )
+    for relative in missing:
+        path = vault_root / relative
+        try:
+            path.mkdir()
+        except FileExistsError as error:
+            raise PathGuardError(
+                "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
+            ) from error
+        info = path.lstat()
+        if (
+            not stat.S_ISDIR(info.st_mode)
+            or stat.S_ISLNK(info.st_mode)
+            or _is_reparse(info)
+        ):
+            raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
+    return tuple(
+        PathGuard.capture(
+            vault_root,
+            guard.target,
+            leaf_policy=guard.leaf_policy,
+            expected_content_hash=guard.expected_content_hash,
+        )
+        for guard in original
+    )
 def batch_atomic_write(
-    writes: Iterable[PlannedWrite], *, vault_root: Path | None = None
+    writes: Iterable[PlannedWrite],
+    *,
+    vault_root: Path | None = None,
+    required_guards: Iterable[PathGuard] = (),
 ) -> list[Path]:
     """Stage each write as a sibling .tmp file, then os.replace() them into place.
 
@@ -271,6 +695,7 @@ def batch_atomic_write(
     for write in writes:
         deduped[write.path] = write
     writes = list(deduped.values())
+    read_only_guards = tuple(required_guards)
     # Access-tier backstop: when the caller knows the vault root, refuse any
     # write that lands in a `readonly`/`excluded` tree (_access.yaml). Central
     # here so every content writer inherits it without per-tool wiring. No
@@ -293,6 +718,39 @@ def batch_atomic_write(
             reason = access.writable_reason(vault_root, rel)
             if reason is not None:
                 raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+    if (
+        read_only_guards or any(write.guard is not None for write in writes)
+    ) and vault_root is None:
+        raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
+    bound_guards: list[PathGuard | None] = []
+    if vault_root is not None:
+        root = Path(vault_root)
+        write_guards: list[PathGuard] = []
+        guard_positions: list[int] = []
+        for write in writes:
+            guard = write.guard
+            if guard is None:
+                bound_guards.append(None)
+                continue
+            expected_path = root / guard.target
+            if os.path.abspath(write.path) != os.path.abspath(expected_path):
+                raise PathGuardError("PATH_GUARD_TARGET", "write path does not match guard target")
+            guard_positions.append(len(bound_guards))
+            write_guards.append(guard)
+            bound_guards.append(None)
+        prepared = _prepare_path_guards(root, (*write_guards, *read_only_guards))
+        for position, guard in zip(
+            guard_positions, prepared[: len(write_guards)], strict=True
+        ):
+            bound_guards[position] = guard
+        read_only_guards = prepared[len(write_guards) :]
+        for guard in (*read_only_guards, *(item for item in bound_guards if item is not None)):
+            guard.recheck(root)
+    else:
+        bound_guards = [None] * len(writes)
+    for write in writes:
+        if write.create_only and os.path.lexists(write.path):
+            raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
     staged: list[tuple[Path, Path]] = []  # (final, tmp)
     try:
         for w in writes:
@@ -314,7 +772,7 @@ def batch_atomic_write(
     backups: dict[Path, Path | None] = {}
     try:
         for final, _tmp in staged:
-            if not final.exists():
+            if not os.path.lexists(final):
                 backups[final] = None
                 continue
             fd, backup_str = tempfile.mkstemp(
@@ -334,7 +792,16 @@ def batch_atomic_write(
 
     replaced: list[Path] = []
     try:
-        for final, tmp in staged:
+        for index, (final, tmp) in enumerate(staged):
+            if vault_root is not None:
+                root = Path(vault_root)
+                for guard in read_only_guards:
+                    guard.recheck(root)
+                for guard in bound_guards[index:]:
+                    if guard is not None:
+                        guard.recheck(root)
+            if writes[index].create_only and os.path.lexists(final):
+                raise CreateOnlyConflict(_safe_write_target(final, vault_root))
             os.replace(tmp, final)
             replaced.append(final)
     except Exception as commit_error:
@@ -576,6 +1043,53 @@ def in_append_only_tree(rel_path: str) -> str | None:
 _YAML_SAFE_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
 
 
+class _DuplicateYamlKey(yaml.YAMLError):
+    pass
+
+
+class _UniqueKeySafeLoader(_YAML_SAFE_LOADER):
+    pass
+
+
+def _construct_unique_mapping(
+    loader: _UniqueKeySafeLoader, node: yaml.MappingNode, deep: bool = False
+) -> dict[Any, Any]:
+    loader.flatten_mapping(node)
+    result: dict[Any, Any] = {}
+    seen: set[Any] = set()
+    for key_node, value_node in node.value:
+        key = loader.construct_object(key_node, deep=deep)
+        try:
+            duplicate = key in seen
+        except TypeError as error:
+            raise yaml.constructor.ConstructorError(
+                "while constructing a mapping",
+                node.start_mark,
+                "found an unhashable key",
+                key_node.start_mark,
+            ) from error
+        if duplicate:
+            raise _DuplicateYamlKey("duplicate mapping key")
+        seen.add(key)
+        result[key] = loader.construct_object(value_node, deep=deep)
+    return result
+
+
+_UniqueKeySafeLoader.add_constructor(
+    yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG,
+    _construct_unique_mapping,
+)
+
+
+@dataclass
+class FrontmatterError(ValueError):
+    code: str
+    reason: str
+
+    def __post_init__(self) -> None:
+        ValueError.__init__(self, f"{self.code}: {self.reason}")
+
+
 def yaml_safe_load(text: str):
     """`yaml.safe_load` via libyaml when available (hot-path frontmatter seam).
 
@@ -586,7 +1100,9 @@ def yaml_safe_load(text: str):
     return yaml.load(text, Loader=_YAML_SAFE_LOADER)  # noqa: S506 — safe schema, see above
 
 
-def parse_frontmatter(text: str) -> tuple[dict[str, Any], str, str | None]:
+def parse_frontmatter(
+    text: str, *, strict: bool = False
+) -> tuple[dict[str, Any], str, str | None]:
     """Split a markdown file into (frontmatter_dict, body, frontmatter_text).
 
     Returns ({}, text, None) when no frontmatter block is present.
@@ -600,10 +1116,30 @@ def parse_frontmatter(text: str) -> tuple[dict[str, Any], str, str | None]:
     if body.startswith("\n"):
         body = body[1:]
     try:
-        fm = yaml_safe_load(fm_text) or {}
+        if strict:
+            fm = yaml.load(  # noqa: S506 - custom loader retains SafeLoader schema
+                fm_text, Loader=_UniqueKeySafeLoader
+            )
+        else:
+            fm = yaml_safe_load(fm_text)
+        fm = fm or {}
         if not isinstance(fm, dict):
+            if strict:
+                raise FrontmatterError(
+                    "INVALID_FRONTMATTER", "frontmatter root must be a mapping"
+                )
             fm = {}
-    except yaml.YAMLError:
+    except _DuplicateYamlKey as error:
+        if strict:
+            raise FrontmatterError(
+                "DUPLICATE_FRONTMATTER_KEY", "frontmatter contains a duplicate key"
+            ) from error
+        fm = {}
+    except yaml.YAMLError as error:
+        if strict:
+            raise FrontmatterError(
+                "INVALID_FRONTMATTER", "frontmatter is not valid safe YAML"
+            ) from error
         fm = {}
     return fm, body, fm_text
 

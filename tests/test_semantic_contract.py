@@ -61,6 +61,21 @@ def _corpus(
         tmp_path,
         states,
         registry=relation_registry.core_registry(),
+        identity_census=_identity_census(*states),
+    )
+
+
+def _identity_census(
+    *states: semantic_contract.SemanticPageState,
+) -> semantic_contract.StableIdentityCensus:
+    return semantic_contract.StableIdentityCensus(
+        tuple(
+            semantic_contract.StableIdentityEntry(
+                state.path,
+                state.identity if state.identity_kind == "exomem_id" else None,
+            )
+            for state in states
+        )
     )
 
 
@@ -146,6 +161,80 @@ def test_page_state_is_immutable_detached_and_deterministic(tmp_path: Path) -> N
         state.frontmatter["title"] = "Changed"  # type: ignore[index]
     with pytest.raises(TypeError):
         state.frontmatter["flags"][0] = "changed"  # type: ignore[index]
+
+
+def test_review_fingerprint_default_is_normalized_but_source_hash_stays_raw(
+    tmp_path: Path,
+) -> None:
+    raw = _source(exomem_id=_ID_A, body="Body.\r\n")
+    normalized = raw.replace("\r\n", "\n")
+    defaulted = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        raw,
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+    )
+    normalized_state = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        normalized,
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+    )
+    suppressed = semantic_contract.build_page_state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        raw,
+        relation_registry=relation_registry.core_registry(),
+        language_registry=semantic_language_registry.core_registry(),
+        review_fingerprint=None,
+    )
+
+    assert defaulted.source_hash == semantic_contract.vault.content_hash(raw)
+    assert defaulted.source_hash != normalized_state.source_hash
+    assert defaulted.review_fingerprint == normalized_state.review_fingerprint
+    assert defaulted.review_fingerprint is not None
+    assert suppressed.review_fingerprint is None
+
+
+def test_broad_identity_census_prevents_direct_review_state_bypass(
+    tmp_path: Path,
+) -> None:
+    page = _state(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/page.md",
+        _source(exomem_id=_ID_A, body="## Relations\n"),
+        review_fingerprint="fingerprint",
+    )
+    census = semantic_contract.StableIdentityCensus(
+        (
+            semantic_contract.StableIdentityEntry(page.path, _ID_A),
+            semantic_contract.StableIdentityEntry(
+                "Knowledge Base/Private/page.sync-conflict-copy.MD", _ID_A
+            ),
+        )
+    )
+    corpus = semantic_contract.SemanticCorpusContext.from_states(
+        tmp_path,
+        (page,),
+        registry=relation_registry.core_registry(),
+        identity_census=census,
+    )
+    review = semantic_contract.RelationReviewState(
+        "reviewed_none", _ID_A, "fingerprint", reason="reviewed"
+    )
+
+    result = _evaluate(
+        before=page,
+        after=page,
+        before_corpus=corpus,
+        after_corpus=corpus,
+        after_review=review,
+    )
+
+    assert result.relation_disposition.kind == "stale"
+    assert result.should_block
 
 
 def test_page_state_preserves_non_string_frontmatter_key_identity(
@@ -500,7 +589,10 @@ def test_attached_projects_use_any_valid_scope_and_superseded_by_keeps_authored_
         _source(title="Older", page_type="pattern", project="other"),
     )
     corpus = semantic_contract.SemanticCorpusContext.from_states(
-        tmp_path, (authored, older), registry=registry
+        tmp_path,
+        (authored, older),
+        registry=registry,
+        identity_census=_identity_census(authored, older),
     )
     extension, lifecycle = corpus.outbound[authored.path][0], corpus.outbound[older.path][0]
 
@@ -539,7 +631,10 @@ def test_project_scoped_relation_requires_an_attached_authored_project(
         _source(title="Target", page_type="pattern", project="alpha"),
     )
     corpus = semantic_contract.SemanticCorpusContext.from_states(
-        tmp_path, (authored, target), registry=registry
+        tmp_path,
+        (authored, target),
+        registry=registry,
+        identity_census=_identity_census(authored, target),
     )
     fact = corpus.outbound[authored.path][0]
 
@@ -580,7 +675,10 @@ def test_relation_scope_uses_graph_file_target_kind_and_preserves_raw_alias(
         _source(title="Target", page_type="pattern"),
     )
     corpus = semantic_contract.SemanticCorpusContext.from_states(
-        tmp_path, (source, target), registry=registry
+        tmp_path,
+        (source, target),
+        registry=registry,
+        identity_census=_identity_census(source, target),
     )
     fact = corpus.outbound[source.path][0]
 
@@ -1204,6 +1302,7 @@ def test_global_relation_registry_finding_uses_exact_extension_identity(
         tmp_path,
         (page,),
         registry=registry,
+        identity_census=_identity_census(page),
     )
 
     result = _evaluate(
@@ -1272,6 +1371,7 @@ def test_relation_registry_identity_is_exact_when_extension_paths_collide(
         tmp_path,
         (page,),
         registry=registry,
+        identity_census=_identity_census(page),
     )
 
     result = _evaluate(
@@ -1307,6 +1407,7 @@ def test_root_relation_registry_findings_use_distinct_registry_level_identities(
         tmp_path,
         (page,),
         registry=registry,
+        identity_census=_identity_census(page),
     )
 
     result = _evaluate(

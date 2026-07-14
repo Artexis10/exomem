@@ -7,20 +7,14 @@ independent from rebuildable indexes and review decisions.
 
 from __future__ import annotations
 
-import errno
-import hashlib
-import os
 import re
-import tempfile
-import threading
-import time
 from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
-from typing import Any, BinaryIO
+from typing import Any
 
 import yaml
 
@@ -28,13 +22,15 @@ from . import access, activation
 from . import find as find_module
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, normalize_id
-from .vault import PlannedWrite, batch_atomic_write, content_hash, parse_frontmatter
-
-if os.name == "nt":  # pragma: no cover - imported only on Windows
-    import msvcrt
-else:  # pragma: no cover - platform branch, behavior exercised on POSIX
-    import fcntl
-
+from .vault import (
+    PlannedWrite,
+    VaultLockError,
+    VaultLockTimeout,
+    batch_atomic_write,
+    content_hash,
+    parse_frontmatter,
+    vault_creation_lock,
+)
 
 SCHEMA_VERSION = 1
 CONTRACT_VERSION = 1
@@ -45,8 +41,6 @@ _PAGE_KEYS = frozenset(
 _ROOT_KEYS = frozenset({"schema_version", "contract_version", "pages"})
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UNSET = object()
-_THREAD_LOCKS: dict[str, threading.Lock] = {}
-_THREAD_LOCKS_GUARD = threading.Lock()
 
 
 @dataclass
@@ -476,64 +470,18 @@ def _normalize_page_path(vault_root: Path, path: Path | str) -> tuple[str | None
     return rel_path, absolute
 
 
-def _thread_lock(path: Path) -> threading.Lock:
-    key = str(path.resolve())
-    with _THREAD_LOCKS_GUARD:
-        return _THREAD_LOCKS.setdefault(key, threading.Lock())
-
-
-class _InterprocessFileLock:
-    """Portable advisory lock, released automatically when the process exits."""
-
-    def __init__(self, path: Path, *, timeout: float = 30.0):
-        self.path = path
-        self.timeout = timeout
-        self._handle: BinaryIO | None = None
-
-    def __enter__(self) -> _InterprocessFileLock:
-        deadline = time.monotonic() + self.timeout
-        while True:
-            handle = self.path.open("a+b")
-            try:
-                if os.name == "nt":  # pragma: no cover - Windows deployment
-                    handle.seek(0)
-                    if not handle.read(1):
-                        handle.write(b"\0")
-                        handle.flush()
-                    handle.seek(0)
-                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
-                else:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except OSError as error:
-                handle.close()
-                if error.errno not in {errno.EACCES, errno.EAGAIN}:
-                    raise
-                if time.monotonic() >= deadline:
-                    raise ActivationManifestError(
-                        "ACTIVATION_MANIFEST_LOCK_TIMEOUT",
-                        "timed out acquiring the activation-manifest creation lock",
-                    ) from None
-                time.sleep(0.01)
-                continue
-            self._handle = handle
-            return self
-
-    def __exit__(self, *_: object) -> None:
-        if self._handle is None:
-            return
-        if os.name == "nt":  # pragma: no cover - Windows deployment
-            self._handle.seek(0)
-            msvcrt.locking(self._handle.fileno(), msvcrt.LK_UNLCK, 1)
-        else:
-            fcntl.flock(self._handle.fileno(), fcntl.LOCK_UN)
-        self._handle.close()
-        self._handle = None
-
-
 @contextmanager
 def _creation_lock(path: Path) -> Iterator[None]:
-    digest = hashlib.sha256(str(path.resolve()).encode("utf-8")).hexdigest()
-    lock_dir = Path(tempfile.gettempdir()) / "exomem-activation-locks"
-    lock_dir.mkdir(parents=True, exist_ok=True)
-    with _thread_lock(path), _InterprocessFileLock(lock_dir / f"{digest}.lock"):
-        yield
+    try:
+        with vault_creation_lock(path.parents[2], "activation-manifest"):
+            yield
+    except VaultLockTimeout as error:
+        raise ActivationManifestError(
+            "ACTIVATION_MANIFEST_LOCK_TIMEOUT",
+            "timed out acquiring the activation-manifest creation lock",
+        ) from error
+    except VaultLockError as error:
+        raise ActivationManifestError(
+            error.code,
+            "could not safely acquire the activation-manifest creation lock",
+        ) from error

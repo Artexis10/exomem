@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
@@ -38,6 +40,33 @@ _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset({"edit", "observe"})
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
+_REVIEW_FINGERPRINT_UNSET = object()
+
+
+def _canonical_hash(payload: Mapping[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def review_content_fingerprint(page_identity: str, source: str) -> str:
+    """Return the portable review fingerprint shared by model and coordinator."""
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    if not normalized.endswith("\n"):
+        normalized += "\n"
+    return _canonical_hash(
+        {
+            "schema_version": 1,
+            "page_identity": page_identity,
+            "normalized_source_hash": hashlib.sha256(
+                normalized.encode("utf-8")
+            ).hexdigest(),
+        }
+    )
 
 
 def _stable_value_key(value: Any) -> tuple[str, str, str]:
@@ -166,6 +195,81 @@ class SemanticPageState:
             "canonical_bullet_count": self.document.canonical_bullet_count,
             "eligible_governed": self.eligible_governed,
             "eligible_compiled": self.eligible_compiled,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class StableIdentityEntry:
+    path: str
+    page_identity: str | None
+
+    def __post_init__(self) -> None:
+        path = PurePosixPath(str(self.path).replace("\\", "/")).as_posix()
+        if (
+            not path
+            or path.startswith("/")
+            or any(part in {"", ".", ".."} for part in PurePosixPath(path).parts)
+            or PurePosixPath(path).suffix.casefold() != ".md"
+        ):
+            raise ValueError("stable identity path must be safe vault-relative POSIX")
+        identity = self.page_identity
+        if identity is not None and (
+            type(identity) is not str or normalize_id(identity) != identity
+        ):
+            raise ValueError("stable page identity must be a canonical UUID")
+        object.__setattr__(self, "path", path)
+
+
+@dataclass(frozen=True, slots=True)
+class StableIdentityCensus:
+    entries: tuple[StableIdentityEntry, ...]
+    paths_by_identity: Mapping[str, tuple[str, ...]] = field(init=False)
+
+    def __post_init__(self) -> None:
+        entries = tuple(
+            sorted(
+                tuple(self.entries),
+                key=lambda item: (item.path, item.page_identity or ""),
+            )
+        )
+        paths = [entry.path for entry in entries]
+        if len(paths) != len(set(paths)):
+            raise ValueError("stable identity census contains a duplicate path")
+        grouped: dict[str, list[str]] = {}
+        for entry in entries:
+            if entry.page_identity is not None:
+                grouped.setdefault(entry.page_identity, []).append(entry.path)
+        object.__setattr__(self, "entries", entries)
+        object.__setattr__(
+            self,
+            "paths_by_identity",
+            MappingProxyType(
+                {identity: tuple(sorted(values)) for identity, values in sorted(grouped.items())}
+            ),
+        )
+
+    def with_page(self, page: SemanticPageState) -> StableIdentityCensus:
+        entries = [entry for entry in self.entries if entry.path != page.path]
+        entries.append(
+            StableIdentityEntry(
+                page.path,
+                page.identity if page.identity_kind == "exomem_id" else None,
+            )
+        )
+        return StableIdentityCensus(tuple(entries))
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "entry_count": len(self.entries),
+            "identity_count": len(self.paths_by_identity),
+            "entries": [
+                {"path": entry.path, "page_identity": entry.page_identity}
+                for entry in self.entries
+            ],
+            "paths_by_identity": {
+                identity: list(paths)
+                for identity, paths in self.paths_by_identity.items()
+            },
         }
 
 
@@ -459,6 +563,7 @@ class SemanticCorpusContext:
     inbound: Mapping[str, tuple[RelationFact, ...]]
     outbound: Mapping[str, tuple[RelationFact, ...]]
     activation_census: activation_manifest.ActivationCensus
+    identity_census: StableIdentityCensus
     registry: relation_registry.RelationRegistry = field(repr=False, compare=False)
 
     def __post_init__(self) -> None:
@@ -509,18 +614,29 @@ class SemanticCorpusContext:
         states: Iterable[SemanticPageState],
         *,
         registry: relation_registry.RelationRegistry,
+        identity_census: StableIdentityCensus,
     ) -> SemanticCorpusContext:
         by_path: dict[str, SemanticPageState] = {}
         for state in states:
             if state.path in by_path:
                 raise ValueError(f"duplicate semantic page path: {state.path}")
             by_path[state.path] = state
-        return _context_from_state_map(Path(vault_root), by_path, _copy_registry(registry))
+        return _context_from_state_map(
+            Path(vault_root),
+            by_path,
+            _copy_registry(registry),
+            StableIdentityCensus(tuple(identity_census.entries)),
+        )
 
     def with_candidate(self, state: SemanticPageState) -> SemanticCorpusContext:
         pages = dict(self.pages)
         pages[state.path] = state
-        return _context_from_state_map(self.vault_root, pages, self.registry)
+        return _context_from_state_map(
+            self.vault_root,
+            pages,
+            self.registry,
+            self.identity_census.with_page(state),
+        )
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -529,6 +645,7 @@ class SemanticCorpusContext:
             "relation_facts": [fact.as_dict() for fact in self.relation_facts],
             "eligible_governed_paths": sorted(self.eligible_governed_paths),
             "eligible_compiled_paths": sorted(self.eligible_compiled_paths),
+            "identity_census": self.identity_census.as_dict(),
             "inbound": {
                 path: [fact.identity for fact in facts] for path, facts in self.inbound.items()
             },
@@ -578,7 +695,7 @@ def build_page_state(
     *,
     relation_registry: relation_registry.RelationRegistry | None = None,
     language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
-    review_fingerprint: str | None = None,
+    review_fingerprint: str | None | object = _REVIEW_FINGERPRINT_UNSET,
 ) -> SemanticPageState:
     """Build detached semantic state from one already-read Markdown string."""
     root = Path(vault_root)
@@ -612,12 +729,25 @@ def build_page_state(
     normalized_id = normalize_id(frontmatter.get(ID_FIELD))
     identity_kind = "exomem_id" if normalized_id is not None else "path"
     identity = normalized_id or rel_path
+    resolved_review_fingerprint = review_fingerprint
+    if review_fingerprint is _REVIEW_FINGERPRINT_UNSET:
+        resolved_review_fingerprint = (
+            review_content_fingerprint(normalized_id, source)
+            if normalized_id is not None
+            else None
+        )
+    elif review_fingerprint is not None and type(review_fingerprint) is not str:
+        raise ValueError("review_fingerprint must be a string or None")
     return SemanticPageState(
         path=rel_path,
         identity_kind=identity_kind,
         identity=identity,
         source_hash=vault.content_hash(source),
-        review_fingerprint=review_fingerprint,
+        review_fingerprint=(
+            str(resolved_review_fingerprint)
+            if resolved_review_fingerprint is not None
+            else None
+        ),
         frontmatter=frontmatter,
         page_type=page_type,
         projects=projects,
@@ -640,6 +770,7 @@ def build_corpus_context(
     root = Path(vault_root)
     relation_definitions = registry or relation_registry.load_registry(root)
     language = language_registry or semantic_language_registry.load_registry(root)
+    identity_census, census_sources = _build_identity_census(root)
     states: dict[str, SemanticPageState] = {}
     candidate_path = candidate.path if candidate is not None else None
     for disk_path in sorted(vault.walk_vault_md(root), key=lambda item: item.as_posix()):
@@ -650,7 +781,9 @@ def build_corpus_context(
         if rel_path == candidate_path:
             continue
         try:
-            source = disk_path.read_text(encoding="utf-8")
+            source = census_sources.get(rel_path)
+            if source is None:
+                source = disk_path.read_text(encoding="utf-8")
         except (OSError, UnicodeDecodeError) as error:
             if (
                 activation.is_managed_governed_path(root, disk_path)
@@ -670,7 +803,108 @@ def build_corpus_context(
         )
     if candidate is not None:
         states[candidate.path] = candidate
-    return _context_from_state_map(root, states, _copy_registry(relation_definitions))
+        identity_census = identity_census.with_page(candidate)
+    return _context_from_state_map(
+        root,
+        states,
+        _copy_registry(relation_definitions),
+        identity_census,
+    )
+
+
+def _build_identity_census(
+    root: Path,
+) -> tuple[StableIdentityCensus, Mapping[str, str]]:
+    """Read every Markdown file below KB once without following aliases."""
+    kb = vault.kb_root(root)
+    entries: list[StableIdentityEntry] = []
+    sources: dict[str, str] = {}
+
+    def walk(directory: Path) -> None:
+        try:
+            children = sorted(os.scandir(directory), key=lambda item: item.name.casefold())
+        except OSError as error:
+            raise activation_manifest.ActivationManifestError(
+                "IDENTITY_CENSUS_ENUMERATION_FAILED",
+                "could not enumerate the stable-identity census",
+            ) from error
+        for child in children:
+            path = Path(child.path)
+            try:
+                info = child.stat(follow_symlinks=False)
+            except OSError as error:
+                raise activation_manifest.ActivationManifestError(
+                    "IDENTITY_CENSUS_ENTRY_UNREADABLE",
+                    "could not inspect a stable-identity census entry",
+                ) from error
+            if child.is_symlink() or vault._is_reparse(info):
+                raise activation_manifest.ActivationManifestError(
+                    "IDENTITY_CENSUS_UNSAFE_ENTRY",
+                    "stable-identity census contains a filesystem alias",
+                )
+            if stat.S_ISDIR(info.st_mode):
+                walk(path)
+                continue
+            if path.suffix.casefold() != ".md":
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise activation_manifest.ActivationManifestError(
+                    "IDENTITY_CENSUS_NONREGULAR_MARKDOWN",
+                    "stable-identity census contains nonregular Markdown",
+                )
+            rel = path.relative_to(root).as_posix()
+            try:
+                source = path.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError) as error:
+                code = (
+                    "ACTIVATION_MANIFEST_PAGE_UNREADABLE"
+                    if activation.is_managed_governed_path(root, path)
+                    and access.access_tier(root, rel) == access.TIER_READ_WRITE
+                    else "IDENTITY_CENSUS_PAGE_UNREADABLE"
+                )
+                raise activation_manifest.ActivationManifestError(
+                    code,
+                    f"could not safely inspect stable identity at {rel}",
+                ) from error
+            try:
+                frontmatter, _, _ = vault.parse_frontmatter(source, strict=True)
+            except vault.FrontmatterError as error:
+                raise activation_manifest.ActivationManifestError(
+                    error.code,
+                    f"could not safely inspect stable identity at {rel}",
+                ) from error
+            raw_identity = frontmatter.get(ID_FIELD)
+            identity: str | None = None
+            if raw_identity is not None:
+                if not isinstance(raw_identity, str) or normalize_id(raw_identity) is None:
+                    raise activation_manifest.ActivationManifestError(
+                        "IDENTITY_CENSUS_INVALID_ID",
+                        f"stable identity is invalid at {rel}",
+                    )
+                identity = normalize_id(raw_identity)
+            entries.append(StableIdentityEntry(rel, identity))
+            sources[rel] = source
+
+    try:
+        root_info = kb.lstat()
+    except FileNotFoundError:
+        return StableIdentityCensus(()), MappingProxyType({})
+    except OSError as error:
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_ROOT_UNREADABLE",
+            "Knowledge Base root is unavailable for identity census",
+        ) from error
+    if (
+        not stat.S_ISDIR(root_info.st_mode)
+        or stat.S_ISLNK(root_info.st_mode)
+        or vault._is_reparse(root_info)
+    ):
+        raise activation_manifest.ActivationManifestError(
+            "IDENTITY_CENSUS_UNSAFE_ROOT",
+            "Knowledge Base root is unsafe for identity census",
+        )
+    walk(kb)
+    return StableIdentityCensus(tuple(entries)), MappingProxyType(dict(sources))
 
 
 def _resolver_snapshot(
@@ -693,6 +927,7 @@ def _context_from_state_map(
     root: Path,
     states: Mapping[str, SemanticPageState],
     registry: relation_registry.RelationRegistry,
+    identity_census: StableIdentityCensus,
 ) -> SemanticCorpusContext:
     ordered_pages = {path: states[path] for path in sorted(states)}
     entries = tuple((path, ordered_pages[path].title) for path in ordered_pages)
@@ -748,6 +983,7 @@ def _context_from_state_map(
             }
         ),
         activation_census=activation_manifest.ActivationCensus.from_candidates(candidates),
+        identity_census=identity_census,
         registry=registry,
     )
 
@@ -1078,9 +1314,15 @@ def qualify_relation(
     return RelationQualification(not ordered, ordered)
 
 
-def _review_current(review: RelationReviewState, page: SemanticPageState) -> bool:
+def _review_current(
+    review: RelationReviewState,
+    page: SemanticPageState,
+    corpus: SemanticCorpusContext,
+) -> bool:
     return (
-        review.page_identity == page.identity
+        page.identity_kind == "exomem_id"
+        and review.page_identity == page.identity
+        and corpus.identity_census.paths_by_identity.get(page.identity) == (page.path,)
         and page.review_fingerprint is not None
         and review.content_fingerprint == page.review_fingerprint
     )
@@ -1107,7 +1349,7 @@ def _relation_disposition(
             qualifying.append((direction, fact))
         else:
             rejected.append(RejectedRelationFact(fact, result.reasons))
-    review_is_current = review is not None and _review_current(review, page)
+    review_is_current = review is not None and _review_current(review, page, corpus)
     stale_review = review is not None and not review_is_current
     other_governed = corpus.eligible_governed_paths - {page.path}
     if qualifying:
