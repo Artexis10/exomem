@@ -1176,12 +1176,14 @@ def upsert_after_write_status(
 
 
 def upsert_after_write(vault_root: Path, written_paths: list[Path]) -> bool:
-    """Compatibility wrapper returning whether all eligible work completed."""
+    """Preserve the historical Boolean for primary vector work completion."""
     status = upsert_after_write_status(vault_root, written_paths)
     # Preserve the legacy memoized-import-failure precedence: historically a
     # stripped install returned ``False`` even for a batch containing no
     # embeddable paths.
-    return not _IMPORT_FAILED and status.status == "completed"
+    return not _IMPORT_FAILED and (
+        status.status == "completed" or status.code == "embedding_auxiliary_failed"
+    )
 
 
 def _live_embed_max_chunks() -> int:

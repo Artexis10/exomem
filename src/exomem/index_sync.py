@@ -213,11 +213,17 @@ def _rel_md_paths(vault_root: Path, paths: list[Path]) -> list[str]:
     return out
 
 
-def _record_deferred_semantic_upserts(vault_root: Path, paths: list[Path]) -> int:
-    rels = _rel_md_paths(vault_root, paths)
-    before = deferred_index.status(vault_root)["count"]
-    deferred_index.add(vault_root, rels)
-    return max(0, deferred_index.status(vault_root)["count"] - before)
+def _record_deferred_semantic_upserts(
+    vault_root: Path, paths: list[Path]
+) -> tuple[int, int]:
+    from . import index_paths
+
+    rels = [
+        rel
+        for rel in _rel_md_paths(vault_root, paths)
+        if index_paths.is_embeddable_path(vault_root / rel)
+    ]
+    return len(rels), deferred_index.add(vault_root, rels)
 
 
 def deferred_work_status(vault_root: Path | None = None) -> dict:
@@ -338,7 +344,9 @@ def upsert_after_write(
     )
     if defer_semantic or mode.defer_expensive_indexes():
         try:
-            added = _record_deferred_semantic_upserts(vault_root, eligible)
+            semantic_count, added = _record_deferred_semantic_upserts(
+                vault_root, eligible
+            )
         except Exception:  # noqa: BLE001 - degradation is reported, other lanes landed
             log.warning("durable semantic defer failed", exc_info=True)
             components.append(
@@ -349,11 +357,18 @@ def upsert_after_write(
         else:
             if added:
                 log.info("deferred semantic indexing for %d markdown file(s)", added)
-            components.append(
-                IndexComponentOutcome(
-                    "embeddings", "deferred", "deferred_durable"
+            if semantic_count:
+                components.append(
+                    IndexComponentOutcome(
+                        "embeddings", "deferred", "deferred_durable"
+                    )
                 )
-            )
+            else:
+                components.append(
+                    IndexComponentOutcome(
+                        "embeddings", "accepted", "no_eligible_paths"
+                    )
+                )
     else:
         from . import embeddings
 

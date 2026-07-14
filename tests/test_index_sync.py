@@ -80,6 +80,54 @@ def test_embedding_upsert_status_distinguishes_completed_and_degraded(
     assert degraded.status == "degraded"
     assert degraded.code == "embedding_encode_failed"
     assert "private backend detail" not in repr(degraded)
+    assert embeddings.upsert_after_write(tmp_path, [target]) is False
+
+    monkeypatch.setattr(
+        embeddings,
+        "get_model",
+        lambda: (_ for _ in ()).throw(RuntimeError("private model detail")),
+    )
+    assert embeddings.upsert_after_write(tmp_path, [target]) is False
+
+
+def test_embedding_legacy_bool_ignores_claim_auxiliary_only_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import claims
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "item.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Item\n", encoding="utf-8")
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    readiness.reset()
+    monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    page = SimpleNamespace(rel_path="Knowledge Base/Notes/item.md")
+    monkeypatch.setattr(find_module._CACHE, "get", lambda *_args: page)
+    monkeypatch.setattr(embeddings, "_chunks_for_page", lambda *_args: ["item"])
+    monkeypatch.setattr(embeddings, "_embed_live_chunks", lambda chunks: [[1.0]])
+
+    class _Index:
+        def upsert_file(self, *_args) -> None:
+            return None
+
+        def delete_file(self, *_args) -> None:
+            return None
+
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: _Index())
+    monkeypatch.setattr(claims, "claim_level_enabled", lambda: True)
+    monkeypatch.setattr(
+        claims,
+        "upsert_claims_after_write",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("private claim detail")),
+    )
+
+    status = embeddings.upsert_after_write_status(tmp_path, [target])
+
+    assert status.status == "degraded"
+    assert status.code == "embedding_auxiliary_failed"
+    assert "private claim detail" not in repr(status)
+    assert embeddings.upsert_after_write(tmp_path, [target]) is True
 
 
 def test_embedding_delete_status_distinguishes_disabled_completed_and_degraded(
@@ -197,6 +245,37 @@ def test_durable_defer_report_does_not_enter_embedding_warmup_queue(
         assert report.reconcile_required is False
     finally:
         readiness.reset()
+        deferred_index.clear(tmp_path)
+
+
+def test_durable_defer_with_no_semantic_paths_reports_accepted_noop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph, find, lexstore, memory_refs
+
+    target = tmp_path / "Knowledge Base" / "config.json"
+    target.parent.mkdir(parents=True)
+    target.write_text("{}\n", encoding="utf-8")
+    for module in (lexstore, memory_refs, epistemic_graph):
+        monkeypatch.setattr(module, "upsert_after_write", lambda *_args: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_args: None)
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_args: (_ for _ in ()).throw(AssertionError("must not dispatch")),
+    )
+    deferred_index.clear(tmp_path)
+    try:
+        report = index_sync.upsert_after_write(
+            tmp_path, [target], defer_semantic=True
+        )
+
+        outcome = _outcome(report, "embeddings")
+        assert outcome.outcome == "accepted"
+        assert outcome.code == "no_eligible_paths"
+        assert deferred_index.status(tmp_path)["count"] == 0
+        assert report.reconcile_required is False
+    finally:
         deferred_index.clear(tmp_path)
 
 
