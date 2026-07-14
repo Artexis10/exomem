@@ -7,42 +7,17 @@
       "type": "object"
     }
   },
-  "adopt_vault": {
-    "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
+  "bootstrap": {
+    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, how compiled notes differ from raw sources/evidence,\nand how Exomem differs from built-in AI memory. The payload is deterministic\ninstruction plus local compute policy and product-surface metadata; it does\nnot inspect or summarize vault content.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "path": {
-          "default": "",
-          "description": "Vault subtree to scan.",
+        "profile": {
+          "default": "compact",
+          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is enough for normal clients. Full adds examples. Diagnostics adds performance interpretation guidance.",
           "type": "string"
         },
-        "mode": {
-          "default": "scan-only",
-          "description": "scan-only, save-manifest, copy-as-sources, or compile-selected.",
-          "type": "string"
-        },
-        "max_depth": {
-          "default": 3,
-          "description": "Folder tree depth cap.",
-          "type": "integer"
-        },
-        "include_hidden": {
-          "default": false,
-          "description": "Include hidden files/directories.",
-          "type": "boolean"
-        },
-        "samples": {
-          "default": 5,
-          "description": "Filename sample count per folder.",
-          "type": "integer"
-        },
-        "pack_limit": {
-          "default": 6,
-          "description": "Max suggested knowledge packs.",
-          "type": "integer"
-        },
-        "manifest_path": {
+        "workflow": {
           "anyOf": [
             {
               "type": "string"
@@ -52,22 +27,7 @@
             }
           ],
           "default": null,
-          "description": "Optional manifest destination."
-        },
-        "selected_paths": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Explicit legacy files for copy/compile modes."
+          "description": "Optional caller-selected workflow label. Returned as context only; it does not change server behavior."
         }
       },
       "type": "object"
@@ -244,29 +204,39 @@
       "type": "object"
     }
   },
-  "bootstrap": {
-    "description": "Return Exomem's versioned operating contract for generic MCP clients.\n\nCall this once at the start of a session when the client does not have the\nExomem Claude Skill loaded. It teaches the agent how to use the tools: when\nto search, when to save, how to interpret scoped misses, which `find` knobs\nare cheap vs diagnostic, how compiled notes differ from raw sources/evidence,\nand how Exomem differs from built-in AI memory. The payload is deterministic\ninstruction plus local compute policy and product-surface metadata; it does\nnot inspect or summarize vault content.",
+  "read_memory": {
+    "description": "Read one memory page or curated vault file by path.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. This wraps the canonical page reader and can include history and\nlink summaries in the same call.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
-        "profile": {
-          "default": "compact",
-          "description": "\"compact\" (default), \"full\", or \"diagnostics\". Compact is enough for normal clients. Full adds examples. Diagnostics adds performance interpretation guidance.",
+        "path": {
+          "description": "Vault-relative path or Knowledge Base-relative shorthand.",
           "type": "string"
         },
-        "workflow": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional caller-selected workflow label. Returned as context only; it does not change server behavior."
+        "frontmatter_only": {
+          "default": false,
+          "description": "Return only frontmatter for cheap scanning.",
+          "type": "boolean"
+        },
+        "include_history": {
+          "default": false,
+          "description": "Include recorded edit/supersession history.",
+          "type": "boolean"
+        },
+        "links": {
+          "default": false,
+          "description": "Include inbound and outbound wikilink summaries.",
+          "type": "boolean"
+        },
+        "include_raw": {
+          "default": false,
+          "description": "Include the raw markdown file text.",
+          "type": "boolean"
         }
       },
+      "required": [
+        "path"
+      ],
       "type": "object"
     }
   },
@@ -306,6 +276,780 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    }
+  },
+  "remember": {
+    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`;\nproof artifacts belong in `preserve_evidence`.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "content": {
+          "description": "Full markdown body to write after frontmatter.",
+          "type": "string"
+        },
+        "title": {
+          "description": "Unicode display title stored in frontmatter and the H1.",
+          "type": "string"
+        },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case filename component."
+        },
+        "note_type": {
+          "default": "insight",
+          "description": "research-note, insight, failure, pattern, experiment, or production-log.",
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project keys for cross-project notes. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source/evidence paths this conclusion draws from."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowercase tags."
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional status override."
+        },
+        "severity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Failure severity."
+        },
+        "pattern_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pattern subtype."
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment domain."
+        },
+        "started": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment start date."
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment duration."
+        },
+        "hypothesis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment hypothesis."
+        },
+        "n": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment sample size."
+        },
+        "concluded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment conclusion date."
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production-log medium."
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production recording date."
+        },
+        "published": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production publication date."
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production host/creator."
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production editor/producer."
+        },
+        "suggestions": {
+          "default": true,
+          "description": "Include link suggestions in the result.",
+          "type": "boolean"
+        },
+        "project_category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Category for a new project key."
+        }
+      },
+      "required": [
+        "content",
+        "title"
+      ],
+      "type": "object"
+    }
+  },
+  "edit_memory": {
+    "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Page to edit.",
+          "type": "string"
+        },
+        "why": {
+          "description": "One-line rationale recorded in the log.",
+          "type": "string"
+        },
+        "new_body": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replace the whole markdown body."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replace tags."
+        },
+        "old_string": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact body snippet to replace."
+        },
+        "new_string": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Replacement text."
+        },
+        "replace_all": {
+          "default": false,
+          "description": "Replace every occurrence of old_string.",
+          "type": "boolean"
+        },
+        "heading": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Section heading for section-targeted edits."
+        },
+        "section_position": {
+          "default": "append",
+          "description": "append, prepend, or replace.",
+          "type": "string"
+        },
+        "edits": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Batch edits, each with old_string/new_string/replace_all."
+        },
+        "row_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opinion-row key to fill."
+        },
+        "take": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opinion-row text."
+        },
+        "overwrite": {
+          "default": false,
+          "description": "Allow replacing an existing take.",
+          "type": "boolean"
+        },
+        "field": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Frontmatter field to set."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "items": {},
+              "type": "array"
+            },
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "New frontmatter value."
+        },
+        "allow_curated": {
+          "default": false,
+          "description": "Permit frontmatter patch under curated trees.",
+          "type": "boolean"
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Refuse write if content changed since read."
+        },
+        "validate_only": {
+          "default": false,
+          "description": "Preview a surgical match without writing.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "path",
+        "why"
+      ],
+      "type": "object"
+    }
+  },
+  "replace_memory": {
+    "description": "Supersede an existing compiled memory with a new version.\n\nThe old page remains readable and points to the new page. Use this for\nmeaningful changes in conclusion, not small edits.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "old_path": {
+          "description": "Existing page to supersede.",
+          "type": "string"
+        },
+        "content": {
+          "description": "Full markdown body for the new page.",
+          "type": "string"
+        },
+        "title": {
+          "description": "New page title.",
+          "type": "string"
+        },
+        "slug": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional lowercase ASCII kebab-case filename component."
+        },
+        "note_type": {
+          "default": "insight",
+          "description": "New page type.",
+          "type": "string"
+        },
+        "reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Why the old page is being superseded."
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required for research-note."
+        },
+        "projects": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project keys."
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source/evidence paths for the new conclusion."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowercase tags."
+        },
+        "status": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional status override."
+        },
+        "severity": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Failure severity."
+        },
+        "pattern_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Pattern subtype."
+        },
+        "domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment domain."
+        },
+        "started": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment start date."
+        },
+        "duration": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment duration."
+        },
+        "hypothesis": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment hypothesis."
+        },
+        "n": {
+          "anyOf": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment sample size."
+        },
+        "concluded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Experiment conclusion date."
+        },
+        "medium": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production-log medium."
+        },
+        "recorded": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production recording date."
+        },
+        "published": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production publication date."
+        },
+        "host": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production host/creator."
+        },
+        "editor": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Production editor/producer."
+        },
+        "project_category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Category for a new project key."
+        }
+      },
+      "required": [
+        "old_path",
+        "content",
+        "title"
+      ],
       "type": "object"
     }
   },
@@ -430,6 +1174,309 @@
       },
       "required": [
         "sources"
+      ],
+      "type": "object"
+    }
+  },
+  "preserve_evidence": {
+    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. Binary files use `transfer_artifact`\nplus the `/upload` endpoint so bytes do not pass through the model.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "scope": {
+          "description": "Incident, case, project, or domain key.",
+          "type": "string"
+        },
+        "category": {
+          "description": "Evidence category within the scope.",
+          "type": "string"
+        },
+        "filename": {
+          "description": "Artifact filename, including extension.",
+          "type": "string"
+        },
+        "content": {
+          "description": "UTF-8 text to preserve as received.",
+          "type": "string"
+        },
+        "description": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional sidecar description."
+        }
+      },
+      "required": [
+        "scope",
+        "category",
+        "filename",
+        "content"
+      ],
+      "type": "object"
+    }
+  },
+  "transfer_artifact": {
+    "description": "Prepare out-of-band binary artifact transfer.\n\nReturns a short-lived token and URL for uploading evidence binaries or\ndownloading a vault file into a sandbox. The long-lived server secret never\nleaves the server.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "default": "upload",
+          "description": "upload or download.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
+  "review_memory": {
+    "description": "Review memory health, provenance, drift, or source backlog.\n\nDefault mode is read-only attention review. Write-capable repairs are in\n`maintain_memory`, not here.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "mode": {
+          "default": "attention",
+          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, or relation-queue. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`.",
+          "type": "string"
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional category filter for attention/activation/audit."
+        },
+        "limit": {
+          "default": 25,
+          "description": "Attention/activation/evolution result cap.",
+          "type": "integer"
+        },
+        "query": {
+          "default": "",
+          "description": "Topic for evolution review.",
+          "type": "string"
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Source paths for compilation mode."
+        },
+        "suggested_title": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional compilation title hint."
+        },
+        "tag": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Provenance tag shorthand."
+        },
+        "key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Provenance key filter."
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Provenance value filter."
+        },
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Restrict provenance scan to one path."
+        },
+        "state": {
+          "default": "open",
+          "description": "For attention/activation, open (default), all, snoozed, or dismissed.",
+          "type": "string"
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable `exomem://review/<id>` reference for item mode."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "review_item_context": {
+    "description": "Inspect one stable review item with bounded recorded context.\n\nResolves an Inbox or corpus-activation item by `exomem://review/<id>` and\ncomposes its target, related summaries, provenance/evidence, graph, history,\nand path-specific supersession evolution. This is deterministic read-only\nassembly: it runs no model, makes no epistemic judgment, and never writes.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "description": "Stable `exomem://review/<id>` reference.",
+          "type": "string"
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional reviewed fingerprint; a mismatch asks the caller to refresh instead of presenting stale context."
+        },
+        "max_body_chars": {
+          "default": 4000,
+          "description": "Maximum target body characters.",
+          "type": "integer"
+        },
+        "max_related_pages": {
+          "default": 8,
+          "description": "Maximum related-page summaries.",
+          "type": "integer"
+        },
+        "max_graph_nodes": {
+          "default": 30,
+          "description": "Maximum graph nodes.",
+          "type": "integer"
+        },
+        "max_graph_edges": {
+          "default": 60,
+          "description": "Maximum graph edges.",
+          "type": "integer"
+        },
+        "max_history": {
+          "default": 10,
+          "description": "Maximum recorded history entries.",
+          "type": "integer"
+        },
+        "max_evolution_versions": {
+          "default": 10,
+          "description": "Maximum recorded supersession versions.",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "ref"
+      ],
+      "type": "object"
+    }
+  },
+  "triage_memory": {
+    "description": "Triage one Epistemic Inbox item explicitly.\n\nThis is the write-capable companion to read-only `review_memory`. Decisions\nbind to the current signal fingerprint, so materially changed knowledge\nresurfaces automatically.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "ref": {
+          "description": "Stable `exomem://review/<id>` reference from review_memory.",
+          "type": "string"
+        },
+        "action": {
+          "description": "dismiss, snooze, or reopen.",
+          "type": "string"
+        },
+        "until": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Snooze-through date as YYYY-MM-DD; required only for snooze."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional short rationale stored with the review decision."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
+        }
+      },
+      "required": [
+        "ref",
+        "action"
       ],
       "type": "object"
     }
@@ -846,20 +1893,42 @@
       "type": "object"
     }
   },
-  "edit_memory": {
-    "description": "Edit an existing memory page with an auditable reason.\n\nUse for small corrections, section edits, batch string edits, opinion-row\nfills, or one frontmatter field. Substantial rewrites should use\n`replace_memory` so history stays explicit.",
+  "adopt_vault": {
+    "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
         "path": {
-          "description": "Page to edit.",
+          "default": "",
+          "description": "Vault subtree to scan.",
           "type": "string"
         },
-        "why": {
-          "description": "One-line rationale recorded in the log.",
+        "mode": {
+          "default": "scan-only",
+          "description": "scan-only, save-manifest, copy-as-sources, or compile-selected.",
           "type": "string"
         },
-        "new_body": {
+        "max_depth": {
+          "default": 3,
+          "description": "Folder tree depth cap.",
+          "type": "integer"
+        },
+        "include_hidden": {
+          "default": false,
+          "description": "Include hidden files/directories.",
+          "type": "boolean"
+        },
+        "samples": {
+          "default": 5,
+          "description": "Filename sample count per folder.",
+          "type": "integer"
+        },
+        "pack_limit": {
+          "default": 6,
+          "description": "Max suggested knowledge packs.",
+          "type": "integer"
+        },
+        "manifest_path": {
           "anyOf": [
             {
               "type": "string"
@@ -869,9 +1938,9 @@
             }
           ],
           "default": null,
-          "description": "Replace the whole markdown body."
+          "description": "Optional manifest destination."
         },
-        "tags": {
+        "selected_paths": {
           "anyOf": [
             {
               "items": {
@@ -884,55 +1953,173 @@
             }
           ],
           "default": null,
-          "description": "Replace tags."
-        },
-        "old_string": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Exact body snippet to replace."
-        },
-        "new_string": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Replacement text."
-        },
-        "replace_all": {
-          "default": false,
-          "description": "Replace every occurrence of old_string.",
-          "type": "boolean"
-        },
-        "heading": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Section heading for section-targeted edits."
-        },
-        "section_position": {
-          "default": "append",
-          "description": "append, prepend, or replace.",
+          "description": "Explicit legacy files for copy/compile modes."
+        }
+      },
+      "type": "object"
+    }
+  },
+  "adoption_studio": {
+    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\nAdoption Studio turns a messy legacy vault into governed Exomem knowledge\nwithout ever rewriting, moving, or deleting an original file. It is a durable,\ncanonical-file-backed run with a preview-exact-actions contract: you see the\nprecise imports before anything is written, and `apply` commits exactly that\nplan or refuses. One required `action` multiplexes the whole lifecycle; the\nread-only default (`status`) is safe and `start` is explicitly guarded.\n\nLifecycle actions: `start` scans a subtree read-only and snapshots a candidate\ninventory; `select` materializes a folder-rule selection server-side; `plan`\npreviews exact targets, titles, hashes, and frontmatter; `apply` copies the\nvalidated subset into governed Sources with provenance in one atomic batch;\n`cancel` closes a pre-apply run; `finish` proves recall and hands you a first\nquestion. Agent actions ride the run afterwards: `work-item` returns bounded\nread-only context, `propose` submits structured proposals, and\n`apply-proposal` approves one through an existing governed leaf.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Required. One of start, status, select, plan, apply, cancel, finish, work-item, propose, or apply-proposal.",
           "type": "string"
         },
-        "edits": {
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable adoption run id from `start`; required by every action except `start` and the run-listing form of `status`."
+        },
+        "path": {
+          "default": "",
+          "description": "For `start`, the vault subtree to scan. Defaults to the vault root.",
+          "type": "string"
+        },
+        "include_hidden": {
+          "default": false,
+          "description": "For `start`, include hidden files/directories in the scan.",
+          "type": "boolean"
+        },
+        "initialize_kb": {
+          "default": false,
+          "description": "For `start`, bootstrap the Knowledge Base scaffold first when it does not exist yet (otherwise `start` refuses with KB_NOT_INITIALIZED).",
+          "type": "boolean"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, folder or file paths whose eligible files are selected (server materializes the concrete set)."
+        },
+        "exclude": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, folder or file paths to remove from the selection."
+        },
+        "overrides": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, explicit per-file paths to force-select."
+        },
+        "include_junk": {
+          "default": false,
+          "description": "For `select`, include junk (e.g. zero-byte) files that are otherwise demoted. Default false.",
+          "type": "boolean"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply`, the plan id echoed from `plan`/`status`; a mismatch or a changed selection is refused with PLAN_STALE."
+        },
+        "retry_failed": {
+          "default": false,
+          "description": "For `apply`, re-plan and re-apply only the failed subset.",
+          "type": "boolean"
+        },
+        "only_paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply`, restrict the (retry) apply to these originals."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required approver rationale for `apply-proposal`; also records the reason on `cancel`."
+        },
+        "write_manifest": {
+          "default": true,
+          "description": "For `finish`, write an optional run manifest under `Knowledge Base/_Adoption/`. Default true.",
+          "type": "boolean"
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `work-item`, explicit source paths to include instead of the first `max_sources` applied imports."
+        },
+        "max_sources": {
+          "default": 5,
+          "description": "For `work-item`, the maximum sources returned. Default 5.",
+          "type": "integer"
+        },
+        "max_chars_per_source": {
+          "default": 2000,
+          "description": "For `work-item`, the per-source excerpt cap. Default 2000.",
+          "type": "integer"
+        },
+        "proposals": {
           "anyOf": [
             {
               "items": {
@@ -946,9 +2133,9 @@
             }
           ],
           "default": null,
-          "description": "Batch edits, each with old_string/new_string/replace_all."
+          "description": "For `propose`, the list of structured proposal objects to submit."
         },
-        "row_key": {
+        "ref": {
           "anyOf": [
             {
               "type": "string"
@@ -958,9 +2145,9 @@
             }
           ],
           "default": null,
-          "description": "Opinion-row key to fill."
+          "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` proposal ref."
         },
-        "take": {
+        "expected_fingerprint": {
           "anyOf": [
             {
               "type": "string"
@@ -970,58 +2157,7 @@
             }
           ],
           "default": null,
-          "description": "Opinion-row text."
-        },
-        "overwrite": {
-          "default": false,
-          "description": "Allow replacing an existing take.",
-          "type": "boolean"
-        },
-        "field": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Frontmatter field to set."
-        },
-        "value": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "integer"
-            },
-            {
-              "type": "number"
-            },
-            {
-              "type": "boolean"
-            },
-            {
-              "items": {},
-              "type": "array"
-            },
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "New frontmatter value."
-        },
-        "allow_curated": {
-          "default": false,
-          "description": "Permit frontmatter patch under curated trees.",
-          "type": "boolean"
+          "description": "For `apply-proposal`, the reviewed fingerprint that must still match, or the write is refused."
         },
         "expected_hash": {
           "anyOf": [
@@ -1033,17 +2169,11 @@
             }
           ],
           "default": null,
-          "description": "Refuse write if content changed since read."
-        },
-        "validate_only": {
-          "default": false,
-          "description": "Preview a surgical match without writing.",
-          "type": "boolean"
+          "description": "For `apply-proposal`, the target page hash for relation and reconciliation-relate approvals."
         }
       },
       "required": [
-        "path",
-        "why"
+        "action"
       ],
       "type": "object"
     }
@@ -1091,6 +2221,115 @@
           "type": "boolean"
         }
       },
+      "type": "object"
+    }
+  },
+  "schema_memory": {
+    "description": "Infer, validate, diff, or save governed memory schemas.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "operation": {
+          "description": "infer, validate, or diff.",
+          "type": "string"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Lowercase contract slug; required only for `subject=\"contract\"`."
+        },
+        "subject": {
+          "default": "contract",
+          "description": "`contract`, `relations`, or `traversal-profiles`.",
+          "type": "string"
+        },
+        "project": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional project scope for inference."
+        },
+        "page_type": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional page-type scope for inference."
+        },
+        "save": {
+          "default": false,
+          "description": "Persist an inferred proposal. Default false.",
+          "type": "boolean"
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required current hash when overwriting a saved contract."
+        },
+        "strict": {
+          "default": false,
+          "description": "In validate mode, signal a failing CLI/CI outcome on findings.",
+          "type": "boolean"
+        },
+        "compare_to": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "In diff mode, compare to this saved contract instead of corpus reality."
+        },
+        "proposal": {
+          "anyOf": [
+            {
+              "additionalProperties": true,
+              "type": "object"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reviewed relation registry or traversal-profile proposal."
+        },
+        "include_model_suggestions": {
+          "default": false,
+          "description": "Request response-only optional relation suggestions.",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "operation"
+      ],
       "type": "object"
     }
   },
@@ -1253,49 +2492,6 @@
           "description": "YYYY-MM-DD filter for trash-list."
         }
       },
-      "type": "object"
-    }
-  },
-  "preserve_evidence": {
-    "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. Binary files use `transfer_artifact`\nplus the `/upload` endpoint so bytes do not pass through the model.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "scope": {
-          "description": "Incident, case, project, or domain key.",
-          "type": "string"
-        },
-        "category": {
-          "description": "Evidence category within the scope.",
-          "type": "string"
-        },
-        "filename": {
-          "description": "Artifact filename, including extension.",
-          "type": "string"
-        },
-        "content": {
-          "description": "UTF-8 text to preserve as received.",
-          "type": "string"
-        },
-        "description": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional sidecar description."
-        }
-      },
-      "required": [
-        "scope",
-        "category",
-        "filename",
-        "content"
-      ],
       "type": "object"
     }
   },
@@ -1474,983 +2670,6 @@
       },
       "required": [
         "path"
-      ],
-      "type": "object"
-    }
-  },
-  "read_memory": {
-    "description": "Read one memory page or curated vault file by path.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. This wraps the canonical page reader and can include history and\nlink summaries in the same call.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "path": {
-          "description": "Vault-relative path or Knowledge Base-relative shorthand.",
-          "type": "string"
-        },
-        "frontmatter_only": {
-          "default": false,
-          "description": "Return only frontmatter for cheap scanning.",
-          "type": "boolean"
-        },
-        "include_history": {
-          "default": false,
-          "description": "Include recorded edit/supersession history.",
-          "type": "boolean"
-        },
-        "links": {
-          "default": false,
-          "description": "Include inbound and outbound wikilink summaries.",
-          "type": "boolean"
-        },
-        "include_raw": {
-          "default": false,
-          "description": "Include the raw markdown file text.",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "path"
-      ],
-      "type": "object"
-    }
-  },
-  "remember": {
-    "description": "Remember a durable conclusion as compiled governed knowledge.\n\nThis is for distilled thinking, decisions, findings, failures, patterns,\nexperiments, and production logs. Raw material belongs in `capture_source`;\nproof artifacts belong in `preserve_evidence`.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "content": {
-          "description": "Full markdown body to write after frontmatter.",
-          "type": "string"
-        },
-        "title": {
-          "description": "Unicode display title stored in frontmatter and the H1.",
-          "type": "string"
-        },
-        "slug": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional lowercase ASCII kebab-case filename component."
-        },
-        "note_type": {
-          "default": "insight",
-          "description": "research-note, insight, failure, pattern, experiment, or production-log.",
-          "type": "string"
-        },
-        "project": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Required for research-note. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
-        },
-        "projects": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional project keys for cross-project notes. Any slug-shaped key is accepted; unknown keys auto-register on first use (a typo guard rejects near-misses within edit distance 2 of an existing key) and create the matching Notes/Research/<Folder>/. Pass project_category to bucket a new key. Current keys (not exhaustive): personal, project-alpha, project-beta, work."
-        },
-        "sources": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Source/evidence paths this conclusion draws from."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Lowercase tags."
-        },
-        "status": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional status override."
-        },
-        "severity": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Failure severity."
-        },
-        "pattern_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Pattern subtype."
-        },
-        "domain": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment domain."
-        },
-        "started": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment start date."
-        },
-        "duration": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment duration."
-        },
-        "hypothesis": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment hypothesis."
-        },
-        "n": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment sample size."
-        },
-        "concluded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment conclusion date."
-        },
-        "medium": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production-log medium."
-        },
-        "recorded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production recording date."
-        },
-        "published": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production publication date."
-        },
-        "host": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production host/creator."
-        },
-        "editor": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production editor/producer."
-        },
-        "suggestions": {
-          "default": true,
-          "description": "Include link suggestions in the result.",
-          "type": "boolean"
-        },
-        "project_category": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Category for a new project key."
-        }
-      },
-      "required": [
-        "content",
-        "title"
-      ],
-      "type": "object"
-    }
-  },
-  "replace_memory": {
-    "description": "Supersede an existing compiled memory with a new version.\n\nThe old page remains readable and points to the new page. Use this for\nmeaningful changes in conclusion, not small edits.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "old_path": {
-          "description": "Existing page to supersede.",
-          "type": "string"
-        },
-        "content": {
-          "description": "Full markdown body for the new page.",
-          "type": "string"
-        },
-        "title": {
-          "description": "New page title.",
-          "type": "string"
-        },
-        "slug": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional lowercase ASCII kebab-case filename component."
-        },
-        "note_type": {
-          "default": "insight",
-          "description": "New page type.",
-          "type": "string"
-        },
-        "reason": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Why the old page is being superseded."
-        },
-        "project": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Required for research-note."
-        },
-        "projects": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional project keys."
-        },
-        "sources": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Source/evidence paths for the new conclusion."
-        },
-        "tags": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Lowercase tags."
-        },
-        "status": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional status override."
-        },
-        "severity": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Failure severity."
-        },
-        "pattern_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Pattern subtype."
-        },
-        "domain": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment domain."
-        },
-        "started": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment start date."
-        },
-        "duration": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment duration."
-        },
-        "hypothesis": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment hypothesis."
-        },
-        "n": {
-          "anyOf": [
-            {
-              "type": "integer"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment sample size."
-        },
-        "concluded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Experiment conclusion date."
-        },
-        "medium": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production-log medium."
-        },
-        "recorded": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production recording date."
-        },
-        "published": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production publication date."
-        },
-        "host": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production host/creator."
-        },
-        "editor": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Production editor/producer."
-        },
-        "project_category": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Category for a new project key."
-        }
-      },
-      "required": [
-        "old_path",
-        "content",
-        "title"
-      ],
-      "type": "object"
-    }
-  },
-  "review_item_context": {
-    "description": "Inspect one stable review item with bounded recorded context.\n\nResolves an Inbox or corpus-activation item by `exomem://review/<id>` and\ncomposes its target, related summaries, provenance/evidence, graph, history,\nand path-specific supersession evolution. This is deterministic read-only\nassembly: it runs no model, makes no epistemic judgment, and never writes.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "ref": {
-          "description": "Stable `exomem://review/<id>` reference.",
-          "type": "string"
-        },
-        "expected_fingerprint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional reviewed fingerprint; a mismatch asks the caller to refresh instead of presenting stale context."
-        },
-        "max_body_chars": {
-          "default": 4000,
-          "description": "Maximum target body characters.",
-          "type": "integer"
-        },
-        "max_related_pages": {
-          "default": 8,
-          "description": "Maximum related-page summaries.",
-          "type": "integer"
-        },
-        "max_graph_nodes": {
-          "default": 30,
-          "description": "Maximum graph nodes.",
-          "type": "integer"
-        },
-        "max_graph_edges": {
-          "default": 60,
-          "description": "Maximum graph edges.",
-          "type": "integer"
-        },
-        "max_history": {
-          "default": 10,
-          "description": "Maximum recorded history entries.",
-          "type": "integer"
-        },
-        "max_evolution_versions": {
-          "default": 10,
-          "description": "Maximum recorded supersession versions.",
-          "type": "integer"
-        }
-      },
-      "required": [
-        "ref"
-      ],
-      "type": "object"
-    }
-  },
-  "review_memory": {
-    "description": "Review memory health, provenance, drift, or source backlog.\n\nDefault mode is read-only attention review. Write-capable repairs are in\n`maintain_memory`, not here.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "mode": {
-          "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, or relation-queue. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`.",
-          "type": "string"
-        },
-        "categories": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional category filter for attention/activation/audit."
-        },
-        "limit": {
-          "default": 25,
-          "description": "Attention/activation/evolution result cap.",
-          "type": "integer"
-        },
-        "query": {
-          "default": "",
-          "description": "Topic for evolution review.",
-          "type": "string"
-        },
-        "sources": {
-          "anyOf": [
-            {
-              "items": {
-                "type": "string"
-              },
-              "type": "array"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Source paths for compilation mode."
-        },
-        "suggested_title": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional compilation title hint."
-        },
-        "tag": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Provenance tag shorthand."
-        },
-        "key": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Provenance key filter."
-        },
-        "value": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Provenance value filter."
-        },
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Restrict provenance scan to one path."
-        },
-        "state": {
-          "default": "open",
-          "description": "For attention/activation, open (default), all, snoozed, or dismissed.",
-          "type": "string"
-        },
-        "ref": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Stable `exomem://review/<id>` reference for item mode."
-        }
-      },
-      "type": "object"
-    }
-  },
-  "schema_memory": {
-    "description": "Infer, validate, diff, or save governed memory schemas.\n\nContracts describe recurring frontmatter fields, semantic blocks, and typed\nrelations without changing ordinary write validation. Inference is read-only\nunless `save=true`; an existing contract can only be overwritten with its\ncurrent content hash.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "operation": {
-          "description": "infer, validate, or diff.",
-          "type": "string"
-        },
-        "name": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Lowercase contract slug; required only for `subject=\"contract\"`."
-        },
-        "subject": {
-          "default": "contract",
-          "description": "`contract`, `relations`, or `traversal-profiles`.",
-          "type": "string"
-        },
-        "project": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional project scope for inference."
-        },
-        "page_type": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional page-type scope for inference."
-        },
-        "save": {
-          "default": false,
-          "description": "Persist an inferred proposal. Default false.",
-          "type": "boolean"
-        },
-        "expected_hash": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Required current hash when overwriting a saved contract."
-        },
-        "strict": {
-          "default": false,
-          "description": "In validate mode, signal a failing CLI/CI outcome on findings.",
-          "type": "boolean"
-        },
-        "compare_to": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "In diff mode, compare to this saved contract instead of corpus reality."
-        },
-        "proposal": {
-          "anyOf": [
-            {
-              "additionalProperties": true,
-              "type": "object"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Reviewed relation registry or traversal-profile proposal."
-        },
-        "include_model_suggestions": {
-          "default": false,
-          "description": "Request response-only optional relation suggestions.",
-          "type": "boolean"
-        }
-      },
-      "required": [
-        "operation"
-      ],
-      "type": "object"
-    }
-  },
-  "transfer_artifact": {
-    "description": "Prepare out-of-band binary artifact transfer.\n\nReturns a short-lived token and URL for uploading evidence binaries or\ndownloading a vault file into a sandbox. The long-lived server secret never\nleaves the server.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "operation": {
-          "default": "upload",
-          "description": "upload or download.",
-          "type": "string"
-        }
-      },
-      "type": "object"
-    }
-  },
-  "triage_memory": {
-    "description": "Triage one Epistemic Inbox item explicitly.\n\nThis is the write-capable companion to read-only `review_memory`. Decisions\nbind to the current signal fingerprint, so materially changed knowledge\nresurfaces automatically.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {
-        "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory.",
-          "type": "string"
-        },
-        "action": {
-          "description": "dismiss, snooze, or reopen.",
-          "type": "string"
-        },
-        "until": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Snooze-through date as YYYY-MM-DD; required only for snooze."
-        },
-        "why": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional short rationale stored with the review decision."
-        },
-        "expected_fingerprint": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional reviewed fingerprint; a mismatch refuses the write and asks the caller to refresh."
-        }
-      },
-      "required": [
-        "ref",
-        "action"
       ],
       "type": "object"
     }
