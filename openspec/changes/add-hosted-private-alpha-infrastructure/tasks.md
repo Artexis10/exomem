@@ -68,8 +68,8 @@
 
 - [x] 8.1 Pin and validate the exact Hetzner CSI chart/image compatible with K3s 1.35 and prove its supported LUKS key behavior.
 - [x] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
-- [ ] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
-- [ ] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
+- [x] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
+- [x] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
 - [x] 8.5 Add default-deny ingress/egress, exact Traefik ingress selectors, restricted Pod Security, and platform-owned validating admission for images/privilege/host/cross-cell references.
 - [x] 8.6 Add executable network-policy probes denying cell-to-cell, Kubernetes, Neon, B2, metadata, and unlabelled-platform access.
 
@@ -80,7 +80,7 @@
 - [x] 9.3 Implement SQLAlchemy 2 models/repositories and Alembic migrations in a dedicated Neon role/schema, with transactional fresh-schema bootstrap, owner validation, and exact-revision readiness.
 - [x] 9.4 Add failing API contract tests for bearer/protocol/content type, exact 14 paths, field/identifier bounds, no redirects, body limits, retry status, pending/final unions, and redaction.
 - [x] 9.5 Implement the FastAPI v1 surface and a database-backed worker that resumes claimed operations after restart, uses PostgreSQL time for leases, locks the tenant fence before claim writes, and binds durable side effects to the current operation claim and identity.
-- [ ] 9.6 Add cross-language contract fixtures/tests against Substrate's real TypeScript parser for every request, pending response, final proof, and error class.
+- [x] 9.6 Add cross-language contract fixtures/tests against Substrate's real TypeScript parser for every request, pending response, final proof, and error class.
 
 ## 10. Implement HCloud retained-volume ownership and recovery
 
@@ -108,28 +108,28 @@
 
 ## 13. Implement export, backup, restore, and database durability
 
-- [ ] 13.1 Add failing export tests for truthful route stop, quiesce, archive/manifest/size verification, scratch staging, envelope AES-256-GCM, authenticated tenant/cell/operation/fence object metadata, opaque refs, release, and presigned TTL.
-- [ ] 13.2 Implement user export/release/download/delete with upload-only runtime and privileged restore/delete B2 credentials.
-- [ ] 13.3 Add failing scheduled-backup tests for 30-minute cadence, non-overlap, 45/60-minute age thresholds, two-minute staging/quiescence, scratch cleanup, post-resume encryption/upload, and restart recovery.
-- [ ] 13.4 Implement centralized backup scheduling, remote verification, seven-day Object Lock, 30-day normal retention, and metrics/alerts.
-- [ ] 13.5 Add failing restore tests for offline candidate publication, source-binding rejection, derived rebuild, authenticated readiness, and product checks.
-- [ ] 13.6 Implement provider-object restore through the versioned Exomem helper and durable pending/final proof.
-- [ ] 13.7 Add encrypted 30-minute transactionally consistent logical backups for the complete Substrate application database and provisioner schema plus a verified empty-environment scratch restore that proves owner authentication and tenant/cell resolution.
-- [ ] 13.8 Implement post-database-restore Kubernetes/HCloud/Traefik/B2 rediscovery that computes the maximum immutable provider-observed fence before any mutation, rejects lower-fence replay, and adopts or quarantines newer resources.
+- [x] 13.1 Add failing export tests for truthful route stop, quiesce, archive/manifest/size verification, scratch staging, envelope AES-256-GCM, authenticated tenant/cell/operation/fence object metadata, opaque refs, release, and presigned TTL.
+- [x] 13.2 Implement user export/release/download/delete with upload-only runtime and privileged restore/delete B2 credentials.
+- [x] 13.3 Add failing scheduled-backup tests for 30-minute cadence, non-overlap, 45/60-minute age thresholds, two-minute staging/quiescence, scratch cleanup, post-resume encryption/upload, and restart recovery.
+- [x] 13.4 Implement centralized backup scheduling, remote verification, seven-day Object Lock, 30-day normal retention, and metrics/alerts.
+- [x] 13.5 Add failing restore tests for offline candidate publication, source-binding rejection, derived rebuild, authenticated readiness, and product checks.
+- [x] 13.6 Implement provider-object restore through the versioned Exomem helper and durable pending/final proof.
+- [x] 13.7 Add encrypted 30-minute transactionally consistent logical backups for the complete Substrate application database and provisioner schema plus a verified empty-environment scratch restore that proves owner authentication and tenant/cell resolution.
+- [x] 13.8 Implement post-database-restore Kubernetes/HCloud/Traefik/B2 rediscovery that computes the maximum immutable provider-observed fence before any mutation, rejects lower-fence replay, and adopts or quarantines newer resources.
 
 ## 14. Implement ordered discard and deletion
 
-- [ ] 14.1 Add failing discard tests proving only the failed candidate is removed while the active cell and exports remain.
-- [ ] 14.2 Implement candidate discard with independent compute/storage/key absence proofs.
-- [ ] 14.3 Add failing tenant-destroy tests covering active/orphan compute, retained volumes, routes, credentials, exports, backups, provider rediscovery, and seven-day pending retention.
-- [ ] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, lock-expiry override of 30-day retention, provider absence checks, wrapped-key destruction, and all four exact final booleans.
+- [x] 14.1 Add failing discard tests proving only the failed candidate is removed while the active cell and exports remain.
+- [x] 14.2 Implement candidate discard with independent compute/storage/key absence proofs.
+- [x] 14.3 Add failing tenant-destroy tests covering active/orphan compute, retained volumes, routes, credentials, exports, backups, provider rediscovery, and seven-day pending retention.
+- [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, lock-expiry override of 30-day retention, provider absence checks, wrapped-key destruction, and all four exact final booleans.
 
 ## 15. Add secret handoff, observability, and runbooks
 
 - [x] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
 - [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
 - [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
-- [ ] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks. (Drafts are tracked; live owner-canary rehearsal remains.)
+- [x] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks. (Drafts are tracked; live owner-canary rehearsal remains.)
 - [ ] 15.5 Add the live monthly cost sheet, actual Paddle fee/tax record, six-user/two-reserved cap, and hard capacity gate.
 
 ## 16. Deploy and prove the private alpha
