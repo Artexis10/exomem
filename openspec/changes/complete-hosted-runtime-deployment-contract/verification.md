@@ -59,11 +59,32 @@ still reports the pre-existing unscoped backlog; every changed Python file
 passes the configured correctness rules, and both new Python files pass Ruff
 format checking.
 
-## Still external or pending
+## Cross-repository release proof (2026-07-14)
 
-- Task 5.1 remains open because the real K3s manifests/PVC/AtomicWriter checks
-  belong to the infrastructure repository and have not been executed here.
-- Task 5.3 remains open pending the coordinated downstream Substrate fixture
-  refresh.
-- Task 5.5 remains open until the independent implementation review and PR
-  metadata refresh are complete.
+The companion infrastructure branch pins this exact runtime commit
+`c255ffb2dfcd7bc470372d4efa0e8a11b00f0640`, release `0.22.0`, hosted protocol
+`1`, and operator-contract SHA-256
+`407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6`.
+Its exact K3s `v1.35.6+k3s1` gate builds the hosted target, imports only the
+computed image digest, and proves a real PVC/subPath mount, unchanged
+`0700` roots and `0600` markers, native root-owned `0444` Secret AtomicWriter
+projection, read-only-root UID/GID 10001 serving, state-backed temporary roots,
+authenticated readiness/contract, and restart cleanup. The final admission
+review additionally proved that the exact Job-controller finalizer exception
+requires an unchanged Pod spec; routine removal and simultaneous
+`activeDeadlineSeconds` or toleration drift are denied. The independently
+reviewed gate passed 31 tests plus Terraform, Ansible, Helm, Kubeconform, Ruff,
+ShellCheck, strict OpenSpec, and the real runtime drill.
+
+Substrate PR #32 head `6d48e023f3c5a4780c212cef34fc784bf3b1f068`
+contains the generated semantic fixture from this exact commit. It pins release
+`0.22.0`, protocol `1`, and gateway-contract digest
+`49ac4d346991f0f1de5f692a78ad043de6020f9a1692cafc951ec84490f02940`;
+its parser rejects semantic or digest drift and its direct-transfer issuance
+and browser consumption tests use the matching v2 artifact.
+
+Independent runtime, cross-repository contract, transfer, and admission reviews
+resolved every blocking finding. PR #227 is titled
+`feat: complete isolated hosted tenant runtime`, records the exact release unit,
+and has green Python 3.11/3.13, product E2E, retrieval, onboarding, Docker,
+OpenSpec, package, capability, and lint/type checks.
