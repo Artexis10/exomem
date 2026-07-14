@@ -31,6 +31,7 @@ Exomem's governed relations and semantic blocks are deeper than a generic note g
 
 ### Modified Capabilities
 
+- `transactional-vault-writes`: Replace pathname backup authority with descriptor-owned private workspaces and exact in-memory rollback snapshots while preserving ordinary caught-failure rollback guarantees.
 - `agent-bootstrap-contract`: Teach agents the compact/rich semantic language, category versus kind, canonical relations, and review-before-governance behavior.
 - `command-surface`: Expose semantic-unit filters, the generic filter expression, result levels, retrieval explanations, schema controls, and response fields consistently across MCP, REST, CLI, OpenAPI, and generated docs.
 - `context-packs`: Include bounded, cited semantic units and their authored relations without duplicating parent-page context.

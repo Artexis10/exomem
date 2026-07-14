@@ -138,6 +138,32 @@ The operation accepts parent path/reference, category, content, optional kind/ta
 
 `read_memory` can select a unit reference, and `remember`/`replace_memory`/`edit_memory` return semantic-unit feedback. Creation writers support a two-step logically atomic review protocol: a `validate_only=true` call preassigns a candidate page UUID and returns `draft_id`, a content-bound `draft_hash`, a bounded opaque `draft_token` that freezes any server-derived render date/destination and ordered project auto-registration intent, and relation candidates/findings; a commit with identical content echoes the token and may supply `draft_id`, `relation_disposition="reviewed_none"`, `relation_review_hash`, and a non-empty `relation_review_reason`. The writer revalidates the hash, token, and unused identity, persists a bounded creation receipt for every full active-compiled commit, prepares deterministic auxiliary writes first, and replaces the primary page last as the logical commit marker. Reviewed-none/bootstrap receipts also carry disposition; qualifying-relation receipts are recovery state only. Therefore a visible primary page never lacks its required review state. Abrupt process death may leave page-less prepared state; the exact unchanged draft and identical ordered auxiliary target/byte digest may resume it, while any mismatch remains reserved for explicit audit/cleanup. Auxiliary reconstruction accepts only the exact pre-write or already-applied expected state and binds replacements to exact content guards; unrelated drift requires fresh validation. An exact pre-receipt qualifying primary remains an idempotent already-committed result after upgrade, but a page-less no-receipt attempt receives no retroactive prepared-recovery claim. This is normal-return/exception atomicity plus crash-safe visibility and deterministic recovery, not a claim of impossible cross-file all-or-none power-loss atomicity. A qualifying typed relation or the first-page bootstrap needs no reviewed-none decision from the caller. All parameters and response schemas flow through the single command registry to MCP, REST, CLI, OpenAPI, and generated capability docs.
 
+Atomic file batches use descriptor-owned stages in a random private workspace
+under each target parent. Existing-file rollback state is captured in memory as
+exact bytes plus the metadata the platform can safely read and restore through
+descriptors: mode, nanosecond timestamps, and extended attributes where those
+descriptor APIs exist. This removes named backup files and their cleanup race.
+Before each replacement the writer rechecks target guards, workspace identity,
+stage identity/content, already-installed finals, and directory censuses. On a
+handled failure it restores existing files from fresh descriptor-owned stages
+and removes a newly created final only while the supported cooperative-
+concurrency assumptions still hold. Detected or ambiguous namespace drift
+fails closed, retains private residue when necessary, and reports bounded
+reconcile guidance rather than moving or deleting a changed path.
+
+Private workspaces, descriptor-relative traversal, and exact guards preserve
+ordinary caught-failure and cooperating-writer rollback guarantees, but they
+are not a same-principal security boundary. Accidental concurrent edits
+observed before a destructive syscall fail closed. The excluded threat is an
+uncooperative process running as the vault owner that deliberately substitutes
+an exact batch-controlled source-stage, workspace, or destination pathname
+component after its last verified check and before the corresponding kernel
+namespace instruction. A cooperative lock may serialize Exomem writers, but it
+cannot provide the missing conditional identity precondition for every
+pathname component consumed by that instruction or defend against that
+uncooperative same-principal actor. The batch also makes no cross-file
+power-loss atomicity claim.
+
 Existing-page lifecycle review separates reusable review truth from transition recovery. A reviewed-none decision is an immutable, portable artifact keyed only by a unique stable page UUID and the resulting review-content fingerprint; it never binds the operation, prior bytes, transition token, or auxiliary plan. One guarded replaceable prepared-transition slot per UUID binds those transition-specific details and is crash machinery, not review truth. The current page is reviewed-none only when its unique UUID and exact current fingerprint match an immutable decision. A pending transition never blesses the still-current before state; exact retry may resume it, and a later transition back to a previously reviewed fingerprint reuses the immutable decision while creating a distinct prepared transition. Legacy path identities never receive lifecycle decisions: pages that need reviewed-none must first acquire a stable ID through the explicit backfill workflow.
 
 Lifecycle artifacts reserve their UUID even after trash/delete. Recovery may replace a prior committed prepared slot only when the trash sidecar, original path, stable UUID, and trashed bytes exactly prove the committed after state and no live page owns that UUID. Reconcile preserves this `trashed_committed` state; it may remove only a neither-side prepared slot with no exact trash proof. This keeps exact recovery possible without allowing a later creation to steal deleted identity history.
