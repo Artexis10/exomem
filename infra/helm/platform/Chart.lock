@@ -1,0 +1,9 @@
+dependencies:
+- name: hcloud-csi
+  repository: https://charts.hetzner.cloud
+  version: 2.21.1
+- name: traefik
+  repository: https://traefik.github.io/charts
+  version: 41.0.2
+digest: sha256:c2dccb9007d0741d4b41ec953e381bcae0ab30ebf5c4c5fb21401130494bd034
+generated: "2026-07-14T03:12:43.673410068+01:00"

@@ -1,0 +1,13 @@
+apiVersion: v2
+name: exomem-platform
+description: Pinned private-alpha platform services and policy.
+type: application
+version: 0.1.0
+appVersion: "private-alpha-v1"
+dependencies:
+  - name: hcloud-csi
+    repository: https://charts.hetzner.cloud
+    version: 2.21.1
+  - name: traefik
+    repository: https://traefik.github.io/charts
+    version: 41.0.2

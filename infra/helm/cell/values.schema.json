@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["resourceName", "cellId", "vaultId", "workloadMode", "image", "expectedRelease", "expectedProtocol", "workerPolicyDigest", "runtimeUid", "runtimeGid", "storageClassName", "pvcSize", "providerIdentity", "providerRecoveryEnvelopes", "storageLimitBytes", "uploadLimitBytes", "workerLimit", "featureGrants", "browserOrigin", "transferHostname", "credentialsSecretName", "credentialsManagedExternally", "activeCredentialVersion", "initRequestId", "initOperationId", "routes"],
+  "properties": {
+    "resourceName": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{2,62}$"},
+    "cellId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+    "vaultId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$"},
+    "workloadMode": {"type": "string", "enum": ["initialize", "serve"]},
+    "image": {"type": "string", "pattern": "^[^\\s]+@sha256:[a-f0-9]{64}$"},
+    "expectedRelease": {"type": "string", "minLength": 1, "maxLength": 64},
+    "expectedProtocol": {"type": "string", "const": "1"},
+    "workerPolicyDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+    "runtimeUid": {"type": "integer", "const": 10001},
+    "runtimeGid": {"type": "integer", "const": 10001},
+    "storageClassName": {"type": "string", "const": "exomem-hcloud-encrypted-retain"},
+    "pvcSize": {"type": "string", "const": "10Gi"},
+    "providerIdentity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tenantId", "cellId", "operationId", "tenantDigest", "subjectDigest", "operationDigest", "fence"],
+      "properties": {
+        "tenantId": {"type": "string", "pattern": "^[A-Za-z0-9_.:/-]{1,256}$"},
+        "cellId": {"type": "string", "pattern": "^[A-Za-z0-9_.:/-]{1,256}$"},
+        "operationId": {"type": "string", "pattern": "^[A-Za-z0-9_.:/-]{1,256}$"},
+        "tenantDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "subjectDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "operationDigest": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "fence": {"type": "string", "pattern": "^[1-9][0-9]{0,18}$"}
+      }
+    },
+    "providerRecoveryEnvelopes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["namespace", "vaultPvc", "credentialSecret", "serviceAccount", "initRequestConfigMap", "providerOperationConfigMap", "initJob", "defaultDenyNetworkPolicy", "traefikIngressNetworkPolicy", "resourceQuota", "limitRange", "service", "statefulSet", "stripCellMiddleware", "controlIngressRoute", "transferIngressRoute"],
+      "properties": {
+        "namespace": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "vaultPvc": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "credentialSecret": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "serviceAccount": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "initRequestConfigMap": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "providerOperationConfigMap": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "initJob": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "defaultDenyNetworkPolicy": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "traefikIngressNetworkPolicy": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "resourceQuota": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "limitRange": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "service": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "statefulSet": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "stripCellMiddleware": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "controlIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"},
+        "transferIngressRoute": {"type": "string", "minLength": 40, "maxLength": 4096, "pattern": "^[A-Za-z0-9_-]+$"}
+      }
+    },
+    "storageLimitBytes": {"type": "integer", "const": 5368709120},
+    "uploadLimitBytes": {"type": "integer", "const": 94371840},
+    "workerLimit": {"type": "integer", "const": 0},
+    "featureGrants": {"type": "string", "const": ""},
+    "browserOrigin": {"type": "string", "pattern": "^https://[^/]+$"},
+    "transferHostname": {"type": "string", "pattern": "^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$"},
+    "credentialsSecretName": {"type": "string", "const": "exomem-cell-credentials"},
+    "credentialsManagedExternally": {"type": "boolean", "const": true},
+    "activeCredentialVersion": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$"},
+    "initRequestId": {"type": "string", "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"},
+    "initOperationId": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$"},
+    "routes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["enabled", "controlHostname"],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "controlHostname": {"type": "string"}
+      }
+    }
+  }
+}

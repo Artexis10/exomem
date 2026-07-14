@@ -1,0 +1,15 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ .Values.storage.className }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted
+    exomem.io/encrypted: "true"
+provisioner: csi.hetzner.cloud
+reclaimPolicy: Retain
+allowVolumeExpansion: true
+volumeBindingMode: WaitForFirstConsumer
+parameters:
+  csi.storage.k8s.io/fstype: ext4
+  csi.storage.k8s.io/node-publish-secret-name: {{ .Values.storage.encryptionSecretName }}
+  csi.storage.k8s.io/node-publish-secret-namespace: {{ .Values.storage.encryptionSecretNamespace }}

@@ -1,0 +1,101 @@
+{{- $contractRaw := .Files.Get "files/exomem-hosted-schedules-v1.json" -}}
+{{- $contract := $contractRaw | fromJson -}}
+{{- $contractSha256 := $contractRaw | sha256sum -}}
+{{- if ne (int .Values.scheduler.contractVersion) (int $contract.version) -}}
+{{- fail "unsupported hosted scheduler contract version" -}}
+{{- end }}
+{{- if ne .Values.scheduler.contractSha256 $contractSha256 -}}
+{{- fail "scheduler contract SHA-256 mismatch" -}}
+{{- end }}
+{{- if or (ne $contract.authentication.scheme "bearer") (ne $contract.authentication.schedulerEnvironmentVariable "EXOMEM_HOSTED_SCHEDULER_SECRET") (ne $contract.authentication.receiverActiveEnvironmentVariable "EXOMEM_HOSTED_SCHEDULER_SECRET") (ne $contract.authentication.receiverPreviousEnvironmentVariable "EXOMEM_HOSTED_SCHEDULER_SECRET_PREVIOUS") (ne (int $contract.authentication.maxReceiverVersions) 2) -}}
+{{- fail "unsupported hosted scheduler authentication contract" -}}
+{{- end }}
+{{- if or (ne $contract.requestPolicy.method "GET") (ne $contract.requestPolicy.redirect "error") (ne ($contract.requestPolicy.successStatusCodes | toJson) "[200]") -}}
+{{- fail "unsupported hosted scheduler request/status contract" -}}
+{{- end }}
+{{- if ne (int $contract.kubernetesJobPolicy.maxAttempts) (add 1 (int $contract.kubernetesJobPolicy.backoffLimit) | int) -}}
+{{- fail "scheduler maxAttempts must equal backoffLimit plus one" -}}
+{{- end }}
+{{- $schedulerEnvironmentVariable := $contract.authentication.schedulerEnvironmentVariable -}}
+{{- $authorizationScheme := $contract.authentication.scheme | title -}}
+{{- $successStatus := first $contract.requestPolicy.successStatusCodes -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: exomem-hosted-scheduler
+automountServiceAccountToken: false
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-hosted-scheduler-contract
+  annotations:
+    exomem.io/contract-sha256: {{ $contractSha256 | quote }}
+data:
+  contract.json: |-
+{{ $contractRaw | indent 4 }}
+{{- range $job := $contract.jobs }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $job.name }}
+  labels:
+    app.kubernetes.io/name: {{ $job.name }}
+    app.kubernetes.io/part-of: exomem-hosted-scheduler
+  annotations:
+    exomem.io/contract-version: {{ $contract.version | quote }}
+    exomem.io/contract-sha256: {{ $contractSha256 | quote }}
+spec:
+  schedule: {{ $job.schedule | quote }}
+  concurrencyPolicy: {{ $contract.kubernetesJobPolicy.concurrencyPolicy }}
+  startingDeadlineSeconds: {{ $contract.kubernetesJobPolicy.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $contract.kubernetesJobPolicy.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $contract.kubernetesJobPolicy.failedJobsHistoryLimit }}
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: {{ $contract.kubernetesJobPolicy.activeDeadlineSeconds }}
+      backoffLimit: {{ $contract.kubernetesJobPolicy.backoffLimit }}
+      ttlSecondsAfterFinished: {{ $contract.kubernetesJobPolicy.ttlSecondsAfterFinished }}
+      template:
+        metadata:
+          labels:
+            app.kubernetes.io/name: {{ $job.name }}
+            app.kubernetes.io/part-of: exomem-hosted-scheduler
+        spec:
+          serviceAccountName: exomem-hosted-scheduler
+          automountServiceAccountToken: false
+          restartPolicy: Never
+          securityContext:
+            runAsNonRoot: true
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: request
+              image: {{ $.Values.scheduler.image }}
+              imagePullPolicy: IfNotPresent
+              command: ["/bin/sh", "-ec"]
+              args:
+                - |-
+                  status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --proto '=https' --tlsv1.2 --connect-timeout {{ $contract.requestPolicy.connectTimeoutSeconds }} --max-time {{ $contract.requestPolicy.totalTimeoutSeconds }} --max-redirs 0 --request {{ $contract.requestPolicy.method }} --header "Authorization: {{ $authorizationScheme }} ${EXOMEM_HOSTED_SCHEDULER_SECRET}" {{ $contract.origin }}{{ $job.path }})"
+                  test "${status}" = {{ $successStatus | quote }}
+              env:
+                - name: {{ $schedulerEnvironmentVariable }}
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ $.Values.scheduler.secretName }}
+                      key: {{ $.Values.scheduler.secretKey }}
+              resources:
+                requests:
+                  cpu: 5m
+                  memory: 8Mi
+                limits:
+                  cpu: 100m
+                  memory: 32Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                runAsNonRoot: true
+                capabilities:
+                  drop: [ALL]
+{{- end }}

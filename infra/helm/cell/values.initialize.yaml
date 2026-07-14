@@ -1,0 +1,52 @@
+resourceName: cell-alpha
+cellId: alpha-test-original
+vaultId: vault-alpha-original
+workloadMode: initialize
+image: ghcr.io/artexis10/exomem@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expectedRelease: 0.1.0-alpha
+expectedProtocol: "1"
+workerPolicyDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+runtimeUid: 10001
+runtimeGid: 10001
+storageClassName: exomem-hcloud-encrypted-retain
+pvcSize: 10Gi
+providerIdentity:
+  tenantId: tenant-alpha
+  cellId: cell-alpha
+  operationId: operation-alpha
+  tenantDigest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  subjectDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  operationDigest: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  fence: "7"
+providerRecoveryEnvelopes:
+  namespace: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+  vaultPvc: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+  credentialSecret: cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
+  serviceAccount: dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd
+  initRequestConfigMap: eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee
+  providerOperationConfigMap: ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff
+  initJob: gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg
+  defaultDenyNetworkPolicy: hhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhhh
+  traefikIngressNetworkPolicy: iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii
+  resourceQuota: jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+  limitRange: kkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkkk
+  service: llllllllllllllllllllllllllllllllllllllllllllllllllllllllllllllll
+  statefulSet: mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm
+  stripCellMiddleware: nnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnnn
+  controlIngressRoute: oooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooooo
+  transferIngressRoute: pppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppppp
+
+storageLimitBytes: 5368709120
+uploadLimitBytes: 94371840
+workerLimit: 0
+featureGrants: ""
+browserOrigin: https://substratesystems.io
+transferHostname: transfer.example.test
+credentialsSecretName: exomem-cell-credentials
+credentialsManagedExternally: true
+activeCredentialVersion: active-v1
+initRequestId: 123e4567-e89b-42d3-a456-426614174000
+initOperationId: provision-alpha-1
+routes:
+  enabled: false
+  controlHostname: control.example.test

@@ -1,0 +1,51 @@
+resourceName: ""
+cellId: ""
+vaultId: ""
+workloadMode: serve
+image: ""
+expectedRelease: ""
+expectedProtocol: "1"
+workerPolicyDigest: ""
+runtimeUid: 10001
+runtimeGid: 10001
+storageClassName: exomem-hcloud-encrypted-retain
+pvcSize: 10Gi
+providerIdentity:
+  tenantId: ""
+  cellId: ""
+  operationId: ""
+  tenantDigest: ""
+  subjectDigest: ""
+  operationDigest: ""
+  fence: ""
+providerRecoveryEnvelopes:
+  namespace: ""
+  vaultPvc: ""
+  credentialSecret: ""
+  serviceAccount: ""
+  initRequestConfigMap: ""
+  providerOperationConfigMap: ""
+  initJob: ""
+  defaultDenyNetworkPolicy: ""
+  traefikIngressNetworkPolicy: ""
+  resourceQuota: ""
+  limitRange: ""
+  service: ""
+  statefulSet: ""
+  stripCellMiddleware: ""
+  controlIngressRoute: ""
+  transferIngressRoute: ""
+storageLimitBytes: 5368709120
+uploadLimitBytes: 94371840
+workerLimit: 0
+featureGrants: ""
+browserOrigin: https://substratesystems.io
+transferHostname: ""
+credentialsSecretName: exomem-cell-credentials
+credentialsManagedExternally: true
+activeCredentialVersion: ""
+initRequestId: ""
+initOperationId: ""
+routes:
+  enabled: false
+  controlHostname: ""

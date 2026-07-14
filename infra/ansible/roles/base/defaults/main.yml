@@ -1,0 +1,17 @@
+---
+base_packages:
+  - apparmor
+  - ca-certificates
+  - cryptsetup
+  - curl
+  - fail2ban
+  - jq
+  - logrotate
+  - unattended-upgrades
+  - ufw
+
+base_admin_ssh_cidrs: []
+base_administrator_user: exomem-admin
+base_administrator_authorized_keys: []
+base_k3s_pod_cidr: 10.42.0.0/16
+base_k3s_service_cidr: 10.43.0.0/16

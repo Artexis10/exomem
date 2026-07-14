@@ -1,0 +1,97 @@
+cloudflared:
+  image: docker.io/cloudflare/cloudflared:2026.7.0@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df
+  replicas: 1
+  tokenSecretName: exomem-cloudflared-token
+  tokenSecretKey: token
+
+provisioner:
+  image: ""
+  replicas: 1
+  databaseSchema: exomem_provisioner
+  databaseRole: exomem_provisioner_runtime
+  trustedProxyIps: 10.0.0.0/8
+  cellChartPath: /opt/exomem/charts/cell
+  cellChartVersion: 0.1.0
+  helmBinary: /opt/exomem/bin/helm
+  helmVersion: 3.19.4
+  controlHostname: ""
+  transferHostname: ""
+  browserOrigin: https://substratesystems.io
+  releaseManifestJson: ""
+  location: fsn1
+  internalOrigin: http://{resource}.{namespace}.svc.cluster.local:8765
+  pollSeconds: "1"
+  providerRecoverySigningKeySecret:
+    name: exomem-provider-recovery-signer
+    key: private-key
+  providerRecoveryPublicKeySecret:
+    name: exomem-provider-recovery-verifier
+    key: public-key
+
+admission:
+  namespaceContractOperatorUsernames:
+    - system:admin
+    - system:serviceaccount:exomem-platform:exomem-cell-provisioner
+
+scheduler:
+  contractVersion: 1
+  contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc
+  image: docker.io/curlimages/curl:8.18.0@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
+  secretName: exomem-hosted-scheduler
+  secretKey: secret
+
+storage:
+  className: exomem-hcloud-encrypted-retain
+  encryptionSecretName: exomem-volume-encryption
+  encryptionSecretNamespace: exomem-platform
+
+hcloud-csi:
+  storageClasses: []
+  controller:
+    hcloudToken:
+      value: ""
+      existingSecret:
+        name: exomem-hcloud-csi-token
+        key: token
+    hcloudVolumeDefaultLocation: fsn1
+    image:
+      hcloudCSIDriver:
+        name: docker.io/hetznercloud/hcloud-csi-driver
+        tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
+        pullPolicy: IfNotPresent
+  node:
+    image:
+      hcloudCSIDriver:
+        name: docker.io/hetznercloud/hcloud-csi-driver
+        tag: v2.21.1@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f
+        pullPolicy: IfNotPresent
+
+traefik:
+  image:
+    registry: docker.io
+    repository: traefik
+    digest: sha256:21a3d83696379bac6434bb32e1dde0aff0e84ef2abd053ed3db87d3f45e749b2
+  versionOverride: v3.7.6
+  deployment:
+    replicas: 1
+    labels:
+      exomem.io/ingress: traefik
+    podLabels:
+      exomem.io/ingress: traefik
+  service:
+    type: ClusterIP
+  ports:
+    web:
+      port: 8000
+      exposedPort: 80
+    websecure:
+      expose:
+        default: false
+  providers:
+    kubernetesCRD:
+      enabled: true
+      allowCrossNamespace: false
+    kubernetesIngress:
+      enabled: false
+  accessLog:
+    enabled: false
