@@ -38,7 +38,9 @@ _EXCLUDED_FAMILIES = frozenset(
 )
 _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
 _CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
-_GRANDFATHERED_OPERATIONS = frozenset({"edit", "observe"})
+_GRANDFATHERED_OPERATIONS = frozenset(
+    {"edit", "observe", "tier2_overwrite", "tier2_append"}
+)
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 _REVIEW_FINGERPRINT_UNSET = object()
 

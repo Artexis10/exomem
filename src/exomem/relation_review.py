@@ -465,6 +465,14 @@ def _auxiliary_hash(writes: tuple[vault.PlannedWrite, ...], root: Path) -> str:
     )
 
 
+def lifecycle_auxiliary_hash(
+    writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite],
+    vault_root: Path,
+) -> str:
+    """Return the canonical ordered-write digest used by lifecycle records."""
+    return _auxiliary_hash(tuple(writes), Path(vault_root))
+
+
 def draft_token_hash(value: object) -> str:
     """Hash a bounded encoded draft token using the coordinator's public contract."""
     if (

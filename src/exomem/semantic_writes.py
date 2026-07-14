@@ -5,13 +5,16 @@ from __future__ import annotations
 import base64
 import binascii
 import datetime as dt
+import hashlib
 import json
 import re
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 from . import (
+    activation_manifest,
     memory_schema,
     relation_registry,
     relation_review,
@@ -32,6 +35,7 @@ _COMPILED_TYPES = frozenset(
         "production-log",
     }
 )
+_EXISTING_OPERATIONS = frozenset({"edit", "tier2_overwrite", "tier2_append"})
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -230,6 +234,472 @@ class CreationCommit:
                 self.creation_commit.as_dict() if self.creation_commit is not None else None
             ),
         }
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingPreflight:
+    """Detached before/after semantic decision for one existing Markdown write."""
+
+    applicability: Literal["full", "structural", "not_semantic"]
+    operation: Literal["edit", "tier2_overwrite", "tier2_append"]
+    path: str
+    before_source: str
+    after_source: str
+    before: semantic_contract.SemanticPageState
+    after: semantic_contract.SemanticPageState
+    grandfathered: bool
+    transition_token: str
+    transition_hash: str
+    mutated: Literal[False]
+    contract_result: semantic_contract.SemanticContractResult
+    before_corpus: semantic_contract.SemanticCorpusContext
+    after_corpus: semantic_contract.SemanticCorpusContext
+    before_contracts: memory_schema.ResolvedMemoryContracts
+    after_contracts: memory_schema.ResolvedMemoryContracts
+    before_review: semantic_contract.RelationReviewState | None
+    after_review: semantic_contract.RelationReviewState | None
+    requested_decision: relation_review.LifecycleDecision | None
+    activation_census: activation_manifest.ActivationCensus
+    prospective_manifest: activation_manifest.ActivationManifest
+    manifest_install_required: bool
+    primary_guard: vault.PathGuard
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "applicability": self.applicability,
+            "operation": self.operation,
+            "path": self.path,
+            "grandfathered": self.grandfathered,
+            "transition_token": self.transition_token,
+            "transition_hash": self.transition_hash,
+            "mutated": self.mutated,
+            "contract_result": self.contract_result.as_dict(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ExistingCommit:
+    applicability: Literal["full", "structural", "not_semantic"]
+    operation: Literal["edit", "tier2_overwrite", "tier2_append"]
+    path: str
+    mutated: bool
+    written_paths: tuple[str, ...]
+    contract_result: semantic_contract.SemanticContractResult
+    index_report: Any | None
+    lifecycle_state: str | None
+
+    def as_dict(self) -> dict[str, Any]:
+        value = {
+            "applicability": self.applicability,
+            "operation": self.operation,
+            "path": self.path,
+            "mutated": self.mutated,
+            "written_paths": list(self.written_paths),
+            "contract_result": self.contract_result.as_dict(),
+            "lifecycle_state": self.lifecycle_state,
+        }
+        if self.index_report is not None:
+            value["index"] = self.index_report.as_dict()
+        return value
+
+
+def _existing_transition_token(
+    *, operation: str, path: str, before_hash: str, after_hash: str
+) -> str:
+    payload = {
+        "version": 1,
+        "transition_id": str(uuid.uuid4()),
+        "operation": operation,
+        "path": path,
+        "before_hash": before_hash,
+        "after_hash": after_hash,
+    }
+    raw = json.dumps(
+        payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _decode_existing_transition_token(token: str) -> dict[str, Any]:
+    if (
+        type(token) is not str
+        or not token
+        or len(token.encode("utf-8"))
+        > relation_review.MAX_DRAFT_TOKEN_ENCODED_BYTES
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    try:
+        padded = token + "=" * (-len(token) % 4)
+        raw = base64.b64decode(padded, altchars=b"-_", validate=True)
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_json_object)
+    except (TypeError, ValueError, UnicodeError, binascii.Error) as error:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        ) from error
+    if type(value) is not dict or set(value) != {
+        "version",
+        "transition_id",
+        "operation",
+        "path",
+        "before_hash",
+        "after_hash",
+    }:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    if value["version"] != 1 or any(
+        type(value[key]) is not str
+        for key in ("transition_id", "operation", "path", "before_hash", "after_hash")
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    try:
+        transition_id = str(uuid.UUID(value["transition_id"]))
+    except (AttributeError, TypeError, ValueError) as error:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        ) from error
+    if transition_id != value["transition_id"]:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_TOKEN", "transition token is invalid"
+        )
+    return value
+
+
+def _existing_transition_id(token: str) -> str:
+    return str(_decode_existing_transition_token(token)["transition_id"])
+
+
+def _existing_applicability(
+    before: semantic_contract.SemanticPageState,
+    after: semantic_contract.SemanticPageState,
+) -> Literal["full", "structural", "not_semantic"]:
+    if after.eligible_compiled:
+        return "full"
+    if (
+        before.page_type in _COMPILED_TYPES
+        or after.page_type in _COMPILED_TYPES
+        or before.page_type == "entity"
+        or after.page_type == "entity"
+    ):
+        return "structural"
+    if before.page_type is not None or after.page_type is not None:
+        return "structural"
+    return "not_semantic"
+
+
+def preflight_existing(
+    vault_root: Path,
+    *,
+    path: str,
+    after_source: str,
+    operation: Literal["edit", "tier2_overwrite", "tier2_append"],
+    expected_before_hash: str | None = None,
+    transition_token: str | None = None,
+    relation_disposition: str | None = None,
+    relation_review_hash: str | None = None,
+    relation_review_reason: str | None = None,
+) -> ExistingPreflight:
+    """Evaluate an existing-page transition without mutating any shared state."""
+    if operation not in _EXISTING_OPERATIONS:
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_INVALID_OPERATION",
+            "existing semantic write operation is unsupported",
+        )
+    if relation_disposition not in {None, "reviewed_none"}:
+        raise SemanticWriteError(
+            "INVALID_RELATION_REVIEW", "relation disposition is invalid"
+        )
+    root = Path(vault_root)
+    before_source, primary_guard = vault.read_guarded_text(root, root / path)
+    before_hash = vault.content_hash(before_source)
+    if expected_before_hash is not None and expected_before_hash != before_hash:
+        raise SemanticWriteError(
+            "STALE_SEMANTIC_WRITE", "page changed before semantic preflight"
+        )
+
+    registry = relation_registry.load_registry(root)
+    language = semantic_language_registry.load_registry(root)
+    loaded_contracts = memory_schema.load_saved_contracts(root)
+    before_corpus = semantic_contract.build_corpus_context(
+        root, registry=registry, language_registry=language
+    )
+    before = semantic_contract.build_page_state(
+        root,
+        path,
+        before_source,
+        relation_registry=registry,
+        language_registry=language,
+    )
+    after = semantic_contract.build_page_state(
+        root,
+        path,
+        after_source,
+        relation_registry=registry,
+        language_registry=language,
+    )
+    after_corpus = before_corpus.with_candidate(after)
+    before_contracts = memory_schema.resolve_contracts(
+        loaded_contracts,
+        projects=before.projects,
+        page_type=before.page_type,
+        language_registry=language,
+    )
+    after_contracts = memory_schema.resolve_contracts(
+        loaded_contracts,
+        projects=after.projects,
+        page_type=after.page_type,
+        language_registry=language,
+    )
+    before_review = relation_review.load_relation_review(
+        root, before, corpus=before_corpus
+    )
+    after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+
+    token = transition_token or _existing_transition_token(
+        operation=operation,
+        path=path,
+        before_hash=before.source_hash,
+        after_hash=after.source_hash,
+    )
+    token_value = _decode_existing_transition_token(token)
+    if (
+        token_value["operation"] != operation
+        or token_value["path"] != path
+        or token_value["before_hash"] != before.source_hash
+        or token_value["after_hash"] != after.source_hash
+    ):
+        raise SemanticWriteError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "transition token does not match the exact before and after state",
+        )
+    transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
+    requested_decision: relation_review.LifecycleDecision | None = None
+    if relation_disposition == "reviewed_none":
+        if relation_review_hash != transition_hash:
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
+                "review hash does not match the validated transition",
+            )
+        if (
+            after.identity_kind != "exomem_id"
+            or after.review_fingerprint is None
+            or after_corpus.identity_census.paths_by_identity.get(after.identity)
+            != (after.path,)
+        ):
+            raise SemanticWriteError(
+                "RELATION_REVIEW_STABLE_ID_REQUIRED",
+                "lifecycle reviewed-none requires one unique stable page identity",
+            )
+        try:
+            requested_decision = relation_review.build_lifecycle_decision(
+                page_identity=after.identity,
+                after_fingerprint=after.review_fingerprint,
+                reason=relation_review_reason or "",
+            )
+        except relation_review.RelationReviewError as error:
+            raise SemanticWriteError(error.code, error.reason) from error
+        after_review = semantic_contract.RelationReviewState(
+            "reviewed_none",
+            requested_decision.page_identity,
+            requested_decision.after_fingerprint,
+            reason=requested_decision.reason,
+            reference=requested_decision.reference,
+        )
+
+    manifest = activation_manifest.load_manifest(root)
+    boundary = activation_manifest.plan_activation_boundary(
+        before_corpus.activation_census, manifest=manifest
+    )
+    grandfathered = activation_manifest.is_grandfathered(
+        root,
+        path,
+        source_hash=before.source_hash,
+        exomem_id=before.identity if before.identity_kind == "exomem_id" else None,
+        manifest=boundary.manifest,
+        census=before_corpus.activation_census,
+    )
+    applicability = _existing_applicability(before, after)
+    result = semantic_contract.evaluate(
+        before=before,
+        after=after,
+        operation=operation,
+        mode="precommit",
+        before_contracts=before_contracts,
+        after_contracts=after_contracts,
+        before_corpus=before_corpus,
+        after_corpus=after_corpus,
+        before_review=before_review,
+        after_review=after_review,
+        grandfathered=grandfathered and before.eligible_compiled,
+    )
+    return ExistingPreflight(
+        applicability,
+        operation,
+        path,
+        before_source,
+        after_source,
+        before,
+        after,
+        grandfathered,
+        token,
+        transition_hash,
+        False,
+        result,
+        before_corpus,
+        after_corpus,
+        before_contracts,
+        after_contracts,
+        before_review,
+        after_review,
+        requested_decision,
+        before_corpus.activation_census,
+        boundary.manifest,
+        boundary.install_required,
+        primary_guard,
+    )
+
+
+def _reevaluate_existing(
+    preflight: ExistingPreflight,
+    *,
+    manifest: activation_manifest.ActivationManifest,
+) -> tuple[semantic_contract.SemanticContractResult, bool]:
+    grandfathered = activation_manifest.is_grandfathered(
+        preflight.before_corpus.vault_root,
+        preflight.path,
+        source_hash=preflight.before.source_hash,
+        exomem_id=(
+            preflight.before.identity
+            if preflight.before.identity_kind == "exomem_id"
+            else None
+        ),
+        manifest=manifest,
+        census=preflight.activation_census,
+    )
+    result = semantic_contract.evaluate(
+        before=preflight.before,
+        after=preflight.after,
+        operation=preflight.operation,
+        mode="precommit",
+        before_contracts=preflight.before_contracts,
+        after_contracts=preflight.after_contracts,
+        before_corpus=preflight.before_corpus,
+        after_corpus=preflight.after_corpus,
+        before_review=preflight.before_review,
+        after_review=preflight.after_review,
+        grandfathered=grandfathered and preflight.before.eligible_compiled,
+    )
+    return result, grandfathered
+
+
+def commit_existing(
+    vault_root: Path,
+    *,
+    preflight: ExistingPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+) -> ExistingCommit:
+    """Commit one preflighted existing-page transition, primary Markdown last."""
+    root = Path(vault_root)
+    if preflight.contract_result.should_block:
+        raise SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+        )
+
+    result = preflight.contract_result
+    if preflight.manifest_install_required:
+        winner = activation_manifest.ensure_manifest(
+            root, census=preflight.activation_census
+        )
+        result, _ = _reevaluate_existing(preflight, manifest=winner)
+        if result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                "semantic contract blocked against the activation boundary winner",
+            )
+
+    auxiliaries = tuple(auxiliary_writes)
+    lifecycle_writes: tuple[vault.PlannedWrite, ...] = ()
+    required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
+    lifecycle_state: str | None = None
+    stable_active = (
+        preflight.applicability == "full"
+        and preflight.after.identity_kind == "exomem_id"
+        and preflight.after.review_fingerprint is not None
+        and preflight.after_corpus.identity_census.paths_by_identity.get(
+            preflight.after.identity
+        )
+        == (preflight.path,)
+    )
+    if stable_active:
+        prepared = relation_review.build_lifecycle_prepared_transition(
+            transition_id=_existing_transition_id(preflight.transition_token),
+            operation=preflight.operation,
+            page_identity=preflight.after.identity,
+            before_path=preflight.before.path,
+            before_source_hash=preflight.before.source_hash,
+            after_path=preflight.after.path,
+            after_source_hash=preflight.after.source_hash,
+            after_fingerprint=preflight.after.review_fingerprint,
+            decision=preflight.requested_decision,
+            transition_token=preflight.transition_token,
+            auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
+        )
+        current = relation_review.LifecyclePrimaryBinding(
+            preflight.before.path,
+            preflight.before.source_hash,
+            preflight.before.review_fingerprint,
+        )
+        lifecycle = relation_review.plan_lifecycle_transition(
+            root,
+            decision=preflight.requested_decision,
+            prepared=prepared,
+            current=current,
+        )
+        lifecycle_state = lifecycle.state
+        if lifecycle.state == "committed_replay":
+            return ExistingCommit(
+                preflight.applicability,
+                preflight.operation,
+                preflight.path,
+                False,
+                (),
+                result,
+                None,
+                lifecycle.state,
+            )
+        lifecycle_writes = lifecycle.writes
+        required_guards = lifecycle.required_guards
+
+    writes = [*lifecycle_writes, *auxiliaries]
+    writes.append(
+        vault.PlannedWrite(
+            root / preflight.path,
+            preflight.after_source,
+            guard=preflight.primary_guard,
+        )
+    )
+    reports: list[Any] = []
+    written = vault.batch_atomic_write(
+        writes,
+        vault_root=root,
+        required_guards=required_guards,
+        index_reports=reports,
+    )
+    report = reports[0] if reports else None
+    return ExistingCommit(
+        preflight.applicability,
+        preflight.operation,
+        preflight.path,
+        True,
+        tuple(path.relative_to(root).as_posix() for path in written),
+        result,
+        report,
+        lifecycle_state,
+    )
 
 
 def _evaluate_structural(

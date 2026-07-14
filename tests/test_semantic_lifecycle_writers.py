@@ -8,7 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from exomem import activation_manifest, relation_review, semantic_contract, vault
+from exomem import (
+    activation_manifest,
+    index_sync,
+    relation_review,
+    semantic_contract,
+    semantic_writes,
+    vault,
+)
 
 _ID = "00000000-0000-4000-8000-000000000061"
 _OTHER_ID = "00000000-0000-4000-8000-000000000062"
@@ -89,6 +96,206 @@ def _apply_plan(root: Path, plan: relation_review.LifecycleTransitionPlan) -> No
         vault_root=root,
         required_guards=plan.required_guards,
     )
+
+
+def test_existing_preflight_classifies_transition_without_mutation(tmp_path: Path) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    assert preflight.applicability == "full"
+    assert preflight.before.source_hash == vault.content_hash(before)
+    assert preflight.after.source_hash == vault.content_hash(after)
+    assert preflight.grandfathered is True
+    assert preflight.mutated is False
+    assert preflight.transition_token
+    assert preflight.transition_hash == hashlib.sha256(
+        preflight.transition_token.encode("utf-8")
+    ).hexdigest()
+    assert page.read_text(encoding="utf-8") == before
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_existing_preflight_returns_equivalent_findings_for_all_entry_operations(
+    tmp_path: Path,
+) -> None:
+    before = _source("A")
+    _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    results = [
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=after,
+            operation=operation,
+            expected_before_hash=vault.content_hash(before),
+        ).contract_result
+        for operation in ("edit", "tier2_overwrite", "tier2_append")
+    ]
+
+    finding_shapes = [
+        [(item.code, item.key, item.severity) for item in result.findings]
+        for result in results
+    ]
+    assert finding_shapes[0] == finding_shapes[1] == finding_shapes[2]
+    assert [result.should_block for result in results] == [False, False, False]
+
+
+@pytest.mark.parametrize(
+    ("before_status", "after_status", "expected_applicability", "grandfathered"),
+    [
+        ("active", "active", "full", True),
+        ("active", "archived", "structural", True),
+        ("draft", "draft", "structural", False),
+        ("draft", "active", "full", False),
+    ],
+)
+def test_existing_preflight_applies_the_lifecycle_matrix(
+    tmp_path: Path,
+    before_status: str,
+    after_status: str,
+    expected_applicability: str,
+    grandfathered: bool,
+) -> None:
+    before = _source("A").replace("status: active", f"status: {before_status}")
+    after = before.replace(f"status: {before_status}", f"status: {after_status}")
+    _write(tmp_path, _PAGE, before)
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+
+    assert preflight.applicability == expected_applicability
+    assert preflight.grandfathered is grandfathered
+    assert (_PAGE in preflight.after_corpus.eligible_compiled_paths) is (
+        after_status == "active"
+    )
+
+
+def test_existing_preflight_rejects_an_unknown_operation_before_mutation(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=source,
+            operation="move",  # type: ignore[arg-type]
+        )
+
+    assert exc.value.code == "LIFECYCLE_TRANSITION_INVALID_OPERATION"
+    assert page.read_text(encoding="utf-8") == source
+    assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_existing_commit_installs_boundary_and_commits_primary_last_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+    original_batch = vault.batch_atomic_write
+    ordered_batches: list[list[str]] = []
+
+    def capture_batch(writes, **kwargs):
+        materialized = list(writes)
+        ordered_batches.append(
+            [item.path.relative_to(tmp_path).as_posix() for item in materialized]
+        )
+        return original_batch(materialized, **kwargs)
+
+    fanouts: list[list[Path]] = []
+
+    def one_report(_root: Path, paths: list[Path], **_kwargs):
+        fanouts.append(paths)
+        rels = tuple(path.relative_to(tmp_path).as_posix() for path in paths)
+        return index_sync.IndexSyncReport("upsert", rels, rels, ())
+
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", capture_batch)
+    monkeypatch.setattr(index_sync, "upsert_after_write", one_report)
+
+    committed = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+
+    assert page.read_text(encoding="utf-8") == after
+    assert activation_manifest.manifest_path(tmp_path).exists()
+    assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    assert ordered_batches[-1][-1] == _PAGE
+    assert ordered_batches[-1][0].endswith("/prepared.json")
+    assert len(fanouts) == 2  # manifest install, then the actual existing-page commit
+    assert committed.index_report is not None
+    assert committed.index_report.requested_paths[-1] == _PAGE
+
+
+def test_material_edit_requires_and_commits_exact_reviewed_none_transition(
+    tmp_path: Path,
+) -> None:
+    before = _source("A")
+    page = _write(tmp_path, _PAGE, before)
+    current_decision = _decision(before, reason="Current state reviewed")
+    decision_path = relation_review.lifecycle_decision_path(
+        tmp_path, _ID, current_decision.after_fingerprint
+    )
+    decision_path.parent.mkdir(parents=True, exist_ok=True)
+    decision_path.write_text(
+        relation_review.serialize_lifecycle_decision(current_decision),
+        encoding="utf-8",
+    )
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+    )
+    assert preview.contract_result.should_block is True
+
+    reviewed = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+        expected_before_hash=vault.content_hash(before),
+        transition_token=preview.transition_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=preview.transition_hash,
+        relation_review_reason="No honest relation exists for the revised page",
+    )
+
+    assert reviewed.contract_result.should_block is False
+    assert reviewed.requested_decision is not None
+    assert reviewed.requested_decision.after_fingerprint == reviewed.after.review_fingerprint
+    committed = semantic_writes.commit_existing(tmp_path, preflight=reviewed)
+    assert committed.mutated is True
+    assert page.read_text(encoding="utf-8") == after
+    loaded = relation_review.load_lifecycle_decision(
+        tmp_path, _ID, reviewed.after.review_fingerprint
+    )
+    assert loaded == reviewed.requested_decision
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(
