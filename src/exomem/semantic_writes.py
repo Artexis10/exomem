@@ -40,6 +40,94 @@ _FEEDBACK_FINDING_LIMIT = 32
 _FEEDBACK_RELATION_FACT_LIMIT = 16
 _FEEDBACK_ITEM_LIMIT = 32
 _FEEDBACK_COUNT_LIMIT = 32
+_FEEDBACK_STRING_BYTE_LIMIT = 256
+_FEEDBACK_NESTED_ITEM_LIMIT = 8
+_FEEDBACK_BYTE_BUDGET = 120 * 1024
+
+
+def _bounded_feedback_text(value: str, truncation: dict[str, int]) -> str:
+    raw = value.encode("utf-8", errors="replace")
+    if len(raw) <= _FEEDBACK_STRING_BYTE_LIMIT:
+        return raw.decode("utf-8")
+    ellipsis = "…"
+    prefix = raw[: _FEEDBACK_STRING_BYTE_LIMIT - len(ellipsis.encode("utf-8"))]
+    text = prefix.decode("utf-8", errors="ignore")
+    retained = len(text.encode("utf-8"))
+    truncation["strings_truncated"] += 1
+    truncation["string_bytes_omitted"] += len(raw) - retained
+    return text + ellipsis
+
+
+def _bounded_feedback_value(value: Any, truncation: dict[str, int]) -> Any:
+    if isinstance(value, str):
+        return _bounded_feedback_text(value, truncation)
+    if isinstance(value, (list, tuple)):
+        retained = value[:_FEEDBACK_NESTED_ITEM_LIMIT]
+        truncation["nested_items_omitted"] += len(value) - len(retained)
+        return [_bounded_feedback_value(item, truncation) for item in retained]
+    if isinstance(value, dict):
+        bounded: dict[str, Any] = {}
+        for raw_key, item in value.items():
+            key = _bounded_feedback_text(str(raw_key), truncation)
+            if key in bounded:
+                suffix = f"#{len(bounded)}"
+                key = _bounded_feedback_text(
+                    key + suffix,
+                    truncation,
+                )
+            bounded[key] = _bounded_feedback_value(item, truncation)
+        return bounded
+    return value
+
+
+def _feedback_serialized_size(value: dict[str, Any]) -> int:
+    return len(
+        json.dumps(value, ensure_ascii=True, sort_keys=True).encode("utf-8")
+    )
+
+
+def _fit_feedback_byte_budget(value: dict[str, Any]) -> dict[str, Any]:
+    """Deterministically omit retained items until canonical JSON is bounded."""
+    relation = value.get("relation_disposition")
+    top_omitted = value["omitted_counts"]
+    candidates: list[tuple[dict[str, Any], str, dict[str, int]]] = [
+        (value, "warnings", top_omitted),
+        (value, "errors", top_omitted),
+        (value, "blocking_findings", top_omitted),
+        (value, "findings", top_omitted),
+        (value, "actions", top_omitted),
+    ]
+    if isinstance(relation, dict):
+        relation_omitted = relation["omitted_counts"]
+        candidates.extend(
+            (
+                (relation, "rejected_facts", relation_omitted),
+                (relation, "qualifying_facts", relation_omitted),
+                (relation, "qualifying_directions", relation_omitted),
+                (relation, "actions", relation_omitted),
+            )
+        )
+
+    while _feedback_serialized_size(value) >= _FEEDBACK_BYTE_BUDGET:
+        removed_total = 0
+        for container, key, omitted in candidates:
+            items = container[key]
+            if not items:
+                continue
+            keep = len(items) // 2
+            removed = len(items) - keep
+            del items[keep:]
+            omitted[key] = omitted.get(key, 0) + removed
+            removed_total += removed
+        if removed_total == 0:
+            break
+        value["truncation"]["budget_items_omitted"] += removed_total
+    value["omitted_counts"] = dict(sorted(top_omitted.items()))
+    if isinstance(relation, dict):
+        relation["omitted_counts"] = dict(
+            sorted(relation["omitted_counts"].items())
+        )
+    return value
 
 
 def _bounded_semantic_feedback(
@@ -47,18 +135,29 @@ def _bounded_semantic_feedback(
 ) -> dict[str, Any]:
     """Project a full internal result into deterministic bounded writer feedback."""
     omitted: dict[str, int] = {}
+    truncation = {
+        "strings_truncated": 0,
+        "string_bytes_omitted": 0,
+        "nested_items_omitted": 0,
+    }
 
     def findings(
         name: str, values: tuple[semantic_contract.ContractFinding, ...]
     ) -> list[dict[str, Any]]:
         if len(values) > _FEEDBACK_FINDING_LIMIT:
             omitted[name] = len(values) - _FEEDBACK_FINDING_LIMIT
-        return [item.as_dict() for item in values[:_FEEDBACK_FINDING_LIMIT]]
+        return [
+            _bounded_feedback_value(item.as_dict(), truncation)
+            for item in values[:_FEEDBACK_FINDING_LIMIT]
+        ]
 
     def items(name: str, values: tuple[str, ...]) -> list[str]:
         if len(values) > _FEEDBACK_ITEM_LIMIT:
             omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
-        return list(values[:_FEEDBACK_ITEM_LIMIT])
+        return [
+            _bounded_feedback_text(item, truncation)
+            for item in values[:_FEEDBACK_ITEM_LIMIT]
+        ]
 
     kind_counts = result.kind_counts[:_FEEDBACK_COUNT_LIMIT]
     category_counts = result.category_counts[:_FEEDBACK_COUNT_LIMIT]
@@ -77,7 +176,10 @@ def _bounded_semantic_feedback(
         def relation_items(name: str, values: tuple[str, ...]) -> list[str]:
             if len(values) > _FEEDBACK_ITEM_LIMIT:
                 relation_omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
-            return list(values[:_FEEDBACK_ITEM_LIMIT])
+            return [
+                _bounded_feedback_text(item, truncation)
+                for item in values[:_FEEDBACK_ITEM_LIMIT]
+            ]
 
         if len(disposition.qualifying_facts) > _FEEDBACK_RELATION_FACT_LIMIT:
             relation_omitted["qualifying_facts"] = (
@@ -95,22 +197,22 @@ def _bounded_semantic_feedback(
                 "qualifying_directions", disposition.qualifying_directions
             ),
             "qualifying_facts": [
-                fact.as_dict()
+                _bounded_feedback_value(fact.as_dict(), truncation)
                 for fact in disposition.qualifying_facts[
                     :_FEEDBACK_RELATION_FACT_LIMIT
                 ]
             ],
             "rejected_facts": [
-                item.as_dict()
+                _bounded_feedback_value(item.as_dict(), truncation)
                 for item in disposition.rejected_facts[:_FEEDBACK_RELATION_FACT_LIMIT]
             ],
             "actions": relation_items("actions", disposition.actions),
             "omitted_counts": dict(sorted(relation_omitted.items())),
         }
 
-    return {
-        "mode": result.mode,
-        "operation": result.operation,
+    value = {
+        "mode": _bounded_feedback_text(result.mode, truncation),
+        "operation": _bounded_feedback_text(result.operation, truncation),
         "findings": findings("findings", result.findings),
         "errors": findings("errors", result.errors),
         "warnings": findings("warnings", result.warnings),
@@ -119,12 +221,20 @@ def _bounded_semantic_feedback(
         ),
         "should_block": result.should_block,
         "semantic_unit_count": result.semantic_unit_count,
-        "kind_counts": dict(kind_counts),
-        "category_counts": dict(category_counts),
+        "kind_counts": _bounded_feedback_value(dict(kind_counts), truncation),
+        "category_counts": _bounded_feedback_value(
+            dict(category_counts), truncation
+        ),
         "relation_disposition": relation_value,
         "actions": items("actions", result.actions),
         "omitted_counts": dict(sorted(omitted.items())),
+        "truncation": {
+            "byte_budget": _FEEDBACK_BYTE_BUDGET,
+            **truncation,
+            "budget_items_omitted": 0,
+        },
     }
+    return _fit_feedback_byte_budget(value)
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:

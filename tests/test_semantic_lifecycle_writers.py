@@ -1150,6 +1150,235 @@ def test_existing_semantic_feedback_is_deterministically_bounded(tmp_path: Path)
     assert len(large_result.relation_disposition.qualifying_facts) == 96
 
 
+def _existing_feedback_payloads(
+    preflight: semantic_writes.ExistingPreflight,
+    result: semantic_contract.SemanticContractResult,
+) -> tuple[dict, dict]:
+    commit = semantic_writes.ExistingCommit(
+        preflight.applicability,
+        preflight.operation,
+        preflight.path,
+        True,
+        (preflight.path,),
+        result,
+        None,
+        None,
+        preflight.transition_token,
+    )
+    return (
+        replace(preflight, contract_result=result).as_dict()["contract_result"],
+        commit.as_dict()["contract_result"],
+    )
+
+
+def _feedback_preflight(tmp_path: Path) -> semantic_writes.ExistingPreflight:
+    source = _source("A")
+    _write(tmp_path, _PAGE, source)
+    return semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("A\n\n## Relations", "B\n\n## Relations"),
+        operation="edit",
+    )
+
+
+def _assert_byte_bounded_feedback_pair(
+    preflight: semantic_writes.ExistingPreflight,
+    result: semantic_contract.SemanticContractResult,
+) -> tuple[dict, dict]:
+    first = _existing_feedback_payloads(preflight, result)
+    second = _existing_feedback_payloads(preflight, result)
+    assert first == second
+    for payload in first:
+        encoded = json.dumps(payload, ensure_ascii=True, sort_keys=True).encode("utf-8")
+        assert len(encoded) < 128 * 1024
+        assert payload["truncation"]["byte_budget"] < 128 * 1024
+    return first
+
+
+def test_existing_feedback_byte_bounds_one_oversized_diagnostic(tmp_path: Path) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    oversized = "λ" * (512 * 1024)
+    finding = semantic_contract.ContractFinding(
+        code="OVERSIZED_DIAGNOSTIC",
+        severity="error",
+        path=_PAGE,
+        span=None,
+        detail=oversized,
+        remediation=oversized,
+        governed_element_identity=(oversized,),
+        resolved_rule=("synthetic", "*", "oversized"),
+    )
+    result = replace(
+        preflight.contract_result,
+        findings=(finding,),
+        errors=(finding,),
+        warnings=(),
+        blocking_findings=(finding,),
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["strings_truncated"] >= 3
+        assert payload["truncation"]["string_bytes_omitted"] > 0
+        assert oversized not in json.dumps(payload, ensure_ascii=False)
+        projected = payload["findings"][0]
+        for value in (
+            projected["detail"],
+            projected["remediation"],
+            projected["governed_element_identity"][0],
+        ):
+            assert value.endswith("…")
+            assert len(value.encode("utf-8")) <= 256
+    assert result.findings[0].detail == oversized
+    assert result.findings[0].remediation == oversized
+    assert result.findings[0].governed_element_identity == (oversized,)
+
+
+def test_existing_feedback_byte_bounds_one_oversized_relation_fact(
+    tmp_path: Path,
+) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    oversized = "界" * (512 * 1024)
+    fact = semantic_contract.RelationFact(
+        identity="oversized-relation",
+        logical_source_path=_PAGE,
+        logical_target_path=oversized,
+        raw_target=oversized,
+        resolved_target_path=oversized,
+        target_anchor=oversized,
+        target_alias=oversized,
+        authored_path=oversized,
+        authored_line=1,
+        authored_anchor=oversized,
+        authored_projects=(),
+        authored_page_type="insight",
+        source_kind="statement",
+        target_page_type="insight",
+        raw_relation="supports",
+        canonical_relation="supports",
+        family="support",
+        registry_status="active",
+        origin="semantic_relation",
+        authored=True,
+        reviewer_accepted=False,
+        target_status="resolved",
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=("outbound",),
+        qualifying_facts=(fact,),
+        rejected_facts=(
+            semantic_contract.RejectedRelationFact(fact, (oversized,)),
+        ),
+        actions=(oversized,),
+    )
+    result = replace(
+        preflight.contract_result,
+        relation_disposition=disposition,
+        actions=(oversized,),
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["strings_truncated"] >= 8
+        assert payload["truncation"]["string_bytes_omitted"] > 0
+        assert oversized not in json.dumps(payload, ensure_ascii=False)
+        projected = payload["relation_disposition"]["qualifying_facts"][0]
+        for value in (
+            projected["logical_target_path"],
+            projected["raw_target"],
+            projected["target_alias"],
+        ):
+            assert value.endswith("…")
+            assert len(value.encode("utf-8")) <= 256
+    assert result.relation_disposition is not None
+    assert result.relation_disposition.qualifying_facts[0].raw_target == oversized
+    assert result.relation_disposition.qualifying_facts[0].target_alias == oversized
+
+
+def test_existing_feedback_byte_bounds_oversized_nested_collections(
+    tmp_path: Path,
+) -> None:
+    preflight = _feedback_preflight(tmp_path)
+    nested_value = "nested-" + "é" * 4096
+    provenance = tuple(
+        (f"contract-{index}", nested_value, nested_value, nested_value)
+        for index in range(96)
+    )
+    finding = semantic_contract.ContractFinding(
+        code="OVERSIZED_NESTED",
+        severity="warning",
+        path=_PAGE,
+        span=None,
+        detail="nested diagnostic",
+        remediation="inspect truncation metadata",
+        governed_element_identity=("nested",),
+        resolved_rule=("synthetic", "*", "nested"),
+        provenance=provenance,
+    )
+    projects = tuple(f"project-{index}-{nested_value}" for index in range(96))
+    fact = semantic_contract.RelationFact(
+        identity="nested-relation",
+        logical_source_path=_PAGE,
+        logical_target_path="target.md",
+        raw_target="Target",
+        resolved_target_path="target.md",
+        target_anchor=None,
+        target_alias=None,
+        authored_path=_PAGE,
+        authored_line=1,
+        authored_anchor=None,
+        authored_projects=projects,
+        authored_page_type="insight",
+        source_kind="statement",
+        target_page_type="insight",
+        raw_relation="supports",
+        canonical_relation="supports",
+        family="support",
+        registry_status="active",
+        origin="semantic_relation",
+        authored=True,
+        reviewer_accepted=False,
+        target_status="resolved",
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=("outbound",),
+        qualifying_facts=(fact,),
+    )
+    result = replace(
+        preflight.contract_result,
+        findings=(finding,),
+        errors=(),
+        warnings=(finding,),
+        blocking_findings=(),
+        relation_disposition=disposition,
+    )
+
+    payloads = _assert_byte_bounded_feedback_pair(preflight, result)
+
+    for payload in payloads:
+        assert payload["truncation"]["nested_items_omitted"] >= 176
+        assert payload["truncation"]["strings_truncated"] > 0
+        assert nested_value not in json.dumps(payload, ensure_ascii=False)
+        assert len(payload["findings"][0]["provenance"]) == 8
+        assert len(
+            payload["relation_disposition"]["qualifying_facts"][0][
+                "authored_projects"
+            ]
+        ) == 8
+    assert len(result.findings[0].provenance) == 96
+    assert result.relation_disposition is not None
+    assert len(result.relation_disposition.qualifying_facts[0].authored_projects) == 96
+
+
 def test_tier2_append_commits_semantics_log_and_primary_in_one_batch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
