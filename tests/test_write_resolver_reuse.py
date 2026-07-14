@@ -55,6 +55,7 @@ def test_note_reuses_cached_resolver(vault: Path, build_counter: list[int]) -> N
         content="# Resolver reuse probe\n\nBody referencing [[Profile]].",
         note_type="insight",
         title="Resolver reuse probe",
+        status="draft",
     )
     assert len(build_counter) == warm_builds, (
         "note() rebuilt the WikilinkResolver instead of reusing the shared "
@@ -68,6 +69,7 @@ def test_edit_reuses_cached_resolver(vault: Path, build_counter: list[int]) -> N
         content="# Edit resolver probe\n\nOriginal body.",
         note_type="insight",
         title="Edit resolver probe",
+        status="draft",
     )
     _warm_resolver(vault)
     warm_builds = len(build_counter)
@@ -111,13 +113,14 @@ def test_failed_note_write_purges_pending_resolver_entry(
     def boom(writes, *, vault_root):  # signature-compatible with batch_atomic_write
         raise OSError("simulated disk failure")
 
-    monkeypatch.setattr(note_module, "batch_atomic_write", boom)
+    monkeypatch.setattr(note_module.semantic_writes.vault, "batch_atomic_write", boom)
     with pytest.raises(OSError):
         note_module.note(
             vault,
             content="# Phantom entry probe\n\nBody.",
             note_type="insight",
             title="Phantom entry probe",
+            status="draft",
         )
     resolver = find_module._get_query_resolver(vault)
     phantom = "Knowledge Base/Notes/Insights/phantom-entry-probe"

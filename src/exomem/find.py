@@ -1278,7 +1278,7 @@ def _outbound_wikilink_paths(
     return out
 
 
-_RESOLVER_CACHE: dict[Path, tuple[tuple, "object"]] = {}
+_RESOLVER_CACHE: dict[Path, tuple[tuple, object]] = {}
 _RESOLVER_LOCK = threading.Lock()
 
 
@@ -1333,6 +1333,23 @@ def shared_resolver(vault_root: Path):
       never landed, so the disk re-read drops the phantom entry.
     """
     return _get_query_resolver(vault_root)
+
+
+def writer_resolver_snapshot(vault_root: Path):
+    """Return a detached resolver snapshot without warming the shared cache.
+
+    A fresh matching cached resolver is forked.  A cold/stale cache remains
+    untouched and preparation gets a one-off resolver built from disk.
+    """
+    from .vault import WikilinkResolver
+
+    root = Path(vault_root)
+    current_freshness = FreshnessSnapshot(root).vault()
+    with _RESOLVER_LOCK:
+        cached = _RESOLVER_CACHE.get(root)
+        if cached and cached[0] == current_freshness:
+            return cached[1].fork()
+    return WikilinkResolver(root)
 
 
 def on_resolver_files_changed(

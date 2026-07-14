@@ -17,6 +17,21 @@ from exomem import project_keys as project_keys_module
 TODAY = dt.date(2026, 5, 28)
 
 
+def _reviewed_note(vault: Path, **kwargs):
+    """Create an intentionally disconnected active fixture via the current protocol."""
+    validation = note_module.note(vault, validate_only=True, **kwargs)
+    return note_module.note(
+        vault,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="Fixture has no honest relation.",
+        **kwargs,
+    )
+
+
 def test_load_registry_falls_back_when_yaml_missing(vault: Path) -> None:
     """Fixture vault has no project-keys.yaml — loader returns fallback set."""
     registry = project_keys_module.load_project_registry(vault)
@@ -60,7 +75,7 @@ def test_register_rejects_non_slug_keys(vault: Path) -> None:
 
 def test_note_auto_registers_unknown_project_key(vault: Path) -> None:
     """`note(project=<new-slug>)` registers + creates folder + writes."""
-    result = note_module.note(
+    result = _reviewed_note(
         vault,
         content="# Test\n\n## Question\n\nWhat?\n",
         note_type="research-note",
@@ -82,7 +97,7 @@ def test_note_auto_registers_unknown_project_key(vault: Path) -> None:
 
 def test_note_auto_register_is_silent_on_second_use(vault: Path) -> None:
     """Once a key is registered, subsequent uses don't warn again."""
-    note_module.note(
+    _reviewed_note(
         vault,
         content="# First\n\n## Question\n\nWhat?\n",
         note_type="research-note",
@@ -90,7 +105,7 @@ def test_note_auto_register_is_silent_on_second_use(vault: Path) -> None:
         project="vehicles",
         today=TODAY,
     )
-    second = note_module.note(
+    second = _reviewed_note(
         vault,
         content="# Second\n\n## Question\n\nWhat?\n",
         note_type="research-note",
@@ -119,7 +134,7 @@ def test_note_rejects_non_slug_project(vault: Path) -> None:
 
 def test_note_projects_plural_auto_registers_each(vault: Path) -> None:
     """`projects:` list (plural) auto-registers every unknown key."""
-    result = note_module.note(
+    result = _reviewed_note(
         vault,
         content="# Pat\n\n## Problem\n\nX.\n",
         note_type="pattern",
@@ -135,7 +150,7 @@ def test_note_projects_plural_auto_registers_each(vault: Path) -> None:
 
 def test_project_category_lands_in_yaml(vault: Path) -> None:
     """`project_category` arg should propagate into the YAML on new-key registration."""
-    note_module.note(
+    _reviewed_note(
         vault,
         content="# Note\n\n## Question\n\nbody",
         note_type="research-note",
@@ -199,10 +214,9 @@ def test_note_surfaces_typo_as_project_key_typo_error(vault: Path) -> None:
 
 def test_set_frontmatter_field_blocks_project_typo(vault: Path) -> None:
     """Patching `project` to a typo via set_frontmatter_field should raise."""
-    from exomem import note as note_module
     from exomem import set_frontmatter_field as sff_module
     # Land a note first so there's something to patch.
-    r = note_module.note(
+    r = _reviewed_note(
         vault,
         content="# Note\n\n## Question\n\nbody",
         note_type="research-note",
@@ -220,10 +234,9 @@ def test_set_frontmatter_field_blocks_project_typo(vault: Path) -> None:
 
 def test_set_frontmatter_field_autoregisters_new_project(vault: Path) -> None:
     """Patching `project` to a genuinely new (distance ≥3) key should auto-register."""
-    from exomem import note as note_module
     from exomem import project_keys as pk_module
     from exomem import set_frontmatter_field as sff_module
-    r = note_module.note(
+    r = _reviewed_note(
         vault,
         content="# Note\n\n## Question\n\nbody",
         note_type="research-note",
@@ -276,22 +289,21 @@ def test_link_decision_autoregisters_new_project(vault: Path) -> None:
 def test_audit_flags_unregistered_project_key(vault: Path) -> None:
     """Audit's new category catches frontmatter project values not in the registry."""
     from exomem import audit as audit_module
-    from exomem import create_file as cf_module
-    # Use Tier 2 create_file to bypass the auto-register path and land a
-    # frontmatter value the registry doesn't know about. Mirrors how
-    # historical/pre-guard pages could still have drift.
-    cf_module.create_file(
-        vault,
-        path="Knowledge Base/Notes/Research/Project Alpha/probe-drift.md",
-        content="# Probe drift\n\n## Question\n\nbody",
-        frontmatter={
-            "type": "research-note",
-            "project": "completely-unknown-key",
-            "status": "active",
-            "created": "2026-05-28",
-            "updated": "2026-05-28",
-            "tags": [],
-        },
+    # Seed historical/pre-guard drift directly. Tier 2 now shares the semantic
+    # boundary and intentionally cannot be used to smuggle this malformed page.
+    path = vault / "Knowledge Base/Notes/Research/Project Alpha/probe-drift.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "---\n"
+        "type: research-note\n"
+        "project: completely-unknown-key\n"
+        "status: active\n"
+        "created: 2026-05-28\n"
+        "updated: 2026-05-28\n"
+        "tags: []\n"
+        "---\n"
+        "# Probe drift\n\n## Question\n\nbody\n",
+        encoding="utf-8",
     )
     report = audit_module.audit(vault, categories=["unregistered_project_key"])
     drift_findings = [

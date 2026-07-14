@@ -11,7 +11,6 @@ import yaml
 from exomem import note as note_module
 from exomem import replace as replace_module
 
-
 TODAY = dt.date(2026, 5, 25)
 
 
@@ -26,12 +25,26 @@ def _fm(p: Path) -> dict:
 
 def _make_insight(vault: Path, title: str) -> str:
     """Create a fresh insight via note() so the supersession chain has a real target."""
+    kwargs = {
+        "content": f"# {title}\n\nbody.\n",
+        "note_type": "insight",
+        "title": title,
+        "today": TODAY,
+    }
+    validation = note_module.note(
+        vault,
+        validate_only=True,
+        **kwargs,
+    )
     result = note_module.note(
         vault,
-        content=f"# {title}\n\nbody.\n",
-        note_type="insight",
-        title=title,
-        today=TODAY,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="Fixture predecessor has no honest relation.",
+        **kwargs,
     )
     return result.path
 
@@ -204,13 +217,23 @@ def test_replace_accepts_novel_type(vault: Path) -> None:
         "# Products\n\nold facts.\n",
         encoding="utf-8",
     )
+    kwargs = {
+        "old_path": rel,
+        "content": "# Products v2\n\nupdated facts.\n",
+        "note_type": "insight",  # new page goes to Notes/Insights/
+        "title": "Identity Products v2",
+        "today": TODAY,
+    }
+    validation = replace_module.replace(vault, validate_only=True, **kwargs)
     result = replace_module.replace(
         vault,
-        old_path=rel,
-        content="# Products v2\n\nupdated facts.\n",
-        note_type="insight",  # new page goes to Notes/Insights/
-        title="Identity Products v2",
-        today=TODAY,
+        draft_id=validation.draft_id,
+        draft_hash=validation.draft_hash,
+        draft_token=validation.draft_token,
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="Legacy identity predecessor is outside the compiled corpus.",
+        **kwargs,
     )
     # Old page flipped to superseded
     old_fm = _fm(vault / rel)

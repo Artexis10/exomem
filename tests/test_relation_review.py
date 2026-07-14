@@ -335,7 +335,9 @@ def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
         operation="create",
     )
     assert commit.review_reference is None
-    assert not relation_review.review_artifact_path(tmp_path, _ID_B).exists()
+    receipt = relation_review.load_creation_receipt(tmp_path, _ID_B)
+    assert receipt is not None and receipt.kind == "qualifying"
+    assert relation_review.load_relation_reviews(tmp_path) == ()
 
 
 @pytest.mark.parametrize(
@@ -364,6 +366,21 @@ def test_qualifying_relation_rejects_unnecessary_review_and_needs_no_artifact(
             json.dumps(
                 {
                     "schema_version": 2,
+                    "kind": "bootstrap",
+                    "page_identity": _ID_A,
+                    "page_path_at_review": _PAGE_A,
+                    "content_fingerprint": "a" * 64,
+                    "draft_hash": "b" * 64,
+                    "auxiliary_hash": "c" * 64,
+                    "reason": None,
+                }
+            ).encode(),
+            "RELATION_REVIEW_INVALID_SCHEMA",
+        ),
+        (
+            json.dumps(
+                {
+                    "schema_version": 3,
                     "kind": "bootstrap",
                     "page_identity": _ID_A,
                     "page_path_at_review": _PAGE_A,
@@ -609,6 +626,71 @@ def test_successful_replay_and_same_identity_copy_have_exact_precedence(
             operation="create",
         )
     assert copied.value.code == "DRAFT_ID_IN_USE"
+
+
+def test_exact_v2_bootstrap_retry_ignores_later_corpus_growth(tmp_path: Path) -> None:
+    source = _source(_ID_A, title="First")
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_A,
+        source=source,
+        draft_id=_ID_A,
+        operation="create",
+        draft_token="bootstrap-v2-token",
+    )
+    _write(tmp_path, _PAGE_B, _source(_ID_B, title="Later"))
+
+    with pytest.raises(relation_review.RelationReviewError) as replay:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_A,
+            source=source,
+            draft_id=_ID_A,
+            operation="create",
+            draft_token="bootstrap-v2-token",
+        )
+
+    assert replay.value.code == "DRAFT_ALREADY_COMMITTED"
+
+
+def test_exact_v2_reviewed_none_retry_ignores_later_inbound_relation(
+    tmp_path: Path,
+) -> None:
+    source, validation = _reviewed_validation(tmp_path)
+    relation_review.commit_creation_draft(
+        tmp_path,
+        path=_PAGE_B,
+        source=source,
+        draft_id=_ID_B,
+        operation="create",
+        relation_disposition="reviewed_none",
+        relation_review_hash=validation.draft_hash,
+        relation_review_reason="No honest typed relation yet",
+    )
+    inbound_id = "00000000-0000-4000-8000-000000000003"
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/inbound.md",
+        _source(
+            inbound_id,
+            title="Inbound",
+            body="Body.\n\n## Relations\n- supports [[Candidate]]\n",
+        ),
+    )
+
+    with pytest.raises(relation_review.RelationReviewError) as replay:
+        relation_review.commit_creation_draft(
+            tmp_path,
+            path=_PAGE_B,
+            source=source,
+            draft_id=_ID_B,
+            operation="create",
+            relation_disposition="reviewed_none",
+            relation_review_hash=validation.draft_hash,
+            relation_review_reason="No honest typed relation yet",
+        )
+
+    assert replay.value.code == "DRAFT_ALREADY_COMMITTED"
 
 
 def test_load_reviews_returns_sorted_immutable_records_and_ignores_temp_residue(

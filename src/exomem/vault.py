@@ -8,7 +8,6 @@ list_directory, etc.).
 
 from __future__ import annotations
 
-import datetime as _dt
 import errno
 import hashlib
 import json
@@ -613,6 +612,27 @@ class PathGuard:
             and _leaf_hash(leaf, self.leaf_identity) != self.expected_content_hash
         ):
             raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
+
+
+def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
+    """Read UTF-8 text once and bind a guard to those exact source bytes."""
+    root = Path(vault_root)
+    absolute = Path(path)
+    try:
+        relative = absolute.relative_to(root).as_posix()
+    except ValueError as error:
+        raise PathGuardError(
+            "PATH_GUARD_INVALID", "guarded read target is outside the vault"
+        ) from error
+    raw = absolute.read_bytes()
+    text = raw.decode("utf-8")
+    guard = PathGuard.capture(
+        root,
+        relative,
+        leaf_policy="content",
+        expected_content_hash=hashlib.sha256(raw).hexdigest(),
+    )
+    return text, guard
 
 
 @dataclass
@@ -1728,6 +1748,21 @@ class WikilinkResolver:
                 continue
             self._add_entry(rel.removesuffix(".md"), self._read_title_lower(md))
 
+    def fork(self) -> WikilinkResolver:
+        """Return an I/O-free detached copy suitable for write preparation.
+
+        Writers may add their pending primary to the copy without polluting the
+        graph lane's process-shared resolver when validation later fails.
+        """
+        resolver = self.__class__.__new__(self.__class__)
+        resolver.vault_root = self.vault_root
+        resolver.full_paths = set(self.full_paths)
+        resolver.kb_stripped = set(self.kb_stripped)
+        resolver.stems = {key: list(values) for key, values in self.stems.items()}
+        resolver.titles = {key: list(values) for key, values in self.titles.items()}
+        resolver._title_by_rel = dict(self._title_by_rel)
+        return resolver
+
     # ---- shared add/remove primitives -------------------------------------
     # The full build AND the incremental patch both go through these, so a
     # patched resolver's maps are byte-identical to a fresh rebuild's for the
@@ -2111,6 +2146,8 @@ def prepend_log_entry(
     if title.startswith(kb_prefix()):
         title = title[len(kb_prefix()) :]
     new_entry = f"## [{date_iso}] {op} | {title}\n\n{escape_wikilinks_for_log(body)}\n"
+    if new_entry in log_text:
+        return log_text
     # Reuse the same separator the indexes module emits.
     separator = "\n---\n"
     sep_idx = log_text.find(separator)
@@ -2128,6 +2165,15 @@ LOG_ROTATE_KEEP_ENTRIES = 200  # newest entries kept live (>= index.md's cap-50)
 _LOG_ENTRY_START_RE = re.compile(r"^## \[", re.MULTILINE)
 
 
+@dataclass(frozen=True, slots=True)
+class LogWritePlan:
+    """Pure, ordered log update/rotation writes for one stable operation."""
+
+    writes: tuple[PlannedWrite, ...]
+    warning: str | None = None
+    rotation_note: str | None = None
+
+
 def _log_rotate_bytes() -> int:
     raw = os.environ.get("EXOMEM_LOG_ROTATE_BYTES")
     if raw:
@@ -2138,6 +2184,105 @@ def _log_rotate_bytes() -> int:
         except ValueError:
             pass
     return LOG_ROTATE_BYTES_DEFAULT
+
+
+def _plan_log_content(
+    vault_root: Path,
+    *,
+    log_text: str,
+    live_guard: PathGuard,
+    operation_token: str,
+) -> LogWritePlan:
+    """Plan deterministic rotation for already-final live-log bytes."""
+    root = Path(vault_root)
+    log_file = kb_root(root) / "log.md"
+    token_hash = hashlib.sha256(operation_token.encode("utf-8")).hexdigest()
+    archive_path = kb_root(root) / "_archive" / "logs" / f"log-{token_hash[:20]}.md"
+    archive_rel = archive_path.relative_to(root).as_posix()
+    try:
+        current_archive, archive_guard = read_guarded_text(root, archive_path)
+        existing_archive = True
+    except FileNotFoundError:
+        current_archive = None
+        archive_guard = PathGuard.capture(root, archive_rel, leaf_policy="absent")
+        existing_archive = False
+
+    rotate = len(log_text.encode("utf-8")) > _log_rotate_bytes()
+    separator = "\n---\n"
+    sep_idx = log_text.find(separator)
+    starts: list[int] = []
+    if rotate and sep_idx != -1:
+        head_end = sep_idx + len(separator)
+        starts = [
+            match.start()
+            for match in _LOG_ENTRY_START_RE.finditer(log_text[head_end:])
+        ]
+    if rotate and sep_idx != -1 and len(starts) > LOG_ROTATE_KEEP_ENTRIES:
+        head_end = sep_idx + len(separator)
+        entries_text = log_text[head_end:]
+        cut = starts[LOG_ROTATE_KEEP_ENTRIES]
+        live_text = log_text[:head_end] + entries_text[:cut]
+        tail = entries_text[cut:]
+        moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
+        archive_text = (
+            f"# log.md archive segment ({token_hash})\n\n"
+            f"Rotated out of `{kb_prefix()}log.md` — {moved} entrie(s), newest "
+            f"first, byte-exact.\n{separator}{tail}"
+        )
+        if current_archive is not None and current_archive != archive_text:
+            raise ValueError("LOG_ARCHIVE_COLLISION: deterministic archive already differs")
+        return LogWritePlan(
+            (
+                PlannedWrite(
+                    archive_path,
+                    archive_text,
+                    create_only=not existing_archive,
+                    guard=archive_guard,
+                ),
+                PlannedWrite(log_file, live_text, guard=live_guard),
+            ),
+            rotation_note=f"log.md rotated: {moved} older entrie(s) → {archive_rel}",
+        )
+
+    # A completed partial semantic batch may already have rotated the live log.
+    # Include its exact deterministic archive again so the auxiliary target set
+    # and digest remain identical on retry.
+    writes: list[PlannedWrite] = []
+    if current_archive is not None:
+        writes.append(PlannedWrite(archive_path, current_archive, guard=archive_guard))
+    writes.append(PlannedWrite(log_file, log_text, guard=live_guard))
+    return LogWritePlan(tuple(writes))
+
+
+def plan_log_writes(
+    vault_root: Path,
+    *,
+    date_iso: str,
+    op: str,
+    rel_path_no_ext: str,
+    body: str,
+    operation_token: str,
+) -> LogWritePlan:
+    """Purely plan one idempotent log entry and any deterministic rotation."""
+    log_file = kb_root(vault_root) / "log.md"
+    if not log_file.is_file():
+        return LogWritePlan(
+            (), warning=f"{kb_prefix()}log.md missing; skipped log entry"
+        )
+    current, live_guard = read_guarded_text(vault_root, log_file)
+    updated = prepend_log_entry(
+        current,
+        date_iso=date_iso,
+        op=op,
+        rel_path_no_ext=rel_path_no_ext,
+        body=body,
+    )
+    return _plan_log_content(
+        vault_root,
+        log_text=updated,
+        live_guard=live_guard,
+        operation_token=operation_token,
+    )
 
 
 def rotate_log_if_needed(vault_root: Path) -> str | None:
@@ -2162,41 +2307,20 @@ def rotate_log_if_needed(vault_root: Path) -> str | None:
     try:
         if not log_file.exists() or log_file.stat().st_size <= _log_rotate_bytes():
             return None
-        text = log_file.read_text(encoding="utf-8")
-        sep = "\n---\n"  # == indexes.LOG_SEPARATOR (header/entries boundary)
-        sep_idx = text.find(sep)
-        if sep_idx == -1:
-            return None  # unrecognized shape — never rotate what we can't parse
-        head_end = sep_idx + len(sep)
-        head, entries_text = text[:head_end], text[head_end:]
-        starts = [m.start() for m in _LOG_ENTRY_START_RE.finditer(entries_text)]
-        if len(starts) <= LOG_ROTATE_KEEP_ENTRIES:
-            return None  # entry-count floor reached; size is as small as it gets
-        cut = starts[LOG_ROTATE_KEEP_ENTRIES]
-        live_entries, tail = entries_text[:cut], entries_text[cut:]
-        stamp = _dt.datetime.now(_dt.UTC).strftime("%Y%m%dT%H%M%SZ")
-        archive_dir = kb_root(vault_root) / "_archive" / "logs"
-        archive_dir.mkdir(parents=True, exist_ok=True)
-        archive_path = archive_dir / f"log-{stamp}.md"
-        n = 2
-        while archive_path.exists():  # same-second rotations must not clobber
-            archive_path = archive_dir / f"log-{stamp}-{n}.md"
-            n += 1
-        n_moved = len(starts) - LOG_ROTATE_KEEP_ENTRIES
-        archive_text = (
-            f"# log.md archive segment ({stamp})\n\n"
-            f"Rotated out of `{kb_prefix()}log.md` — {n_moved} entrie(s), newest "
-            f"first, byte-exact.\n{sep}{tail}"
+        text, live_guard = read_guarded_text(vault_root, log_file)
+        plan = _plan_log_content(
+            vault_root,
+            log_text=text,
+            live_guard=live_guard,
+            operation_token="standalone-rotation:" + hashlib.sha256(
+                text.encode("utf-8")
+            ).hexdigest(),
         )
-        batch_atomic_write(
-            [
-                PlannedWrite(path=archive_path, content=archive_text),
-                PlannedWrite(path=log_file, content=head + live_entries),
-            ]
-        )
-        rel_archive = archive_path.resolve().relative_to(vault_root.resolve()).as_posix()
-        log.info("log.md rotated: %d entrie(s) -> %s", n_moved, rel_archive)
-        return f"log.md rotated: {n_moved} older entrie(s) → {rel_archive}"
+        if plan.rotation_note is None:
+            return None
+        batch_atomic_write(plan.writes, vault_root=vault_root)
+        log.info(plan.rotation_note)
+        return plan.rotation_note
     except Exception as e:  # noqa: BLE001 — rotation must never break a write
         log.warning("log rotation skipped (%s)", e)
         return None
@@ -2215,20 +2339,29 @@ def write_log_entry(
     Returns None on success; a warning string if log.md was missing (so the
     op can include it in its warnings list). Atomic via `replace`.
     """
-    log_file = kb_root(vault_root) / "log.md"
-    if not log_file.exists():
-        return f"{kb_prefix()}log.md missing; skipped log entry"
-    text = log_file.read_text(encoding="utf-8")
-    new_text = prepend_log_entry(
-        text,
+    operation_token = hashlib.sha256(
+        json.dumps(
+            [date_iso, op, rel_path_no_ext, body],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    plan = plan_log_writes(
+        vault_root,
         date_iso=date_iso,
         op=op,
         rel_path_no_ext=rel_path_no_ext,
         body=body,
+        operation_token="standalone-entry:" + operation_token,
     )
-    batch_atomic_write([PlannedWrite(path=log_file, content=new_text)])
-    rotate_log_if_needed(vault_root)  # size cap; best-effort, logs its own action
-    return None
+    if plan.warning is not None:
+        return plan.warning
+    try:
+        batch_atomic_write(plan.writes, vault_root=vault_root)
+        return None
+    except Exception as error:  # noqa: BLE001 — standalone logging is best-effort
+        log.warning("log write skipped (%s)", error)
+        return f"log entry skipped: {error}"
 
 
 # Matches a single log.md entry header: `## [2026-06-23] edit | Notes/Insights/foo`.

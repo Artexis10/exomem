@@ -51,7 +51,7 @@ _COMPILED_PAGE_TYPES = frozenset(
         "production-log",
     }
 )
-_INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "dropped"})
+_INACTIVE_STATUSES = frozenset({"superseded", "archived", "draft", "planned", "dropped"})
 _SKIP_SLUG_SUFFIXES = ("-architecture", "-snapshot", "-catalog-snapshot")
 _SKIP_TAGS = frozenset({"hub", "snapshot"})
 _ASSERTION_BLOCK_TYPES = frozenset({"claim", "finding", "inference", "hypothesis", "result"})

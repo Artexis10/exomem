@@ -37,7 +37,7 @@ _EXCLUDED_FAMILIES = frozenset(
     {"link", "citation", "derivation", "evidence", "mention", "observation", "provenance"}
 )
 _AUTHORED_SCHEMA_ORIGINS = frozenset({"markdown_relation", "semantic_relation"})
-_CREATE_LIKE = frozenset({"create", "adoption_compile", "tier2_create"})
+_CREATE_LIKE = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
 _GRANDFATHERED_OPERATIONS = frozenset({"edit", "observe"})
 _WIKILINK_RE = re.compile(r"\[\[([^\]\n]+)\]\]")
 _REVIEW_FINGERPRINT_UNSET = object()
@@ -1262,6 +1262,19 @@ def qualify_relation(
     corpus: SemanticCorpusContext,
 ) -> RelationQualification:
     reasons: list[str] = []
+    definition = registry.definition(fact.canonical_relation or "")
+    target_page = corpus.pages.get(fact.logical_target_path)
+    expected_successor = fact.logical_source_path.removesuffix(".md").casefold()
+    mutual_supersession = bool(
+        definition is not None
+        and definition.family == "supersession"
+        and target_page is not None
+        and target_page.status == "superseded"
+        and any(
+            _dependency_key(raw) == expected_successor
+            for raw in _frontmatter_targets(target_page.frontmatter.get("superseded_by"))
+        )
+    )
     if not (fact.authored or fact.reviewer_accepted):
         reasons.append("not_authored_or_accepted")
     if fact.target_status == "unresolved":
@@ -1274,14 +1287,15 @@ def qualify_relation(
         else None
     )
     if fact.target_status == "resolved":
+        if fact.logical_source_path not in corpus.eligible_governed_paths:
+            reasons.append("ineligible_target")
         if (
-            fact.logical_source_path not in corpus.eligible_governed_paths
-            or fact.logical_target_path not in corpus.eligible_governed_paths
+            fact.logical_target_path not in corpus.eligible_governed_paths
+            and not mutual_supersession
         ):
             reasons.append("ineligible_target")
         if fact.logical_source_path == fact.logical_target_path:
             reasons.append("self_target")
-    definition = registry.definition(fact.canonical_relation or "")
     if definition is None:
         reasons.append("unregistered_relation")
     elif definition.status != "active":

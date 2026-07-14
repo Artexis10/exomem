@@ -25,9 +25,9 @@ from . import (
 from .kbdir import kb_dirname
 from .memory_refs import ID_FIELD, new_id, normalize_id
 
-_SCHEMA_VERSION = 1
-_OPERATIONS = frozenset({"create", "adoption_compile", "tier2_create"})
-_KINDS = frozenset({"reviewed_none", "bootstrap"})
+_SCHEMA_VERSION = 2
+_OPERATIONS = frozenset({"create", "replacement", "adoption_compile", "tier2_create"})
+_KINDS = frozenset({"reviewed_none", "bootstrap", "qualifying"})
 _HASH = re.compile(r"^[0-9a-f]{64}$")
 _MAX_ARTIFACT_BYTES = 16 * 1024
 _MAX_REASON_POINTS = 2_000
@@ -38,7 +38,7 @@ _SUPPORTS_REVIEW_DIR_FD = bool(
     os.open in getattr(os, "supports_dir_fd", set())
     and os.stat in getattr(os, "supports_dir_fd", set())
 )
-_RECORD_KEYS = frozenset(
+_V1_RECORD_KEYS = frozenset(
     {
         "schema_version",
         "kind",
@@ -48,6 +48,14 @@ _RECORD_KEYS = frozenset(
         "draft_hash",
         "auxiliary_hash",
         "reason",
+    }
+)
+_V2_RECORD_KEYS = _V1_RECORD_KEYS | frozenset(
+    {
+        "operation",
+        "draft_token_hash",
+        "predecessor_path",
+        "predecessor_content_hash",
     }
 )
 
@@ -165,7 +173,7 @@ class CreationDraftCommit:
 @dataclass(frozen=True, slots=True)
 class RelationReviewRecord:
     schema_version: int
-    kind: Literal["reviewed_none", "bootstrap"]
+    kind: Literal["reviewed_none", "bootstrap", "qualifying"]
     page_identity: str
     page_path_at_review: str
     content_fingerprint: str
@@ -173,9 +181,13 @@ class RelationReviewRecord:
     auxiliary_hash: str
     reason: str | None
     reference: str
+    operation: str | None = None
+    draft_token_hash: str | None = None
+    predecessor_path: str | None = None
+    predecessor_content_hash: str | None = None
 
     def storage_dict(self) -> dict[str, Any]:
-        return {
+        value: dict[str, Any] = {
             "schema_version": self.schema_version,
             "kind": self.kind,
             "page_identity": self.page_identity,
@@ -185,6 +197,16 @@ class RelationReviewRecord:
             "auxiliary_hash": self.auxiliary_hash,
             "reason": self.reason,
         }
+        if self.schema_version >= 2:
+            value.update(
+                {
+                    "operation": self.operation,
+                    "draft_token_hash": self.draft_token_hash,
+                    "predecessor_path": self.predecessor_path,
+                    "predecessor_content_hash": self.predecessor_content_hash,
+                }
+            )
+        return value
 
     def as_dict(self) -> dict[str, Any]:
         return {**self.storage_dict(), "reference": self.reference}
@@ -279,15 +301,25 @@ def _validate_identity(source: str, draft_id: str) -> None:
         )
 
 
-def _draft_hash(draft_id: str, destination: str, fingerprint: str) -> str:
-    return _canonical_hash(
-        {
-            "schema_version": 1,
-            "draft_id": draft_id,
-            "destination": destination,
-            "content_fingerprint": fingerprint,
-        }
-    )
+_EMPTY_DRAFT_TOKEN_HASH = hashlib.sha256(b"").hexdigest()
+
+
+def _draft_hash(
+    draft_id: str,
+    destination: str,
+    fingerprint: str,
+    draft_token_hash: str | None = None,
+) -> str:
+    value: dict[str, object] = {
+        "schema_version": 1,
+        "draft_id": draft_id,
+        "destination": destination,
+        "content_fingerprint": fingerprint,
+    }
+    if draft_token_hash not in {None, _EMPTY_DRAFT_TOKEN_HASH}:
+        value["schema_version"] = 2
+        value["draft_token_hash"] = draft_token_hash
+    return _canonical_hash(value)
 
 
 def _auxiliary_hash(writes: tuple[vault.PlannedWrite, ...], root: Path) -> str:
@@ -303,6 +335,12 @@ def _auxiliary_hash(writes: tuple[vault.PlannedWrite, ...], root: Path) -> str:
             ],
         }
     )
+
+
+def _draft_token_hash(value: object) -> str:
+    if type(value) is not str or len(value) > 12_000 or len(value.encode("utf-8")) > 16_384:
+        raise RelationReviewError("INVALID_DRAFT_TOKEN", "draft token is invalid or too large")
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def review_artifact_path(vault_root: Path, page_identity: str) -> Path:
@@ -540,11 +578,12 @@ def _parse_record(
             "RELATION_REVIEW_INVALID_SCHEMA",
             "review artifact schema version must be an integer",
         )
-    if version != _SCHEMA_VERSION:
+    if version not in {1, _SCHEMA_VERSION}:
         raise RelationReviewError(
             "RELATION_REVIEW_UNSUPPORTED_VERSION", "review artifact schema version is unsupported"
         )
-    if set(value) != _RECORD_KEYS:
+    expected_keys = _V1_RECORD_KEYS if version == 1 else _V2_RECORD_KEYS
+    if set(value) != expected_keys:
         raise RelationReviewError(
             "RELATION_REVIEW_INVALID_SCHEMA", "review artifact has invalid keys"
         )
@@ -565,7 +604,7 @@ def _parse_record(
     reason = value["reason"]
     valid_reason = (
         reason is None
-        if kind == "bootstrap"
+        if kind in {"bootstrap", "qualifying"}
         else type(reason) is str
         and reason == reason.strip()
         and bool(reason)
@@ -573,7 +612,7 @@ def _parse_record(
         and len(reason.encode("utf-8")) <= _MAX_REASON_BYTES
     )
     if (
-        kind not in _KINDS
+        kind not in (_KINDS if version == 2 else {"reviewed_none", "bootstrap"})
         or normalize_id(identity) != identity
         or not _safe_record_path(value["page_path_at_review"])
         or any(
@@ -590,8 +629,33 @@ def _parse_record(
             "RELATION_REVIEW_FILENAME_MISMATCH",
             "review artifact filename does not match its identity",
         )
+    operation = value.get("operation")
+    token_hash = value.get("draft_token_hash")
+    predecessor_path = value.get("predecessor_path")
+    predecessor_hash = value.get("predecessor_content_hash")
+    if version == 2:
+        predecessor_pair = (predecessor_path is not None, predecessor_hash is not None)
+        valid_predecessor = (
+            predecessor_pair == (False, False)
+            if operation != "replacement"
+            else predecessor_pair == (True, True)
+            and type(predecessor_path) is str
+            and _safe_record_path(predecessor_path)
+            and type(predecessor_hash) is str
+            and bool(_HASH.fullmatch(predecessor_hash))
+        )
+        if (
+            type(operation) is not str
+            or operation not in _OPERATIONS
+            or type(token_hash) is not str
+            or not _HASH.fullmatch(token_hash)
+            or not valid_predecessor
+        ):
+            raise RelationReviewError(
+                "RELATION_REVIEW_INVALID_SCHEMA", "review artifact schema is invalid"
+            )
     record = RelationReviewRecord(
-        _SCHEMA_VERSION,
+        version,
         kind,
         identity,
         value["page_path_at_review"],
@@ -600,6 +664,10 @@ def _parse_record(
         value["auxiliary_hash"],
         reason,
         reference,
+        operation,
+        token_hash,
+        predecessor_path,
+        predecessor_hash,
     )
     return record, hashlib.sha256(raw).hexdigest()
 
@@ -641,7 +709,8 @@ def load_relation_reviews(vault_root: Path) -> tuple[RelationReviewRecord, ...]:
                     logical.add(identity.casefold())
                     reference = (opened.path / name).relative_to(root).as_posix()
                     record, _ = _parse_record(opened, name, reference)
-                    records.append(record)
+                    if record.kind in {"reviewed_none", "bootstrap"}:
+                        records.append(record)
         return tuple(sorted(records, key=lambda item: (item.page_identity, item.reference)))
     except RelationReviewError:
         raise
@@ -664,7 +733,7 @@ def load_relation_review(
         if paths != (page_state.path,):
             return None
         record, _ = _load_one(Path(vault_root).absolute(), page_state.identity)
-        if record is None:
+        if record is None or record.kind == "qualifying":
             return None
         return semantic_contract.RelationReviewState(
             record.kind,
@@ -679,6 +748,15 @@ def load_relation_review(
         raise RelationReviewError(
             "RELATION_REVIEW_IO", "relation review could not be loaded"
         ) from error
+
+
+def load_creation_receipt(
+    vault_root: Path, page_identity: str
+) -> RelationReviewRecord | None:
+    """Load any creation receipt, including internal qualifying receipts."""
+    identity = _canonical_id(page_identity, code="RELATION_REVIEW_INVALID_ID")
+    record, _ = _load_one(Path(vault_root).absolute(), identity)
+    return record
 
 
 def _relation_candidates(
@@ -722,6 +800,7 @@ def _validation(
     result: semantic_contract.SemanticContractResult,
     candidate: semantic_contract.SemanticPageState,
     corpus: semantic_contract.SemanticCorpusContext,
+    draft_token_hash: str | None,
 ) -> CreationDraftValidation:
     candidates, total = _relation_candidates(candidate, corpus)
     reviewed_required = result.relation_disposition.kind in {"missing", "stale"}
@@ -732,7 +811,7 @@ def _validation(
     )
     return CreationDraftValidation(
         draft_id,
-        _draft_hash(draft_id, destination, fingerprint),
+        _draft_hash(draft_id, destination, fingerprint, draft_token_hash),
         fingerprint,
         destination,
         False,
@@ -779,6 +858,9 @@ def _attempt(
     commit_auxiliaries: tuple[vault.PlannedWrite, ...] | None = None,
     commit_disposition: str | None = None,
     commit_reason: str | None = None,
+    draft_token_hash: str | None = None,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
 ) -> _Attempt:
     if operation not in _OPERATIONS:
         raise RelationReviewError("INVALID_DRAFT_OPERATION", "unsupported creation operation")
@@ -858,7 +940,7 @@ def _attempt(
         language_registry=language,
     )
     review = None
-    if artifact is not None:
+    if artifact is not None and artifact.kind != "qualifying":
         review = semantic_contract.RelationReviewState(
             artifact.kind,
             artifact.page_identity,
@@ -867,19 +949,51 @@ def _attempt(
             reference=artifact.reference,
         )
     result = _evaluate(candidate, before, after, contracts, operation, review)
-    validation = _validation(identity, destination, fingerprint, result, candidate, after)
+    validation = _validation(
+        identity,
+        destination,
+        fingerprint,
+        result,
+        candidate,
+        after,
+        draft_token_hash,
+    )
     if exact_destination:
-        expected_artifact = result.relation_disposition.kind in {"reviewed_none", "bootstrap"}
+        expected_kind = (
+            "qualifying"
+            if result.relation_disposition.kind == "qualifying_relation"
+            else result.relation_disposition.kind
+        )
+        expected_artifact = expected_kind in _KINDS
         artifact_matches = bool(
             artifact
             and artifact.draft_hash == validation.draft_hash
             and artifact.content_fingerprint == fingerprint
             and artifact.page_path_at_review == destination
+            and (
+                (
+                    artifact.schema_version == 1
+                    and artifact.kind == expected_kind
+                    and expected_artifact
+                )
+                or (
+                    artifact.schema_version == 2
+                    and artifact.operation == operation
+                    and artifact.draft_token_hash == draft_token_hash
+                    and artifact.predecessor_path == predecessor_path
+                    and artifact.predecessor_content_hash == predecessor_content_hash
+                )
+            )
         )
-        exact_replay = (expected_artifact and artifact_matches) or (
+        exact_replay = artifact_matches or (
             result.relation_disposition.kind == "qualifying_relation" and artifact is None
         )
-        if exact_replay and commit_auxiliaries is not None:
+        if (
+            exact_replay
+            and artifact is not None
+            and artifact.schema_version == 1
+            and commit_auxiliaries is not None
+        ):
             auxiliary_digest = _auxiliary_hash(commit_auxiliaries, root)
             if result.relation_disposition.kind == "reviewed_none":
                 exact_replay = bool(
@@ -895,7 +1009,7 @@ def _attempt(
                     and artifact.auxiliary_hash == auxiliary_digest
                 )
             else:
-                exact_replay = commit_disposition is None
+                exact_replay = False
             exact_replay = exact_replay and _all_auxiliaries_match(commit_auxiliaries, root)
         if exact_replay:
             raise RelationReviewError("DRAFT_ALREADY_COMMITTED", "draft is already committed")
@@ -952,6 +1066,69 @@ def validate_creation_draft(
         raise _translate(error) from error
 
 
+def revalidate_prepared_creation_draft(
+    vault_root: Path,
+    *,
+    path: str,
+    source: str,
+    draft_id: str,
+    operation: str,
+    draft_token: str,
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
+) -> CreationDraftValidation:
+    """Validate an exact page-less v1/v2 prepared retry without mutating it.
+
+    The final auxiliary digest/reason equality remains commit-time authority;
+    this seam only lets deterministic writer preparation proceed far enough to
+    reconstruct that exact ordered batch.
+    """
+    try:
+        token_hash = _draft_token_hash(draft_token)
+        attempt = _attempt(
+            Path(vault_root).absolute(),
+            path=path,
+            source=source,
+            draft_id=draft_id,
+            operation=operation,
+            draft_token_hash=token_hash,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
+        )
+        record = attempt.artifact
+        if record is None:
+            return attempt.validation
+        validation = attempt.validation
+        expected_kind = (
+            "qualifying"
+            if validation.relation_disposition == "qualifying_relation"
+            else validation.relation_disposition
+        )
+        matches = bool(
+            record.page_identity == validation.draft_id
+            and record.page_path_at_review == validation.destination
+            and record.content_fingerprint == validation.content_fingerprint
+            and record.draft_hash == validation.draft_hash
+            and record.kind == expected_kind
+            and (
+                record.schema_version == 1
+                or (
+                    record.operation == operation
+                    and record.draft_token_hash == token_hash
+                    and record.predecessor_path == predecessor_path
+                    and record.predecessor_content_hash == predecessor_content_hash
+                )
+            )
+        )
+        if not matches:
+            raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
+        return validation
+    except RelationReviewError:
+        raise
+    except Exception as error:
+        raise _translate(error) from error
+
+
 def _normalize_auxiliary_path(root: Path, path: Path) -> tuple[Path, str]:
     if not isinstance(path, Path):
         raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary target must be a path")
@@ -996,10 +1173,6 @@ def _detach_auxiliaries(
             raise RelationReviewError(
                 "INVALID_AUXILIARY_WRITE", "auxiliary write has an invalid type"
             )
-        if value.create_only or value.guard is not None:
-            raise RelationReviewError(
-                "INVALID_AUXILIARY_WRITE", "auxiliary write cannot carry coordinator controls"
-            )
         try:
             value.content.encode("utf-8")
         except UnicodeEncodeError as error:
@@ -1010,15 +1183,29 @@ def _detach_auxiliaries(
         alias = _portable_alias(relative)
         if alias in seen:
             raise RelationReviewError("INVALID_AUXILIARY_WRITE", "auxiliary targets collide")
-        leaf_policy = "stable" if os.path.lexists(absolute) else "absent"
-        try:
-            vault.PathGuard.capture(root, relative, leaf_policy=leaf_policy)
-        except vault.PathGuardError as error:
-            raise RelationReviewError(
-                "INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe"
-            ) from error
+        if value.guard is not None:
+            if value.guard.target != relative:
+                raise RelationReviewError(
+                    "INVALID_AUXILIARY_WRITE", "auxiliary guard target does not match"
+                )
+            value.guard.recheck(root)
+        else:
+            leaf_policy = "stable" if os.path.lexists(absolute) else "absent"
+            try:
+                vault.PathGuard.capture(root, relative, leaf_policy=leaf_policy)
+            except vault.PathGuardError as error:
+                raise RelationReviewError(
+                    "INVALID_AUXILIARY_WRITE", "auxiliary target is unsafe"
+                ) from error
         seen.add(alias)
-        detached.append(vault.PlannedWrite(absolute, value.content))
+        detached.append(
+            vault.PlannedWrite(
+                absolute,
+                value.content,
+                create_only=value.create_only,
+                guard=value.guard,
+            )
+        )
     return tuple(detached)
 
 
@@ -1072,6 +1259,9 @@ def _commit_plan(
     reason: str | None,
     auxiliary_digest: str,
     artifact_reference: str,
+    draft_token_hash: str,
+    predecessor_path: str | None,
+    predecessor_content_hash: str | None,
 ) -> tuple[semantic_contract.SemanticContractResult, RelationReviewRecord | None]:
     validation = attempt.validation
     if requested_review and supplied_hash != validation.draft_hash:
@@ -1112,7 +1302,7 @@ def _commit_plan(
                 "SEMANTIC_CONTRACT_BLOCKED", "semantic contract rejected reviewed-none"
             )
         record = RelationReviewRecord(
-            1,
+            2,
             "reviewed_none",
             validation.draft_id,
             validation.destination,
@@ -1121,10 +1311,14 @@ def _commit_plan(
             auxiliary_digest,
             reason,
             artifact_reference,
+            operation,
+            draft_token_hash,
+            predecessor_path,
+            predecessor_content_hash,
         )
     elif result.relation_disposition.kind == "bootstrap":
         record = RelationReviewRecord(
-            1,
+            2,
             "bootstrap",
             validation.draft_id,
             validation.destination,
@@ -1133,9 +1327,27 @@ def _commit_plan(
             auxiliary_digest,
             None,
             artifact_reference,
+            operation,
+            draft_token_hash,
+            predecessor_path,
+            predecessor_content_hash,
         )
     elif result.relation_disposition.kind == "qualifying_relation":
-        record = None
+        record = RelationReviewRecord(
+            2,
+            "qualifying",
+            validation.draft_id,
+            validation.destination,
+            validation.content_fingerprint,
+            validation.draft_hash,
+            auxiliary_digest,
+            None,
+            artifact_reference,
+            operation,
+            draft_token_hash,
+            predecessor_path,
+            predecessor_content_hash,
+        )
     elif result.should_block:
         raise RelationReviewError(
             "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
@@ -1144,10 +1356,23 @@ def _commit_plan(
         raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
     else:
         raise RelationReviewError("INVALID_RELATION_REVIEW", "reviewed-none approval is required")
-    if attempt.artifact is not None and (
-        record is None or attempt.artifact.storage_dict() != record.storage_dict()
-    ):
-        raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
+    if attempt.artifact is not None:
+        if attempt.artifact.schema_version == 1:
+            legacy_match = bool(
+                record is not None
+                and record.kind == attempt.artifact.kind
+                and record.page_identity == attempt.artifact.page_identity
+                and record.page_path_at_review == attempt.artifact.page_path_at_review
+                and record.content_fingerprint == attempt.artifact.content_fingerprint
+                and record.draft_hash == attempt.artifact.draft_hash
+                and record.auxiliary_hash == attempt.artifact.auxiliary_hash
+                and record.reason == attempt.artifact.reason
+            )
+            if not legacy_match:
+                raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
+            record = attempt.artifact
+        elif record is None or attempt.artifact.storage_dict() != record.storage_dict():
+            raise RelationReviewError("DRAFT_ID_IN_USE", "draft identity is already reserved")
     return result, record
 
 
@@ -1162,10 +1387,30 @@ def commit_creation_draft(
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
     auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    draft_token: str = "",
+    predecessor_path: str | None = None,
+    predecessor_content_hash: str | None = None,
 ) -> CreationDraftCommit:
     root = Path(vault_root).absolute()
     try:
         identity = _canonical_id(draft_id)
+        token_hash = _draft_token_hash(draft_token)
+        predecessor_fields = (predecessor_path is not None, predecessor_content_hash is not None)
+        if operation == "replacement":
+            if predecessor_fields != (True, True):
+                raise RelationReviewError(
+                    "INVALID_PREDECESSOR", "replacement requires a bound predecessor"
+                )
+            if type(predecessor_path) is not str or not _safe_record_path(predecessor_path):
+                raise RelationReviewError("INVALID_PREDECESSOR", "predecessor path is unsafe")
+            if type(predecessor_content_hash) is not str or not _HASH.fullmatch(
+                predecessor_content_hash
+            ):
+                raise RelationReviewError("INVALID_PREDECESSOR", "predecessor hash is invalid")
+        elif predecessor_fields != (False, False):
+            raise RelationReviewError(
+                "INVALID_PREDECESSOR", "predecessor binding is only valid for replacement"
+            )
         _, destination = _normalize_destination(root, path)
         artifact_rel = review_artifact_path(root, identity).relative_to(root).as_posix()
         auxiliaries = _detach_auxiliaries(
@@ -1193,6 +1438,7 @@ def commit_creation_draft(
             identity,
             destination,
             semantic_contract.review_content_fingerprint(identity, normalized_preview),
+            token_hash,
         )
         if relation_disposition == "reviewed_none" and relation_review_hash != preview_hash:
             raise RelationReviewError("DRAFT_HASH_MISMATCH", "draft hash requires fresh validation")
@@ -1207,6 +1453,9 @@ def commit_creation_draft(
             commit_auxiliaries=auxiliaries,
             commit_disposition=relation_disposition,
             commit_reason=reason,
+            draft_token_hash=token_hash,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
         )
         _commit_plan(
             preliminary,
@@ -1216,6 +1465,9 @@ def commit_creation_draft(
             reason=reason,
             auxiliary_digest=auxiliary_digest,
             artifact_reference=artifact_rel,
+            draft_token_hash=token_hash,
+            predecessor_path=predecessor_path,
+            predecessor_content_hash=predecessor_content_hash,
         )
         activation_manifest.ensure_manifest(
             root, census=preliminary.before_corpus.activation_census
@@ -1230,6 +1482,9 @@ def commit_creation_draft(
                 commit_auxiliaries=auxiliaries,
                 commit_disposition=relation_disposition,
                 commit_reason=reason,
+                draft_token_hash=token_hash,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
             )
             validation = attempt.validation
             result, record = _commit_plan(
@@ -1240,6 +1495,9 @@ def commit_creation_draft(
                 reason=reason,
                 auxiliary_digest=auxiliary_digest,
                 artifact_reference=artifact_rel,
+                draft_token_hash=token_hash,
+                predecessor_path=predecessor_path,
+                predecessor_content_hash=predecessor_content_hash,
             )
 
             prepared = attempt.artifact
@@ -1271,13 +1529,26 @@ def commit_creation_draft(
                 )
             guarded_auxiliaries: list[vault.PlannedWrite] = []
             for auxiliary in auxiliaries:
+                if auxiliary.guard is not None:
+                    guarded_auxiliaries.append(auxiliary)
+                    continue
                 relative = auxiliary.path.relative_to(root).as_posix()
-                policy = "stable" if os.path.lexists(auxiliary.path) else "absent"
+                policy = "content" if os.path.lexists(auxiliary.path) else "absent"
+                expected_hash = None
+                if policy == "content":
+                    stable = vault.PathGuard.capture(root, relative, leaf_policy="stable")
+                    assert stable.leaf_identity is not None
+                    expected_hash = vault._leaf_hash(auxiliary.path, stable.leaf_identity)
                 guarded_auxiliaries.append(
                     vault.PlannedWrite(
                         auxiliary.path,
                         auxiliary.content,
-                        guard=vault.PathGuard.capture(root, relative, leaf_policy=policy),
+                        guard=vault.PathGuard.capture(
+                            root,
+                            relative,
+                            leaf_policy=policy,
+                            expected_content_hash=expected_hash,
+                        ),
                     )
                 )
             writes.extend(guarded_auxiliaries)
@@ -1303,7 +1574,8 @@ def commit_creation_draft(
                     "DRAFT_ID_IN_USE", "draft identity became reserved"
                 ) from error
             written_paths = tuple(item.relative_to(root).as_posix() for item in written)
-            reference = record.reference if record is not None else None
+            review_record = record if record is not None and record.kind != "qualifying" else None
+            reference = review_record.reference if review_record is not None else None
             return CreationDraftCommit(
                 identity,
                 validation.draft_hash,
@@ -1312,7 +1584,7 @@ def commit_creation_draft(
                 True,
                 result.relation_disposition.kind,
                 reference,
-                record is not None,
+                review_record is not None,
                 resumed,
                 written_paths,
                 result,
