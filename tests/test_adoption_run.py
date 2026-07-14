@@ -404,3 +404,113 @@ def test_finish_runs_recall_check_and_first_question(tmp_path: Path) -> None:
     assert manifest_path is not None
     assert manifest_path.startswith("Knowledge Base/_Adoption/")
     assert (vault / manifest_path).exists()
+
+
+# --- fix round: run-level ADOPTION_SOURCE_CHANGED, distinct from PLAN_STALE ---
+def test_apply_refuses_with_adoption_source_changed_when_every_source_drifted(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    run_id = run["run_id"]
+    adoption_run.select(vault, run_id=run_id, include=["Old Notes/quarterly-planning.md"])
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    plan_id = planned["plan"]["plan_id"]
+
+    # The sole selected/planned original drifts after plan but before apply — a
+    # correct plan_id and selection_hash are echoed (NOT a PLAN_STALE case), but
+    # write-time re-validation finds nothing left to commit.
+    (vault / "Old Notes/quarterly-planning.md").write_text(
+        "# Quarterly Planning Notes\n\nRewritten entirely after plan.\n", encoding="utf-8"
+    )
+    before = _non_run_snapshot(vault)
+
+    with pytest.raises(adoption_run.AdoptionRunError) as ei:
+        adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert ei.value.code == "ADOPTION_SOURCE_CHANGED"
+
+    # Refused before any write: run.json and every vault file are untouched, and
+    # the still-valid selection survives so the client can re-scan/re-plan.
+    assert _non_run_snapshot(vault) == before
+    status = adoption_run.status(vault, run_id=run_id)
+    assert status["phase"] == "planned"
+    assert status["selection"]["paths"] == ["Old Notes/quarterly-planning.md"]
+
+
+def test_apply_partial_retry_of_still_failing_item_does_not_raise(tmp_path: Path) -> None:
+    """A retry that still fails for one item, while others are already applied,
+    stays a normal partial response — ADOPTION_SOURCE_CHANGED is reserved for a
+    total washout, not a retry of one stubborn item."""
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    run_id = run["run_id"]
+    _select_all(vault, run_id)
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    plan_id = planned["plan"]["plan_id"]
+
+    (vault / "Old Notes/standup.txt").write_text("standup: CHANGED\n", encoding="utf-8")
+    first = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert first["phase"] == "partial"
+
+    # Retry the still-failing item without restoring it: it fails again, but
+    # since quarterly-planning is already applied this must NOT raise.
+    retried = adoption_run.apply(
+        vault,
+        run_id=run_id,
+        plan_id=plan_id,
+        retry_failed=True,
+        only_paths=["Old Notes/standup.txt"],
+        today=TODAY,
+    )
+    assert retried["phase"] == "partial"
+    assert retried["outcomes"]["Old Notes/standup.txt"]["status"] == "failed"
+
+
+# --- fix round: persisted verify counts, never a live re-hash fabrication ---
+def test_apply_persists_verify_block_and_status_reuses_recorded_counts(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    run_id = run["run_id"]
+    _select_all(vault, run_id)
+    planned = adoption_run.plan(vault, run_id=run_id, today=TODAY)
+    plan_id = planned["plan"]["plan_id"]
+
+    applied = adoption_run.apply(vault, run_id=run_id, plan_id=plan_id, today=TODAY)
+    assert applied["verified_unchanged"] == 2
+    assert applied["verified_total"] == 2
+
+    store = adoption_run.AdoptionRunStore(vault)
+    persisted = store.load(run_id)
+    assert persisted["verify"]["verified_unchanged"] == 2
+    assert persisted["verify"]["verified_total"] == 2
+    assert persisted["verify"]["at"]
+
+    # Mutate an already-applied original AFTER apply committed. A later status()
+    # call must NOT silently re-hash live and report fewer unchanged — it must
+    # surface the recorded verify block from apply time, honestly frozen.
+    (vault / "Old Notes/quarterly-planning.md").write_text(
+        "# Quarterly Planning Notes\n\nEdited after apply.\n", encoding="utf-8"
+    )
+    status = adoption_run.status(vault, run_id=run_id)
+    assert status["verified_unchanged"] == 2
+    assert status["verified_total"] == 2
+
+    # finish reuses the same recorded counts rather than a fresh re-hash.
+    finished = adoption_run.finish(vault, run_id=run_id, today=TODAY)
+    assert finished["verified_unchanged"] == 2
+    assert finished["verified_total"] == 2
+    assert finished["finish"]["verified_unchanged"] == 2
+    assert finished["finish"]["verified_total"] == 2
+
+
+def test_verify_counts_absent_before_any_apply(tmp_path: Path) -> None:
+    """Never fabricate: a run with no applied outcomes carries no verify fields."""
+    vault = _legacy_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    assert "verified_unchanged" not in run
+    assert "verified_total" not in run
+    status = adoption_run.status(vault, run_id=run["run_id"])
+    assert "verified_unchanged" not in status
+    assert "verified_total" not in status

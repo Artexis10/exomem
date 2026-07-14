@@ -341,6 +341,16 @@ def _materialize_selection(
 def _present(root: Path, run: dict, **extra) -> dict:
     out = dict(run)
     out["next_actions"] = _next_actions(run)
+    # Whenever the run carries a persisted `verify` block (set once by `apply`
+    # right after its post-commit re-hash), surface the SAME recorded counts at
+    # the top level of every presented document — never a live re-hash. This is
+    # what lets a later `status()` call stay honest even if an applied original
+    # is mutated afterward: it reports what was actually verified at apply time,
+    # not a fabricated fresh number.
+    verify = run.get("verify")
+    if verify:
+        out["verified_unchanged"] = verify.get("verified_unchanged")
+        out["verified_total"] = verify.get("verified_total")
     out.update(extra)
     return out
 
@@ -674,6 +684,23 @@ def apply(
                 continue
             validated.append(op)
 
+        # Run-level stale-conflict refusal, distinct from PLAN_STALE (a plan
+        # identity mismatch): a plain, whole-plan apply attempt whose write-time
+        # re-validation finds NOTHING left to commit, on a run that has never
+        # successfully applied anything, means every requested source drifted or
+        # vanished since the plan was captured. Refuse before any write so the
+        # still-valid selection survives a re-scan/re-plan (design.md's pinned
+        # ADOPTION_SOURCE_CHANGED vocabulary) — a scoped retry_failed/only_paths
+        # call that still fails one stubborn item (while others already applied)
+        # is NOT this case; that stays a normal partial response.
+        has_any_applied = any(o.get("status") in _APPLIED_STATUSES for o in outcomes.values())
+        if not retry_failed and not only_paths and target_items and not validated and not has_any_applied:
+            raise AdoptionRunError(
+                "ADOPTION_SOURCE_CHANGED",
+                "every requested source changed or is missing since the plan was captured; "
+                "re-scan and re-plan to continue",
+            )
+
         # Persist the transient `applying` phase BEFORE the first item write so a
         # crash mid-apply is visible to `status`.
         run["phase"] = "applying"
@@ -710,13 +737,19 @@ def apply(
 
         run["outcomes"] = outcomes
         run["phase"] = _recompute_phase(outcomes, plan_items)
-        store.save(run)
+        # Post-apply re-hash of applied originals, persisted as the run's single
+        # source of truth for verification counts — never recomputed live by a
+        # later `status`/`finish` call (see `_present`).
         verified_unchanged, verified_total = _verify_originals(root, plan_items, outcomes)
+        run["verify"] = {
+            "verified_unchanged": verified_unchanged,
+            "verified_total": verified_total,
+            "at": _now_iso(),
+        }
+        store.save(run)
     return _present(
         root,
         run,
-        verified_unchanged=verified_unchanged,
-        verified_total=verified_total,
         apply_result={"verified_unchanged": verified_unchanged, "verified_total": verified_total},
     )
 
@@ -758,10 +791,12 @@ def finish(
                 "INVALID_PHASE", f"finish requires phase 'applied' or 'partial', got {run['phase']!r}"
             )
         recall = _recall_check(root, run)
-        plan_items = (run.get("plan") or {}).get("items") or []
-        verified_unchanged, verified_total = _verify_originals(
-            root, plan_items, run.get("outcomes") or {}
-        )
+        # Reuse the SAME real counts the last `apply` call recorded — never a
+        # fresh re-hash at finish time, which could disagree with what was
+        # actually verified immediately after the commit.
+        verify = run.get("verify") or {}
+        verified_unchanged = verify.get("verified_unchanged", 0)
+        verified_total = verify.get("verified_total", 0)
         manifest_path = None
         if write_manifest:
             manifest_path = _write_run_manifest(
@@ -785,9 +820,7 @@ def finish(
         }
         run["phase"] = "done"
         store.save(run)
-    return _present(
-        root, run, verified_unchanged=verified_unchanged, verified_total=verified_total
-    )
+    return _present(root, run)
 
 
 # --------------------------------------------------------------------------- #
