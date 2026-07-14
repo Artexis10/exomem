@@ -36,6 +36,95 @@ _COMPILED_TYPES = frozenset(
     }
 )
 _EXISTING_OPERATIONS = frozenset({"edit", "tier2_overwrite", "tier2_append"})
+_FEEDBACK_FINDING_LIMIT = 32
+_FEEDBACK_RELATION_FACT_LIMIT = 16
+_FEEDBACK_ITEM_LIMIT = 32
+_FEEDBACK_COUNT_LIMIT = 32
+
+
+def _bounded_semantic_feedback(
+    result: semantic_contract.SemanticContractResult,
+) -> dict[str, Any]:
+    """Project a full internal result into deterministic bounded writer feedback."""
+    omitted: dict[str, int] = {}
+
+    def findings(
+        name: str, values: tuple[semantic_contract.ContractFinding, ...]
+    ) -> list[dict[str, Any]]:
+        if len(values) > _FEEDBACK_FINDING_LIMIT:
+            omitted[name] = len(values) - _FEEDBACK_FINDING_LIMIT
+        return [item.as_dict() for item in values[:_FEEDBACK_FINDING_LIMIT]]
+
+    def items(name: str, values: tuple[str, ...]) -> list[str]:
+        if len(values) > _FEEDBACK_ITEM_LIMIT:
+            omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
+        return list(values[:_FEEDBACK_ITEM_LIMIT])
+
+    kind_counts = result.kind_counts[:_FEEDBACK_COUNT_LIMIT]
+    category_counts = result.category_counts[:_FEEDBACK_COUNT_LIMIT]
+    if len(result.kind_counts) > _FEEDBACK_COUNT_LIMIT:
+        omitted["kind_counts"] = len(result.kind_counts) - _FEEDBACK_COUNT_LIMIT
+    if len(result.category_counts) > _FEEDBACK_COUNT_LIMIT:
+        omitted["category_counts"] = (
+            len(result.category_counts) - _FEEDBACK_COUNT_LIMIT
+        )
+
+    relation_value: dict[str, Any] | None = None
+    disposition = result.relation_disposition
+    if disposition is not None:
+        relation_omitted: dict[str, int] = {}
+
+        def relation_items(name: str, values: tuple[str, ...]) -> list[str]:
+            if len(values) > _FEEDBACK_ITEM_LIMIT:
+                relation_omitted[name] = len(values) - _FEEDBACK_ITEM_LIMIT
+            return list(values[:_FEEDBACK_ITEM_LIMIT])
+
+        if len(disposition.qualifying_facts) > _FEEDBACK_RELATION_FACT_LIMIT:
+            relation_omitted["qualifying_facts"] = (
+                len(disposition.qualifying_facts) - _FEEDBACK_RELATION_FACT_LIMIT
+            )
+        if len(disposition.rejected_facts) > _FEEDBACK_RELATION_FACT_LIMIT:
+            relation_omitted["rejected_facts"] = (
+                len(disposition.rejected_facts) - _FEEDBACK_RELATION_FACT_LIMIT
+            )
+        relation_value = {
+            "kind": disposition.kind,
+            "satisfied": disposition.satisfied,
+            "current": disposition.current,
+            "qualifying_directions": relation_items(
+                "qualifying_directions", disposition.qualifying_directions
+            ),
+            "qualifying_facts": [
+                fact.as_dict()
+                for fact in disposition.qualifying_facts[
+                    :_FEEDBACK_RELATION_FACT_LIMIT
+                ]
+            ],
+            "rejected_facts": [
+                item.as_dict()
+                for item in disposition.rejected_facts[:_FEEDBACK_RELATION_FACT_LIMIT]
+            ],
+            "actions": relation_items("actions", disposition.actions),
+            "omitted_counts": dict(sorted(relation_omitted.items())),
+        }
+
+    return {
+        "mode": result.mode,
+        "operation": result.operation,
+        "findings": findings("findings", result.findings),
+        "errors": findings("errors", result.errors),
+        "warnings": findings("warnings", result.warnings),
+        "blocking_findings": findings(
+            "blocking_findings", result.blocking_findings
+        ),
+        "should_block": result.should_block,
+        "semantic_unit_count": result.semantic_unit_count,
+        "kind_counts": dict(kind_counts),
+        "category_counts": dict(category_counts),
+        "relation_disposition": relation_value,
+        "actions": items("actions", result.actions),
+        "omitted_counts": dict(sorted(omitted.items())),
+    }
 
 
 def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -274,7 +363,7 @@ class ExistingPreflight:
             "transition_token": self.transition_token,
             "transition_hash": self.transition_hash,
             "mutated": self.mutated,
-            "contract_result": self.contract_result.as_dict(),
+            "contract_result": _bounded_semantic_feedback(self.contract_result),
         }
 
 
@@ -297,7 +386,7 @@ class ExistingCommit:
             "path": self.path,
             "mutated": self.mutated,
             "written_paths": list(self.written_paths),
-            "contract_result": self.contract_result.as_dict(),
+            "contract_result": _bounded_semantic_feedback(self.contract_result),
             "lifecycle_state": self.lifecycle_state,
             "transition_token": self.transition_token,
         }
@@ -458,11 +547,16 @@ def preflight_existing(
         page_type=after.page_type,
         language_registry=language,
     )
-    before_review = relation_review.load_relation_review(
-        root, before, corpus=before_corpus
-    )
-    after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
     applicability = _existing_applicability(before, after)
+    before_review: semantic_contract.RelationReviewState | None = None
+    after_review: semantic_contract.RelationReviewState | None = None
+    if applicability == "full":
+        before_review = relation_review.load_relation_review(
+            root, before, corpus=before_corpus
+        )
+        after_review = relation_review.load_relation_review(
+            root, after, corpus=after_corpus
+        )
 
     token = transition_token or _existing_transition_token(
         operation=operation,
@@ -554,6 +648,7 @@ def preflight_existing(
         before_review=before_review,
         after_review=after_review,
         grandfathered=grandfathered and before.eligible_compiled,
+        include_relation_disposition=applicability == "full",
     )
     return ExistingPreflight(
         applicability,
@@ -612,26 +707,32 @@ def _reevaluate_existing(
         before_review=preflight.before_review,
         after_review=preflight.after_review,
         grandfathered=grandfathered and preflight.before.eligible_compiled,
+        include_relation_disposition=preflight.applicability == "full",
     )
     return result, grandfathered
 
 
-def commit_existing(
-    vault_root: Path,
+def _commit_existing_locked(
+    root: Path,
     *,
     preflight: ExistingPreflight,
-    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+    auxiliaries: tuple[vault.PlannedWrite, ...],
+    result: semantic_contract.SemanticContractResult,
 ) -> ExistingCommit:
-    """Commit one preflighted existing-page transition, primary Markdown last."""
-    root = Path(vault_root)
-    if preflight.contract_result.should_block:
-        raise SemanticWriteError(
-            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
-        )
-
-    result = preflight.contract_result
-    auxiliaries = tuple(auxiliary_writes)
+    """Plan lifecycle state and commit while the semantic namespace is held."""
     if preflight.committed_replay:
+        if preflight.applicability != "full":
+            return ExistingCommit(
+                preflight.applicability,
+                preflight.operation,
+                preflight.path,
+                False,
+                (),
+                result,
+                None,
+                "committed_replay",
+                preflight.transition_token,
+            )
         if (
             preflight.after.identity_kind != "exomem_id"
             or preflight.after.review_fingerprint is None
@@ -684,17 +785,6 @@ def commit_existing(
             "committed_replay",
             preflight.transition_token,
         )
-
-    if preflight.manifest_install_required:
-        winner = activation_manifest.ensure_manifest(
-            root, census=preflight.activation_census
-        )
-        result, _ = _reevaluate_existing(preflight, manifest=winner)
-        if result.should_block:
-            raise SemanticWriteError(
-                "SEMANTIC_CONTRACT_BLOCKED",
-                "semantic contract blocked against the activation boundary winner",
-            )
 
     lifecycle_writes: tuple[vault.PlannedWrite, ...] = ()
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
@@ -781,6 +871,49 @@ def commit_existing(
         lifecycle_state,
         preflight.transition_token,
     )
+
+
+def commit_existing(
+    vault_root: Path,
+    *,
+    preflight: ExistingPreflight,
+    auxiliary_writes: tuple[vault.PlannedWrite, ...] | list[vault.PlannedWrite] = (),
+) -> ExistingCommit:
+    """Commit one preflighted existing-page transition, primary Markdown last."""
+    root = Path(vault_root)
+    if preflight.contract_result.should_block:
+        raise SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
+        )
+
+    result = preflight.contract_result
+    auxiliaries = tuple(auxiliary_writes)
+    if preflight.manifest_install_required:
+        winner = activation_manifest.ensure_manifest(
+            root, census=preflight.activation_census
+        )
+        result, _ = _reevaluate_existing(preflight, manifest=winner)
+        if result.should_block:
+            raise SemanticWriteError(
+                "SEMANTIC_CONTRACT_BLOCKED",
+                "semantic contract blocked against the activation boundary winner",
+            )
+
+    try:
+        with vault.vault_creation_lock(root, "semantic-creation"):
+            return _commit_existing_locked(
+                root,
+                preflight=preflight,
+                auxiliaries=auxiliaries,
+                result=result,
+            )
+    except vault.VaultLockTimeout as error:
+        raise SemanticWriteError(
+            "SEMANTIC_CREATION_LOCK_TIMEOUT",
+            "timed out acquiring semantic creation lock",
+        ) from error
+    except vault.VaultLockError as error:
+        raise SemanticWriteError(error.code, error.reason) from error
 
 
 def _evaluate_structural(

@@ -475,7 +475,7 @@ class SemanticContractResult:
     semantic_unit_count: int
     kind_counts: tuple[tuple[str, int], ...]
     category_counts: tuple[tuple[str, int], ...]
-    relation_disposition: RelationDisposition
+    relation_disposition: RelationDisposition | None
     actions: tuple[str, ...]
 
     def __post_init__(self) -> None:
@@ -502,7 +502,11 @@ class SemanticContractResult:
             "semantic_unit_count": self.semantic_unit_count,
             "kind_counts": dict(self.kind_counts),
             "category_counts": dict(self.category_counts),
-            "relation_disposition": self.relation_disposition.as_dict(),
+            "relation_disposition": (
+                self.relation_disposition.as_dict()
+                if self.relation_disposition is not None
+                else None
+            ),
             "actions": list(self.actions),
         }
 
@@ -1793,23 +1797,27 @@ def _raw_findings(
     before: SemanticPageState | None,
     before_corpus: SemanticCorpusContext,
     mode: str,
-) -> tuple[list[ContractFinding], RelationDisposition]:
-    disposition = _relation_disposition(
-        page,
-        corpus,
-        review=review,
-        operation=operation,
-        before=before,
-        before_corpus=before_corpus,
-        mode=mode,
-    )
+    include_relation_disposition: bool,
+) -> tuple[list[ContractFinding], RelationDisposition | None]:
+    disposition = None
+    if include_relation_disposition:
+        disposition = _relation_disposition(
+            page,
+            corpus,
+            review=review,
+            operation=operation,
+            before=before,
+            before_corpus=before_corpus,
+            mode=mode,
+        )
     findings = _diagnostic_findings(page)
     findings.extend(_conflict_findings(page, contracts))
     findings.extend(_registry_findings(page, corpus))
     findings.extend(_page_rule_findings(page, contracts, corpus))
-    disposition_finding = _disposition_finding(page, disposition)
-    if disposition_finding is not None:
-        findings.append(disposition_finding)
+    if disposition is not None:
+        disposition_finding = _disposition_finding(page, disposition)
+        if disposition_finding is not None:
+            findings.append(disposition_finding)
     return findings, disposition
 
 
@@ -1859,6 +1867,7 @@ def evaluate(
     before_review: RelationReviewState | None = None,
     after_review: RelationReviewState | None = None,
     grandfathered: bool = False,
+    include_relation_disposition: bool = True,
 ) -> SemanticContractResult:
     """Evaluate supplied immutable state without crossing any adapter boundary."""
     if mode not in {"precommit", "posthoc"}:
@@ -1884,6 +1893,7 @@ def evaluate(
         before=before,
         before_corpus=effective_before_corpus,
         mode=mode,
+        include_relation_disposition=include_relation_disposition,
     )
     if not after_context_matches:
         after_findings.append(_corpus_mismatch_finding(after, phase="after"))
@@ -1901,6 +1911,7 @@ def evaluate(
             before=before,
             before_corpus=effective_before_corpus,
             mode=mode,
+            include_relation_disposition=include_relation_disposition,
         )
 
     raw_before_error_keys = {
@@ -1927,6 +1938,7 @@ def evaluate(
     invalidated_disposition = bool(
         use_subset_exception
         and before_disposition is not None
+        and disposition is not None
         and before_disposition.satisfied
         and not disposition.satisfied
     )
@@ -1972,5 +1984,5 @@ def evaluate(
         kind_counts=kind_counts,
         category_counts=category_counts,
         relation_disposition=disposition,
-        actions=disposition.actions,
+        actions=disposition.actions if disposition is not None else (),
     )

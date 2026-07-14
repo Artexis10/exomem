@@ -4,6 +4,7 @@ import datetime as dt
 import hashlib
 import json
 import os
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
@@ -415,6 +416,80 @@ def test_surgical_edit_commits_through_existing_semantic_coordinator(
     assert set(result.as_dict()) == {"path", "warnings", "semantic"}
 
 
+@pytest.mark.parametrize("mode", ["surgical", "heading", "multi", "set_take"])
+def test_blocked_edit_rendering_does_not_warm_shared_resolver(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    source = _source(
+        "## Finding\n\nA [[Target]] row.\n\n- Film (2026) [take: ]"
+    )
+    _write(tmp_path, _PAGE, source)
+    cache = edit_module.find_module._RESOLVER_CACHE
+    cache.clear()
+
+    def block(*_args, **_kwargs):
+        raise semantic_writes.SemanticWriteError(
+            "SEMANTIC_CONTRACT_BLOCKED", "synthetic precommit blocker"
+        )
+
+    monkeypatch.setattr(semantic_writes, "preflight_existing", block)
+
+    if mode == "surgical":
+        def call():
+            return edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked surgical",
+                old_string="A [[Target]] row.",
+                new_string="Changed [[Target]] row.",
+            )
+
+        error_type = edit_module.EditError
+    elif mode == "heading":
+        def call():
+            return edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked heading",
+                heading="Finding",
+                section_position="replace",
+                new_string="Changed [[Target]] row.",
+            )
+
+        error_type = edit_module.EditError
+    elif mode == "multi":
+        def call():
+            return multi_edit_module.multi_edit(
+                tmp_path,
+                path=_PAGE,
+                why="blocked multi",
+                edits=[
+                    {
+                        "old_string": "A [[Target]] row.",
+                        "new_string": "Changed [[Target]] row.",
+                    }
+                ],
+            )
+
+        error_type = edit_module.EditError
+    else:
+        def call():
+            return set_take_module.set_take(
+                tmp_path,
+                path=_PAGE,
+                row_key="Film (2026)",
+                take="Blocked [[Target]].",
+                why="blocked take",
+            )
+
+        error_type = set_take_module.SetTakeError
+
+    with pytest.raises(error_type):
+        call()
+
+    assert cache == {}
+
+
 def test_multi_edit_validate_and_commit_preserve_shape_with_semantic_feedback(
     tmp_path: Path,
 ) -> None:
@@ -822,6 +897,257 @@ def test_existing_coordinator_exact_committed_replay_is_mutation_free(
     assert replay.lifecycle_state == "committed_replay"
     assert replay.written_paths == ()
     assert after_replay == before_replay
+
+
+def test_existing_lifecycle_plan_and_commit_are_inside_semantic_creation_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    before = _source("A")
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, before)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+    inside = False
+    events: list[str] = []
+    real_plan = semantic_writes.relation_review.plan_lifecycle_transition
+    real_batch = semantic_writes.vault.batch_atomic_write
+
+    @contextmanager
+    def tracked_lock(root: Path, namespace: str):
+        nonlocal inside
+        assert root == tmp_path
+        assert namespace == "semantic-creation"
+        events.append("lock-enter")
+        inside = True
+        try:
+            yield tmp_path / "semantic-creation.lock"
+        finally:
+            inside = False
+            events.append("lock-exit")
+
+    def tracked_plan(*args, **kwargs):
+        assert inside, "lifecycle planning escaped the semantic-creation lock"
+        events.append("plan")
+        return real_plan(*args, **kwargs)
+
+    def tracked_batch(writes, **kwargs):
+        assert inside, "atomic commit escaped the semantic-creation lock"
+        events.append("batch")
+        return real_batch(writes, **kwargs)
+
+    monkeypatch.setattr(semantic_writes.vault, "vault_creation_lock", tracked_lock)
+    monkeypatch.setattr(
+        semantic_writes.relation_review, "plan_lifecycle_transition", tracked_plan
+    )
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", tracked_batch)
+
+    semantic_writes.commit_existing(tmp_path, preflight=preflight)
+
+    assert events == ["lock-enter", "plan", "batch", "lock-exit"]
+
+
+@pytest.mark.parametrize("page_kind", ["inactive", "entity"])
+def test_structural_existing_preflight_ignores_malformed_relation_history(
+    tmp_path: Path, page_kind: str
+) -> None:
+    if page_kind == "inactive":
+        before = _source("A").replace("status: active", "status: draft")
+    else:
+        before = _source("A").replace("type: insight", "type: entity")
+    after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, before)
+    fingerprint = semantic_contract.review_content_fingerprint(_ID, before)
+    malformed = relation_review.lifecycle_decision_path(tmp_path, _ID, fingerprint)
+    malformed.parent.mkdir(parents=True, exist_ok=True)
+    malformed.write_text("{malformed lifecycle history", encoding="utf-8")
+
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="edit",
+    )
+
+    assert preflight.applicability == "structural"
+    assert preflight.before_review is None
+    assert preflight.after_review is None
+    assert preflight.contract_result.relation_disposition is None
+
+
+@pytest.mark.parametrize(
+    "transition",
+    ["active_to_inactive", "inactive_to_inactive", "entity", "arbitrary"],
+)
+def test_non_full_exact_committed_replay_needs_no_lifecycle_prepared_slot(
+    tmp_path: Path, transition: str
+) -> None:
+    if transition == "active_to_inactive":
+        before = _source("A")
+        after = before.replace("status: active", "status: archived").replace(
+            "A\n\n## Relations", "B\n\n## Relations"
+        )
+    elif transition == "inactive_to_inactive":
+        before = _source("A").replace("status: active", "status: draft")
+        after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    elif transition == "entity":
+        before = _source("A").replace("type: insight", "type: entity")
+        after = before.replace("A\n\n## Relations", "B\n\n## Relations")
+    else:
+        before = "# Arbitrary\n\nA\n"
+        after = "# Arbitrary\n\nB\n"
+    _write(tmp_path, _PAGE, before)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+    )
+    first = semantic_writes.commit_existing(tmp_path, preflight=preflight)
+    assert first.applicability == "structural"
+    if transition != "arbitrary":
+        assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+    before_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    replay_preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+        transition_token=first.transition_token,
+    )
+    replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preflight)
+    after_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert replay.mutated is False
+    assert replay.lifecycle_state == "committed_replay"
+    assert replay.written_paths == ()
+    assert after_replay == before_replay
+
+
+def test_existing_semantic_feedback_is_deterministically_bounded(tmp_path: Path) -> None:
+    source = _source("A")
+    _write(tmp_path, _PAGE, source)
+    preflight = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("A\n\n## Relations", "B\n\n## Relations"),
+        operation="edit",
+    )
+    findings = tuple(
+        semantic_contract.ContractFinding(
+            code=f"SYNTHETIC_{index:03d}",
+            severity="error",
+            path=_PAGE,
+            span=None,
+            detail=f"synthetic detail {index}",
+            remediation=f"synthetic remediation {index}",
+            governed_element_identity=("synthetic", str(index)),
+            resolved_rule=("synthetic", "*", str(index)),
+        )
+        for index in range(96)
+    )
+    facts = tuple(
+        semantic_contract.RelationFact(
+            identity=f"fact-{index:03d}",
+            logical_source_path=_PAGE,
+            logical_target_path=f"target-{index:03d}.md",
+            raw_target=f"Target {index:03d}",
+            resolved_target_path=f"target-{index:03d}.md",
+            target_anchor=None,
+            target_alias=None,
+            authored_path=_PAGE,
+            authored_line=index + 1,
+            authored_anchor=None,
+            authored_projects=(),
+            authored_page_type="insight",
+            source_kind="statement",
+            target_page_type="insight",
+            raw_relation="supports",
+            canonical_relation="supports",
+            family="support",
+            registry_status="active",
+            origin="semantic_relation",
+            authored=True,
+            reviewer_accepted=False,
+            target_status="resolved",
+        )
+        for index in range(96)
+    )
+    disposition = semantic_contract.RelationDisposition(
+        kind="qualifying_relation",
+        satisfied=True,
+        current=True,
+        qualifying_directions=tuple(f"direction-{index:03d}" for index in range(96)),
+        qualifying_facts=facts,
+        rejected_facts=tuple(
+            semantic_contract.RejectedRelationFact(fact, ("synthetic",))
+            for fact in facts
+        ),
+        actions=tuple(f"relation-action-{index:03d}" for index in range(96)),
+    )
+    large_result = replace(
+        preflight.contract_result,
+        findings=findings,
+        errors=findings,
+        warnings=findings,
+        blocking_findings=findings,
+        relation_disposition=disposition,
+        actions=tuple(f"action-{index:03d}" for index in range(96)),
+    )
+    commit = semantic_writes.ExistingCommit(
+        preflight.applicability,
+        preflight.operation,
+        preflight.path,
+        True,
+        (preflight.path,),
+        large_result,
+        None,
+        None,
+        preflight.transition_token,
+    )
+
+    for payload in (
+        replace(preflight, contract_result=large_result).as_dict()["contract_result"],
+        commit.as_dict()["contract_result"],
+    ):
+        assert len(payload["findings"]) == 32
+        assert len(payload["errors"]) == 32
+        assert len(payload["warnings"]) == 32
+        assert len(payload["blocking_findings"]) == 32
+        assert len(payload["actions"]) == 32
+        assert payload["omitted_counts"] == {
+            "actions": 64,
+            "blocking_findings": 64,
+            "errors": 64,
+            "findings": 64,
+            "warnings": 64,
+        }
+        relation = payload["relation_disposition"]
+        assert len(relation["qualifying_directions"]) == 32
+        assert len(relation["qualifying_facts"]) == 16
+        assert len(relation["rejected_facts"]) == 16
+        assert len(relation["actions"]) == 32
+        assert relation["omitted_counts"] == {
+            "actions": 64,
+            "qualifying_directions": 64,
+            "qualifying_facts": 80,
+            "rejected_facts": 80,
+        }
+        assert len(json.dumps(payload, sort_keys=True).encode("utf-8")) < 128 * 1024
+    assert len(large_result.findings) == 96
+    assert len(large_result.relation_disposition.qualifying_facts) == 96
 
 
 def test_tier2_append_commits_semantics_log_and_primary_in_one_batch(

@@ -185,7 +185,7 @@ def multi_edit(
 
     # ---- apply sequentially in memory; any failure raises before the write ----
     from . import find as find_module
-    resolver = find_module.shared_resolver(vault_root)
+    resolver = find_module.writer_resolver_snapshot(vault_root)
     body = editable.body
     warnings: list[str] = []
     for i, e in enumerate(edits):

@@ -275,6 +275,7 @@ def edit(
                 matches=_match_contexts(body, old_string),  # type: ignore[arg-type]
                 semantic=semantic,
             )
+        resolver = find_module.writer_resolver_snapshot(vault_root)
         new_body_final, body_warnings = apply_surgical_replace(
             body,
             old_string,  # type: ignore[arg-type]
@@ -282,10 +283,12 @@ def edit(
             replace_all,
             vault_root,
             rel_path=rel_path,
+            resolver=resolver,
         )
         body_changed = True
     elif heading_mode:
         # new_string is not None here (validated above).
+        resolver = find_module.writer_resolver_snapshot(vault_root)
         new_body_final, body_warnings = apply_section_edit(
             body,
             heading,  # type: ignore[arg-type]
@@ -293,6 +296,7 @@ def edit(
             new_string,  # type: ignore[arg-type]
             vault_root,
             rel_path=rel_path,
+            resolver=resolver,
             create_missing=create_missing_section,
         )
         body_changed = True
