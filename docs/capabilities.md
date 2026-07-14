@@ -14,6 +14,23 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 - CLI commands: 21
 - Hand-registered MCP tools: none
 
+## Hosted Cell Capability Boundary
+
+Hosted operation keeps this registry-derived command surface inside one private,
+single-vault cell per tenant. The public gateway authenticates the account, resolves
+exactly one cell from server-side state, checks provider-neutral entitlements, and then
+forwards a compatible registry command. Public callers cannot select a tenant, cell,
+private endpoint, credential, or vault path.
+
+Exomem cells own command execution, mutation safety, private readiness, bounded feature
+enforcement, and canonical export/restore. They do not own accounts, public sessions,
+Paddle, provisioning, encrypted backup retention, KMS, or destructive external deletion.
+Paddle is never a cell request-path or package runtime dependency; Substrate projects its
+billing state into internal provider-neutral capabilities before routing.
+
+See [hosted-operations.md](hosted-operations.md) and the
+[Substrate control-plane contract](substrate-control-plane-contract.md).
+
 ## Product Command Registry
 
 | Command | Tier | Surfaces | Mode | Destructive | CLI positional | Routes | Parameters | Summary |

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import re
@@ -11,7 +12,7 @@ from pathlib import Path
 
 import yaml
 
-from . import freshness
+from . import freshness, privacy_log
 from .find_types import ParsedPage
 
 log = logging.getLogger(__name__)
@@ -36,26 +37,59 @@ def _page_cache_size() -> int:
 
 @dataclass
 class FrontmatterCache:
-    """Per-process cache of parsed pages, invalidated by mtime."""
+    """Per-process cache invalidated by file identity or content changes."""
 
     entries: OrderedDict[Path, ParsedPage] = field(default_factory=OrderedDict)
+    _signatures: dict[Path, tuple[int, int, int, int, int, bytes]] = field(
+        default_factory=dict, repr=False
+    )
+
+    def clear(self) -> None:
+        self.entries.clear()
+        self._signatures.clear()
 
     def get(self, path: Path, vault_root: Path) -> ParsedPage | None:
         try:
-            mtime = path.stat().st_mtime
+            stat = path.stat()
         except FileNotFoundError:
             self.entries.pop(path, None)
+            self._signatures.pop(path, None)
             return None
+        if len(self._signatures) != len(self.entries):
+            self._signatures = {
+                cached_path: self._signatures[cached_path]
+                for cached_path in self.entries
+                if cached_path in self._signatures
+            }
+        content = _read_page_bytes(path)
+        if content is None:
+            self.entries.pop(path, None)
+            self._signatures.pop(path, None)
+            return None
+        # Stat metadata is not content identity: on native Windows ctime is
+        # creation time, so a same-size rewrite can preserve this whole tuple.
+        # Hash the bytes already needed on a miss and reuse those exact bytes
+        # for parsing, keeping the fingerprint and ParsedPage consistent.
+        signature = (
+            stat.st_mtime_ns,
+            stat.st_ctime_ns,
+            stat.st_size,
+            stat.st_dev,
+            stat.st_ino,
+            hashlib.blake2b(content, digest_size=16).digest(),
+        )
         cached = self.entries.get(path)
-        if cached and cached.mtime == mtime:
+        if cached and self._signatures.get(path) == signature:
             self.entries.move_to_end(path)
             return cached
-        parsed = parse_page(path, mtime, vault_root)
+        parsed = parse_page(path, stat.st_mtime, vault_root, content=content)
         if parsed is not None:
             self.entries[path] = parsed
+            self._signatures[path] = signature
             self.entries.move_to_end(path)
             while len(self.entries) > _page_cache_size():
-                self.entries.popitem(last=False)
+                evicted_path, _ = self.entries.popitem(last=False)
+                self._signatures.pop(evicted_path, None)
         return parsed
 
 
@@ -63,7 +97,7 @@ CACHE = FrontmatterCache()
 
 
 def walk_freshness_key(paths) -> tuple[int, int, str]:
-    """(file count, max st_mtime_ns, digest of sorted path+mtime pairs).
+    """(file count, max mtime_ns, digest of sorted path+metadata records).
 
     Digest-strength on purpose: count/max-mtime alone miss a delete paired
     with a create, a rename (mtime preserved), and a replacement carrying an
@@ -71,10 +105,10 @@ def walk_freshness_key(paths) -> tuple[int, int, str]:
     find cache, BM25, the wikilink resolver, the inbound-link index) compares
     the whole triple, so those histories now invalidate correctly.
     """
-    entries: list[tuple[str, int]] = []
+    entries: list[tuple[str, freshness.FileSignature]] = []
     for p in paths:
         try:
-            entries.append((str(p), p.stat().st_mtime_ns))
+            entries.append((str(p), freshness.stat_signature(p)))
         except OSError:
             continue
     return freshness.triple_from_entries(entries)
@@ -99,11 +133,35 @@ def walk_md(root: Path):
             yield child
 
 
-def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
+def _read_page_bytes(path: Path) -> bytes | None:
     try:
-        text = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as e:
-        log.warning("could not read %s: %s", path, e)
+        return path.read_bytes()
+    except OSError as e:
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
+        return None
+
+
+def parse_page(
+    path: Path,
+    mtime: float,
+    vault_root: Path,
+    *,
+    content: bytes | None = None,
+) -> ParsedPage | None:
+    if content is None:
+        content = _read_page_bytes(path)
+        if content is None:
+            return None
+    try:
+        text = content.decode("utf-8")
+    except UnicodeDecodeError as e:
+        if privacy_log.content_private_logging_enabled():
+            log.warning("hosted content parse failed code=HOSTED_CONTENT_READ_FAILED")
+        else:
+            log.warning("could not read %s: %s", path, e)
         return None
 
     fm_match = FRONTMATTER_PATTERN.match(text)
@@ -112,11 +170,15 @@ def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
             # Hot path: every page-cache miss parses here (warm-up walks the
             # whole vault through it). libyaml loader via the vault seam.
             from .vault import yaml_safe_load
+
             frontmatter = yaml_safe_load(fm_match.group(1)) or {}
             if not isinstance(frontmatter, dict):
                 frontmatter = {}
         except yaml.YAMLError as e:
-            log.warning("YAML parse error in %s: %s", path, e)
+            if privacy_log.content_private_logging_enabled():
+                log.warning("hosted content parse failed code=HOSTED_CONTENT_PARSE_FAILED")
+            else:
+                log.warning("YAML parse error in %s: %s", path, e)
             frontmatter = {}
         body = fm_match.group(2)
         # The FRONTMATTER_PATTERN consumes the closing `\n---\n` but not the
@@ -130,6 +192,7 @@ def parse_page(path: Path, mtime: float, vault_root: Path) -> ParsedPage | None:
         body = text
 
     from .vault import resolve_display_title
+
     title = resolve_display_title(frontmatter, body, path)
 
     try:
@@ -163,6 +226,7 @@ def passes_filters(
     # unit tests -> skip; real find paths always pass it.)
     if vault_root is not None:
         from . import access
+
         if not access.is_indexable(vault_root, page.rel_path):
             return False
     if types and page.page_type not in types:
@@ -192,9 +256,9 @@ def passes_filters(
 
 def all_projects(fm: dict) -> set[str]:
     out: set[str] = set()
-    if (p := fm.get("project")):
+    if p := fm.get("project"):
         out.add(str(p))
-    if (ps := fm.get("projects")):
+    if ps := fm.get("projects"):
         if isinstance(ps, list):
             out.update(str(x) for x in ps)
         else:

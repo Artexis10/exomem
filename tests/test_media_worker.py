@@ -3,12 +3,36 @@
 import os
 import threading
 import time
+from contextlib import contextmanager
 
 import numpy as np
 import pytest
 
 from exomem import embeddings, extract, media_worker, preserve, server_runtime
 from exomem import find as find_module
+
+
+@pytest.fixture(autouse=True)
+def _isolated_writer_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
+
+
+class _RecordingMutationManager:
+    def __init__(self, vault) -> None:
+        self.vault = vault
+        self.depth = 0
+        self.events: list[str] = []
+
+    @contextmanager
+    def mutation_guard(self, vault):
+        assert vault == self.vault
+        self.events.append("guard-enter")
+        self.depth += 1
+        try:
+            yield
+        finally:
+            self.depth -= 1
+            self.events.append("guard-exit")
 
 
 def _preserve_media_stub(vault, filename="rec.mp3"):
@@ -28,7 +52,9 @@ def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPat
     assert "extracted_by: pending" in body
 
 
-def test_preserve_media_no_stub_when_extraction_disabled(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_preserve_media_no_stub_when_extraction_disabled(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     result = _preserve_media_stub(vault, filename="rec2.mp3")
     assert result.sidecar_path is None  # nothing would fill it → don't write a stub
@@ -39,18 +65,331 @@ def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) ->
     result = _preserve_media_stub(vault, filename="call.mp3")
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
-        extract, "extract_text",
+        extract,
+        "extract_text",
         lambda p, media_type=None, vault_root=None: extract.ExtractResult(
-            text="discussion of the broken sink and water damage", media_type="audio", engine="faster-whisper:test"
+            text="discussion of the broken sink and water damage",
+            media_type="audio",
+            engine="faster-whisper:test",
         ),
     )
     w = media_worker.MediaWorker(vault, execution_mode="inline")
-    w._process(media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"))
+    w._process(
+        media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio")
+    )
 
     body = sidecar.read_text(encoding="utf-8")
     assert "water damage" in body
     assert "extracted_by: faster-whisper:test" in body
     assert "extracted_by: pending" not in body
+
+
+def test_extraction_compute_stays_outside_guard_and_sidecar_commit_is_inside(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="guarded.mp3")
+    sidecar = vault / result.sidecar_path
+    manager = _RecordingMutationManager(vault)
+    original_update = preserve.update_sidecar_extraction
+
+    def extract_outside(*_args, **_kwargs):
+        assert manager.depth == 0
+        manager.events.append("extract")
+        return extract.ExtractResult(text="guarded transcript", media_type="audio", engine="test")
+
+    def update_inside(*args, **kwargs):
+        assert manager.depth > 0
+        manager.events.append("sidecar-commit")
+        return original_update(*args, **kwargs)
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(extract, "extract_text", extract_outside)
+    monkeypatch.setattr(preserve, "update_sidecar_extraction", update_inside)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert manager.events.index("extract") < manager.events.index("guard-enter")
+    assert manager.events.index("guard-enter") < manager.events.index("sidecar-commit")
+    assert manager.depth == 0
+
+
+def test_sidecar_edit_during_extraction_makes_result_stale(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="edited-during-extraction.mp3")
+    sidecar = vault / result.sidecar_path
+    manager = _RecordingMutationManager(vault)
+
+    def extract_after_user_edit(*_args, **_kwargs):
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8") + "\nUSER CANONICAL EDIT\n",
+            encoding="utf-8",
+        )
+        return extract.ExtractResult(
+            text="STALE MACHINE TRANSCRIPT", media_type="audio", engine="test"
+        )
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(extract, "extract_text", extract_after_user_edit)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert "USER CANONICAL EDIT" in body
+    assert "STALE MACHINE TRANSCRIPT" not in body
+    assert "extracted_by: pending" in body
+
+
+@pytest.mark.parametrize("extraction_fails", [False, True])
+def test_parent_media_change_during_extraction_skips_stale_sidecar_commit(
+    vault, monkeypatch: pytest.MonkeyPatch, extraction_fails: bool
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename=f"binary-stale-{extraction_fails}.mp3")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    manager = _RecordingMutationManager(vault)
+
+    def extract_after_binary_change(*_args, **_kwargs):
+        binary.write_bytes(b"replacement-media")
+        if extraction_fails:
+            raise RuntimeError("old media could not be decoded")
+        return extract.ExtractResult(
+            text="STALE BINARY TRANSCRIPT", media_type="audio", engine="test"
+        )
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(extract, "extract_text", extract_after_binary_change)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    worker._process(
+        media_worker._Job(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    body = sidecar.read_text(encoding="utf-8")
+    assert binary.read_bytes() == b"replacement-media"
+    assert "STALE BINARY TRANSCRIPT" not in body
+    assert "extracted_by: failed:" not in body
+    assert "extracted_by: pending" in body
+
+
+def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Yolo",
+        category="photos",
+        filename="guarded.jpg",
+        data=b"\xff\xd8\xff",
+        text="beach",
+    )
+    manager = _RecordingMutationManager(vault)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    def embed_outside(_path):
+        assert manager.depth == 0
+        manager.events.append("clip-embed")
+        return np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+
+    def upsert_inside(*_args, **_kwargs):
+        assert manager.depth > 0
+        manager.events.append("clip-commit")
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(embeddings, "embed_image", embed_outside)
+    monkeypatch.setattr(worker._clip_index, "upsert", upsert_inside)
+
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert manager.events.index("clip-embed") < manager.events.index("guard-enter")
+    assert manager.events.index("guard-enter") < manager.events.index("clip-commit")
+    assert manager.depth == 0
+
+
+def test_scene_artifacts_and_reembed_index_commit_use_guard(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Yolo",
+        category="video",
+        filename="guarded.mp4",
+        data=b"video",
+        text="scene",
+    )
+    manager = _RecordingMutationManager(vault)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    frames = [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))]
+    pairs = [(object(), object())]
+
+    def embed_scenes_outside(_path):
+        assert manager.depth == 0
+        manager.events.append("scene-embed")
+        return frames, pairs
+
+    def clip_commit_inside(*_args, **_kwargs):
+        assert manager.depth > 0
+        manager.events.append("clip-commit")
+
+    def scene_commit_inside(*_args, **_kwargs):
+        assert manager.depth > 0
+        manager.events.append("scene-commit")
+        return []
+
+    def reembed_inside(*_args, **_kwargs):
+        assert manager.depth > 0
+        manager.events.append("reembed-commit")
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(media_worker.scene_frames, "scene_frames_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_video_scenes", embed_scenes_outside)
+    monkeypatch.setattr(worker._clip_index, "upsert_frames", clip_commit_inside)
+    monkeypatch.setattr(media_worker.scene_frames, "write_scene_frames", scene_commit_inside)
+    monkeypatch.setattr(media_worker.index_sync, "upsert_after_write", reembed_inside)
+
+    clip_job = media_worker._Job(
+        binary_path=vault / result.path,
+        sidecar_path=vault / result.sidecar_path,
+        media_type="video",
+        do_ocr=False,
+        do_clip=True,
+    )
+    worker._process(clip_job)
+    worker._process(
+        media_worker._Job(
+            binary_path=clip_job.binary_path,
+            sidecar_path=clip_job.sidecar_path,
+            media_type="video",
+            do_ocr=False,
+            do_clip=False,
+            do_reembed=True,
+        )
+    )
+
+    assert manager.events.index("scene-embed") < manager.events.index("guard-enter")
+    assert "clip-commit" in manager.events
+    assert "scene-commit" in manager.events
+    assert "reembed-commit" in manager.events
+    assert manager.depth == 0
+
+
+def test_parent_media_change_during_clip_compute_skips_stale_index_and_scenes(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
+    result = preserve.preserve_bytes(
+        vault,
+        scope="Yolo",
+        category="video",
+        filename="changes-during-clip.mp4",
+        data=b"original-video",
+        text="scene",
+    )
+    binary = vault / result.path
+    manager = _RecordingMutationManager(vault)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    def embed_then_replace(_path):
+        assert manager.depth == 0
+        binary.write_bytes(b"replacement-video-with-new-identity")
+        return (
+            [(1.0, np.ones(embeddings.CLIP_DIM, dtype=np.float32))],
+            [(object(), object())],
+        )
+
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(media_worker.scene_frames, "scene_frames_enabled", lambda: True)
+    monkeypatch.setattr(embeddings, "embed_video_scenes", embed_then_replace)
+    monkeypatch.setattr(
+        worker._clip_index,
+        "upsert_frames",
+        lambda *_args, **_kwargs: pytest.fail("stale CLIP vectors were committed"),
+    )
+    monkeypatch.setattr(
+        media_worker.scene_frames,
+        "write_scene_frames",
+        lambda *_args, **_kwargs: pytest.fail("stale scene frames were committed"),
+    )
+
+    worker._process(
+        media_worker._Job(
+            binary_path=binary,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="video",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
+
+    assert binary.read_bytes() == b"replacement-video-with-new-identity"
+    assert manager.depth == 0
+
+
+def test_media_commit_exception_releases_mutation_guard(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem.writer_lease import LeaseConfig, LeaseManager
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="commit-fails.mp3")
+    manager = LeaseManager(LeaseConfig(state_dir=vault.parent / "exception-state"))
+    monkeypatch.setattr(media_worker, "get_manager", lambda: manager, raising=False)
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="transcript", media_type="audio", engine="test"
+        ),
+    )
+
+    def fail_commit(*_args, **_kwargs):
+        raise RuntimeError("commit failed")
+
+    monkeypatch.setattr(preserve, "update_sidecar_extraction", fail_commit)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    with pytest.raises(RuntimeError, match="commit failed"):
+        worker._process(
+            media_worker._Job(
+                binary_path=vault / result.path,
+                sidecar_path=vault / result.sidecar_path,
+                media_type="audio",
+            )
+        )
+
+    with manager.mutation_guard(vault):
+        pass
 
 
 def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -60,7 +399,8 @@ def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.Monke
     result = _preserve_media_stub(vault, filename="meeting2.mp3")
     sidecar = vault / result.sidecar_path
     monkeypatch.setattr(
-        extract, "extract_text",
+        extract,
+        "extract_text",
         lambda p, media_type=None, vault_root=None: extract.ExtractResult(
             text="[Speaker A]: we shipped it\n[Speaker B]: nice work",
             media_type="audio",
@@ -72,7 +412,9 @@ def test_worker_writes_speaker_labels_and_field(vault, monkeypatch: pytest.Monke
         ),
     )
     w = media_worker.MediaWorker(vault, execution_mode="inline")
-    w._process(media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"))
+    w._process(
+        media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio")
+    )
 
     body = sidecar.read_text(encoding="utf-8")
     assert "[Speaker A]: we shipped it" in body
@@ -91,7 +433,9 @@ def test_worker_marks_failed_on_extraction_error(vault, monkeypatch: pytest.Monk
 
     monkeypatch.setattr(extract, "extract_text", boom)
     w = media_worker.MediaWorker(vault, execution_mode="inline")
-    w._process(media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"))
+    w._process(
+        media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio")
+    )
 
     body = sidecar.read_text(encoding="utf-8")
     assert "extracted_by: failed:" in body
@@ -125,7 +469,6 @@ def test_start_skips_asr_prewarm_when_policy_disables_it(
         w.stop()
 
 
-
 def test_start_logs_diarization_readiness(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list = []
     monkeypatch.setattr(extract, "log_diarization_readiness", lambda v=None: calls.append(v))
@@ -150,10 +493,13 @@ def test_run_extraction_passes_vault_root(vault, monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(extract, "extract_text", _spy)
     w = media_worker.MediaWorker(vault)
-    w._process(media_worker._Job(
-        binary_path=vault / result.path, sidecar_path=vault / result.sidecar_path,
-        media_type="audio",
-    ))
+    w._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
     assert seen["vault_root"] == vault
 
 
@@ -167,7 +513,9 @@ def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(extract, "extract_text", unavailable)
     w = media_worker.MediaWorker(vault)
-    w._process(media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio"))
+    w._process(
+        media_worker._Job(binary_path=vault / result.path, sidecar_path=sidecar, media_type="audio")
+    )
 
     # Engine absent now → stays pending so a provisioned box retries on its restart scan.
     assert "extracted_by: pending" in sidecar.read_text(encoding="utf-8")
@@ -185,22 +533,38 @@ def test_worker_clip_embeds_image(vault, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     res = preserve.preserve_bytes(
-        vault, scope="Yolo", category="photos", filename="p.jpg", data=b"\xff\xd8\xff", text="beach",
+        vault,
+        scope="Yolo",
+        category="photos",
+        filename="p.jpg",
+        data=b"\xff\xd8\xff",
+        text="beach",
     )
-    monkeypatch.setattr(embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32))
+    monkeypatch.setattr(
+        embeddings, "embed_image", lambda p: np.ones(embeddings.CLIP_DIM, dtype=np.float32)
+    )
     w = media_worker.MediaWorker(vault)
-    w._process(media_worker._Job(
-        binary_path=vault / res.path, sidecar_path=vault / res.sidecar_path,
-        media_type="image", do_ocr=False, do_clip=True,
-    ))
+    w._process(
+        media_worker._Job(
+            binary_path=vault / res.path,
+            sidecar_path=vault / res.sidecar_path,
+            media_type="image",
+            do_ocr=False,
+            do_clip=True,
+        )
+    )
     assert embeddings.ClipIndex(vault).has(res.path)
 
 
 def test_scan_unindexed_images_enqueues(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_CLIP", raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
-    preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t")
-    preserve.preserve_bytes(vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t")
+    preserve.preserve_bytes(
+        vault, scope="Yolo", category="photos", filename="x.jpg", data=b"\xff\xd8\xff", text="t"
+    )
+    preserve.preserve_bytes(
+        vault, scope="Yolo", category="photos", filename="y.png", data=b"\x89PNG", text="t"
+    )
     w = media_worker.MediaWorker(vault)
     assert w._scan_unindexed_images() == 2  # both images queued for CLIP
 
@@ -308,7 +672,11 @@ def test_find_surfaces_media_fields(vault, monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     # Provide text so the sidecar is populated + keyword-findable; media frontmatter is set either way.
     preserve.preserve_bytes(
-        vault, scope="Yolo", category="audio", filename="meeting.mp3", data=b"X",
+        vault,
+        scope="Yolo",
+        category="audio",
+        filename="meeting.mp3",
+        data=b"X",
         text="quarterly review of the water damage claim",
     )
     find_module.clear_cache()

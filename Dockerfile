@@ -1,9 +1,10 @@
 # exomem — multi-stage container image.
 #
-# Three final targets share this one file:
+# Four final targets share this one file:
 #   lean (target `lean`, DEFAULT — base deps only, no torch, no model download)
 #   ml   (target `ml`   — the `embeddings` extra, CPU-only torch, no CUDA runtime)
 #   cuda (target `cuda` — the `embeddings` extra, CUDA-capable torch, CPU-default at idle)
+#   hosted (target `hosted` — fixed non-root identity and immutable release metadata)
 #
 # `lean` is intentionally the LAST stage in this file: `docker build .` / `docker
 # buildx build .` with no `--target` builds the final stage in the file, and lean
@@ -140,6 +141,37 @@ LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
 # unconditionally, including for `--transport stdio`, where there is no HTTP
 # server to probe. The healthcheck lives in compose.yaml instead.
 VOLUME /data
+EXPOSE 8765
+ENTRYPOINT ["exomem"]
+CMD ["--transport", "http", "--port", "8765"]
+
+########################################################################
+# Final: hosted (target `hosted`). The platform mounts only the bound
+# vault/state/log roots plus native Secret/operator projections. Kubernetes
+# supplies readOnlyRootFilesystem; this image supplies the matching fixed
+# runtime identity and avoids bytecode writes to the image layer.
+########################################################################
+FROM python:3.12-slim AS hosted
+COPY --from=builder-lean /app/.venv /app/.venv
+COPY LICENSE /LICENSE
+
+ARG EXOMEM_RELEASE_BUILD_TIME
+RUN test -n "$EXOMEM_RELEASE_BUILD_TIME" \
+ && groupadd --gid 10001 exomem \
+ && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /nonexistent --shell /usr/sbin/nologin exomem
+
+ENV PATH=/app/.venv/bin:$PATH \
+    EXOMEM_HOST=0.0.0.0 \
+    EXOMEM_CONTAINER_VARIANT=hosted \
+    EXOMEM_RELEASE_BUILD_TIME=${EXOMEM_RELEASE_BUILD_TIME} \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1
+
+LABEL org.opencontainers.image.source="https://github.com/Artexis10/exomem" \
+      org.opencontainers.image.licenses="AGPL-3.0-or-later" \
+      org.opencontainers.image.description="exomem — isolated hosted cell runtime (fixed UID/GID, operator CLI, read-only-root compatible)"
+
+USER 10001:10001
 EXPOSE 8765
 ENTRYPOINT ["exomem"]
 CMD ["--transport", "http", "--port", "8765"]

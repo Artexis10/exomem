@@ -22,21 +22,21 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from . import find as find_module
+from . import privacy_log
 from .kbdir import kb_prefix
 from .vault import content_hash
-
 
 log = logging.getLogger(__name__)
 
 
 @dataclass
 class GetResult:
-    path: str           # vault-relative, with .md, normalized
+    path: str  # vault-relative, with .md, normalized
     frontmatter: dict
-    body: str           # markdown body without the frontmatter delimiters
-    content: str        # full raw file (frontmatter delimiters + body)
-    content_hash: str   # sha256 of `content` — echo to edit(expected_hash=...)
-    mtime: float        # file mtime (advisory; hash is the real guard)
+    body: str  # markdown body without the frontmatter delimiters
+    content: str  # full raw file (frontmatter delimiters + body)
+    content_hash: str  # sha256 of `content` — echo to edit(expected_hash=...)
+    mtime: float  # file mtime (advisory; hash is the real guard)
 
     def as_dict(self, include_raw: bool = False) -> dict:
         """Wire shape. `content` (the raw file text) ships only on request —
@@ -78,6 +78,8 @@ def get_page(vault_root: Path, *, path: str) -> GetResult:
         raise GetError(code="INVALID_PATH", reason="path is empty")
 
     rel = path.strip().replace("\\", "/").lstrip("/")
+    if privacy_log.is_reserved_hosted_vault_path(rel):
+        raise GetError(code="INVALID_PATH", reason="path is reserved by hosted runtime")
     # Only auto-append .md if the path has NO extension. Previously this
     # appended unconditionally, which made e.g. `foo.meta.json` resolve to
     # `foo.meta.json.md` and 404 — surfaced when trying to inspect trash

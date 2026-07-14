@@ -1,22 +1,64 @@
 """/upload endpoint — out-of-band binary upload straight into Evidence/.
 
-Drives the real FastMCP ASGI app via Starlette's sync TestClient (no
-pytest-asyncio dependency). `load_dotenv` is neutralized so the repo `.env`
-can't clobber the per-test fixture vault.
+Drives the real FastMCP ASGI app through HTTPX's in-process ASGI transport
+(no pytest-asyncio dependency). `load_dotenv` is neutralized so the repo
+`.env` can't clobber the per-test fixture vault.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 
+import httpx
 import pytest
-from starlette.testclient import TestClient
 
 from exomem import server
 
 
-def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
+@pytest.fixture(autouse=True)
+def _isolated_writer_state(tmp_path, monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-state"))
+
+
+class _ASGIClient:
+    """Synchronous test facade without Starlette's Python 3.14 portal deadlock."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    def request(self, method: str, path: str, **kwargs) -> httpx.Response:
+        async def send() -> httpx.Response:
+            transport = httpx.ASGITransport(app=self.app)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://testserver"
+            ) as client:
+                return await client.request(method, path, **kwargs)
+
+        return asyncio.run(send())
+
+    def get(self, path: str, **kwargs) -> httpx.Response:
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs) -> httpx.Response:
+        return self.request("POST", path, **kwargs)
+
+
+def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> _ASGIClient:
+    from exomem import server_transfer
+
     monkeypatch.setattr(server, "load_dotenv", lambda *a, **k: None)
+
+    # Python 3.14 currently deadlocks both Starlette's TestClient portal and its
+    # AnyIO worker-return path. ASGITransport plus an inline threadpool seam keeps
+    # the route contract exact; concurrent tests still run requests in real threads.
+    async def inline_threadpool(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", inline_threadpool)
     # Hermeticity: the /upload route is gated by these env vars, and a developer's
     # ambient shell may already have them set (the author's deployment box does).
     # Clear them first so a test that doesn't pass one sees the "disabled" default
@@ -26,11 +68,18 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     mcp = server.build_server(require_auth=False)
-    return TestClient(mcp.http_app())
+    return _ASGIClient(mcp.http_app())
 
 
 def test_upload_requires_auth(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+    from exomem import writer_lease
+
     client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    monkeypatch.setattr(
+        writer_lease,
+        "get_manager",
+        lambda: pytest.fail("unauthorized upload reached mutation coordination"),
+    )
     r = client.post(
         "/upload",
         files={"file": ("shot.png", b"\x89PNGdata", "image/png")},
@@ -58,6 +107,137 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert body["content_type"] == "image/png"
     written = vault / body["path"]
     assert written.read_bytes() == b"\x89PNGrealbytes"
+
+
+def test_upload_parses_before_guard_and_preserves_inside_it(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import preserve, writer_lease
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    events: list[str] = []
+
+    class RecordingManager:
+        depth = 0
+
+        def ensure_writer(self) -> None:
+            events.append("legacy-ensure")
+
+        @contextmanager
+        def mutation_guard(self, guarded_vault):
+            assert guarded_vault == vault
+            events.append("guard-enter")
+            self.depth += 1
+            try:
+                yield
+            finally:
+                self.depth -= 1
+                events.append("guard-exit")
+
+    manager = RecordingManager()
+    original = preserve.preserve_stream
+
+    def checked_preserve(*args, **kwargs):
+        assert manager.depth == 1
+        assert kwargs["scope"] == "S"
+        assert kwargs["category"] == "C"
+        events.append("preserve")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: manager)
+    monkeypatch.setattr(preserve, "preserve_stream", checked_preserve)
+
+    response = client.post(
+        "/upload",
+        files={"file": ("guarded.bin", b"bytes", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert events == ["guard-enter", "preserve", "guard-exit"]
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [("MUTATION_BUSY", 409), ("MUTATION_LOCK_UNAVAILABLE", 503)],
+)
+def test_upload_maps_mutation_lock_errors(
+    vault, monkeypatch: pytest.MonkeyPatch, code: str, status: int
+) -> None:
+    from exomem import writer_lease
+    from exomem.cli_ops import OpError
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    class RejectingManager:
+        def ensure_writer(self) -> None:
+            return None
+
+        @contextmanager
+        def mutation_guard(self, _vault):
+            raise OpError(code, "lock rejected the upload")
+            yield
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: RejectingManager())
+    response = client.post(
+        "/upload",
+        files={"file": (f"{code}.bin", b"bytes", "application/octet-stream")},
+        data={"scope": "S", "category": "C"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == status, response.text
+    assert response.json()["code"] == code
+
+
+def test_identical_concurrent_uploads_serialize_before_append_only_check(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import preserve
+
+    first_client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    second_client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    original = preserve.preserve_stream
+    state_lock = threading.Lock()
+    first_entered = threading.Event()
+    second_entered = threading.Event()
+    release_first = threading.Event()
+    calls = 0
+
+    def overlapping_preserve(*args, **kwargs):
+        nonlocal calls
+        with state_lock:
+            calls += 1
+            call = calls
+        if call == 1:
+            first_entered.set()
+            assert release_first.wait(3.0)
+        else:
+            second_entered.set()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "preserve_stream", overlapping_preserve)
+    request = {
+        "files": {"file": ("same.bin", b"identical", "application/octet-stream")},
+        "data": {"scope": "S", "category": "C"},
+        "headers": {"Authorization": "Bearer sekret"},
+    }
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(first_client.post, "/upload", **request)
+        assert first_entered.wait(2.0)
+        second = pool.submit(second_client.post, "/upload", **request)
+        try:
+            assert not second_entered.wait(0.15), "second upload entered commit concurrently"
+        finally:
+            release_first.set()
+        responses = [first.result(timeout=5.0), second.result(timeout=5.0)]
+
+    assert sorted(response.status_code for response in responses) == [201, 409]
+    conflict = next(response for response in responses if response.status_code == 409)
+    assert conflict.json()["code"] == "ARTIFACT_EXISTS"
+    assert (vault / "Knowledge Base/Evidence/S/C/same.bin").read_bytes() == b"identical"
 
 
 def test_spoofed_cf_access_header_is_not_trusted(vault, monkeypatch: pytest.MonkeyPatch) -> None:

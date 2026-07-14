@@ -67,8 +67,8 @@ _REPEAT = 3  # passes over the query set → ~9 samples per lane for a stable me
 # --- Ceilings (see the module docstring for the measured baseline they derive
 # from). Median-based; a rebuild regression trips them with room to spare while
 # CI-speed variance over the warm baseline does not.
-CEIL_GRAPH_MS = 1000.0   # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
-CEIL_TOTAL_MS = 5000.0   # warm ~805ms; catastrophic-blowup backstop, CI-robust
+CEIL_GRAPH_MS = 1000.0  # warm ~222ms; a per-query resolver rebuild → ~1.9s trips this
+CEIL_TOTAL_MS = 5000.0  # warm ~805ms; catastrophic-blowup backstop, CI-robust
 
 # --- Warm-graph scaling bound (the anti-O(N) gate from the FTS5 change).
 # MEASURED BASIS (2026-07-04, same box as the module baseline, registry LIVE):
@@ -80,8 +80,8 @@ CEIL_TOTAL_MS = 5000.0   # warm ~805ms; catastrophic-blowup backstop, CI-robust
 # N_NOTES_LARGE would add the walk back (~800ms at 8k on the reference box) and
 # blow this bound by an order of magnitude; timing jitter on millisecond-scale
 # medians is absorbed by the absolute slack. Re-measure, don't hand-tune.
-N_NOTES_LARGE = 8000     # 4x the base corpus
-CEIL_GRAPH_RATIO = 1.5   # warm graph median at 4x corpus must stay within 1.5x
+N_NOTES_LARGE = 8000  # 4x the base corpus
+CEIL_GRAPH_RATIO = 1.5  # warm graph median at 4x corpus must stay within 1.5x
 GRAPH_RATIO_SLACK_MS = 25.0  # noise floor for ms-scale medians on shared CI
 
 
@@ -89,13 +89,15 @@ def _seed_freshness_live(vault: Path) -> None:
     """Seed the event-maintained freshness registry the way the watcher does, so
     the graph lane's resolver is live and warm (production shape) — not rebuilt."""
     freshness.seed(
-        vault, "vault",
-        ((str(p), p.stat().st_mtime_ns) for p in walk_vault_md(vault)),
+        vault,
+        "vault",
+        ((str(p), freshness.stat_signature(p)) for p in walk_vault_md(vault)),
     )
     kb = vault / "Knowledge Base"
     freshness.seed(
-        vault, "kb",
-        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb)),
+        vault,
+        "kb",
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb)),
     )
 
 
@@ -210,8 +212,7 @@ def test_warm_graph_lane_does_not_scale_linearly(tmp_path: Path, model_free) -> 
     large_medians, _ = _measure(large)
 
     assert "graph" in small_medians and "graph" in large_medians, (
-        f"graph lane did not run at both sizes: "
-        f"{small_medians.keys()} / {large_medians.keys()}"
+        f"graph lane did not run at both sizes: {small_medians.keys()} / {large_medians.keys()}"
     )
     g_small, g_large = small_medians["graph"], large_medians["graph"]
     bound = max(g_small * CEIL_GRAPH_RATIO, g_small + GRAPH_RATIO_SLACK_MS)

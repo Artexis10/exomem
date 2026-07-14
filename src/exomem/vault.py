@@ -28,7 +28,7 @@ from typing import Any, BinaryIO, Literal
 import yaml
 from slugify import slugify as _slugify
 
-from . import freshness
+from . import freshness, privacy_log
 from .kbdir import kb_dirname, kb_prefix
 
 if os.name == "nt":  # pragma: no cover - imported only on Windows
@@ -2130,12 +2130,14 @@ def read_guarded_text(vault_root: Path, path: Path) -> tuple[str, PathGuard]:
 
 @dataclass
 class PlannedWrite:
-    """One target file in a batch write: destination path + final content."""
+    """One target file in a batch write, with an optional commit-time CAS guard."""
 
     path: Path
     content: str
     create_only: bool = False
     guard: PathGuard | None = None
+    expected_hash: str | None = None
+    ensure_directories: tuple[Path, ...] = ()
 
 
 def _summarize_batch_targets(
@@ -2182,7 +2184,12 @@ def _safe_write_target(path: Path, vault_root: Path | None) -> str:
         return path.name
 
 
-def _prepare_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> tuple[PathGuard, ...]:
+def _prepare_path_guards(
+    vault_root: Path,
+    guards: Iterable[PathGuard],
+    *,
+    created_dirs: list[Path] | None = None,
+) -> tuple[PathGuard, ...]:
     original = tuple(guards)
     for guard in original:
         guard.recheck(vault_root)
@@ -2190,20 +2197,28 @@ def _prepare_path_guards(vault_root: Path, guards: Iterable[PathGuard]) -> tuple
         {relative for guard in original for relative in guard.missing_parents},
         key=lambda value: (len(Path(value).parts), value),
     )
-    _create_missing_guard_parents(
-        vault_root,
-        missing,
-        expected_ancestors=tuple(identity for guard in original for identity in guard.ancestors),
-    )
-    return tuple(
-        PathGuard.capture(
+    try:
+        _create_missing_guard_parents(
             vault_root,
-            guard.target,
-            leaf_policy=guard.leaf_policy,
-            expected_content_hash=guard.expected_content_hash,
+            missing,
+            expected_ancestors=tuple(
+                identity for guard in original for identity in guard.ancestors
+            ),
+            created_dirs=created_dirs,
         )
-        for guard in original
-    )
+        return tuple(
+            PathGuard.capture(
+                vault_root,
+                guard.target,
+                leaf_policy=guard.leaf_policy,
+                expected_content_hash=guard.expected_content_hash,
+            )
+            for guard in original
+        )
+    except BaseException:
+        if created_dirs is not None:
+            _remove_empty_created_dirs(created_dirs)
+        raise
 
 
 def _directory_flags() -> int:
@@ -2239,6 +2254,7 @@ def _create_missing_guard_parents(
     missing_parents: Iterable[str],
     *,
     expected_ancestors: Iterable[PathIdentity],
+    created_dirs: list[Path] | None = None,
 ) -> None:
     missing = tuple(
         sorted(
@@ -2263,6 +2279,8 @@ def _create_missing_guard_parents(
                 raise PathGuardError(
                     "PATH_GUARD_CHANGED", "missing guard ancestor appeared"
                 ) from error
+            if created_dirs is not None:
+                created_dirs.append(path)
             info = path.lstat()
             if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode) or _is_reparse(info):
                 raise PathGuardError("PATH_GUARD_UNSAFE", "created guard ancestor is unsafe")
@@ -2301,6 +2319,8 @@ def _create_missing_guard_parents(
                 created_descriptor = _open_directory_at(parent_descriptor, parts[-1])
                 expected_by_path[relative] = _identity(relative, os.fstat(created_descriptor))
                 os.close(created_descriptor)
+                if created_dirs is not None:
+                    created_dirs.append(vault_root / relative)
             finally:
                 os.close(parent_descriptor)
     finally:
@@ -2337,7 +2357,74 @@ def _post_commit_batch_fanout(
         )
 
 
+class ContentHashMismatchError(RuntimeError):
+    """A planned destination changed before its guarded batch could commit."""
+
+    def __init__(self, path: Path, expected_hash: str, actual_hash: str | None):
+        self.path = path
+        self.expected_hash = expected_hash
+        self.actual_hash = actual_hash
+        actual = actual_hash or "<missing>"
+        super().__init__(
+            f"content changed before commit: {path} "
+            f"(expected {expected_hash}, found {actual})"
+        )
+
+
+_BATCH_COMMIT_LOCK = threading.RLock()
+MISSING_CONTENT_HASH = "<missing>"
+
+
+def _create_parent_dirs(parent: Path, created_dirs: list[Path]) -> None:
+    """Create missing parents and record only directories created by this call."""
+    missing: list[Path] = []
+    cursor = parent
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        try:
+            directory.mkdir()
+        except FileExistsError:
+            continue
+        created_dirs.append(directory)
+
+
+def _remove_empty_created_dirs(created_dirs: list[Path]) -> None:
+    """Best-effort rollback for empty parent directories created during staging."""
+    for directory in reversed(created_dirs):
+        try:
+            directory.rmdir()
+        except OSError:
+            pass
+
+
 def batch_atomic_write(
+    writes: Iterable[PlannedWrite],
+    *,
+    vault_root: Path | None = None,
+    required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
+    index_reports: list[Any] | None = None,
+) -> list[Path]:
+    """Commit one batch while serializing all in-process vault writers.
+
+    A process-shared lock closes the gap between validating any ``expected_hash``
+    guards and replacing destinations. The locked implementation uses private
+    descriptor-owned staging, exact rollback snapshots, and one post-commit
+    index fan-out.
+    """
+    with _BATCH_COMMIT_LOCK:
+        return _batch_atomic_write_locked(
+            writes,
+            vault_root=vault_root,
+            required_guards=required_guards,
+            index_reports=index_reports,
+        )
+
+
+def _batch_atomic_write_locked(
     writes: Iterable[PlannedWrite],
     *,
     vault_root: Path | None = None,
@@ -2373,6 +2460,21 @@ def batch_atomic_write(
         absolute_parts = Path(os.path.abspath(write.path)).parts
         if any(part.startswith(_BATCH_RESIDUE_PREFIX) for part in absolute_parts):
             raise _batch_residue_error("BATCH_RESIDUE_UNSAFE")
+        if write.expected_hash is not None:
+            try:
+                current = write.path.read_text(encoding="utf-8")
+            except FileNotFoundError:
+                actual_hash = None
+            else:
+                actual_hash = content_hash(current)
+            expected_missing = write.expected_hash == MISSING_CONTENT_HASH
+            if (
+                not (expected_missing and actual_hash is None)
+                and actual_hash != write.expected_hash
+            ):
+                raise ContentHashMismatchError(
+                    write.path, write.expected_hash, actual_hash
+                )
     all_required_guards = tuple(required_guards)
     if any(
         not isinstance(guard, (PathGuard, DirectoryCensusGuard))
@@ -2397,16 +2499,18 @@ def batch_atomic_write(
 
         vault_resolved = vault_root.resolve()
         for w in writes:
-            try:
-                rel = w.path.resolve().relative_to(vault_resolved).as_posix()
-            except (ValueError, OSError) as e:
-                # Fail CLOSED: a staged write that resolves outside the vault must
-                # never proceed (callers resolve paths first, so this is a
-                # defense-in-depth backstop, not a normal path).
-                raise ValueError(f"WRITE_REFUSED: {w.path} resolves outside the vault root") from e
-            reason = access.writable_reason(vault_root, rel)
-            if reason is not None:
-                raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
+            for target in (w.path, *w.ensure_directories):
+                try:
+                    rel = target.resolve().relative_to(vault_resolved).as_posix()
+                except (ValueError, OSError) as e:
+                    # Fail CLOSED: a staged write or planned directory outside the
+                    # vault must never proceed.
+                    raise ValueError(
+                        f"WRITE_REFUSED: {target} resolves outside the vault root"
+                    ) from e
+                reason = access.writable_reason(vault_root, rel)
+                if reason is not None:
+                    raise ValueError(f"WRITE_REFUSED: {rel}: {reason}")
     target_summary = _summarize_batch_targets(writes, vault_root)
     if (
         read_only_guards
@@ -2414,6 +2518,7 @@ def batch_atomic_write(
         or any(write.guard is not None for write in writes)
     ) and vault_root is None:
         raise PathGuardError("PATH_GUARD_ROOT", "guarded writes require vault_root")
+    created_dirs: list[Path] = []
     bound_guards: list[PathGuard | None] = []
     if vault_root is not None:
         root = Path(vault_root)
@@ -2430,18 +2535,30 @@ def batch_atomic_write(
             guard_positions.append(len(bound_guards))
             write_guards.append(guard)
             bound_guards.append(None)
-        prepared = _prepare_path_guards(root, (*write_guards, *read_only_guards))
+        prepared = _prepare_path_guards(
+            root,
+            (*write_guards, *read_only_guards),
+            created_dirs=created_dirs,
+        )
         for position, guard in zip(guard_positions, prepared[: len(write_guards)], strict=True):
             bound_guards[position] = guard
         read_only_guards = prepared[len(write_guards) :]
-        for guard in (*read_only_guards, *(item for item in bound_guards if item is not None)):
-            guard.recheck(root)
-        for guard in directory_guards:
-            guard.recheck(root, allowed_changes=(write.path for write in writes))
+        try:
+            for guard in (
+                *read_only_guards,
+                *(item for item in bound_guards if item is not None),
+            ):
+                guard.recheck(root)
+            for guard in directory_guards:
+                guard.recheck(root, allowed_changes=(write.path for write in writes))
+        except BaseException:
+            _remove_empty_created_dirs(created_dirs)
+            raise
     else:
         bound_guards = [None] * len(writes)
     for write in writes:
         if write.create_only and os.path.lexists(write.path):
+            _remove_empty_created_dirs(created_dirs)
             raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
 
     workspace_by_parent: dict[Path, _BatchWorkspace] = {}
@@ -2450,6 +2567,9 @@ def batch_atomic_write(
     source_guards: list[_BatchArtifactGuard | None] = []
     try:
         for write in writes:
+            for directory in write.ensure_directories:
+                _create_parent_dirs(directory, created_dirs)
+            _create_parent_dirs(write.path.parent, created_dirs)
             parent = Path(os.path.abspath(write.path.parent))
             if parent not in workspace_by_parent:
                 workspace_by_parent[parent] = _BatchWorkspace.create(parent)
@@ -2472,16 +2592,19 @@ def batch_atomic_write(
         cause = stage_error.__cause__ if retained_during_init else stage_error
         if cause is not None and not isinstance(cause, Exception):
             _cleanup_batch_workspaces(workspace_by_parent.values())
+            _remove_empty_created_dirs(created_dirs)
             raise cause from None
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
         if retained_during_init or cleanup_retained:
             public_cause = cause or stage_error
+            _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_CLEANUP_INCOMPLETE",
                 target_summary,
                 False,
                 diagnostics=(public_cause,),
             ) from public_cause
+        _remove_empty_created_dirs(created_dirs)
         raise
 
     allowed_census_changes = (
@@ -2491,6 +2614,9 @@ def batch_atomic_write(
     replaced: list[Path] = []
     final_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
+        from .writer_lease import validate_active_write_fence
+
+        validate_active_write_fence()
         for index, (final, workspace, artifact) in enumerate(staged):
             for candidate_workspace in workspace_by_parent.values():
                 candidate_workspace.recheck()
@@ -2613,6 +2739,7 @@ def batch_atomic_write(
             workspace_by_parent.values(), retained=implicated_workspaces
         )
         if rollback_errors:
+            _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_ROLLBACK_INCOMPLETE",
                 target_summary,
@@ -2620,14 +2747,17 @@ def batch_atomic_write(
                 diagnostics=rollback_errors,
             ) from commit_error
         if cleanup_retained:
+            _remove_empty_created_dirs(created_dirs)
             raise BatchWriteError(
                 "BATCH_CLEANUP_INCOMPLETE",
                 target_summary,
                 False,
             ) from commit_error
+        _remove_empty_created_dirs(created_dirs)
         raise
     except BaseException:
         _cleanup_batch_workspaces(workspace_by_parent.values())
+        _remove_empty_created_dirs(created_dirs)
         raise
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
@@ -2696,6 +2826,8 @@ def resolve_under_vault(
         raise VaultPathError(code="INVALID_PATH", reason="path is empty")
 
     rel = raw.replace("\\", "/").lstrip("/")
+    if privacy_log.is_reserved_hosted_vault_path(rel):
+        raise VaultPathError(code="INVALID_PATH", reason="path is reserved by hosted runtime")
     # Reject absolute paths (drive letters or leading drive)
     if re.match(r"^[a-zA-Z]:", rel):
         raise VaultPathError(

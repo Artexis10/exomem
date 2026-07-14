@@ -49,10 +49,12 @@ from . import (
 from . import project_keys as project_keys_module
 from .kbdir import kb_prefix
 from .vault import (
+    MISSING_CONTENT_HASH,
     InvalidSlugError,
     PlannedWrite,
     WikilinkResolver,
     batch_atomic_write,
+    content_hash,
     ensure_canonical_h1,
     escape_wikilinks_for_log,
     find_body_wikilinks,
@@ -80,6 +82,94 @@ NOTE_TYPES = (
 def _load_keys(vault_root: Path) -> project_keys_module.ProjectRegistry:
     """Load the live project registry (from `_Schema/project-keys.yaml`)."""
     return project_keys_module.load_project_registry(vault_root)
+
+
+def _plan_project_registrations(
+    vault_root: Path,
+    candidates: list[str],
+    *,
+    category: str,
+) -> tuple[
+    project_keys_module.ProjectRegistry,
+    PlannedWrite | None,
+    list[str],
+]:
+    """Build registry updates for a composed write without mutating the vault."""
+    registry = _load_keys(vault_root)
+    folders = dict(registry.project_to_folder)
+    categories = dict(registry.project_to_category)
+    registry_path = kb_root(vault_root) / "_Schema" / "project-keys.yaml"
+    if registry_path.exists():
+        original = registry_path.read_text(encoding="utf-8")
+        text = original
+        expected_hash = content_hash(original)
+    else:
+        bootstrap_lines = [
+            "# Project keys for research-notes and cross-cutting projects: list.",
+            "# exomem loads this at startup and auto-appends new keys on use.",
+            "",
+            "projects:",
+        ]
+        for key, folder in folders.items():
+            bootstrap_lines.append(f"  {key}:")
+            bootstrap_lines.append(f"    folder: {folder}")
+            bootstrap_lines.append(
+                f"    category: {categories.get(key, 'uncategorized')}"
+            )
+        text = "\n".join(bootstrap_lines) + "\n"
+        expected_hash = MISSING_CONTENT_HASH
+
+    warnings: list[str] = []
+    required_project_dirs: list[Path] = []
+    changed = False
+    for candidate in candidates:
+        if candidate in folders:
+            continue
+        if not project_keys_module._SLUG_RE.match(candidate):
+            continue
+        close = project_keys_module._closest_existing_key(
+            candidate, list(folders)
+        )
+        if close is not None:
+            raise project_keys_module.ProjectKeyTypoError(
+                candidate, close[0], close[1]
+            )
+        folder = project_keys_module._title_case_slug(candidate)
+        if not text.endswith("\n"):
+            text += "\n"
+        text += (
+            "\n  # auto-registered by exomem\n"
+            f"  {candidate}:\n"
+            f"    folder: {folder}\n"
+            f"    category: {category}\n"
+        )
+        folders[candidate] = folder
+        categories[candidate] = category
+        required_project_dirs.append(
+            kb_root(vault_root) / "Notes" / "Research" / folder
+        )
+        changed = True
+        warnings.append(
+            f"Auto-registered project key {candidate!r} (folder: {folder!r}"
+            + (f", category: {category!r}" if category != "uncategorized" else "")
+            + ")."
+        )
+
+    planned_write = (
+        PlannedWrite(
+            path=registry_path,
+            content=text,
+            expected_hash=expected_hash,
+            ensure_directories=tuple(required_project_dirs),
+        )
+        if changed
+        else None
+    )
+    planned_registry = project_keys_module.ProjectRegistry(
+        project_to_folder=folders,
+        project_to_category=categories,
+    )
+    return planned_registry, planned_write, warnings
 
 SEVERITY_VALUES = ("minor", "moderate", "serious", "critical")
 
@@ -272,6 +362,7 @@ def _legacy_note(
     suggestions: bool = True,
     today: dt.date | None = None,
     project_category: str | None = None,
+    _planned_writes: list[PlannedWrite] | None = None,
 ) -> NoteResult:
     """Create a compiled note + update indexes/log + back-ref cited sources atomically.
 
@@ -297,41 +388,62 @@ def _legacy_note(
     # registration is visible. Invalid slugs fall through to validation
     # which rejects them with a typed error.
     autoregister_warnings: list[str] = []
+    planned_registry: project_keys_module.ProjectRegistry | None = None
+    project_registration_write: PlannedWrite | None = None
     candidates: list[str] = []
     if project:
         candidates.append(project)
     if projects:
         candidates.extend(p for p in projects if p)
     if candidates:
-        registry = _load_keys(vault_root)
-        for cand in candidates:
-            if cand in registry.project_to_folder:
-                continue
+        if _planned_writes is not None:
             try:
-                _, new_folder, was_new = project_keys_module.register_project_key(
-                    vault_root, cand,
+                (
+                    planned_registry,
+                    project_registration_write,
+                    autoregister_warnings,
+                ) = _plan_project_registrations(
+                    vault_root,
+                    candidates,
                     category=project_category or "uncategorized",
                 )
-                if was_new:
-                    cat_note = (
-                        f", category: {project_category!r}"
-                        if project_category else ""
-                    )
-                    autoregister_warnings.append(
-                        f"Auto-registered project key {cand!r} (folder: "
-                        f"{new_folder!r}{cat_note})."
-                    )
             except project_keys_module.ProjectKeyTypoError as e:
-                # Surface as a typed validation error — the agent's natural
-                # recovery is to re-call with the suggested key.
                 raise NoteError(
                     code="PROJECT_KEY_TYPO",
-                    missing=["project" if cand == project else "projects"],
+                    missing=["project" if e.key == project else "projects"],
                     reason=str(e),
                 ) from e
-            except ValueError:
-                # Invalid slug — fall through to validation which will reject.
-                pass
+        else:
+            registry = _load_keys(vault_root)
+            for cand in candidates:
+                if cand in registry.project_to_folder:
+                    continue
+                try:
+                    _, new_folder, was_new = project_keys_module.register_project_key(
+                        vault_root,
+                        cand,
+                        category=project_category or "uncategorized",
+                    )
+                    if was_new:
+                        cat_note = (
+                            f", category: {project_category!r}"
+                            if project_category else ""
+                        )
+                        autoregister_warnings.append(
+                            f"Auto-registered project key {cand!r} (folder: "
+                            f"{new_folder!r}{cat_note})."
+                        )
+                except project_keys_module.ProjectKeyTypoError as e:
+                    # Surface as a typed validation error — the agent's natural
+                    # recovery is to re-call with the suggested key.
+                    raise NoteError(
+                        code="PROJECT_KEY_TYPO",
+                        missing=["project" if cand == project else "projects"],
+                        reason=str(e),
+                    ) from e
+                except ValueError:
+                    # Invalid slug — fall through to validation which will reject.
+                    pass
 
     err = _validate(
         note_type=note_type,
@@ -347,6 +459,7 @@ def _legacy_note(
         duration=duration,
         medium=medium,
         vault_root=vault_root,
+        project_registry=planned_registry,
     )
     if err is not None:
         raise NoteError(code=err.code, missing=err.missing, reason=err.reason)
@@ -365,6 +478,8 @@ def _legacy_note(
         medium=medium,
         started=started,
         date_iso=date_iso,
+        project_registry=planned_registry,
+        create_parents=_planned_writes is None,
     )
     rel_note_no_ext = note_path.relative_to(vault_root).with_suffix("").as_posix()
     new_note_wikilink = f"[[{render_wikilink_target(rel_note_no_ext, vault_root)}]]"
@@ -487,7 +602,10 @@ def _legacy_note(
         backrefs_planned=0,
         suggestions_count=len(corpus_suggestions),
     )
-    writes: list[PlannedWrite] = [PlannedWrite(path=note_path, content=note_md)]
+    writes: list[PlannedWrite] = []
+    if project_registration_write is not None:
+        writes.append(project_registration_write)
+    writes.append(PlannedWrite(path=note_path, content=note_md))
     warnings: list[str] = (
         list(autoregister_warnings)
         + list(slug_warnings)
@@ -584,25 +702,30 @@ def _legacy_note(
     else:
         warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
-    try:
-        batch_atomic_write(writes, vault_root=vault_root)
-    except Exception as e:
-        log.exception("partial write during note(); some files may be updated")
-        warnings.append(f"partial write — reconcile on desktop: {e}")
-        # Purge this write's add_pending registration from the SHARED resolver
-        # — the note never landed, and a phantom entry would resolve wikilinks
-        # to a nonexistent page until the next full rebuild.
+    if _planned_writes is None:
         try:
-            find_module.on_resolver_files_changed(
-                vault_root, [rel_note_no_ext + ".md"], []
-            )
-        except Exception:  # noqa: BLE001 — purge is best-effort cleanup
-            log.debug("resolver pending-purge failed", exc_info=True)
-        raise
+            batch_atomic_write(writes, vault_root=vault_root)
+        except Exception as e:
+            log.exception("partial write during note(); some files may be updated")
+            warnings.append(f"partial write — reconcile on desktop: {e}")
+            # Purge this write's add_pending registration from the SHARED resolver
+            # — the note never landed, and a phantom entry would resolve wikilinks
+            # to a nonexistent page until the next full rebuild.
+            try:
+                find_module.on_resolver_files_changed(
+                    vault_root, [rel_note_no_ext + ".md"], []
+                )
+            except Exception:  # noqa: BLE001 — purge is best-effort cleanup
+                log.debug("resolver pending-purge failed", exc_info=True)
+            raise
 
-    rotate_note = rotate_log_if_needed(vault_root)
-    if rotate_note:
-        warnings.append(rotate_note)
+        rotate_note = rotate_log_if_needed(vault_root)
+        if rotate_note:
+            warnings.append(rotate_note)
+    else:
+        # Internal composition seam for replace(): preserve note()'s exact
+        # write plan while letting the supersession pointers join the same batch.
+        _planned_writes.extend(writes)
 
     write_feedback["sources"]["backrefs_planned"] = backrefs_planned
 
@@ -643,7 +766,7 @@ def _validate(
     duration: str | None,
     medium: str | None,
     vault_root: Path,
-    registry: project_keys_module.ProjectRegistry | None = None,
+    project_registry: project_keys_module.ProjectRegistry | None = None,
 ) -> _Err | None:
     missing: list[str] = []
     reasons: list[str] = []
@@ -690,8 +813,8 @@ def _validate(
             missing.append("status")
             reasons.append(f"status must be 'active' or 'draft', got {status!r}")
 
-    live_registry = registry or _load_keys(vault_root)
-    valid_keys = live_registry.project_to_folder
+    registry = project_registry or _load_keys(vault_root)
+    valid_keys = registry.project_to_folder
     if note_type == "research-note":
         if not project:
             missing.append("project")
@@ -796,15 +919,15 @@ def _resolve_path(
     medium: str | None,
     started: str | None,
     date_iso: str,
-    registry: project_keys_module.ProjectRegistry | None = None,
-    create_parent: bool = True,
+    project_registry: project_keys_module.ProjectRegistry | None = None,
+    create_parents: bool = True,
 ) -> Path:
     kb = kb_root(vault_root)
     if note_type == "research-note":
         assert project is not None  # validated above
         # Use live registry so auto-registered keys resolve to their folder.
-        live_registry = registry or _load_keys(vault_root)
-        folder_name = live_registry.folder_for(project) or project.capitalize()
+        registry = project_registry or _load_keys(vault_root)
+        folder_name = registry.folder_for(project) or project.capitalize()
         folder = kb / "Notes" / "Research" / folder_name
         stem = slug
     elif note_type == "insight":
@@ -826,7 +949,7 @@ def _resolve_path(
         stem = f"{date_iso[:7]}-{slug}"  # YYYY-MM-<slug>
     else:  # pragma: no cover — validation guards this
         raise ValueError(f"unhandled note_type: {note_type}")
-    if create_parent:
+    if create_parents:
         folder.mkdir(parents=True, exist_ok=True)
     return unique_path(folder, stem)
 
@@ -1264,7 +1387,7 @@ def note(
         duration=duration,
         medium=medium,
         vault_root=root,
-        registry=key_plan.registry,
+        project_registry=key_plan.registry,
     )
     if err is not None:
         raise NoteError(err.code, err.missing, err.reason)
@@ -1289,8 +1412,8 @@ def note(
             medium=medium,
             started=started,
             date_iso=render_date,
-            registry=key_plan.registry,
-            create_parent=False,
+            project_registry=key_plan.registry,
+            create_parents=False,
         )
         destination = note_path.relative_to(root).as_posix()
         token_value = semantic_writes.DraftToken(

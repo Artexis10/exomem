@@ -1398,7 +1398,7 @@ def on_resolver_files_changed(
 def unload_ram_caches() -> dict[str, int]:
     """Evict rebuildable find RAM caches without clearing freshness/inbound metadata."""
     page_entries = len(_CACHE.entries)
-    _CACHE.entries.clear()
+    _CACHE.clear()
     with _RESOLVER_LOCK:
         resolver_entries = len(_RESOLVER_CACHE)
         _RESOLVER_CACHE.clear()

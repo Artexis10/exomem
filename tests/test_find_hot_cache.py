@@ -3,6 +3,7 @@ invalidation, caller-mutation safety, and the clear_cache() test hook."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
@@ -75,10 +76,34 @@ def test_markdown_write_invalidates(vault: Path, monkeypatch) -> None:
     assert any(h.path.endswith("hot-cache-freshness-probe.md") for h in hits)
 
 
+def test_preserved_mtime_replacement_invalidates_warmed_find(vault: Path) -> None:
+    """External sync tools may replace bytes while preserving the source mtime."""
+
+    note = vault / "Knowledge Base" / "Notes" / "freshness-replacement.md"
+    note.write_text("# Freshness\n\nalphauniquesentinel\n", encoding="utf-8")
+    before = note.stat()
+    assert any(
+        hit.path.endswith(note.name)
+        for hit in find_module.find(vault, query="alphauniquesentinel", mode="keyword")
+    )
+
+    replacement = note.with_suffix(".replacement")
+    replacement.write_text(
+        "# Freshness\n\nbetauniquereplacementsentinel with different bytes\n",
+        encoding="utf-8",
+    )
+    os.utime(replacement, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(replacement, note)
+    assert note.stat().st_mtime_ns == before.st_mtime_ns
+
+    new_hits = find_module.find(vault, query="betauniquereplacementsentinel", mode="keyword")
+    old_hits = find_module.find(vault, query="alphauniquesentinel", mode="keyword")
+    assert any(hit.path.endswith(note.name) for hit in new_hits)
+    assert not any(hit.path.endswith(note.name) for hit in old_hits)
+
+
 @pytest.mark.parametrize("sidecar_name", [".embeddings.sqlite", ".clip.sqlite"])
-def test_sidecar_generation_invalidates(
-    vault: Path, monkeypatch, sidecar_name: str
-) -> None:
+def test_sidecar_generation_invalidates(vault: Path, monkeypatch, sidecar_name: str) -> None:
     """A gen-bumping write to a semantic sidecar invalidates the hot cache — keyed
     on the in-band (epoch, generation) token, NOT the sidecar file mtime (a WAL
     checkpoint moves the mtime with no content change; an uncheckpointed commit
@@ -128,7 +153,7 @@ def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
     freshness.seed(
         vault,
         "kb",
-        ((str(p), p.stat().st_mtime_ns) for p in find_module._walk_md(kb)),
+        ((str(p), freshness.stat_signature(p)) for p in find_module._walk_md(kb)),
     )
     before_freshness = freshness.triple(vault, "kb")
 
@@ -136,12 +161,14 @@ def test_unload_ram_caches_preserves_freshness(vault: Path) -> None:
     status = find_module.cache_status()
     assert status["pages"]["entries"] > 0
     assert status["hot_find"]["entries"] > 0
+    assert find_module._CACHE._signatures
 
     unloaded = find_module.unload_ram_caches()
     assert unloaded["pages"] > 0
     assert unloaded["hot_find"] > 0
     assert find_module.cache_status()["pages"]["entries"] == 0
     assert find_module.cache_status()["hot_find"]["entries"] == 0
+    assert not find_module._CACHE._signatures
     assert freshness.triple(vault, "kb") == before_freshness
 
     assert find_module.find(vault, query="metabolism")

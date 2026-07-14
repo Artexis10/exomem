@@ -15,8 +15,8 @@ and get a byte-identical triple.
 
 Parity is guaranteed by construction: the digest is computed by the SINGLE
 shared `triple_from_entries` helper below (also used by `find._walk_freshness_key`),
-over exactly the same `(str(absolute_path), st_mtime_ns)` pairs the walk would
-produce — and `scopes_for` applies exactly the same inclusion rules the two
+over exactly the same `(absolute_path, mtime_ns, ctime_ns, size)` records the
+walk would produce — and `scopes_for` applies exactly the same inclusion rules the two
 walks apply (`find.EXCLUDED_DIR_NAMES` for kb, `vault.VAULT_SCAN_SKIP_DIRS` for
 vault; `.md`-only; sync-conflict duplicates excluded). A registry that included
 one extra file or directory would silently diverge from the walk it stands in
@@ -85,9 +85,13 @@ class ReconcileDelta(NamedTuple):
     changed: list[str]
     deleted: list[str]
 
+
+FileSignature = tuple[int, int, int]
+SignatureLike = int | FileSignature
+
 _lock = threading.RLock()
-# (vault_root_str, scope) -> {absolute_path_str: mtime_ns}
-_maps: dict[tuple[str, str], dict[str, int]] = {}
+# (vault_root_str, scope) -> {absolute_path_str: (mtime_ns, ctime_ns, size)}
+_maps: dict[tuple[str, str], dict[str, FileSignature]] = {}
 # (vault_root_str, scope) -> cached derived triple (None = recompute on read)
 _triples: dict[tuple[str, str], tuple[int, int, str] | None] = {}
 # which (vault_root_str, scope) have been seeded and are being maintained
@@ -104,24 +108,46 @@ def _truthy(value: str | None) -> bool:
     return bool(value) and value.strip().lower() not in {"", "0", "false", "no", "off"}
 
 
-def triple_from_entries(entries: Iterable[tuple[str, int]]) -> tuple[int, int, str]:
-    """`(count, max_mtime_ns, digest)` for `(path_str, mtime_ns)` pairs.
+def stat_signature(path: Path) -> FileSignature:
+    """Shared file-change signature for corpus and parsed-page caches."""
+
+    return signature_from_stat(path.stat())
+
+
+def signature_from_stat(st: os.stat_result) -> FileSignature:
+    """Build the shared signature from an already-fetched stat result."""
+
+    return (st.st_mtime_ns, st.st_ctime_ns, st.st_size)
+
+
+def _normalize_signature(value: SignatureLike) -> FileSignature:
+    # Keep the public registry seam compatible with older callers while all
+    # production publishers use the full signature.
+    if isinstance(value, int):
+        return (value, 0, 0)
+    return (int(value[0]), int(value[1]), int(value[2]))
+
+
+def triple_from_entries(
+    entries: Iterable[tuple[str, SignatureLike]],
+) -> tuple[int, int, str]:
+    """`(count, max_mtime_ns, digest)` for path + metadata-signature pairs.
 
     The single source of truth for the freshness digest — `find._walk_freshness_key`
     collects pairs via `stat()` and calls this; the registry calls it over its
-    in-memory map. Digest-strength: the sorted path+mtime hash catches
-    delete-paired-with-create, renames (mtime preserved), and backdated
-    replacements that count/max-mtime alone would miss.
+    in-memory map. Digest-strength: the sorted path+metadata hash catches
+    delete-paired-with-create, renames, and content replacements that preserve
+    mtimes and would otherwise leave warmed recall stale.
     """
-    items = sorted(entries)
+    items = sorted((sp, _normalize_signature(signature)) for sp, signature in entries)
     latest = 0
     h = hashlib.blake2b(digest_size=16)
-    for sp, ns in items:
-        if ns > latest:
-            latest = ns
+    for sp, signature in items:
+        if signature[0] > latest:
+            latest = signature[0]
         h.update(sp.encode("utf-8", "surrogatepass"))
         h.update(b"\0")
-        h.update(str(ns).encode("ascii"))
+        h.update(":".join(str(part) for part in signature).encode("ascii"))
         h.update(b"\0")
     return len(items), latest, h.hexdigest()
 
@@ -173,8 +199,8 @@ def is_live(vault_root: Path, scope: str) -> bool:
         return _key(vault_root, scope) in _live
 
 
-def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]) -> None:
-    """Install the full `(path_str, mtime_ns)` set for a scope and mark it live.
+def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]) -> None:
+    """Install the full `(path_str, signature)` set for a scope and mark it live.
 
     Called once per scope at watcher start (from `warm_all`), and by the
     periodic reconcile. Entries must be produced by the SAME walk the fallback
@@ -182,13 +208,13 @@ def seed(vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]) -> No
     """
     key = _key(vault_root, scope)
     with _lock:
-        _maps[key] = {sp: ns for sp, ns in entries}
+        _maps[key] = {sp: _normalize_signature(signature) for sp, signature in entries}
         _triples[key] = None
         _live.add(key)
 
 
 def reconcile(
-    vault_root: Path, scope: str, entries: Iterable[tuple[str, int]]
+    vault_root: Path, scope: str, entries: Iterable[tuple[str, SignatureLike]]
 ) -> ReconcileDelta:
     """Replace the map from a fresh walk; return the drift delta.
 
@@ -200,14 +226,14 @@ def reconcile(
     always fully replaced regardless of what the caller does with the delta.
     """
     key = _key(vault_root, scope)
-    fresh = {sp: ns for sp, ns in entries}
+    fresh = {sp: _normalize_signature(signature) for sp, signature in entries}
     with _lock:
         old = _maps.get(key)
         _maps[key] = fresh
         _triples[key] = None
         _live.add(key)
     old = old or {}
-    changed = [sp for sp, ns in fresh.items() if old.get(sp) != ns]
+    changed = [sp for sp, signature in fresh.items() if old.get(sp) != signature]
     deleted = [sp for sp in old if sp not in fresh]
     drifted = bool(changed or deleted)
     if drifted:
@@ -215,7 +241,10 @@ def reconcile(
             "freshness_reconcile_drift: %s scope=%s map re-derived from a fresh walk "
             "(a filesystem event was missed since the last reconcile): "
             "%d changed, %d deleted",
-            vault_root, scope, len(changed), len(deleted),
+            vault_root,
+            scope,
+            len(changed),
+            len(deleted),
         )
     return ReconcileDelta(drifted=drifted, changed=changed, deleted=deleted)
 
@@ -239,8 +268,8 @@ def triple(vault_root: Path, scope: str) -> tuple[int, int, str] | None:
         return cached
 
 
-def live_entries(vault_root: Path, scope: str) -> dict[str, int] | None:
-    """The live `{abs_path_str: mtime_ns}` map for a scope, or None when not live.
+def live_entries(vault_root: Path, scope: str) -> dict[str, FileSignature] | None:
+    """The live `{abs_path_str: signature}` map for a scope, or None when not live.
 
     Returns a copy so callers can diff without holding the lock. The lexical heal
     reads this instead of re-walking the filesystem: whenever a heal fires, this
@@ -314,17 +343,17 @@ def on_files_changed(
         in_kb, in_vault = scopes_for(vault_root, p)
         if in_kb or in_vault:
             del_items.append((str(p), in_kb, in_vault))
-    chg_items: list[tuple[str, int | None, bool, bool]] = []
+    chg_items: list[tuple[str, FileSignature | None, bool, bool]] = []
     for path in changed:
         p = _canonicalize_event_path(vault_root, vr, Path(path))
         in_kb, in_vault = scopes_for(vault_root, p)
         if not (in_kb or in_vault):
             continue
         try:
-            ns: int | None = p.stat().st_mtime_ns
+            signature: FileSignature | None = stat_signature(p)
         except OSError:
-            ns = None  # created then gone before we could stat — treat as absent
-        chg_items.append((str(p), ns, in_kb, in_vault))
+            signature = None  # created then gone before we could stat — treat as absent
+        chg_items.append((str(p), signature, in_kb, in_vault))
     if not (del_items or chg_items):
         return
 
@@ -339,17 +368,17 @@ def on_files_changed(
                     m = _maps.get(self_key)
                     if m is not None and m.pop(sp, None) is not None:
                         _triples[self_key] = None
-        for sp, ns, in_kb, in_vault in chg_items:
+        for sp, signature, in_kb, in_vault in chg_items:
             for scope, member in (("kb", in_kb), ("vault", in_vault)):
                 self_key = _key(vault_root, scope)
                 if not (member and self_key in _live):
                     continue
                 m = _maps.setdefault(self_key, {})
-                if ns is None:
+                if signature is None:
                     if m.pop(sp, None) is not None:
                         _triples[self_key] = None
-                elif m.get(sp) != ns:
-                    m[sp] = ns
+                elif m.get(sp) != signature:
+                    m[sp] = signature
                     _triples[self_key] = None
 
 

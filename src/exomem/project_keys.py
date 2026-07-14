@@ -342,7 +342,17 @@ def plan_project_keys(
             f"    folder: {item.folder}\n"
             f"    category: {item.category}\n"
         )
-    write = PlannedWrite(path, text, create_only=not path_exists, guard=guard)
+    project_directories = tuple(
+        kb_root(root) / "Notes" / "Research" / item.folder
+        for item in introductions
+    )
+    write = PlannedWrite(
+        path,
+        text,
+        create_only=not path_exists,
+        guard=guard,
+        ensure_directories=project_directories,
+    )
     return ProjectKeyPlan(registry, tuple(introductions), (write,))
 
 

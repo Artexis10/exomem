@@ -30,13 +30,17 @@ from . import indexes, memory_refs, relation_review, semantic_writes
 from . import note as note_module
 from .kbdir import kb_prefix
 from .vault import (
+    ContentHashMismatchError,
     PathGuard,
     PathGuardError,
     PlannedWrite,
     batch_atomic_write,
+    content_hash,
     kb_root,
+    parse_frontmatter,
     plan_log_writes,
     render_wikilink_target,
+    rotate_log_if_needed,
 )
 
 log = logging.getLogger(__name__)
@@ -110,24 +114,25 @@ def _legacy_replace(
             ),
         )
 
-    # Load old page, validate it's actually supersedable.
+    # Load one content version of the old page for both eligibility and CAS.
     try:
-        mtime = old_resolved.stat().st_mtime
-    except OSError as e:
+        old_text = old_resolved.read_text(encoding="utf-8")
+    except FileNotFoundError as e:
         raise ReplaceError(
             code="OLD_NOT_FOUND",
             missing=["old_path"],
             reason=str(e),
         ) from e
-    old_parsed = find_module._parse_page(old_resolved, mtime, vault_root)
-    if old_parsed is None:
+    except (OSError, UnicodeDecodeError) as e:
         raise ReplaceError(
             code="UNREADABLE",
             missing=["old_path"],
-            reason=f"could not parse {rel_old_with_ext} as markdown",
-        )
+            reason=str(e),
+        ) from e
+    old_frontmatter, _old_body, _old_frontmatter_text = parse_frontmatter(old_text)
+    old_expected_hash = content_hash(old_text)
 
-    if old_parsed.frontmatter.get("status") == "superseded":
+    if old_frontmatter.get("status") == "superseded":
         raise ReplaceError(
             code="ALREADY_SUPERSEDED",
             missing=["old_path"],
@@ -137,9 +142,15 @@ def _legacy_replace(
             ),
         )
 
-    # Construct the new page via note.note() — full reuse, including
-    # index/log/back-ref writes.
-    new_result = note_module.note(vault_root, today=today, **note_kwargs)
+    # Construct note()'s complete write plan without committing it yet. The
+    # public note() path still commits normally when this private list is absent.
+    note_writes: list[PlannedWrite] = []
+    new_result = note_module._legacy_note(
+        vault_root,
+        today=today,
+        _planned_writes=note_writes,
+        **note_kwargs,
+    )
     new_path_str = new_result.path  # vault-relative, with .md
     rel_new_no_ext = new_path_str.removesuffix(".md")
     if not rel_new_no_ext.startswith(kb_prefix()):
@@ -148,8 +159,9 @@ def _legacy_replace(
 
     warnings: list[str] = list(new_result.warnings)
 
-    # Inject `supersedes:` into the freshly-written new page's frontmatter.
-    new_text = new_resolved.read_text(encoding="utf-8")
+    # Inject `supersedes:` into the planned new page's frontmatter.
+    new_page_write = next(write for write in note_writes if write.path == new_resolved)
+    new_text = new_page_write.content
     old_link_target = render_wikilink_target(rel_old_no_ext, vault_root)
     new_text_updated = _inject_supersedes(new_text, old_link_target)
     if new_text_updated == new_text:
@@ -157,9 +169,9 @@ def _legacy_replace(
             "could not inject supersedes: into new page frontmatter — "
             "frontmatter shape unexpected"
         )
+    new_page_write.content = new_text_updated
 
     # Patch old page: status -> superseded, add superseded_by, refresh updated.
-    old_text = old_resolved.read_text(encoding="utf-8")
     new_link_target = render_wikilink_target(rel_new_no_ext, vault_root)
     old_text_updated = _mark_superseded(old_text, new_link_target, date_iso)
     if old_text_updated == old_text:
@@ -171,8 +183,11 @@ def _legacy_replace(
     # Append a log entry naming the supersession explicitly.
     kb = kb_root(vault_root)
     log_file = kb / "log.md"
-    log_writes: list[PlannedWrite] = []
-    if log_file.exists():
+    log_write = next(
+        (write for write in reversed(note_writes) if write.path == log_file),
+        None,
+    )
+    if log_write is not None:
         log_body_parts = [
             f"Supersedes `{rel_old_no_ext}` via exomem."
         ]
@@ -180,26 +195,46 @@ def _legacy_replace(
             log_body_parts.append(reason.strip())
         log_body = " ".join(log_body_parts)
         new_log = _prepend_replace_log_entry(
-            log_file.read_text(encoding="utf-8"),
+            log_write.content,
             date_iso=date_iso,
             rel_new_no_ext=rel_new_no_ext,
             body=log_body,
         )
-        log_writes.append(PlannedWrite(path=log_file, content=new_log))
+        log_write.content = new_log
+    elif log_file.exists():
+        warnings.append("note write plan omitted log.md; skipped replace log entry")
     else:
         warnings.append(f"{kb_prefix()}log.md missing; skipped replace log entry")
 
-    writes = [
-        PlannedWrite(path=new_resolved, content=new_text_updated),
-        PlannedWrite(path=old_resolved, content=old_text_updated),
-    ] + log_writes
+    writes = note_writes + [
+        PlannedWrite(
+            path=old_resolved,
+            content=old_text_updated,
+            expected_hash=old_expected_hash,
+        )
+    ]
 
     try:
         batch_atomic_write(writes, vault_root=vault_root)
+    except ContentHashMismatchError as e:
+        _purge_planned_note(vault_root, rel_new_no_ext)
+        raise ReplaceError(
+            code="STALE_SUPERSEDE",
+            missing=["old_path"],
+            reason=(
+                f"{rel_old_with_ext} changed after supersession eligibility was read; "
+                "retry against the current active page"
+            ),
+        ) from e
     except Exception as e:
-        log.exception("partial write during replace(); some files may be updated")
-        warnings.append(f"partial write — reconcile on desktop: {e}")
+        _purge_planned_note(vault_root, rel_new_no_ext)
+        log.exception("supersession batch failed and was rolled back")
+        warnings.append(f"supersession batch rolled back: {e}")
         raise
+
+    rotate_note = rotate_log_if_needed(vault_root)
+    if rotate_note:
+        warnings.append(rotate_note)
 
     return ReplaceResult(
         old_path=rel_old_with_ext,
@@ -208,6 +243,16 @@ def _legacy_replace(
         old_ref=memory_refs.ReferenceIndex(vault_root).ref_for_path(rel_old_with_ext),
         new_ref=new_result.ref,
     )
+
+
+def _purge_planned_note(vault_root: Path, rel_new_no_ext: str) -> None:
+    """Remove note()'s pending resolver entry when its composed batch fails."""
+    try:
+        find_module.on_resolver_files_changed(
+            vault_root, [rel_new_no_ext + ".md"], []
+        )
+    except Exception:  # noqa: BLE001 — purge is best-effort cleanup
+        log.debug("resolver pending-purge failed", exc_info=True)
 
 
 # ---------------- path resolution ----------------

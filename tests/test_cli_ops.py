@@ -43,6 +43,9 @@ def test_http_status_mapping() -> None:
     assert cli_ops.http_status_for("NOT_FOUND") == 404
     assert cli_ops.http_status_for("OLD_NOT_FOUND") == 404
     assert cli_ops.http_status_for("ENTITY_EXISTS") == 409
+    assert cli_ops.http_status_for("WRITER_FENCED") == 409
+    assert cli_ops.http_status_for("MUTATION_BUSY") == 409
+    assert cli_ops.http_status_for("MUTATION_LOCK_UNAVAILABLE") == 503
     assert cli_ops.http_status_for("INVALID_NOTE") == 400
 
 
@@ -65,6 +68,13 @@ def test_batch_write_error_uses_shared_public_payload_and_conflict_status(
 
     assert cli_ops.error_dict(error) == error.as_public_dict()
     assert cli_ops.http_status_for(code) == 409
+
+
+@pytest.mark.parametrize("code", ["MUTATION_BUSY", "MUTATION_LOCK_UNAVAILABLE"])
+def test_mutation_lock_errors_have_actionable_remediation(code: str) -> None:
+    error = cli_ops.error_dict(cli_ops.OpError(code, "hosted mutation unavailable"))
+    assert error["code"] == code
+    assert error["remediation"]
 
 
 # ---------------- coercion ----------------

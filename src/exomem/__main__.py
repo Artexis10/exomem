@@ -39,6 +39,10 @@ from .kbdir import kb_dirname, kb_prefix
 
 def main(argv: list[str] | None = None) -> int:
     raw = list(sys.argv[1:] if argv is None else argv)
+    if raw and raw[0] == "hosted":
+        from .hosted_operator import main as hosted_operator_main
+
+        return hosted_operator_main(raw[1:])
     if raw and raw[0] == "setup":
         from .setup_wizard import setup_main
 
@@ -309,8 +313,16 @@ def _backfill_media_main(argv: list[str]) -> int:
         "--vault", default=os.environ.get("EXOMEM_VAULT_PATH"),
         help=f"vault root containing '{kb_prefix()}' (default: $EXOMEM_VAULT_PATH)",
     )
-    parser.add_argument("--dry-run", action="store_true", help="report what would change; write nothing")
-    parser.add_argument("--no-ocr", action="store_true", help="skip text extraction (sidecar + CLIP only)")
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would change; write nothing",
+    )
+    parser.add_argument(
+        "--no-ocr",
+        action="store_true",
+        help="skip text extraction (sidecar + CLIP only)",
+    )
     parser.add_argument("--no-clip", action="store_true", help="skip CLIP image embedding")
     parser.add_argument(
         "--rediarize", action="store_true",
@@ -889,16 +901,19 @@ def _install_hook_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem install-hook",
         description=(
-            "Wire the KB capture + retrieval hooks into Claude Code or Codex: a "
+            "Wire the KB capture, retrieval, and local continuation hooks into "
+            "Claude Code or Codex: a "
             "Stop hook that captures conclusions at stepping-stones (write), and "
             "a UserPromptSubmit hook that reminds the agent to consult the KB before "
-            "answering (read). Language-agnostic and cheap (gated + cooldown). "
+            "answering (read), plus structural PreCompact/SessionStart recovery. "
+            "Claude also supports SessionEnd; pinned Codex 0.144.3 does not. "
+            "Language-agnostic and cheap (gated + cooldown). "
             "Re-running is idempotent."
         ),
     )
     parser.add_argument(
         "--client",
-        choices=("claude", "codex"),
+        choices=("claude", "codex", "all"),
         default=None,
         help="client hook config to wire/check (default: claude for install; both for --check)",
     )
@@ -926,11 +941,15 @@ def _install_hook_main(argv: list[str]) -> int:
     from . import install_hook as hook_module
 
     if args.check:
-        if (args.hook_dir or args.settings) and args.client is None:
-            parser.error("--hook-dir/--settings with --check require --client")
+        if (args.hook_dir or args.settings) and args.client in {None, "all"}:
+            parser.error("--hook-dir/--settings with --check require one explicit client")
         try:
             report = hook_module.check_hooks(
-                clients=(args.client,) if args.client else hook_module.SUPPORTED_CLIENTS,
+                clients=(
+                    (args.client,)
+                    if args.client not in {None, "all"}
+                    else hook_module.SUPPORTED_CLIENTS
+                ),
                 hook_dir=Path(args.hook_dir) if args.hook_dir else None,
                 settings_path=Path(args.settings) if args.settings else None,
             )
@@ -943,6 +962,25 @@ def _install_hook_main(argv: list[str]) -> int:
             print(hook_module.render_check_human(report))
         return 0 if report["success"] else 1
 
+    if args.client == "all":
+        if args.hook_dir or args.settings:
+            parser.error("--client all cannot be combined with --hook-dir or --settings")
+        report = hook_module.install_all_hooks(wire=not args.print_only)
+        if args.json:
+            print(json.dumps(report))
+        else:
+            for row in report["clients"]:
+                if row["success"]:
+                    result = row["result"]
+                    destination = result["settings"] or "print-only output"
+                    print(f"Installed hooks for {row['client']} into {destination}.")
+                else:
+                    print(
+                        f"Failed to install hooks for {row['client']}: {row['error']}",
+                        file=sys.stderr,
+                    )
+        return 0 if report["success"] else 1
+
     try:
         report = hook_module.install_hook(
             hook_dir=args.hook_dir,
@@ -950,7 +988,7 @@ def _install_hook_main(argv: list[str]) -> int:
             wire=not args.print_only,
             client=args.client or "claude",
         )
-    except FileNotFoundError as e:
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as e:
         print(f"exomem install-hook: {e}", file=sys.stderr)
         return 1
 
@@ -977,7 +1015,9 @@ def _install_hook_main(argv: list[str]) -> int:
 # --------------------------------------------------------------------------- #
 # Simple product actions (friendly CLI aliases over canonical registry commands)
 # --------------------------------------------------------------------------- #
-_SIMPLE_CLI_ACTIONS = frozenset({"ask", "remember", "capture", "review", "connect", "adopt", "maintain"})
+_SIMPLE_CLI_ACTIONS = frozenset(
+    {"ask", "remember", "capture", "review", "connect", "adopt", "maintain"}
+)
 
 
 def _simple_cli_action_names() -> frozenset[str]:
@@ -1026,7 +1066,10 @@ def _simple_action_main(argv: list[str]) -> int:
 def _simple_ask_main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="exomem ask",
-        description="Ask Exomem what it knows. Thin alias over ask_memory with compact recall defaults.",
+        description=(
+            "Ask Exomem what it knows. Thin alias over ask_memory with compact "
+            "recall defaults."
+        ),
     )
     parser.add_argument("query", help="question or search phrase")
     parser.add_argument("--deep", action="store_true", help="include a packed reasoning context")
@@ -1042,9 +1085,27 @@ def _simple_ask_main(argv: list[str]) -> int:
         default="kb",
         help="search scope (default: kb, which can auto-widen)",
     )
-    parser.add_argument("--type", dest="types", action="append", default=None, help="page type filter (repeatable)")
-    parser.add_argument("--project", dest="projects", action="append", default=None, help="project filter (repeatable)")
-    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag filter (repeatable)")
+    parser.add_argument(
+        "--type",
+        dest="types",
+        action="append",
+        default=None,
+        help="page type filter (repeatable)",
+    )
+    parser.add_argument(
+        "--project",
+        dest="projects",
+        action="append",
+        default=None,
+        help="project filter (repeatable)",
+    )
+    parser.add_argument(
+        "--tag",
+        dest="tags",
+        action="append",
+        default=None,
+        help="tag filter (repeatable)",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -1076,11 +1137,34 @@ def _simple_remember_main(argv: list[str]) -> int:
     )
     parser.add_argument("content", help="compiled note body markdown")
     parser.add_argument("--title", required=True, help="note title")
-    parser.add_argument("--type", dest="note_type", default="insight", help="note type (default: insight)")
+    parser.add_argument(
+        "--type",
+        dest="note_type",
+        default="insight",
+        help="note type (default: insight)",
+    )
     parser.add_argument("--project", help="research-note project key")
-    parser.add_argument("--project-ref", dest="projects", action="append", default=None, help="projects list entry (repeatable)")
-    parser.add_argument("--source", dest="sources", action="append", default=None, help="source/evidence path (repeatable)")
-    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag (repeatable)")
+    parser.add_argument(
+        "--project-ref",
+        dest="projects",
+        action="append",
+        default=None,
+        help="projects list entry (repeatable)",
+    )
+    parser.add_argument(
+        "--source",
+        dest="sources",
+        action="append",
+        default=None,
+        help="source/evidence path (repeatable)",
+    )
+    parser.add_argument(
+        "--tag",
+        dest="tags",
+        action="append",
+        default=None,
+        help="tag (repeatable)",
+    )
     parser.add_argument("--status", help="status override")
     parser.add_argument("--severity", help="failure severity")
     parser.add_argument("--pattern-type", help="pattern subtype")
@@ -1120,11 +1204,22 @@ def _simple_capture_main(argv: list[str]) -> int:
         description="Capture raw source or proof-bearing text. Thin alias over add/preserve.",
     )
     parser.add_argument("content", help="raw text to capture")
-    parser.add_argument("--as", dest="capture_kind", choices=("source", "evidence"), default="source")
+    parser.add_argument(
+        "--as",
+        dest="capture_kind",
+        choices=("source", "evidence"),
+        default="source",
+    )
     parser.add_argument("--title", help="source title (required for --as source)")
     parser.add_argument("--source-type", default="other", help="source type for --as source")
     parser.add_argument("--url", help="source URL")
-    parser.add_argument("--tag", dest="tags", action="append", default=None, help="tag (repeatable)")
+    parser.add_argument(
+        "--tag",
+        dest="tags",
+        action="append",
+        default=None,
+        help="tag (repeatable)",
+    )
     parser.add_argument("--why-captured", help="why this source is worth keeping")
     parser.add_argument("--scope", help="evidence scope for --as evidence")
     parser.add_argument("--category", help="evidence category for --as evidence")
@@ -1197,8 +1292,18 @@ def _simple_review_main(argv: list[str]) -> int:
         prog="exomem review",
         description="Review the Epistemic Inbox or run the full vault audit.",
     )
-    parser.add_argument("--audit", action="store_true", help="run the full audit report instead of attention queue")
-    parser.add_argument("--category", dest="categories", action="append", default=None, help="review/audit category (repeatable)")
+    parser.add_argument(
+        "--audit",
+        action="store_true",
+        help="run the full audit report instead of attention queue",
+    )
+    parser.add_argument(
+        "--category",
+        dest="categories",
+        action="append",
+        default=None,
+        help="review/audit category (repeatable)",
+    )
     parser.add_argument("--limit", type=int, default=25, help="attention item cap")
     parser.add_argument(
         "--state",
@@ -1230,13 +1335,22 @@ def _simple_connect_main(argv: list[str]) -> int:
     parser.add_argument("--path", help="existing page path")
     parser.add_argument("--draft-title", help="draft title")
     parser.add_argument("--draft-body", help="draft body")
-    parser.add_argument("--relations", action="store_true", help="suggest typed graph relations instead of wikilinks")
-    parser.add_argument("--model-suggestions", action="store_true", help="opt into model-backed relation suggestions")
+    parser.add_argument(
+        "--relations",
+        action="store_true",
+        help="suggest typed graph relations instead of wikilinks",
+    )
+    parser.add_argument(
+        "--model-suggestions",
+        action="store_true",
+        help="opt into model-backed relation suggestions",
+    )
     parser.add_argument("--limit", type=int, default=8, help="candidate cap")
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
-    core = ["connect_memory", "--operation", "suggest-relations" if args.relations else "suggest-links"]
+    operation = "suggest-relations" if args.relations else "suggest-links"
+    core = ["connect_memory", "--operation", operation]
     if args.path:
         core.extend(["--path", args.path])
     if args.draft_title:
@@ -1262,11 +1376,21 @@ def _simple_adopt_main(argv: list[str]) -> int:
         help="adoption mode (default: scan-only)",
     )
     parser.add_argument("--max-depth", type=int, help="folder tree depth cap")
-    parser.add_argument("--include-hidden", action="store_true", help="include hidden files/directories")
+    parser.add_argument(
+        "--include-hidden",
+        action="store_true",
+        help="include hidden files/directories",
+    )
     parser.add_argument("--samples", type=int, help="filename sample count per folder")
     parser.add_argument("--pack-limit", type=int, help="maximum suggested knowledge packs")
     parser.add_argument("--manifest-path", help="optional adoption manifest destination")
-    parser.add_argument("--selected-path", dest="selected_paths", action="append", default=None, help="legacy file to copy/compile (repeatable)")
+    parser.add_argument(
+        "--selected-path",
+        dest="selected_paths",
+        action="append",
+        default=None,
+        help="legacy file to copy/compile (repeatable)",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -1291,11 +1415,33 @@ def _simple_maintain_main(argv: list[str]) -> int:
         prog="exomem maintain",
         description="Check vault health; write-capable fixes require explicit flags.",
     )
-    parser.add_argument("--fix", action="store_true", help="run audit_fix instead of read-only audit")
-    parser.add_argument("--reconcile", action="store_true", help="run reconcile instead of read-only audit")
-    parser.add_argument("--dry-run", action="store_true", help="with --fix/--reconcile, report without writing")
-    parser.add_argument("--rebuild-embeddings", action="store_true", help="with --fix, rebuild text embeddings")
-    parser.add_argument("--category", dest="categories", action="append", default=None, help="audit category (repeatable)")
+    parser.add_argument(
+        "--fix",
+        action="store_true",
+        help="run audit_fix instead of read-only audit",
+    )
+    parser.add_argument(
+        "--reconcile",
+        action="store_true",
+        help="run reconcile instead of read-only audit",
+    )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="with --fix/--reconcile, report without writing",
+    )
+    parser.add_argument(
+        "--rebuild-embeddings",
+        action="store_true",
+        help="with --fix, rebuild text embeddings",
+    )
+    parser.add_argument(
+        "--category",
+        dest="categories",
+        action="append",
+        default=None,
+        help="audit category (repeatable)",
+    )
     parser.add_argument("--json", action="store_true", help="emit the shared JSON envelope")
     args = parser.parse_args(argv)
 
@@ -1470,7 +1616,11 @@ def _print_adopt_human(result: dict) -> None:
     if plan := result.get("compile_plan"):
         sources = plan.get("sources") or []
         skipped = plan.get("skipped") or []
-        print(f"\nCompile plan: {plan.get('status', 'unknown')} ({len(sources)} source(s), {len(skipped)} skipped)")
+        status = plan.get("status", "unknown")
+        print(
+            f"\nCompile plan: {status} "
+            f"({len(sources)} source(s), {len(skipped)} skipped)"
+        )
         proposal = plan.get("proposal") or {}
         if proposal.get("suggested_title"):
             print(f"  Suggested title: {proposal.get('suggested_title')}")

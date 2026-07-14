@@ -2289,6 +2289,8 @@ def _detach_auxiliaries(
                 value.content,
                 create_only=value.create_only,
                 guard=value.guard,
+                expected_hash=value.expected_hash,
+                ensure_directories=value.ensure_directories,
             )
         )
     return tuple(detached)

@@ -29,7 +29,7 @@ def _reset_registries():
 def _entries(paths):
     for p in paths:
         try:
-            yield (str(p), p.stat().st_mtime_ns)
+            yield (str(p), freshness.stat_signature(p))
         except OSError:
             continue
 
