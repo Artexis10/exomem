@@ -14,11 +14,27 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
+from urllib.parse import urlsplit
 
 
 class _Response(Protocol):
     status: int
     headers: Any
+
+    def geturl(self) -> str: ...
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> None:
+        return None
 
 
 @dataclass(frozen=True)
@@ -45,7 +61,19 @@ def _fetch(target: str, timeout_seconds: int) -> _Response:
         method="GET",
         headers={"User-Agent": "exomem-hosted-blackbox/v1", "Accept": "application/json"},
     )
-    return urllib.request.urlopen(request, timeout=timeout_seconds)  # noqa: S310
+    opener = urllib.request.build_opener(_NoRedirect())
+    return opener.open(request, timeout=timeout_seconds)  # noqa: S310
+
+
+def _exact_https_target(target: str) -> bool:
+    parsed = urlsplit(target)
+    return bool(
+        parsed.scheme == "https"
+        and parsed.hostname
+        and parsed.username is None
+        and parsed.password is None
+        and not parsed.fragment
+    )
 
 
 def observe(
@@ -62,10 +90,15 @@ def observe(
     reason = "transport-failed"
     ok = False
     try:
+        if not _exact_https_target(target):
+            raise ValueError("target is not exact HTTPS")
         response = fetch(target, timeout_seconds)
         status = int(response.status)
-        ok = status == 200
-        reason = "ok" if ok else "unexpected-status"
+        if response.geturl() != target:
+            reason = "redirected"
+        else:
+            ok = status == 200
+            reason = "ok" if ok else "unexpected-status"
         if ok and maximum_age_header is not None:
             raw_age = response.headers.get(maximum_age_header)
             try:
@@ -84,7 +117,14 @@ def observe(
 
 
 def _contract_observations(contract: dict[str, Any]) -> list[Observation]:
-    if contract.get("schema_version") != 1 or not isinstance(contract.get("checks"), list):
+    poll_interval = contract.get("poll_interval_seconds")
+    if (
+        contract.get("schema_version") != 1
+        or not isinstance(poll_interval, int)
+        or isinstance(poll_interval, bool)
+        or poll_interval <= 0
+        or not isinstance(contract.get("checks"), list)
+    ):
         raise ValueError("black-box contract is invalid")
     observations: list[Observation] = []
     for check in contract["checks"]:
@@ -93,6 +133,13 @@ def _contract_observations(contract: dict[str, Any]) -> list[Observation]:
         target_env = check.get("target_environment_variable")
         if not isinstance(target_env, str) or not os.environ.get(target_env):
             raise ValueError("black-box target is not configured")
+        maximum_age = check.get("maximum_age_seconds")
+        if maximum_age is not None and (
+            not isinstance(maximum_age, int)
+            or isinstance(maximum_age, bool)
+            or maximum_age < poll_interval
+        ):
+            raise ValueError("black-box freshness threshold is shorter than its cadence")
         observations.append(
             observe(
                 name=check["name"],

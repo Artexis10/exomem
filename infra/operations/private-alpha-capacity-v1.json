@@ -29,5 +29,10 @@
     "tax_treatment": null,
     "net_receipt_eur_for_friend_price": null,
     "evidence_recorded_at": null
+  },
+  "evidence": {
+    "provider_invoice_reference": null,
+    "paddle_statement_reference": null,
+    "recorded_at": null
   }
 }

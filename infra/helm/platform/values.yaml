@@ -14,12 +14,11 @@ admission:
 scheduler:
   contractVersion: 1
   contractSha256: 02c1b9fa8d031ed77df9015f8555cfc95545b266767474aa52a8ccf08f4b40fc
-  image: docker.io/curlimages/curl:8.18.0@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17
   secretName: exomem-hosted-scheduler
   secretKey: secret
 
 observability:
-  contractSha256: 0eb711e98e16e184aa48aad2b7e5dce24e65cfcfdac6f1c14a33ebba59cc6e43
+  contractSha256: cd576fd9012557787d8c740e96fdafdbfc851cf6a818207ec128731e8d732ad0
 
 storage:
   className: exomem-hcloud-encrypted-retain

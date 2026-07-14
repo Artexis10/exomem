@@ -80,9 +80,6 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
     )
-    assert values["scheduler"]["image"].endswith(
-        "@sha256:d94d07ba9e7d6de898b6d96c1a072f6f8266c687af78a74f380087a0addf5d17"
-    )
     assert "@sha256:79b979d2fc7b46fdddab19e619c65faa201d0d76080765f0ec4b1969e0abe33f" in json.dumps(
         values["hcloud-csi"]
     )
@@ -209,12 +206,34 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         assert job_spec["ttlSecondsAfterFinished"] == 300
         assert pod["restartPolicy"] == "Never"
         assert container["env"][0]["name"] == "EXOMEM_HOSTED_SCHEDULER_SECRET"
-        command = " ".join(container["args"])
-        assert contract["origin"] + job["path"] in command
-        assert "--connect-timeout 5" in command
-        assert "--max-time 20" in command
-        assert 'test "${status}" = "200"' in command
+        env = {item["name"]: item.get("value") for item in container["env"]}
+        assert env["TARGET_URL"] == contract["origin"] + job["path"]
+        assert env["CONNECT_TIMEOUT_SECONDS"] == "5"
+        assert env["TOTAL_TIMEOUT_SECONDS"] == "20"
+        assert env["CADENCE_SECONDS"] == (
+            "60" if job["schedule"] == "* * * * *" else "3600"
+        )
+        assert container["command"] == [
+            "python",
+            "/opt/exomem-hosted/scheduler_runtime.py",
+            "request",
+        ]
+        assert container["image"] == "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
+        assert pod["automountServiceAccountToken"] is False
+        assert {volume["name"] for volume in pod["volumes"]} == {"runtime", "kube-api"}
         assert "CRON_SECRET" not in json.dumps(rendered)
+
+        state = _find(
+            documents, "ConfigMap", f"exomem-hosted-scheduler-state-{job['name']}"
+        )
+        persisted = json.loads(state["data"]["state.json"])
+        assert persisted["job"] == job["name"]
+        assert persisted["duration_seconds"]["buckets"] == {
+            "1": 0,
+            "5": 0,
+            "20": 0,
+            "+Inf": 0,
+        }
 
     policy = _find(documents, "ConfigMap", "exomem-hosted-scheduler-contract")
     rendered_contract = json.loads(policy["data"]["contract.json"])
@@ -296,26 +315,43 @@ def test_platform_renders_owned_namespaces_and_content_free_observability() -> N
     )
     assert contract["alerts"]["scheduler_missed_run_seconds"] == 180
     assert contract["alerts"]["scheduler_consecutive_failures"] == 2
+    assert contract["poll_interval_seconds"] == 300
+    scheduler_check = next(
+        check for check in contract["checks"] if check["name"] == "scheduler-last-success"
+    )
+    assert scheduler_check["maximum_age_seconds"] == 480
     assert contract["alerts"]["backup_warn_age_seconds"] == 2700
     assert contract["alerts"]["backup_block_age_seconds"] == 3600
 
     scheduler_jobs = [item for item in documents if item.get("kind") == "CronJob"]
     scheduler_text = json.dumps(scheduler_jobs)
-    scheduler_commands = "\n".join(
-        item["spec"]["jobTemplate"]["spec"]["template"]["spec"]["containers"][0]["args"][0]
-        for item in scheduler_jobs
-    )
-    assert 'if status="$(curl' in scheduler_commands
-    assert 'status="000"' in scheduler_commands
+    runtime = _find(documents, "ConfigMap", "exomem-hosted-scheduler-runtime")
+    runtime_source = runtime["data"]["scheduler_runtime.py"]
+    assert "record_attempt" in runtime_source
+    assert "evaluate_alerts" in runtime_source
+    assert "ThreadingHTTPServer" in runtime_source
+    assert "NoRedirect" in runtime_source
+    assert _find(documents, "Deployment", "exomem-hosted-scheduler-collector")
+    evaluator = _find(documents, "Deployment", "exomem-hosted-scheduler-alerts")
+    evaluator_env = {
+        item["name"]: item["value"]
+        for item in evaluator["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert evaluator_env["MISSED_RUN_SECONDS"] == "180"
+    assert evaluator_env["FAILURE_THRESHOLD"] == "2"
+    metrics_service = _find(documents, "Service", "exomem-hosted-scheduler-metrics")
+    assert metrics_service["metadata"]["annotations"]["prometheus.io/scrape"] == "true"
+    alert_state = _find(documents, "ConfigMap", "exomem-hosted-scheduler-alert-state")
+    assert json.loads(alert_state["data"]["state.json"])["transitions_total"] == 0
     for metric in (
         "exomem_hosted_scheduler_attempts_total",
         "exomem_hosted_scheduler_failures_total",
         "exomem_hosted_scheduler_duration_seconds",
         "exomem_hosted_scheduler_last_success_unixtime",
     ):
-        assert metric in scheduler_text
+        assert metric in runtime_source
     for forbidden in ("response_body", "authorization_value", "environment_dump"):
-        assert forbidden not in scheduler_text.lower()
+        assert forbidden not in (scheduler_text + runtime_source).lower()
 
 
 @pytest.mark.parametrize(

@@ -31,6 +31,16 @@ def _load_module():
     return module
 
 
+def _load_ciphertext_validator():
+    path = ROOT / "infra" / "scripts" / "validate_sops_ciphertext.py"
+    spec = importlib.util.spec_from_file_location("validate_sops_ciphertext_round_trip", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
 def _matrix() -> dict[str, object]:
     return json.loads(MATRIX.read_text(encoding="utf-8"))
 
@@ -772,6 +782,8 @@ def test_pinned_sops_age_round_trip_preserves_json_escaped_secret(
     encrypted_document = json.loads(ciphertext)
     assert encrypted_document["stringData"]["token"].startswith("ENC[")
     assert isinstance(encrypted_document["sops"], dict)
+    validator = _load_ciphertext_validator()
+    assert validator.validate(matrix_path=MATRIX, artifacts=[target], root=tmp_path) == 1
 
     decrypted = subprocess.run(
         [sops_bin, "decrypt", "--input-type", "json", "--output-type", "json", str(target)],

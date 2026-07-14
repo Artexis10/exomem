@@ -4,6 +4,8 @@ set -euo pipefail
 script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 infra_dir="$(cd -- "${script_dir}/.." && pwd -P)"
 repo_root="$(cd -- "${infra_dir}/.." && pwd -P)"
+# shellcheck source=/dev/null
+source "${infra_dir}/tool-versions.env"
 terraform_bin="${TERRAFORM_BIN:-terraform}"
 tflint_bin="${TFLINT_BIN:-$(command -v tflint)}"
 checkov_bin="${CHECKOV_BIN:-$(command -v checkov)}"
@@ -64,12 +66,19 @@ for values in values.validation.yaml values.initialize.yaml; do
 done
 
 "${script_dir}/validate_sops_ciphertext.py"
+"${script_dir}/validate_sops_ciphertext.py" \
+  --matrix "${repo_root}/tests/fixtures/hosted-sops/secret-destinations-v1.json" \
+  --artifact "${repo_root}/tests/fixtures/hosted-sops/cloudflared-token.v1.sops.json" \
+  --require-artifact
 TERRAFORM_BIN="${terraform_bin}" \
 ANSIBLE_PLAYBOOK_BIN="${ansible_playbook_bin}" \
 HELM_BIN="${helm_bin}" \
 uv run --frozen pytest -q "${repo_root}"/tests/test_hosted_*.py
-uvx ruff check "${repo_root}"/tests/test_hosted_*.py "${infra_dir}"/scripts/*.py
-uvx mypy --follow-imports skip --ignore-missing-imports --check-untyped-defs \
+uvx --from "ruff==${RUFF_VERSION}" ruff check \
+  "${repo_root}"/tests/test_hosted_*.py "${infra_dir}"/scripts/*.py \
+  "${infra_dir}/helm/platform/files/scheduler_runtime.py"
+uvx --from "mypy==${MYPY_VERSION}" mypy \
+  --follow-imports skip --ignore-missing-imports --check-untyped-defs \
   "${infra_dir}"/scripts/*.py
 uv run --project "${infra_dir}/provisioner" --frozen pytest -q \
   --confcutdir="${infra_dir}/provisioner" "${infra_dir}/provisioner/tests"
@@ -77,4 +86,5 @@ uv run --project "${infra_dir}/provisioner" --frozen ruff check \
   "${infra_dir}/provisioner/src" "${infra_dir}/provisioner/tests"
 shellcheck "${script_dir}"/*.sh
 "${trivy_bin}" fs --scanners secret --exit-code 1 --no-progress \
-  --skip-dirs .terraform --skip-dirs charts "${infra_dir}"
+  --skip-dirs .git --skip-dirs .venv --skip-dirs .venv-hosted-ci \
+  --skip-dirs .terraform --skip-dirs charts "${repo_root}"

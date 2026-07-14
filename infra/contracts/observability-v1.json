@@ -1,5 +1,6 @@
 {
   "schema_version": 1,
+  "poll_interval_seconds": 300,
   "checks": [
     {
       "name": "control-availability",
@@ -18,7 +19,7 @@
       "target_environment_variable": "EXOMEM_BLACKBOX_SCHEDULER_URL",
       "timeout_seconds": 10,
       "maximum_age_header": "x-exomem-scheduler-last-success-age-seconds",
-      "maximum_age_seconds": 180
+      "maximum_age_seconds": 480
     }
   ],
   "metrics": [

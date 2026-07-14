@@ -54,6 +54,16 @@ def test_hosted_ci_wires_every_static_security_gate() -> None:
         assert required in combined
     assert "secret" in combined.lower()
     assert "openspec validate add-hosted-private-alpha-infrastructure --strict" in workflow
+    assert 'UV_VERSION: "0.11.28"' in workflow
+    assert 'PYTHON_VERSION: "3.13.5"' in workflow
+    assert 'NODE_VERSION: "22.17.1"' in workflow
+    assert "uvx --from \"ruff==${RUFF_VERSION}\"" in validator
+    assert "uvx --from \"mypy==${MYPY_VERSION}\"" in validator
+    assert '--skip-dirs charts "${repo_root}"' in validator
+    for action_line in (
+        line.strip() for line in workflow.splitlines() if line.strip().startswith("- uses:")
+    ):
+        assert len(action_line.rsplit("@", 1)[1].split()[0]) == 40
 
 
 def test_k3s_snapshot_and_break_glass_contract_is_off_host_and_versioned() -> None:
@@ -225,6 +235,59 @@ pathlib.Path(os.environ['KUBECTL_INPUT']).write_bytes(sys.stdin.buffer.read())
     assert applied["stringData"] == {"secret": "must-not-be-printed"}
 
 
+def test_sops_ciphertext_validator_binds_every_leaf_to_one_destination(
+    tmp_path: Path,
+) -> None:
+    module = _load(
+        "infra/scripts/validate_sops_ciphertext.py", "validate_sops_ciphertext_test"
+    )
+    fixture_root = ROOT / "tests/fixtures/hosted-sops"
+    fixture = fixture_root / "cloudflared-token.v1.sops.json"
+    matrix = fixture_root / "secret-destinations-v1.json"
+    assert module.validate(matrix_path=matrix, artifacts=[fixture], root=ROOT) == 1
+
+    repository = tmp_path / "repository"
+    target = repository / "infra/secrets/platform/cloudflared-token.v1.sops.json"
+    target.parent.mkdir(parents=True)
+    document = json.loads(fixture.read_text(encoding="utf-8"))
+    document["metadata"]["namespace"] = "exomem-platform"
+    target.write_text(json.dumps(document), encoding="utf-8")
+    test_matrix = repository / "matrix.json"
+    test_matrix.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "secrets": {
+                    "cloudflared": {
+                        "destinations": {
+                            "k3s.cloudflared.active": {
+                                "kind": "sops_k8s_secret",
+                                "slot": "active",
+                                "target": "infra/secrets/platform/cloudflared-token.{version}.sops.json",
+                                "namespace": "exomem-platform",
+                                "kubernetes_secret": "exomem-cloudflared-token",
+                                "key": "token",
+                            }
+                        }
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(RuntimeError, match="plaintext payload leaf"):
+        module.validate(matrix_path=test_matrix, artifacts=[target], root=repository)
+
+    document["metadata"]["namespace"] = fixture_document = json.loads(
+        fixture.read_text(encoding="utf-8")
+    )["metadata"]["namespace"]
+    assert fixture_document.startswith("ENC[")
+    document["stringData"]["decoy"] = document["stringData"]["token"]
+    target.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(RuntimeError, match="stringData shape"):
+        module.validate(matrix_path=test_matrix, artifacts=[target], root=repository)
+
+
 def test_rotation_retirement_gate_covers_every_independent_rotation() -> None:
     module = _load("infra/scripts/rotation_gate.py", "rotation_gate_test")
     contract = json.loads((INFRA / "contracts/rotation-drills-v1.json").read_text())
@@ -237,12 +300,24 @@ def test_rotation_retirement_gate_covers_every_independent_rotation() -> None:
         "provisioner-wrapping-key",
     }
     for name, rotation in contract["rotations"].items():
+        recorded_at = "2026-07-14T12:00:00Z"
         evidence = {
             "schema_version": 1,
+            "contract_sha256": module.contract_digest(contract),
+            "drill_id": "123e4567-e89b-42d3-a456-426614174000",
+            "recorded_at": recorded_at,
             "rotation": name,
             "old_version": "v1",
             "new_version": "v2",
-            "observations": {key: True for key in rotation["retirement_requires"]},
+            "observations": {
+                key: {
+                    "passed": True,
+                    "observed_at": recorded_at,
+                    "proof_type": "probe",
+                    "reference": f"probe:{index:08d}",
+                }
+                for index, key in enumerate(rotation["retirement_requires"], start=1)
+            },
         }
         result = module.verify_evidence(contract, evidence)
         assert result.rotation == name
@@ -252,6 +327,13 @@ def test_rotation_retirement_gate_covers_every_independent_rotation() -> None:
         missing["observations"].pop(rotation["retirement_requires"][0])
         with pytest.raises(module.RotationGateError, match="retirement evidence is incomplete"):
             module.verify_evidence(contract, missing)
+
+        boolean_only = json.loads(json.dumps(evidence))
+        boolean_only["observations"] = {
+            key: True for key in rotation["retirement_requires"]
+        }
+        with pytest.raises(module.RotationGateError, match="incomplete"):
+            module.verify_evidence(contract, boolean_only)
 
 
 def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path) -> None:
@@ -266,15 +348,47 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     assert contract["pricing"]["friend_price_eur_gross"] == 5
     assert contract["pricing"]["public_price_eur_gross_range"] == [10, 15]
     assert contract["live_costs_verified"] is False
-    assert module.evaluate(contract, active_user_cells=5, attached_volumes=5).allowed is False
+    observation = {
+        "schema_version": 1,
+        "source": "kubernetes-api",
+        "cluster_uid": "cluster-uid-1234",
+        "observed_at": "2026-07-14T12:00:00Z",
+        "reference": "k8s-observation:capacity-0001",
+        "active_user_cells": 5,
+        "attached_volumes": 5,
+    }
+    assert module.evaluate(contract, observation).allowed is False
 
     proven = json.loads(json.dumps(contract))
     proven["live_costs_verified"] = True
     proven["paddle"]["actual_fee_tax_verified"] = True
-    assert module.evaluate(proven, active_user_cells=5, attached_volumes=5).allowed is True
-    blocked = module.evaluate(proven, active_user_cells=6, attached_volumes=6)
+    proven["paddle"].update(
+        {
+            "fee_model": "verified-live-statement",
+            "tax_treatment": "merchant-of-record",
+            "net_receipt_eur_for_friend_price": 4.1,
+            "evidence_recorded_at": "2026-07-14T11:00:00Z",
+        }
+    )
+    proven["monthly_costs_eur_ex_vat"] = {
+        key: 1.0 for key in proven["monthly_costs_eur_ex_vat"]
+    }
+    proven["evidence"] = {
+        "provider_invoice_reference": "invoice:hetzner-0001",
+        "paddle_statement_reference": "statement:paddle-0001",
+        "recorded_at": "2026-07-14T11:00:00Z",
+    }
+    assert module.evaluate(proven, observation).allowed is True
+    blocked_observation = {**observation, "active_user_cells": 6, "attached_volumes": 6}
+    blocked = module.evaluate(proven, blocked_observation)
     assert blocked.allowed is False
     assert blocked.reason == "active-user-cell-capacity-exhausted"
+
+    unattributed = {
+        "active_user_cells": 0,
+        "attached_volumes": 0,
+    }
+    assert module.evaluate(proven, unattributed).reason == "invalid-capacity-observation"
 
 
 def test_runbook_index_is_complete_and_executable_by_default() -> None:
@@ -334,6 +448,30 @@ def test_network_probe_plan_contains_every_denied_boundary() -> None:
     assert "unlabelled-platform-ingress" in manifest
     assert "cell-to-cell" not in manifest
 
+    targets = module.LiveTargets.from_document(
+        {
+            "schema_version": 1,
+            "cluster_uid": "cluster-uid-1",
+            "source": {
+                "namespace": "cell-alpha-test",
+                "service": "cell-alpha",
+                "uid": "service-alpha-uid",
+            },
+            "peer": {
+                "namespace": "cell-beta-test",
+                "service": "cell-beta",
+                "uid": "service-beta-uid",
+            },
+            "neon_host": "neon.example.com",
+            "b2_host": "b2.example.com",
+        }
+    )
+    assert targets.as_document()["cluster_uid"] == "cluster-uid-1"
+    with pytest.raises(module.NetworkProbeError, match="incomplete"):
+        module.LiveTargets.from_document(
+            {**targets.as_document(), "neon_host": "missing host!"}
+        )
+
 
 def test_network_probe_executor_fails_if_any_denied_connection_succeeds(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -354,7 +492,17 @@ with pathlib.Path(os.environ['CALLS']).open('a') as stream:
 if sys.argv[1] == 'apply':
     sys.stdin.buffer.read()
 if sys.argv[1] == 'get':
-    print('10.43.8.7', end='')
+    kind = sys.argv[2]
+    name = sys.argv[3]
+    if kind == 'namespace':
+        print(json.dumps({'metadata': {'uid': 'cluster-uid-1'}}))
+    elif kind == 'service':
+        uid = 'service-alpha-uid' if name == 'cell-alpha' else 'service-beta-uid'
+        print(json.dumps({'metadata': {'uid': uid}, 'spec': {'clusterIP': '10.43.8.7'}}))
+    elif kind == 'endpoints':
+        print(json.dumps({'subsets': [{'addresses': [{'ip': '10.42.0.7'}]}]}))
+if sys.argv[1] == 'wait' and os.environ.get('FAIL_POSITIVE') == '1' and 'positive-controls' in sys.argv[-1]:
+    raise SystemExit(1)
 if sys.argv[1] == 'exec' and os.environ.get('ALLOW_TARGET') in sys.argv:
     raise SystemExit(23)
 """,
@@ -368,17 +516,57 @@ if sys.argv[1] == 'exec' and os.environ.get('ALLOW_TARGET') in sys.argv:
         b2_host="b2.invalid",
     )
     manifest = module.render_probe_manifest(plan)
+    targets = module.LiveTargets.from_document(
+        {
+            "schema_version": 1,
+            "cluster_uid": "cluster-uid-1",
+            "source": {
+                "namespace": "cell-alpha-test",
+                "service": "cell-alpha",
+                "uid": "service-alpha-uid",
+            },
+            "peer": {
+                "namespace": "cell-beta-test",
+                "service": "cell-beta",
+                "uid": "service-beta-uid",
+            },
+            "neon_host": "neon.invalid",
+            "b2_host": "b2.invalid",
+        }
+    )
     monkeypatch.setenv("CALLS", str(calls))
     monkeypatch.setenv("ALLOW_TARGET", "none")
-    module.execute_probe_manifest(manifest, plan, str(kubectl), "cell-alpha")
+    module.execute_probe_manifest(
+        manifest, plan, str(kubectl), "cell-alpha", targets=targets
+    )
     invocations = [json.loads(line) for line in calls.read_text().splitlines()]
     assert sum(item[0] == "exec" for item in invocations) == 5
-    assert sum(item[0] == "get" for item in invocations) == 1
-    assert sum(item[0] == "wait" for item in invocations) == 1
+    assert sum(item[0] == "get" for item in invocations) == 5
+    assert sum(item[0] == "apply" for item in invocations) == 2
+    assert sum(item[0] == "wait" for item in invocations) == 2
+    assert next(index for index, item in enumerate(invocations) if item[0] == "wait") < next(
+        index for index, item in enumerate(invocations) if item[0] == "exec"
+    )
 
     monkeypatch.setenv("ALLOW_TARGET", "neon.invalid")
     with pytest.raises(module.NetworkProbeError, match="neon"):
-        module.execute_probe_manifest(manifest, plan, str(kubectl), "cell-alpha")
+        module.execute_probe_manifest(
+            manifest, plan, str(kubectl), "cell-alpha", targets=targets
+        )
+
+    monkeypatch.setenv("ALLOW_TARGET", "none")
+    monkeypatch.setenv("FAIL_POSITIVE", "1")
+    with pytest.raises(module.NetworkProbeError, match="positive-controls"):
+        module.execute_probe_manifest(
+            manifest, plan, str(kubectl), "cell-alpha", targets=targets
+        )
+    invocations = [json.loads(line) for line in calls.read_text().splitlines()]
+    final_positive_wait = max(
+        index
+        for index, item in enumerate(invocations)
+        if item[0] == "wait" and "positive-controls" in item[-1]
+    )
+    assert not any(item[0] == "exec" for item in invocations[final_positive_wait + 1 :])
 
 
 def test_external_probe_never_returns_response_body_or_target() -> None:
@@ -388,6 +576,9 @@ def test_external_probe_never_returns_response_body_or_target() -> None:
         status = 200
         body = b"credential filename note query private"
         headers = {"content-type": "application/json"}
+
+        def geturl(self) -> str:
+            return "https://secret-host.invalid/private/path"
 
     observation = module.observe(
         name="control",
@@ -400,6 +591,27 @@ def test_external_probe_never_returns_response_body_or_target() -> None:
     assert "secret-host" not in rendered
     assert "credential" not in rendered
     assert "body" not in rendered
+
+    class Redirected(Response):
+        def geturl(self) -> str:
+            return "https://other.invalid/private/path"
+
+    redirected = module.observe(
+        name="control",
+        target="https://secret-host.invalid/private/path",
+        fetch=lambda _target, _timeout: Redirected(),
+        timeout_seconds=5,
+    )
+    assert redirected.ok is False
+    assert redirected.reason == "redirected"
+    insecure = module.observe(
+        name="control",
+        target="http://secret-host.invalid/private/path",
+        fetch=lambda _target, _timeout: Response(),
+        timeout_seconds=5,
+    )
+    assert insecure.ok is False
+    assert insecure.reason == "transport-failed"
 
 
 def test_new_operator_scripts_are_executable() -> None:
