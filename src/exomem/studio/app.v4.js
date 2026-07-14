@@ -1,6 +1,7 @@
 import {ApiError, command, setStoredKey, storedKey} from "/studio/assets/api.v1.js";
 import {categoriesFor, reportStatus, sectionState, visibleItems, worklistFiltersVisible} from "/studio/assets/model.v1.js";
-import {readRoute, routePatch, writeRoute} from "/studio/assets/state.v1.js";
+import {readRoute, routePatch, writeRoute} from "/studio/assets/state.v2.js";
+import * as adoption from "/studio/assets/adoption.v1.js";
 
 const byId = (id) => document.getElementById(id);
 const authPanel = byId("auth-panel");
@@ -54,6 +55,18 @@ function showStudio() {
   connected(true);
 }
 
+function showView(view) {
+  const areaNav = byId("area-nav");
+  if (areaNav) areaNav.hidden = false;
+  const adopt = view === "adopt";
+  studio.hidden = adopt;
+  const adoptionSection = byId("adoption");
+  if (adoptionSection) adoptionSection.hidden = !adopt;
+  for (const tab of document.querySelectorAll("[data-view]")) {
+    tab.setAttribute("aria-current", String(tab.dataset.view === view));
+  }
+}
+
 function showAuth(error = null) {
   studio.hidden = true;
   authPanel.hidden = false;
@@ -64,9 +77,15 @@ function showAuth(error = null) {
 async function authenticate(key = "") {
   byId("auth-error").hidden = true;
   try {
+    // A cheap review_memory call is the shared auth probe for both views.
     const data = await command("review_memory", {mode: route.mode, state: route.state, limit: 50}, {key});
     if (key) setStoredKey(key);
     showStudio();
+    showView(route.view);
+    if (route.view === "adopt") {
+      await adoption.enter(route);
+      return;
+    }
     if (route.mode === "relation-queue") {
       queue = data;
       renderRelationQueue();
@@ -834,9 +853,26 @@ function wireEvents() {
   byId("dialog-form").addEventListener("submit", submitDialog);
   byId("dialog-cancel").addEventListener("click", () => dialog.close());
   dialog.addEventListener("close", () => focusItem(restoreRef));
+  for (const tab of document.querySelectorAll("[data-view]")) {
+    tab.addEventListener("click", async () => {
+      if (tab.dataset.view === route.view) return;
+      adoption.leave();
+      route = routePatch(route, {view: tab.dataset.view, run: "", astep: "start"});
+      writeRoute(route);
+      showView(route.view);
+      if (route.view === "adopt") await adoption.enter(route);
+      else await loadWorklist();
+    });
+  }
+  document.addEventListener("adopt:leave", async () => {
+    showView(route.view);
+    await loadWorklist();
+  });
   window.addEventListener("popstate", async () => {
     route = readRoute();
-    await loadWorklist();
+    showView(route.view);
+    if (route.view === "adopt") await adoption.enter(route);
+    else await loadWorklist();
   });
 }
 
