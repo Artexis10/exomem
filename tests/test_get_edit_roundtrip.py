@@ -10,7 +10,6 @@ import pytest
 from exomem import edit as edit_module
 from exomem import get_page as get_module
 
-
 TODAY = dt.date(2026, 5, 18)
 
 
@@ -51,7 +50,8 @@ def _make_identity_page(vault: Path) -> str:
     p = vault / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        "---\ntype: identity\nscope: career\ncreated: 2026-05-24\nupdated: 2026-05-24\ntags: []\n---\n"
+        "---\ntype: identity\nscope: career\ncreated: 2026-05-24\n"
+        "updated: 2026-05-24\ntags: []\n---\n"
         "# Career\n\noriginal body.\n",
         encoding="utf-8",
     )
@@ -109,7 +109,9 @@ def test_edit_still_refuses_superseded(vault: Path) -> None:
     p = vault / rel
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(
-        "---\ntype: identity\nstatus: superseded\ncreated: 2026-05-24\nupdated: 2026-05-24\ntags: []\nsuperseded_by: \"[[Notes/...]]\"\n---\n# Career\n\nx.\n",
+        "---\ntype: identity\nstatus: superseded\ncreated: 2026-05-24\n"
+        "updated: 2026-05-24\ntags: []\n"
+        'superseded_by: "[[Notes/...]]"\n---\n# Career\n\nx.\n',
         encoding="utf-8",
     )
     with pytest.raises(edit_module.EditError) as exc:

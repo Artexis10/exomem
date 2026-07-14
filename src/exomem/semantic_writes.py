@@ -263,6 +263,7 @@ class ExistingPreflight:
     prospective_manifest: activation_manifest.ActivationManifest
     manifest_install_required: bool
     primary_guard: vault.PathGuard
+    committed_replay: bool
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -287,6 +288,7 @@ class ExistingCommit:
     contract_result: semantic_contract.SemanticContractResult
     index_report: Any | None
     lifecycle_state: str | None
+    transition_token: str
 
     def as_dict(self) -> dict[str, Any]:
         value = {
@@ -297,6 +299,7 @@ class ExistingCommit:
             "written_paths": list(self.written_paths),
             "contract_result": self.contract_result.as_dict(),
             "lifecycle_state": self.lifecycle_state,
+            "transition_token": self.transition_token,
         }
         if self.index_report is not None:
             value["index"] = self.index_report.as_dict()
@@ -386,9 +389,10 @@ def _existing_applicability(
         or after.page_type == "entity"
     ):
         return "structural"
-    if before.page_type is not None or after.page_type is not None:
-        return "structural"
-    return "not_semantic"
+    # This coordinator is entered only for governed Markdown. Untyped/arbitrary
+    # Markdown still receives the structural/safety contract; non-Markdown
+    # writers preserve their legacy path and never enter this seam.
+    return "structural"
 
 
 def preflight_existing(
@@ -458,6 +462,7 @@ def preflight_existing(
         root, before, corpus=before_corpus
     )
     after_review = relation_review.load_relation_review(root, after, corpus=after_corpus)
+    applicability = _existing_applicability(before, after)
 
     token = transition_token or _existing_transition_token(
         operation=operation,
@@ -466,11 +471,21 @@ def preflight_existing(
         after_hash=after.source_hash,
     )
     token_value = _decode_existing_transition_token(token)
+    committed_replay = bool(
+        transition_token is not None
+        and token_value["operation"] == operation
+        and token_value["path"] == path
+        and token_value["after_hash"] == before.source_hash
+        and token_value["after_hash"] == after.source_hash
+    )
     if (
         token_value["operation"] != operation
         or token_value["path"] != path
-        or token_value["before_hash"] != before.source_hash
         or token_value["after_hash"] != after.source_hash
+        or (
+            token_value["before_hash"] != before.source_hash
+            and not committed_replay
+        )
     ):
         raise SemanticWriteError(
             "LIFECYCLE_TRANSITION_MISMATCH",
@@ -479,6 +494,11 @@ def preflight_existing(
     transition_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
     requested_decision: relation_review.LifecycleDecision | None = None
     if relation_disposition == "reviewed_none":
+        if applicability != "full":
+            raise SemanticWriteError(
+                "INVALID_RELATION_REVIEW",
+                "reviewed-none applies only to an active compiled result",
+            )
         if relation_review_hash != transition_hash:
             raise SemanticWriteError(
                 "LIFECYCLE_TRANSITION_REVIEW_MISMATCH",
@@ -522,7 +542,6 @@ def preflight_existing(
         manifest=boundary.manifest,
         census=before_corpus.activation_census,
     )
-    applicability = _existing_applicability(before, after)
     result = semantic_contract.evaluate(
         before=before,
         after=after,
@@ -560,6 +579,7 @@ def preflight_existing(
         boundary.manifest,
         boundary.install_required,
         primary_guard,
+        committed_replay,
     )
 
 
@@ -610,6 +630,61 @@ def commit_existing(
         )
 
     result = preflight.contract_result
+    auxiliaries = tuple(auxiliary_writes)
+    if preflight.committed_replay:
+        if (
+            preflight.after.identity_kind != "exomem_id"
+            or preflight.after.review_fingerprint is None
+        ):
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_MISMATCH",
+                "committed replay requires the exact stable resulting identity",
+            )
+        try:
+            prepared = relation_review.load_lifecycle_prepared(
+                root, preflight.after.identity
+            )
+        except relation_review.RelationReviewError as error:
+            raise SemanticWriteError(error.code, error.reason) from error
+        token_value = _decode_existing_transition_token(preflight.transition_token)
+        requested_reference = (
+            preflight.requested_decision.reference
+            if preflight.requested_decision is not None
+            else None
+        )
+        exact = bool(
+            prepared is not None
+            and prepared.transition_id == token_value["transition_id"]
+            and prepared.operation == preflight.operation
+            and prepared.page_identity == preflight.after.identity
+            and prepared.before_path == preflight.path
+            and prepared.before_source_hash == token_value["before_hash"]
+            and prepared.after_path == preflight.path
+            and prepared.after_source_hash == preflight.after.source_hash
+            and prepared.after_fingerprint == preflight.after.review_fingerprint
+            and prepared.decision_reference == requested_reference
+            and prepared.transition_token_hash
+            == hashlib.sha256(preflight.transition_token.encode("utf-8")).hexdigest()
+            and prepared.auxiliary_hash
+            == relation_review.lifecycle_auxiliary_hash(auxiliaries, root)
+        )
+        if not exact:
+            raise SemanticWriteError(
+                "LIFECYCLE_TRANSITION_MISMATCH",
+                "committed replay does not match the prepared transition",
+            )
+        return ExistingCommit(
+            preflight.applicability,
+            preflight.operation,
+            preflight.path,
+            False,
+            (),
+            result,
+            None,
+            "committed_replay",
+            preflight.transition_token,
+        )
+
     if preflight.manifest_install_required:
         winner = activation_manifest.ensure_manifest(
             root, census=preflight.activation_census
@@ -621,7 +696,6 @@ def commit_existing(
                 "semantic contract blocked against the activation boundary winner",
             )
 
-    auxiliaries = tuple(auxiliary_writes)
     lifecycle_writes: tuple[vault.PlannedWrite, ...] = ()
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...] = ()
     lifecycle_state: str | None = None
@@ -635,30 +709,35 @@ def commit_existing(
         == (preflight.path,)
     )
     if stable_active:
-        prepared = relation_review.build_lifecycle_prepared_transition(
-            transition_id=_existing_transition_id(preflight.transition_token),
-            operation=preflight.operation,
-            page_identity=preflight.after.identity,
-            before_path=preflight.before.path,
-            before_source_hash=preflight.before.source_hash,
-            after_path=preflight.after.path,
-            after_source_hash=preflight.after.source_hash,
-            after_fingerprint=preflight.after.review_fingerprint,
-            decision=preflight.requested_decision,
-            transition_token=preflight.transition_token,
-            auxiliary_hash=relation_review.lifecycle_auxiliary_hash(auxiliaries, root),
-        )
-        current = relation_review.LifecyclePrimaryBinding(
-            preflight.before.path,
-            preflight.before.source_hash,
-            preflight.before.review_fingerprint,
-        )
-        lifecycle = relation_review.plan_lifecycle_transition(
-            root,
-            decision=preflight.requested_decision,
-            prepared=prepared,
-            current=current,
-        )
+        try:
+            prepared = relation_review.build_lifecycle_prepared_transition(
+                transition_id=_existing_transition_id(preflight.transition_token),
+                operation=preflight.operation,
+                page_identity=preflight.after.identity,
+                before_path=preflight.before.path,
+                before_source_hash=preflight.before.source_hash,
+                after_path=preflight.after.path,
+                after_source_hash=preflight.after.source_hash,
+                after_fingerprint=preflight.after.review_fingerprint,
+                decision=preflight.requested_decision,
+                transition_token=preflight.transition_token,
+                auxiliary_hash=relation_review.lifecycle_auxiliary_hash(
+                    auxiliaries, root
+                ),
+            )
+            current = relation_review.LifecyclePrimaryBinding(
+                preflight.before.path,
+                preflight.before.source_hash,
+                preflight.before.review_fingerprint,
+            )
+            lifecycle = relation_review.plan_lifecycle_transition(
+                root,
+                decision=preflight.requested_decision,
+                prepared=prepared,
+                current=current,
+            )
+        except relation_review.RelationReviewError as error:
+            raise SemanticWriteError(error.code, error.reason) from error
         lifecycle_state = lifecycle.state
         if lifecycle.state == "committed_replay":
             return ExistingCommit(
@@ -670,6 +749,7 @@ def commit_existing(
                 result,
                 None,
                 lifecycle.state,
+                preflight.transition_token,
             )
         lifecycle_writes = lifecycle.writes
         required_guards = lifecycle.required_guards
@@ -699,6 +779,7 @@ def commit_existing(
         result,
         report,
         lifecycle_state,
+        preflight.transition_token,
     )
 
 

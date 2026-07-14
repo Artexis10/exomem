@@ -12,10 +12,17 @@ import pytest
 from exomem import (
     activation_manifest,
     index_sync,
+    memory_schema,
     relation_review,
     semantic_contract,
     semantic_writes,
     vault,
+)
+from exomem import (
+    append_to_file as append_module,
+)
+from exomem import (
+    create_file as create_file_module,
 )
 from exomem import (
     edit as edit_module,
@@ -58,6 +65,25 @@ def _write(root: Path, rel: str, source: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(source, encoding="utf-8")
     return path
+
+
+def _save_required_block_contract(
+    root: Path, *, name: str, project: str, block: str, validation: str
+) -> None:
+    memory_schema.save_contract(
+        root,
+        memory_schema.MemoryContract(
+            name=name,
+            scope=memory_schema.ContractScope(
+                project=project, page_type="insight"
+            ),
+            sample_size=1,
+            fields={},
+            blocks={block: {"required": True}},
+            relations={},
+            validation=validation,
+        ).as_dict(),
+    )
 
 
 def _binding(path: str, source: str) -> relation_review.LifecyclePrimaryBinding:
@@ -215,6 +241,34 @@ def test_existing_preflight_rejects_an_unknown_operation_before_mutation(
     assert exc.value.code == "LIFECYCLE_TRANSITION_INVALID_OPERATION"
     assert page.read_text(encoding="utf-8") == source
     assert not activation_manifest.manifest_path(tmp_path).exists()
+
+
+def test_existing_preflight_rejects_reviewed_none_for_inactive_result(
+    tmp_path: Path,
+) -> None:
+    source = _source("Draft").replace("status: active", "status: draft")
+    _write(tmp_path, _PAGE, source)
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=source.replace("Draft", "Still draft"),
+        operation="edit",
+    )
+
+    with pytest.raises(semantic_writes.SemanticWriteError) as exc:
+        semantic_writes.preflight_existing(
+            tmp_path,
+            path=_PAGE,
+            after_source=source.replace("Draft", "Still draft"),
+            operation="edit",
+            transition_token=preview.transition_token,
+            relation_disposition="reviewed_none",
+            relation_review_hash=preview.transition_hash,
+            relation_review_reason="Inactive pages do not receive review records",
+        )
+
+    assert exc.value.code == "INVALID_RELATION_REVIEW"
+    assert not relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
 
 
 def test_existing_commit_installs_boundary_and_commits_primary_last_once(
@@ -423,6 +477,89 @@ def test_set_take_propagates_edit_semantic_feedback_unchanged(tmp_path: Path) ->
     assert set(result.as_dict()) == {"path", "row", "warnings", "semantic"}
 
 
+@pytest.mark.parametrize("validation", ["strict", "warn", "off"])
+def test_real_edit_honors_saved_contract_validation_mode(
+    tmp_path: Path, validation: str
+) -> None:
+    _save_required_block_contract(
+        tmp_path,
+        name=f"alpha-{validation}",
+        project="alpha",
+        block="finding",
+        validation=validation,
+    )
+    source = _source("## Finding\n\nRequired conclusion.").replace(
+        "status: active\n", "status: active\nproject: alpha\n"
+    )
+    page = _write(tmp_path, _PAGE, source)
+
+    if validation == "strict":
+        with pytest.raises(edit_module.EditError) as exc:
+            edit_module.edit(
+                tmp_path,
+                path=_PAGE,
+                why="remove required block",
+                new_body="No structured block remains.",
+                today=dt.date(2026, 7, 14),
+            )
+        assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+        assert page.read_text(encoding="utf-8") == source
+        return
+
+    result = edit_module.edit(
+        tmp_path,
+        path=_PAGE,
+        why="remove required block",
+        new_body="No structured block remains.",
+        today=dt.date(2026, 7, 14),
+    )
+    assert result.semantic is not None
+    findings = result.semantic["contract_result"]["findings"]
+    contract_findings = [
+        item for item in findings if item["code"].startswith("CONTRACT_")
+    ]
+    if validation == "warn":
+        assert [item["code"] for item in contract_findings] == [
+            "CONTRACT_REQUIRED_BLOCK"
+        ]
+        assert contract_findings[0]["severity"] == "warning"
+    else:
+        assert contract_findings == []
+
+
+def test_real_edit_resolves_multi_project_saved_contracts(tmp_path: Path) -> None:
+    _save_required_block_contract(
+        tmp_path,
+        name="alpha-required",
+        project="alpha",
+        block="finding",
+        validation="strict",
+    )
+    _save_required_block_contract(
+        tmp_path,
+        name="beta-required",
+        project="beta",
+        block="decision",
+        validation="strict",
+    )
+    source = _source(
+        "## Finding\n\nAlpha.\n\n## Decision\n\nBeta."
+    ).replace("status: active\n", "status: active\nprojects: [alpha, beta]\n")
+    page = _write(tmp_path, _PAGE, source)
+
+    with pytest.raises(edit_module.EditError) as exc:
+        edit_module.edit(
+            tmp_path,
+            path=_PAGE,
+            why="remove beta block",
+            new_body="## Finding\n\nAlpha remains.",
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "SEMANTIC_CONTRACT_BLOCKED"
+    assert page.read_text(encoding="utf-8") == source
+
+
 def test_set_frontmatter_project_plan_is_pure_until_semantic_commit(
     tmp_path: Path,
 ) -> None:
@@ -534,6 +671,254 @@ def test_set_frontmatter_draft_to_active_commits_exact_reviewed_none(
     assert committed.semantic["lifecycle_state"] == "new"
     assert "status: active" in page.read_text(encoding="utf-8")
     assert relation_review.lifecycle_prepared_path(tmp_path, _ID).exists()
+
+
+def test_tier2_overwrite_validate_and_commit_use_existing_coordinator(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+
+    preview = create_file_module.create_file(
+        tmp_path,
+        path=_PAGE,
+        content=after,
+        overwrite=True,
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert isinstance(preview, semantic_writes.ExistingPreflight)
+    assert preview.operation == "tier2_overwrite"
+    assert preview.mutated is False
+    assert page.read_text(encoding="utf-8") == source
+
+    committed = create_file_module.create_file(
+        tmp_path,
+        path=_PAGE,
+        content=after,
+        overwrite=True,
+        draft_token=preview.transition_token,
+        today=dt.date(2026, 7, 14),
+    )
+    assert committed.semantic is not None
+    assert committed.semantic["operation"] == "tier2_overwrite"
+    assert committed.semantic["mutated"] is True
+    assert page.read_text(encoding="utf-8") == after
+    assert set(committed.as_dict()) == {"path", "warnings", "semantic"}
+
+
+def test_tier2_overwrite_true_on_absent_path_preserves_creation_behavior(
+    tmp_path: Path,
+) -> None:
+    rel = "Knowledge Base/Identity/new.md"
+
+    result = create_file_module.create_file(
+        tmp_path,
+        path=rel,
+        content="---\ntype: identity\n---\n# New\n",
+        overwrite=True,
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.creation is not None
+    assert result.semantic is None
+    assert (tmp_path / rel).exists()
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        (_source("A"), _source("A", page_id=None)),
+        (_source("A"), _source("A", page_id=_OTHER_ID)),
+        (
+            _source("A"),
+            _source("A").replace(
+                f"exomem_id: {_ID}\n", f"exomem_id: {_ID}\nexomem_id: {_ID}\n"
+            ),
+        ),
+        (_source("A", page_id=None), _source("A")),
+    ],
+)
+def test_tier2_overwrite_rejects_stable_identity_bypass(
+    tmp_path: Path, before: str, after: str
+) -> None:
+    page = _write(tmp_path, _PAGE, before)
+
+    with pytest.raises(create_file_module.CreateFileError) as exc:
+        create_file_module.create_file(
+            tmp_path,
+            path=_PAGE,
+            content=after,
+            overwrite=True,
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STABLE_ID_BYPASS"
+    assert page.read_text(encoding="utf-8") == before
+
+
+def test_tier2_overwrite_detects_concurrent_change_without_clobbering(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+    page = _write(tmp_path, _PAGE, source)
+    original = semantic_writes.preflight_existing
+
+    def race(*args, **kwargs):
+        page.write_text(source + "\nConcurrent writer.\n", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(create_file_module.semantic_writes, "preflight_existing", race)
+
+    with pytest.raises(create_file_module.CreateFileError) as exc:
+        create_file_module.create_file(
+            tmp_path,
+            path=_PAGE,
+            content=after,
+            overwrite=True,
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+    assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
+
+
+def test_existing_coordinator_exact_committed_replay_is_mutation_free(
+    tmp_path: Path,
+) -> None:
+    source = _source("A")
+    after = source.replace("A\n\n## Relations", "B\n\n## Relations")
+    _write(tmp_path, _PAGE, source)
+    preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+    )
+    first = semantic_writes.commit_existing(tmp_path, preflight=preview)
+    before_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    replay_preview = semantic_writes.preflight_existing(
+        tmp_path,
+        path=_PAGE,
+        after_source=after,
+        operation="tier2_overwrite",
+        transition_token=first.transition_token,
+    )
+    replay = semantic_writes.commit_existing(tmp_path, preflight=replay_preview)
+    after_replay = {
+        path.relative_to(tmp_path).as_posix(): path.read_bytes()
+        for path in tmp_path.rglob("*")
+        if path.is_file()
+    }
+
+    assert replay.mutated is False
+    assert replay.lifecycle_state == "committed_replay"
+    assert replay.written_paths == ()
+    assert after_replay == before_replay
+
+
+def test_tier2_append_commits_semantics_log_and_primary_in_one_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    log_path = tmp_path / "Knowledge Base/log.md"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.write_text("# Log\n\n---\n", encoding="utf-8")
+    batches: list[list[str]] = []
+    original = semantic_writes.vault.batch_atomic_write
+
+    def capture(writes, **kwargs):
+        materialized = list(writes)
+        batches.append(
+            [item.path.relative_to(tmp_path).as_posix() for item in materialized]
+        )
+        return original(materialized, **kwargs)
+
+    monkeypatch.setattr(semantic_writes.vault, "batch_atomic_write", capture)
+
+    result = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="\nAppended detail.\n",
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert result.semantic is not None
+    assert result.semantic["operation"] == "tier2_append"
+    assert result.semantic["mutated"] is True
+    assert batches[-1][-1] == _PAGE
+    assert batches[-1].count("Knowledge Base/log.md") == 1
+    assert page.read_text(encoding="utf-8").endswith("\nAppended detail.\n")
+
+
+def test_tier2_append_detects_concurrent_change_without_losing_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = _source("A")
+    page = _write(tmp_path, _PAGE, source)
+    original = semantic_writes.preflight_existing
+
+    def race(*args, **kwargs):
+        page.write_text(source + "\nConcurrent writer.\n", encoding="utf-8")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(append_module.semantic_writes, "preflight_existing", race)
+
+    with pytest.raises(append_module.AppendError) as exc:
+        append_module.append_to_file(
+            tmp_path,
+            path=_PAGE,
+            content="Our append.\n",
+            today=dt.date(2026, 7, 14),
+        )
+
+    assert exc.value.code == "STALE_SEMANTIC_WRITE"
+    assert page.read_text(encoding="utf-8") == source + "\nConcurrent writer.\n"
+
+
+def test_tier2_append_exact_committed_retry_does_not_duplicate_content(
+    tmp_path: Path,
+) -> None:
+    source = _source("A").rstrip("\n")
+    page = _write(tmp_path, _PAGE, source)
+    preview = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        validate_only=True,
+        today=dt.date(2026, 7, 14),
+    )
+    assert isinstance(preview, semantic_writes.ExistingPreflight)
+    first = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        semantic_transition_token=preview.transition_token,
+        today=dt.date(2026, 7, 14),
+    )
+    after = page.read_text(encoding="utf-8")
+
+    replay = append_module.append_to_file(
+        tmp_path,
+        path=_PAGE,
+        content="Appended once.\n",
+        semantic_transition_token=first.semantic["transition_token"],
+        today=dt.date(2026, 7, 14),
+    )
+
+    assert replay.semantic is not None
+    assert replay.semantic["mutated"] is False
+    assert replay.semantic["lifecycle_state"] == "committed_replay"
+    assert page.read_text(encoding="utf-8") == after
+    assert after.count("Appended once.") == 1
 
 
 def test_canonical_decision_and_prepared_round_trip_with_direct_current_lookup(

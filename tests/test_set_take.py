@@ -15,7 +15,6 @@ import pytest
 
 from exomem import set_take as set_take_module
 
-
 TODAY = dt.date(2026, 6, 1)
 
 

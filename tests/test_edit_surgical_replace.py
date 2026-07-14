@@ -17,7 +17,6 @@ import pytest
 
 from exomem import edit as edit_module
 
-
 TODAY = dt.date(2026, 6, 1)
 
 
@@ -59,7 +58,11 @@ def test_surgical_replace_fills_a_take(vault: Path) -> None:
 
 def test_surgical_append_to_section(vault: Path) -> None:
     """Append a row by replacing a section anchor with itself + the new line."""
-    rel = _make_page(vault, "# Scratch\n\n## Opinions\n\n### Conversation-derived\n\n## Connections\n\n- x\n")
+    rel = _make_page(
+        vault,
+        "# Scratch\n\n## Opinions\n\n### Conversation-derived\n\n"
+        "## Connections\n\n- x\n",
+    )
     anchor = "### Conversation-derived\n"
     edit_module.edit(
         vault,

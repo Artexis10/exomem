@@ -49,11 +49,14 @@ class CreateFileResult:
     path: str
     warnings: list[str]
     creation: dict | None = None
+    semantic: dict | None = None
 
     def as_dict(self) -> dict:
         value = {"path": self.path, "warnings": self.warnings}
         if self.creation is not None:
             value["creation"] = self.creation
+        if self.semantic is not None:
+            value["semantic"] = self.semantic
         return value
 
 
@@ -82,7 +85,11 @@ def create_file(
     relation_disposition: str | None = None,
     relation_review_hash: str | None = None,
     relation_review_reason: str | None = None,
-) -> CreateFileResult | semantic_writes.CreationPreflight:
+) -> (
+    CreateFileResult
+    | semantic_writes.CreationPreflight
+    | semantic_writes.ExistingPreflight
+):
     if frontmatter:
         for key in frontmatter:
             reason = excluded_frontmatter_reason(str(key))
@@ -125,7 +132,9 @@ def create_file(
         )
 
     existing_text: str | None = None
-    if abs_path.exists():
+    existing_guard: vault_module.PathGuard | None = None
+    existing_file = abs_path.exists()
+    if existing_file:
         if not overwrite:
             raise CreateFileError(
                 code="FILE_EXISTS",
@@ -141,12 +150,19 @@ def create_file(
                 reason=f"{rel_path} exists but is not a regular file",
             )
         if rel_path.casefold().endswith(".md"):
-            existing_text = abs_path.read_text(encoding="utf-8")
+            try:
+                existing_text, existing_guard = read_guarded_text(
+                    vault_root, abs_path
+                )
+            except (OSError, UnicodeError) as error:
+                raise CreateFileError(
+                    "UNREADABLE", "existing Markdown could not be read safely"
+                ) from error
 
     is_markdown = rel_path.casefold().endswith(".md")
     today = today or dt.date.today()
     date_iso = today.isoformat()
-    if draft_token is not None and is_markdown and not overwrite:
+    if draft_token is not None and is_markdown and not existing_file:
         try:
             token_value = semantic_writes.DraftToken.decode(draft_token)
         except semantic_writes.SemanticWriteError as error:
@@ -184,29 +200,11 @@ def create_file(
     else:
         full_text = content
 
-    def _semantic_family(text: str | None) -> str | None:
-        if text is None:
-            return None
-        try:
-            fm, _, _ = vault_module.parse_frontmatter(text, strict=True)
-        except ValueError:
-            return "semantic"
-        page_type = fm.get("type")
-        if page_type in {
-            "research-note", "insight", "failure", "pattern", "experiment",
-            "production-log", "entity",
-        }:
-            return "semantic"
-        return None
-
-    if overwrite and (_semantic_family(existing_text) or _semantic_family(full_text)):
-        raise CreateFileError(
-            code="SEMANTIC_OVERWRITE_NOT_WIRED",
-            reason="semantic Markdown overwrite is deferred until lifecycle wiring is available",
-        )
+    if existing_file and overwrite and is_markdown and existing_text is not None:
+        _guard_tier2_stable_identity(existing_text, full_text)
 
     identity = draft_id
-    if is_markdown and not overwrite:
+    if is_markdown and not existing_file:
         try:
             fm, _, _ = vault_module.parse_frontmatter(full_text, strict=True)
         except ValueError as error:
@@ -229,7 +227,7 @@ def create_file(
         or semantic_writes.DraftToken(
             "create_file", "tier2_create", rel_path, date_iso
         ).encode()
-        if is_markdown and not overwrite
+        if is_markdown and not existing_file
         else "create-file:" + hashlib.sha256(
             f"{date_iso}\0{rel_path}\0{full_text}".encode()
         ).hexdigest()
@@ -259,7 +257,8 @@ def create_file(
         warnings.append(log_plan.rotation_note)
 
     creation: dict | None = None
-    if is_markdown and not overwrite:
+    semantic: dict | None = None
+    if is_markdown and not existing_file:
         token = creation_token
         try:
             preflight = semantic_writes.preflight_creation(
@@ -316,9 +315,41 @@ def create_file(
         ) as error:
             raise CreateFileError(error.code, error.reason) from error
         creation = committed.as_dict()
+    elif existing_file and overwrite and is_markdown:
+        try:
+            preflight = semantic_writes.preflight_existing(
+                vault_root,
+                path=rel_path,
+                after_source=full_text,
+                operation="tier2_overwrite",
+                expected_before_hash=(
+                    vault_module.content_hash(existing_text)
+                    if existing_text is not None
+                    else None
+                ),
+                transition_token=draft_token,
+                relation_disposition=relation_disposition,
+                relation_review_hash=relation_review_hash,
+                relation_review_reason=relation_review_reason,
+            )
+        except semantic_writes.SemanticWriteError as error:
+            raise CreateFileError(error.code, error.reason) from error
+        if validate_only:
+            return preflight
+        try:
+            committed = semantic_writes.commit_existing(
+                vault_root,
+                preflight=preflight,
+                auxiliary_writes=log_plan.writes,
+            )
+        except semantic_writes.SemanticWriteError as error:
+            raise CreateFileError(error.code, error.reason) from error
+        semantic = committed.as_dict()
     else:
         writes = list(log_plan.writes)
-        writes.append(PlannedWrite(path=abs_path, content=full_text))
+        writes.append(
+            PlannedWrite(path=abs_path, content=full_text, guard=existing_guard)
+        )
         try:
             batch_atomic_write(writes, vault_root=vault_root)
         except Exception as e:
@@ -326,4 +357,56 @@ def create_file(
             warnings.append(f"partial write — reconcile on desktop: {e}")
             raise
 
-    return CreateFileResult(path=rel_path, warnings=warnings, creation=creation)
+    return CreateFileResult(
+        path=rel_path,
+        warnings=warnings,
+        creation=creation,
+        semantic=semantic,
+    )
+
+
+_GOVERNED_IDENTITY_TYPES = frozenset(
+    {
+        "research-note",
+        "insight",
+        "failure",
+        "pattern",
+        "experiment",
+        "production-log",
+        "entity",
+    }
+)
+
+
+def _guard_tier2_stable_identity(before_source: str, after_source: str) -> None:
+    """Prevent raw overwrite from becoming an identity backfill/replace seam."""
+    try:
+        before, _, _ = vault_module.parse_frontmatter(before_source, strict=True)
+    except vault_module.FrontmatterError as error:
+        raise CreateFileError(error.code, error.reason) from error
+    if before.get("type") not in _GOVERNED_IDENTITY_TYPES:
+        return
+    try:
+        after, _, _ = vault_module.parse_frontmatter(after_source, strict=True)
+    except vault_module.FrontmatterError as error:
+        raise CreateFileError(
+            "STABLE_ID_BYPASS",
+            "raw overwrite cannot duplicate or invalidate governed stable identity; "
+            "use the explicit backfill/replace workflow",
+        ) from error
+
+    before_present = "exomem_id" in before
+    after_present = "exomem_id" in after
+    before_id = memory_refs.normalize_id(before.get("exomem_id"))
+    after_id = memory_refs.normalize_id(after.get("exomem_id"))
+    changed = (
+        (before_id is not None and after_id != before_id)
+        or (before_id is None and after_id is not None)
+        or before_present != after_present
+    )
+    if changed:
+        raise CreateFileError(
+            "STABLE_ID_BYPASS",
+            "raw overwrite cannot remove, change, duplicate, or add governed "
+            "stable identity; use the explicit backfill/replace workflow",
+        )

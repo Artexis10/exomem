@@ -49,6 +49,8 @@ from .vault import (
     in_append_only_tree,
     kb_root,
     normalize_body_wikilinks,
+    plan_log_writes,
+    read_guarded_text,
 )
 
 log = logging.getLogger(__name__)
@@ -297,7 +299,7 @@ def edit(
     elif new_body is not None:
         # Normalize wikilinks to canonical full form. Existing body is left
         # alone to preserve user-intended legacy forms in untouched files.
-        resolver = find_module.shared_resolver(vault_root)
+        resolver = find_module.writer_resolver_snapshot(vault_root)
         new_body_final, body_warnings = normalize_body_wikilinks(
             new_body, vault_root, resolver=resolver
         )
@@ -307,22 +309,6 @@ def edit(
 
     # Normalize trailing newline so we don't accumulate blanks across edits.
     new_body_final = new_body_final.rstrip() + "\n"
-
-    # Conflict (contradiction-band) surfacing — only when the body actually
-    # changed (a tags-only edit can't introduce a new claim, so it skips the
-    # embed entirely). Best-effort and PRE-commit, so the page's own freshly-
-    # edited vectors aren't in the sidecar yet; `self_path` excludes it anyway.
-    # Measurement, never a block — appended to the edit's warnings.
-    if body_changed and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
-        try:
-            body_warnings = list(body_warnings) + [
-                corpus_aware.overlap_warning(c)
-                for c in corpus_aware.detect_contradictions(
-                    vault_root, title="", body=new_body_final, self_path=rel_path
-                )
-            ]
-        except Exception as e:  # noqa: BLE001 — nudges never break an edit
-            log.debug("corpus-aware contradiction check failed (non-fatal): %s", e)
 
     new_text = f"---\n{fm_text}\n---\n{new_body_final}"
 
@@ -668,7 +654,6 @@ def commit_edit(
     log-missing / partial-write warnings).
     """
     kb = kb_root(vault_root)
-    log_file = kb / "log.md"
     writes: list[PlannedWrite] = []
     warnings: list[str] = list(extra_warnings or [])
 
@@ -676,30 +661,44 @@ def commit_edit(
     # keeps the indexes self-healing.
     top_index = kb / "index.md"
     if top_index.exists():
-        current_top = top_index.read_text(encoding="utf-8")
+        current_top, top_guard = read_guarded_text(vault_root, top_index)
         sub_writes, new_top = indexes.compute_subindex_writes(
             vault_root, top_index_text=current_top
         )
         if new_top is not None and new_top != current_top:
-            writes.append(PlannedWrite(path=top_index, content=new_top))
+            writes.append(
+                PlannedWrite(path=top_index, content=new_top, guard=top_guard)
+            )
         writes.extend(sub_writes)
 
     rel_no_ext = rel_path.removesuffix(".md")
-    if log_file.exists():
-        log_body_parts = [f"Edit via exomem. {why.strip()}"]
-        if changed:
-            log_body_parts.append(f"Changed: {', '.join(changed)}.")
-        log_body = " ".join(log_body_parts)
-        new_log = _prepend_log_entry(
-            log_file.read_text(encoding="utf-8"),
+    log_body_parts = [f"Edit via exomem. {why.strip()}"]
+    if changed:
+        log_body_parts.append(f"Changed: {', '.join(changed)}.")
+    log_body = " ".join(log_body_parts)
+    try:
+        log_plan = plan_log_writes(
+            vault_root,
             date_iso=date_iso,
-            rel_no_ext=rel_no_ext,
-            body=log_body,
             op=op,
+            rel_path_no_ext=rel_no_ext,
+            body=log_body,
+            operation_token=(
+                "edit:"
+                + content_hash(
+                    f"{date_iso}\0{op}\0{rel_path}\0{why}\0{new_text}"
+                )
+            ),
         )
-        writes.append(PlannedWrite(path=log_file, content=new_log))
-    else:
-        warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
+    except (OSError, UnicodeError, ValueError) as error:
+        raise EditError(
+            "LOG_PLAN_CONFLICT", ["log"], "edit log update could not be planned safely"
+        ) from error
+    writes.extend(log_plan.writes)
+    if log_plan.warning is not None:
+        warnings.append(log_plan.warning)
+    if log_plan.rotation_note is not None:
+        warnings.append(log_plan.rotation_note)
 
     semantic_operation = "edit" if op in {"edit", "multi_edit"} else op
     try:
@@ -725,6 +724,27 @@ def commit_edit(
         log.exception("partial write during edit(); some files may be updated")
         warnings.append(f"partial write — reconcile on desktop: {e}")
         raise
+
+    # Suggestions are measurements, never dispositions. They run only after
+    # the guarded semantic batch succeeds, so validation/blocking paths cannot
+    # mutate model/cache state or spend embedding work.
+    body_changed = any(item.startswith("body") for item in changed)
+    if body_changed and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        match = _FM_PATTERN.match(new_text)
+        try:
+            warnings.extend(
+                corpus_aware.overlap_warning(candidate)
+                for candidate in corpus_aware.detect_contradictions(
+                    vault_root,
+                    title="",
+                    body=match.group(2) if match is not None else new_text,
+                    self_path=rel_path,
+                )
+            )
+        except Exception as error:  # noqa: BLE001 — nudges never break an edit
+            log.debug(
+                "corpus-aware contradiction check failed (non-fatal): %s", error
+            )
     return CommitEditResult(warnings, committed.as_dict())
 
 
