@@ -99,10 +99,10 @@ def test_postgres_url_role_must_match_dedicated_runtime_role() -> None:
 def test_settings_require_bounded_failure_ceiling_and_private_trusted_proxies() -> None:
     settings = _settings(
         max_failure_attempts=4,
-        trusted_proxy_ips="127.0.0.1,10.42.0.0/16",
+        trusted_proxy_ips="127.0.0.1,10.42.7.9/16,127.0.0.1/32",
     )
     assert settings.max_failure_attempts == 4
-    assert settings.trusted_proxy_ips == "127.0.0.1,10.42.0.0/16"
+    assert settings.trusted_proxy_ips == "127.0.0.1/32,10.42.0.0/16"
 
     for invalid in ("*", "0.0.0.0/0", "8.8.8.8", "not-an-address"):
         with pytest.raises(ValidationError):

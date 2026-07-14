@@ -108,6 +108,41 @@ async def test_worker_checkpoints_before_and_after_effect(
 
 
 @pytest.mark.asyncio
+async def test_worker_drops_post_effect_write_after_tenant_fence_is_superseded(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+) -> None:
+    _, repository, _ = worker_context
+    operation = await repository.submit("provision", "superseded-effect", _request())
+
+    class SupersedingDriver:
+        async def observed_fence(self, _tenant_id: str) -> int:
+            return 0
+
+        async def execute(
+            self,
+            _action: str,
+            _request_data: dict[str, object],
+            _context: EffectContext,
+        ) -> DriverFinal:
+            await repository.submit(
+                "health",
+                "higher-fence-during-effect",
+                _request(operationId="operation-worker-newer", fenceGeneration=5),
+            )
+            return DriverFinal(result={"completed": True})
+
+    worker = ProvisionerWorker(repository, SupersedingDriver(), worker_id="fenced-worker")
+    now = datetime(2030, 1, 1, tzinfo=UTC)
+
+    assert await worker.run_once(now=now) is True
+    superseded = await repository.get_by_id(operation.id)
+    assert superseded is not None
+    assert superseded.state is OperationState.CLAIMED
+    assert superseded.checkpoint == "effect-prepared"
+    assert await repository.load_result(operation.id) is None
+
+
+@pytest.mark.asyncio
 async def test_expired_claim_is_resumed_after_worker_restart(
     worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
 ) -> None:

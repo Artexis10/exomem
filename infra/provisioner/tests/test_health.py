@@ -86,5 +86,14 @@ async def test_database_readiness_requires_expected_migration_revision(tmp_path:
                 "INSERT INTO alembic_version(version_num) VALUES ('wrong_revision')"
             )
         assert await database.ready() is False
+        async with database.engine.begin() as connection:
+            await connection.exec_driver_sql("DELETE FROM alembic_version")
+            await connection.exec_driver_sql(
+                "INSERT INTO alembic_version(version_num) VALUES ('0001_initial')"
+            )
+            await connection.exec_driver_sql(
+                "INSERT INTO alembic_version(version_num) VALUES ('unexpected_branch')"
+            )
+        assert await database.ready() is False
     finally:
         await database.dispose()

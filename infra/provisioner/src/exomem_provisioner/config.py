@@ -67,6 +67,8 @@ class ProvisionerSettings(BaseSettings):
         parts = [part.strip() for part in value.split(",")]
         if not parts or any(not part for part in parts):
             raise ValueError("trusted proxies must be explicit private or loopback networks")
+        normalized: list[str] = []
+        seen: set[str] = set()
         for part in parts:
             try:
                 network = ipaddress.ip_network(part, strict=False)
@@ -80,7 +82,11 @@ class ProvisionerSettings(BaseSettings):
                 or network.is_multicast
             ):
                 raise ValueError("trusted proxies must be private or loopback networks")
-        return ",".join(parts)
+            canonical = str(network)
+            if canonical not in seen:
+                normalized.append(canonical)
+                seen.add(canonical)
+        return ",".join(normalized)
 
     @model_validator(mode="after")
     def validate_independent_secrets(self) -> ProvisionerSettings:

@@ -14,7 +14,7 @@ from .driver import (
     LostAcknowledgement,
     ProvisionerDriver,
 )
-from .repository import ClaimConflict, OperationRepository, OperationSnapshot
+from .repository import ClaimConflict, OperationRepository, OperationSnapshot, StaleFence
 
 
 class ProvisionerWorker:
@@ -47,7 +47,7 @@ class ProvisionerWorker:
         )
         try:
             return await self._run_claimed(operation, claim_lost=claim_lost, now=now)
-        except ClaimConflict:
+        except (ClaimConflict, StaleFence):
             return True
         finally:
             stop_heartbeat.set()
@@ -73,7 +73,7 @@ class ProvisionerWorker:
                         claim_token=operation.claim_token or "",
                         claim_generation=operation.claim_generation,
                     )
-                except ClaimConflict:
+                except (ClaimConflict, StaleFence):
                     lost.set()
                     return
 

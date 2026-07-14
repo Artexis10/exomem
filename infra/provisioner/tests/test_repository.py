@@ -7,12 +7,13 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import func, select
 from sqlalchemy.dialects import postgresql
 
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
-from exomem_provisioner.models import OperationState, ResourceKind
+from exomem_provisioner.models import CredentialMetadata, OperationState, ResourceKind
 from exomem_provisioner.repository import (
     ClaimConflict,
     IdempotencyConflict,
@@ -79,7 +80,7 @@ def test_canonical_request_hash_is_order_independent_and_secret_sensitive() -> N
 
 def test_postgres_claim_query_uses_skip_locked() -> None:
     compiled = str(
-        _claim_statement(datetime.now(UTC)).compile(dialect=postgresql.dialect())
+        _claim_statement("operation-id", datetime.now(UTC)).compile(dialect=postgresql.dialect())
     ).upper()
 
     assert "FOR UPDATE SKIP LOCKED" in compiled
@@ -316,6 +317,7 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     digest = hashlib.sha256(b"credential-sentinel").hexdigest()
     await repository.record_credential_metadata(
         operation_id=operation.id,
+        **claim_args,
         cell_id="cell-alpha",
         version=2,
         credential_digest=digest,
@@ -323,6 +325,7 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     )
     await repository.record_export(
         operation_id=operation.id,
+        **claim_args,
         tenant_id="tenant-alpha",
         cell_id="cell-alpha",
         export_reference="export-provider-sentinel",
@@ -334,6 +337,7 @@ async def test_repository_persists_typed_records_and_immutable_provider_metadata
     )
     await repository.record_backup(
         operation_id=operation.id,
+        **claim_args,
         tenant_id="tenant-alpha",
         cell_id="cell-alpha",
         backup_reference="backup-provider-sentinel",
@@ -348,8 +352,13 @@ async def test_export_replay_compares_every_immutable_field(
     repository: OperationRepository,
 ) -> None:
     operation = await repository.submit("export", "immutable-export", _request())
+    claim = await repository.claim_next("export-worker")
+    assert claim is not None and claim.claim_token
     original: dict[str, object] = {
         "operation_id": operation.id,
+        "worker_id": "export-worker",
+        "claim_token": claim.claim_token,
+        "claim_generation": claim.claim_generation,
         "tenant_id": "tenant-alpha",
         "cell_id": "cell-alpha",
         "export_reference": "export-provider-sentinel",
@@ -382,8 +391,13 @@ async def test_backup_replay_compares_every_immutable_field(
     repository: OperationRepository,
 ) -> None:
     operation = await repository.submit("export", "immutable-backup", _request())
+    claim = await repository.claim_next("backup-worker")
+    assert claim is not None and claim.claim_token
     original: dict[str, object] = {
         "operation_id": operation.id,
+        "worker_id": "backup-worker",
+        "claim_token": claim.claim_token,
+        "claim_generation": claim.claim_generation,
         "tenant_id": "tenant-alpha",
         "cell_id": "cell-alpha",
         "backup_reference": "backup-provider-sentinel",
@@ -405,6 +419,132 @@ async def test_backup_replay_compares_every_immutable_field(
         replay = {**original, field: changed}
         with pytest.raises(ImmutableMetadataConflict, match="backup provider metadata"):
             await repository.record_backup(**replay)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_side_effect_records_require_claim_bound_operation_identity(
+    repository: OperationRepository,
+) -> None:
+    operation = await repository.submit("provision", "bound-effects", _request())
+    claim = await repository.claim_next("bound-worker")
+    assert claim is not None and claim.claim_token
+    claim_args = {
+        "worker_id": "bound-worker",
+        "claim_token": claim.claim_token,
+        "claim_generation": claim.claim_generation,
+    }
+
+    with pytest.raises(ImmutableMetadataConflict, match="operation identity"):
+        await repository.record_resource(
+            operation_id=operation.id,
+            **claim_args,
+            tenant_id="tenant-other",
+            cell_id="cell-alpha",
+            kind=ResourceKind.VOLUME,
+            recoverable_reference="volume-reference",
+            provider_operation_id="operation-alpha",
+            provider_fence_generation=7,
+        )
+    with pytest.raises(ImmutableMetadataConflict, match="operation identity"):
+        await repository.record_credential_metadata(
+            operation_id=operation.id,
+            **claim_args,
+            cell_id="cell-other",
+            version=1,
+            credential_digest="a" * 64,
+            active=False,
+        )
+    with pytest.raises(ImmutableMetadataConflict, match="operation identity"):
+        await repository.record_export(
+            operation_id=operation.id,
+            **claim_args,
+            tenant_id="tenant-alpha",
+            cell_id="cell-alpha",
+            export_reference="export-reference",
+            archive_sha256="a" * 64,
+            manifest_sha256="b" * 64,
+            archive_size=1024,
+            provider_operation_id="operation-other",
+            provider_fence_generation=7,
+        )
+    with pytest.raises(ImmutableMetadataConflict, match="operation identity"):
+        await repository.record_backup(
+            operation_id=operation.id,
+            **claim_args,
+            tenant_id="tenant-alpha",
+            cell_id="cell-alpha",
+            backup_reference="backup-reference",
+            object_sha256="c" * 64,
+            provider_operation_id="operation-alpha",
+            provider_fence_generation=8,
+        )
+
+
+@pytest.mark.asyncio
+async def test_credential_stage_promote_is_claim_bound_and_monotonic(
+    repository: OperationRepository,
+) -> None:
+    operation = await repository.submit("rotate-credential", "credential-promotion", _request())
+    claim = await repository.claim_next("credential-worker")
+    assert claim is not None and claim.claim_token
+    claim_args = {
+        "worker_id": "credential-worker",
+        "claim_token": claim.claim_token,
+        "claim_generation": claim.claim_generation,
+    }
+    first_digest = hashlib.sha256(b"credential-one").hexdigest()
+    next_digest = hashlib.sha256(b"credential-two").hexdigest()
+
+    await repository.record_credential_metadata(
+        operation_id=operation.id,
+        **claim_args,
+        cell_id="cell-alpha",
+        version=1,
+        credential_digest=first_digest,
+        active=True,
+    )
+    await repository.record_credential_metadata(
+        operation_id=operation.id,
+        **claim_args,
+        cell_id="cell-alpha",
+        version=2,
+        credential_digest=next_digest,
+        active=False,
+    )
+    await repository.record_credential_metadata(
+        operation_id=operation.id,
+        **claim_args,
+        cell_id="cell-alpha",
+        version=2,
+        credential_digest=next_digest,
+        active=True,
+    )
+
+    async with repository._sessions() as session:  # noqa: SLF001 - persistence invariant
+        active_count = await session.scalar(
+            select(func.count())
+            .select_from(CredentialMetadata)
+            .where(CredentialMetadata.cell_id == "cell-alpha", CredentialMetadata.active.is_(True))
+        )
+    assert active_count == 1
+    with pytest.raises(ImmutableMetadataConflict, match="cannot be reversed"):
+        await repository.record_credential_metadata(
+            operation_id=operation.id,
+            **claim_args,
+            cell_id="cell-alpha",
+            version=2,
+            credential_digest=next_digest,
+            active=False,
+        )
+    with pytest.raises(ImmutableMetadataConflict, match="identity"):
+        await repository.record_credential_metadata(
+            operation_id=operation.id,
+            **claim_args,
+            cell_id="cell-alpha",
+            version=2,
+            credential_digest="f" * 64,
+            active=True,
+        )
 
 
 @pytest.mark.asyncio

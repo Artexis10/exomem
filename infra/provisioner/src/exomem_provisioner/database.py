@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import Column, MetaData, String, Table, delete, func, insert, select
+from sqlalchemy import Column, MetaData, String, Table, delete, func, insert, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -60,17 +60,26 @@ class ProvisionerDatabase:
     async def ready(self) -> bool:
         try:
             async with self.session_factory() as session:
-                revision = await session.scalar(select(self._revision_table.c.version_num))
+                revisions = list(await session.scalars(select(self._revision_table.c.version_num)))
                 if self._is_sqlite:
                     role = self._settings.database_role
                     schema = self._settings.database_schema
+                    schema_owner = self._settings.database_role
                 else:
                     role = await session.scalar(select(func.current_user()))
                     schema = await session.scalar(select(func.current_schema()))
+                    schema_owner = await session.scalar(
+                        text(
+                            "SELECT pg_get_userbyid(nspowner) "
+                            "FROM pg_namespace WHERE nspname = :schema"
+                        ),
+                        {"schema": self._settings.database_schema},
+                    )
             return (
-                revision == DATABASE_REVISION
+                revisions == [DATABASE_REVISION]
                 and role == self._settings.database_role
                 and schema == self._settings.database_schema
+                and schema_owner == self._settings.database_role
             )
         except Exception:  # noqa: BLE001 - readiness is deliberately content-free
             return False

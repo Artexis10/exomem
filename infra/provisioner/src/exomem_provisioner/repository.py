@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -82,12 +82,19 @@ def _claim_condition(claimed_at: datetime):
     )
 
 
-def _claim_statement(claimed_at: datetime):
+def _claim_candidate_statement(claimed_at: datetime):
     return (
-        select(Operation)
+        select(Operation.id, Operation.tenant_id)
         .where(_claim_condition(claimed_at))
         .order_by(Operation.created_at, Operation.id)
         .limit(1)
+    )
+
+
+def _claim_statement(operation_id: str, claimed_at: datetime):
+    return (
+        select(Operation)
+        .where(Operation.id == operation_id, _claim_condition(claimed_at))
         .with_for_update(skip_locked=True)
     )
 
@@ -169,6 +176,75 @@ def _require_active_claim(
     ):
         raise ClaimConflict("worker no longer owns an active operation claim")
     return operation
+
+
+async def _database_now(session: AsyncSession, explicit: datetime | None) -> datetime:
+    if explicit is not None:
+        return _as_utc(explicit)
+    if session.get_bind().dialect.name == "postgresql":
+        current = await session.scalar(select(func.clock_timestamp()))
+        if current is None:
+            raise RuntimeError("PostgreSQL did not return its current clock time")
+        return _as_utc(current)
+    return datetime.now(UTC)
+
+
+async def _lock_operation_fence_first(
+    session: AsyncSession,
+    operation_id: str,
+) -> Operation:
+    tenant_id = await session.scalar(
+        select(Operation.tenant_id).where(Operation.id == operation_id)
+    )
+    if tenant_id is None:
+        raise ClaimConflict("operation does not exist")
+    fence = await session.get(TenantFence, tenant_id, with_for_update=True)
+    operation = await session.get(Operation, operation_id, with_for_update=True)
+    if operation is None:
+        raise ClaimConflict("operation does not exist")
+    if fence is None or fence.fence_generation != operation.fence_generation:
+        raise StaleFence("active claim fence is stale")
+    return operation
+
+
+async def _lock_active_claim(
+    session: AsyncSession,
+    operation_id: str,
+    *,
+    worker_id: str,
+    claim_token: str,
+    claim_generation: int,
+    now: datetime | None,
+) -> tuple[Operation, datetime]:
+    operation = await _lock_operation_fence_first(session, operation_id)
+    checked_at = await _database_now(session, now)
+    return (
+        _require_active_claim(
+            operation,
+            worker_id=worker_id,
+            claim_token=claim_token,
+            claim_generation=claim_generation,
+            now=checked_at,
+        ),
+        checked_at,
+    )
+
+
+def _require_operation_identity(
+    operation: Operation,
+    *,
+    tenant_id: str,
+    cell_id: str | None,
+    provider_operation_id: str,
+    provider_fence_generation: int,
+) -> None:
+    if (
+        operation.tenant_id != tenant_id
+        or operation.cell_id != cell_id
+        or operation.provider_operation_id != provider_operation_id
+        or operation.provider_fence_generation != provider_fence_generation
+    ):
+        raise ImmutableMetadataConflict("side effect does not match active operation identity")
 
 
 class OperationRepository:
@@ -303,9 +379,9 @@ class OperationRepository:
         *,
         now: datetime | None = None,
     ) -> OperationSnapshot | None:
-        claimed_at = now or datetime.now(UTC)
         claim_token = secrets.token_urlsafe(32)
         async with self._sessions.begin() as session:
+            claimed_at = await _database_now(session, now)
             if session.get_bind().dialect.name == "sqlite":
                 candidate = (
                     select(Operation.id)
@@ -333,9 +409,19 @@ class OperationRepository:
                 operation = await session.get(Operation, operation_id)
                 if operation is None:
                     return None
+                fence = await session.get(TenantFence, operation.tenant_id)
+                if fence is None or fence.fence_generation != operation.fence_generation:
+                    raise StaleFence("active claim fence is stale")
                 return _operation_snapshot(operation)
-            operation = await session.scalar(_claim_statement(claimed_at))
+            candidate = (await session.execute(_claim_candidate_statement(claimed_at))).first()
+            if candidate is None:
+                return None
+            fence = await session.get(TenantFence, candidate.tenant_id, with_for_update=True)
+            claimed_at = await _database_now(session, now)
+            operation = await session.scalar(_claim_statement(candidate.id, claimed_at))
             if operation is None:
+                return None
+            if fence is None or fence.fence_generation != operation.fence_generation:
                 return None
             operation.state = OperationState.CLAIMED
             operation.checkpoint = "effect-prepared"
@@ -343,6 +429,7 @@ class OperationRepository:
             operation.claim_token = claim_token
             operation.claim_generation += 1
             operation.claim_expires_at = claimed_at + timedelta(seconds=self.claim_seconds)
+            operation.updated_at = claimed_at
             await session.flush()
             return _operation_snapshot(operation)
 
@@ -355,14 +442,14 @@ class OperationRepository:
         claim_generation: int,
         now: datetime | None = None,
     ) -> OperationSnapshot:
-        renewed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, renewed_at = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=renewed_at,
+                now=now,
             )
             operation.claim_expires_at = renewed_at + timedelta(seconds=self.claim_seconds)
             await session.flush()
@@ -377,14 +464,14 @@ class OperationRepository:
         claim_generation: int,
         now: datetime | None = None,
     ) -> None:
-        checked_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, _ = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=checked_at,
+                now=now,
             )
             operation.checkpoint = "effect-applied"
 
@@ -399,14 +486,14 @@ class OperationRepository:
         retry_after_seconds: int,
         now: datetime | None = None,
     ) -> OperationSnapshot:
-        pending_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, pending_at = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=pending_at,
+                now=now,
             )
             operation.state = OperationState.PENDING
             operation.checkpoint = checkpoint
@@ -432,14 +519,14 @@ class OperationRepository:
         code: str,
         now: datetime | None = None,
     ) -> OperationSnapshot:
-        failed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, failed_at = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=failed_at,
+                now=now,
             )
             operation.state = OperationState.ERROR
             operation.checkpoint = "failed"
@@ -461,14 +548,14 @@ class OperationRepository:
         retry_after_seconds: int,
         now: datetime | None = None,
     ) -> OperationSnapshot:
-        failed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, failed_at = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=failed_at,
+                now=now,
             )
             attempts = int(operation.progress.get("failure_attempts", 0)) + 1
             operation.progress = {**operation.progress, "failure_attempts": attempts}
@@ -498,14 +585,14 @@ class OperationRepository:
         claim_generation: int,
         now: datetime | None = None,
     ) -> OperationSnapshot:
-        completed_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            operation = _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, completed_at = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=completed_at,
+                now=now,
             )
             operation.result_ciphertext = self._codec.encrypt_json(
                 result,
@@ -540,14 +627,14 @@ class OperationRepository:
         provider_fence_generation: int,
     ) -> ResourceSnapshot:
         digest = _reference_digest(recoverable_reference)
-        checked_at = now or datetime.now(UTC)
         async with self._sessions.begin() as session:
-            _require_active_claim(
-                await session.get(Operation, operation_id, with_for_update=True),
+            operation, _ = await _lock_active_claim(
+                session,
+                operation_id,
                 worker_id=worker_id,
                 claim_token=claim_token,
                 claim_generation=claim_generation,
-                now=checked_at,
+                now=now,
             )
             existing = await session.scalar(
                 select(Resource).where(
@@ -564,6 +651,13 @@ class OperationRepository:
                     or existing.provider_fence_generation != provider_fence_generation
                 ):
                     raise ImmutableMetadataConflict("resource provider metadata is immutable")
+                _require_operation_identity(
+                    operation,
+                    tenant_id=existing.tenant_id,
+                    cell_id=existing.cell_id,
+                    provider_operation_id=existing.provider_operation_id,
+                    provider_fence_generation=existing.provider_fence_generation,
+                )
                 return ResourceSnapshot(
                     existing.id,
                     existing.operation_id,
@@ -571,6 +665,13 @@ class OperationRepository:
                     existing.provider_operation_id,
                     existing.provider_fence_generation,
                 )
+            _require_operation_identity(
+                operation,
+                tenant_id=tenant_id,
+                cell_id=cell_id,
+                provider_operation_id=provider_operation_id,
+                provider_fence_generation=provider_fence_generation,
+            )
             resource = Resource(
                 operation_id=operation_id,
                 tenant_id=tenant_id,
@@ -598,12 +699,35 @@ class OperationRepository:
         self,
         *,
         operation_id: str,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
         cell_id: str,
         version: int,
         credential_digest: str,
         active: bool,
     ) -> None:
         async with self._sessions.begin() as session:
+            operation, _ = await _lock_active_claim(
+                session,
+                operation_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=now,
+            )
+            if operation.cell_id != cell_id:
+                raise ImmutableMetadataConflict(
+                    "side effect does not match active operation identity"
+                )
+            credentials = list(
+                await session.scalars(
+                    select(CredentialMetadata)
+                    .where(CredentialMetadata.cell_id == cell_id)
+                    .with_for_update()
+                )
+            )
             existing = await session.scalar(
                 select(CredentialMetadata).where(
                     CredentialMetadata.cell_id == cell_id,
@@ -614,10 +738,24 @@ class OperationRepository:
                 if (
                     existing.operation_id != operation_id
                     or existing.credential_digest != credential_digest
-                    or existing.active != active
                 ):
-                    raise ImmutableMetadataConflict("credential metadata is immutable")
+                    raise ImmutableMetadataConflict("credential metadata identity is immutable")
+                if existing.active and not active:
+                    raise ImmutableMetadataConflict(
+                        "active credential promotion cannot be reversed"
+                    )
+                if active and not existing.active:
+                    for credential in credentials:
+                        if credential.id != existing.id and credential.active:
+                            credential.active = False
+                    await session.flush()
+                    existing.active = True
                 return
+            if active:
+                for credential in credentials:
+                    if credential.active:
+                        credential.active = False
+                await session.flush()
             session.add(
                 CredentialMetadata(
                     operation_id=operation_id,
@@ -632,6 +770,10 @@ class OperationRepository:
         self,
         *,
         operation_id: str,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
         tenant_id: str,
         cell_id: str,
         export_reference: str,
@@ -642,6 +784,14 @@ class OperationRepository:
         provider_fence_generation: int,
     ) -> None:
         async with self._sessions.begin() as session:
+            operation, _ = await _lock_active_claim(
+                session,
+                operation_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=now,
+            )
             existing = await session.scalar(
                 select(ExportRecord).where(ExportRecord.operation_id == operation_id)
             )
@@ -658,7 +808,21 @@ class OperationRepository:
                     or existing.provider_fence_generation != provider_fence_generation
                 ):
                     raise ImmutableMetadataConflict("export provider metadata is immutable")
+                _require_operation_identity(
+                    operation,
+                    tenant_id=existing.tenant_id,
+                    cell_id=existing.cell_id,
+                    provider_operation_id=existing.provider_operation_id,
+                    provider_fence_generation=existing.provider_fence_generation,
+                )
                 return
+            _require_operation_identity(
+                operation,
+                tenant_id=tenant_id,
+                cell_id=cell_id,
+                provider_operation_id=provider_operation_id,
+                provider_fence_generation=provider_fence_generation,
+            )
             session.add(
                 ExportRecord(
                     operation_id=operation_id,
@@ -681,6 +845,10 @@ class OperationRepository:
         self,
         *,
         operation_id: str,
+        worker_id: str,
+        claim_token: str,
+        claim_generation: int,
+        now: datetime | None = None,
         tenant_id: str,
         cell_id: str,
         backup_reference: str,
@@ -689,6 +857,14 @@ class OperationRepository:
         provider_fence_generation: int,
     ) -> None:
         async with self._sessions.begin() as session:
+            operation, _ = await _lock_active_claim(
+                session,
+                operation_id,
+                worker_id=worker_id,
+                claim_token=claim_token,
+                claim_generation=claim_generation,
+                now=now,
+            )
             existing = await session.scalar(
                 select(BackupRecord).where(BackupRecord.operation_id == operation_id)
             )
@@ -703,7 +879,21 @@ class OperationRepository:
                     or existing.provider_fence_generation != provider_fence_generation
                 ):
                     raise ImmutableMetadataConflict("backup provider metadata is immutable")
+                _require_operation_identity(
+                    operation,
+                    tenant_id=existing.tenant_id,
+                    cell_id=existing.cell_id,
+                    provider_operation_id=existing.provider_operation_id,
+                    provider_fence_generation=existing.provider_fence_generation,
+                )
                 return
+            _require_operation_identity(
+                operation,
+                tenant_id=tenant_id,
+                cell_id=cell_id,
+                provider_operation_id=provider_operation_id,
+                provider_fence_generation=provider_fence_generation,
+            )
             session.add(
                 BackupRecord(
                     operation_id=operation_id,

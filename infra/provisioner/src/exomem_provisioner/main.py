@@ -12,6 +12,11 @@ from .logging import configure_content_free_logging
 from .repository import OperationRepository
 
 
+def _require_production_database(settings: ProvisionerSettings) -> None:
+    if not settings.database_url.get_secret_value().startswith("postgresql+asyncpg://"):
+        raise RuntimeError("PostgreSQL is required for production provisioner startup")
+
+
 def _create_app(settings: ProvisionerSettings):
     database = ProvisionerDatabase(settings)
     repository = OperationRepository(
@@ -34,12 +39,14 @@ def _create_app(settings: ProvisionerSettings):
 def create_app_from_env():
     configure_content_free_logging()
     settings = ProvisionerSettings()  # type: ignore[call-arg]  # required values come from env
+    _require_production_database(settings)
     return _create_app(settings)
 
 
 def run_api() -> None:
     configure_content_free_logging()
     settings = ProvisionerSettings()  # type: ignore[call-arg]  # required values come from env
+    _require_production_database(settings)
     uvicorn.run(
         _create_app(settings),
         host="0.0.0.0",

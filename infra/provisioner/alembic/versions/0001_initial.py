@@ -35,9 +35,6 @@ def _foreign_key(table: str, column: str) -> str:
 def upgrade() -> None:
     schema = _schema()
     role = _role()
-    if schema is not None and role is not None:
-        op.execute(sa.text(f'CREATE SCHEMA IF NOT EXISTS "{schema}" AUTHORIZATION "{role}"'))
-
     action = sa.Enum(
         "PROVISION",
         "HEALTH",
@@ -171,6 +168,15 @@ def upgrade() -> None:
         sa.CheckConstraint("length(credential_digest) = 64", name="ck_credential_digest"),
         sa.UniqueConstraint("cell_id", "version", name="uq_credential_cell_version"),
         schema=schema,
+    )
+    op.create_index(
+        "uq_credential_one_active_per_cell",
+        "credential_metadata",
+        ["cell_id"],
+        unique=True,
+        schema=schema,
+        postgresql_where=sa.text("active"),
+        sqlite_where=sa.text("active = 1"),
     )
     for table, hash_column, size_column in (
         ("exports", "archive_sha256", True),

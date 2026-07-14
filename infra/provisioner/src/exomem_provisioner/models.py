@@ -20,6 +20,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
@@ -159,6 +160,13 @@ class CredentialMetadata(Base):
         UniqueConstraint("cell_id", "version", name="uq_credential_cell_version"),
         CheckConstraint("version >= 1", name="ck_credential_version"),
         CheckConstraint("length(credential_digest) = 64", name="ck_credential_digest"),
+        Index(
+            "uq_credential_one_active_per_cell",
+            "cell_id",
+            unique=True,
+            postgresql_where=text("active"),
+            sqlite_where=text("active = 1"),
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))

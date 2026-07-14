@@ -6,7 +6,7 @@ import re
 from logging.config import fileConfig
 from urllib.parse import unquote, urlsplit
 
-from sqlalchemy import engine_from_config, pool
+from sqlalchemy import engine_from_config, pool, text
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
@@ -70,6 +70,19 @@ def _run_migrations(connection: Connection) -> None:
         version_table_schema=provisioner_schema,
     )
     with context.begin_transaction():
+        if provisioner_schema is not None and provisioner_role is not None:
+            connection.execute(
+                text(
+                    f'CREATE SCHEMA IF NOT EXISTS "{provisioner_schema}" '
+                    f'AUTHORIZATION "{provisioner_role}"'
+                )
+            )
+            owner = connection.scalar(
+                text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = :schema"),
+                {"schema": provisioner_schema},
+            )
+            if owner != provisioner_role:
+                raise RuntimeError("schema owner does not match dedicated runtime role")
         context.run_migrations()
 
 
