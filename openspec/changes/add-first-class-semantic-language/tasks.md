@@ -22,7 +22,7 @@
 - [x] 3.4 Implement one pure semantic contract result over fields, units, categories, typed relations, schema findings, page lifecycle, and review disposition, with precommit-blocking and posthoc-nonblocking caller modes.
 - [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
 - [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
-- [ ] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
+- [x] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
 - [ ] 3.8 Grandfather existing pages into activation/review using stable finding keys and the mechanical after-errors-subset-of-before-errors rule while preventing invalidated accepted dispositions.
 
 ## 4. Derived Unit Indexes And Freshness
