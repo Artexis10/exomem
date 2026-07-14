@@ -327,7 +327,13 @@ def _runtime_environment(release: dict[str, Any]) -> list[str]:
     return arguments
 
 
-def _probe_contract(port: int, credential: str, *, timeout_seconds: int = 60) -> dict[str, Any]:
+def _probe_contract(
+    port: int,
+    credential: str,
+    *,
+    protocol: str,
+    timeout_seconds: int = 60,
+) -> dict[str, Any]:
     principal = base64.urlsafe_b64encode(hashlib.sha256(b"release-verifier").digest())
     principal = principal.rstrip(b"=").decode("ascii")
     deadline = time.monotonic() + timeout_seconds
@@ -338,7 +344,7 @@ def _probe_contract(port: int, credential: str, *, timeout_seconds: int = 60) ->
             headers={
                 "Authorization": f"Bearer {credential}",
                 "X-Exomem-Cell-Id": "release-verification-cell",
-                "X-Exomem-Protocol-Version": "1",
+                "X-Exomem-Protocol-Version": protocol,
                 "X-Exomem-Request-Id": str(uuid.uuid4()),
                 "X-Exomem-Principal-Scope": principal,
             },
@@ -476,7 +482,11 @@ def probe_runtime_contract(image: str, release: dict[str, Any], fixture: dict[st
                 )
                 port_output = _run(["docker", "port", container, "8765/tcp"]).stdout.strip()
                 port = int(port_output.rsplit(":", 1)[1])
-                observed = _probe_contract(port, credential)
+                observed = _probe_contract(
+                    port,
+                    credential,
+                    protocol=str(release["hostedProtocol"]),
+                )
                 if observed != fixture:
                     raise ValueError(
                         "published runtime /contract response differs from Substrate fixture"

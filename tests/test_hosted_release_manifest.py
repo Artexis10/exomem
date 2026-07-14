@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import importlib.util
+import io
 import json
 import os
 import re
@@ -230,6 +231,39 @@ def test_image_provenance_must_bind_source_target_and_build_time() -> None:
         ][key] = value
         with pytest.raises(ValueError):
             verifier.validate_image_provenance(release, changed)
+
+
+def test_live_contract_probe_uses_the_selected_hosted_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    verifier = _verifier_module()
+    observed: dict[str, str | None] = {}
+
+    class Response(io.BytesIO):
+        status = 200
+
+        class Headers:
+            @staticmethod
+            def get_content_type() -> str:
+                return "application/json"
+
+        headers = Headers()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args: object) -> None:
+            self.close()
+
+    def open_request(request, *, timeout: int):
+        assert timeout == 3
+        observed["protocol"] = request.get_header("X-exomem-protocol-version")
+        return Response(b'{"schema_version":1}')
+
+    monkeypatch.setattr(verifier.urllib.request, "urlopen", open_request)
+
+    assert verifier._probe_contract(8765, "credential", protocol="2") == {"schema_version": 1}
+    assert observed == {"protocol": "2"}
 
 
 @pytest.mark.skipif(
