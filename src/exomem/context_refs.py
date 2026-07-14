@@ -9,7 +9,6 @@ from __future__ import annotations
 import hashlib
 from urllib.parse import quote
 
-
 SCHEME = "exomem"
 
 
@@ -44,3 +43,8 @@ def proposal_ref(sources: list[str]) -> str:
     normalized = "\n".join(_clean_path(s) for s in sources)
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
     return f"{SCHEME}://proposal/{digest}"
+
+
+def adoption_run_ref(run_id: str) -> str:
+    """Reference a durable adoption run by its stable id."""
+    return f"{SCHEME}://adoption/run/{_encode(run_id)}"

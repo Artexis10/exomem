@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -388,29 +389,48 @@ def _unique_import_path(folder: Path, stem: str, reserved: set[Path]) -> Path:
 
 
 
-def _copy_as_sources(
-    root: Path,
-    *,
-    selected_paths: list[str] | None,
-    today: dt.date,
-) -> dict:
-    _require_kb(root)
-    if not selected_paths:
-        raise AdoptError(
-            "MISSING_SELECTION",
-            "copy-as-sources requires selected_paths; scan first, then pass explicit files",
-        )
+@dataclass
+class ImportItem:
+    """One resolved legacy file staged for a governed Sources import.
 
+    Produced by ``plan_import_items`` (pure: read + hash + render, no writes) and
+    consumed by ``commit_import_items`` (the single batch write). The two halves
+    let the stateless ``copy-as-sources`` mode and the durable adoption run share
+    one code path with identical behavior.
+    """
+
+    original_path: str  # vault-relative path of the untouched original
+    target_rel: str  # vault-relative path of the governed Sources copy
+    target: Path  # absolute destination
+    sha256: str
+    bytes: int
+    title: str
+    content: str  # fully rendered imported-Source markdown
+    slug_warning: str | None = None
+
+
+def plan_import_items(
+    root: Path,
+    selected_paths: list[str] | None,
+    *,
+    today: dt.date,
+) -> tuple[list[ImportItem], list[dict]]:
+    """Resolve, read, hash, and render each selected legacy file. Pure (no writes).
+
+    Returns ``(items, skipped)`` where ``skipped`` carries per-path resolution
+    failures (``UNSUPPORTED_IMPORT_TYPE`` / ``ALREADY_GOVERNED`` / vault-path
+    errors). Unique target reservation checks the live disk plus the in-batch
+    reservation set, so a target already present out-of-band is re-resolved to a
+    fresh unique name — the same collision handling ``_copy_as_sources`` used.
+    """
     kb = kb_root(root)
     folder = kb / "Sources" / IMPORTED_SOURCE_FOLDER
-    folder.mkdir(parents=True, exist_ok=True)
     date_iso = today.isoformat()
-    copied: list[dict] = []
+    items: list[ImportItem] = []
     skipped: list[dict] = []
-    writes: list[PlannedWrite] = []
     reserved_targets: set[Path] = set()
 
-    for raw in selected_paths:
+    for raw in selected_paths or []:
         resolved = _resolve_selected_text_file(root, raw)
         if isinstance(resolved, dict):
             skipped.append(resolved)
@@ -422,12 +442,14 @@ def _copy_as_sources(
         title = _title_from_text(abs_path, text)
         slug, slug_warning = slugify_with_truncation_check(title)
         target = _unique_import_path(folder, f"{date_iso}-{slug}", reserved_targets)
-        rel_target = target.relative_to(root).as_posix()
-        if slug_warning:
-            skipped.append({"path": rel, "code": "SLUG_TRUNCATED", "reason": slug_warning})
-        writes.append(
-            PlannedWrite(
-                path=target,
+        items.append(
+            ImportItem(
+                original_path=rel,
+                target_rel=target.relative_to(root).as_posix(),
+                target=target,
+                sha256=sha,
+                bytes=len(data),
+                title=title,
                 content=_render_imported_source(
                     title=title,
                     rel_original=rel,
@@ -436,21 +458,42 @@ def _copy_as_sources(
                     date_iso=date_iso,
                     content=text,
                 ),
+                slug_warning=slug_warning,
             )
         )
+    return items, skipped
+
+
+def commit_import_items(
+    root: Path,
+    items: list[ImportItem],
+    *,
+    today: dt.date,
+) -> dict:
+    """Write every planned import plus the Sources/top indexes and log in ONE batch.
+
+    Returns ``{"copied_sources": [...], "warnings": [...]}``. Raises nothing when
+    ``items`` is empty (callers decide whether that is an error).
+    """
+    if not items:
+        return {"copied_sources": [], "warnings": []}
+
+    kb = kb_root(root)
+    date_iso = today.isoformat()
+    writes: list[PlannedWrite] = []
+    copied: list[dict] = []
+    for item in items:
+        writes.append(PlannedWrite(path=item.target, content=item.content))
         copied.append(
             {
-                "original_path": rel,
-                "original_ref": context_refs.vault_ref(rel),
-                "source_path": rel_target,
-                "source_ref": context_refs.source_ref(rel_target),
-                "original_sha256": sha,
-                "original_bytes": len(data),
+                "original_path": item.original_path,
+                "original_ref": context_refs.vault_ref(item.original_path),
+                "source_path": item.target_rel,
+                "source_ref": context_refs.source_ref(item.target_rel),
+                "original_sha256": item.sha256,
+                "original_bytes": item.bytes,
             }
         )
-
-    if not copied:
-        return {"copied_sources": [], "skipped": skipped, "warnings": ["no importable files copied"]}
 
     sources_dir = kb / "Sources"
     post_counts = indexes._count_sources(sources_dir)
@@ -530,7 +573,87 @@ def _copy_as_sources(
         warnings.append(f"{kb_prefix()}log.md missing; skipped log entry")
 
     batch_atomic_write(writes, vault_root=root)
-    return {"copied_sources": copied, "skipped": skipped, "warnings": warnings}
+    return {"copied_sources": copied, "warnings": warnings}
+
+
+def _copy_as_sources(
+    root: Path,
+    *,
+    selected_paths: list[str] | None,
+    today: dt.date,
+) -> dict:
+    _require_kb(root)
+    if not selected_paths:
+        raise AdoptError(
+            "MISSING_SELECTION",
+            "copy-as-sources requires selected_paths; scan first, then pass explicit files",
+        )
+
+    items, skipped = plan_import_items(root, selected_paths, today=today)
+    for item in items:
+        if item.slug_warning:
+            skipped.append(
+                {"path": item.original_path, "code": "SLUG_TRUNCATED", "reason": item.slug_warning}
+            )
+    if not items:
+        return {"copied_sources": [], "skipped": skipped, "warnings": ["no importable files copied"]}
+
+    result = commit_import_items(root, items, today=today)
+    return {
+        "copied_sources": result["copied_sources"],
+        "skipped": skipped,
+        "warnings": result["warnings"],
+    }
+
+
+def _render_run_manifest(*, run_id: str, summary: dict, today: dt.date, rel_path: str) -> str:
+    lines = [
+        "---",
+        "type: adoption-run-manifest",
+        f"created: {today.isoformat()}",
+        f"run_id: {run_id}",
+        "status: active",
+        "tags: [adoption, onboarding]",
+        "---",
+        "",
+        "# Adoption Run Manifest",
+        "",
+        f"Saved at `{rel_path}` by `adoption_studio(action=\"finish\")`. Originals remain untouched.",
+        "",
+        "## Machine-Readable Summary",
+        "",
+        "```json",
+        json.dumps(summary, indent=2, sort_keys=True, ensure_ascii=False, default=str),
+        "```",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def run_manifest_writes(
+    root: Path,
+    *,
+    run_id: str,
+    summary: dict,
+    today: dt.date,
+) -> tuple[list[PlannedWrite], str, list[str]]:
+    """Planned writes for a durable adoption-run manifest under ``_Adoption/``.
+
+    Reuses ``_add_manifest_index_writes`` (the shared manifest index/log helper)
+    so the run manifest bumps Recent activity and the log exactly like the
+    stateless ``save-manifest`` mode. Returns ``(writes, rel_path, warnings)``;
+    the caller folds these into (or commits alongside) its own batch.
+    """
+    rel = f"{kb_prefix()}{ADOPTION_DIR}/{today.isoformat()}-adoption-run-{run_id}.md"
+    target = root / rel
+    writes: list[PlannedWrite] = [
+        PlannedWrite(
+            path=target,
+            content=_render_run_manifest(run_id=run_id, summary=summary, today=today, rel_path=rel),
+        )
+    ]
+    warnings = _add_manifest_index_writes(root=root, writes=writes, rel_path=rel, today=today)
+    return writes, rel, warnings
 
 
 def _source_wikilink_path(rel_path: str) -> str:
