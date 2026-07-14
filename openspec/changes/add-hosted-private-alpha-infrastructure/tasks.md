@@ -70,7 +70,7 @@
 - [ ] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
 - [ ] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
 - [ ] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
-- [ ] 8.5 Add default-deny ingress/egress, exact Traefik ingress selectors, restricted Pod Security, and platform-owned validating admission for images/privilege/host/cross-cell references.
+- [x] 8.5 Add default-deny ingress/egress, exact Traefik ingress selectors, restricted Pod Security, and platform-owned validating admission for images/privilege/host/cross-cell references.
 - [ ] 8.6 Add executable network-policy probes denying cell-to-cell, Kubernetes, Neon, B2, metadata, and unlabelled-platform access.
 
 ## 9. Implement the durable provisioner core

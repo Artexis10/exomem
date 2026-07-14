@@ -20,7 +20,7 @@ spec:
   entryPoints: [web]
   routes:
     - kind: Rule
-      match: Host(`{{ .Values.routes.controlHostname }}`) && PathPrefix(`/cells/{{ .Values.cellId }}/private/exomem/v1`)
+      match: Host(`{{ .Values.routes.controlHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/private/exomem/v1`) || PathPrefix(`/cells/{{ .Values.cellId }}/private/exomem/v1/`))
       middlewares:
         - name: {{ .Values.resourceName }}-strip-cell
       services:

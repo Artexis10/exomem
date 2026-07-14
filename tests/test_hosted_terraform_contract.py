@@ -73,6 +73,9 @@ def test_cloudflare_tunnel_has_exact_control_and_transfer_ingress() -> None:
     assert 'service = "http_status:404"' in cloudflare
     assert "var.control_hostname" in cloudflare
     assert "var.transfer_hostname" in cloudflare
+    expected_traefik = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
+    assert cloudflare.count(expected_traefik) == 2
+    assert "traefik.kube-system.svc.cluster.local" not in cloudflare
     assert cloudflare.count("cloudflare_dns_record") == 2
     assert 'type    = "CNAME"' in cloudflare
     assert "proxied = true" in cloudflare

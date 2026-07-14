@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -25,6 +26,7 @@ def _render(
     *,
     namespace: str,
     extra_args: tuple[str, ...] = (),
+    release_name: str = "contract-test",
 ) -> list[dict]:
     if HELM is None:
         pytest.skip("set HELM_BIN to run pinned Helm rendering")
@@ -32,7 +34,7 @@ def _render(
         [
             str(HELM),
             "template",
-            "contract-test",
+            release_name,
             str(chart),
             "--namespace",
             namespace,
@@ -93,17 +95,35 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
 
     runtime_class = _find(documents, "RuntimeClass", "exomem-storage-init")
     assert runtime_class["handler"] == "runc"
-    assert _find(documents, "ValidatingAdmissionPolicy", "exomem-storage-init-boundary")
-    tenant_admission = _find(
-        documents, "ValidatingAdmissionPolicy", "exomem-tenant-cell-boundary"
+    tenant_admission = _find(documents, "ValidatingAdmissionPolicy", "exomem-tenant-boundary")
+    assert "paramKind" not in tenant_admission["spec"]
+    tenant_binding = _find(
+        documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary"
     )
-    namespace_selector = tenant_admission["spec"]["matchConstraints"]["namespaceSelector"]
-    assert namespace_selector["matchLabels"] == {"exomem.io/tenant-cell": "true"}
+    assert "matchResources" not in tenant_binding["spec"]
+    assert "matchConditions" not in tenant_admission["spec"]
+    variables = tenant_admission["spec"]["variables"]
+    assert [variable["name"] for variable in variables] == [
+        "storageInit",
+        "tenantNamespace",
+        "inScope",
+    ]
+    assert "exomem-storage-init" in variables[0]["expression"]
+    assert "exomem.io/tenant-cell" in variables[1]["expression"]
+    assert all(
+        "!variables.inScope" in validation["expression"]
+        for validation in tenant_admission["spec"]["validations"]
+    )
     admission_text = json.dumps(tenant_admission)
-    assert "@sha256:" in admission_text
+    assert "namespaceObject.metadata.annotations['exomem.io/approved-image']" in admission_text
     assert "runAsUser == 10001" in admission_text
     assert "persistentVolumeClaim.claimName" in admission_text
     assert "secret.secretName" in admission_text
+    assert "configMap.name" in admission_text
+    assert "size(object.spec.initContainers)" in admission_text
+    assert "has(object.spec.initContainers)" in admission_text
+    assert "has(dyn(volume.emptyDir).sizeLimit)" in admission_text
+    assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
 
     contract = json.loads(CONTRACT.read_text(encoding="utf-8"))
     cronjobs = {
@@ -138,6 +158,19 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     policy = _find(documents, "ConfigMap", "exomem-hosted-scheduler-contract")
     rendered_contract = json.loads(policy["data"]["contract.json"])
     assert rendered_contract == contract
+    contract_sha = hashlib.sha256(CONTRACT.read_bytes()).hexdigest()
+    assert policy["metadata"]["annotations"]["exomem.io/contract-sha256"] == contract_sha
+    assert all(
+        item["metadata"]["annotations"]["exomem.io/contract-sha256"] == contract_sha
+        for item in cronjobs.values()
+    )
+    assert contract["authentication"] == {
+        "scheme": "bearer",
+        "schedulerEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+        "receiverActiveEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET",
+        "receiverPreviousEnvironmentVariable": "EXOMEM_HOSTED_SCHEDULER_SECRET_PREVIOUS",
+        "maxReceiverVersions": 2,
+    }
     assert rendered_contract["observability"] == {
         "contentFree": True,
         "attemptCounterMetric": "exomem_hosted_scheduler_attempts_total",
@@ -147,6 +180,31 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "missedRunAlertAfterSeconds": 180,
         "consecutiveFailureAlertThreshold": 2,
     }
+
+
+def test_platform_rejects_scheduler_contract_sha_drift() -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(PLATFORM),
+            "--namespace",
+            "exomem-platform",
+            "--values",
+            str(PLATFORM / "values.validation.yaml"),
+            "--set",
+            f"scheduler.contractSha256={'0' * 64}",
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "scheduler contract SHA-256 mismatch" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -163,6 +221,25 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
 
     workload = _find(documents, expected_kind, "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init")
+    namespace = _find(documents, "Namespace", "cell-alpha-test")
+    assert namespace["metadata"]["labels"] == {
+        "exomem.io/tenant-cell": "true",
+        "exomem.io/cell-resource": "cell-alpha",
+        "pod-security.kubernetes.io/enforce": "restricted",
+        "pod-security.kubernetes.io/enforce-version": "v1.35",
+        "pod-security.kubernetes.io/audit": "restricted",
+        "pod-security.kubernetes.io/audit-version": "v1.35",
+        "pod-security.kubernetes.io/warn": "restricted",
+        "pod-security.kubernetes.io/warn-version": "v1.35",
+    }
+    assert namespace["metadata"]["annotations"] == {
+        "helm.sh/resource-policy": "keep",
+        "exomem.io/resource-name": "cell-alpha",
+        "exomem.io/approved-image": "ghcr.io/artexis10/exomem@sha256:" + "a" * 64,
+        "exomem.io/pvc-name": "cell-alpha-data",
+        "exomem.io/credentials-secret-name": "cell-alpha-credentials",
+        "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
+    }
     if expected_kind == "Job":
         pod = workload["spec"]["template"]["spec"]
         assert pod["runtimeClassName"] == "exomem-storage-init"
@@ -177,6 +254,7 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         ]
     else:
         pod = workload["spec"]["template"]["spec"]
+        assert pod["restartPolicy"] == "Always"
         assert "runtimeClassName" not in pod
         assert "fsGroup" not in pod.get("securityContext", {})
         assert len(pod.get("initContainers", [])) == 0
@@ -189,6 +267,11 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert security["capabilities"]["drop"] == ["ALL"]
         env = {item["name"]: item.get("value") for item in container["env"]}
         assert env["EXOMEM_HOSTED_CELL_ID"] == "alpha-test-original"
+        assert env["EXOMEM_HOSTED_VAULT_ID"] == "vault-alpha-original"
+        assert env["EXOMEM_HOSTED_RUNTIME_UID"] == "10001"
+        assert env["EXOMEM_HOSTED_RUNTIME_GID"] == "10001"
+        assert env["EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN"] == "https://substratesystems.io"
+        assert "EXOMEM_HOSTED_BROWSER_ORIGIN" not in env
         assert env["EXOMEM_HOSTED_STORAGE_LIMIT_BYTES"] == "5368709120"
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
         assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
@@ -204,6 +287,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         )
         assert credentials["secret"]["defaultMode"] == 0o444
         assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
+        assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
+        assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 
     network_policies = [item for item in documents if item.get("kind") == "NetworkPolicy"]
     assert len(network_policies) >= (2 if expected_kind == "StatefulSet" else 1)
@@ -240,8 +325,12 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
     transfer = _find(documents, "IngressRoute", "cell-alpha-transfer")
     assert control["spec"]["routes"][0]["match"] == (
         "Host(`control.example.test`) && "
-        "PathPrefix(`/cells/alpha-test-original/private/exomem/v1`)"
+        "(Path(`/cells/alpha-test-original/private/exomem/v1`) || "
+        "PathPrefix(`/cells/alpha-test-original/private/exomem/v1/`))"
     )
+    control_match = control["spec"]["routes"][0]["match"]
+    assert "PathPrefix(`/cells/alpha-test-original/private/exomem/v1`)" not in control_match
+    assert "/private/exomem/v10" not in control_match
     assert transfer["spec"]["routes"][0]["match"] == (
         "Host(`transfer.example.test`) && "
         "(Path(`/cells/alpha-test-original/public/exomem/v2/transfers/upload`) || "
@@ -256,3 +345,26 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
     rendered_text = json.dumps(documents).lower()
     assert "email" not in rendered_text
     assert "owner-name" not in rendered_text
+
+
+def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> None:
+    documents = _render(
+        PLATFORM,
+        PLATFORM / "values.validation.yaml",
+        namespace="exomem-platform",
+        release_name="exomem-platform",
+    )
+    traefik = next(
+        document
+        for document in documents
+        if document.get("kind") == "Service"
+        and document.get("metadata", {}).get("name") == "exomem-platform-traefik"
+    )
+    assert traefik["spec"]["ports"] == [
+        {"name": "web", "port": 80, "protocol": "TCP", "targetPort": "web"}
+    ]
+    target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
+    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(
+        encoding="utf-8"
+    )
+    assert cloudflare.count(target) == 2

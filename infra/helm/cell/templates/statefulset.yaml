@@ -21,6 +21,7 @@ spec:
     spec:
       serviceAccountName: {{ .Values.resourceName }}
       automountServiceAccountToken: false
+      restartPolicy: Always
       terminationGracePeriodSeconds: 30
       securityContext:
         seccompProfile:
@@ -43,6 +44,12 @@ spec:
               value: "1"
             - name: EXOMEM_HOSTED_CELL_ID
               value: {{ .Values.cellId | quote }}
+            - name: EXOMEM_HOSTED_VAULT_ID
+              value: {{ .Values.vaultId | quote }}
+            - name: EXOMEM_HOSTED_RUNTIME_UID
+              value: {{ .Values.runtimeUid | quote }}
+            - name: EXOMEM_HOSTED_RUNTIME_GID
+              value: {{ .Values.runtimeGid | quote }}
             - name: EXOMEM_VAULT_PATH
               value: /var/lib/exomem/vault
             - name: EXOMEM_HOSTED_STATE_ROOT
@@ -67,7 +74,7 @@ spec:
               value: {{ printf "%.0f" .Values.workerLimit | quote }}
             - name: EXOMEM_HOSTED_FEATURE_GRANTS
               value: {{ .Values.featureGrants | quote }}
-            - name: EXOMEM_HOSTED_BROWSER_ORIGIN
+            - name: EXOMEM_HOSTED_TRANSFER_BROWSER_ORIGIN
               value: {{ .Values.browserOrigin | quote }}
             - name: EXOMEM_HOSTED_TRANSFER_HOST
               value: {{ .Values.transferHostname | quote }}

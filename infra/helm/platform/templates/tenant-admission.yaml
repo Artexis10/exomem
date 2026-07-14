@@ -1,0 +1,199 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-tenant-boundary
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods"]
+  variables:
+    - name: storageInit
+      expression: >-
+        has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init'
+    - name: tenantNamespace
+      expression: >-
+        has(namespaceObject.metadata.labels) &&
+        'exomem.io/tenant-cell' in namespaceObject.metadata.labels &&
+        namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true'
+    - name: inScope
+      expression: variables.storageInit || variables.tenantNamespace
+  validations:
+    - expression: >-
+        !variables.inScope ||
+        (
+        has(namespaceObject.metadata.labels) &&
+        namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true' &&
+        has(namespaceObject.metadata.annotations) &&
+        'exomem.io/resource-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/approved-image' in namespaceObject.metadata.annotations &&
+        'exomem.io/pvc-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/credentials-secret-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/init-request-configmap-name' in namespaceObject.metadata.annotations &&
+        has(object.metadata.labels) &&
+        'exomem.io/cell' in object.metadata.labels &&
+        object.metadata.labels['exomem.io/cell'] == namespaceObject.metadata.annotations['exomem.io/resource-name'] &&
+        object.spec.serviceAccountName == namespaceObject.metadata.annotations['exomem.io/resource-name'] &&
+        object.spec.automountServiceAccountToken == false)
+      message: The pod must match its platform-owned tenant namespace contract.
+    - expression: >-
+        !variables.inScope ||
+        (
+        (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
+        (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
+        (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
+        !has(object.spec.nodeName) && !has(object.spec.hostAliases))
+      message: Tenant pods cannot use host access or node selection.
+    - expression: >-
+        !variables.inScope ||
+        (
+        has(object.spec.securityContext) &&
+        has(object.spec.securityContext.seccompProfile) &&
+        object.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+        !has(object.spec.securityContext.fsGroup) &&
+        !has(object.spec.securityContext.fsGroupChangePolicy) &&
+        !has(object.spec.securityContext.runAsUser) &&
+        !has(object.spec.securityContext.runAsGroup) &&
+        !has(object.spec.securityContext.supplementalGroups) &&
+        !has(object.spec.securityContext.sysctls))
+      message: Tenant pod security context must be the exact runtime-default profile.
+    - expression: >-
+        !variables.inScope ||
+        ((has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init' &&
+          object.spec.restartPolicy == 'Never') ||
+          ((!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') &&
+            (!has(object.spec.restartPolicy) || object.spec.restartPolicy == 'Always')))
+      message: Tenant pod restart policy must match its lifecycle mode.
+    - expression: >-
+        !variables.inScope ||
+        (
+        (!has(object.spec.initContainers) || size(object.spec.initContainers) == 0) &&
+        size(object.spec.containers) == 1)
+      message: Tenant pods cannot use sidecars or init containers.
+    - expression: >-
+        !variables.inScope ||
+        (
+        object.spec.containers[0].name == 'exomem' &&
+        object.spec.containers[0].image == namespaceObject.metadata.annotations['exomem.io/approved-image'] &&
+        object.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+        object.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+        object.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+        (!has(object.spec.containers[0].securityContext.privileged) ||
+          object.spec.containers[0].securityContext.privileged == false) &&
+        size(object.spec.containers[0].securityContext.capabilities.drop) == 1 &&
+        object.spec.containers[0].securityContext.capabilities.drop[0] == 'ALL')
+      message: Tenant pods must use the exact approved immutable image and base security context.
+    - expression: >-
+        !variables.inScope ||
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (
+        !has(object.spec.containers[0].command) &&
+        object.spec.containers[0].args == ['hosted', 'init', '--request-file', '/run/exomem/operator-requests/init.json'] &&
+        (!has(object.spec.containers[0].env) || size(object.spec.containers[0].env) == 0) &&
+        object.spec.containers[0].securityContext.runAsUser == 0 &&
+        object.spec.containers[0].securityContext.runAsGroup == 0 &&
+        size(object.spec.containers[0].securityContext.capabilities.add) == 3 &&
+        object.spec.containers[0].securityContext.capabilities.add.all(capability,
+          capability in ['CHOWN', 'DAC_OVERRIDE', 'FOWNER']))
+      message: Storage initialization must use the exact approved operator command, identity, and capabilities.
+    - expression: >-
+        !variables.inScope ||
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (
+        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '100m' &&
+        string(dyn(object.spec.containers[0].resources).requests['memory']) == '128Mi' &&
+        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '1' &&
+        string(dyn(object.spec.containers[0].resources).limits['memory']) == '1Gi' &&
+        size(dyn(object.spec.containers[0].resources).requests) == 2 &&
+        size(dyn(object.spec.containers[0].resources).limits) == 2)
+      message: Storage initialization must use the exact approved compute resources.
+    - expression: >-
+        !variables.inScope ||
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (size(object.spec.volumes) == 3 && object.spec.volumes.all(volume,
+          (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
+            volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
+          (volume.name == 'credentials' && has(volume.secret) &&
+            volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
+            volume.secret.defaultMode == 292) ||
+          (volume.name == 'init-request' && has(volume.configMap) &&
+            volume.configMap.name == namespaceObject.metadata.annotations['exomem.io/init-request-configmap-name'] &&
+            volume.configMap.defaultMode == 292)))
+      message: Storage initialization may mount only the exact tenant PVC, credential Secret, and request ConfigMap.
+    - expression: >-
+        !variables.inScope ||
+        (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
+        (size(object.spec.containers[0].volumeMounts) == 3 &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'data' && mount.mountPath == '/var/lib/exomem' && !has(mount.subPath) &&
+          (!has(mount.readOnly) || mount.readOnly == false)) &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'credentials' && mount.mountPath == '/run/exomem/credentials' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'init-request' && mount.mountPath == '/run/exomem/operator-requests/init.json' &&
+          mount.readOnly == true && mount.subPath == 'init.json'))
+      message: Storage initialization mounts must match the exact tenant paths.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (
+        object.spec.containers[0].securityContext.runAsNonRoot == true &&
+        object.spec.containers[0].securityContext.runAsUser == 10001 &&
+        object.spec.containers[0].securityContext.runAsGroup == 10001 &&
+        (!has(object.spec.containers[0].securityContext.capabilities.add) ||
+          size(object.spec.containers[0].securityContext.capabilities.add) == 0))
+      message: Serving pods must use the exact restricted identity and capabilities.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (
+        string(dyn(object.spec.containers[0].resources).requests['cpu']) == '100m' &&
+        string(dyn(object.spec.containers[0].resources).requests['memory']) == '256Mi' &&
+        string(dyn(object.spec.containers[0].resources).requests['ephemeral-storage']) == '512Mi' &&
+        string(dyn(object.spec.containers[0].resources).limits['cpu']) == '1' &&
+        string(dyn(object.spec.containers[0].resources).limits['memory']) == '1Gi' &&
+        string(dyn(object.spec.containers[0].resources).limits['ephemeral-storage']) == '512Mi' &&
+        size(dyn(object.spec.containers[0].resources).requests) == 3 &&
+        size(dyn(object.spec.containers[0].resources).limits) == 3)
+      message: Serving pods must use the exact approved compute resources.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (size(object.spec.volumes) == 3 && object.spec.volumes.all(volume,
+          (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
+            volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
+          (volume.name == 'credentials' && has(volume.secret) &&
+            volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
+            volume.secret.defaultMode == 292) ||
+          (volume.name == 'tmp' && has(volume.emptyDir) &&
+            has(dyn(volume.emptyDir).sizeLimit) &&
+            string(dyn(volume.emptyDir).sizeLimit) == '256Mi')))
+      message: Serving pods may mount only their own PVC, credential Secret, and bounded temporary volume.
+    - expression: >-
+        !variables.inScope ||
+        (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
+        (size(object.spec.containers[0].volumeMounts) == 5 &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'data' && mount.mountPath == '/var/lib/exomem/vault' && mount.subPath == 'vault') &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'data' && mount.mountPath == '/var/lib/exomem/state' && mount.subPath == 'state') &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'data' && mount.mountPath == '/var/lib/exomem/logs' && mount.subPath == 'logs') &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'credentials' && mount.mountPath == '/run/exomem/credentials' &&
+          mount.readOnly == true && !has(mount.subPath)) &&
+        object.spec.containers[0].volumeMounts.exists(mount,
+          mount.name == 'tmp' && mount.mountPath == '/tmp' && !has(mount.subPath)))
+      message: Serving mounts must match the exact tenant paths.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-tenant-boundary
+spec:
+  policyName: exomem-tenant-boundary
+  validationActions: [Deny]

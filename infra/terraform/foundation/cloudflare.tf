@@ -22,14 +22,14 @@ resource "cloudflare_zero_trust_tunnel_cloudflared_config" "alpha" {
     ingress = [
       {
         hostname = var.control_hostname
-        service  = "http://traefik.kube-system.svc.cluster.local:80"
+        service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
         origin_request = {
           http_host_header = var.control_hostname
         }
       },
       {
         hostname = var.transfer_hostname
-        service  = "http://traefik.kube-system.svc.cluster.local:80"
+        service  = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
         origin_request = {
           http_host_header = var.transfer_hostname
         }
