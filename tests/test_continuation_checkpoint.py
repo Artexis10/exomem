@@ -2932,13 +2932,11 @@ def test_portable_catalog_cursor_is_bounded_persisted_and_fixed_size(
         with checkpoint._open_secure_directory(root_path, create=False) as root:
             with checkpoint._advisory_lock_at(root, ".root.lock") as root_lock:
                 cursor = checkpoint._read_prune_sequence(root_lock, offset=17)
-                names, next_cursor, exhausted, inspected = (
-                    checkpoint._prune_catalog_window(
-                        root,
-                        cursor=cursor,
-                        limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
-                        deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
-                    )
+                names, next_cursor, exhausted, inspected = checkpoint._prune_catalog_window(
+                    root,
+                    cursor=cursor,
+                    limit=checkpoint.MAX_PRUNE_ENUM_ENTRIES,
+                    deadline=time.monotonic() + checkpoint.MAX_PRUNE_LOCK_SECONDS,
                 )
                 checkpoint._write_prune_sequence(root_lock, next_cursor, offset=17)
         assert inspected <= checkpoint.MAX_PRUNE_ENUM_ENTRIES

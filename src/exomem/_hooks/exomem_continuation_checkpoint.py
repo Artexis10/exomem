@@ -1779,9 +1779,7 @@ def _cleanup_pending_root_entry(
         except OSError:
             pass
         return
-    if (
-        now_ns - int(pending["created_at_ns"]) > RETENTION_NS
-    ):
+    if now_ns - int(pending["created_at_ns"]) > RETENTION_NS:
         try:
             _unlink_at(root, name)
             if _existing_kind(root, name) is None:
@@ -2055,9 +2053,7 @@ def _session_lock(
                         raise OSError("continuation session manifest was not published")
                     try:
                         _unlink_at(root_handle, _pending_session_name(state_name))
-                        if _existing_kind(
-                            root_handle, _pending_session_name(state_name)
-                        ) is None:
+                        if _existing_kind(root_handle, _pending_session_name(state_name)) is None:
                             _unregister_prune_catalog_entry(
                                 root_handle,
                                 root_lock,
@@ -2074,9 +2070,7 @@ def _session_lock(
                 ):
                     try:
                         _unlink_at(root_handle, _pending_session_name(state_name))
-                        if _existing_kind(
-                            root_handle, _pending_session_name(state_name)
-                        ) is None:
+                        if _existing_kind(root_handle, _pending_session_name(state_name)) is None:
                             _unregister_prune_catalog_entry(
                                 root_handle,
                                 root_lock,
@@ -3020,9 +3014,7 @@ def _tombstone_expired_candidate(
                     if manifest_status == "valid":
                         try:
                             _unlink_at(root_handle, _pending_session_name(name))
-                            if _existing_kind(
-                                root_handle, _pending_session_name(name)
-                            ) is None:
+                            if _existing_kind(root_handle, _pending_session_name(name)) is None:
                                 _unregister_prune_catalog_entry(
                                     root_handle,
                                     root_lock,
@@ -3085,10 +3077,7 @@ def _prune_catalog_header() -> bytes:
 
 
 def _prune_catalog_size() -> int:
-    return (
-        _PRUNE_CATALOG_HEADER_BYTES
-        + MAX_PRUNE_CATALOG_ENTRIES * _PRUNE_CATALOG_RECORD_BYTES
-    )
+    return _PRUNE_CATALOG_HEADER_BYTES + MAX_PRUNE_CATALOG_ENTRIES * _PRUNE_CATALOG_RECORD_BYTES
 
 
 def _read_exact_at(fd: int, offset: int, size: int) -> bytes:
@@ -3170,8 +3159,7 @@ def _open_prune_catalog(root: _SecureDirectory, *, create: bool) -> int:
             not stat.S_ISREG(info.st_mode)
             or (os.name != "nt" and stat.S_IMODE(info.st_mode) != 0o600)
             or info.st_size != _prune_catalog_size()
-            or _read_exact_at(fd, 0, _PRUNE_CATALOG_HEADER_BYTES)
-            != _prune_catalog_header()
+            or _read_exact_at(fd, 0, _PRUNE_CATALOG_HEADER_BYTES) != _prune_catalog_header()
         ):
             raise OSError("invalid prune catalog")
         return fd
@@ -3221,11 +3209,7 @@ def _decode_prune_catalog_record(raw: bytes) -> tuple[str, str | None]:
         raise OSError("invalid prune catalog record status")
     length = int.from_bytes(raw[1:3], "big")
     encoded = raw[3 : 3 + MAX_IDENTIFIER_BYTES]
-    if (
-        length < 1
-        or length > MAX_IDENTIFIER_BYTES
-        or any(encoded[length:])
-    ):
+    if length < 1 or length > MAX_IDENTIFIER_BYTES or any(encoded[length:]):
         raise OSError("invalid prune catalog record name")
     try:
         name = encoded[:length].decode("utf-8")
@@ -3251,8 +3235,7 @@ def _read_prune_catalog_slot(fd: int, slot: int) -> tuple[str, str | None]:
 def _prune_catalog_probe(name: str) -> tuple[int, ...]:
     start = int.from_bytes(_prune_catalog_key(name)[:8], "big")
     return tuple(
-        (start + offset) % MAX_PRUNE_CATALOG_ENTRIES
-        for offset in range(MAX_PRUNE_CATALOG_ENTRIES)
+        (start + offset) % MAX_PRUNE_CATALOG_ENTRIES for offset in range(MAX_PRUNE_CATALOG_ENTRIES)
     )
 
 
@@ -3538,22 +3521,18 @@ def prune_expired(
                     )
                 scan_cursor = _read_prune_sequence(root_lock, offset=17)
                 if os.name == "nt" or force_portable_catalog:
-                    scanned_names, next_cursor, _exhausted, _inspected = (
-                        _prune_catalog_window(
-                            root_handle,
-                            cursor=scan_cursor,
-                            limit=MAX_PRUNE_ENUM_ENTRIES,
-                            deadline=lock_deadline,
-                        )
+                    scanned_names, next_cursor, _exhausted, _inspected = _prune_catalog_window(
+                        root_handle,
+                        cursor=scan_cursor,
+                        limit=MAX_PRUNE_ENUM_ENTRIES,
+                        deadline=lock_deadline,
                     )
                 else:
-                    scanned_names, next_cursor, _exhausted, _inspected = (
-                        _directory_window(
-                            root_handle,
-                            cursor=scan_cursor,
-                            limit=MAX_PRUNE_ENUM_ENTRIES,
-                            deadline=lock_deadline,
-                        )
+                    scanned_names, next_cursor, _exhausted, _inspected = _directory_window(
+                        root_handle,
+                        cursor=scan_cursor,
+                        limit=MAX_PRUNE_ENUM_ENTRIES,
+                        deadline=lock_deadline,
                     )
                 _write_prune_sequence(root_lock, next_cursor, offset=17)
                 for scanned_name in tuple(scanned_names):
@@ -3610,9 +3589,7 @@ def prune_expired(
                 break
             try:
                 remaining = max(0.0, lock_deadline - time.monotonic())
-                with _advisory_lock_at(
-                    root_handle, ".root.lock", timeout=remaining
-                ) as root_lock:
+                with _advisory_lock_at(root_handle, ".root.lock", timeout=remaining) as root_lock:
                     tombstone = _tombstone_expired_candidate(
                         root_handle,
                         root_lock,
