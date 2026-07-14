@@ -614,6 +614,77 @@ class PathGuard:
             raise PathGuardError("PATH_GUARD_CONTENT", "guarded content changed")
 
 
+def _same_captured_identity(first: PathIdentity, second: PathIdentity) -> bool:
+    return (
+        first.device == second.device
+        and first.inode == second.inode
+        and first.mode == second.mode
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _BatchArtifactGuard:
+    """Bind one batch-owned file to its parent, identity, and exact bytes."""
+
+    root: Path
+    guard: PathGuard
+
+    @property
+    def path(self) -> Path:
+        return self.root / self.guard.target
+
+    @property
+    def identity(self) -> PathIdentity:
+        identity = self.guard.leaf_identity
+        if identity is None:  # pragma: no cover - content guards always bind a leaf
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact disappeared")
+        return identity
+
+    @property
+    def content_hash(self) -> str:
+        digest = self.guard.expected_content_hash
+        if digest is None:  # pragma: no cover - content guards always bind a hash
+            raise PathGuardError("PATH_GUARD_CONTENT", "batch artifact hash is unavailable")
+        return digest
+
+    @classmethod
+    def capture(
+        cls,
+        path: Path,
+        *,
+        expected_content_hash: str | None = None,
+        expected_identity: PathIdentity | None = None,
+    ) -> _BatchArtifactGuard:
+        absolute = Path(os.path.abspath(path))
+        root = absolute.parent
+        if expected_content_hash is None:
+            stable = PathGuard.capture(root, absolute.name, leaf_policy="stable")
+            identity = stable.leaf_identity
+            if identity is None:  # pragma: no cover - stable capture requires a leaf
+                raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact disappeared")
+            expected_content_hash = _leaf_hash(absolute, identity)
+            stable.recheck(root)
+            expected_identity = identity
+        guard = PathGuard.capture(
+            root,
+            absolute.name,
+            leaf_policy="content",
+            expected_content_hash=expected_content_hash,
+        )
+        identity = guard.leaf_identity
+        if identity is None or (
+            expected_identity is not None
+            and not _same_captured_identity(expected_identity, identity)
+        ):
+            raise PathGuardError("PATH_GUARD_CHANGED", "batch artifact identity changed")
+        artifact = cls(root, guard)
+        artifact.recheck()
+        return artifact
+
+    def recheck(self) -> None:
+        self.guard.recheck(self.root)
+
+
 def _bounded_directory_entries(
     path: Path,
     *,
@@ -1122,6 +1193,7 @@ def batch_atomic_write(
         if write.create_only and os.path.lexists(write.path):
             raise CreateOnlyConflict(_safe_write_target(write.path, vault_root))
     staged: list[tuple[Path, Path]] = []  # (final, tmp)
+    staged_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
         for w in writes:
             w.path.parent.mkdir(parents=True, exist_ok=True)
@@ -1132,26 +1204,37 @@ def batch_atomic_write(
             )
             os.close(fd)
             tmp = Path(tmp_str)
-            tmp.write_text(w.content, encoding="utf-8", newline="\n")
             staged.append((w.path, tmp))
+            tmp.write_text(w.content, encoding="utf-8", newline="\n")
+            planned_hash = hashlib.sha256(w.content.encode("utf-8")).hexdigest()
+            staged_guards[tmp] = _BatchArtifactGuard.capture(
+                tmp, expected_content_hash=planned_hash
+            )
     except Exception:
         for _, tmp in staged:
             tmp.unlink(missing_ok=True)
         raise
 
     backups: dict[Path, Path | None] = {}
+    backup_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
         for final, _tmp in staged:
             if not os.path.lexists(final):
                 backups[final] = None
                 continue
+            source_guard = _BatchArtifactGuard.capture(final)
             fd, backup_str = tempfile.mkstemp(
                 prefix=f".{final.name}.", suffix=".bak", dir=str(final.parent)
             )
             os.close(fd)
             backup = Path(backup_str)
-            shutil.copy2(final, backup)
             backups[final] = backup
+            shutil.copy2(final, backup)
+            source_guard.recheck()
+            backup_guards[final] = _BatchArtifactGuard.capture(
+                backup,
+                expected_content_hash=source_guard.content_hash,
+            )
     except Exception:
         for _, tmp in staged:
             tmp.unlink(missing_ok=True)
@@ -1161,8 +1244,15 @@ def batch_atomic_write(
         raise
 
     replaced: list[Path] = []
+    final_guards: dict[Path, _BatchArtifactGuard] = {}
     try:
         for index, (final, tmp) in enumerate(staged):
+            for _, staged_tmp in staged[index:]:
+                staged_guards[staged_tmp].recheck()
+            for guard in backup_guards.values():
+                guard.recheck()
+            for guard in final_guards.values():
+                guard.recheck()
             if vault_root is not None:
                 root = Path(vault_root)
                 for guard in read_only_guards:
@@ -1172,24 +1262,69 @@ def batch_atomic_write(
                         guard.recheck(root)
                 allowed_census_changes = (
                     *(write.path for write in writes),
-                    *(staged_tmp for _, staged_tmp in staged),
-                    *(backup for backup in backups.values() if backup is not None),
+                    *(
+                        staged_guards[staged_tmp].path
+                        for _, staged_tmp in staged[index:]
+                    ),
+                    *(guard.path for guard in backup_guards.values()),
                 )
                 for guard in directory_guards:
                     guard.recheck(root, allowed_changes=allowed_census_changes)
             if writes[index].create_only and os.path.lexists(final):
                 raise CreateOnlyConflict(_safe_write_target(final, vault_root))
+            staged_guard = staged_guards[tmp]
+            staged_guard.recheck()
             os.replace(tmp, final)
             replaced.append(final)
+            final_guards[final] = _BatchArtifactGuard.capture(
+                final,
+                expected_content_hash=staged_guard.content_hash,
+                expected_identity=staged_guard.identity,
+            )
+        for guard in read_only_guards:
+            guard.recheck(Path(vault_root))
+        for guard in backup_guards.values():
+            guard.recheck()
+        for guard in final_guards.values():
+            guard.recheck()
+        if vault_root is not None:
+            root = Path(vault_root)
+            allowed_census_changes = (
+                *(write.path for write in writes),
+                *(guard.path for guard in backup_guards.values()),
+            )
+            for guard in directory_guards:
+                guard.recheck(root, allowed_changes=allowed_census_changes)
+        for guard in backup_guards.values():
+            guard.recheck()
+        for guard in final_guards.values():
+            guard.recheck()
     except Exception as commit_error:
         rollback_errors: list[str] = []
         for final in reversed(replaced):
             backup = backups.get(final)
             try:
+                final_guard = final_guards.get(final)
+                if final_guard is None:
+                    raise PathGuardError(
+                        "PATH_GUARD_CHANGED", "committed batch artifact is unbound"
+                    )
+                final_guard.recheck()
                 if backup is None:
                     final.unlink(missing_ok=True)
+                    if os.path.lexists(final):
+                        raise PathGuardError(
+                            "PATH_GUARD_CHANGED", "committed batch artifact remains"
+                        )
                 else:
+                    backup_guard = backup_guards[final]
+                    backup_guard.recheck()
                     os.replace(backup, final)
+                    _BatchArtifactGuard.capture(
+                        final,
+                        expected_content_hash=backup_guard.content_hash,
+                        expected_identity=backup_guard.identity,
+                    )
                     backups[final] = None
             except Exception as rollback_error:  # noqa: BLE001 - report every restore failure
                 rollback_errors.append(f"{final}: {rollback_error}")
