@@ -1,0 +1,11 @@
+---
+- name: Harden and bootstrap the Exomem private-alpha node
+  hosts: hosted_nodes
+  become: true
+  gather_facts: true
+  serial: 1
+  any_errors_fatal: true
+
+  roles:
+    - base
+    - k3s

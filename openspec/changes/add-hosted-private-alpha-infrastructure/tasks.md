@@ -58,9 +58,9 @@
 
 ## 7. Implement idempotent Ansible and K3s bootstrap
 
-- [ ] 7.1 Add Molecule/check-mode or equivalent tests for base hardening, exact package/service configuration, and no fetched cluster-admin kubeconfig.
-- [ ] 7.2 Implement base OS updates, key-only SSH, administrator path, UFW, fail2ban, time sync, log rotation, disk hygiene, and `cryptsetup`.
-- [ ] 7.3 Add tests for pinned/checksummed K3s installation, embedded etcd, secrets encryption, metadata-safe audit, token expiry policy, image/log GC, and restricted kubeconfig.
+- [x] 7.1 Add Molecule/check-mode or equivalent tests for base hardening, exact package/service configuration, and no fetched cluster-admin kubeconfig.
+- [x] 7.2 Implement base OS updates, key-only SSH, administrator path, UFW, fail2ban, time sync, log rotation, disk hygiene, and `cryptsetup`.
+- [x] 7.3 Add tests for pinned/checksummed K3s installation, embedded etcd, secrets encryption, metadata-safe audit, token expiry policy, image/log GC, and restricted kubeconfig.
 - [ ] 7.4 Implement K3s bootstrap plus encrypted off-host etcd snapshots and break-glass escrow.
 - [ ] 7.5 Generate Ansible inventory from non-sensitive Terraform outputs and prove two consecutive site runs converge cleanly.
 

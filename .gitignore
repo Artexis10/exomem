@@ -46,6 +46,7 @@ scripts/generic/substitutions.txt
 !*.tfbackend.example
 !*.tfvars.example
 infra/ansible/inventory.yml
+infra/ansible/group_vars/hosted_nodes.yml
 infra/secrets/*.dec.yaml
 infra/secrets/*.plain.yaml
 infra/secrets/age.key

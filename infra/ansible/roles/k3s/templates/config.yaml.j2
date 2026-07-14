@@ -1,0 +1,38 @@
+cluster-init: true
+token: {{ k3s_server_token | to_json }}
+node-ip: {{ private_node_ip | to_json }}
+advertise-address: {{ private_node_ip | to_json }}
+flannel-iface: {{ k3s_private_interface | to_json }}
+secrets-encryption: true
+write-kubeconfig-mode: "0640"
+write-kubeconfig-group: exomem-operators
+protect-kernel-defaults: true
+disable:
+  - traefik
+  - servicelb
+  - local-storage
+kube-apiserver-arg:
+  - service-account-extend-token-expiration=false
+  - service-account-max-token-expiration=24h
+  - audit-policy-file=/etc/rancher/k3s/audit-policy.yaml
+  - audit-log-path=/var/lib/rancher/k3s/server/logs/audit.log
+  - audit-log-maxage=7
+  - audit-log-maxbackup=3
+  - audit-log-maxsize=100
+kubelet-arg:
+  - image-gc-high-threshold=75
+  - image-gc-low-threshold=65
+  - container-log-max-size=10Mi
+  - container-log-max-files=3
+etcd-snapshot-schedule-cron: "*/30 * * * *"
+etcd-snapshot-retention: 6
+etcd-s3: true
+etcd-s3-endpoint: {{ k3s_etcd_s3_endpoint | to_json }}
+etcd-s3-region: {{ k3s_etcd_s3_region | to_json }}
+etcd-s3-bucket: {{ k3s_etcd_s3_bucket | to_json }}
+etcd-s3-folder: exomem-private-alpha/etcd
+etcd-s3-access-key: {{ k3s_etcd_s3_access_key | to_json }}
+etcd-s3-secret-key: {{ k3s_etcd_s3_secret_key | to_json }}
+etcd-s3-retention: 336
+etcd-s3-timeout: 2m
+etcd-s3-skip-ssl-verify: false

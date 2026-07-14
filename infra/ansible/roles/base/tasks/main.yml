@@ -1,0 +1,152 @@
+---
+- name: Validate administrator access inputs
+  ansible.builtin.assert:
+    that:
+      - base_admin_ssh_cidrs | length > 0
+      - base_administrator_authorized_keys | length > 0
+      - "'0.0.0.0/0' not in base_admin_ssh_cidrs"
+      - "'::/0' not in base_admin_ssh_cidrs"
+    fail_msg: At least one non-global SSH CIDR and administrator key are required.
+
+- name: Update the apt cache and installed packages
+  ansible.builtin.apt:
+    update_cache: true
+    cache_valid_time: 3600
+    upgrade: safe
+
+- name: Install the hardened node package set
+  ansible.builtin.apt:
+    name: "{{ base_packages }}"
+    state: present
+
+- name: Create the operator group
+  ansible.builtin.group:
+    name: exomem-operators
+    system: true
+    state: present
+
+- name: Create the administrator account
+  ansible.builtin.user:
+    name: "{{ base_administrator_user }}"
+    groups:
+      - sudo
+      - exomem-operators
+    append: true
+    create_home: true
+    password_lock: true
+    shell: /bin/bash
+    state: present
+
+- name: Create the administrator SSH directory
+  ansible.builtin.file:
+    path: "/home/{{ base_administrator_user }}/.ssh"
+    state: directory
+    owner: "{{ base_administrator_user }}"
+    group: "{{ base_administrator_user }}"
+    mode: "0700"
+
+- name: Install the administrator public keys
+  ansible.builtin.copy:
+    content: "{{ base_administrator_authorized_keys | join('\n') }}\n"
+    dest: "/home/{{ base_administrator_user }}/.ssh/authorized_keys"
+    owner: "{{ base_administrator_user }}"
+    group: "{{ base_administrator_user }}"
+    mode: "0600"
+
+- name: Install the administrator sudo policy
+  ansible.builtin.copy:
+    content: "{{ base_administrator_user }} ALL=(ALL:ALL) NOPASSWD:ALL\n"
+    dest: "/etc/sudoers.d/90-{{ base_administrator_user }}"
+    owner: root
+    group: root
+    mode: "0440"
+    validate: /usr/sbin/visudo -cf %s
+
+- name: Install SSH hardening policy
+  ansible.builtin.template:
+    src: 99-exomem-hardening.conf.j2
+    dest: /etc/ssh/sshd_config.d/99-exomem-hardening.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Validate and reload SSH
+
+- name: Install fail2ban SSH policy
+  ansible.builtin.template:
+    src: exomem-sshd.local.j2
+    dest: /etc/fail2ban/jail.d/exomem-sshd.local
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart fail2ban
+
+- name: Install bounded journal storage policy
+  ansible.builtin.template:
+    src: 99-exomem-storage.conf.j2
+    dest: /etc/systemd/journald.conf.d/99-exomem-storage.conf
+    owner: root
+    group: root
+    mode: "0644"
+  notify: Restart journald
+
+- name: Install unattended-upgrade policy
+  ansible.builtin.template:
+    src: 52-exomem-unattended-upgrades.j2
+    dest: /etc/apt/apt.conf.d/52exomem-unattended-upgrades
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Enable time synchronization
+  ansible.builtin.systemd_service:
+    name: systemd-timesyncd
+    enabled: true
+    state: started
+
+- name: Enable fail2ban
+  ansible.builtin.systemd_service:
+    name: fail2ban
+    enabled: true
+    state: started
+
+- name: Deny unsolicited inbound traffic
+  community.general.ufw:
+    direction: incoming
+    default: deny
+
+- name: Allow outbound traffic
+  community.general.ufw:
+    direction: outgoing
+    default: allow
+
+- name: Permit Kubernetes forwarding through UFW
+  ansible.builtin.lineinfile:
+    path: /etc/default/ufw
+    regexp: ^DEFAULT_FORWARD_POLICY=
+    line: DEFAULT_FORWARD_POLICY="ACCEPT"
+    owner: root
+    group: root
+    mode: "0644"
+
+- name: Allow SSH only from explicit administrator networks
+  community.general.ufw:
+    rule: allow
+    port: "22"
+    proto: tcp
+    src: "{{ item }}"
+    comment: Exomem administrator SSH
+  loop: "{{ base_admin_ssh_cidrs }}"
+
+- name: Allow the fixed K3s pod and service networks
+  community.general.ufw:
+    rule: allow
+    src: "{{ item }}"
+    comment: Exomem K3s internal network
+  loop:
+    - "{{ base_k3s_pod_cidr }}"
+    - "{{ base_k3s_service_cidr }}"
+
+- name: Enable UFW with low-volume logging
+  community.general.ufw:
+    state: enabled
+    logging: low
