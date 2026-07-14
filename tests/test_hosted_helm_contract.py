@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLATFORM = ROOT / "infra/helm/platform"
 CELL = ROOT / "infra/helm/cell"
 CONTRACT = ROOT / "infra/contracts/exomem-hosted-schedules-v1.json"
+RUNTIME_GATE = ROOT / "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
 HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
 
 
@@ -70,12 +71,8 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
         (PLATFORM / "values.validation.yaml").read_text(encoding="utf-8")
     )
     assert values["runtime"]["image"] == ""
-    assert validation_values["runtime"]["image"] == (
-        "ghcr.io/artexis10/exomem@sha256:" + "a" * 64
-    )
-    platform_schema = json.loads(
-        (PLATFORM / "values.schema.json").read_text(encoding="utf-8")
-    )
+    assert validation_values["runtime"]["image"] == ("ghcr.io/artexis10/exomem@sha256:" + "a" * 64)
+    platform_schema = json.loads((PLATFORM / "values.schema.json").read_text(encoding="utf-8"))
     assert "@sha256:" in json.dumps(platform_schema["properties"]["runtime"])
     assert values["cloudflared"]["image"].endswith(
         "@sha256:5e49861633763e8933475477c20bae6039ed47f32c1d267a34babc347f28f0df"
@@ -90,6 +87,23 @@ def test_platform_dependencies_and_first_party_images_are_immutable() -> None:
     assert "1dd5776c2810f80f038454c9333a3814a2319b1b" in provenance
     assert "encryption-passphrase" in provenance
     assert "crypto_LUKS" in provenance
+
+
+def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
+    gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+    assert gate == {
+        "artifact": "exomem-hosted-runtime-k3s-gate",
+        "schemaVersion": 1,
+        "sourceRepository": "https://github.com/Artexis10/exomem",
+        "sourceCommit": "c255ffb2dfcd7bc470372d4efa0e8a11b00f0640",
+        "release": "0.22.0",
+        "hostedProtocol": "1",
+        "dockerTarget": "hosted",
+        "releaseBuildTime": "2026-07-14T03:50:34Z",
+        "operatorContractSha256": (
+            "407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6"
+        ),
+    }
 
 
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
@@ -108,9 +122,7 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert runtime_class["handler"] == "runc"
     tenant_admission = _find(documents, "ValidatingAdmissionPolicy", "exomem-tenant-boundary")
     assert "paramKind" not in tenant_admission["spec"]
-    tenant_binding = _find(
-        documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary"
-    )
+    tenant_binding = _find(documents, "ValidatingAdmissionPolicyBinding", "exomem-tenant-boundary")
     assert "matchResources" not in tenant_binding["spec"]
     assert "matchConditions" not in tenant_admission["spec"]
     variables = tenant_admission["spec"]["variables"]
@@ -134,7 +146,15 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "configMap.name" in admission_text
     assert "size(object.spec.initContainers)" in admission_text
     assert "has(object.spec.initContainers)" in admission_text
-    assert "has(dyn(volume.emptyDir).sizeLimit)" in admission_text
+    assert "has(dyn(volume.emptyDir).sizeLimit)" not in admission_text
+    assert "request.operation == 'UPDATE'" in admission_text
+    assert "object.spec.nodeName == oldObject.spec.nodeName" in admission_text
+    assert (
+        "object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', "
+        "'--request-file', '/run/exomem/operator-requests/init.json']"
+    ) in admission_text
+    assert "size(object.spec.volumes) == 2" in admission_text
+    assert "size(object.spec.containers[0].volumeMounts) == 4" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
     assert "securityContext.seccompProfile" in admission_text
     assert "terminationMessagePath == '/dev/termination-log'" in admission_text
@@ -281,7 +301,11 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     assert quota["spec"]["hard"]["persistentvolumeclaims"] == "1"
     assert quota["spec"]["hard"]["requests.storage"] == "10Gi"
 
-    workload = _find(documents, expected_kind, "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init")
+    workload = _find(
+        documents,
+        expected_kind,
+        "cell-alpha" if expected_kind == "StatefulSet" else "cell-alpha-init",
+    )
     namespace = _find(documents, "Namespace", "cell-alpha-test")
     assert namespace["metadata"]["labels"] == {
         "exomem.io/tenant-cell": "true",
@@ -312,6 +336,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert container["args"] == [
             "hosted",
             "init",
+            "--contract-version",
+            "1",
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
@@ -342,15 +368,17 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
         assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
         assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == ""
-        assert env["TMPDIR"] == "/tmp/runtime"
-
-        temporary = next(volume for volume in pod["volumes"] if volume["name"] == "tmp")
-        assert temporary["emptyDir"]["sizeLimit"] == "256Mi"
+        assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
+        assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
+        assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
+            "/var/lib/exomem/vault",
+            "/var/lib/exomem/state",
+            "/var/lib/exomem/logs",
+            "/run/exomem/credentials",
+        }
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 
-        credentials = next(
-            volume for volume in pod["volumes"] if volume["name"] == "credentials"
-        )
+        credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
         assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
@@ -384,9 +412,7 @@ def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:
         extra_args=("--set", "routes.enabled=true"),
     )
     middleware = _find(documents, "Middleware", "cell-alpha-strip-cell")
-    assert middleware["spec"]["stripPrefix"]["prefixes"] == [
-        "/cells/alpha-test-original"
-    ]
+    assert middleware["spec"]["stripPrefix"]["prefixes"] == ["/cells/alpha-test-original"]
 
     control = _find(documents, "IngressRoute", "cell-alpha-control")
     transfer = _find(documents, "IngressRoute", "cell-alpha-transfer")
@@ -433,9 +459,7 @@ def test_cell_route_and_runtime_share_one_transfer_hostname() -> None:
     }
     assert environment["EXOMEM_HOSTED_TRANSFER_HOST"] == "files.example.test"
     route = _find(documents, "IngressRoute", "cell-alpha-transfer")
-    assert route["spec"]["routes"][0]["match"].startswith(
-        "Host(`files.example.test`)"
-    )
+    assert route["spec"]["routes"][0]["match"].startswith("Host(`files.example.test`)")
 
 
 def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> None:
@@ -455,7 +479,5 @@ def test_cloudflare_tunnel_targets_the_rendered_production_traefik_service() -> 
         {"name": "web", "port": 80, "protocol": "TCP", "targetPort": "web"}
     ]
     target = "http://exomem-platform-traefik.exomem-platform.svc.cluster.local:80"
-    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(
-        encoding="utf-8"
-    )
+    cloudflare = (ROOT / "infra/terraform/foundation/cloudflare.tf").read_text(encoding="utf-8")
     assert cloudflare.count(target) == 2

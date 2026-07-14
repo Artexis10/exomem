@@ -32,6 +32,8 @@ spec:
           args:
             - hosted
             - init
+            - --contract-version
+            - "1"
             - --request-file
             - /run/exomem/operator-requests/init.json
           resources:

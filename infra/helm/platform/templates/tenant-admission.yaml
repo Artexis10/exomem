@@ -44,7 +44,10 @@ spec:
         (!has(object.spec.hostNetwork) || object.spec.hostNetwork == false) &&
         (!has(object.spec.hostPID) || object.spec.hostPID == false) &&
         (!has(object.spec.hostIPC) || object.spec.hostIPC == false) &&
-        !has(object.spec.nodeName) && !has(object.spec.hostAliases))
+        (!has(object.spec.nodeName) ||
+          (request.operation == 'UPDATE' && has(oldObject.spec.nodeName) &&
+            object.spec.nodeName == oldObject.spec.nodeName)) &&
+        !has(object.spec.hostAliases))
       message: Tenant pods cannot use host access or node selection.
     - expression: >-
         !variables.inScope ||
@@ -97,7 +100,7 @@ spec:
         (!has(object.spec.runtimeClassName) || object.spec.runtimeClassName != 'exomem-storage-init') ||
         (
         !has(object.spec.containers[0].command) &&
-        object.spec.containers[0].args == ['hosted', 'init', '--request-file', '/run/exomem/operator-requests/init.json'] &&
+        object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', '--request-file', '/run/exomem/operator-requests/init.json'] &&
         (!has(object.spec.containers[0].env) || size(object.spec.containers[0].env) == 0) &&
         object.spec.containers[0].securityContext.runAsUser == 0 &&
         object.spec.containers[0].securityContext.runAsGroup == 0 &&
@@ -192,20 +195,17 @@ spec:
     - expression: >-
         !variables.inScope ||
         (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
-        (size(object.spec.volumes) == 3 && object.spec.volumes.all(volume,
+        (size(object.spec.volumes) == 2 && object.spec.volumes.all(volume,
           (volume.name == 'data' && has(volume.persistentVolumeClaim) &&
             volume.persistentVolumeClaim.claimName == namespaceObject.metadata.annotations['exomem.io/pvc-name']) ||
           (volume.name == 'credentials' && has(volume.secret) &&
             volume.secret.secretName == namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
-            volume.secret.defaultMode == 292) ||
-          (volume.name == 'tmp' && has(volume.emptyDir) &&
-            has(dyn(volume.emptyDir).sizeLimit) &&
-            string(dyn(volume.emptyDir).sizeLimit) == '256Mi')))
-      message: Serving pods may mount only their own PVC, credential Secret, and bounded temporary volume.
+            volume.secret.defaultMode == 292)))
+      message: Serving pods may mount only their own PVC and credential Secret.
     - expression: >-
         !variables.inScope ||
         (has(object.spec.runtimeClassName) && object.spec.runtimeClassName == 'exomem-storage-init') ||
-        (size(object.spec.containers[0].volumeMounts) == 5 &&
+        (size(object.spec.containers[0].volumeMounts) == 4 &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem/vault' && mount.subPath == 'vault') &&
         object.spec.containers[0].volumeMounts.exists(mount,
@@ -214,9 +214,7 @@ spec:
           mount.name == 'data' && mount.mountPath == '/var/lib/exomem/logs' && mount.subPath == 'logs') &&
         object.spec.containers[0].volumeMounts.exists(mount,
           mount.name == 'credentials' && mount.mountPath == '/run/exomem/credentials' &&
-          mount.readOnly == true && !has(mount.subPath)) &&
-        object.spec.containers[0].volumeMounts.exists(mount,
-          mount.name == 'tmp' && mount.mountPath == '/tmp' && !has(mount.subPath)))
+          mount.readOnly == true && !has(mount.subPath)))
       message: Serving mounts must match the exact tenant paths.
 ---
 apiVersion: admissionregistration.k8s.io/v1

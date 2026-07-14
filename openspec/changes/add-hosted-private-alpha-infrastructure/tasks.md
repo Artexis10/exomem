@@ -16,7 +16,7 @@
 - [ ] 2.8 Add failing tests for direct-transfer CORS preflight, signed claims, consume-before-bytes JTI replay rejection across restart, abort/new-ticket behavior, and path/operation binding.
 - [ ] 2.9 Implement direct upload/download grant authorization without the long-lived cell bearer and set the alpha payload limit to 90 MiB.
 - [ ] 2.10 Add and test a content-free authenticated hosted exec-probe helper that generates fresh request identity headers.
-- [ ] 2.11 Validate a non-root/read-only-root hosted container shape with fixed writable mounts and immutable image reference.
+- [x] 2.11 Validate a non-root/read-only-root hosted container shape with fixed writable mounts and immutable image reference.
 - [ ] 2.12 Run PR #227 focused security/isolation/portability tests, full Python suite, Ruff, package/image checks, strict OpenSpec validation, and independent review.
 
 ## 3. Complete the Substrate hosted control-plane contract
@@ -34,7 +34,7 @@
 
 ## 4. Freeze the cross-repository release unit
 
-- [ ] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
+- [x] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
 - [ ] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
 - [ ] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
 - [ ] 4.4 Pin the release manifest in infrastructure values and reject mutable tags or partial version overrides.

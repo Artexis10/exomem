@@ -59,7 +59,7 @@ spec:
             - name: EXOMEM_LOG_DIR
               value: /var/lib/exomem/logs
             - name: TMPDIR
-              value: /tmp/runtime
+              value: /var/lib/exomem/state/tmp/runtime
             - name: HOME
               value: /var/lib/exomem/state/home
             - name: EXOMEM_HOSTED_PROTOCOL_VERSION
@@ -126,8 +126,6 @@ spec:
             - name: credentials
               mountPath: /run/exomem/credentials
               readOnly: true
-            - name: tmp
-              mountPath: /tmp
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -136,7 +134,4 @@ spec:
           secret:
             secretName: {{ .Values.credentialsSecretName }}
             defaultMode: 0444
-        - name: tmp
-          emptyDir:
-            sizeLimit: 256Mi
 {{- end }}
