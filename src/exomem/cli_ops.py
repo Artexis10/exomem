@@ -64,6 +64,10 @@ _CONFLICT_CODES = frozenset(
         "IDEMPOTENCY_KEY_REUSED",
         "IDEMPOTENCY_IN_PROGRESS",
         "MUTATION_BUSY",
+        # Adoption Studio drift codes (add-adoption-studio): a stale plan/apply or a
+        # proposal whose bound content changed since review is a conflict, not a
+        # plain bad-request — the client's honest recourse is to re-scan/re-read,
+        # not to resubmit the same payload.
         "ADOPTION_SOURCE_CHANGED",
         "PLAN_STALE",
         "REVIEW_ITEM_CHANGED",

@@ -1242,7 +1242,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, or relation-queue. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`.",
+          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -1372,7 +1372,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference.",
+          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead.",
           "type": "string"
         },
         "expected_fingerprint": {
@@ -1430,7 +1430,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory.",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`).",
           "type": "string"
         },
         "action": {
