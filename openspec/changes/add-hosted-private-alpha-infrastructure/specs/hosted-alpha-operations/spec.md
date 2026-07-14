@@ -22,7 +22,7 @@ Cell CPU/memory requests and limits SHALL be set from an owner/canary soak cover
 - **THEN** the evidence identifies whether request tuning, CX43 resize, another node, or dedicated CPU is the next reviewed change
 
 ### Requirement: Minimal observability covers independent failure domains
-The alpha SHALL use external black-box control-path and backup-freshness checks, Kubernetes event/resource metrics, provisioner structured metrics, and alert delivery. At least one availability and backup-age signal SHALL run outside the production node. Logs SHALL use opaque cell/operation/request IDs and MUST NOT contain emails, user IDs, credentials, grants, presigned URLs, filenames, note/query text, snippets, embeddings, media, or environment dumps.
+The alpha SHALL use external black-box control-path and backup-freshness checks, Kubernetes event/resource metrics, provisioner structured metrics, the schedule-contract-encoded content-free `exomem_hosted_scheduler_attempts_total` and `exomem_hosted_scheduler_failures_total` counters, `exomem_hosted_scheduler_duration_seconds` histogram, `exomem_hosted_scheduler_last_success_unixtime` gauge, and alert delivery. At least one availability and backup-age signal SHALL run outside the production node. Logs SHALL use opaque cell/operation/request IDs and MUST NOT contain emails, user IDs, credentials, authorization headers, cron response bodies, grants, presigned URLs, filenames, note/query text, snippets, embeddings, media, or environment dumps.
 
 #### Scenario: Production node disappears
 - **WHEN** the K3s node and every in-cluster monitor are unavailable
@@ -32,8 +32,12 @@ The alpha SHALL use external black-box control-path and backup-freshness checks,
 - **WHEN** representative provision, transfer, export, restore, and deletion flows complete
 - **THEN** application/proxy/provisioner/Kubernetes logs contain operational IDs and timing but none of the prohibited identity/content/secret fields
 
+#### Scenario: External Substrate schedule stops advancing
+- **WHEN** one of the three contract-rendered K3s CronJobs misses its cadence or repeatedly receives a redirect, authentication failure, or non-success status from Vercel
+- **THEN** the contract's content-free metrics identify only the declared job and contract version, the missed-run alert fires 180 seconds after due time or the failure alert fires after two consecutive failures, and no response body or bearer is retained
+
 ### Requirement: Alerts cover lifecycle and durability failures
-Alerts SHALL cover failed/terminal provisioning, ready-cell unavailability, pending work exceeding its expected window, backup age at 45/60 minutes, restore-drill failure, PVC reserved-space pressure, node pressure, tunnel/Access failure, secret-version mismatch, and exhausted safe volume attachments.
+Alerts SHALL cover failed/terminal provisioning, ready-cell unavailability, pending work exceeding its expected window, backup age at 45/60 minutes, restore-drill failure, PVC reserved-space pressure, node pressure, tunnel/Access failure, external scheduler contract drift, a run 180 seconds overdue, two consecutive scheduler failures, secret-version mismatch, and exhausted safe volume attachments.
 
 #### Scenario: Cell logs approach their cap or PVC reserve
 - **WHEN** rotating logs approach 128 MiB or PVC free space approaches the reserved 1 GiB

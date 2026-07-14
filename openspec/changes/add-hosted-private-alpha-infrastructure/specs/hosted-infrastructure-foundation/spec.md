@@ -34,11 +34,34 @@ Ansible SHALL configure a declared Linux image with security updates, unattended
 - **THEN** audit records contain metadata needed for attribution but no credential body or issued bearer token
 
 ### Requirement: Platform releases are immutable and reproducible
-The platform SHALL install CSI, SOPS-managed static secrets, Traefik, Cloudflare Tunnel, lightweight metrics/alerts, and the Exomem system chart from pinned versions. Provider locks SHALL be committed; Helm/chart versions and first-party image digests SHALL be recorded; mutable `latest` references SHALL be rejected.
+The platform SHALL install CSI, SOPS-managed static secrets, Traefik, Cloudflare Tunnel, lightweight metrics/alerts, contract-rendered external Substrate CronJobs, and the Exomem system chart from pinned versions. Provider locks SHALL be committed; Helm/chart versions and first-party image digests SHALL be recorded; mutable `latest` references SHALL be rejected.
 
 #### Scenario: Empty-cluster platform install is deterministic
 - **WHEN** the platform release is installed into a freshly bootstrapped cluster with the same inputs
 - **THEN** the rendered resources and immutable image references match the reviewed release inventory and become healthy
+
+### Requirement: Frequent Substrate schedules are external, exact, and observable
+Vercel SHALL continue to host the authenticated cron route handlers, but the three minute/hour Exomem schedules MUST NOT be declared in Vercel Hobby cron configuration. The K3s platform release SHALL consume pinned version `1` of Substrate's `ops/exomem-hosted-schedules.json` contract. The contract itself SHALL encode canonical origin `https://substratesystems.io` and exactly: `GET /api/cron/exomem-access-delivery` at `* * * * *`; `GET /api/cron/exomem-reconcile` at `* * * * *`; and `GET /api/cron/exomem-export-gc` at `17 * * * *`.
+
+Version `1` SHALL also encode `authentication.scheme: bearer`, K3s sender variable `EXOMEM_HOSTED_SCHEDULER_SECRET`, Vercel active/previous receiver variables `EXOMEM_HOSTED_SCHEDULER_SECRET`/`EXOMEM_HOSTED_SCHEDULER_SECRET_PREVIOUS`, and `maxReceiverVersions: 2`. Its request policy SHALL encode method `GET`, redirect `error`, connect/total timeouts of five/20 seconds, and success status `[200]`. Its Kubernetes job policy SHALL encode `startingDeadlineSeconds: 45`, `activeDeadlineSeconds: 30`, `concurrencyPolicy: Forbid`, `backoffLimit: 1`, `maxAttempts: 2`, successful/failed job-history limits of one/three, and `ttlSecondsAfterFinished: 300`. Its observability block SHALL set `contentFree: true`; name `exomem_hosted_scheduler_attempts_total`, `exomem_hosted_scheduler_failures_total`, `exomem_hosted_scheduler_duration_seconds`, and `exomem_hosted_scheduler_last_success_unixtime`; and define alerts at 180 seconds after a missed due time and two consecutive failures. The renderer and cross-repository release validation SHALL reject an unsupported version or any contract/rendered-manifest drift.
+
+Each CronJob SHALL send exactly `Authorization: Bearer <EXOMEM_HOSTED_SCHEDULER_SECRET>`, render every request/job/observability setting from the contract, and treat every redirect or non-success status as failure. The dedicated secret MUST authorize only the three contract routes and MUST NOT authorize global-`CRON_SECRET` routes such as backup GC, claim follow-ups, or IndexNow. K3s MUST NOT receive global `CRON_SECRET`, database, Paddle, provisioner, cell, Cloudflare Access, or browser credentials. These external jobs are distinct from K3s-internal vault and database durability schedulers.
+
+#### Scenario: Versioned contract renders the production jobs
+- **WHEN** platform chart inputs select scheduler contract version `1`
+- **THEN** the rendered manifests match its origin, three path/method/cadence tuples, redirect/timeouts, deadlines, concurrency, retry/attempt bounds, history/TTL limits, and content-free metric/alert definitions exactly, and cross-repository validation proves none is present in Vercel Hobby cron configuration
+
+#### Scenario: Cron route redirects
+- **WHEN** a scheduled request receives any redirect response
+- **THEN** contract redirect policy `error` fails the job without following the location or forwarding `EXOMEM_HOSTED_SCHEDULER_SECRET`, records a content-free outcome/failure metric, and becomes alertable under the encoded thresholds
+
+#### Scenario: Scheduler bearer is absent or wrong
+- **WHEN** the live K3s scheduler calls any of the three routes without the exact deployed `EXOMEM_HOSTED_SCHEDULER_SECRET`
+- **THEN** the Vercel route fails closed without performing work, while the correct live bearer succeeds
+
+#### Scenario: Scheduler bearer is tried on an unrelated cron route
+- **WHEN** the dedicated hosted-scheduler bearer is sent to backup GC, claim follow-ups, IndexNow, or any route absent from contract version `1`
+- **THEN** the unrelated route rejects it and no unrelated cron work runs
 
 ### Requirement: Online cell volumes are encrypted, retained, and provider-identifiable
 Each cell SHALL receive one minimum 10 GiB Hetzner CSI volume using a tested LUKS StorageClass and `Retain` reclaim policy. The system SHALL record the bound PV `volumeHandle`, location, and immutable opaque tenant/cell/operation/fence provider labels in external state. A privileged volume lifecycle worker, separate from routine namespaced reconciliation, SHALL use the HCloud API for label verification, retained-volume deletion proof, and clean-cluster static-PV/PVC rebind. Final provision success SHALL require that provider ownership checkpoint to be durable and independently verified.
@@ -60,7 +83,7 @@ Each cell SHALL receive one minimum 10 GiB Hetzner CSI volume using a tested LUK
 - **THEN** replay adopts the bound `volumeHandle`, records and verifies its provider labels, and does not create a second volume or return final success early
 
 ### Requirement: Static and dynamic secrets have one recoverable handoff path
-Static platform secrets SHALL be SOPS/age ciphertext with the age key escrowed off-cluster. Dynamic cell credentials, fences, provider references, and wrapped keys SHALL be encrypted in the external provisioner store under a separately escrowed root key. One non-printing handoff workflow SHALL enforce a versioned per-secret destination matrix without placing plaintext in repository files, shell history, saved-plan output, or CI logs. Cloudflare Access client credentials SHALL go only to Vercel; the Tunnel credential SHALL go only to K3s; the provisioner bearer SHALL go only to its Vercel caller and K3s service; cell credentials SHALL go only from encrypted provisioner state to their cell Secret; wrapping keys SHALL go only to their named workloads and offline escrow.
+Static platform secrets SHALL be SOPS/age ciphertext with the age key escrowed off-cluster. Dynamic cell credentials, fences, provider references, and wrapped keys SHALL be encrypted in the external provisioner store under a separately escrowed root key. One non-printing handoff workflow SHALL enforce a versioned per-secret destination matrix without placing plaintext in repository files, shell history, saved-plan output, or CI logs. Cloudflare Access client credentials SHALL go only to Vercel; the Tunnel credential SHALL go only to K3s; `EXOMEM_HOSTED_SCHEDULER_SECRET` SHALL go only to the three Exomem hosted Vercel handlers and K3s scheduler; global Vercel `CRON_SECRET` SHALL NOT go to K3s; the provisioner bearer SHALL go only to its Vercel caller and K3s service; cell credentials SHALL go only from encrypted provisioner state to their cell Secret; wrapping keys SHALL go only to their named workloads and offline escrow.
 
 #### Scenario: Clean secret reconstruction succeeds
 - **WHEN** a new cluster is built without the previous etcd state
@@ -73,6 +96,10 @@ Static platform secrets SHALL be SOPS/age ciphertext with the age key escrowed o
 #### Scenario: Tunnel credential rotates independently
 - **WHEN** the Cloudflare Tunnel credential is rotated
 - **THEN** only the versioned K3s Secret changes and the Vercel Access secret remains unchanged
+
+#### Scenario: Scheduler bearer rotates through a coordinated cutover
+- **WHEN** `EXOMEM_HOSTED_SCHEDULER_SECRET` rotates
+- **THEN** the Vercel handlers first accept new active plus old previous, the still-old K3s sender succeeds during overlap, K3s changes to new, the previous receiver version retires only after the new sender succeeds, the old bearer then rejects, unrelated cron routes reject both hosted-scheduler versions, global `CRON_SECRET` remains unchanged and outside K3s, and cadence monitoring records no missed run
 
 #### Scenario: Provisioner root key rotates without orphaning ciphertext
 - **WHEN** a new root wrapping-key version becomes active

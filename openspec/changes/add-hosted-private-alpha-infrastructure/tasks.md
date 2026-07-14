@@ -1,8 +1,8 @@
 ## 1. Restore a trustworthy baseline
 
 - [x] 1.1 Land the independently reviewed FrontmatterCache invalidation/clear fix on current Exomem `main` and rerun the complete lean suite.
-- [ ] 1.2 Refresh Exomem PR #227 from current `main`, resolve `vault.py`, `writer_lease.py`, and writer-lease tests semantically, and record a clean full-suite baseline.
-- [ ] 1.3 Refresh Substrate PR #32 from current `main`, reproduce/fix its failed Vercel check, and record its unit, integration, type, lint, migration, and build baseline.
+- [x] 1.2 Refresh Exomem PR #227 from current `main`, resolve `vault.py`, `writer_lease.py`, and writer-lease tests semantically, and record a clean full-suite baseline.
+- [x] 1.3 Refresh Substrate PR #32 from current `main`, reproduce/fix its failed Vercel check, and record its unit, integration, type, lint, migration, and build baseline.
 
 ## 2. Complete the Exomem hosted runtime deployment contract
 
@@ -29,7 +29,7 @@
 - [ ] 3.6 Implement direct upload/download ticket routes/browser flow and update fixed alpha upload limits to 90 MiB.
 - [ ] 3.7 Generate the hosted gateway fixture from the selected Exomem commit and update release/protocol/command/digest expectations as one unit.
 - [ ] 3.8 Add integration tests holding provision, restore, and seven-day simulated deletion pending beyond six runs before accepting final proofs.
-- [ ] 3.9 Verify migrations 0017-0021+, database access layer, Paddle sandbox/live configuration, signed webhooks, minute/hour cron authentication, Brevo delivery, and build/deploy checks.
+- [ ] 3.9 Verify migrations 0017-0021+, database access layer, Paddle sandbox/live configuration, signed webhooks, Brevo delivery, and build/deploy checks; prove the three frequent authenticated handlers remain on Vercel but outside Hobby cron configuration and publish the complete version `1` K3s schedule contract, fail closed on `EXOMEM_HOSTED_SCHEDULER_SECRET`, reject that dedicated bearer on unrelated global-cron routes, and never expose global `CRON_SECRET` to K3s.
 - [ ] 3.10 Run the full Substrate hosted test/build suite and independent review, then refresh PR #32 title/body/checklist with exact evidence.
 
 ## 4. Freeze the cross-repository release unit
@@ -67,7 +67,7 @@
 ## 8. Implement platform and cell Helm releases
 
 - [ ] 8.1 Pin and validate the exact Hetzner CSI chart/image compatible with K3s 1.35 and prove its supported LUKS key behavior.
-- [ ] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, metrics/alerts, and platform namespaces.
+- [ ] 8.2 Implement the encrypted `Retain` StorageClass, SOPS static-secret application, Traefik, Cloudflare Tunnel, platform namespaces, and the three CronJobs rendered only from the complete pinned Substrate schedule contract: exact origin/jobs; the sender/active/previous/max-two hosted-scheduler auth fields; `GET`/redirect `error`/five-second connect/20-second total/[200] request policy; 45/30-second starting/active deadlines; `Forbid`; backoff one/maximum two attempts; one/three history limits; 300-second TTL; the four exact content-free metric names; and 180-second missed-run/two-failure alerts.
 - [ ] 8.3 Add failing rendered-manifest tests for one fixed cell resource set, immutable image, original cell ID, invariant roots, 0700 init ownership, non-root/read-only security, 5 GiB application entitlement, 90 MiB upload, zero workers, and 128 MiB log cap; prove quota admits exactly one 10 GiB PVC and denies a second claim.
 - [ ] 8.4 Implement the versioned cell chart with StatefulSet, one 10 GiB PVC, Service, Secret, PVC-count/storage quota, application entitlement, limits, probe helper, and bounded temporary/log behavior.
 - [ ] 8.5 Add default-deny ingress/egress, exact Traefik ingress selectors, restricted Pod Security, and platform-owned validating admission for images/privilege/host/cross-cell references.
@@ -126,9 +126,9 @@
 
 ## 15. Add secret handoff, observability, and runbooks
 
-- [ ] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
-- [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
-- [ ] 15.3 Add external black-box availability and backup-freshness checks, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
+- [ ] 15.1 Add a non-printing SOPS/Terraform secret handoff command with an enforced destination/version matrix—Access to Vercel only, Tunnel to K3s only, `EXOMEM_HOSTED_SCHEDULER_SECRET` to the three Exomem hosted Vercel handlers and K3s scheduler only, global `CRON_SECRET` never to K3s, shared application secrets only to named peers—and fixtures that scan output/files/history for plaintext.
+- [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
+- [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
 - [ ] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks.
 - [ ] 15.5 Add the live monthly cost sheet, actual Paddle fee/tax record, six-user/two-reserved cap, and hard capacity gate.
 
@@ -137,7 +137,7 @@
 - [ ] 16.1 Apply reviewed foundation/durability saved plans and retain redacted plan/cost/locking evidence.
 - [ ] 16.2 Bootstrap the CX33 twice, install the platform, and reconstruct it once from an empty operator environment.
 - [ ] 16.3 Provision a canary twice with one key, conflict changed input, reject stale fences, restart mid-operation, and verify exact release/readiness/isolation.
-- [ ] 16.4 Run direct-transfer, credential-rotation, maintenance, 30-minute backup, near-5-GiB quiescence, clean restore, volume rebind, database restore/rediscovery, discard, and retained deletion drills.
+- [ ] 16.4 Run direct-transfer, credential-rotation, complete external scheduler contract/render/auth/cross-route/redirect/timeout/deadline/non-overlap/retry/history/TTL/metrics/alert drills, maintenance, 30-minute backup, near-5-GiB quiescence, clean restore, volume rebind, database restore/rediscovery, discard, and retained deletion drills.
 - [ ] 16.5 Provision the owner through the real invite/entitlement path and complete capture, recall, Review Studio, transfer, export, restart, compatible upgrade, suspend/resume, and restore journeys.
 - [ ] 16.6 Run the CX33 owner soak and record latency, CPU/memory, PVC/log headroom, attachment capacity, backup age, RPO/RTO, and fixed/marginal costs.
 - [ ] 16.7 Run full Exomem, Substrate, Terraform/Ansible/Helm/provisioner, security, strict OpenSpec, and deployment verification plus independent final review.
