@@ -7,36 +7,36 @@
 ## 2. Complete the Exomem hosted runtime deployment contract
 
 - [x] 2.1 Add an OpenSpec delta on the PR #227 branch for supported init/restore, active-pending credential rotation, authenticated probe, and direct-transfer grant behavior.
-- [ ] 2.2 Add failing pure tests for a supported idempotent hosted cell initializer using the exact cell/root/UID binding inputs.
-- [ ] 2.3 Implement the versioned init CLI/helper in the hosted image and pass binding/idempotency tests.
-- [ ] 2.4 Add failing tests for offline candidate restore that rejects source binding state and atomically publishes under a new candidate identity.
-- [ ] 2.5 Implement the versioned offline restore CLI/helper and pass archive/path/digest/binding/rebuild tests.
-- [ ] 2.6 Add failing tests for active/pending credential stage, overlap health, promotion, finalization, restart persistence, and old-token rejection.
-- [ ] 2.7 Implement durable credential-overlap state using token digests/version metadata while keeping plaintext in injected Secrets.
-- [ ] 2.8 Add failing tests for direct-transfer CORS preflight, signed claims, consume-before-bytes JTI replay rejection across restart, abort/new-ticket behavior, and path/operation binding.
-- [ ] 2.9 Implement direct upload/download grant authorization without the long-lived cell bearer and set the alpha payload limit to 90 MiB.
-- [ ] 2.10 Add and test a content-free authenticated hosted exec-probe helper that generates fresh request identity headers.
-- [ ] 2.11 Validate a non-root/read-only-root hosted container shape with fixed writable mounts and immutable image reference.
-- [ ] 2.12 Run PR #227 focused security/isolation/portability tests, full Python suite, Ruff, package/image checks, strict OpenSpec validation, and independent review.
+- [x] 2.2 Add failing pure tests for a supported idempotent hosted cell initializer using the exact cell/root/UID binding inputs.
+- [x] 2.3 Implement the versioned init CLI/helper in the hosted image and pass binding/idempotency tests.
+- [x] 2.4 Add failing tests for offline candidate restore that rejects source binding state and atomically publishes under a new candidate identity.
+- [x] 2.5 Implement the versioned offline restore CLI/helper and pass archive/path/digest/binding/rebuild tests.
+- [x] 2.6 Add failing tests for active/pending credential stage, overlap health, promotion, finalization, restart persistence, and old-token rejection.
+- [x] 2.7 Implement durable credential-overlap state using token digests/version metadata while keeping plaintext in injected Secrets.
+- [x] 2.8 Add failing tests for direct-transfer CORS preflight, signed claims, consume-before-bytes JTI replay rejection across restart, abort/new-ticket behavior, and path/operation binding.
+- [x] 2.9 Implement direct upload/download grant authorization without the long-lived cell bearer and set the alpha payload limit to 90 MiB.
+- [x] 2.10 Add and test a content-free authenticated hosted exec-probe helper that generates fresh request identity headers.
+- [x] 2.11 Validate a non-root/read-only-root hosted container shape with fixed writable mounts and immutable image reference.
+- [x] 2.12 Run PR #227 focused security/isolation/portability tests, full Python suite, Ruff, package/image checks, strict OpenSpec validation, and independent review.
 
 ## 3. Complete the Substrate hosted control-plane contract
 
-- [ ] 3.1 Add failing provisioner-client/reconciler tests for strict pending-or-final action responses on the same 14 endpoints.
-- [ ] 3.2 Implement a durable non-attempt-consuming waiting checkpoint so work can remain pending past six cron cycles and process restarts.
-- [ ] 3.3 Add failing tests for Cloudflare Access service-token headers on provisioner and private cell control calls, including version rotation overlap.
-- [ ] 3.4 Implement Access header injection from validated Vercel environment configuration without accepting browser-supplied values.
-- [ ] 3.5 Add failing route/browser tests for small direct-transfer ticket issuance, canonical origin, one-time grant metadata, and absence of file bodies from Vercel Functions.
-- [ ] 3.6 Implement direct upload/download ticket routes/browser flow and update fixed alpha upload limits to 90 MiB.
-- [ ] 3.7 Generate the hosted gateway fixture from the selected Exomem commit and update release/protocol/command/digest expectations as one unit.
-- [ ] 3.8 Add integration tests holding provision, restore, and seven-day simulated deletion pending beyond six runs before accepting final proofs.
+- [x] 3.1 Add failing provisioner-client/reconciler tests for strict pending-or-final action responses on the same 14 endpoints.
+- [x] 3.2 Implement a durable non-attempt-consuming waiting checkpoint so work can remain pending past six cron cycles and process restarts.
+- [x] 3.3 Add failing tests for Cloudflare Access service-token headers on provisioner and private cell control calls, including version rotation overlap.
+- [x] 3.4 Implement Access header injection from validated Vercel environment configuration without accepting browser-supplied values.
+- [x] 3.5 Add failing route/browser tests for small direct-transfer ticket issuance, canonical origin, one-time grant metadata, and absence of file bodies from Vercel Functions.
+- [x] 3.6 Implement direct upload/download ticket routes/browser flow and update fixed alpha upload limits to 90 MiB.
+- [x] 3.7 Generate the hosted gateway fixture from the selected Exomem commit and update release/protocol/command/digest expectations as one unit.
+- [x] 3.8 Add integration tests holding provision, restore, and seven-day simulated deletion pending beyond six runs before accepting final proofs.
 - [ ] 3.9 Verify migrations 0017-0021+, database access layer, Paddle sandbox/live configuration, signed webhooks, Brevo delivery, and build/deploy checks; prove the three frequent authenticated handlers remain on Vercel but outside Hobby cron configuration and publish the complete version `1` K3s schedule contract, fail closed on `EXOMEM_HOSTED_SCHEDULER_SECRET`, reject that dedicated bearer on unrelated global-cron routes, and never expose global `CRON_SECRET` to K3s.
-- [ ] 3.10 Run the full Substrate hosted test/build suite and independent review, then refresh PR #32 title/body/checklist with exact evidence.
+- [x] 3.10 Run the full Substrate hosted test/build suite and independent review, then refresh PR #32 title/body/checklist with exact evidence.
 
 ## 4. Freeze the cross-repository release unit
 
-- [ ] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
-- [ ] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
-- [ ] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
+- [x] 4.1 Build and publish or locally load an immutable Exomem hosted image from the reviewed PR #227 commit.
+- [x] 4.2 Record image digest, Exomem release, hosted protocol, command registry, and generated contract digest in one release manifest.
+- [x] 4.3 Contract-test the selected Substrate fixture against the real image `/contract` route and fail on any semantic or digest drift.
 - [x] 4.4 Pin the release manifest in infrastructure values and reject mutable tags or partial version overrides.
 
 ## 5. Scaffold and statically validate the IaC surfaces

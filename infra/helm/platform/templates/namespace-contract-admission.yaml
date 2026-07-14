@@ -1,6 +1,6 @@
 {{- $operatorUsernames := .Values.admission.namespaceContractOperatorUsernames | toJson -}}
 {{- $protectedLabels := list "exomem.io/tenant-cell" "exomem.io/cell-resource" "pod-security.kubernetes.io/enforce" "pod-security.kubernetes.io/enforce-version" "pod-security.kubernetes.io/audit" "pod-security.kubernetes.io/audit-version" "pod-security.kubernetes.io/warn" "pod-security.kubernetes.io/warn-version" -}}
-{{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/init-request-configmap-name" "exomem.io/tenant-id" "exomem.io/cell-id" "exomem.io/operation-id" "exomem.io/tenant-digest" "exomem.io/subject-digest" "exomem.io/operation-digest" "exomem.io/fence" -}}
+{{- $protectedAnnotations := list "helm.sh/resource-policy" "exomem.io/resource-name" "exomem.io/approved-image" "exomem.io/pvc-name" "exomem.io/credentials-secret-name" "exomem.io/init-request-configmap-name" "exomem.io/tenant-id" "exomem.io/cell-id" "exomem.io/operation-id" "exomem.io/tenant-digest" "exomem.io/subject-digest" "exomem.io/operation-digest" "exomem.io/fence" "exomem.io/vault-id" "exomem.io/expected-release" "exomem.io/worker-policy-digest" "exomem.io/browser-origin" "exomem.io/transfer-hostname" -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -66,7 +66,7 @@ spec:
         'exomem.io/tenant-id' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
         'exomem.io/cell-id' in variables.newAnnotations &&
-        variables.newAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        variables.newAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') &&
         'exomem.io/operation-id' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
         'exomem.io/tenant-digest' in variables.newAnnotations &&
@@ -76,7 +76,18 @@ spec:
         'exomem.io/operation-digest' in variables.newAnnotations &&
         variables.newAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
         'exomem.io/fence' in variables.newAnnotations &&
-        variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
+        variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$') &&
+        'exomem.io/vault-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/vault-id'].matches('^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$') &&
+        'exomem.io/expected-release' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/expected-release'].size() >= 1 &&
+        variables.newAnnotations['exomem.io/expected-release'].size() <= 64 &&
+        'exomem.io/worker-policy-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/worker-policy-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/browser-origin' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/browser-origin'].matches('^https://[^/]+$') &&
+        'exomem.io/transfer-hostname' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/transfer-hostname'].matches('^[a-z0-9](?:[a-z0-9-]{0,62}\\.)+[a-z]{2,63}$')
         )
       message: Tenant namespaces must keep the exact restricted-v1.35 tenant namespace contract.
     - expression: >-

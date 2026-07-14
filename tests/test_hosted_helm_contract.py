@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PLATFORM = ROOT / "infra/helm/platform"
 CELL = ROOT / "infra/helm/cell"
 CONTRACT = ROOT / "infra/contracts/exomem-hosted-schedules-v1.json"
+RUNTIME_GATE = ROOT / "infra/contracts/exomem-hosted-runtime-k3s-gate-v1.json"
 HELM = Path(os.environ["HELM_BIN"]) if "HELM_BIN" in os.environ else None
 
 
@@ -705,6 +706,26 @@ def test_platform_pins_exact_durability_contracts() -> None:
         "database_backup_bucket_name": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET",
     }
 
+def test_runtime_k3s_gate_pins_the_reviewed_release_unit() -> None:
+    gate = json.loads(RUNTIME_GATE.read_text(encoding="utf-8"))
+    assert gate == {
+        "artifact": "exomem-hosted-runtime-k3s-gate",
+        "schemaVersion": 1,
+        "k3sImage": (
+            "rancher/k3s@sha256:"
+            "9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c"
+        ),
+        "sourceRepository": "https://github.com/Artexis10/exomem",
+        "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
+        "release": "0.22.0",
+        "hostedProtocol": "1",
+        "dockerTarget": "hosted",
+        "releaseBuildTime": "2026-07-14T05:37:15Z",
+        "operatorContractSha256": (
+            "407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6"
+        ),
+    }
+
 
 def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
@@ -730,6 +751,9 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "storageInit",
         "tenantNamespace",
         "inScope",
+        "controllerUpdate",
+        "controllerJobFinalizerRemoval",
+        "controllerJobFinalizerTransition",
     ]
     assert "exomem-storage-init" in variables[0]["expression"]
     assert "exomem.io/tenant-cell" in variables[1]["expression"]
@@ -746,11 +770,27 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
     assert "configMap.name" in admission_text
     assert "size(object.spec.initContainers)" in admission_text
     assert "has(object.spec.initContainers)" in admission_text
-    assert "has(dyn(volume.emptyDir).sizeLimit)" in admission_text
+    assert "has(dyn(volume.emptyDir).sizeLimit)" not in admission_text
+    assert "request.operation == 'UPDATE'" in admission_text
+    assert "object.spec.nodeName == oldObject.spec.nodeName" in admission_text
+    assert "object.spec == oldObject.spec" in admission_text
+    assert (
+        "object.spec.containers[0].args == ['hosted', 'init', '--contract-version', '1', "
+        "'--request-file', '/run/exomem/operator-requests/init.json']"
+    ) in admission_text
+    assert "size(object.spec.volumes) == 2" in admission_text
+    assert "size(object.spec.containers[0].volumeMounts) == 4" in admission_text
     assert "seccompProfile.type == 'RuntimeDefault'" in admission_text
     assert "securityContext.seccompProfile" in admission_text
     assert "terminationMessagePath == '/dev/termination-log'" in admission_text
     assert "terminationMessagePolicy == 'File'" in admission_text
+    assert (
+        "request.userInfo.username == 'system:serviceaccount:kube-system:job-controller'"
+        in admission_text
+    )
+    assert "batch.kubernetes.io/job-tracking" in admission_text
+    assert "exact approved serving command and environment" in admission_text
+    assert "exact approved serving ports, probes, and interactive surface" in admission_text
     for forbidden_surface in (
         "lifecycle",
         "livenessProbe",
@@ -795,6 +835,12 @@ def test_platform_renders_luks_retain_storage_and_exact_schedule_contract() -> N
         "exomem.io/init-request-configmap-name",
         "exomem.io/tenant-cell",
         "exomem.io/cell-resource",
+        "exomem.io/cell-id",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
     ):
         assert protected_field in namespace_policy_text
 
@@ -1049,10 +1095,23 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
     }
     assert namespace["metadata"]["annotations"] == {
         "helm.sh/resource-policy": "keep",
+        "exomem.io/tenant-id": "tenant-alpha",
+        "exomem.io/cell-id": "alpha-test-original",
+        "exomem.io/operation-id": "operation-alpha",
+        "exomem.io/tenant-digest": "a" * 64,
+        "exomem.io/subject-digest": "b" * 64,
+        "exomem.io/operation-digest": "c" * 64,
+        "exomem.io/fence": "7",
+        "exomem.io/recovery-envelope": "a" * 64,
         "exomem.io/resource-name": "cell-alpha",
         "exomem.io/pvc-name": "cell-alpha-data",
-        "exomem.io/credentials-secret-name": "cell-alpha-credentials",
+        "exomem.io/credentials-secret-name": "exomem-cell-credentials",
         "exomem.io/init-request-configmap-name": "cell-alpha-init-request",
+        "exomem.io/vault-id": "vault-alpha-original",
+        "exomem.io/expected-release": "0.1.0-alpha",
+        "exomem.io/worker-policy-digest": "b" * 64,
+        "exomem.io/browser-origin": "https://substratesystems.io",
+        "exomem.io/transfer-hostname": "transfer.example.test",
     }
     if expected_kind == "Job":
         pod = workload["spec"]["template"]["spec"]
@@ -1066,6 +1125,8 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert container["args"] == [
             "hosted",
             "init",
+            "--contract-version",
+            "1",
             "--request-file",
             "/run/exomem/operator-requests/init.json",
         ]
@@ -1096,15 +1157,19 @@ def test_cell_chart_renders_separate_privileged_init_and_restricted_serving_mode
         assert env["EXOMEM_HOSTED_UPLOAD_LIMIT_BYTES"] == "94371840"
         assert env["EXOMEM_HOSTED_WORKER_LIMIT"] == "0"
         assert env["EXOMEM_HOSTED_FEATURE_GRANTS"] == ""
-        assert env["TMPDIR"] == "/tmp/runtime"
-
-        temporary = next(volume for volume in pod["volumes"] if volume["name"] == "tmp")
-        assert temporary["emptyDir"]["sizeLimit"] == "256Mi"
+        assert env["TMPDIR"] == "/var/lib/exomem/state/tmp/runtime"
+        assert {volume["name"] for volume in pod["volumes"]} == {"data", "credentials"}
+        assert {mount["mountPath"] for mount in container["volumeMounts"]} == {
+            "/var/lib/exomem/vault",
+            "/var/lib/exomem/state",
+            "/var/lib/exomem/logs",
+            "/run/exomem/credentials",
+        }
         assert container["resources"]["limits"]["ephemeral-storage"] == "512Mi"
 
         credentials = next(volume for volume in pod["volumes"] if volume["name"] == "credentials")
         assert credentials["secret"]["defaultMode"] == 0o444
-        assert credentials["secret"]["secretName"] == "cell-alpha-credentials"
+        assert credentials["secret"]["secretName"] == "exomem-cell-credentials"
         assert "EXOMEM_HOSTED_SERVICE_CREDENTIAL" not in env
         assert not any("secretKeyRef" in item.get("valueFrom", {}) for item in container["env"])
 
@@ -1126,6 +1191,36 @@ def test_cell_schema_rejects_mutable_image_and_non_fixed_limits() -> None:
     assert '"const": 0' in text
     assert '"const": "10Gi"' in text
     assert '"transferHostname"' not in json.dumps(schema["properties"]["routes"])
+
+
+def test_cell_chart_rejects_mismatched_runtime_and_provider_cell_ids(tmp_path: Path) -> None:
+    if HELM is None:
+        pytest.skip("set HELM_BIN to run pinned Helm rendering")
+    override = tmp_path / "mismatched-cell-id.yaml"
+    override.write_text(
+        yaml.safe_dump({"providerIdentity": {"cellId": "different-cell"}}),
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [
+            str(HELM),
+            "template",
+            "contract-test",
+            str(CELL),
+            "--namespace",
+            "cell-alpha-test",
+            "--values",
+            str(CELL / "values.validation.yaml"),
+            "--values",
+            str(override),
+        ],
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode != 0
+    assert "providerIdentity.cellId must equal cellId" in result.stderr
 
 
 def test_cell_routes_expose_only_exact_control_and_transfer_paths() -> None:

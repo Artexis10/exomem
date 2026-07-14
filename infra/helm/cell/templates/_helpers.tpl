@@ -21,6 +21,9 @@ exomem.io/recovery-envelope: {{ required (printf "providerRecoveryEnvelopes.%s i
 {{- end -}}
 
 {{- define "exomem-cell.validateProviderRecovery" -}}
+{{- if ne .Values.providerIdentity.cellId .Values.cellId -}}
+{{- fail "providerIdentity.cellId must equal cellId" -}}
+{{- end -}}
 {{- $values := list
   .Values.providerRecoveryEnvelopes.namespace
   .Values.providerRecoveryEnvelopes.vaultPvc

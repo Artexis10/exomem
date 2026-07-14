@@ -12,7 +12,7 @@ storageClassName: exomem-hcloud-encrypted-retain
 pvcSize: 10Gi
 providerIdentity:
   tenantId: tenant-alpha
-  cellId: cell-alpha
+  cellId: alpha-test-original
   operationId: operation-alpha
   tenantDigest: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
   subjectDigest: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
