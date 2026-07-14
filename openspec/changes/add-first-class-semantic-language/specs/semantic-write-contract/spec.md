@@ -16,7 +16,7 @@ One pure semantic-contract evaluator SHALL accept parsed before/after state plus
 - **THEN** it records the same error keys without reverting, deleting, or rewriting the file
 
 ### Requirement: Contract Applicability Is Lifecycle-Specific
-Active governed compiled create/replacement, active Tier-2 create/overwrite/append under compiled-memory paths, and active adoption compile SHALL receive full precommit syntax, saved-schema, and relation-disposition enforcement. An inactive governed compiled create SHALL receive structural and saved-schema precommit only, SHALL NOT join the active relation corpus, and SHALL NOT receive reviewed-none or bootstrap state. Activation of that page SHALL re-enter the full current contract before the primary update. `draft`, `planned`, `dropped`, and `archived` SHALL be inactive; `planned` is the production-log outline phase. Replacements SHALL produce active successors. Governed compiled edit/observe SHALL receive precommit evaluation with grandfathering where applicable. Other governed-KB Tier-2 documents SHALL receive structural/safety checks only. Move SHALL reevaluate only rules affected by path/project/page-type/scope changes and SHALL refresh identity/index state. Delete/trash SHALL skip departing-content validation while applying existing inbound/lifecycle guards and derived cleanup. Sources/Evidence SHALL never receive mutation-time semantic enforcement, though read-only parsing/indexing MAY expose valid units as raw-parent observations. Watcher/reconcile SHALL be posthoc and nonblocking.
+Active governed compiled create/replacement, active Tier-2 create/overwrite/append under compiled-memory paths, and active adoption compile SHALL receive full precommit syntax, saved-schema, and relation-disposition enforcement. An inactive governed compiled create SHALL receive structural and saved-schema precommit only, SHALL NOT join the active relation corpus, and SHALL NOT receive reviewed-none or bootstrap state. Activation of that page SHALL re-enter the full current contract before the primary update. `draft`, `planned`, `dropped`, and `archived` SHALL be inactive; `planned` is the production-log outline phase. Replacements SHALL produce active successors. Governed compiled edit/observe SHALL receive precommit evaluation with grandfathering where applicable. Other governed-KB Tier-2 documents SHALL receive structural/safety checks only. Move SHALL build the final corpus and reevaluate the deterministic dependency-affected closure, including unchanged pages whose relation resolution or disposition changes, before refreshing identity/index state. Delete/trash SHALL skip departing-content validation while applying existing inbound/lifecycle guards and derived cleanup. Sources/Evidence SHALL never receive mutation-time semantic enforcement, though read-only parsing/indexing MAY expose valid units as raw-parent observations. Watcher/reconcile SHALL be posthoc and nonblocking.
 
 #### Scenario: Inactive draft defers relation disposition
 - **WHEN** a newly created compiled page has an inactive lifecycle status
@@ -99,6 +99,43 @@ Creation-capable governed writers SHALL support `validate_only=true`. Validation
 - **WHEN** all rebuildable indexes/databases are removed and the vault is rebuilt
 - **THEN** a still-current portable reviewed-none disposition is recovered from governed vault content
 
+### Requirement: Existing-Page Review Decisions And Transition Recovery Are Separate
+For an existing page with a unique valid stable memory UUID, a reviewed-none lifecycle decision SHALL be an immutable portable artifact at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/<after-fingerprint>.json`. Its canonical bounded schema SHALL contain the schema/kind, normalized UUID, exact resulting review-content fingerprint, bounded non-empty reason, and a decision hash derived only from those stable decision fields. Its identity SHALL NOT depend on operation, prior bytes/path, transition token, log/index plan, or auxiliary digest. Transition-specific crash recovery SHALL use one separately guarded replaceable slot at `Knowledge Base/_Schema/relation-reviews/lifecycle/<uuid>/prepared.json`. Its canonical bounded schema SHALL contain the schema/kind, canonical transition UUID, operation, normalized page UUID, exact before/after paths and source hashes, after fingerprint, decision reference plus exact decision-bytes hash or JSON null when no decision is needed, transition-token hash, ordered auxiliary digest, and optional `carried_from` decision reference. The prepared slot SHALL NOT itself satisfy relation review. A current reviewed-none disposition SHALL require an exact unique UUID plus current-fingerprint decision match.
+
+Lifecycle decisions and prepared slots SHALL NOT be created or loaded for path-only legacy identities. A legacy page requiring reviewed-none SHALL first acquire a stable UUID through the explicit backfill workflow. Decision lookup SHALL be direct by UUID/current fingerprint, alias/symlink/reparse safe, and bounded to 256 conforming decision files per UUID; overflow or unsafe/malformed exact lifecycle state SHALL fail closed with governed cleanup guidance. The immutable 6D v1/v2 receipt at `relation-reviews/<uuid>.json` SHALL NOT be overwritten, deleted, reinterpreted, or migrated. Any conforming lifecycle artifact SHALL reserve its UUID against later creation even when the page is absent and no creation receipt exists; unsafe or malformed lifecycle state at that exact UUID SHALL likewise fail creation closed as identity-in-use. Trash/delete SHALL preserve that history. Recovery MAY replace the last committed prepared slot only when the trash sidecar, original path, UUID, and trashed bytes exactly prove its committed after state and no live page owns the UUID. Reconcile SHALL preserve and report that `trashed_committed` proof and SHALL remove only a neither-side prepared slot with no exact trash proof.
+
+#### Scenario: Inactive page activates with reviewed-none
+- **WHEN** an inactive stable-ID page is validated and committed into an active state with an exact reviewed-none decision
+- **THEN** the immutable decision and prepared transition are installed before the active primary becomes visible
+
+#### Scenario: Pending transition does not review the before state
+- **WHEN** an `A -> B` prepared transition exists but the current primary still exactly matches `A`
+- **THEN** the decision for `B` does not satisfy `A`, and a different transition is refused until the exact pending transition is retried or reconciled
+
+#### Scenario: Interrupted existing-page transition resumes exactly
+- **WHEN** a process stops after preparing the decision, transition slot, or deterministic auxiliaries and an exact retry repeats the same bound transition
+- **THEN** the writer adopts the prepared slot, commits the resulting primary last, and rejects token, reason, content, path, or auxiliary drift
+
+#### Scenario: Committed replay is mutation-free
+- **WHEN** an exact retry finds that the current primary already matches the prepared transition's after state
+- **THEN** it returns the existing committed outcome without writing the primary, decision, slot, log, or indexes again
+
+#### Scenario: Prior reviewed fingerprint is reusable across transitions
+- **WHEN** a page follows `A -> B`, later changes to `C`, and then returns exactly to reviewed fingerprint `B`
+- **THEN** the immutable `B` decision is reused while a distinct `C -> B` prepared transition binds the new before state and auxiliaries
+
+#### Scenario: Changed content cannot reuse lifecycle review
+- **WHEN** the proposed resulting fingerprint differs from every exact immutable decision for the page UUID
+- **THEN** a prior reviewed-none decision cannot satisfy it and fresh review is required before mutation
+
+#### Scenario: Stale prepared slot is cleaned only without recovery proof
+- **WHEN** current live bytes match neither side of a prepared slot
+- **THEN** dry-run reconcile reports the state, and write-mode reconcile may guarded-remove it only when no exact trash-sidecar/UUID/bytes proof establishes `trashed_committed`
+
+#### Scenario: Deleted identity cannot be stolen
+- **WHEN** a stable-ID page is trashed or deleted while conforming lifecycle state remains and a new creation attempts to reuse that UUID
+- **THEN** creation fails as identity-in-use, while exact guarded recovery of the original trashed bytes remains allowed
+
 ### Requirement: Canonical Relation Authoring And Validation
 New note-level typed relations SHALL be authored as one registered lower-snake-case relation and one wikilink per bullet under `## Relations`. An empty section SHALL be structurally valid only when another current disposition satisfies relation review. Placeholder bullets such as `- (none yet)`, malformed bullets, and unregistered semantically inert labels MUST NOT satisfy the disposition.
 
@@ -114,6 +151,8 @@ New note-level typed relations SHALL be authored as one registered lower-snake-c
 Existing compiled pages lacking the new relation/category contract SHALL remain readable and editable under a migration warning policy and SHALL enter activation/review queues instead of being bulk rewritten. Each error finding SHALL have stable key `(code, governed_element_identity, resolved_rule)`. An in-process edit MAY preserve pre-existing error debt only when its after-error key set is a subset of its before-error key set and it does not invalidate a current accepted disposition. Any new error key SHALL block. Replacements SHALL be treated as new compiled conclusions.
 
 On first capability activation, the system SHALL create one portable vault-managed activation manifest that records the current contract version and identities/source hashes of pre-existing governed compiled pages without rewriting those pages. Stable memory IDs SHALL be preferred; legacy pages SHALL use an explicitly move-unstable path+source-hash fallback. Pages first seen after that activation boundary SHALL be new pages, including out-of-band creations, and SHALL receive current-contract posthoc findings when they bypass an in-process writer.
+
+Validate-only and preliminary blockers SHALL NOT create the activation manifest. When the manifest is missing, a real first commit SHALL atomically install or observe the immutable activation-boundary winner after preliminary validation and SHALL then repeat evaluation before any other mutation. If the installed race winner changes membership and repeated evaluation blocks, that immutable manifest SHALL be the sole side effect.
 
 #### Scenario: Legacy debt does not block unrelated safe edit
 - **WHEN** an existing grandfathered page lacks typed relations and receives an unrelated edit that preserves its prior semantic state
@@ -197,7 +236,7 @@ The system SHALL expose `observe_memory` with `add`, `update`, `remove`, and `va
 - **THEN** it refuses with the existing write-boundary error contract
 
 ### Requirement: Index Failure Does Not Destroy Committed Markdown
-If Markdown commits successfully but a derived semantic-unit sidecar update fails, the operation SHALL preserve the committed Markdown, record deterministic index drift, return degraded/index-reconcile guidance, and allow reconcile to rebuild the missing records.
+If Markdown commits successfully but a derived semantic-unit sidecar update fails, the operation SHALL preserve the committed Markdown, record deterministic index drift, return degraded/index-reconcile guidance, and allow reconcile to rebuild the missing records. Immediate feedback SHALL distinguish configured disable/no-op, process-local warmup deferral, durable deferred-index work, proved completion, observed degradation, and accepted-unverified legacy leaves. It SHALL require reconcile only for observed degradation and SHALL NOT duplicate the index fan-out to manufacture feedback.
 
 #### Scenario: Sidecar failure after write is recoverable
 - **WHEN** a valid Markdown write commits and the semantic-unit index update then fails
