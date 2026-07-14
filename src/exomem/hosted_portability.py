@@ -1555,8 +1555,13 @@ class LifecycleCheckpointStore:
         root = Path(export_root).absolute()
         artifact = root / f"exomem-export-{digest}.zip"
         try:
-            if os.path.lexists(artifact):
+            try:
                 artifact_stat = artifact.lstat()
+            except FileNotFoundError:
+                # Release is idempotent. Another replay may remove the exact
+                # artifact between our existence check and lstat.
+                artifact_stat = None
+            if artifact_stat is not None:
                 if stat.S_ISLNK(artifact_stat.st_mode) or not stat.S_ISREG(artifact_stat.st_mode):
                     _fail(
                         "EXPORT_RELEASE_CLEANUP_FAILED",
