@@ -34,10 +34,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import audit as audit_module
-from . import indexes
+from . import indexes, relation_review, semantic_writes
 from .vault import PlannedWrite, batch_atomic_write, kb_root
 
 log = logging.getLogger(__name__)
+
+_LIFECYCLE_REPORT_LIMIT = 256
 
 
 @dataclass
@@ -49,6 +51,19 @@ class ReconcileReport:
     graph_status: str = "current"  # "current" | "refreshed" | "disabled"
     references_refreshed: int = 0
     references_status: str = "current"  # "current" | "refreshed"
+    semantic_activation: str = "prospective"
+    semantic_contract_findings: list[dict] = field(default_factory=list)
+    semantic_contract_summary: dict[str, int] = field(default_factory=dict)
+    semantic_contract_omitted_counts: dict[str, int] = field(default_factory=dict)
+    semantic_contract_truncation: dict[str, int] = field(default_factory=dict)
+    lifecycle_prepared: list[dict] = field(default_factory=list)
+    lifecycle_prepared_summary: dict[str, int] = field(default_factory=dict)
+    lifecycle_prepared_cleaned: list[str] = field(default_factory=list)
+    lifecycle_prepared_cleanup_blocked: list[dict[str, str]] = field(
+        default_factory=list
+    )
+    lifecycle_prepared_issues: list[dict[str, str]] = field(default_factory=list)
+    lifecycle_prepared_omitted_count: int = 0
     remaining_drift: list[dict] = field(default_factory=list)
     dry_run: bool = False
 
@@ -61,6 +76,21 @@ class ReconcileReport:
             "graph_status": self.graph_status,
             "references_refreshed": self.references_refreshed,
             "references_status": self.references_status,
+            "semantic_activation": self.semantic_activation,
+            "semantic_contract_findings": self.semantic_contract_findings,
+            "semantic_contract_summary": self.semantic_contract_summary,
+            "semantic_contract_omitted_counts": self.semantic_contract_omitted_counts,
+            "semantic_contract_truncation": self.semantic_contract_truncation,
+            "lifecycle_prepared": self.lifecycle_prepared,
+            "lifecycle_prepared_summary": self.lifecycle_prepared_summary,
+            "lifecycle_prepared_cleaned": self.lifecycle_prepared_cleaned,
+            "lifecycle_prepared_cleanup_blocked": (
+                self.lifecycle_prepared_cleanup_blocked
+            ),
+            "lifecycle_prepared_issues": self.lifecycle_prepared_issues,
+            "lifecycle_prepared_omitted_count": (
+                self.lifecycle_prepared_omitted_count
+            ),
             "remaining_drift": self.remaining_drift,
             "dry_run": self.dry_run,
         }
@@ -96,6 +126,55 @@ def reconcile(vault_root: Path, *, dry_run: bool = False) -> ReconcileReport:
         from .activation_manifest import ensure_manifest
 
         ensure_manifest(vault_root)
+    semantic_batch = semantic_writes.evaluate_posthoc_batch(
+        vault_root,
+        operation="reconcile",
+    )
+    semantic = semantic_batch.as_dict()
+    report.semantic_activation = semantic["activation"]
+    report.semantic_contract_findings = semantic["semantic_contract_findings"]
+    report.semantic_contract_summary = semantic["semantic_contract_summary"]
+    report.semantic_contract_omitted_counts = semantic["omitted_counts"]
+    report.semantic_contract_truncation = semantic["truncation"]
+    assert semantic_batch.corpus is not None
+    lifecycle_batch = relation_review.inspect_lifecycle_prepared_slots(
+        vault_root,
+        corpus=semantic_batch.corpus,
+    )
+    lifecycle = lifecycle_batch.inspections
+    report.lifecycle_prepared = [
+        item.as_dict() for item in lifecycle[:_LIFECYCLE_REPORT_LIMIT]
+    ]
+    report.lifecycle_prepared_omitted_count = max(
+        0, len(lifecycle) - len(report.lifecycle_prepared)
+    )
+    report.lifecycle_prepared_summary = {
+        state: sum(item.state == state for item in lifecycle)
+        for state in ("committed", "pending", "stale", "trashed_committed")
+    }
+    report.lifecycle_prepared_issues = [
+        issue.as_dict()
+        for issue in lifecycle_batch.issues[:_LIFECYCLE_REPORT_LIMIT]
+    ]
+    if not dry_run and lifecycle_batch.cleanup_safe:
+        for item in lifecycle:
+            if not item.cleanup_eligible:
+                continue
+            try:
+                cleaned = relation_review.cleanup_stale_lifecycle_prepared(
+                    vault_root, item
+                )
+            except relation_review.RelationReviewError as error:
+                if len(report.lifecycle_prepared_cleanup_blocked) < _LIFECYCLE_REPORT_LIMIT:
+                    report.lifecycle_prepared_cleanup_blocked.append(
+                        {
+                            "page_identity": item.prepared.page_identity,
+                            "code": error.code,
+                        }
+                    )
+                continue
+            if len(report.lifecycle_prepared_cleaned) < _LIFECYCLE_REPORT_LIMIT:
+                report.lifecycle_prepared_cleaned.append(cleaned)
     kb = kb_root(vault_root)
 
     # ---- 1. Index counts (recompute from disk; preserve curated text) ----

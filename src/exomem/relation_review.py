@@ -8,10 +8,11 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
+from types import MappingProxyType
 from typing import Any, Literal
 
 from . import (
@@ -42,6 +43,10 @@ _LIFECYCLE_MAX_RESIDUE = 3
 _LIFECYCLE_MAX_DIRECTORY_ENTRIES = (
     _LIFECYCLE_MAX_DECISIONS + 1 + _LIFECYCLE_MAX_RESIDUE
 )
+_LIFECYCLE_MAX_IDENTITIES = 4_096
+_LIFECYCLE_TRASH_MAX_DIRECTORY_ENTRIES = 1_024
+_LIFECYCLE_TRASH_MAX_DIRECTORIES = 4_096
+_LIFECYCLE_TRASH_MAX_FILES = 16_384
 _LIFECYCLE_ATOMIC_RESIDUE = re.compile(
     r"^\.(?:prepared\.json|[0-9a-f]{64}\.json)\.[a-z0-9_]{8}\.(?:tmp|bak)$"
 )
@@ -352,6 +357,48 @@ class LifecycleTransitionPlan:
     prepared: LifecyclePreparedTransition
     writes: tuple[vault.PlannedWrite, ...]
     required_guards: tuple[vault.PathGuard | vault.DirectoryCensusGuard, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePreparedInspection:
+    """One directly loaded crash slot bound to its primary and trash snapshot."""
+
+    prepared: LifecyclePreparedTransition
+    state: Literal["pending", "committed", "trashed_committed", "stale"]
+    cleanup_eligible: bool
+    prepared_guard: vault.PathGuard
+    primary_guards: tuple[vault.PathGuard, ...]
+    trash_guards: tuple[vault.DirectoryCensusGuard, ...]
+    trash_content_guards: tuple[vault.PathGuard, ...]
+    trash_target_guards: tuple[vault.PathGuard, ...]
+    trash_proof: LifecycleTrashProof | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            "page_identity": self.prepared.page_identity,
+            "state": self.state,
+            "reference": self.prepared.reference,
+            "cleanup_eligible": self.cleanup_eligible,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePreparedIssue:
+    code: str
+    page_identity: str | None = None
+
+    def as_dict(self) -> dict[str, str]:
+        value = {"code": self.code}
+        if self.page_identity is not None:
+            value["page_identity"] = self.page_identity
+        return value
+
+
+@dataclass(frozen=True, slots=True)
+class LifecyclePreparedBatch:
+    inspections: tuple[LifecyclePreparedInspection, ...]
+    issues: tuple[LifecyclePreparedIssue, ...]
+    cleanup_safe: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -1119,6 +1166,505 @@ def load_lifecycle_prepared(
     return prepared
 
 
+@dataclass(frozen=True, slots=True)
+class _LifecycleTrashSnapshot:
+    files: frozenset[str]
+    directories: frozenset[str]
+    guards: tuple[vault.DirectoryCensusGuard, ...]
+    content_guards: tuple[vault.PathGuard, ...]
+    sidecars_by_original: Mapping[str, tuple[_LifecycleTrashSidecar, ...]]
+
+
+@dataclass(frozen=True, slots=True)
+class _LifecycleTrashSidecar:
+    original_path: str
+    trash_root: str
+    target_kind: Literal["file", "directory", "missing"]
+    source: str
+    guard: vault.PathGuard
+
+
+def list_lifecycle_prepared_identities(vault_root: Path) -> tuple[str, ...]:
+    """Enumerate bounded lifecycle UUID directories, then direct-load each slot."""
+    root = Path(vault_root).absolute()
+    identities: list[str] = []
+    with _open_review_directory(
+        root,
+        nested=("lifecycle",),
+        max_entries=_LIFECYCLE_MAX_IDENTITIES,
+    ) as opened:
+        if opened is None:
+            return ()
+        for name in opened.names:
+            try:
+                identity = _canonical_id(
+                    name, code="RELATION_REVIEW_INVALID_ID"
+                )
+                info = (
+                    os.stat(
+                        name,
+                        dir_fd=opened.descriptor,
+                        follow_symlinks=False,
+                    )
+                    if opened.descriptor_relative
+                    else (opened.path / name).lstat()
+                )
+            except (OSError, RelationReviewError) as error:
+                raise RelationReviewError(
+                    "RELATION_REVIEW_DIRECTORY_UNSAFE",
+                    "lifecycle identity directory is unsafe",
+                ) from error
+            if (
+                stat.S_ISLNK(info.st_mode)
+                or vault._is_reparse(info)
+                or not stat.S_ISDIR(info.st_mode)
+            ):
+                raise RelationReviewError(
+                    "RELATION_REVIEW_DIRECTORY_UNSAFE",
+                    "lifecycle identity directory is unsafe",
+                )
+            _, names, _ = _inspect_lifecycle_identity(root, identity)
+            if "prepared.json" in names:
+                identities.append(identity)
+    return tuple(identities)
+
+
+def _safe_trash_original_path(value: object) -> bool:
+    if type(value) is not str:
+        return False
+    posix = PurePosixPath(value)
+    return bool(
+        value
+        and "\\" not in value
+        and "\0" not in value
+        and posix.as_posix() == value
+        and not posix.is_absolute()
+        and not any(part in {"", ".", ".."} for part in posix.parts)
+        and posix.parts
+        and posix.parts[0] == kb_dirname()
+    )
+
+
+def _capture_lifecycle_trash_snapshot(root: Path) -> _LifecycleTrashSnapshot:
+    start = f"{kb_dirname()}/_trash"
+    pending = [start]
+    files: set[str] = set()
+    directories: set[str] = set()
+    guards: list[vault.DirectoryCensusGuard] = []
+    while pending:
+        relative = pending.pop()
+        if len(guards) >= _LIFECYCLE_TRASH_MAX_DIRECTORIES:
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_LIMIT",
+                "trash proof census exceeds its bounded directory limit",
+            )
+        try:
+            guard = vault.DirectoryCensusGuard.capture(
+                root,
+                relative,
+                max_entries=_LIFECYCLE_TRASH_MAX_DIRECTORY_ENTRIES,
+            )
+        except vault.PathGuardError as error:
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_UNSAFE",
+                "trash proof census cannot be inspected safely",
+            ) from error
+        guards.append(guard)
+        if guard.directory_identity is None:
+            continue
+        directories.add(relative)
+        for entry in guard.entries:
+            child = root / entry.relative_path
+            try:
+                info = child.lstat()
+            except OSError as error:
+                raise RelationReviewError(
+                    "LIFECYCLE_TRASH_RACE",
+                    "trash proof census changed during inspection",
+                ) from error
+            if (
+                not vault._same_identity(entry, info)
+                or stat.S_ISLNK(info.st_mode)
+                or vault._is_reparse(info)
+            ):
+                raise RelationReviewError(
+                    "LIFECYCLE_TRASH_UNSAFE",
+                    "trash proof census contains an unsafe entry",
+                )
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(entry.relative_path)
+            elif stat.S_ISREG(info.st_mode):
+                files.add(entry.relative_path)
+                if len(files) > _LIFECYCLE_TRASH_MAX_FILES:
+                    raise RelationReviewError(
+                        "LIFECYCLE_TRASH_LIMIT",
+                        "trash proof census exceeds its bounded file limit",
+                    )
+            else:
+                raise RelationReviewError(
+                    "LIFECYCLE_TRASH_UNSAFE",
+                    "trash proof census contains an unsafe entry",
+                )
+    content_guards: list[vault.PathGuard] = []
+    sidecars: dict[str, list[_LifecycleTrashSidecar]] = {}
+    for relative in sorted(files):
+        if not relative.endswith(".meta.json"):
+            continue
+        try:
+            raw = (root / relative).read_bytes()
+            guard = vault.PathGuard.capture(
+                root,
+                relative,
+                leaf_policy="content",
+                expected_content_hash=hashlib.sha256(raw).hexdigest(),
+            )
+            source = raw.decode("utf-8", errors="strict")
+            metadata = parse_exact_json_object(source)
+            original = metadata.get("original_path")
+            if not _safe_trash_original_path(original):
+                raise ValueError("trash sidecar original_path is invalid")
+        except (OSError, UnicodeDecodeError, ValueError, vault.PathGuardError) as error:
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_INVALID",
+                "trash proof inventory contains an invalid sidecar or changed file",
+            ) from error
+        content_guards.append(guard)
+        assert isinstance(original, str)
+        trash_root = relative.removesuffix(".meta.json")
+        target_kind: Literal["file", "directory", "missing"] = "missing"
+        if trash_root in files:
+            target_kind = "file"
+        elif trash_root in directories:
+            target_kind = "directory"
+        sidecars.setdefault(original, []).append(
+            _LifecycleTrashSidecar(
+                original,
+                trash_root,
+                target_kind,
+                source,
+                guard,
+            )
+        )
+    return _LifecycleTrashSnapshot(
+        frozenset(files),
+        frozenset(directories),
+        tuple(guards),
+        tuple(content_guards),
+        MappingProxyType(
+            {
+                original: tuple(entries)
+                for original, entries in sorted(sidecars.items())
+            }
+        ),
+    )
+
+
+def _guard_lifecycle_primary_paths(
+    root: Path, prepared: LifecyclePreparedTransition
+) -> tuple[vault.PathGuard, ...]:
+    guards: list[vault.PathGuard] = []
+    for relative in sorted({prepared.before_path, prepared.after_path}):
+        path = root / relative
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            guards.append(
+                vault.PathGuard.capture(root, relative, leaf_policy="absent")
+            )
+            continue
+        except OSError as error:
+            raise RelationReviewError(
+                "LIFECYCLE_PRIMARY_INVALID",
+                "prepared transition primary cannot be inspected safely",
+            ) from error
+        try:
+            guards.append(
+                vault.PathGuard.capture(
+                    root,
+                    relative,
+                    leaf_policy="content",
+                    expected_content_hash=hashlib.sha256(raw).hexdigest(),
+                )
+            )
+        except vault.PathGuardError as error:
+            raise RelationReviewError(
+                "LIFECYCLE_PRIMARY_INVALID",
+                "prepared transition primary cannot be inspected safely",
+            ) from error
+    return tuple(guards)
+
+
+def _prepared_primary_binding(
+    prepared: LifecyclePreparedTransition,
+    corpus: semantic_contract.SemanticCorpusContext,
+) -> tuple[LifecyclePrimaryBinding, tuple[str, ...]]:
+    owner_paths = tuple(
+        path
+        for path in corpus.identity_census.paths_by_identity.get(
+            prepared.page_identity, ()
+        )
+        if not path.startswith(f"{kb_dirname()}/_trash/")
+    )
+    if len(owner_paths) == 1 and owner_paths[0] in corpus.pages:
+        state = corpus.pages[owner_paths[0]]
+        return (
+            LifecyclePrimaryBinding(
+                state.path,
+                state.source_hash,
+                state.review_fingerprint,
+            ),
+            owner_paths,
+        )
+    return (
+        LifecyclePrimaryBinding(prepared.after_path, "0" * 64, None),
+        owner_paths,
+    )
+
+
+def _trash_proof_for_prepared(
+    root: Path,
+    prepared: LifecyclePreparedTransition,
+    *,
+    corpus: semantic_contract.SemanticCorpusContext,
+    snapshot: _LifecycleTrashSnapshot,
+) -> tuple[LifecycleTrashProof | None, tuple[vault.PathGuard, ...]]:
+    live_owner_paths = tuple(
+        path
+        for path in corpus.identity_census.paths_by_identity.get(
+            prepared.page_identity, ()
+        )
+        if not path.startswith(f"{kb_dirname()}/_trash/")
+    )
+    target_guards: list[vault.PathGuard] = []
+    parts = PurePosixPath(prepared.after_path).parts
+    original_candidates = (
+        prepared.after_path,
+        *("/".join(parts[:index]) for index in range(len(parts) - 1, 0, -1)),
+    )
+    candidates = (
+        sidecar
+        for original in original_candidates
+        for sidecar in snapshot.sidecars_by_original.get(original, ())
+    )
+    for sidecar in candidates:
+        if sidecar.target_kind == "directory":
+            prefix = f"{sidecar.original_path.rstrip('/')}/"
+            if not prepared.after_path.startswith(prefix):
+                continue
+            suffix = prepared.after_path.removeprefix(prefix)
+            trash_path = f"{sidecar.trash_root}/{suffix}"
+        elif sidecar.target_kind == "file":
+            if prepared.after_path != sidecar.original_path:
+                continue
+            trash_path = sidecar.trash_root
+        else:
+            continue
+        if trash_path not in snapshot.files or not trash_path.endswith(".md"):
+            continue
+        try:
+            raw = (root / trash_path).read_bytes()
+            source_guard = vault.PathGuard.capture(
+                root,
+                trash_path,
+                leaf_policy="content",
+                expected_content_hash=hashlib.sha256(raw).hexdigest(),
+            )
+            target_guards.append(source_guard)
+            source = raw.decode("utf-8", errors="strict")
+            frontmatter, _, _ = vault.parse_frontmatter(source)
+        except (UnicodeDecodeError, ValueError):
+            continue
+        except (OSError, vault.PathGuardError) as error:
+            raise RelationReviewError(
+                "LIFECYCLE_TRASH_RACE",
+                "trash target changed during lifecycle inspection",
+            ) from error
+        if normalize_id(frontmatter.get(ID_FIELD)) != prepared.page_identity:
+            continue
+        proof = LifecycleTrashProof(
+            page_identity=prepared.page_identity,
+            original_path=prepared.after_path,
+            trash_path=trash_path,
+            source_hash=vault.content_hash(source),
+            review_fingerprint=semantic_contract.review_content_fingerprint(
+                prepared.page_identity, source
+            ),
+            source_guard=source_guard,
+            sidecar_source=sidecar.source,
+            sidecar_guard=sidecar.guard,
+            live_owner_paths=live_owner_paths,
+        )
+        try:
+            if trash_proof_commits_prepared(prepared, proof):
+                return proof, tuple(target_guards)
+        except RelationReviewError:
+            continue
+    return None, tuple(target_guards)
+
+
+def inspect_lifecycle_prepared_slots(
+    vault_root: Path,
+    *,
+    corpus: semantic_contract.SemanticCorpusContext,
+) -> LifecyclePreparedBatch:
+    """Classify all direct prepared slots against one already-built corpus."""
+    root = Path(vault_root).absolute()
+    try:
+        identities = list_lifecycle_prepared_identities(root)
+    except RelationReviewError as error:
+        return LifecyclePreparedBatch(
+            (), (LifecyclePreparedIssue(error.code),), False
+        )
+    if not identities:
+        return LifecyclePreparedBatch((), (), True)
+    issues: list[LifecyclePreparedIssue] = []
+    try:
+        trash = _capture_lifecycle_trash_snapshot(root)
+    except RelationReviewError as error:
+        trash = None
+        issues.append(LifecyclePreparedIssue(error.code))
+    inspections: list[LifecyclePreparedInspection] = []
+    for identity in identities:
+        try:
+            prepared, prepared_guard = _load_lifecycle_prepared_bound(root, identity)
+        except RelationReviewError as error:
+            issues.append(LifecyclePreparedIssue(error.code, identity))
+            continue
+        if prepared is None or prepared_guard is None:
+            issues.append(
+                LifecyclePreparedIssue("LIFECYCLE_RECONCILE_RACE", identity)
+            )
+            continue
+        try:
+            _load_prepared_decision_guard(root, prepared)
+        except RelationReviewError as error:
+            issues.append(LifecyclePreparedIssue(error.code, identity))
+            continue
+        current, owner_paths = _prepared_primary_binding(prepared, corpus)
+        if len(owner_paths) > 1 or (
+            len(owner_paths) == 1 and owner_paths[0] not in corpus.pages
+        ):
+            issues.append(
+                LifecyclePreparedIssue("LIFECYCLE_PRIMARY_AMBIGUOUS", identity)
+            )
+            continue
+        state: Literal["pending", "committed", "trashed_committed", "stale"]
+        state = lifecycle_prepared_state(prepared, current)
+        proof = None
+        target_guards: tuple[vault.PathGuard, ...] = ()
+        if state == "stale":
+            if trash is None:
+                issues.append(
+                    LifecyclePreparedIssue("LIFECYCLE_TRASH_INDETERMINATE", identity)
+                )
+                continue
+            try:
+                proof, target_guards = _trash_proof_for_prepared(
+                    root,
+                    prepared,
+                    corpus=corpus,
+                    snapshot=trash,
+                )
+            except RelationReviewError as error:
+                issues.append(LifecyclePreparedIssue(error.code, identity))
+                continue
+            if proof is not None:
+                state = "trashed_committed"
+        try:
+            primary_guards = _guard_lifecycle_primary_paths(root, prepared)
+        except RelationReviewError as error:
+            issues.append(LifecyclePreparedIssue(error.code, identity))
+            continue
+        inspections.append(
+            LifecyclePreparedInspection(
+                prepared=prepared,
+                state=state,
+                cleanup_eligible=state == "stale" and proof is None,
+                prepared_guard=prepared_guard,
+                primary_guards=primary_guards,
+                trash_guards=trash.guards if trash is not None else (),
+                trash_content_guards=(
+                    trash.content_guards if trash is not None else ()
+                ),
+                trash_target_guards=target_guards,
+                trash_proof=proof,
+            )
+        )
+    cleanup_safe = not issues and trash is not None
+    if not cleanup_safe:
+        inspections = [replace(item, cleanup_eligible=False) for item in inspections]
+    return LifecyclePreparedBatch(
+        tuple(inspections), tuple(issues[:_LIFECYCLE_MAX_IDENTITIES]), cleanup_safe
+    )
+
+
+def cleanup_stale_lifecycle_prepared(
+    vault_root: Path,
+    inspection: LifecyclePreparedInspection,
+) -> str:
+    """Guarded-remove exactly one still-stale slot; never touch decisions/content."""
+    root = Path(vault_root).absolute()
+    if inspection.state != "stale" or not inspection.cleanup_eligible:
+        raise RelationReviewError(
+            "LIFECYCLE_RECONCILE_NOT_STALE",
+            "only an exactly inspected stale prepared slot is cleanup-eligible",
+        )
+    try:
+        with vault.vault_creation_lock(root, "semantic-creation"):
+            inspection.prepared_guard.recheck(root)
+            for guard in inspection.primary_guards:
+                guard.recheck(root)
+            for guard in inspection.trash_guards:
+                guard.recheck(root)
+            for guard in inspection.trash_content_guards:
+                guard.recheck(root)
+            for guard in inspection.trash_target_guards:
+                guard.recheck(root)
+            prepared, prepared_guard = _load_lifecycle_prepared_bound(
+                root, inspection.prepared.page_identity
+            )
+            if prepared != inspection.prepared or prepared_guard is None:
+                raise RelationReviewError(
+                    "LIFECYCLE_RECONCILE_RACE",
+                    "prepared transition changed before cleanup",
+                )
+            inspection.prepared_guard.recheck(root)
+            with _open_review_directory(
+                root,
+                nested=("lifecycle", inspection.prepared.page_identity),
+                max_entries=_LIFECYCLE_MAX_DIRECTORY_ENTRIES,
+            ) as opened:
+                if opened is None or "prepared.json" not in opened.names:
+                    raise RelationReviewError(
+                        "LIFECYCLE_RECONCILE_RACE",
+                        "prepared transition changed before cleanup",
+                    )
+                raw, immediate_guard = _read_artifact_bytes(
+                    opened, "prepared.json"
+                )
+                immediate = _parse_lifecycle_prepared(
+                    raw,
+                    page_identity=inspection.prepared.page_identity,
+                )
+                if immediate != inspection.prepared:
+                    raise RelationReviewError(
+                        "LIFECYCLE_RECONCILE_RACE",
+                        "prepared transition changed before cleanup",
+                    )
+                inspection.prepared_guard.recheck(root)
+                immediate_guard.recheck(root)
+                if opened.descriptor_relative:
+                    os.unlink("prepared.json", dir_fd=opened.descriptor)
+                else:  # pragma: no cover - Windows fallback
+                    (opened.path / "prepared.json").unlink()
+    except vault.PathGuardError as error:
+        raise RelationReviewError(
+            "LIFECYCLE_RECONCILE_RACE",
+            "primary, trash, or prepared state changed before cleanup",
+        ) from error
+    return inspection.prepared.reference
+
+
 def lifecycle_identity_reserved(vault_root: Path, page_identity: str) -> bool:
     """Return whether any exact lifecycle identity directory reserves the UUID."""
     _, _, census = _inspect_lifecycle_identity(vault_root, page_identity)
@@ -1241,10 +1787,7 @@ def _load_prepared_decision_guard(
     return guard
 
 
-def _validate_lifecycle_trash_proof(
-    *,
-    prepared: LifecyclePreparedTransition,
-    current: LifecyclePrimaryBinding,
+def _validate_exact_lifecycle_trash_proof(
     proof: LifecycleTrashProof,
 ) -> None:
     try:
@@ -1269,15 +1812,14 @@ def _validate_lifecycle_trash_proof(
         original_matches = proof.original_path == sidecar_object.get("original_path")
         identity_matches = proof.page_identity == sidecar_identity
     valid = (
-        prepared.operation == "recover"
-        and proof.page_identity == prepared.page_identity
+        isinstance(proof, LifecycleTrashProof)
+        and normalize_id(proof.page_identity) == proof.page_identity
         and identity_matches
         and original_matches
-        and proof.trash_path == prepared.before_path
-        and proof.trash_path == current.path
-        and proof.source_hash == prepared.before_source_hash
-        and proof.source_hash == current.source_hash
-        and proof.review_fingerprint == current.review_fingerprint
+        and _safe_record_path(proof.original_path)
+        and _safe_record_path(proof.trash_path)
+        and bool(_HASH.fullmatch(proof.source_hash))
+        and bool(_HASH.fullmatch(proof.review_fingerprint))
         and proof.source_guard.target == proof.trash_path
         and proof.source_guard.leaf_policy == "content"
         and proof.source_guard.expected_content_hash == proof.source_hash
@@ -1287,6 +1829,29 @@ def _validate_lifecycle_trash_proof(
         and proof.sidecar_guard.expected_content_hash
         == vault.content_hash(proof.sidecar_source)
         and not proof.live_owner_paths
+    )
+    if not valid:
+        raise RelationReviewError(
+            "LIFECYCLE_TRANSITION_MISMATCH",
+            "trash proof does not bind exact sidecar, UUID, bytes, and ownership",
+        )
+
+
+def _validate_lifecycle_trash_proof(
+    *,
+    prepared: LifecyclePreparedTransition,
+    current: LifecyclePrimaryBinding,
+    proof: LifecycleTrashProof,
+) -> None:
+    _validate_exact_lifecycle_trash_proof(proof)
+    valid = (
+        prepared.operation == "recover"
+        and proof.page_identity == prepared.page_identity
+        and proof.trash_path == prepared.before_path
+        and proof.trash_path == current.path
+        and proof.source_hash == prepared.before_source_hash
+        and proof.source_hash == current.source_hash
+        and proof.review_fingerprint == current.review_fingerprint
     )
     if not valid:
         raise RelationReviewError(
@@ -1305,6 +1870,16 @@ def _trash_proof_commits_prepared(
         and prepared.after_source_hash == proof.source_hash
         and prepared.after_fingerprint == proof.review_fingerprint
     )
+
+
+def trash_proof_commits_prepared(
+    prepared: LifecyclePreparedTransition,
+    proof: LifecycleTrashProof,
+) -> bool:
+    """Validate recovery's exact proof and bind it to a prior committed slot."""
+    _validate_lifecycle_prepared(prepared)
+    _validate_exact_lifecycle_trash_proof(proof)
+    return _trash_proof_commits_prepared(prepared, proof)
 
 
 def plan_lifecycle_transition(

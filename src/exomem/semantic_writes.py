@@ -316,6 +316,7 @@ class PosthocBatch:
     operation: Literal["watcher", "audit", "reconcile"]
     activation: Literal["current", "prospective"]
     evaluations: tuple[PosthocPageEvaluation, ...]
+    corpus: semantic_contract.SemanticCorpusContext | None = None
 
     def as_dict(self) -> dict[str, Any]:
         findings: list[dict[str, Any]] = []
@@ -518,7 +519,7 @@ def evaluate_posthoc_batch(
                 activation_status,
             )
         )
-    return PosthocBatch(operation, activation_status, tuple(evaluations))
+    return PosthocBatch(operation, activation_status, tuple(evaluations), corpus)
 
 
 @dataclass(frozen=True, slots=True)
