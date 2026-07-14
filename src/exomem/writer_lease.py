@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import pickle
+import re
 import sqlite3
 import threading
 import time
@@ -30,7 +31,155 @@ _COORDINATOR_USER_AGENT = (
     "Mozilla/5.0 (compatible; Exomem-Coordinator/1.0; +https://github.com/Artexis10/exomem)"
 )
 _IMPLICIT_RETRY_TTL_SECONDS = 60.0
+_COMMITTED_FAILURE_CODE = "BATCH_CLEANUP_INCOMPLETE"
+_COMMITTED_FAILURE_MESSAGE = "The batch workspace cleanup is incomplete."
+_COMMITTED_FAILURE_REMEDIATION = (
+    "Do not retry the write; committed destinations are preserved. Reconcile retained "
+    "workspace state."
+)
+_COMMITTED_FAILURE_TOP_KEYS = frozenset({"code", "message", "remediation", "outcome"})
+_COMMITTED_FAILURE_OUTCOME_KEYS = frozenset(
+    {
+        "kind",
+        "committed",
+        "incomplete",
+        "affected_count",
+        "targets",
+        "omitted_target_count",
+    }
+)
+_WINDOWS_DRIVE_PREFIX = re.compile(r"^[A-Za-z]:")
 logger = logging.getLogger(__name__)
+
+
+def _invalid_committed_failure_payload() -> ValueError:
+    return ValueError("invalid committed failure payload")
+
+
+def _validate_committed_failure_payload(payload: Any) -> dict[str, Any]:
+    """Return an owned copy of the one public committed-failure shape."""
+    if type(payload) is not dict or set(payload) != _COMMITTED_FAILURE_TOP_KEYS:
+        raise _invalid_committed_failure_payload()
+    if (
+        payload.get("code") != _COMMITTED_FAILURE_CODE
+        or payload.get("message") != _COMMITTED_FAILURE_MESSAGE
+        or payload.get("remediation") != _COMMITTED_FAILURE_REMEDIATION
+    ):
+        raise _invalid_committed_failure_payload()
+    outcome = payload.get("outcome")
+    if type(outcome) is not dict or set(outcome) != _COMMITTED_FAILURE_OUTCOME_KEYS:
+        raise _invalid_committed_failure_payload()
+    affected_count = outcome.get("affected_count")
+    omitted_target_count = outcome.get("omitted_target_count")
+    targets = outcome.get("targets")
+    if (
+        outcome.get("kind") != "cleanup_incomplete"
+        or outcome.get("committed") is not True
+        or outcome.get("incomplete") is not True
+        or type(affected_count) is not int
+        or affected_count < 0
+        or type(omitted_target_count) is not int
+        or omitted_target_count < 0
+        or type(targets) is not list
+        or len(targets) > 16
+        or omitted_target_count != affected_count - len(targets)
+    ):
+        raise _invalid_committed_failure_payload()
+    for target in targets:
+        if type(target) is not str:
+            raise _invalid_committed_failure_payload()
+        try:
+            encoded = target.encode("utf-8")
+        except UnicodeEncodeError:
+            raise _invalid_committed_failure_payload() from None
+        parts = target.split("/")
+        if (
+            not target
+            or target.startswith("/")
+            or "\\" in target
+            or "\0" in target
+            or len(encoded) > 1024
+            or _WINDOWS_DRIVE_PREFIX.match(target) is not None
+            or any(part in {"", ".", ".."} for part in parts)
+            or any(part.startswith(".exomem-batch-") for part in parts)
+        ):
+            raise _invalid_committed_failure_payload()
+    return {
+        "code": _COMMITTED_FAILURE_CODE,
+        "message": _COMMITTED_FAILURE_MESSAGE,
+        "remediation": _COMMITTED_FAILURE_REMEDIATION,
+        "outcome": {
+            "kind": "cleanup_incomplete",
+            "committed": True,
+            "incomplete": True,
+            "affected_count": affected_count,
+            "targets": list(targets),
+            "omitted_target_count": omitted_target_count,
+        },
+    }
+
+
+def _serialize_committed_failure_payload(payload: Any) -> bytes:
+    validated = _validate_committed_failure_payload(payload)
+    return json.dumps(
+        validated,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _invalid_committed_failure_payload()
+        result[key] = value
+    return result
+
+
+def _deserialize_committed_failure_payload(payload: Any) -> dict[str, Any]:
+    if type(payload) is not bytes:
+        raise _invalid_committed_failure_payload()
+    try:
+        decoded = payload.decode("utf-8")
+        parsed = json.loads(decoded, object_pairs_hook=_reject_duplicate_json_keys)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        raise _invalid_committed_failure_payload() from None
+    return _validate_committed_failure_payload(parsed)
+
+
+def _committed_failure_payload(error: Exception) -> dict[str, Any] | None:
+    if getattr(error, "committed", None) is not True:
+        return None
+    public_dict = getattr(error, "as_public_dict", None)
+    if not callable(public_dict):
+        return None
+    try:
+        return _validate_committed_failure_payload(public_dict())
+    except Exception:  # noqa: BLE001 - arbitrary exception payloads are not cacheable
+        return None
+
+
+class _CachedCommittedFailure(ValueError):
+    """Reconstructed public failure containing no original exception state."""
+
+    committed = True
+
+    def __init__(self, payload: Any):
+        self._payload = _validate_committed_failure_payload(payload)
+        self.code = _COMMITTED_FAILURE_CODE
+        ValueError.__init__(self, self.__str__())
+
+    def as_public_dict(self) -> dict[str, Any]:
+        return _validate_committed_failure_payload(self._payload)
+
+    def __str__(self) -> str:
+        return self._payload_json()
+
+    def _payload_json(self) -> str:
+        return _serialize_committed_failure_payload(self._payload).decode("utf-8")
 
 
 @dataclass(frozen=True)
@@ -177,7 +326,8 @@ class LeaseCoordinatorClient:
             raise OpError(
                 "WRITER_COORDINATOR_UNAVAILABLE",
                 f"writer coordinator could not confirm authority: {exc}",
-                "Check the coordinator URL, credentials, and service health; reads remain available.",
+                "Check the coordinator URL, credentials, and service health; "
+                "reads remain available.",
             ) from None
 
 
@@ -217,7 +367,7 @@ class IdempotencyStore:
             if expires_after is not None:
                 conn.execute(
                     "DELETE FROM mutations WHERE key LIKE 'implicit:%' "
-                    "AND state = 'completed' AND updated_at <= ?",
+                    "AND state IN ('completed', 'committed_failure') AND updated_at <= ?",
                     (now - expires_after,),
                 )
             row = conn.execute(
@@ -236,6 +386,20 @@ class IdempotencyStore:
                     if on_replay is not None:
                         on_replay()
                     return pickle.loads(row[2])  # noqa: S301 - local trusted runtime state
+                if row[1] == "committed_failure":
+                    try:
+                        failure = _CachedCommittedFailure(
+                            _deserialize_committed_failure_payload(row[2])
+                        )
+                    except Exception:  # noqa: BLE001 - corrupt state blocks mutation
+                        raise OpError(
+                            "IDEMPOTENCY_IN_PROGRESS",
+                            "cached committed mutation state requires reconciliation",
+                            "Reconcile the local idempotency store before retrying this mutation.",
+                        ) from None
+                    if on_replay is not None:
+                        on_replay()
+                    raise failure
                 raise OpError(
                     "IDEMPOTENCY_IN_PROGRESS",
                     "an identical mutation with this key is already in progress",
@@ -246,19 +410,41 @@ class IdempotencyStore:
             )
         try:
             result = operation()
-        except Exception:
-            with self._connect() as conn:
-                conn.execute(
-                    "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
-                    (key, digest),
-                )
+        except Exception as operation_error:
+            committed_failure = _committed_failure_payload(operation_error)
+            if committed_failure is None:
+                with self._connect() as conn:
+                    conn.execute(
+                        "DELETE FROM mutations WHERE key = ? AND digest = ? AND state = 'pending'",
+                        (key, digest),
+                    )
+                raise
+            try:
+                payload = _serialize_committed_failure_payload(committed_failure)
+                with self._connect() as conn:
+                    cursor = conn.execute(
+                        "UPDATE mutations SET state = 'committed_failure', result = ?, "
+                        "updated_at = ? WHERE key = ? AND digest = ? AND state = 'pending'",
+                        (payload, self.clock(), key, digest),
+                    )
+                    if cursor.rowcount != 1:
+                        raise sqlite3.OperationalError(
+                            "pending idempotency marker changed before committed failure update"
+                        )
+            except Exception as storage_error:
+                raise operation_error from storage_error
             raise
         payload = pickle.dumps(result)
         with self._connect() as conn:
-            conn.execute(
-                "UPDATE mutations SET state = 'completed', result = ?, updated_at = ? WHERE key = ? AND digest = ?",
+            cursor = conn.execute(
+                "UPDATE mutations SET state = 'completed', result = ?, updated_at = ? "
+                "WHERE key = ? AND digest = ?",
                 (payload, self.clock(), key, digest),
             )
+            if cursor.rowcount != 1:
+                raise sqlite3.OperationalError(
+                    "pending idempotency marker changed before completion update"
+                )
         return result
 
 

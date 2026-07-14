@@ -447,7 +447,7 @@ _BATCH_COMMITTED_REMEDIATION = (
 )
 
 
-class BatchWriteError(RuntimeError):
+class BatchWriteError(ValueError):
     """Sanitized public outcome for a batch that retained workspace state."""
 
     def __init__(
@@ -478,7 +478,7 @@ class BatchWriteError(RuntimeError):
             _BATCH_COMMITTED_REMEDIATION if committed else _BATCH_RETRY_REMEDIATION
         )
         self._diagnostics = tuple(diagnostics)
-        RuntimeError.__init__(self, self.__str__())
+        ValueError.__init__(self, self.__str__())
 
     def as_public_dict(self) -> dict[str, Any]:
         return {

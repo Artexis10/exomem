@@ -36,6 +36,57 @@ _OPENAPI_TYPES = {
     "json": {},
 }
 
+_OPENAPI_OUTCOME_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string"},
+        "committed": {"type": "boolean"},
+        "incomplete": {"type": "boolean"},
+        "affected_count": {"type": "integer", "minimum": 0},
+        "targets": {
+            "type": "array",
+            "items": {"type": "string"},
+            "maxItems": 16,
+        },
+        "omitted_target_count": {"type": "integer", "minimum": 0},
+    },
+    "required": [
+        "kind",
+        "committed",
+        "incomplete",
+        "affected_count",
+        "targets",
+        "omitted_target_count",
+    ],
+    "additionalProperties": False,
+}
+_OPENAPI_ERROR_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string"},
+        "message": {"type": "string"},
+        "remediation": {"type": ["string", "null"]},
+        "outcome": _OPENAPI_OUTCOME_SCHEMA,
+    },
+    "required": ["code", "message", "remediation"],
+    "additionalProperties": False,
+}
+_OPENAPI_ERROR_ENVELOPE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "success": {"const": False},
+        "error": {"$ref": "#/components/schemas/Error"},
+    },
+    "required": ["success", "error"],
+    "additionalProperties": False,
+}
+_OPENAPI_ERROR_RESPONSE = {
+    "description": "{success: false, error: {code, message, remediation, outcome?}}",
+    "content": {
+        "application/json": {"schema": {"$ref": "#/components/schemas/ErrorEnvelope"}}
+    },
+}
+
 
 def register_rest_facade(
     mcp_app: FastMCP,
@@ -170,9 +221,8 @@ def register_rest_facade(
                     },
                     "responses": {
                         "200": {"description": "{success: true, data: ...}"},
-                        "400": {
-                            "description": "{success: false, error: {code, message, remediation}}"
-                        },
+                        "400": _OPENAPI_ERROR_RESPONSE,
+                        "409": _OPENAPI_ERROR_RESPONSE,
                         "401": {"description": "missing/invalid API key"},
                         "503": {"description": "REST API disabled"},
                     },
@@ -183,7 +233,13 @@ def register_rest_facade(
                 "openapi": "3.1.0",
                 "info": {"title": "exomem personal REST facade", "version": "1.0.0"},
                 "components": {
-                    "securitySchemes": {"bearerAuth": {"type": "http", "scheme": "bearer"}}
+                    "securitySchemes": {
+                        "bearerAuth": {"type": "http", "scheme": "bearer"}
+                    },
+                    "schemas": {
+                        "Error": _OPENAPI_ERROR_SCHEMA,
+                        "ErrorEnvelope": _OPENAPI_ERROR_ENVELOPE_SCHEMA,
+                    },
                 },
                 "paths": paths,
             }

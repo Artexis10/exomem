@@ -8,8 +8,9 @@ import pytest
 import yaml
 from starlette.testclient import TestClient
 
+from exomem import commands, server, writer_lease
 from exomem import find as find_module
-from exomem import server
+from exomem import vault as vault_module
 
 PRODUCT_ROUTES = [
     "bootstrap",
@@ -40,6 +41,9 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     for leaky in (
         "EXOMEM_REST_API_KEY", "EXOMEM_UPLOAD_TOKEN",
         "EXOMEM_CF_ACCESS_TEAM_DOMAIN", "EXOMEM_CF_ACCESS_AUD",
+        "EXOMEM_WRITER_LEASE_URL", "EXOMEM_WRITER_LEASE_VAULT_ID",
+        "EXOMEM_WRITER_LEASE_REPLICA_ID", "EXOMEM_WRITER_LEASE_TOKEN",
+        "EXOMEM_WRITER_LEASE_STATE_DIR",
     ):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
@@ -63,7 +67,9 @@ def test_all_product_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> Non
 def test_ask_memory_route_calls_the_same_find_leaf(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
-        "/api/ask_memory", json={"query": "metabolism", "mode": "keyword", "detail": "full"}, headers=_auth()
+        "/api/ask_memory",
+        json={"query": "metabolism", "mode": "keyword", "detail": "full"},
+        headers=_auth(),
     )
     assert r.status_code == 200, r.text
     payload = r.json()
@@ -82,7 +88,9 @@ def test_replace_memory_route_exists(vault, monkeypatch: pytest.MonkeyPatch) -> 
     assert "code" in body["error"]
 
 
-def test_product_review_connection_dataset_and_file_routes_exist(vault, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_product_review_connection_dataset_and_file_routes_exist(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     for name in (
         "connect_memory",
@@ -121,13 +129,68 @@ def test_validation_error_uses_envelope_with_code(vault, monkeypatch: pytest.Mon
     assert err["message"]
 
 
+def test_committed_batch_failure_rest_replay_is_exact_409_and_invokes_once(
+    vault,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    raw = PermissionError(
+        f"{vault}/.exomem-batch-{'a' * 32}/stage-0.tmp: low-level private detail"
+    )
+    original = vault_module.BatchWriteError(
+        "BATCH_CLEANUP_INCOMPLETE",
+        vault_module.BatchTargetSummary(1, ("REST/replayed.md",), 0),
+        committed=True,
+        diagnostics=(raw,),
+    )
+
+    def committed_create(*args, **kwargs):  # noqa: ANN002, ANN003, ARG001
+        nonlocal calls
+        calls += 1
+        raise original from raw
+
+    writer_lease.reset_managers_for_tests()
+    monkeypatch.setattr(commands, "op_create_file", committed_create)
+    client = _client(
+        vault,
+        monkeypatch,
+        EXOMEM_REST_API_KEY="sekret",
+        EXOMEM_WRITER_LEASE_STATE_DIR=str(tmp_path / "lease-state"),
+    )
+    headers = {**_auth(), "Idempotency-Key": "rest-committed"}
+    request = {
+        "operation": "create",
+        "path": "Knowledge Base/Notes/Insights/replayed.md",
+        "content": "committed",
+    }
+
+    first = client.post("/api/manage_memory_file", json=request, headers=headers)
+    replay = client.post("/api/manage_memory_file", json=request, headers=headers)
+
+    expected = {"success": False, "error": original.as_public_dict()}
+    assert first.status_code == 409
+    assert replay.status_code == 409
+    assert first.json() == expected
+    assert replay.json() == expected
+    for secret in (str(vault), ".exomem-batch-", "stage-0.tmp", "private detail"):
+        assert secret not in first.text
+        assert secret not in replay.text
+    assert calls == 1
+
+
 def test_remember_route_preserves_unicode_title_and_explicit_slug(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     response = client.post(
         "/api/remember",
-        json={"title": "睡眠", "slug": "sleep", "content": "## 要約\n\n本文。"},
+        json={
+            "title": "睡眠",
+            "slug": "sleep",
+            "content": "## 要約\n\n本文。",
+            "status": "draft",
+        },
         headers=_auth(),
     )
     assert response.status_code == 200, response.text
@@ -207,6 +270,23 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
     assert {"project", "page_type", "save", "expected_hash", "strict", "compare_to"} <= set(
         schema_contract["properties"]
     )
+
+    error_schema = doc["components"]["schemas"]["Error"]
+    assert "outcome" in error_schema["properties"]
+    assert "outcome" not in error_schema.get("required", [])
+    outcome_schema = error_schema["properties"]["outcome"]
+    assert set(outcome_schema["required"]) == {
+        "kind",
+        "committed",
+        "incomplete",
+        "affected_count",
+        "targets",
+        "omitted_target_count",
+    }
+    conflict = doc["paths"]["/api/remember"]["post"]["responses"]["409"]
+    assert conflict["content"]["application/json"]["schema"] == {
+        "$ref": "#/components/schemas/ErrorEnvelope"
+    }
 
 
 def test_review_memory_route_and_openapi_params(vault, monkeypatch: pytest.MonkeyPatch) -> None:
