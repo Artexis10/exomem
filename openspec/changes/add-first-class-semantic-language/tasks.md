@@ -59,7 +59,7 @@
 - [ ] 6.7 Implement versioned `retrieval_profile` with intent, requested/effective modes, normalized filters, lanes/reasons/weights, backend/model/metric direction/range/rounding, fusion constants, rerank decision, compute context needed for interpretation, and final-order/tie-break policy.
 - [ ] 6.8 Implement per-hit explanations with only participating lanes, metric-labelled ranks/values, exact RRF math only when fusion runs, graph provenance, actual single-lane/filter-only sort tuples, ordered multipliers/reranking/tie-break chain, and final rank; keep unavailable/nonparticipating lanes top-level rather than fabricating hit entries or zero.
 - [ ] 6.9 Add isolated-lane fidelity tests proving public hybrid explanations reproduce candidate membership, ranks, fusion contributions, degradation, and final ordering within documented rounding.
-- [ ] 6.10 Extend `read_memory` to resolve exact anchored/fingerprint-bound unit references and return bounded parent context or explicit stale/ambiguous status.
+- [x] 6.10 Extend `read_memory` to resolve exact anchored/fingerprint-bound unit references and return bounded parent context or explicit stale/ambiguous status.
 - [ ] 6.11 Extend graph context to seed/filter compact and rich unit nodes by category/kind without inferring semantics.
 - [ ] 6.12 Extend context packs with bounded cited semantic units, unit-seeded authored relations, provenance/lifecycle context, explicit truncation, and a nonduplicating legacy `semantic_blocks` projection.
 - [ ] 6.13 Add embeddings-disabled and degraded-path tests proving lexical/category/filter recall, explanations, and context remain useful without loading a model.

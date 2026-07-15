@@ -1020,8 +1020,9 @@ def test_identity_exact_resolution_rejects_missing_and_stale_references() -> Non
     assert current.unit == unit
     assert wrong_fingerprint.status == "stale"
     assert wrong_fingerprint.unit is None
-    assert old_reference.status == "missing"
+    assert old_reference.status == "stale"
     assert old_reference.unit is None
+    assert old_reference.expected_fingerprint == unit.fingerprint
 
 
 def test_identity_serialization_and_unicode_legacy_uri_are_deterministic() -> None:

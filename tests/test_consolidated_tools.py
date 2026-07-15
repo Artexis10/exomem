@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import commands, semantic_index
 from exomem import server as server_module
 
 
@@ -55,6 +56,36 @@ def _make_page(vault: Path, body: str, *, name: str = "scratch-test.md") -> str:
         encoding="utf-8",
     )
     return rel
+
+
+def test_read_memory_exact_unit_matches_canonical_response(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/mcp-exact-unit.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 12345678-1234-5678-1234-567812345678\n"
+        "title: MCP exact unit\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "- [config] MCP can read this unit ^mcp-unit\n",
+        encoding="utf-8",
+    )
+    state = semantic_index.current_parent_index_state(vault, rel)
+    unit_ref = state.document.units[0].unit_ref
+    assert unit_ref is not None
+    expected = commands.op_read_memory(vault, path=rel, unit_ref=unit_ref)
+
+    out = _call(
+        _build(monkeypatch),
+        "read_memory",
+        {"path": rel, "unit_ref": unit_ref},
+    )
+
+    assert out == expected
 
 
 # ---------------- edit: mode routing ----------------

@@ -75,6 +75,7 @@ from . import replace as replace_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_language_registry as semantic_language_registry_module
+from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module
 from . import set_take as set_take_module
 from . import traversal_profiles as traversal_profiles_module
@@ -2911,12 +2912,16 @@ def op_read_memory(
     include_history: bool = False,
     links: bool = False,
     include_raw: bool = False,
+    unit_ref: str | None = None,
 ) -> dict:
-    """Read one memory page or curated vault file by path.
+    """Read one memory page or one exact semantic unit by reference.
 
     Use after `ask_memory` chooses a hit, or when a caller already knows the
-    path. This wraps the canonical page reader and can include history and
-    link summaries in the same call.
+    path. With `unit_ref`, returns that exact current semantic unit, its parent
+    citation/lifecycle, and at most 2,400 characters of surrounding Markdown.
+    Missing, stale, ambiguous, and superseded references are reported through
+    the response `status`; no nearby unit is silently substituted. Without
+    `unit_ref`, this preserves the existing page-read response exactly.
 
     Args:
         path: Vault-relative path or Knowledge Base-relative shorthand.
@@ -2924,7 +2929,30 @@ def op_read_memory(
         include_history: Include recorded edit/supersession history.
         links: Include inbound and outbound wikilink summaries.
         include_raw: Include the raw markdown file text.
+        unit_ref: Exact unit reference returned by unit-level recall. Page-only
+            expansion flags are not accepted together with an exact unit read.
     """
+    if unit_ref is not None:
+        if frontmatter_only or include_history or links or include_raw:
+            raise ValueError(
+                "INVALID_UNIT_READ_OPTIONS: unit_ref cannot be combined with "
+                "frontmatter_only, include_history, links, or include_raw"
+            )
+        resolved_path = _resolve_memory_identifier(vault_root, path)
+        try:
+            page = get_page_module.get_page(vault_root, path=resolved_path)
+        except get_page_module.GetError as e:
+            raise ValueError(f"{e.code}: {e.reason}") from e
+        query_log.log_get_call(
+            read_path=page.path,
+            frontmatter_only=False,
+            include_history=False,
+        )
+        return semantic_unit_read_module.read_semantic_unit(
+            vault_root,
+            page=page,
+            unit_ref=unit_ref,
+        ).as_dict()
     return op_get(
         vault_root,
         path=path,

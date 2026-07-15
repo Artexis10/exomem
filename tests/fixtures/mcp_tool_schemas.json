@@ -1479,7 +1479,7 @@
     }
   },
   "read_memory": {
-    "description": "Read one memory page or curated vault file by path.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. This wraps the canonical page reader and can include history and\nlink summaries in the same call.",
+    "description": "Read one memory page or one exact semantic unit by reference.\n\nUse after `ask_memory` chooses a hit, or when a caller already knows the\npath. With `unit_ref`, returns that exact current semantic unit, its parent\ncitation/lifecycle, and at most 2,400 characters of surrounding Markdown.\nMissing, stale, ambiguous, and superseded references are reported through\nthe response `status`; no nearby unit is silently substituted. Without\n`unit_ref`, this preserves the existing page-read response exactly.",
     "inputSchema": {
       "additionalProperties": false,
       "properties": {
@@ -1506,6 +1506,18 @@
           "default": false,
           "description": "Include the raw markdown file text.",
           "type": "boolean"
+        },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact unit reference returned by unit-level recall. Page-only expansion flags are not accepted together with an exact unit read."
         }
       },
       "required": [

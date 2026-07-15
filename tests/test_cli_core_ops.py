@@ -12,6 +12,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+from exomem import commands, semantic_index
 from exomem.__main__ import main
 
 _INSIGHT = "Knowledge Base/Notes/Insights/progressive-disclosure-without-mode-fragmentation.md"
@@ -51,6 +52,37 @@ def test_read_memory_reads_a_page(vault: Path, capsys) -> None:
     payload = json.loads(out.strip().splitlines()[-1])
     assert payload["success"] is True
     assert payload["data"]["frontmatter"]["type"] == "insight"
+
+
+def test_read_memory_reads_exact_semantic_unit(vault: Path, capsys) -> None:
+    rel = "Knowledge Base/Notes/Insights/cli-exact-unit.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 12345678-1234-5678-1234-567812345678\n"
+        "title: CLI exact unit\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "- [config] CLI can read this unit ^cli-unit\n",
+        encoding="utf-8",
+    )
+    state = semantic_index.current_parent_index_state(vault, rel)
+    unit_ref = state.document.units[0].unit_ref
+    assert unit_ref is not None
+    expected = commands.op_read_memory(vault, path=rel, unit_ref=unit_ref)
+
+    code, out, _ = _run(
+        ["read_memory", rel, "--unit-ref", unit_ref, "--json"],
+        capsys,
+    )
+
+    assert code == 0
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data == expected
+    assert data["status"] == "found"
+    assert data["unit"]["unit_ref"] == unit_ref
+    assert data["unit"]["content"] == "CLI can read this unit"
 
 
 def test_review_memory_attention_runs(vault: Path, capsys) -> None:

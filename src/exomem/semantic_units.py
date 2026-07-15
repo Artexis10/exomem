@@ -325,6 +325,17 @@ class SemanticUnitDocument:
         ]
         if len(ambiguous) > 1:
             return SemanticUnitResolution(status="ambiguous", unit_ref=requested)
+        parent_ref, separator, fragment = requested.rpartition("#")
+        if (
+            separator
+            and parent_ref == self.parent_ref
+            and re.fullmatch(r"unit-([0-9a-f]{64})", fragment)
+        ):
+            return SemanticUnitResolution(
+                status="stale",
+                unit_ref=requested,
+                expected_fingerprint=fragment.removeprefix("unit-"),
+            )
         return SemanticUnitResolution(status="missing", unit_ref=requested)
 
     def to_dict(self) -> dict[str, Any]:
