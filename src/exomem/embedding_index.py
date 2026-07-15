@@ -454,7 +454,11 @@ class EmbeddingIndex:
         return _EmbCache(epoch, gen, instance, mtime, metadata, np.stack(vectors, axis=0))
 
     def search(
-        self, query_vec: np.ndarray, k: int
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, int, str, float]]:
         """Top-k chunk hits: list of `(file_path, chunk_idx, chunk_text, score)`.
 
@@ -463,12 +467,19 @@ class EmbeddingIndex:
         `EXOMEM_VEC_QUANT=binary`), otherwise the in-memory numpy scan. Every vec
         failure mode falls through to the scan — search never breaks on vec0.
         """
-        vec_hits = self._vec_search(query_vec, k)
-        if vec_hits is not None:
-            return vec_hits
+        if allowed_paths is None:
+            vec_hits = self._vec_search(query_vec, k)
+            if vec_hits is not None:
+                return vec_hits
         metadata, matrix = self.all_vectors()
         if not metadata:
             return []
+        if allowed_paths is not None:
+            keep = [index for index, (path, _chunk) in enumerate(metadata) if path in allowed_paths]
+            if not keep:
+                return []
+            metadata = [metadata[index] for index in keep]
+            matrix = matrix[keep]
         # query_vec is (768,) normalized; matrix is (N, 768) normalized.
         scores = matrix @ query_vec.astype(np.float32, copy=False)
         k_eff = min(k, len(scores))

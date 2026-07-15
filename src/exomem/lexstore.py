@@ -186,6 +186,7 @@ def search_bm25(
     *,
     scope: str = "kb",
     freshness: tuple | None = None,
+    allowed_paths: set[str] | None = None,
 ) -> list[tuple[str, float]] | None:
     """Top-k `(rel_path, score)` from the FTS5 index, or None → use the
     in-process rung. Matches the python rung's shape: OR membership,
@@ -201,7 +202,7 @@ def search_bm25(
     if not tokens:
         return []
     store = get_store(vault_root)
-    return store.search_bm25(tokens, k, scope, freshness)
+    return store.search_bm25(tokens, k, scope, freshness, allowed_paths)
 
 
 def search_substring(
@@ -915,7 +916,12 @@ class LexicalStore:
     # -------------------------------------------------------------- search
 
     def search_bm25(
-        self, stemmed_tokens: list[str], k: int, scope: str, freshness: tuple | None
+        self,
+        stemmed_tokens: list[str],
+        k: int,
+        scope: str,
+        freshness: tuple | None,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, float]] | None:
         if self._failed:
             return None
@@ -923,7 +929,9 @@ class LexicalStore:
             conn = self._connect()
             try:
                 self._ensure_synced(conn, scope, freshness)
-                return self._bm25_query(conn, stemmed_tokens, k, scope)
+                return self._bm25_query(
+                    conn, stemmed_tokens, k, scope, allowed_paths
+                )
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -935,18 +943,31 @@ class LexicalStore:
             return None
 
     def _bm25_query(
-        self, conn: sqlite3.Connection, tokens: list[str], k: int, scope: str
+        self,
+        conn: sqlite3.Connection,
+        tokens: list[str],
+        k: int,
+        scope: str,
+        allowed_paths: set[str] | None = None,
     ) -> list[tuple[str, float]]:
         # Tokens are [a-z0-9]+ — no FTS5 syntax can hide in them, but quote
         # anyway; OR mirrors get_scores() membership (any-term match).
         match = " OR ".join(f'"{t}"' for t in tokens)
         col = "in_vault" if scope == "vault" else "in_kb"
+        allowed_clause = ""
+        params: list[object] = [match]
+        if allowed_paths is not None:
+            allowed_clause = " AND p.path IN (SELECT value FROM json_each(?))"
+            params.append(json.dumps(sorted(allowed_paths), ensure_ascii=False))
+        params.append(k)
         rows = conn.execute(
             "SELECT p.path, -bm25(fts) AS score "
             "FROM fts JOIN pages p ON p.rowid = fts.rowid "
-            f"WHERE fts MATCH ? AND p.{col} = 1 "
+            f"WHERE fts MATCH ? AND p.{col} = 1"
+            + allowed_clause
+            + " "
             "ORDER BY bm25(fts), p.path LIMIT ?",
-            (match, k),
+            params,
         ).fetchall()
         return [(p, float(s)) for p, s in rows]
 

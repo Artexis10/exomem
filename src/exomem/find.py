@@ -10,6 +10,7 @@ Cached in-process between calls: keyed by file path, invalidated by mtime.
 from __future__ import annotations
 
 import copy
+import json
 import logging
 import os
 import threading
@@ -19,7 +20,15 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from . import find_candidates, find_corpus, find_policy, find_results, find_types, freshness
+from . import (
+    find_candidates,
+    find_corpus,
+    find_policy,
+    find_results,
+    find_types,
+    freshness,
+    structured_filters,
+)
 from . import ranking_config as _ranking_config
 from .find_types import (
     FindTimings,
@@ -224,6 +233,7 @@ def _freshness_key(
     mode: str,
     graph: bool,
     snapshot: FreshnessSnapshot,
+    unit_filters: bool = False,
 ) -> tuple:
     """Freshness inputs that can change this request's answer.
 
@@ -239,7 +249,31 @@ def _freshness_key(
       unmoved (STALE hits); the in-band generation changes iff the content did.
       See EmbeddingIndex.cache_token / lexstore.cache_token.
     """
-    parts: list[Any] = [date.today().toordinal()]
+    from . import access
+
+    parts: list[Any] = [
+        date.today().toordinal(),
+        ("access_policy", access.policy_fingerprint(vault_root)),
+    ]
+    if unit_filters:
+        from . import relation_registry, semantic_language_registry
+
+        language = semantic_language_registry.load_registry(vault_root)
+        relations = relation_registry.load_registry(vault_root)
+        parts.extend(
+            (
+                (
+                    "semantic_language_registry",
+                    language.schema_version,
+                    language.content_hash,
+                ),
+                (
+                    "relation_registry",
+                    relations.core_version,
+                    relations.extension_hash,
+                ),
+            )
+        )
     if scope in ("kb", "kb-only"):
         parts.append(("kb", *snapshot.kb()))
     if scope == "vault" or (scope == "kb" and query_norm):
@@ -280,6 +314,9 @@ def find(
     speakers: list[str] | None = None,
     file_types: list[str] | None = None,
     exclude_file_types: list[str] | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
+    filters: dict[str, Any] | None = None,
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -406,6 +443,62 @@ def find(
     limit = min(limit, 100)
     query_norm = (query or "").lower().strip()
 
+    language_registry = None
+
+    def _resolve_language_value(value: str, *, namespace: str) -> str:
+        nonlocal language_registry
+        if language_registry is None:
+            from . import semantic_language_registry
+
+            language_registry = semantic_language_registry.load_registry(vault_root)
+        resolution = (
+            language_registry.resolve_category(value)
+            if namespace == "category"
+            else language_registry.resolve_kind(value)
+        )
+        if resolution.status == "registry_invalid":
+            raise structured_filters.FilterError(
+                "INVALID_FILTER_VALUE",
+                f"$.unit.{namespace}",
+                "semantic-language registry is invalid",
+                expected=f"unambiguous governed {namespace}",
+                remediation="Repair the semantic-language registry before filtering by aliases.",
+            )
+        return resolution.resolved or resolution.key
+
+    filter_plan = structured_filters.compile_filter(
+        filters,
+        shortcuts=structured_filters.FilterShortcuts(
+            types=tuple(types or ()),
+            projects=tuple(projects or ()),
+            tags=tuple(tags or ()),
+            speakers=tuple(speakers or ()),
+            file_types=tuple(file_types or ()),
+            exclude_file_types=tuple(exclude_file_types or ()),
+            categories=tuple(categories or ()),
+            kinds=tuple(kinds or ()),
+            updated_after=updated_after,
+            updated_before=updated_before,
+            recency_days=recency_days,
+        ),
+        resolve_category=lambda value: _resolve_language_value(
+            value, namespace="category"
+        ),
+        resolve_kind=lambda value: _resolve_language_value(value, namespace="kind"),
+    )
+    filter_key = json.dumps(
+        filter_plan.to_dict(),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    if filter_plan.root is not None:
+        # Every shortcut is now represented in the shared typed plan.  Clear
+        # the legacy arguments so no lane applies a second, divergent filter.
+        types = projects = tags = speakers = file_types = exclude_file_types = None
+        updated_after = updated_before = None
+        recency_days = None
+
     # One freshness snapshot + one parsed-page memo per request: every
     # consumer below (hot cache, BM25, resolver, auto-widen, boost passes)
     # shares them instead of re-walking / re-stat'ing.
@@ -433,13 +526,14 @@ def find(
             str(vault_root.resolve()), query, _t(types), _t(projects), _t(tags),
             _t(speakers), _t(file_types), _t(exclude_file_types), limit, scope,
             mode, graph, rerank, auto_rerank, temporal, intent,
-            updated_after, updated_before, recency_days,
+            updated_after, updated_before, recency_days, filter_key,
             prefer_compiled, prefer_active, resolved_config,
         )
         with _span(timings, "freshness"):
             fresh = _freshness_key(
                 vault_root, scope=scope, query_norm=query_norm, mode=mode,
                 graph=graph, snapshot=snapshot,
+                unit_filters=filter_plan.has_unit_predicate,
             )
         cache_key = (request_key, fresh)
         with _span(timings, "cache_lookup"):
@@ -465,6 +559,14 @@ def find(
     # same KB tree but auto-widens to the vault below when it underfills. Both
     # map to a KB-only walk in the underlying rankers.
     walk_scope = "vault" if scope == "vault" else "kb"
+    eligible_paths: set[str] | None = None
+    if filter_plan.root is not None:
+        with _span(timings, "filter_eligibility"):
+            eligible_paths = _eligible_filter_paths(
+                vault_root,
+                scope=walk_scope,
+                plan=filter_plan,
+            )
 
     # Empty queries always degrade to keyword behavior — there's no signal
     # to embed or score with, just "give me recent stuff that matches the
@@ -476,7 +578,7 @@ def find(
                 query_norm=query_norm,
                 types=types, projects=projects, tags=tags, speakers=speakers,
                 file_types=file_types, exclude_file_types=exclude_file_types,
-                limit=limit, scope=walk_scope,
+                limit=limit, scope=walk_scope, eligible_paths=eligible_paths,
             )
     else:
         hits = _find_semantic(
@@ -495,6 +597,7 @@ def find(
             page_memo=page_memo,
             degraded_out=degraded,
             failed_out=failed,
+            eligible_paths=eligible_paths,
         )
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
@@ -522,6 +625,7 @@ def find(
                     types=types, projects=projects, tags=tags, speakers=speakers,
                     file_types=file_types, exclude_file_types=exclude_file_types,
                     limit=limit, snapshot=snapshot,
+                    filter_plan=filter_plan if filter_plan.root is not None else None,
                 )
                 if h.path not in seen
             ]
@@ -582,6 +686,90 @@ def _collapse_frame_children(
     )
 
 
+def _eligible_filter_paths(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+) -> set[str]:
+    """Resolve the one backend-independent eligible parent identity set."""
+    if scope == "kb":
+        root = vault_root / kb_dirname()
+        walk = _walk_md(root) if root.is_dir() else ()
+    else:
+        from .vault import walk_vault_md
+
+        walk = walk_vault_md(vault_root)
+
+    pages: dict[str, ParsedPage] = {}
+    for path in walk:
+        if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        page = _CACHE.get(path, vault_root)
+        if page is not None:
+            pages[page.rel_path] = page
+
+    def _indexable(page: ParsedPage) -> bool:
+        return _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=None,
+            projects=None,
+            tags=None,
+            speakers=None,
+            file_types=None,
+            exclude_file_types=None,
+        )
+
+    eligibility_by_emitted_path: dict[str, bool] = {}
+    eligible: set[str] = set()
+    for page in pages.values():
+        # Access policy always runs before caller filters, including for a
+        # scene-frame child whose match is emitted as its parent video.
+        if not _indexable(page):
+            continue
+        emitted = (
+            pages.get(page.parent_media + ".md", page)
+            if page.parent_media
+            else page
+        )
+        if not _indexable(emitted):
+            continue
+        matches = eligibility_by_emitted_path.get(emitted.rel_path)
+        if matches is None:
+            units: tuple[dict[str, Any], ...] = ()
+            if plan.has_unit_predicate:
+                try:
+                    from . import semantic_index
+
+                    state = semantic_index.current_parent_index_state(
+                        vault_root, emitted.path
+                    )
+                    units = tuple(
+                        structured_filters.unit_view(unit)
+                        for unit in state.document.units
+                    )
+                except (OSError, UnicodeError, ValueError) as error:
+                    log.warning(
+                        "semantic-unit filter parse failed for %s: %s",
+                        emitted.rel_path,
+                        error,
+                    )
+            matches = structured_filters.page_matches(
+                plan,
+                page=structured_filters.page_view(emitted),
+                units=units,
+            )
+            eligibility_by_emitted_path[emitted.rel_path] = matches
+        if matches:
+            # Candidate lanes address the child before frame collapsing, while
+            # final hits address the emitted parent. Both identities therefore
+            # belong to the exact same eligibility set.
+            eligible.add(page.rel_path)
+            eligible.add(emitted.rel_path)
+    return eligible
+
+
 def _find_keyword(
     vault_root: Path,
     *,
@@ -594,6 +782,7 @@ def _find_keyword(
     exclude_file_types: list[str] | None = None,
     limit: int,
     scope: str,
+    eligible_paths: set[str] | None = None,
 ) -> list[Hit]:
     """Original keyword-mode find. Preserved for backward compat."""
     if scope == "kb":
@@ -613,6 +802,8 @@ def _find_keyword(
             continue
         page = _CACHE.get(path, vault_root)
         if page is None:
+            continue
+        if eligible_paths is not None and page.rel_path not in eligible_paths:
             continue
         excerpt = _make_excerpt(page, query_norm)
         if query_norm and excerpt is None:
@@ -693,6 +884,7 @@ def _find_semantic(
     page_memo: dict[str, ParsedPage | None] | None = None,
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
+    eligible_paths: set[str] | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -738,6 +930,7 @@ def _find_semantic(
         record_degradation=_record_degradation,
         degraded_out=degraded_out,
         failed_out=failed_out,
+        eligible_paths=eligible_paths,
     )
 
     if not bundle.had_rankings:
@@ -751,7 +944,7 @@ def _find_semantic(
             query_norm=query_norm,
             types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
-            limit=limit, scope=scope,
+            limit=limit, scope=scope, eligible_paths=eligible_paths,
         )
 
     fused = bundle.fused
@@ -802,6 +995,8 @@ def _find_semantic(
             continue
         page = _page_of(rel_path)
         if page is None:
+            continue
+        if eligible_paths is not None and rel_path not in eligible_paths:
             continue
         if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
@@ -992,6 +1187,7 @@ def _find_outside_kb(
     exclude_file_types: list[str] | None = None,
     limit: int,
     snapshot: FreshnessSnapshot | None = None,
+    filter_plan: structured_filters.FilterPlan | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
@@ -1009,17 +1205,50 @@ def _find_outside_kb(
         return []
     from . import bm25
 
-    # Over-fetch: KB files dominate the corpus, so pull a generous slice then
-    # filter to out-of-KB paths. Auto-widen only fires when the KB underfilled
-    # — i.e. the query was already rare in the KB — so the out-of-KB target
-    # won't be buried under hundreds of KB matches.
-    bm25_k = max(limit * 5, 100)
+    eligible_paths = (
+        _eligible_filter_paths(vault_root, scope="vault", plan=filter_plan)
+        if filter_plan is not None
+        else None
+    )
+
+    allowed_outside = (
+        {
+            path
+            for path in eligible_paths or ()
+            if not path.startswith(kb_prefix())
+        }
+        if eligible_paths is not None
+        else None
+    )
+    # Unfiltered widening still over-fetches because KB files dominate the
+    # vault corpus. A structured filter instead ranks the exact outside-KB
+    # eligible set, so no eligible page can be buried below that over-fetch cap.
+    bm25_k = (
+        max(limit, len(allowed_outside))
+        if allowed_outside is not None
+        else max(limit * 5, 100)
+    )
     candidates: list[str] = []
     try:
-        for path, _score in bm25.search(
-            vault_root, query, k=bm25_k, scope="vault",
-            freshness=snapshot.vault() if snapshot is not None else None,
-        ):
+        bm25_hits = (
+            bm25.search(
+                vault_root,
+                query,
+                k=bm25_k,
+                scope="vault",
+                freshness=snapshot.vault() if snapshot is not None else None,
+            )
+            if allowed_outside is None
+            else bm25.search(
+                vault_root,
+                query,
+                k=bm25_k,
+                scope="vault",
+                freshness=snapshot.vault() if snapshot is not None else None,
+                allowed_paths=allowed_outside,
+            )
+        )
+        for path, _score in bm25_hits:
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
     except ImportError:
@@ -1038,6 +1267,8 @@ def _find_outside_kb(
             continue
         page = _CACHE.get(vault_root / rel_path, vault_root)
         if page is None:
+            continue
+        if eligible_paths is not None and rel_path not in eligible_paths:
             continue
         if not _passes_filters(page, vault_root=vault_root, types=types, projects=projects, tags=tags, speakers=speakers,
                                file_types=file_types, exclude_file_types=exclude_file_types):
