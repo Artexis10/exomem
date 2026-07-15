@@ -641,6 +641,9 @@ class LexicalStore:
             for row in conn.execute("SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages")
         }
         with conn:
+            # Manual owner-row deletion can leave contentless FTS rows behind.
+            # Purge them before SQLite reuses one of the missing rowids.
+            self._delete_orphan_rows(conn)
             for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
                 w = walk.get(rel)
                 if w is None or (w[1][0], w[2], w[3]) != (mtime_ns, in_kb, in_vault):
@@ -772,6 +775,21 @@ class LexicalStore:
         for (rowid,) in rowids:
             conn.execute("DELETE FROM unit_fts WHERE rowid = ?", (rowid,))
         conn.execute("DELETE FROM semantic_units WHERE parent_path = ?", (parent_path,))
+
+    def _delete_orphan_rows(self, conn: sqlite3.Connection) -> None:
+        """Remove side-table rows whose owning record was deleted out-of-band."""
+        orphan_parents = conn.execute(
+            "SELECT DISTINCT u.parent_path FROM semantic_units u "
+            "LEFT JOIN pages p ON p.path = u.parent_path WHERE p.path IS NULL"
+        ).fetchall()
+        for (parent_path,) in orphan_parents:
+            self._delete_semantic_units(conn, str(parent_path))
+        conn.execute(
+            "DELETE FROM unit_fts WHERE rowid NOT IN "
+            "(SELECT rowid FROM semantic_units)"
+        )
+        conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
+        conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
 
     def _delete_rowid(self, conn: sqlite3.Connection, rowid: int) -> None:
         row = conn.execute("SELECT path FROM pages WHERE rowid = ?", (rowid,)).fetchone()
