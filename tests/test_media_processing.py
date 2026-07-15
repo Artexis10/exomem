@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 
 import pytest
+import yaml
 
 from exomem import media_jobs
 
@@ -28,6 +29,19 @@ def _drop_media(
     return binary
 
 
+def _frontmatter_and_body(path: Path) -> tuple[dict[str, object], str]:
+    text = path.read_text(encoding="utf-8")
+    assert text.startswith("---\n")
+    raw_frontmatter, body = text.removeprefix("---\n").split("\n---\n", 1)
+    frontmatter = yaml.safe_load(raw_frontmatter)
+    assert isinstance(frontmatter, dict)
+    return frontmatter, body
+
+
+def _job_count(vault: Path) -> int:
+    return sum(media_jobs.status(vault)["counts"].values())
+
+
 def test_classifies_m4a_case_insensitively_as_audio() -> None:
     media_processing = _media_processing()
 
@@ -37,16 +51,18 @@ def test_classifies_m4a_case_insensitively_as_audio() -> None:
 
 def test_unsupported_media_is_ignored_automatically_and_errors_explicitly(vault: Path) -> None:
     media_processing = _media_processing()
-    binary = _drop_media(vault, "recording.aac", b"unsupported")
+    binary = _drop_media(vault, "recording.bin", b"unsupported")
 
     assert media_processing.classify_media(binary) is None
     assert media_processing.reconcile_media(vault, binary, explicit=False) is None
     assert not binary.with_name(binary.name + ".md").exists()
-    assert media_jobs.status(vault)["counts"]["pending"] == 0
+    assert _job_count(vault) == 0
 
     with pytest.raises(media_processing.MediaProcessingError) as exc:
         media_processing.reconcile_media(vault, binary, explicit=True)
     assert exc.value.code == "UNSUPPORTED_MEDIA"
+    assert not binary.with_name(binary.name + ".md").exists()
+    assert _job_count(vault) == 0
 
 
 def test_missing_sidecar_becomes_canonical_pending_work(vault: Path) -> None:
@@ -61,10 +77,10 @@ def test_missing_sidecar_becomes_canonical_pending_work(vault: Path) -> None:
     assert result.sidecar_path == sidecar
     assert result.job_id is not None
     assert sidecar.exists()
-    body = sidecar.read_text(encoding="utf-8")
-    assert "type: source" in body
-    assert "media_type: audio" in body
-    assert "extracted_by: pending" in body
+    frontmatter, _ = _frontmatter_and_body(sidecar)
+    assert frontmatter["type"] == "source"
+    assert frontmatter["media_type"] == "audio"
+    assert frontmatter["extracted_by"] == "pending"
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
 
@@ -77,10 +93,11 @@ def test_prose_only_sidecar_is_repaired_without_losing_notes(vault: Path) -> Non
 
     result = media_processing.reconcile_media(vault, binary)
 
-    body = sidecar.read_text(encoding="utf-8")
+    frontmatter, body = _frontmatter_and_body(sidecar)
     assert result.state == "pending"
-    assert body.startswith("---\n")
-    assert "extracted_by: pending" in body
+    assert frontmatter["type"] == "source"
+    assert frontmatter["media_type"] == "audio"
+    assert frontmatter["extracted_by"] == "pending"
     assert f"## Preserved notes\n\n{original}" in body
     assert media_jobs.status(vault)["counts"]["pending"] == 1
 
@@ -102,12 +119,12 @@ def test_reconciliation_records_binary_provenance_without_mutating_evidence(vaul
         before.st_mtime_ns,
         before.st_ctime_ns,
     )
-    body = binary.with_name(binary.name + ".md").read_text(encoding="utf-8")
-    assert "original_filename: Voice Memo.M4A" in body
-    assert f"binary_sha256: {digest}" in body
-    assert f"binary_size: {len(payload)}" in body
-    assert f"binary_mtime_ns: {before.st_mtime_ns}" in body
-    assert f"binary_ctime_ns: {before.st_ctime_ns}" in body
+    frontmatter, _ = _frontmatter_and_body(binary.with_name(binary.name + ".md"))
+    assert frontmatter["original_filename"] == "Voice Memo.M4A"
+    assert frontmatter["binary_sha256"] == digest
+    assert frontmatter["binary_size"] == len(payload)
+    assert frontmatter["binary_mtime_ns"] == before.st_mtime_ns
+    assert frontmatter["binary_ctime_ns"] == before.st_ctime_ns
 
 
 def test_valid_completed_transcript_is_preserved_and_not_requeued(vault: Path) -> None:
@@ -136,7 +153,7 @@ def test_valid_completed_transcript_is_preserved_and_not_requeued(vault: Path) -
     assert result.state == "completed"
     assert result.job_id is None
     assert sidecar.read_bytes() == before
-    assert media_jobs.status(vault)["counts"]["pending"] == 0
+    assert _job_count(vault) == 0
 
 
 def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None:
@@ -152,24 +169,37 @@ def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None
     assert second.job_id == first.job_id
     assert sidecar.read_bytes() == first_bytes
     assert sidecar.stat().st_mtime_ns == first_mtime
-    assert media_jobs.status(vault)["counts"]["pending"] == 1
+    assert _job_count(vault) == 1
 
 
-@pytest.mark.parametrize("location", ["outside-vault", "outside-knowledge-base"])
+@pytest.mark.parametrize(
+    "location", ["outside-vault", "outside-knowledge-base", "symlink-escape"]
+)
 def test_reconciliation_confines_paths_to_governed_knowledge_base(
     vault: Path, tmp_path: Path, location: str
 ) -> None:
     media_processing = _media_processing()
     if location == "outside-vault":
         binary = tmp_path / "elsewhere" / "escape.m4a"
-    else:
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"escape attempt")
+    elif location == "outside-knowledge-base":
         binary = vault / "Attachments" / "escape.m4a"
-    binary.parent.mkdir(parents=True, exist_ok=True)
-    binary.write_bytes(b"escape attempt")
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"escape attempt")
+    else:
+        target = tmp_path / "outside-target.m4a"
+        target.write_bytes(b"symlink escape attempt")
+        binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "escape-link.m4a"
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            binary.symlink_to(target)
+        except (NotImplementedError, OSError) as exc:
+            pytest.skip(f"symlink creation unavailable: {exc}")
 
     with pytest.raises(media_processing.MediaProcessingError) as exc:
         media_processing.reconcile_media(vault, binary)
 
     assert exc.value.code == "MEDIA_PATH_OUTSIDE_KB"
     assert not binary.with_name(binary.name + ".md").exists()
-    assert media_jobs.status(vault)["counts"]["pending"] == 0
+    assert _job_count(vault) == 0
