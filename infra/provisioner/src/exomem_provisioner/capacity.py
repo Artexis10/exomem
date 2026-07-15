@@ -53,8 +53,21 @@ _CELL_NAMESPACE_MARKERS = frozenset(
         "exomem.io/tenant-id",
         "exomem.io/cell-id",
         "exomem.io/operation-id",
+        "exomem.io/tenant-digest",
+        "exomem.io/subject-digest",
+        "exomem.io/operation-digest",
         "exomem.io/fence",
+        "exomem.io/recovery-envelope",
         "exomem.io/provision-mode",
+        "exomem.io/pvc-name",
+        "exomem.io/credentials-secret-name",
+        "exomem.io/init-request-configmap-name",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
+        "exomem.io/runtime-admitted",
     }
 )
 
@@ -442,6 +455,7 @@ class KubernetesCapacityObserver:
                 raise CapacityReceiptError("persistent volume observation is ambiguous")
             pv_by_name[name] = pv
         pvc_by_identity: dict[tuple[str, str], object] = {}
+        pvc_by_volume_name: dict[str, list[object]] = {}
         for pvc in (_attr(pvcs, "items", ()) or ()):
             metadata = _metadata(pvc)
             identity = (_attr(metadata, "namespace"), _attr(metadata, "name"))
@@ -451,6 +465,13 @@ class KubernetesCapacityObserver:
             ):
                 raise CapacityReceiptError("persistent volume claim observation is ambiguous")
             pvc_by_identity[identity] = pvc
+            volume_name = _attr(_attr(pvc, "spec", {}), "volume_name")
+            if volume_name is not None:
+                if not isinstance(volume_name, str) or not volume_name:
+                    raise CapacityReceiptError(
+                        "persistent volume claim observation is ambiguous"
+                    )
+                pvc_by_volume_name.setdefault(volume_name, []).append(pvc)
 
         attached = 0
         orphan_ids: set[str] = set()
@@ -479,8 +500,13 @@ class KubernetesCapacityObserver:
             seen_va_uids.add(va_uid)
             seen_pv_names.add(pv_name)
             attached += 1
+            bound_pvcs = pvc_by_volume_name.get(pv_name, [])
+            if len(bound_pvcs) > 1:
+                raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
             pv = pv_by_name.get(pv_name)
             if pv is None:
+                if bound_pvcs:
+                    raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
                 orphan_ids.add(f"va:{va_uid}:{va_name}:pv:{pv_name}")
                 continue
             pv_spec = _attr(pv, "spec", {})
@@ -508,10 +534,13 @@ class KubernetesCapacityObserver:
             if pvc is not None:
                 pvc_metadata = _metadata(pvc)
                 if (
-                    _attr(pvc_metadata, "uid") != claim_uid
+                    bound_pvcs != [pvc]
+                    or _attr(pvc_metadata, "uid") != claim_uid
                     or _attr(_attr(pvc, "spec", {}), "volume_name") != pv_name
                 ):
                     raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
+            elif bound_pvcs:
+                raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
             if pvc is None or namespace_identity is None:
                 orphan_ids.add(f"volume:{handle}")
                 continue

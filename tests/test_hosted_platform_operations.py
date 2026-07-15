@@ -21,6 +21,34 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 ROOT = Path(__file__).resolve().parents[1]
 INFRA = ROOT / "infra"
 
+_NAMESPACE_OWNED_MARKERS = (
+    *(("labels", marker) for marker in (
+        "exomem.io/tenant-cell",
+        "exomem.io/cell-resource",
+    )),
+    *(("annotations", marker) for marker in (
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/tenant-digest",
+        "exomem.io/subject-digest",
+        "exomem.io/operation-digest",
+        "exomem.io/fence",
+        "exomem.io/recovery-envelope",
+        "exomem.io/resource-name",
+        "exomem.io/pvc-name",
+        "exomem.io/credentials-secret-name",
+        "exomem.io/init-request-configmap-name",
+        "exomem.io/provision-mode",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
+        "exomem.io/runtime-admitted",
+    )),
+)
+
 
 def _load(relative: str, name: str) -> ModuleType:
     path = ROOT / relative
@@ -1227,6 +1255,43 @@ def test_capacity_collector_lists_namespaces_without_label_selector(
         state_name="capacity-state",
     )
     assert requested[0] == "https://kubernetes.default.svc/api/v1/namespaces"
+
+
+@pytest.mark.parametrize(("section", "marker"), _NAMESPACE_OWNED_MARKERS)
+def test_capacity_collector_rejects_each_incomplete_owned_namespace_marker(
+    section: str,
+    marker: str,
+) -> None:
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_collector_owned_marker_test",
+    )
+    metadata: dict[str, object] = {
+        "name": "ordinary-namespace",
+        "labels": {},
+        "annotations": {},
+    }
+    values = metadata[section]
+    assert isinstance(values, dict)
+    values[marker] = "owned-marker-sentinel"
+
+    with pytest.raises(module.ReceiptCollectorError, match="namespace identity"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={
+                "kind": "NamespaceList",
+                "items": [{"metadata": metadata}],
+            },
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server={
+                "server": {
+                    "id": 101,
+                    "datacenter": {"location": {"name": "fsn1"}},
+                }
+            },
+            hcloud_pages=[{"volumes": []}],
+            expected_server_id=101,
+            expected_location="fsn1",
+        )
 
 
 def test_rotation_collector_rejects_uncontracted_or_failed_observations(tmp_path: Path) -> None:

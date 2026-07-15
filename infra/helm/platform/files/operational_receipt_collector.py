@@ -43,8 +43,21 @@ _CELL_NAMESPACE_MARKERS = frozenset(
         "exomem.io/tenant-id",
         "exomem.io/cell-id",
         "exomem.io/operation-id",
+        "exomem.io/tenant-digest",
+        "exomem.io/subject-digest",
+        "exomem.io/operation-digest",
         "exomem.io/fence",
+        "exomem.io/recovery-envelope",
         "exomem.io/provision-mode",
+        "exomem.io/pvc-name",
+        "exomem.io/credentials-secret-name",
+        "exomem.io/init-request-configmap-name",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
+        "exomem.io/runtime-admitted",
     }
 )
 

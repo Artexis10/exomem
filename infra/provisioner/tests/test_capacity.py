@@ -44,6 +44,34 @@ from exomem_provisioner.repository import (
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 
+_NAMESPACE_OWNED_MARKERS = (
+    *(("labels", marker) for marker in (
+        "exomem.io/tenant-cell",
+        "exomem.io/cell-resource",
+    )),
+    *(("annotations", marker) for marker in (
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/tenant-digest",
+        "exomem.io/subject-digest",
+        "exomem.io/operation-digest",
+        "exomem.io/fence",
+        "exomem.io/recovery-envelope",
+        "exomem.io/resource-name",
+        "exomem.io/pvc-name",
+        "exomem.io/credentials-secret-name",
+        "exomem.io/init-request-configmap-name",
+        "exomem.io/provision-mode",
+        "exomem.io/vault-id",
+        "exomem.io/expected-release",
+        "exomem.io/worker-policy-digest",
+        "exomem.io/browser-origin",
+        "exomem.io/transfer-hostname",
+        "exomem.io/runtime-admitted",
+    )),
+)
+
 
 def _settings(path: Path) -> ProvisionerSettings:
     return ProvisionerSettings(
@@ -1397,18 +1425,70 @@ async def test_kubernetes_observer_lists_broadly_and_ignores_only_unrelated_name
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(("section", "marker"), _NAMESPACE_OWNED_MARKERS)
+async def test_kubernetes_observer_rejects_each_incomplete_owned_namespace_marker(
+    section: str,
+    marker: str,
+) -> None:
+    metadata = SimpleNamespace(
+        name="ordinary-namespace",
+        labels={},
+        annotations={},
+    )
+    getattr(metadata, section)[marker] = "owned-marker-sentinel"
+
+    class Core:
+        def list_namespace(self):
+            return SimpleNamespace(items=[SimpleNamespace(metadata=metadata)])
+
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[])
+
+        def list_node(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="node-one"),
+                        spec=SimpleNamespace(provider_id="hcloud://101"),
+                    )
+                ]
+            )
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[])
+
+    with pytest.raises(CapacityReceiptError, match="namespace identity"):
+        await KubernetesCapacityObserver(
+            core_v1=Core(),
+            storage_v1=Storage(),
+            expected_server_id=101,
+            expected_location="fsn1",
+            now=lambda: NOW,
+        ).observe()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("include_pv", "include_pvc", "include_namespace"),
+    ("include_pv", "include_pvc", "include_namespace", "clean_orphan"),
     [
-        (False, False, False),
-        (True, False, True),
-        (True, True, False),
+        (False, False, False, True),
+        (False, True, False, False),
+        (True, False, True, True),
+        (True, True, False, True),
     ],
 )
 async def test_kubernetes_observer_counts_only_clean_missing_object_combinations_as_orphans(
     include_pv: bool,
     include_pvc: bool,
     include_namespace: bool,
+    clean_orphan: bool,
 ) -> None:
     identity = OpaqueProviderMetadata("tenant-orphan", "cell-orphan", "operation-orphan", 1)
     namespace = _namespace(identity, "serve")
@@ -1468,13 +1548,18 @@ async def test_kubernetes_observer_counts_only_clean_missing_object_combinations
         def list_volume_attachment(self):
             return SimpleNamespace(items=[attachment])
 
-    observation = await KubernetesCapacityObserver(
+    observer = KubernetesCapacityObserver(
         core_v1=Core(),
         storage_v1=Storage(),
         expected_server_id=101,
         expected_location="fsn1",
         now=lambda: NOW,
-    ).observe()
+    )
+    if not clean_orphan:
+        with pytest.raises(CapacityReceiptError, match="PVC ownership"):
+            await observer.observe()
+        return
+    observation = await observer.observe()
     assert observation.attached_hcloud_volumes == 1
     assert len(observation.orphan_attachment_ids) == 1
 
