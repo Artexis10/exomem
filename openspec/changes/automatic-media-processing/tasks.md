@@ -2,7 +2,7 @@
 
 ### Task 1
 
-- [ ] 1.1 Add failing classification and orchestration tests for `.m4a`, unsupported media, missing sidecars, prose-only sidecar repair, provenance/hash fields, valid transcript preservation, idempotent reconciliation, and path confinement.
+- [x] 1.1 Add failing classification and orchestration tests for `.m4a`, unsupported media, missing sidecars, prose-only sidecar repair, provenance/hash fields, valid transcript preservation, idempotent reconciliation, and path confinement.
 
 ### Task 2
 
