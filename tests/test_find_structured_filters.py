@@ -102,6 +102,7 @@ def test_unit_predicates_are_grouped_against_one_child_for_page_results(
         query="",
         scope="kb-only",
         mode="keyword",
+        result_level="page",
         filters={
             "$and": [
                 {"page.status": {"$eq": "active"}},
@@ -121,6 +122,7 @@ def test_generic_filter_and_shortcuts_intersect_in_filter_only_order(
         filter_vault,
         query="",
         scope="kb-only",
+        result_level="page",
         types=["insight"],
         projects=["alpha"],
         tags=["AUTH"],
@@ -156,6 +158,7 @@ def test_category_alias_is_resolved_before_candidate_work(filter_vault: Path) ->
         filter_vault,
         query="",
         scope="kb-only",
+        result_level="page",
         categories=["configuration"],
         filters={"page.status": {"$eq": "active"}},
         limit=20,
@@ -205,6 +208,7 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         filter_vault,
         query="",
         scope="kb-only",
+        result_level="page",
         categories=["config"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
@@ -220,11 +224,283 @@ def test_hot_cache_tracks_registry_changes_for_unit_filters(
         filter_vault,
         query="",
         scope="kb-only",
+        result_level="page",
         categories=["config"],
         filters={"page.frontmatter:/metadata/priority": {"$eq": 99}},
         limit=20,
     )
     assert second == []
+
+
+def test_unit_filter_auto_returns_independently_citable_units(
+    filter_vault: Path,
+) -> None:
+    hits = find_module.find(
+        filter_vault,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        filters={
+            "$and": [
+                {"page.status": {"$eq": "active"}},
+                {"unit.category": {"$eq": "config"}},
+            ]
+        },
+        limit=20,
+    )
+
+    payloads = [hit.as_dict() for hit in hits]
+    assert [payload["parent_path"] for payload in payloads] == [
+        "Knowledge Base/Notes/matching.md",
+        "Knowledge Base/Notes/split-units.md",
+    ]
+    assert all(payload["result_type"] == "semantic_unit" for payload in payloads)
+    assert all(payload["unit_ref"] for payload in payloads)
+    assert all(payload["source_anchor"] for payload in payloads)
+    assert all("text" not in payload["source_span"] for payload in payloads)
+    assert [payload["category"] for payload in payloads] == ["config", "config"]
+
+
+def test_explicit_page_mode_annotates_the_same_matching_unit(
+    filter_vault: Path,
+) -> None:
+    hits = find_module.find(
+        filter_vault,
+        query="",
+        scope="kb-only",
+        mode="keyword",
+        result_level="page",
+        filters={
+            "$and": [
+                {"page.status": {"$eq": "active"}},
+                {"unit.category": {"$eq": "config"}},
+                {"unit.tags": {"$contains": "auth"}},
+            ]
+        },
+        limit=20,
+    )
+
+    assert [hit.path for hit in hits] == ["Knowledge Base/Notes/matching.md"]
+    payload = hits[0].as_dict()
+    assert len(payload["matched_units"]) == 1
+    assert payload["matched_units"][0]["category"] == "config"
+    assert payload["matched_units"][0]["anchor"] == "matching"
+    assert "text" not in payload["matched_units"][0]["span"]
+
+
+def test_python_lexical_backend_preserves_unit_filter_eligibility(
+    filter_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    hits = find_module.find(
+        filter_vault,
+        query="Category",
+        scope="kb-only",
+        result_level="unit",
+        categories=["config"],
+        filters={"page.status": {"$eq": "active"}},
+        limit=20,
+    )
+
+    assert [hit.as_dict()["parent_path"] for hit in hits] == [
+        "Knowledge Base/Notes/split-units.md"
+    ]
+
+
+def test_page_matched_units_are_bounded_and_report_truncation(
+    filter_vault: Path,
+) -> None:
+    _write_page(
+        filter_vault,
+        "many-units",
+        status="active",
+        updated="2026-01-06",
+        priority=77,
+        observations="\n".join(
+            f"- [config] Matching unit {index} #auth ^cap-{index}"
+            for index in range(7)
+        ),
+    )
+    hits = find_module.find(
+        filter_vault,
+        query="",
+        scope="kb-only",
+        result_level="page",
+        filters={
+            "$and": [
+                {"page.frontmatter:/metadata/priority": {"$eq": 77}},
+                {"unit.category": {"$eq": "config"}},
+            ]
+        },
+        limit=20,
+    )
+
+    payload = hits[0].as_dict()
+    assert len(payload["matched_units"]) == 5
+    assert payload["matched_units_truncated"] == 2
+
+
+def test_category_word_in_content_cannot_spoof_exact_unit_metadata(
+    filter_vault: Path,
+) -> None:
+    _write_page(
+        filter_vault,
+        "category-spoof",
+        status="active",
+        updated="2026-01-06",
+        priority=88,
+        observations="- [decision] This mentions requirement repeatedly ^spoof",
+    )
+    hits = find_module.find(
+        filter_vault,
+        query="requirement",
+        scope="kb-only",
+        categories=["requirement"],
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 88}},
+        limit=20,
+    )
+    assert hits == []
+
+
+def test_identical_unit_content_keeps_distinct_category_identities(
+    filter_vault: Path,
+) -> None:
+    _write_page(
+        filter_vault,
+        "same-content",
+        status="active",
+        updated="2026-01-06",
+        priority=89,
+        observations=(
+            "- [config] Identical semantic payload ^same-config\n"
+            "- [rule] Identical semantic payload ^same-rule"
+        ),
+    )
+    hits = find_module.find(
+        filter_vault,
+        query="Identical semantic payload",
+        scope="kb-only",
+        categories=["config", "rule"],
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 89}},
+        limit=20,
+    )
+
+    payloads = [hit.as_dict() for hit in hits]
+    assert [payload["category"] for payload in payloads] == ["config", "rule"]
+    assert len({payload["unit_ref"] for payload in payloads}) == 2
+
+
+def test_text_unit_recall_falls_back_when_registry_makes_fts_rows_stale(
+    filter_vault: Path,
+) -> None:
+    _write_page(
+        filter_vault,
+        "registry-text-freshness",
+        status="active",
+        updated="2026-01-06",
+        priority=90,
+        observations="- [configuration] registry needle ^registry-text",
+    )
+    registry = (
+        filter_vault
+        / "Knowledge Base"
+        / "_Schema"
+        / "semantic-language-registry.yaml"
+    )
+
+    def write_registry(description: str) -> None:
+        registry.parent.mkdir(parents=True, exist_ok=True)
+        registry.write_text(
+            "schema_version: 1\n"
+            "categories:\n"
+            "  config:\n"
+            f"    description: {description}\n"
+            "    aliases: [configuration]\n"
+            "kinds: {}\n",
+            encoding="utf-8",
+        )
+
+    write_registry("Initial configuration facts")
+    first = find_module.find(
+        filter_vault,
+        query="registry needle",
+        scope="kb-only",
+        result_level="unit",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 90}},
+        limit=20,
+    )
+    assert len(first) == 1
+
+    write_registry("Revised configuration facts")
+    second = find_module.find(
+        filter_vault,
+        query="registry needle",
+        scope="kb-only",
+        result_level="unit",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 90}},
+        limit=20,
+    )
+    assert [hit.as_dict()["unit_ref"] for hit in second] == [
+        first[0].as_dict()["unit_ref"]
+    ]
+
+
+def test_python_unit_ranking_breaks_zero_score_ties_toward_active_parent(
+    filter_vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_LEXICAL_BACKEND", "python")
+    _write_page(
+        filter_vault,
+        "a-superseded",
+        status="superseded",
+        updated="2026-01-06",
+        priority=91,
+        observations="- [config] needle ^superseded-needle",
+    )
+    _write_page(
+        filter_vault,
+        "z-active",
+        status="active",
+        updated="2026-01-06",
+        priority=91,
+        observations="- [config] needle ^active-needle",
+    )
+    for index in range(2):
+        _write_page(
+            filter_vault,
+            f"filler-{index}",
+            status="active",
+            updated="2026-01-06",
+            priority=91,
+            observations=f"- [config] unrelated-{index} ^filler-{index}",
+        )
+
+    active_first = find_module.find(
+        filter_vault,
+        query="needle",
+        scope="kb-only",
+        result_level="unit",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 91}},
+        prefer_active=True,
+        limit=20,
+    )
+    assert [hit.as_dict()["parent_path"] for hit in active_first] == [
+        "Knowledge Base/Notes/z-active.md",
+        "Knowledge Base/Notes/a-superseded.md",
+    ]
+
+    path_order = find_module.find(
+        filter_vault,
+        query="needle",
+        scope="kb-only",
+        result_level="unit",
+        filters={"page.frontmatter:/metadata/priority": {"$eq": 91}},
+        prefer_active=False,
+        limit=20,
+    )
+    assert path_order[0].as_dict()["parent_path"] == (
+        "Knowledge Base/Notes/a-superseded.md"
+    )
 
 
 def test_invalid_filter_fails_before_candidate_search(

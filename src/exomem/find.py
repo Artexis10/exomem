@@ -34,6 +34,7 @@ from .find_types import (
     FindTimings,
     Hit,
     ParsedPage,
+    SemanticUnitHit,
 )
 from .kbdir import kb_dirname, kb_prefix
 
@@ -317,6 +318,7 @@ def find(
     categories: list[str] | None = None,
     kinds: list[str] | None = None,
     filters: dict[str, Any] | None = None,
+    result_level: str = "auto",
     limit: int = 15,
     scope: str = "kb",
     mode: str = "hybrid",
@@ -335,7 +337,7 @@ def find(
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
-) -> list[Hit]:
+) -> list[Hit] | list[SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -492,6 +494,10 @@ def find(
         sort_keys=True,
         separators=(",", ":"),
     )
+    effective_result_level = structured_filters.resolve_result_level(
+        result_level,
+        filter_plan,
+    )
     if filter_plan.root is not None:
         # Every shortcut is now represented in the shared typed plan.  Clear
         # the legacy arguments so no lane applies a second, divergent filter.
@@ -510,10 +516,29 @@ def find(
             page_memo[rel] = _CACHE.get(vault_root / rel, vault_root)
         return page_memo[rel]
 
+    walk_scope = "vault" if scope == "vault" else "kb"
+    resolved_config = config if config is not None else _active_ranking()
+    if effective_result_level == "unit":
+        if timings is not None:
+            timings.cache["enabled"] = False
+        return _find_semantic_units(
+            vault_root,
+            query=query,
+            limit=limit,
+            scope=walk_scope,
+            plan=filter_plan,
+            snapshot=snapshot,
+            prefer_active=prefer_active,
+            config=resolved_config,
+        )
+    if effective_result_level == "mixed":
+        raise NotImplementedError(
+            "mixed semantic-unit recall is implemented in the next recall slice"
+        )
+
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
     # log freshness never has to enter the cache key.
-    resolved_config = config if config is not None else _active_ranking()
     cache_size = 0 if prefer_used else _find_cache_size()
     cache_key: tuple | None = None
     if timings is not None:
@@ -527,7 +552,7 @@ def find(
             _t(speakers), _t(file_types), _t(exclude_file_types), limit, scope,
             mode, graph, rerank, auto_rerank, temporal, intent,
             updated_after, updated_before, recency_days, filter_key,
-            prefer_compiled, prefer_active, resolved_config,
+            effective_result_level, prefer_compiled, prefer_active, resolved_config,
         )
         with _span(timings, "freshness"):
             fresh = _freshness_key(
@@ -558,7 +583,6 @@ def find(
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
     # map to a KB-only walk in the underlying rankers.
-    walk_scope = "vault" if scope == "vault" else "kb"
     eligible_paths: set[str] | None = None
     if filter_plan.root is not None:
         with _span(timings, "filter_eligibility"):
@@ -655,6 +679,10 @@ def find(
             recency_days=recency_days,
         )
 
+    if filter_plan.has_unit_predicate:
+        with _span(timings, "matched_units"):
+            _annotate_matched_units(vault_root, hits, filter_plan)
+
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
     # A result produced with warm-deferred lanes is lexical-only — caching it
     # would keep serving the degraded ranking after the warm completes. A
@@ -684,6 +712,315 @@ def _collapse_frame_children(
         attribution,
         *aux_maps,
     )
+
+
+_MATCHED_UNITS_CAP = 5
+_UNIT_EXCERPT_MAX = 320
+
+
+def _unit_excerpt(content: str) -> str:
+    compact = " ".join(content.split())
+    if len(compact) <= _UNIT_EXCERPT_MAX:
+        return compact
+    return compact[: _UNIT_EXCERPT_MAX - 1].rstrip() + "…"
+
+
+def _unit_span(unit: Any) -> dict[str, int]:
+    """Coordinates only; authored text is carried once through content/excerpt."""
+    return {
+        "start_line": unit.span.start_line,
+        "start_column": unit.span.start_column,
+        "end_line": unit.span.end_line,
+        "end_column": unit.span.end_column,
+        "start_offset": unit.span.start_offset,
+        "end_offset": unit.span.end_offset,
+    }
+
+
+def _eligible_unit_records(
+    vault_root: Path,
+    *,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+) -> dict[str, tuple[ParsedPage, Any, int]]:
+    """Return current unit identities satisfying one exact `(page, unit)` plan."""
+    if scope == "kb":
+        root = vault_root / kb_dirname()
+        walk = _walk_md(root) if root.is_dir() else ()
+    else:
+        from .vault import walk_vault_md
+
+        walk = walk_vault_md(vault_root)
+
+    from . import semantic_index
+
+    eligible: dict[str, tuple[ParsedPage, Any, int]] = {}
+    for path in walk:
+        if path.name.lower() in _NAVIGATION_BASENAMES:
+            continue
+        page = _CACHE.get(path, vault_root)
+        if page is None or not _passes_filters(
+            page,
+            vault_root=vault_root,
+            types=None,
+            projects=None,
+            tags=None,
+            speakers=None,
+            file_types=None,
+            exclude_file_types=None,
+        ):
+            continue
+        try:
+            state = semantic_index.current_parent_index_state(vault_root, page.path)
+        except (OSError, UnicodeError, ValueError) as error:
+            log.warning(
+                "semantic-unit retrieval parse failed for %s: %s",
+                page.rel_path,
+                error,
+            )
+            continue
+        page_value = structured_filters.page_view(page)
+        for source_order, unit in enumerate(state.document.units):
+            if unit.unit_ref is None:
+                continue
+            if structured_filters.evaluate_filter(
+                plan,
+                page=page_value,
+                unit=structured_filters.unit_view(unit),
+            ):
+                eligible[unit.unit_ref] = (page, unit, source_order)
+    return eligible
+
+
+def _python_unit_scores(
+    records: dict[str, tuple[ParsedPage, Any, int]],
+    query: str,
+) -> dict[str, float]:
+    """Deterministic in-process lexical rung when the FTS sidecar is absent."""
+    from . import bm25
+
+    query_tokens = bm25.tokenize(query)
+    if not query_tokens:
+        return {}
+    refs = list(records)
+    corpus = [bm25.tokenize(records[unit_ref][1].content) for unit_ref in refs]
+    if not any(corpus):
+        return {}
+    from rank_bm25 import BM25Okapi
+
+    scores = BM25Okapi(corpus).get_scores(query_tokens)
+    wanted = set(query_tokens)
+    return {
+        unit_ref: float(score)
+        for unit_ref, tokens, score in zip(refs, corpus, scores, strict=True)
+        if wanted.intersection(tokens)
+    }
+
+
+def _unit_text_match_refs(
+    records: dict[str, tuple[ParsedPage, Any, int]],
+    query: str,
+) -> set[str]:
+    """Exact OR/stemming membership shared with both lexical rungs."""
+    from . import bm25
+
+    wanted = set(bm25.tokenize(query))
+    if not wanted:
+        return set()
+    return {
+        unit_ref
+        for unit_ref, (_page, unit, _source_order) in records.items()
+        if wanted.intersection(bm25.tokenize(unit.content))
+    }
+
+
+def _unit_rank_score(
+    raw_score: float,
+    *,
+    page: ParsedPage,
+    prefer_active: bool,
+    config: RankingConfig,
+) -> float:
+    if not prefer_active or page.status != "superseded":
+        return raw_score
+    penalty = config.superseded_penalty
+    return raw_score * penalty if raw_score >= 0 else raw_score / penalty
+
+
+def _semantic_unit_hit(
+    page: ParsedPage,
+    unit: Any,
+    *,
+    bm25_rank: int | None,
+    bm25_score: float | None,
+) -> SemanticUnitHit:
+    return SemanticUnitHit(
+        unit_ref=unit.unit_ref,
+        form=unit.form,
+        category_raw=unit.category_raw,
+        category_key=unit.category_key,
+        category=unit.category,
+        kind=unit.kind,
+        content=unit.content,
+        excerpt=_unit_excerpt(unit.content),
+        tags=list(unit.tags),
+        context=unit.context,
+        source_anchor=unit.anchor,
+        source_span=_unit_span(unit),
+        source_hash=unit.source_hash,
+        parent_path=page.rel_path,
+        parent_ref=unit.parent_ref,
+        parent_title=page.title,
+        parent_type=page.page_type,
+        parent_status=page.status,
+        parent_updated=page.updated,
+        parent_superseded_by=page.superseded_by,
+        bm25_rank=bm25_rank,
+        bm25_score=bm25_score,
+    )
+
+
+def _find_semantic_units(
+    vault_root: Path,
+    *,
+    query: str,
+    limit: int,
+    scope: str,
+    plan: structured_filters.FilterPlan,
+    snapshot: FreshnessSnapshot,
+    prefer_active: bool,
+    config: RankingConfig,
+) -> list[SemanticUnitHit]:
+    """Lexical/filter-only unit recall with exact pre-ranking eligibility."""
+    records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
+    if not records:
+        return []
+
+    if not query.strip():
+        ordered = sorted(
+            records.values(),
+            key=lambda record: (
+                record[0].updated or "0000-00-00",
+                record[0].rel_path,
+                -record[2],
+            ),
+            reverse=True,
+        )
+        return [
+            _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
+            for page, unit, _source_order in ordered[:limit]
+        ]
+
+    from . import lexstore
+
+    indexed = lexstore.search_semantic_units(
+        vault_root,
+        query,
+        k=len(records),
+        scope=scope,
+        freshness=snapshot.for_scope(scope),
+        allowed_unit_refs=set(records),
+    )
+    if indexed is None:
+        scores = _python_unit_scores(records, query)
+    else:
+        indexed_scores = {
+            hit.unit_ref: hit.lexical_score
+            for hit in indexed
+            if hit.unit_ref in records and hit.lexical_score is not None
+        }
+        # Registry edits can change the current parent generation without
+        # moving the Markdown corpus freshness key. The sidecar correctly
+        # rejects those stale rows; if that makes its match set incomplete,
+        # score the already-parsed live eligible records through the Python
+        # rung rather than returning a false negative.
+        scores = (
+            indexed_scores
+            if set(indexed_scores) == _unit_text_match_refs(records, query)
+            else _python_unit_scores(records, query)
+        )
+    ranked = sorted(
+        (
+            (
+                unit_ref,
+                raw_score,
+                _unit_rank_score(
+                    raw_score,
+                    page=records[unit_ref][0],
+                    prefer_active=prefer_active,
+                    config=config,
+                ),
+            )
+            for unit_ref, raw_score in scores.items()
+        ),
+        key=lambda item: (
+            -item[2],
+            bool(
+                prefer_active
+                and records[item[0]][0].status == "superseded"
+            ),
+            records[item[0]][0].rel_path,
+            records[item[0]][2],
+            item[0],
+        ),
+    )
+    return [
+        _semantic_unit_hit(
+            records[unit_ref][0],
+            records[unit_ref][1],
+            bm25_rank=rank,
+            bm25_score=raw_score,
+        )
+        for rank, (unit_ref, raw_score, _adjusted) in enumerate(
+            ranked[:limit],
+            start=1,
+        )
+    ]
+
+
+def _annotate_matched_units(
+    vault_root: Path,
+    hits: list[Hit],
+    plan: structured_filters.FilterPlan,
+) -> None:
+    """Attach bounded same-unit matches without changing default page bytes."""
+    from . import semantic_index
+
+    for hit in hits:
+        page = _CACHE.get(vault_root / hit.path, vault_root)
+        if page is None:
+            hit.matched_units = []
+            continue
+        try:
+            state = semantic_index.current_parent_index_state(vault_root, page.path)
+        except (OSError, UnicodeError, ValueError) as error:
+            log.warning("matched-unit parse failed for %s: %s", hit.path, error)
+            hit.matched_units = []
+            continue
+        page_value = structured_filters.page_view(page)
+        matched = [
+            unit
+            for unit in state.document.units
+            if structured_filters.evaluate_filter(
+                plan,
+                page=page_value,
+                unit=structured_filters.unit_view(unit),
+            )
+        ]
+        hit.matched_units = [
+            {
+                "unit_ref": unit.unit_ref,
+                "form": unit.form,
+                "category": unit.category,
+                "category_key": unit.category_key,
+                "kind": unit.kind,
+                "anchor": unit.anchor,
+                "span": _unit_span(unit),
+                "excerpt": _unit_excerpt(unit.content),
+            }
+            for unit in matched[:_MATCHED_UNITS_CAP]
+        ]
+        hit.matched_units_truncated = max(0, len(matched) - _MATCHED_UNITS_CAP)
 
 
 def _eligible_filter_paths(

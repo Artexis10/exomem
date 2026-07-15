@@ -107,6 +107,34 @@ Use SQLite for the index.
     assert rows[0]["parser_version"] >= 1
 
 
+def test_allowed_unit_refs_are_applied_before_top_k(tmp_path: Path) -> None:
+    _write_page(
+        tmp_path,
+        """\
+- [config] needle needle needle needle ^first
+- [config] needle with a deliberately longer lower-ranked body ^second
+""",
+    )
+    all_hits = lexstore.search_semantic_units(
+        tmp_path,
+        "needle",
+        k=10,
+        scope="kb",
+    )
+    assert all_hits is not None and len(all_hits) == 2
+    allowed_ref = all_hits[1].unit_ref
+
+    filtered = lexstore.search_semantic_units(
+        tmp_path,
+        "needle",
+        k=1,
+        scope="kb",
+        allowed_unit_refs={allowed_ref},
+    )
+    assert filtered is not None
+    assert [hit.unit_ref for hit in filtered] == [allowed_ref]
+
+
 def test_parent_update_replaces_all_unit_rows_in_one_transaction(tmp_path: Path) -> None:
     page = _write_page(
         tmp_path,

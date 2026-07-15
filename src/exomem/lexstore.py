@@ -236,6 +236,7 @@ def search_semantic_units(
     kinds: list[str] | None = None,
     scope: str = "kb",
     freshness: tuple | None = None,
+    allowed_unit_refs: set[str] | None = None,
 ) -> list[SemanticUnitLexicalHit] | None:
     """Return exact-metadata semantic-unit candidates from the lexical sidecar."""
     if not _usable():
@@ -255,6 +256,7 @@ def search_semantic_units(
         kind_keys,
         scope,
         freshness,
+        allowed_unit_refs,
     )
     if hits is None:
         return None
@@ -979,6 +981,7 @@ class LexicalStore:
         kinds: tuple[str, ...],
         scope: str,
         freshness: tuple | None,
+        allowed_unit_refs: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit] | None:
         if self._failed:
             return None
@@ -986,7 +989,15 @@ class LexicalStore:
             conn = self._connect()
             try:
                 self._ensure_synced(conn, scope, freshness)
-                return self._semantic_unit_query(conn, stemmed_tokens, k, categories, kinds, scope)
+                return self._semantic_unit_query(
+                    conn,
+                    stemmed_tokens,
+                    k,
+                    categories,
+                    kinds,
+                    scope,
+                    allowed_unit_refs,
+                )
             finally:
                 conn.close()
         except sqlite3.Error as e:
@@ -1005,6 +1016,7 @@ class LexicalStore:
         categories: tuple[str, ...],
         kinds: tuple[str, ...],
         scope: str,
+        allowed_unit_refs: set[str] | None = None,
     ) -> list[SemanticUnitLexicalHit]:
         col = "in_vault" if scope == "vault" else "in_kb"
         clauses = [f"u.{col} = 1"]
@@ -1017,6 +1029,11 @@ class LexicalStore:
             placeholders = ",".join("?" for _ in kinds)
             clauses.append(f"u.kind IN ({placeholders})")
             params.extend(kinds)
+        if allowed_unit_refs is not None:
+            clauses.append("u.unit_ref IN (SELECT value FROM json_each(?))")
+            params.append(
+                json.dumps(sorted(allowed_unit_refs), ensure_ascii=False)
+            )
         columns = (
             "u.record_type, u.unit_ref, u.parent_path, u.parent_ref, "
             "u.parent_generation, u.parent_source_hash, u.parser_version, u.form, "
