@@ -2817,30 +2817,19 @@ def test_prune_bounds_root_enumeration_before_candidate_work(
     root = checkpoint.client_state_root(home, "codex")
     root.mkdir(parents=True)
     root.chmod(0o700)
-    precomputed = [f"foreign-{number:06d}" for number in range(300_000)]
-    inspected = 0
-    real_list = checkpoint._list_directory
 
-    def huge_root_listing(directory) -> list[str]:
-        nonlocal inspected
-        if directory.path == root:
-            inspected += len(precomputed)
-            return precomputed
-        return real_list(directory)
+    def fail_unbounded_listing(_directory) -> list[str]:
+        pytest.fail("pruning must not materialize an unbounded root listing")
 
-    monkeypatch.setattr(checkpoint, "_list_directory", huge_root_listing)
-    started = time.monotonic()
+    monkeypatch.setattr(checkpoint, "_list_directory", fail_unbounded_listing)
     removed = checkpoint.prune_expired(
         home,
         "codex",
         current_session="current",
         now_ns=checkpoint.RETENTION_NS + 1,
     )
-    elapsed = time.monotonic() - started
 
     assert removed == 0
-    assert inspected <= 32
-    assert elapsed < checkpoint.MAX_PRUNE_LOCK_SECONDS + 0.1
 
 
 @pytest.mark.skipif(not sys.platform.startswith("linux"), reason="uses Linux directory cookies")
