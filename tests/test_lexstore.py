@@ -237,7 +237,10 @@ def test_manual_row_drift_self_heals(tmp_path):
     side = lexstore.lexical_path(tmp_path)
     conn = sqlite3.connect(side)
     try:
-        conn.execute("DELETE FROM pages WHERE rowid IN (SELECT rowid FROM pages LIMIT 2)")
+        conn.execute(
+            "DELETE FROM pages WHERE rowid IN "
+            "(SELECT rowid FROM pages ORDER BY rowid DESC LIMIT 2)"
+        )
         conn.commit()
     finally:
         conn.close()
