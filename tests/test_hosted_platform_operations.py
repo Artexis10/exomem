@@ -580,7 +580,8 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     contract = json.loads((INFRA / "operations/private-alpha-capacity-v1.json").read_text())
     assert contract["limits"] == {
         "active_user_cells": 6,
-        "reserved_volume_attachments": 2,
+        "active_recovery_cells": 2,
+        "maximum_potential_attachments": 8,
         "provider_volume_attachment_limit": 16,
         "minimum_unused_provider_headroom": 8,
     }
@@ -661,10 +662,13 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         "receipt_id": "123e4567-e89b-42d3-a456-426614174001",
         "sequence": 41,
         "cluster_uid": "cluster-uid-1234",
+        "hcloud_server_id": 101,
+        "hcloud_location": "fsn1",
         "observed_at": "2026-07-14T12:00:00Z",
         "expires_at": "2026-07-14T12:05:00Z",
         "active_user_cells": 5,
-        "attached_volumes": 5,
+        "active_recovery_cells": 1,
+        "attached_volumes": 6,
     }
     economics = {
         "schema_version": 1,
@@ -713,27 +717,15 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     )
     assert decision.allowed is True
 
-    replay_state = tmp_path / "capacity-gate-state.json"
     assert module.evaluate_files(
         contract,
         capacity_receipt=capacity_path,
         economics_receipt=economics_path,
         capacity_public_key=capacity_public_key,
         economics_public_key=economics_public_key,
-        replay_state_path=replay_state,
         now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
     ).allowed
-    assert stat.S_IMODE(replay_state.stat().st_mode) == 0o600
-    with pytest.raises(module.CapacityGateError, match="replayed"):
-        module.evaluate_files(
-            contract,
-            capacity_receipt=capacity_path,
-            economics_receipt=economics_path,
-            capacity_public_key=capacity_public_key,
-            economics_public_key=economics_public_key,
-            replay_state_path=replay_state,
-            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
-        )
+    assert not hasattr(module, "_consume_capacity_receipt")
 
     substituted_capacity_key = Ed25519PrivateKey.generate()
     write_receipt(capacity_path, capacity, substituted_capacity_key)
@@ -760,7 +752,7 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
         )
     write_receipt(economics_path, economics, economics_private_key)
 
-    blocked_capacity = {**capacity, "active_user_cells": 6, "attached_volumes": 6}
+    blocked_capacity = {**capacity, "active_user_cells": 6}
     write_receipt(capacity_path, blocked_capacity, capacity_private_key)
     blocked = module.evaluate_files(
         contract,
@@ -772,6 +764,22 @@ def test_capacity_gate_blocks_unknown_economics_and_seventh_user(tmp_path: Path)
     )
     assert blocked.allowed is False
     assert blocked.reason == "active-user-cell-capacity-exhausted"
+
+    for changed, reason in (
+        ({"active_recovery_cells": 3}, "active-recovery-cell-capacity-exhausted"),
+        ({"attached_volumes": 8}, "safe-volume-attachment-headroom-exhausted"),
+    ):
+        write_receipt(capacity_path, {**capacity, **changed}, capacity_private_key)
+        decision = module.evaluate_files(
+            contract,
+            capacity_receipt=capacity_path,
+            economics_receipt=economics_path,
+            capacity_public_key=capacity_public_key,
+            economics_public_key=economics_public_key,
+            now=datetime(2026, 7, 14, 12, 1, tzinfo=UTC),
+        )
+        assert decision.allowed is False
+        assert decision.reason == reason
 
     tampered = json.loads(capacity_path.read_text(encoding="utf-8"))
     tampered["active_user_cells"] = 0
@@ -980,22 +988,61 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
             serialization.PublicFormat.Raw,
         )
     ).hexdigest()
-    snapshot = module.capacity_snapshot_from_documents(
-        tenant_namespaces={
-            "kind": "NamespaceList",
-            "items": [{"metadata": {"name": "must-not-leak"}} for _ in range(4)],
-        },
-        cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
-        hcloud_pages=[
-            {
-                "volumes": [
-                    {"id": 11, "server": 101},
-                    {"id": 12, "server": None},
-                    {"id": 13, "server": 102},
-                ],
-                "meta": {"pagination": {"next_page": None}},
+
+    def namespace(index: int, mode: str) -> dict[str, object]:
+        tenant_id = f"tenant-{index}"
+        cell_id = f"cell-{index}"
+        operation_id = f"operation-{index}"
+        resource_name = f"exo-{hashlib.sha256(cell_id.encode()).hexdigest()[:20]}"
+        return {
+            "metadata": {
+                "name": resource_name,
+                "labels": {"exomem.io/tenant-cell": "true"},
+                "annotations": {
+                    "exomem.io/tenant-id": tenant_id,
+                    "exomem.io/cell-id": cell_id,
+                    "exomem.io/operation-id": operation_id,
+                    "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode()).hexdigest(),
+                    "exomem.io/subject-digest": hashlib.sha256(cell_id.encode()).hexdigest(),
+                    "exomem.io/operation-digest": hashlib.sha256(
+                        operation_id.encode()
+                    ).hexdigest(),
+                    "exomem.io/fence": "1",
+                    "exomem.io/resource-name": resource_name,
+                    "exomem.io/provision-mode": mode,
+                },
             }
-        ],
+        }
+
+    namespaces = [
+        namespace(1, "serve"),
+        namespace(2, "serve"),
+        namespace(3, "serve"),
+        namespace(4, "restore-candidate"),
+    ]
+    server = {
+        "server": {
+            "id": 101,
+            "datacenter": {"location": {"name": "fsn1"}},
+        }
+    }
+    pages = [
+        {
+            "volumes": [
+                {"id": 11, "server": 101},
+                {"id": 12, "server": None},
+                {"id": 13, "server": 102},
+            ],
+            "meta": {"pagination": {"next_page": None}},
+        }
+    ]
+    snapshot = module.capacity_snapshot_from_documents(
+        tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+        cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+        hcloud_server=server,
+        hcloud_pages=pages,
+        expected_server_id=101,
+        expected_location="fsn1",
     )
     observed_at = datetime(2026, 7, 14, 12, 0, tzinfo=UTC)
     capacity = module.build_capacity_receipt(
@@ -1006,10 +1053,35 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
         private_key=capacity_private_key,
         receipt_id="123e4567-e89b-42d3-a456-426614174001",
     )
-    assert capacity["active_user_cells"] == 4
-    assert capacity["attached_volumes"] == 2
+    assert capacity["active_user_cells"] == 3
+    assert capacity["active_recovery_cells"] == 1
+    assert capacity["attached_volumes"] == 1
+    assert capacity["hcloud_server_id"] == 101
+    assert capacity["hcloud_location"] == "fsn1"
     assert capacity["expires_at"] == "2026-07-14T12:05:00Z"
-    assert "must-not-leak" not in json.dumps(capacity)
+    assert "tenant-1" not in json.dumps(capacity)
+
+    invalid_namespace = json.loads(json.dumps(namespaces[0]))
+    del invalid_namespace["metadata"]["annotations"]["exomem.io/provision-mode"]
+    for invalid_namespaces in ([invalid_namespace], [namespaces[0], namespaces[0]]):
+        with pytest.raises(module.ReceiptCollectorError, match="namespace identity"):
+            module.capacity_snapshot_from_documents(
+                tenant_namespaces={"kind": "NamespaceList", "items": invalid_namespaces},
+                cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+                hcloud_server=server,
+                hcloud_pages=pages,
+                expected_server_id=101,
+                expected_location="fsn1",
+            )
+    with pytest.raises(module.ReceiptCollectorError, match="HCloud server"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": namespaces},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server=server,
+            hcloud_pages=pages,
+            expected_server_id=102,
+            expected_location="fsn1",
+        )
 
     provider_invoice = tmp_path / "provider-invoice.pdf"
     paddle_statement = tmp_path / "paddle-statement.csv"
@@ -1226,11 +1298,25 @@ def test_production_composition_contract_binds_release_and_operator_actions() ->
         "destroy",
     }
     capacity = contract["capacity_gate"]
-    assert capacity["implementation"] == "KubernetesHCloudCapacityGate"
-    assert capacity["invoked_before"] == ["namespace-create", "pvc-create"]
+    assert capacity["implementation"] == "SignedLiveReceiptPostgreSQLCapacityAuthority"
+    assert capacity["invoked_before"] == [
+        "routine-provider-effect",
+        "volume-registration-provider-effect",
+    ]
+    assert capacity["provider_defense_checks"] == ["namespace-create", "helm-install"]
+    assert capacity["sources"] == [
+        "signed-kubernetes-hcloud-receipt",
+        "fresh-kubernetes-observation",
+        "postgresql-capacity-reservations",
+    ]
+    assert capacity["public_material_consumers"] == [
+        "exomem-provisioner-worker",
+        "exomem-volume-worker",
+    ]
     assert capacity["limits"] == {
         "active_user_cells": 6,
-        "reserved_volume_attachments": 2,
+        "active_recovery_cells": 2,
+        "maximum_potential_attachments": 8,
         "provider_volume_attachment_limit": 16,
         "minimum_unused_provider_headroom": 8,
     }
@@ -1410,7 +1496,10 @@ def test_receipt_keypairs_have_atomic_generated_trust_roots() -> None:
     ("pair_name", "expected_destination_kinds"),
     [
         ("provider_recovery", ["sops_k8s_secret", "sops_escrow", "sops_k8s_secret"]),
-        ("capacity_receipt", ["sops_k8s_secret", "sops_escrow"]),
+        (
+            "capacity_receipt",
+            ["sops_k8s_secret", "sops_k8s_secret", "sops_escrow"],
+        ),
         ("economics_receipt", ["sops_escrow", "sops_escrow"]),
         ("rotation_receipt", ["sops_escrow", "sops_escrow"]),
     ],

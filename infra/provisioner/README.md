@@ -22,6 +22,17 @@ only the authoritative durable destroy/discard claim: it never calls back into
 Substrate for admission, billing, or lifecycle state. No production process has
 a fake-provider selection path.
 
+Every PROVISION-capable worker also shares one public-only capacity admission
+authority. It verifies a five-minute Ed25519 receipt bound to the current
+cluster, configured HCloud server/location, separate serve/recovery counts, and
+attached-volume count; reconciles that receipt with a fresh Kubernetes
+namespace/PV/PVC/VolumeAttachment/Node observation; then serializes admission on
+the singleton PostgreSQL capacity ledger. Active reservations survive retries,
+claims, failures, and restarts. The exact limits are six USER cells, two
+RECOVERY cells, and eight potential attachments, leaving eight unused slots
+beneath the provider limit of sixteen. Only a final provider-proved DISCARD or
+DESTROY releases reservations, atomically with operation completion.
+
 Credential-dependent HCloud, B2 Object Lock, Cloudflare, and clean-cluster
 rebind drills remain release gates even when deterministic and exact-K3s suites
 pass.
@@ -181,7 +192,11 @@ helm upgrade --install exomem-platform infra/helm/platform \
 
 The routine worker additionally requires the release-manifest path, pinned
 Helm/chart details, internal/control/transfer origins, a worker ID, and
-`EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY`. The Helm chart supplies non-secret
+`EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY`. Both routine and volume-registration
+workers require `EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY`, the immutable
+`EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH`, the receipt ConfigMap namespace and
+name, and the expected HCloud server ID/location. Neither receives the capacity
+receipt signing key or collector HCloud read token. The Helm chart supplies non-secret
 fields, mounts the release ConfigMap, and consumes each governed Secret by its
 exact key. Its RBAC is read-mostly cluster discovery plus admission-bounded
 namespaced lifecycle mutation; it has no `pods/exec` or persistent-volume write
@@ -189,7 +204,8 @@ rule.
 
 The privileged volume worker receives only the common operation-store settings,
 an HCloud token, the volume-encryption Secret identity, location, worker ID, and
-its governed `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`. Its queue filter accepts
+its governed `EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY`, plus the same public
+capacity verifier inputs. Its queue filter accepts
 only `volume-registration-required` continuations. B2 credentials are confined
 to the corresponding durability workloads, and Cloudflare Access credentials
 remain outside K3s.

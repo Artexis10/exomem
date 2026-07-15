@@ -12,7 +12,7 @@ import time
 import uuid
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -25,10 +25,21 @@ if PROVISIONER_TEST_IMAGE is None:
     from sqlalchemy import func, select, text, update
 
     import exomem_provisioner.repository as repository_module
+    from exomem_provisioner.capacity import (
+        CapacityBlocked,
+        CapacityObservation,
+        CapacityReservationAuthority,
+        VerifiedCapacityReceipt,
+    )
     from exomem_provisioner.config import ProvisionerSettings
     from exomem_provisioner.crypto import AesGcmEnvelopeCodec
     from exomem_provisioner.database import DATABASE_REVISION, ProvisionerDatabase
-    from exomem_provisioner.models import Operation, TenantFence
+    from exomem_provisioner.models import (
+        CapacityLedger,
+        CapacityReservation,
+        Operation,
+        TenantFence,
+    )
     from exomem_provisioner.repository import OperationRepository, StaleFence
 else:
     database_source = (
@@ -399,10 +410,15 @@ async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_
                     )
                 ).scalars()
             )
+            ledger_rows = await connection.scalar(
+                text(f'SELECT count(*) FROM "{target.schema}".capacity_ledger')
+            )
         assert str(version).startswith("17")
         assert owner == target.role
         assert revisions == [DATABASE_REVISION]
         assert {"operations", "tenant_fences", "resources", "credential_metadata"} <= tables
+        assert {"capacity_ledger", "capacity_reservations"} <= tables
+        assert ledger_rows == 1
         assert await database.ready() is True
 
         wrong_owner = f"wrong_owner_{uuid.uuid4().hex[:8]}"
@@ -892,5 +908,123 @@ async def test_postgresql17_claim_uses_database_clock_without_explicit_test_time
         monkeypatch.setattr(repository_module, "datetime", SkewedDateTime)
 
         assert await repository.claim_next("clock-skewed-worker") is None
+    finally:
+        await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
+async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
+    postgresql17: PostgreSQL17,
+) -> None:
+    target = _new_database(postgresql17, "capacity")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    database = ProvisionerDatabase(target.settings)
+    repository = _repository(database, target.settings)
+    authority = CapacityReservationAuthority(database.session_factory)
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+    observation = CapacityObservation(
+        observed_at=observed_at,
+        cluster_uid="cluster-postgresql-capacity",
+        hcloud_server_id=101,
+        hcloud_location="fsn1",
+        user_resource_names=frozenset(),
+        recovery_resource_names=frozenset(),
+        orphan_attachment_ids=frozenset(),
+        attached_hcloud_volumes=0,
+    )
+    receipt = VerifiedCapacityReceipt(
+        receipt_id=str(uuid.uuid4()),
+        sequence=1,
+        observed_at=observed_at,
+        expires_at=observed_at.replace(microsecond=0) + timedelta(seconds=300),
+        cluster_uid=observation.cluster_uid,
+        hcloud_server_id=observation.hcloud_server_id,
+        hcloud_location=observation.hcloud_location,
+        active_user_cells=0,
+        active_recovery_cells=0,
+        attached_volumes=0,
+    )
+
+    async def claim(index: int):
+        request = _request(
+            operationId=f"operation-postgresql-capacity-{index}",
+            tenantId=f"tenant-postgresql-capacity-{index}",
+            cellId=f"cell-postgresql-capacity-{index}",
+            fenceGeneration=1,
+            provisionMode="serve",
+        )
+        await repository.submit("provision", f"capacity-{index}", request)
+        worker_id = f"capacity-worker-{index}"
+        operation = await repository.claim_next(worker_id)
+        assert operation is not None and operation.claim_token is not None
+        return operation, request, worker_id
+
+    async def reserve(claimed: tuple[object, dict[str, object], str]):
+        operation, request, worker_id = claimed
+        return await authority.reserve(
+            operation,
+            request,
+            receipt=receipt,
+            observation=observation,
+            worker_id=worker_id,
+            claim_token=operation.claim_token,
+            claim_generation=operation.claim_generation,
+        )
+
+    try:
+        for index in range(5):
+            await reserve(await claim(index))
+        contenders = [await claim(5), await claim(6)]
+        results = await asyncio.gather(
+            *(reserve(item) for item in contenders),
+            return_exceptions=True,
+        )
+
+        assert sum(not isinstance(result, BaseException) for result in results) == 1
+        blocked = [result for result in results if isinstance(result, CapacityBlocked)]
+        assert len(blocked) == 1
+        assert blocked[0].reason == "capacity-user-exhausted"
+
+        expiring_operation, expiring_request, expiring_worker = await claim(7)
+        expiring_receipt = replace(
+            receipt,
+            expires_at=datetime.now(UTC) + timedelta(seconds=1),
+        )
+        async with database.session_factory() as blocker_session:
+            async with blocker_session.begin():
+                locked_ledger = await blocker_session.get(
+                    CapacityLedger, 1, with_for_update=True
+                )
+                assert locked_ledger is not None
+                waiting = asyncio.create_task(
+                    authority.reserve(
+                        expiring_operation,
+                        expiring_request,
+                        receipt=expiring_receipt,
+                        observation=observation,
+                        worker_id=expiring_worker,
+                        claim_token=expiring_operation.claim_token,
+                        claim_generation=expiring_operation.claim_generation,
+                    )
+                )
+                await asyncio.sleep(0.2)
+                assert not waiting.done(), "capacity admission did not wait on the ledger"
+                await asyncio.sleep(1.1)
+            with pytest.raises(CapacityBlocked) as expired:
+                await asyncio.wait_for(waiting, timeout=5)
+        assert expired.value.reason == "capacity-live-receipt-unavailable"
+
+        async with database.session_factory() as session:
+            active = await session.scalar(
+                select(func.count()).select_from(CapacityReservation).where(
+                    CapacityReservation.released_at.is_(None)
+                )
+            )
+            revision = await session.scalar(
+                select(CapacityLedger.revision).where(CapacityLedger.id == 1)
+            )
+        assert active == 6
+        assert revision == 6
     finally:
         await database.dispose()

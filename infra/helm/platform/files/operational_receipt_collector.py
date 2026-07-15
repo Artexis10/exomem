@@ -32,6 +32,8 @@ _ROTATION_DOMAIN = b"exomem.rotation-drill-receipt.v1\0"
 _RECEIPT_ID = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\Z")
 _VERSION = re.compile(r"v[1-9][0-9]*\Z")
 _BASE64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
+_OPAQUE_PROVIDER_ID = re.compile(r"[A-Za-z0-9_.:/-]{1,64}\Z")
+_HCLOUD_LOCATION = re.compile(r"[a-z0-9][a-z0-9-]{1,31}\Z")
 
 
 class ReceiptCollectorError(RuntimeError):
@@ -41,7 +43,10 @@ class ReceiptCollectorError(RuntimeError):
 @dataclass(frozen=True)
 class CapacitySnapshot:
     cluster_uid: str
+    hcloud_server_id: int
+    hcloud_location: str
     active_user_cells: int
+    active_recovery_cells: int
     attached_volumes: int
 
 
@@ -163,19 +168,101 @@ def capacity_snapshot_from_documents(
     *,
     tenant_namespaces: dict[str, Any],
     cluster_namespace: dict[str, Any],
+    hcloud_server: dict[str, Any],
     hcloud_pages: list[dict[str, Any]],
+    expected_server_id: int,
+    expected_location: str,
 ) -> CapacitySnapshot:
     items = tenant_namespaces.get("items") if isinstance(tenant_namespaces, dict) else None
     metadata = cluster_namespace.get("metadata") if isinstance(cluster_namespace, dict) else None
     cluster_uid = metadata.get("uid") if isinstance(metadata, dict) else None
     if (
-        tenant_namespaces.get("kind") != "NamespaceList"
+        not isinstance(tenant_namespaces, dict)
+        or tenant_namespaces.get("kind") != "NamespaceList"
         or not isinstance(items, list)
         or any(not isinstance(item, dict) for item in items)
         or not isinstance(cluster_uid, str)
         or len(cluster_uid) < 8
     ):
         raise ReceiptCollectorError("Kubernetes capacity observation is invalid")
+    if (
+        not isinstance(expected_server_id, int)
+        or isinstance(expected_server_id, bool)
+        or expected_server_id < 1
+        or not isinstance(expected_location, str)
+        or _HCLOUD_LOCATION.fullmatch(expected_location) is None
+    ):
+        raise ReceiptCollectorError("configured HCloud server identity is invalid")
+    server = hcloud_server.get("server") if isinstance(hcloud_server, dict) else None
+    datacenter = server.get("datacenter") if isinstance(server, dict) else None
+    location = datacenter.get("location") if isinstance(datacenter, dict) else None
+    if (
+        not isinstance(server, dict)
+        or server.get("id") != expected_server_id
+        or not isinstance(location, dict)
+        or location.get("name") != expected_location
+    ):
+        raise ReceiptCollectorError("HCloud server identity differs")
+
+    resource_names: set[str] = set()
+    cell_ids: set[str] = set()
+    active_user_cells = 0
+    active_recovery_cells = 0
+    for item in items:
+        namespace_metadata = item.get("metadata")
+        labels = namespace_metadata.get("labels") if isinstance(namespace_metadata, dict) else None
+        annotations = (
+            namespace_metadata.get("annotations")
+            if isinstance(namespace_metadata, dict)
+            else None
+        )
+        name = namespace_metadata.get("name") if isinstance(namespace_metadata, dict) else None
+        if not isinstance(labels, dict) or not isinstance(annotations, dict):
+            raise ReceiptCollectorError("tenant namespace identity is invalid")
+        tenant_id = annotations.get("exomem.io/tenant-id")
+        cell_id = annotations.get("exomem.io/cell-id")
+        operation_id = annotations.get("exomem.io/operation-id")
+        fence_raw = annotations.get("exomem.io/fence")
+        mode = annotations.get("exomem.io/provision-mode")
+        if (
+            labels.get("exomem.io/tenant-cell") != "true"
+            or not all(
+                isinstance(value, str) and _OPAQUE_PROVIDER_ID.fullmatch(value) is not None
+                for value in (tenant_id, cell_id, operation_id)
+            )
+            or not isinstance(fence_raw, str)
+            or not fence_raw.isdigit()
+            or not 1 <= int(fence_raw) <= 9_007_199_254_740_991
+            or str(int(fence_raw)) != fence_raw
+            or mode not in {"serve", "restore-candidate"}
+        ):
+            raise ReceiptCollectorError("tenant namespace identity is invalid")
+        assert isinstance(tenant_id, str)
+        assert isinstance(cell_id, str)
+        assert isinstance(operation_id, str)
+        resource_name = f"exo-{hashlib.sha256(cell_id.encode('utf-8')).hexdigest()[:20]}"
+        expected_annotations = {
+            "exomem.io/tenant-digest": hashlib.sha256(tenant_id.encode("utf-8")).hexdigest(),
+            "exomem.io/subject-digest": hashlib.sha256(cell_id.encode("utf-8")).hexdigest(),
+            "exomem.io/operation-digest": hashlib.sha256(
+                operation_id.encode("utf-8")
+            ).hexdigest(),
+            "exomem.io/resource-name": resource_name,
+        }
+        if (
+            name != resource_name
+            or any(annotations.get(key) != value for key, value in expected_annotations.items())
+            or resource_name in resource_names
+            or cell_id in cell_ids
+        ):
+            raise ReceiptCollectorError("tenant namespace identity is invalid")
+        resource_names.add(resource_name)
+        cell_ids.add(cell_id)
+        if mode == "serve":
+            active_user_cells += 1
+        else:
+            active_recovery_cells += 1
+
     volume_ids: set[int] = set()
     attached = 0
     if not hcloud_pages:
@@ -196,10 +283,13 @@ def capacity_snapshot_from_documents(
             ):
                 raise ReceiptCollectorError("HCloud capacity observation is invalid")
             volume_ids.add(identifier)
-            attached += int(server is not None)
+            attached += int(server == expected_server_id)
     return CapacitySnapshot(
         cluster_uid=cluster_uid,
-        active_user_cells=len(items),
+        hcloud_server_id=expected_server_id,
+        hcloud_location=expected_location,
+        active_user_cells=active_user_cells,
+        active_recovery_cells=active_recovery_cells,
         attached_volumes=attached,
     )
 
@@ -224,9 +314,12 @@ def build_capacity_receipt(
         "receipt_id": receipt_id,
         "sequence": sequence,
         "cluster_uid": snapshot.cluster_uid,
+        "hcloud_server_id": snapshot.hcloud_server_id,
+        "hcloud_location": snapshot.hcloud_location,
         "observed_at": _timestamp(observed_at),
         "expires_at": _timestamp(observed_at + timedelta(seconds=ttl)),
         "active_user_cells": snapshot.active_user_cells,
+        "active_recovery_cells": snapshot.active_recovery_cells,
         "attached_volumes": snapshot.attached_volumes,
     }
     return _sign(unsigned, contract=contract, private_key=private_key, kind="capacity")
@@ -493,8 +586,20 @@ def _json_request(
 
 
 def _capacity_live_documents(
-    *, token_path: Path, ca_path: Path, hcloud_token: str, namespace: str, state_name: str
-) -> tuple[dict[str, Any], dict[str, Any], list[dict[str, Any]], dict[str, Any]]:
+    *,
+    token_path: Path,
+    ca_path: Path,
+    hcloud_token: str,
+    hcloud_server_id: int,
+    namespace: str,
+    state_name: str,
+) -> tuple[
+    dict[str, Any],
+    dict[str, Any],
+    dict[str, Any],
+    list[dict[str, Any]],
+    dict[str, Any],
+]:
     try:
         token = token_path.read_text(encoding="ascii").strip()
     except (OSError, UnicodeDecodeError) as exc:
@@ -520,6 +625,10 @@ def _capacity_live_documents(
         "Authorization": f"Bearer {hcloud_token}",
         "Accept": "application/json",
     }
+    hcloud_server = _json_request(
+        f"https://api.hetzner.cloud/v1/servers/{hcloud_server_id}",
+        headers=hcloud_headers,
+    )
     pages: list[dict[str, Any]] = []
     page = 1
     while page:
@@ -540,7 +649,7 @@ def _capacity_live_documents(
             page = next_page
         else:
             raise ReceiptCollectorError("HCloud pagination is invalid")
-    return tenant_namespaces, cluster_namespace, pages, state
+    return tenant_namespaces, cluster_namespace, hcloud_server, pages, state
 
 
 def _state_sequence(state: dict[str, Any]) -> tuple[int, str]:
@@ -603,12 +712,15 @@ def run_capacity(args: argparse.Namespace) -> None:
     contract = _load_json(args.contract, "capacity contract")
     private_key = private_key_from_secret(os.environ.get(args.private_key_env, ""))
     hcloud_token = os.environ.get(args.hcloud_token_env, "")
-    tenant_namespaces, cluster_namespace, pages, state = _capacity_live_documents(
+    tenant_namespaces, cluster_namespace, hcloud_server, pages, state = (
+        _capacity_live_documents(
         token_path=args.kubernetes_token,
         ca_path=args.kubernetes_ca,
         hcloud_token=hcloud_token,
+        hcloud_server_id=args.hcloud_server_id,
         namespace=args.namespace,
         state_name=args.state_configmap,
+        )
     )
     sequence, resource_version = _state_sequence(state)
     receipt = build_capacity_receipt(
@@ -616,7 +728,10 @@ def run_capacity(args: argparse.Namespace) -> None:
         snapshot=capacity_snapshot_from_documents(
             tenant_namespaces=tenant_namespaces,
             cluster_namespace=cluster_namespace,
+            hcloud_server=hcloud_server,
             hcloud_pages=pages,
+            expected_server_id=args.hcloud_server_id,
+            expected_location=args.hcloud_location,
         ),
         sequence=sequence,
         observed_at=datetime.now(UTC).replace(microsecond=0),
@@ -673,6 +788,8 @@ def _parser() -> argparse.ArgumentParser:
     )
     capacity.add_argument("--private-key-env", default="EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY")
     capacity.add_argument("--hcloud-token-env", default="EXOMEM_HCLOUD_CAPACITY_TOKEN")
+    capacity.add_argument("--hcloud-server-id", type=int, required=True)
+    capacity.add_argument("--hcloud-location", required=True)
 
     economics = subparsers.add_parser("economics")
     economics.add_argument("--contract", type=Path, required=True)

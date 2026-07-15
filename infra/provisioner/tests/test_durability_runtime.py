@@ -176,6 +176,7 @@ def test_production_builders_pass_explicit_disjoint_action_allowlists() -> None:
         repository=repository,  # type: ignore[arg-type]
         driver=object(),  # type: ignore[arg-type]
         worker_id="routine-worker",
+        capacity_admission=object(),
     )
     deletion = build_deletion_operation_worker(
         repository=repository,  # type: ignore[arg-type]

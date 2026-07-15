@@ -1,4 +1,22 @@
 {{- $releaseJson := include "exomem.hostedReleaseJson" . -}}
+{{- $capacityContractRaw := .Files.Get "files/private-alpha-capacity-v1.json" -}}
+{{- if ne .Values.capacityCollector.contractSha256 ($capacityContractRaw | sha256sum) -}}
+{{- fail "provisioner capacity contract SHA-256 mismatch" -}}
+{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: exomem-capacity-contract
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/part-of: exomem-hosted
+  annotations:
+    exomem.io/capacity-contract-sha256: {{ $capacityContractRaw | sha256sum | quote }}
+immutable: true
+data:
+  private-alpha-capacity-v1.json: |
+{{ $capacityContractRaw | indent 4 }}
+---
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -173,6 +191,11 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.provisioner.providerRecoveryPublicKeySecret.name }}
                   key: {{ .Values.provisioner.providerRecoveryPublicKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.capacityReceiptPublicKeySecret.name }}
+                  key: {{ .Values.provisioner.capacityReceiptPublicKeySecret.key }}
             - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
               value: {{ .Values.provisioner.databaseSchema | quote }}
             - name: EXOMEM_PROVISIONER_DATABASE_ROLE
@@ -197,6 +220,14 @@ spec:
               value: {{ .Values.provisioner.browserOrigin | quote }}
             - name: EXOMEM_PROVISIONER_LOCATION
               value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH
+              value: /etc/exomem/capacity/private-alpha-capacity-v1.json
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP
+              value: {{ .Values.capacityCollector.stateConfigMap | quote }}
+            - name: EXOMEM_PROVISIONER_HCLOUD_SERVER_ID
+              value: {{ .Values.capacityCollector.hcloudServerId | quote }}
             - name: EXOMEM_PROVISIONER_INTERNAL_ORIGIN
               value: {{ .Values.provisioner.internalOrigin | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
@@ -236,6 +267,9 @@ spec:
             - name: hosted-release
               mountPath: /etc/exomem/release
               readOnly: true
+            - name: capacity-contract
+              mountPath: /etc/exomem/capacity
+              readOnly: true
       volumes:
         - name: temporary
           emptyDir:
@@ -246,3 +280,9 @@ spec:
             items:
               - key: exomem-hosted-release-v1.json
                 path: exomem-hosted-release-v1.json
+        - name: capacity-contract
+          configMap:
+            name: exomem-capacity-contract
+            items:
+              - key: private-alpha-capacity-v1.json
+                path: private-alpha-capacity-v1.json

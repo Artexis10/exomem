@@ -21,9 +21,10 @@ from .lifecycle import (
 from .logging import configure_content_free_logging
 from .main import _require_production_database
 from .models import ResourceKind
+from .production import build_live_capacity_admission
 from .provider_identity import ProviderRecoveryIdentityCodec
 from .repository import OperationRepository
-from .worker import ProvisionerWorker
+from .worker import CapacityAdmission, ProvisionerWorker
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,6 +76,24 @@ def _repository(
     )
 
 
+def build_volume_registration_worker(
+    *,
+    repository: OperationRepository,
+    driver: Any,
+    worker_id: str,
+    capacity_admission: CapacityAdmission | None,
+) -> ProvisionerWorker:
+    """Build the PROVISION checkpoint owner with the shared admission authority."""
+
+    return ProvisionerWorker(
+        repository,
+        driver,
+        worker_id=worker_id,
+        include_checkpoints=frozenset({"volume-registration-required"}),
+        capacity_admission=capacity_admission,
+    )
+
+
 async def _run_volume_worker() -> None:
     from hcloud import Client as HCloudClient
     from kubernetes import client, config
@@ -86,16 +105,23 @@ async def _run_volume_worker() -> None:
     repository = _repository(common, database)
     config.load_incluster_config()
     api_client = client.ApiClient()
+    core_v1 = client.CoreV1Api(api_client)
+    capacity = build_live_capacity_admission(
+        repository=repository,
+        settings=settings,
+        core_v1=core_v1,
+        storage_v1=client.StorageV1Api(api_client),
+    )
     components = build_volume_provider_components(
         settings=settings,
-        core_v1=client.CoreV1Api(api_client),
+        core_v1=core_v1,
         hcloud_client=HCloudClient(token=settings.hcloud_token.get_secret_value()),
     )
-    worker = ProvisionerWorker(
-        repository,
-        components.driver,
+    worker = build_volume_registration_worker(
+        repository=repository,
+        driver=components.driver,
         worker_id=settings.worker_id,
-        include_checkpoints=frozenset({"volume-registration-required"}),
+        capacity_admission=capacity,
     )
     try:
         while True:

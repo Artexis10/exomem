@@ -251,10 +251,11 @@ def test_platform_renders_real_provisioner_composition() -> None:
         "key": "public-key",
     }
     assert "EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY" not in environment
+    assert "EXOMEM_PROVISIONER_HCLOUD_SERVER_ID" in environment
     assert not any(
         privileged_fragment in name
         for name in environment
-        for privileged_fragment in ("HCLOUD", "B2_", "DELETE_CREDENTIAL")
+        for privileged_fragment in ("HCLOUD_TOKEN", "B2_", "DELETE_CREDENTIAL")
     )
     assert environment["EXOMEM_PROVISIONER_RELEASE_MANIFEST_PATH"]["value"] == (
         "/etc/exomem/release/exomem-hosted-release-v1.json"
@@ -285,8 +286,15 @@ def test_platform_renders_real_provisioner_composition() -> None:
         and rule.get("resources") == ["volumeattachments"]
     )
     assert volume_attachment_rule["verbs"] == ["get", "list", "watch"]
+    persistent_volume_rule = next(
+        rule
+        for rule in provisioner_role["rules"]
+        if rule.get("apiGroups") == [""]
+        and "persistentvolumes" in rule.get("resources", [])
+    )
+    assert persistent_volume_rule["verbs"] == ["get", "list", "watch"]
     assert not any(
-        resource in {"persistentvolumes", "pods", "pods/exec"}
+        resource in {"pods", "pods/exec"}
         for rule in provisioner_role["rules"]
         for resource in rule.get("resources", [])
     )
@@ -311,6 +319,7 @@ def test_platform_renders_real_provisioner_composition() -> None:
 def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -> None:
     documents = _render(PLATFORM, PLATFORM / "values.validation.yaml", namespace="exomem-platform")
     runtime = _find(documents, "ConfigMap", "exomem-operational-receipt-collector")
+    assert runtime["immutable"] is True
     assert runtime["data"]["private-alpha-capacity-v1.json"] == (
         ROOT / "infra/operations/private-alpha-capacity-v1.json"
     ).read_text(encoding="utf-8")
@@ -335,6 +344,18 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
         "python",
         "/opt/exomem-hosted/operational_receipt_collector.py",
         "capacity",
+    ]
+    assert container["args"] == [
+        "--contract",
+        "/opt/exomem-hosted/private-alpha-capacity-v1.json",
+        "--namespace",
+        "exomem-platform",
+        "--state-configmap",
+        "exomem-capacity-receipt",
+        "--hcloud-server-id",
+        "101",
+        "--hcloud-location",
+        "fsn1",
     ]
     environment = {item["name"]: item for item in container["env"]}
     assert environment["EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY"]["valueFrom"]["secretKeyRef"] == {
@@ -375,8 +396,55 @@ def test_platform_renders_live_capacity_receipt_collector_with_isolated_keys() -
     rendered = json.dumps(documents)
     api = _find(documents, "Deployment", "exomem-provisioner-api")
     worker = _find(documents, "Deployment", "exomem-provisioner-worker")
-    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps([api, worker])
+    volume_worker = _find(documents, "Deployment", "exomem-volume-worker")
+    assert "EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY" not in json.dumps(
+        [api, worker, volume_worker]
+    )
+    assert "EXOMEM_HCLOUD_CAPACITY_TOKEN" not in json.dumps([api, worker, volume_worker])
     assert rendered.count("exomem-capacity-receipt-signer") == 1
+
+    contract = _find(documents, "ConfigMap", "exomem-capacity-contract")
+    assert contract["immutable"] is True
+    assert contract["data"]["private-alpha-capacity-v1.json"] == (
+        ROOT / "infra/operations/private-alpha-capacity-v1.json"
+    ).read_text(encoding="utf-8")
+    for deployment in (worker, volume_worker):
+        container = deployment["spec"]["template"]["spec"]["containers"][0]
+        environment = {item["name"]: item for item in container["env"]}
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY"]["valueFrom"][
+            "secretKeyRef"
+        ] == {
+            "name": "exomem-capacity-receipt-verifier",
+            "key": "public-key",
+        }
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH"]["value"] == (
+            "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+        )
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE"]["value"] == (
+            "exomem-platform"
+        )
+        assert environment["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"]["value"] == (
+            "exomem-capacity-receipt"
+        )
+        assert environment["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"]["value"] == "101"
+        assert any(
+            mount["name"] == "capacity-contract"
+            and mount["mountPath"] == "/etc/exomem/capacity"
+            and mount["readOnly"] is True
+            for mount in container["volumeMounts"]
+        )
+    provisioner_role = _find(documents, "ClusterRole", "exomem-cell-provisioner")
+    for resource, api_group in (
+        ("nodes", ""),
+        ("persistentvolumes", ""),
+        ("volumeattachments", "storage.k8s.io"),
+    ):
+        rule = next(
+            item
+            for item in provisioner_role["rules"]
+            if resource in item.get("resources", []) and api_group in item.get("apiGroups", [])
+        )
+        assert rule["verbs"] == ["get", "list", "watch"]
 
 
 def test_platform_renders_disjoint_durability_workloads() -> None:
@@ -477,6 +545,7 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
             "exomem-provisioner-wrapping-key/key-material",
             "exomem-provider-recovery-signer/private-key",
             "exomem-provisioner-hcloud-token/token",
+            "exomem-capacity-receipt-verifier/public-key",
         },
     }
     for name, (kind, command, schedule, token) in expected.items():
@@ -521,6 +590,14 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     assert volume_env["EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE"] == (
         "exomem-platform"
     )
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH"] == (
+        "/etc/exomem/capacity/private-alpha-capacity-v1.json"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE"] == "exomem-platform"
+    assert volume_env["EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP"] == (
+        "exomem-capacity-receipt"
+    )
+    assert volume_env["EXOMEM_PROVISIONER_HCLOUD_SERVER_ID"] == "101"
 
     deletion_job = json.loads(
         _find(documents, "ConfigMap", "exomem-deletion-job-template")["data"][
@@ -615,6 +692,16 @@ def test_platform_renders_disjoint_durability_workloads() -> None:
     )
     assert namespace_rule["resources"] == ["namespaces"]
     assert namespace_rule["verbs"] == ["get", "list", "watch"]
+    for resource, api_group in (
+        ("nodes", ""),
+        ("volumeattachments", "storage.k8s.io"),
+    ):
+        rule = next(
+            item
+            for item in volume_role["rules"]
+            if resource in item.get("resources", []) and api_group in item.get("apiGroups", [])
+        )
+        assert rule["verbs"] == ["get", "list", "watch"]
 
     for policy_name, service_account in (
         ("exomem-provisioner-scope", "exomem-cell-provisioner"),

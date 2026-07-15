@@ -252,6 +252,13 @@ rules:
     resources: ["namespaces"]
     verbs: ["get", "list", "watch"]
   - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: [{{ .Values.capacityCollector.stateConfigMap | quote }}]
+    verbs: ["get"]
+  - apiGroups: [""]
     resources: ["persistentvolumeclaims"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]
   - apiGroups: [""]
@@ -261,7 +268,7 @@ rules:
     resources: ["leases"]
     verbs: ["create", "delete", "get", "patch", "update"]
   - apiGroups: ["storage.k8s.io"]
-    resources: ["storageclasses"]
+    resources: ["storageclasses", "volumeattachments"]
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -974,11 +981,24 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.provisioner.providerRecoverySigningKeySecret.name }}
                   key: {{ .Values.provisioner.providerRecoverySigningKeySecret.key }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.provisioner.capacityReceiptPublicKeySecret.name }}
+                  key: {{ .Values.provisioner.capacityReceiptPublicKeySecret.key }}
             - name: EXOMEM_PROVISIONER_HCLOUD_TOKEN
               valueFrom:
                 secretKeyRef: {name: exomem-provisioner-hcloud-token, key: token}
             - name: EXOMEM_PROVISIONER_LOCATION
               value: {{ .Values.provisioner.location | quote }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_CONTRACT_PATH
+              value: /etc/exomem/capacity/private-alpha-capacity-v1.json
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_NAMESPACE
+              value: {{ .Release.Namespace | quote }}
+            - name: EXOMEM_PROVISIONER_CAPACITY_RECEIPT_CONFIG_MAP
+              value: {{ .Values.capacityCollector.stateConfigMap | quote }}
+            - name: EXOMEM_PROVISIONER_HCLOUD_SERVER_ID
+              value: {{ .Values.capacityCollector.hcloudServerId | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAME
               value: {{ .Values.storage.encryptionSecretName | quote }}
             - name: EXOMEM_PROVISIONER_VOLUME_ENCRYPTION_SECRET_NAMESPACE
@@ -998,6 +1018,12 @@ spec:
             capabilities: {drop: [ALL]}
           volumeMounts:
             - {name: temporary, mountPath: /tmp}
+            - {name: capacity-contract, mountPath: /etc/exomem/capacity, readOnly: true}
       volumes:
         - name: temporary
           emptyDir: {sizeLimit: 64Mi}
+        - name: capacity-contract
+          configMap:
+            name: exomem-capacity-contract
+            items:
+              - {key: private-alpha-capacity-v1.json, path: private-alpha-capacity-v1.json}

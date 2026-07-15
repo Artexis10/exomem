@@ -101,6 +101,29 @@ database-backup delete output or K3s Secret. Never combine or substitute them.
 
 ## Generated shared credentials
 
+Create the capacity receipt keypair atomically; never copy its private seed into
+a worker Secret. The matrix sends the private half only to
+`exomem-capacity-receipt-signer/private-key`, sends the public half to
+`exomem-capacity-receipt-verifier/public-key` for the routine and
+volume-registration workers, and retains a separately encrypted public escrow
+copy for operator verification:
+
+```bash
+SOPS_AGE_RECIPIENTS=age1... \
+  infra/scripts/provider_recovery_keypair_handoff.py \
+  --matrix "$matrix" \
+  --repository-root "$repo_root" \
+  --version v1 \
+  --pair capacity-receipt
+```
+
+Include both K3s ciphertext destinations in the signed active-secret registry.
+The receipt public key is unpadded base64url Ed25519 material; it is not secret,
+but its exact destination and trust-root binding are governed. The collector's
+HCloud read token and signing seed must remain absent from both worker
+Deployments. The privileged volume worker's separate HCloud mutation token does
+not authorize receipt signing.
+
 Read once and deliver the initial hosted-scheduler bearer to both named peers:
 
 ```bash

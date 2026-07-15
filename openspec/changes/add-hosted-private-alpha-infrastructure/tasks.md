@@ -131,7 +131,7 @@
 - [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
 - [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
 - [x] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks. (Drafts are tracked; live owner-canary rehearsal remains.)
-- [ ] 15.5 Add the live monthly cost sheet, actual Paddle fee/tax record, six-user/two-reserved cap, and hard capacity gate.
+- [ ] 15.5 Add the live monthly cost sheet and actual Paddle fee/tax record, then retain them with invitation evidence. (The automated signed-live-receipt plus PostgreSQL six-USER/two-RECOVERY/eight-attachment capacity sub-gate is implemented and tested; live economics evidence remains open.)
 
 ## 16. Deploy and prove the private alpha
 

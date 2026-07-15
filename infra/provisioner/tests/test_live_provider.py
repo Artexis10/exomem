@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -7,16 +9,17 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
+from exomem_provisioner.capacity import CapacityConflict
 from exomem_provisioner.config import (
     ProviderWorkerSettings,
     load_hosted_release_manifest,
 )
 from exomem_provisioner.lifecycle import MetadataConflict, OpaqueProviderMetadata
 from exomem_provisioner.live import (
-    KubernetesCapacityGate,
     KubernetesProviderRegistry,
     LiveLifecyclePlane,
 )
+from exomem_provisioner.models import CapacityReservationClass
 from exomem_provisioner.production import build_live_provider_components
 from exomem_provisioner.provider_identity import (
     ProviderRecoveryIdentityCodec,
@@ -31,6 +34,29 @@ class _NotFound(Exception):
 
 RELEASE_FIXTURE = Path(__file__).parent / "fixtures/exomem-hosted-release-v1.json"
 IDENTITY_CODEC = ProviderRecoveryIdentityCodec.from_secret("provider-recovery-root")
+
+
+def _capacity_contract(path: Path) -> Path:
+    raw_key = base64.urlsafe_b64decode(IDENTITY_CODEC.public_key() + "=")
+    contract = {
+        "schema_version": 1,
+        "receipt_authentication": {
+            "algorithm": "ed25519",
+            "capacity_domain": "exomem.capacity-live-receipt.v1",
+            "capacity_ttl_seconds": 300,
+            "capacity_public_key_id": hashlib.sha256(raw_key).hexdigest(),
+        },
+        "limits": {
+            "active_user_cells": 6,
+            "active_recovery_cells": 2,
+            "maximum_potential_attachments": 8,
+            "provider_volume_attachment_limit": 16,
+            "minimum_unused_provider_headroom": 8,
+        },
+    }
+    target = path / "private-alpha-capacity-v1.json"
+    target.write_text(json.dumps(contract), encoding="utf-8")
+    return target
 
 
 def _metadata() -> OpaqueProviderMetadata:
@@ -51,6 +77,11 @@ def _settings(**overrides: object) -> ProviderWorkerSettings:
         "internal_origin": "http://{resource}.{namespace}.svc.cluster.local:8765",
         "worker_id": "worker-alpha",
         "provider_recovery_public_key": IDENTITY_CODEC.public_key(),
+        "capacity_receipt_public_key": IDENTITY_CODEC.public_key(),
+        "capacity_contract_path": "/etc/exomem/capacity/private-alpha-capacity-v1.json",
+        "capacity_receipt_namespace": "exomem-platform",
+        "capacity_receipt_config_map": "exomem-capacity-receipt",
+        "hcloud_server_id": 101,
     }
     values.update(overrides)
     return ProviderWorkerSettings(**values)  # type: ignore[arg-type]
@@ -68,6 +99,10 @@ def test_live_worker_settings_require_one_release_manifest_and_bound_internal_or
         _settings(release_manifest_path="/tmp/partial-release.json")
     with pytest.raises(ValidationError):
         _settings(internal_origin="http://arbitrary-upstream.invalid")
+    with pytest.raises(ValidationError):
+        _settings(hcloud_server_id=0)
+    with pytest.raises(ValidationError):
+        _settings(capacity_contract_path="relative-capacity.json")
     monkeypatch.setenv("EXOMEM_PROVISIONER_CELL_IMAGE", "ignored-is-still-forbidden")
     with pytest.raises(ValidationError):
         _settings()
@@ -167,7 +202,7 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
 
-    await registry.ensure_namespace(metadata, envelopes["namespace"])
+    await registry.ensure_namespace(metadata, envelopes["namespace"], "serve")
     await registry.record_operation(metadata, envelopes["providerOperationConfigMap"])
 
     assert core.namespace.metadata.labels["app.kubernetes.io/managed-by"] == "Helm"
@@ -182,7 +217,9 @@ async def test_registry_creates_exact_helm_adoptable_namespace_and_operation_fen
     assert core.namespace_selectors == ["exomem.io/tenant-cell=true"]
 
 
-def test_production_factory_wires_the_live_plane_without_a_fake_selection_path() -> None:
+def test_production_factory_wires_the_live_plane_without_a_fake_selection_path(
+    tmp_path: Path,
+) -> None:
     async def requester(*args, **kwargs):  # pragma: no cover - construction only
         raise AssertionError
 
@@ -190,8 +227,8 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path()
         raise AssertionError
 
     components = build_live_provider_components(
-        repository=SimpleNamespace(),  # type: ignore[arg-type]
-        settings=_settings(),
+        repository=SimpleNamespace(session_factory=SimpleNamespace()),  # type: ignore[arg-type]
+        settings=_settings(capacity_contract_path=str(_capacity_contract(tmp_path))),
         core_v1=SimpleNamespace(),
         apps_v1=SimpleNamespace(),
         batch_v1=SimpleNamespace(),
@@ -210,6 +247,7 @@ def test_production_factory_wires_the_live_plane_without_a_fake_selection_path()
     assert components.driver._config.operator_contract_digest == "c" * 64
     assert components.driver._plane is components.plane
     assert components.driver._volumes is None
+    assert components.capacity is components.plane._capacity
 
 
 @pytest.mark.asyncio
@@ -362,7 +400,7 @@ async def test_registry_rejects_unowned_existing_namespace() -> None:
         identity_verifier=IDENTITY_CODEC.verifier(),
     )
     with pytest.raises(MetadataConflict):
-        await registry.ensure_namespace(metadata, "forged")
+        await registry.ensure_namespace(metadata, "forged", "serve")
 
 
 @pytest.mark.asyncio
@@ -429,41 +467,74 @@ async def test_registry_requires_deployed_helm_record_in_addition_to_pvc() -> No
 
 
 @pytest.mark.asyncio
-async def test_live_capacity_gate_uses_kubernetes_attachment_observations_only() -> None:
+async def test_live_plane_requires_exact_reservation_before_namespace_or_release() -> None:
     metadata = _metadata()
+    calls: list[tuple[str, object]] = []
 
-    class Core:
-        names = [f"exo-existing-{index}" for index in range(5)]
+    class Capacity:
+        reject = False
 
-        def list_namespace(self, *, label_selector):
-            assert label_selector == "exomem.io/tenant-cell=true"
+        async def require_active(self, **identity):
+            if self.reject:
+                raise CapacityConflict("absent")
+            calls.append(("capacity", identity))
+
+    class Registry:
+        async def ensure_namespace(self, owner, envelope, mode):
+            calls.append(("namespace", (owner, envelope, mode)))
+
+        async def record_operation(self, owner, envelope):
+            calls.append(("operation", (owner, envelope)))
+
+        async def inspect(self, current, owner):
             return SimpleNamespace(
-                items=[SimpleNamespace(metadata=SimpleNamespace(name=name)) for name in self.names]
+                namespace=True,
+                release=False,
+                init_complete=False,
+                init_failed=False,
+                serving=False,
+                runtime_admitted=False,
+                routes=(False, False),
             )
 
-    class Storage:
-        attached = 5
+    capacity = Capacity()
+    plane = LiveLifecyclePlane(
+        repository=SimpleNamespace(),  # type: ignore[arg-type]
+        registry=Registry(),  # type: ignore[arg-type]
+        cell=SimpleNamespace(),  # type: ignore[arg-type]
+        helm=SimpleNamespace(),  # type: ignore[arg-type]
+        runtime=SimpleNamespace(),  # type: ignore[arg-type]
+        routes=SimpleNamespace(),  # type: ignore[arg-type]
+        maintenance=SimpleNamespace(),  # type: ignore[arg-type]
+        capacity=capacity,  # type: ignore[arg-type]
+        identity_verifier=IDENTITY_CODEC.verifier(),
+        config=SimpleNamespace(),  # type: ignore[arg-type]
+    )
+    key = plane._key(metadata)
+    plane._operation_ids[key] = "internal-operation-alpha"
+    plane._recovery_envelopes[key] = {
+        "namespace": "signed-namespace",
+        "providerOperationConfigMap": "signed-operation",
+    }
 
-        def list_volume_attachment(self):
-            return SimpleNamespace(
-                items=[
-                    SimpleNamespace(status=SimpleNamespace(attached=True))
-                    for _ in range(self.attached)
-                ]
-            )
+    await plane.ensure_namespace(metadata, {"provisionMode": "serve"})
 
-    core = Core()
-    storage = Storage()
-    gate = KubernetesCapacityGate(
-        core_v1=core,
-        storage_v1=storage,
+    assert calls[0] == (
+        "capacity",
+        {
+            "internal_operation_id": "internal-operation-alpha",
+            "tenant_id": "tenant-alpha",
+            "cell_id": "cell-alpha",
+            "provider_operation_id": "operation-alpha",
+            "fence_generation": 7,
+            "reservation_class": CapacityReservationClass.USER,
+        },
+    )
+    assert calls[1] == (
+        "namespace",
+        (metadata, "signed-namespace", "serve"),
     )
 
-    assert await gate.block_reason(metadata) is None
-    core.names.append("exo-existing-six")
-    assert await gate.block_reason(metadata) == "active-user-cell-capacity-exhausted"
-    core.names = ["exo-existing-one"]
-    storage.attached = 6
-    assert await gate.block_reason(metadata) == ("safe-volume-attachment-headroom-exhausted")
-    core.names = [metadata.resource_name]
-    assert await gate.block_reason(metadata) is None
+    capacity.reject = True
+    with pytest.raises(MetadataConflict, match="exact active capacity reservation"):
+        await plane.install_release(metadata, {"provisionMode": "serve"}, {})

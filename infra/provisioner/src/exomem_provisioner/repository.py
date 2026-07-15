@@ -16,6 +16,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .crypto import EnvelopeCodec
 from .models import (
     BackupRecord,
+    CapacityLedger,
+    CapacityReleaseReason,
+    CapacityReservation,
     CellOperationLock,
     CredentialMetadata,
     ExportRecord,
@@ -360,6 +363,65 @@ async def _lock_active_claim(
     return active, checked_at
 
 
+async def _release_completed_capacity(
+    session: AsyncSession,
+    operation: Operation,
+    result: dict[str, Any],
+    *,
+    completed_at: datetime,
+) -> None:
+    proof_fields = {
+        OperationAction.DISCARD: {
+            "computeDestroyed",
+            "storageDestroyed",
+            "keysDestroyed",
+        },
+        OperationAction.DESTROY: {
+            "computeDestroyed",
+            "storageDestroyed",
+            "keysDestroyed",
+            "tenantResourcesDestroyed",
+        },
+    }
+    required = proof_fields.get(operation.action)
+    if required is None or set(result) != required or any(result[key] is not True for key in required):
+        return
+    if operation.action is OperationAction.DISCARD and operation.cell_id is None:
+        raise ImmutableMetadataConflict("discard capacity release has no authenticated cell")
+    ledger = await session.get(CapacityLedger, 1, with_for_update=True)
+    if ledger is None:
+        raise ImmutableMetadataConflict("capacity ledger singleton is missing")
+    statement = select(CapacityReservation).where(
+        CapacityReservation.tenant_id == operation.tenant_id,
+        CapacityReservation.released_at.is_(None),
+    )
+    if operation.action is OperationAction.DISCARD:
+        statement = statement.where(CapacityReservation.cell_id == operation.cell_id)
+    reservations = list(
+        await session.scalars(statement.order_by(CapacityReservation.id).with_for_update())
+    )
+    if any(
+        reservation.reserving_fence_generation >= operation.fence_generation
+        for reservation in reservations
+    ):
+        raise StaleFence("destructive operation cannot release an equal-or-newer reservation")
+    if not reservations:
+        return
+    reason = (
+        CapacityReleaseReason.DISCARD
+        if operation.action is OperationAction.DISCARD
+        else CapacityReleaseReason.DESTROY
+    )
+    for reservation in reservations:
+        reservation.released_at = completed_at
+        reservation.releasing_operation_id = operation.id
+        reservation.releasing_provider_operation_id = operation.external_operation_id
+        reservation.releasing_fence_generation = operation.fence_generation
+        reservation.release_reason = reason
+    ledger.revision += 1
+    ledger.updated_at = completed_at
+
+
 def _require_operation_identity(
     operation: Operation,
     *,
@@ -390,6 +452,10 @@ class OperationRepository:
         self._codec = codec
         self.claim_seconds = claim_seconds
         self.max_failure_attempts = max_failure_attempts
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._sessions
 
     async def get(self, action: str, idempotency_key: str) -> OperationSnapshot | None:
         action_value = OperationAction(action)
@@ -895,6 +961,12 @@ class OperationRepository:
                 claim_token=claim_token,
                 claim_generation=claim_generation,
                 now=now,
+            )
+            await _release_completed_capacity(
+                session,
+                operation,
+                result,
+                completed_at=completed_at,
             )
             operation.result_ciphertext = self._codec.encrypt_json(
                 result,

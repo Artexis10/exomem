@@ -96,9 +96,20 @@ jq -n \
       proofTenantId: $proof_tenant, proofCellId: $proof_cell}}}' \
   > "$durability_values"
 chmod 0600 "$durability_values"
+
+# Bind every capacity receipt and worker observation to the exact foundation server.
+hcloud_server_id="$(terraform -chdir=infra/terraform/foundation output -raw server_id)"
+case "$hcloud_server_id" in
+  ''|*[!0-9]*|0) echo "foundation server_id is invalid" >&2; exit 1 ;;
+esac
+capacity_values="${deploy_work_dir}/capacity-values.json"
+jq -n --argjson server_id "$hcloud_server_id" \
+  '{capacityCollector: {hcloudServerId: $server_id}}' > "$capacity_values"
+chmod 0600 "$capacity_values"
 helm template exomem-platform infra/helm/platform --namespace exomem-platform \
   --values infra/helm/platform/values.yaml \
   --values "${deploy_work_dir}/release-values.json" \
+  --values "$capacity_values" \
   --values "$durability_values" \
   --show-only templates/namespaces.yaml | kubectl apply -f -
 ```
@@ -134,8 +145,11 @@ SOPS_AGE_RECIPIENTS=age1... \
 ```
 
 Generate the independent capacity, economics, and rotation receipt pairs through
-the same atomic boundary. Their private seeds route only to the named collector;
-their public verifiers route to operator escrow:
+the same atomic boundary. Private seeds route only to the named collector. The
+capacity public verifier routes both to operator escrow and to
+`exomem-capacity-receipt-verifier/public-key`, which is consumed only by the
+routine and volume-registration workers; the other public verifiers remain in
+operator escrow:
 
 ```bash
 for pair in capacity-receipt economics-receipt rotation-receipt; do
@@ -344,6 +358,7 @@ test -z "$(kubectl -n exomem-platform get "job/${bootstrap_job}" \
 helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-platform \
   --values infra/helm/platform/values.yaml \
   --values "${deploy_work_dir}/release-values.json" \
+  --values "$capacity_values" \
   --values "$durability_values" --atomic --wait --timeout 10m
 ```
 
@@ -353,11 +368,14 @@ helm upgrade --install exomem-platform infra/helm/platform --namespace exomem-pl
 kubectl wait --for=condition=Available deployment/exomem-cloudflared -n exomem-platform --timeout=180s
 kubectl wait --for=condition=Available deployment/exomem-provisioner-api -n exomem-platform --timeout=180s
 kubectl wait --for=condition=Available deployment/exomem-provisioner-worker -n exomem-platform --timeout=180s
+kubectl wait --for=condition=Available deployment/exomem-volume-worker -n exomem-platform --timeout=180s
 kubectl -n exomem-platform get service/exomem-provisioner -o jsonpath='{.spec.ports[0].port}{"\n"}'
 kubectl -n exomem-platform get configmap/exomem-hosted-release-v1 \
   -o jsonpath='{.data.exomem-hosted-release-v1\.json}' | jq -e \
   '.artifact == "exomem-hosted-release" and .schemaVersion == 1 and (.commandRegistry | length) == 21'
 kubectl get storageclass exomem-hcloud-encrypted-retain
+kubectl -n exomem-platform get configmap/exomem-capacity-contract \
+  -o jsonpath='{.immutable}{"\n"}'
 kubectl auth can-i create pods \
   --as=system:serviceaccount:exomem-platform:exomem-provisioner-api -n exomem-platform
 ```

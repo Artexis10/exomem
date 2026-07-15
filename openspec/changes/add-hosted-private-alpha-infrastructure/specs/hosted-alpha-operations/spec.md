@@ -1,11 +1,23 @@
 ## ADDED Requirements
 
 ### Requirement: Private-alpha capacity is hard-capped until measured
-The first deployment SHALL use one x86 Hetzner CX33 and SHALL stop automatic provisioning at six active user cells: the owner plus at most five paid accounts. It SHALL reserve two additional volume attachments for canary/restore drills and MUST reserve further attachment headroom below Hetzner's 16-volume server limit. Increasing the cap SHALL require a fresh resource/latency soak and reviewed cost sheet.
+The first deployment SHALL use one x86 Hetzner CX33 and SHALL stop automatic provisioning at six active USER cells, two RECOVERY/restore-candidate cells, and eight potential/attached cell volumes. It MUST preserve at least eight unused attachments beneath Hetzner's 16-volume server limit. Admission SHALL reconcile a fresh signed cluster/server/location-bound live receipt with a strict local Kubernetes observation and SHALL serialize durable PostgreSQL reservations. Increasing the cap SHALL require a fresh resource/latency soak and reviewed cost sheet.
 
 #### Scenario: Seventh user cell is requested
 - **WHEN** six user cells are already active and no reviewed cap increase exists
 - **THEN** provisioning remains queued/blocked with a capacity reason and does not allocate another user volume
+
+#### Scenario: Concurrent sixth-slot requests race
+- **WHEN** five USER reservations exist and two workers concurrently request distinct sixth slots
+- **THEN** the PostgreSQL ledger admits exactly one, leaves the other pending with a content-free capacity reason, and retains no unreserved provider effect
+
+#### Scenario: Recovery or attachment headroom is exhausted
+- **WHEN** a request would create a third RECOVERY cell or a ninth potential/orphan attachment
+- **THEN** provisioning remains pending before namespace, PVC, Helm, or HCloud mutation
+
+#### Scenario: Collector sequence restarts after reconstruction
+- **WHEN** a newly signed, fresh, cluster/server-bound receipt has a lower sequence after clean-cluster reconstruction and matches the fresh local observation
+- **THEN** it remains admissible because no worker-local or PostgreSQL monotonic-sequence state is required
 
 ### Requirement: EUR 5 pricing is treated as measured subsidy
 Before activating the friend Paddle catalog or inviting a paid account, the operator SHALL record actual server, IPv4, per-cell volume, B2 retained storage/operations, Neon/Vercel marginal cost, alerting, actual Paddle account fee, and VAT-inclusive/exclusive treatment. The sheet SHALL show expected net receipt for EUR 5 and SHALL distinguish this private-alpha subsidy from a later EUR 10-15 public tier.

@@ -44,6 +44,8 @@ The cell SHALL use invariant absolute vault/state/log paths, no symlink componen
 
 Provision SHALL NOT create a route or return final success until the bound PV `volumeHandle` and location are durably recorded and the HCloud tenant/cell/operation/fence labels are independently verified. Replay after a crash in that interval SHALL adopt the original volume.
 
+Before either the routine lifecycle driver or the dedicated volume-registration driver performs a PROVISION effect, the worker SHALL revalidate the signed live receipt and fresh local observation and SHALL create or find the exact active reservation for the claimed internal operation, immutable tenant/cell/resource/class/provider-operation/fence identity, and current claim. Namespace creation and initial Helm installation SHALL independently require that exact active reservation. Reservation release SHALL occur only in the same fenced transaction as final provider-proved DISCARD or DESTROY completion; pending, failure, retry exhaustion, claim expiry, and provision completion SHALL retain it.
+
 #### Scenario: Fresh cell initializes once
 - **WHEN** a new provision action binds an empty PVC
 - **THEN** the supported runtime initializer creates matching binding markers and repeated initialization is a no-op
@@ -55,6 +57,14 @@ Provision SHALL NOT create a route or return final success until the bound PV `v
 #### Scenario: Second PVC is denied without blocking the cell PVC
 - **WHEN** the chart requests its declared 10 GiB PVC and a later workload requests another claim
 - **THEN** the declared cell PVC is admitted, the second claim is denied by quota, and the 5 GiB application entitlement remains enforced inside Exomem
+
+#### Scenario: Volume registration resumes after a worker crash
+- **WHEN** routine provisioning has committed a reservation and reached `volume-registration-required` before the privileged worker restarts
+- **THEN** the volume worker revalidates live evidence, finds the same exact active reservation idempotently, and only then resumes its driver effect
+
+#### Scenario: Final destruction releases reserved capacity
+- **WHEN** DISCARD proves exactly compute/storage/key destruction or DESTROY additionally proves all tenant resources destroyed at a strictly newer fence
+- **THEN** operation completion and the targeted reservation release commit atomically while the historical reservation row remains
 
 ### Requirement: Provisioner health proves the exact runtime admission contract
 Health SHALL call the authenticated private cell live, ready, and contract routes and SHALL return the exact flattened identity, protocol, release, service-authentication, mutation-authority, read/write admission, worker-policy, and reason fields parsed by Substrate. It MUST NOT substitute TCP success, OAuth metadata, or Helm status for runtime readiness.

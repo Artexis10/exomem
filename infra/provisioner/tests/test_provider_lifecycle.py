@@ -45,6 +45,12 @@ from exomem_provisioner.repository import OperationRepository
 from exomem_provisioner.worker import ProvisionerWorker
 
 
+class _AllowingAdmission:
+    async def admit(self, operation, request, **claim):
+        del operation, request, claim
+        return None
+
+
 def _request(**overrides: object) -> dict[str, object]:
     value: dict[str, object] = {
         "operationId": "operation-alpha",
@@ -211,6 +217,7 @@ async def test_provision_worker_restarts_across_checkpoints_and_encrypts_provide
             exclude_checkpoints=(
                 frozenset() if is_volume_checkpoint else frozenset({"volume-registration-required"})
             ),
+            capacity_admission=_AllowingAdmission(),
         )
         await worker.run_once(now=now + timedelta(seconds=attempt * 3))
         current = await repository.get_by_id(operation.id)
@@ -744,40 +751,6 @@ def test_provider_metadata_maximum_opaque_ids_round_trip_without_recovery_regist
     mismatched["exomem_tenant"] = "0" * 24
     with pytest.raises(MetadataConflict):
         OpaqueProviderMetadata.from_hcloud_labels(mismatched)
-
-
-@pytest.mark.asyncio
-async def test_provision_capacity_block_stays_pending_without_allocating_namespace() -> None:
-    plane = HighFidelityProviderPlane(location="fsn1")
-    plane.block_capacity("active-user-cell-capacity-exhausted")
-    driver = CellLifecycleDriver(
-        plane=plane, volume_worker=VolumeLifecycleWorker(plane, plane), config=_config()
-    )
-
-    blocked = await driver.execute("provision", _request(), _context())
-
-    assert blocked == DriverPending("capacity-active-user-cell-capacity-exhausted", 300)
-    assert plane.has_namespace(_metadata()) is False
-
-
-@pytest.mark.asyncio
-async def test_provision_rechecks_live_capacity_immediately_before_release_allocation() -> None:
-    plane = HighFidelityProviderPlane(location="fsn1")
-    metadata = _metadata()
-    await plane.ensure_namespace(metadata)
-    plane.block_capacity("safe-volume-attachment-headroom-exhausted")
-    driver = CellLifecycleDriver(
-        plane=plane, volume_worker=VolumeLifecycleWorker(plane, plane), config=_config()
-    )
-
-    blocked = await driver.execute(
-        "provision",
-        _request(),
-        _context(checkpoint="namespace-ready"),
-    )
-
-    assert blocked == DriverPending("capacity-safe-volume-attachment-headroom-exhausted", 300)
-    assert plane.has_release(metadata) is False
 
 
 @pytest.mark.asyncio
