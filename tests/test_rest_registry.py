@@ -47,6 +47,7 @@ def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
     ):
         monkeypatch.delenv(leaky, raising=False)
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
+    env.setdefault("EXOMEM_WRITER_LEASE_STATE_DIR", str(vault.parent / "writer-lease-state"))
     for key, value in env.items():
         monkeypatch.setenv(key, value)
     mcp = server.build_server(require_auth=False)
