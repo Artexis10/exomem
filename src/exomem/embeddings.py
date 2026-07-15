@@ -24,6 +24,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -1095,7 +1096,7 @@ def upsert_after_write_status(
         return EmbeddingSyncStatus(
             "degraded", "embedding_index_open_failed", eligible_count
         )
-    per_file: list[tuple[str, list[str], float]] = []
+    per_file: list[tuple[Path, Any, list[str], float]] = []
     failure_code: str | None = None
     for md in md_paths:
         try:
@@ -1130,15 +1131,7 @@ def upsert_after_write_status(
             log.warning("embedding chunks could not be prepared: %s", e)
             failure_code = "embedding_chunking_failed"
             continue
-        if not chunks:
-            # Page has no embeddable content — drop any stale rows for it.
-            try:
-                index.delete_file(page.rel_path)
-            except Exception as e:  # noqa: BLE001 - stale-row cleanup is observable
-                log.warning("embedding stale-row cleanup failed: %s", e)
-                failure_code = "embedding_delete_failed"
-            continue
-        per_file.append((page.rel_path, chunks, mtime))
+        per_file.append((md, page, chunks, mtime))
 
     if not per_file:
         return EmbeddingSyncStatus(
@@ -1147,14 +1140,45 @@ def upsert_after_write_status(
             eligible_count,
         )
 
-    for rel_path, chunks, mtime in per_file:
+    from . import semantic_index
+
+    for md, page, chunks, mtime in per_file:
+        rel_path = page.rel_path
+        if chunks:
+            try:
+                vectors = _embed_live_chunks(chunks)
+                index.upsert_file(rel_path, chunks, vectors, mtime)
+            except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
+                log.warning(
+                    "embedding encode failed for %s: %s; sidecar left stale",
+                    rel_path,
+                    e,
+                )
+                failure_code = failure_code or "embedding_encode_failed"
+        else:
+            # Page has no embeddable chunks — drop stale page rows. Unit rows
+            # are rebuilt independently below from the normalized unit parse.
+            try:
+                index.delete_file(rel_path)
+            except Exception as e:  # noqa: BLE001 - stale-row cleanup is observable
+                log.warning("embedding stale-row cleanup failed: %s", e)
+                failure_code = failure_code or "embedding_delete_failed"
+
         try:
-            vectors = _embed_live_chunks(chunks)
-            index.upsert_file(rel_path, chunks, vectors, mtime)
-        except Exception as e:  # noqa: BLE001 - one bad encode must not fail the writer
-            log.warning("embedding encode failed for %s: %s; sidecar left stale", rel_path, e)
-            failure_code = "embedding_encode_failed"
-            continue
+            state = semantic_index.current_parent_index_state(vault_root, md)
+            units = [unit for unit in state.document.units if unit.unit_ref is not None]
+            if units:
+                unit_vectors = _embed_live_chunks([unit.content for unit in units])
+                index.upsert_semantic_units(state, unit_vectors, mtime)
+            else:
+                index.delete_semantic_units(rel_path)
+        except Exception as e:  # noqa: BLE001 - optional unit vectors soft-fail
+            log.warning(
+                "semantic-unit embedding update failed for %s: %s; sidecar left stale",
+                rel_path,
+                e,
+            )
+            failure_code = failure_code or "semantic_unit_embedding_encode_failed"
 
     # Claim-level sidecar (.claims.sqlite) rides the same write seam — opt-in via
     # EXOMEM_CLAIM_LEVEL, no-op otherwise. Local import avoids a module cycle
@@ -1269,15 +1293,18 @@ def index_incremental(
     selection `rebuild_all` uses — so the two agree on WHICH files belong in the index.
     Returns a small stats dict (also the CLI's machine-readable output).
     """
-    from . import access
+    from . import access, semantic_index
     from . import find as find_module
 
     scope = index_paths.index_scope()
     index = get_embedding_index(vault_root)
     row_mtimes = index.file_mtimes()
+    unit_parent_states = index.semantic_unit_parent_states()
 
     pending: list[tuple[str, list[str], float]] = []
+    pending_units: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
     seen_on_disk: set[str] = set()
+    unit_seen_on_disk: set[str] = set()
     scanned = 0
     for md in index_paths.iter_index_markdown(vault_root):
         if not index_paths.is_embeddable_path(md):
@@ -1287,6 +1314,24 @@ def index_incremental(
             continue
         if not access.is_indexable(vault_root, page.rel_path):
             continue  # excluded tree (_access.yaml) — keep it out of the index
+        try:
+            unit_state = semantic_index.build_parent_index_state(vault_root, md)
+        except (OSError, UnicodeError, ValueError):
+            unit_state = None
+        if unit_state is not None:
+            unit_seen_on_disk.add(page.rel_path)
+            expected_refs = frozenset(
+                unit.unit_ref
+                for unit in unit_state.document.units
+                if unit.unit_ref is not None
+            )
+            stored = unit_parent_states.get(page.rel_path)
+            expected_stored = (
+                frozenset({unit_state.parent_generation}),
+                expected_refs,
+            )
+            if stored != expected_stored and (stored is not None or expected_refs):
+                pending_units.append((unit_state, page.mtime))
         chunks = _chunks_for_page(vault_root, page)
         if not chunks:
             continue
@@ -1299,18 +1344,24 @@ def index_incremental(
 
     # Rows for files no longer walked (deleted or newly excluded) → prune, so the
     # incremental index stays a faithful reflection of the scope without a full wipe.
-    stale = [rp for rp in row_mtimes if rp not in seen_on_disk]
+    stale = sorted(
+        {rp for rp in row_mtimes if rp not in seen_on_disk}
+        | {rp for rp in unit_parent_states if rp not in unit_seen_on_disk}
+    )
 
     stats = {
         "scope": scope,
         "scanned": scanned,
         "files_to_embed": len(pending),
         "chunks_embedded": 0,
+        "unit_parents_to_embed": len(pending_units),
+        "unit_vectors_embedded": 0,
         "files_pruned": len(stale),
         "dry_run": dry_run,
     }
     log_fn(
         f"index({scope}): {scanned} indexable file(s); {len(pending)} to (re)embed, "
+        f"{len(pending_units)} semantic-unit parent(s) to (re)embed, "
         f"{len(stale)} stale row-set(s) to prune (dry_run={dry_run})"
     )
     if dry_run:
@@ -1352,6 +1403,49 @@ def index_incremental(
             batch = []
             batch_chunks = 0
     _flush(batch)
+
+    unit_batch: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
+    unit_batch_size = 0
+
+    def _flush_units(
+        group: list[tuple[semantic_index.SemanticParentIndexState, float]],
+    ) -> None:
+        if not group:
+            return
+        texts = [
+            unit.content
+            for state, _mtime in group
+            for unit in state.document.units
+            if unit.unit_ref is not None
+        ]
+        vectors = (
+            embed_texts(texts, is_query=False)
+            if texts
+            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        )
+        offset = 0
+        for state, mtime in group:
+            count = sum(
+                unit.unit_ref is not None for unit in state.document.units
+            )
+            index.upsert_semantic_units(
+                state,
+                vectors[offset : offset + count],
+                mtime,
+            )
+            offset += count
+        stats["unit_vectors_embedded"] += len(texts)
+
+    for item in pending_units:
+        unit_batch.append(item)
+        unit_batch_size += sum(
+            unit.unit_ref is not None for unit in item[0].document.units
+        )
+        if unit_batch_size >= batch_size:
+            _flush_units(unit_batch)
+            unit_batch = []
+            unit_batch_size = 0
+    _flush_units(unit_batch)
 
     log_fn(f"index done: {stats}")
     return stats

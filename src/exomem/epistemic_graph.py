@@ -20,6 +20,7 @@ from . import find as find_module
 from . import (
     relation_registry,
     semantic_blocks,
+    semantic_index,
     semantic_language_registry,
     semantic_units,
     traversal_profiles,
@@ -28,7 +29,7 @@ from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -317,8 +318,8 @@ class EpistemicGraphIndex:
             return False
         if not rel.lower().endswith(".md") or vault_module.in_excluded_scan_dir(rel):
             return False
-        self._delete_path(conn, rel)
         if not path.exists():
+            self._delete_path(conn, rel)
             return False
         try:
             raw = path.read_text(encoding="utf-8")
@@ -327,28 +328,29 @@ class EpistemicGraphIndex:
         page = find_module._parse_page(path, path.stat().st_mtime, self.vault_root)
         if page is None:
             return False
-        document = semantic_units.parse_semantic_units(
-            page.body,
-            path=page.rel_path,
-            validate=False,
-            language_registry=self.language_registry,
-            relation_registry=self.registry,
-            include_legacy_relations=True,
-            retain_unknown_relations=True,
-            project=_page_project(page.frontmatter),
-            page_type=page.page_type,
+        state = semantic_index.current_parent_index_state(
+            self.vault_root,
+            path,
+            source=raw,
         )
-        blocks = document.rich_units
+        document = state.document
         file_node = _file_node(page, raw)
-        block_nodes = [_block_node(page, block, raw) for block in blocks]
+        unit_nodes = [
+            _unit_node(page, unit, state)
+            for unit in document.units
+            if unit.unit_ref is not None
+        ]
         edges = _edges_for_page(
             self.vault_root,
             page,
             document,
             registry=self.registry,
             source_hash=file_node.source_hash,
+            parent_state=state,
         )
         with conn:
+            conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
+            conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
@@ -370,7 +372,7 @@ class EpistemicGraphIndex:
                     ).content_hash,
                 ),
             )
-            for node in [file_node, *block_nodes]:
+            for node in [file_node, *unit_nodes]:
                 _insert_node(conn, node)
             for edge in edges:
                 _insert_edge(conn, edge)
@@ -523,7 +525,45 @@ def graph_context(
         allowed &= set(narrowed)
     conn = idx._connect()
     try:
-        seeds = _seed_nodes(conn, path=path, query=query)
+        drift_counts: dict[str, int] = {}
+        freshness_cache: dict[tuple[str, str, str, int], bool] = {}
+
+        def _current_record(record: dict[str, Any], *, parent_path: str) -> bool:
+            metadata = record.get("metadata") or {}
+            if metadata.get("record_type") != "semantic_unit":
+                return True
+            try:
+                stamp = (
+                    parent_path,
+                    str(metadata["parent_generation"]),
+                    str(metadata["parent_source_hash"]),
+                    int(metadata["parser_version"]),
+                )
+            except (KeyError, TypeError, ValueError):
+                drift_counts["invalid_generation_stamp"] = (
+                    drift_counts.get("invalid_generation_stamp", 0) + 1
+                )
+                return False
+            accepted = freshness_cache.get(stamp)
+            if accepted is None:
+                freshness = semantic_index.validate_parent_record(
+                    vault_root,
+                    parent_path=stamp[0],
+                    parent_generation_value=stamp[1],
+                    parent_source_hash=stamp[2],
+                    parser_version=stamp[3],
+                )
+                accepted = freshness.current
+                freshness_cache[stamp] = accepted
+                if not accepted:
+                    drift_counts[freshness.code] = drift_counts.get(freshness.code, 0) + 1
+            return accepted
+
+        seeds = [
+            seed
+            for seed in _seed_nodes(conn, path=path, query=query)
+            if _current_record(seed, parent_path=str(seed.get("path") or ""))
+        ]
         if not seeds:
             return {
                 "available": True,
@@ -549,6 +589,10 @@ def graph_context(
             rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
             next_frontier: set[str] = set()
             for edge in rows:
+                if not _current_record(
+                    edge, parent_path=str(edge.get("source_path") or "")
+                ):
+                    continue
                 status = edge.get("registry_status")
                 if status == "unregistered":
                     key = (
@@ -582,6 +626,10 @@ def graph_context(
                         node = _node_by_key(conn, key)
                         if node is None:
                             node = _placeholder_node(key)
+                        elif not _current_record(
+                            node, parent_path=str(node.get("path") or "")
+                        ):
+                            continue
                         if type_filter and node["kind"] not in type_filter:
                             continue
                         if len(seen_nodes) >= max_nodes:
@@ -593,7 +641,11 @@ def graph_context(
                         else:
                             next_frontier.add(key)
             frontier = next_frontier
-        nodes = _nodes_by_keys(conn, seen_nodes) + [
+        nodes = [
+            node
+            for node in _nodes_by_keys(conn, seen_nodes)
+            if _current_record(node, parent_path=str(node.get("path") or ""))
+        ] + [
             placeholder_nodes[key] for key in sorted(placeholder_nodes)
         ]
         edges = list(seen_edges.values())
@@ -618,6 +670,14 @@ def graph_context(
             )
         if excluded_scope:
             warnings.append({"code": "scope_violations", "count": excluded_scope})
+        if drift_counts:
+            warnings.append(
+                {
+                    "code": "semantic_unit_index_drift",
+                    "count": sum(drift_counts.values()),
+                    "reasons": dict(sorted(drift_counts.items())),
+                }
+            )
         return {
             "available": True,
             "reason": None,
@@ -833,6 +893,73 @@ def _block_node(page, unit: semantic_units.SemanticUnit, raw_text: str) -> Graph
     )
 
 
+def _compact_unit_key(unit: semantic_units.SemanticUnit) -> str:
+    if unit.unit_ref is None:
+        raise ValueError("compact semantic-unit graph nodes require an addressable unit_ref")
+    return "unit:" + hashlib.sha256(unit.unit_ref.encode("utf-8")).hexdigest()
+
+
+def _unit_key(page, unit: semantic_units.SemanticUnit) -> str:
+    return _block_key(page, unit) if unit.form == "rich" else _compact_unit_key(unit)
+
+
+def _unit_generation_metadata(
+    unit: semantic_units.SemanticUnit,
+    state: semantic_index.SemanticParentIndexState,
+) -> dict[str, Any]:
+    return {
+        "record_type": "semantic_unit",
+        "unit_ref": unit.unit_ref,
+        "form": unit.form,
+        "category_raw": unit.category_raw,
+        "category_key": unit.category_key,
+        "category": unit.category,
+        "kind": unit.kind,
+        "parent_generation": state.parent_generation,
+        "parent_source_hash": state.parent_source_hash,
+        "parser_version": state.parser_version,
+    }
+
+
+def _unit_node(
+    page,
+    unit: semantic_units.SemanticUnit,
+    state: semantic_index.SemanticParentIndexState,
+) -> GraphNode:
+    generation = _unit_generation_metadata(unit, state)
+    if unit.form == "rich":
+        legacy = _block_node(page, unit, "")
+        return GraphNode(
+            node_key=legacy.node_key,
+            kind=legacy.kind,
+            path=legacy.path,
+            anchor=legacy.anchor,
+            title=legacy.title,
+            text=legacy.text,
+            source_hash=state.parent_source_hash,
+            line_start=legacy.line_start,
+            line_end=legacy.line_end,
+            metadata={**(legacy.metadata or {}), **generation},
+        )
+    return GraphNode(
+        node_key=_compact_unit_key(unit),
+        kind=unit.kind,
+        path=page.rel_path,
+        anchor=unit.anchor,
+        title=None,
+        text=unit.content,
+        source_hash=state.parent_source_hash,
+        line_start=unit.line,
+        line_end=unit.end_line,
+        metadata={
+            "origin": "compact_observation",
+            "tags": list(unit.tags),
+            "context": unit.context,
+            **generation,
+        },
+    )
+
+
 def _edges_for_page(
     vault_root: Path,
     page,
@@ -840,6 +967,7 @@ def _edges_for_page(
     *,
     registry: relation_registry.RelationRegistry | None = None,
     source_hash: str | None = None,
+    parent_state: semantic_index.SemanticParentIndexState | None = None,
 ) -> list[GraphEdge]:
     registry = registry or relation_registry.load_registry(vault_root)
     source_hash = source_hash or vault_module.content_hash(page.body)
@@ -859,9 +987,33 @@ def _edges_for_page(
     file_key = _file_key(rel)
     resolver = find_module.shared_resolver(vault_root)
     edges: list[GraphEdge] = []
+    for unit in document.units:
+        if unit.unit_ref is None or unit.form == "rich":
+            continue
+        generation = (
+            _unit_generation_metadata(unit, parent_state)
+            if parent_state is not None
+            else {}
+        )
+        edges.append(
+            page_edge(
+                _compact_unit_key(unit),
+                file_key,
+                "derived_from",
+                "semantic_unit",
+                source_path=rel,
+                source_anchor=unit.anchor or f"line-{unit.line}",
+                metadata=generation,
+            )
+        )
     for unit in document.rich_units:
         block_key = _block_key(page, unit)
         block_anchor = _block_anchor(unit)
+        generation = (
+            _unit_generation_metadata(unit, parent_state)
+            if parent_state is not None
+            else {}
+        )
         edges.append(
             page_edge(
                 block_key,
@@ -870,7 +1022,7 @@ def _edges_for_page(
                 "semantic_block",
                 source_path=rel,
                 source_anchor=block_anchor,
-                metadata={"block_kind": unit.kind},
+                metadata={"block_kind": unit.kind, **generation},
             )
         )
         for relation in unit.relations:
@@ -902,6 +1054,7 @@ def _edges_for_page(
                         "line": relation.line,
                         "raw": relation.raw,
                         "target_resolution": "unresolved" if warning else "resolved",
+                        **generation,
                     },
                 )
             )

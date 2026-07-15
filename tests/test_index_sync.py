@@ -65,6 +65,9 @@ def test_embedding_upsert_status_distinguishes_completed_and_degraded(
         def delete_file(self, *_args) -> None:
             return None
 
+        def delete_semantic_units(self, *_args) -> None:
+            return None
+
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: _Index())
 
     completed = embeddings.upsert_after_write_status(tmp_path, [target])
@@ -112,6 +115,9 @@ def test_embedding_legacy_bool_ignores_claim_auxiliary_only_failure(
             return None
 
         def delete_file(self, *_args) -> None:
+            return None
+
+        def delete_semantic_units(self, *_args) -> None:
             return None
 
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: _Index())

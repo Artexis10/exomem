@@ -409,7 +409,7 @@ def parse_semantic_units(
     path: str = "",
     parent_ref: str | None = None,
     validate: bool = True,
-    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    language_registry: semantic_language_registry.LanguageRegistryView | None = None,
     relation_registry: RelationRegistry | None = None,
     include_legacy_relations: bool = False,
     retain_unknown_relations: bool = False,

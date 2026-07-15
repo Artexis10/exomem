@@ -18,7 +18,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import relation_review, semantic_writes
+from . import relation_review, semantic_index, semantic_writes
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
     DirectoryCensusGuard,
@@ -184,6 +184,7 @@ def recover_from_trash(
         )
 
     semantic: dict | None = None
+    semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     recovery_entries: list[semantic_writes.RecoveryEntry] = []
     destination_root_guard: PathGuard | None = None
     trash_census_guards: tuple[DirectoryCensusGuard, ...] = ()
@@ -274,6 +275,10 @@ def recover_from_trash(
                 recovery_sidecar_guard=sidecar_guard,
                 relation_reviews=relation_reviews,
             )
+            semantic_states = {
+                item.after.path: semantic_index.from_semantic_page_state(item.after)
+                for item in preflight.evaluations
+            }
             if validate_only:
                 return RecoverResult(
                     trash_path=trash_rel,
@@ -367,7 +372,21 @@ def recover_from_trash(
                 "watcher", "completed", "self_write_registered"
             )
         try:
-            report = index_sync.upsert_after_write(vault_root, restored_markdown)
+            restored_states = {
+                path.relative_to(vault_root).as_posix(): semantic_states[
+                    path.relative_to(vault_root).as_posix()
+                ]
+                for path in restored_markdown
+                if path.relative_to(vault_root).as_posix() in semantic_states
+            }
+            if restored_states:
+                report = index_sync.upsert_after_write(
+                    vault_root,
+                    restored_markdown,
+                    semantic_states=restored_states,
+                )
+            else:
+                report = index_sync.upsert_after_write(vault_root, restored_markdown)
         except Exception:  # noqa: BLE001 - restore remains authoritative
             log.exception("restored index refresh failed for %s", restore_rel)
             warnings.append(

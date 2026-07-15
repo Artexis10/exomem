@@ -246,7 +246,9 @@ def infer_contract(
             page.body,
             path=page.rel_path,
             validate=False,
-            language_registry=_AllAttachedProjectsRegistry(language, projects),
+            language_registry=semantic_language_registry.for_attached_projects(
+                language, projects
+            ),
             relation_registry=relation_definitions,
             include_legacy_relations=True,
             retain_unknown_relations=True,
@@ -731,48 +733,6 @@ def category_observations(
     )[1]
 
 
-@dataclass(frozen=True)
-class _AllAttachedProjectsRegistry:
-    registry: semantic_language_registry.SemanticLanguageRegistry
-    projects: tuple[str, ...]
-
-    @property
-    def findings(self):
-        return self.registry.findings
-
-    def resolve_heading(
-        self,
-        raw: str,
-        *,
-        project: str | None = None,
-        page_type: str | None = None,
-    ) -> semantic_language_registry.LabelResolution:
-        return self._resolve(self.registry.resolve_heading, raw, page_type=page_type)
-
-    def resolve_category(
-        self,
-        raw: str,
-        *,
-        project: str | None = None,
-        page_type: str | None = None,
-    ) -> semantic_language_registry.LabelResolution:
-        return self._resolve(self.registry.resolve_category, raw, page_type=page_type)
-
-    def _resolve(self, resolver, raw: str, *, page_type: str | None):
-        resolutions = [
-            resolver(raw, project=project, page_type=page_type)
-            for project in self.projects or (None,)
-        ]
-        return next(
-            (
-                resolution
-                for resolution in resolutions
-                if resolution.status != "scope_violation"
-            ),
-            resolutions[0],
-        )
-
-
 def _scan_category_observations(
     vault_root: Path,
     *,
@@ -789,7 +749,9 @@ def _scan_category_observations(
             page.body,
             path=page.rel_path,
             validate=False,
-            language_registry=_AllAttachedProjectsRegistry(registry, projects),
+            language_registry=semantic_language_registry.for_attached_projects(
+                registry, projects
+            ),
             project=None,
             page_type=page.page_type,
         )
@@ -1558,7 +1520,7 @@ def validate_contract(vault_root: Path, contract: MemoryContract, *, strict: boo
             page.body,
             path=page.rel_path,
             validate=False,
-            language_registry=_AllAttachedProjectsRegistry(
+            language_registry=semantic_language_registry.for_attached_projects(
                 language_registry, projects
             ),
             relation_registry=relations_registry,

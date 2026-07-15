@@ -24,10 +24,11 @@ wrappers as the outermost belt.
 from __future__ import annotations
 
 import logging
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
-from . import deferred_index
+from . import deferred_index, semantic_index
 
 log = logging.getLogger(__name__)
 
@@ -362,49 +363,14 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
     return clear_deferred_work(vault_root, paths=paths)
 
 
-def upsert_after_write(
-    vault_root: Path, written_paths: list[Path], *, defer_semantic: bool = False
-) -> IndexSyncReport:
-    """Fan a writer's markdown change out to every index sidecar.
-
-    Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
-    dropped first: every index's FULL rebuild skips them, so the incremental
-    path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
-    events the same way; this belt covers direct writer calls.
-    """
+def _dispatch_upsert_components(
+    vault_root: Path,
+    eligible: list[Path],
+    *,
+    defer_semantic: bool,
+) -> list[IndexComponentOutcome]:
     from . import epistemic_graph, find, lexstore, memory_refs, mode
-    from .vault import in_excluded_scan_dir
 
-    vr = vault_root.resolve()
-
-    def _rel(p: Path) -> str | None:
-        try:
-            return p.resolve().relative_to(vr).as_posix()
-        except (OSError, ValueError):
-            return None
-
-    requested_rels: list[str] = []
-    eligible: list[Path] = []
-    eligible_rels: list[str] = []
-    for p in written_paths:
-        rel = _rel(p)
-        if rel is None:
-            continue
-        requested_rels.append(rel)
-        if in_excluded_scan_dir(rel):
-            continue
-        eligible.append(p)
-        eligible_rels.append(rel)
-    requested_report, requested_truncated = _bounded_paths(requested_rels)
-    eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
-    if not eligible:
-        return IndexSyncReport(
-            "upsert",
-            requested_report,
-            eligible_report,
-            (),
-            requested_truncated or eligible_truncated,
-        )
     components = [
         _legacy_component(
             "lexstore", lambda: lexstore.upsert_after_write(vault_root, eligible)
@@ -468,6 +434,74 @@ def upsert_after_write(
             )
         else:
             components.append(component)
+    return components
+
+
+def upsert_after_write(
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    defer_semantic: bool = False,
+    semantic_states: Mapping[str, semantic_index.SemanticParentIndexState] | None = None,
+) -> IndexSyncReport:
+    """Fan a writer's markdown change out to every index sidecar.
+
+    Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
+    dropped first: every index's FULL rebuild skips them, so the incremental
+    path must too (`vault.in_excluded_scan_dir`). The watcher filters its own
+    events the same way; this belt covers direct writer calls.
+    """
+    from .vault import in_excluded_scan_dir
+
+    vr = vault_root.resolve()
+
+    def _rel(p: Path) -> str | None:
+        try:
+            return p.resolve().relative_to(vr).as_posix()
+        except (OSError, ValueError):
+            return None
+
+    requested_rels: list[str] = []
+    eligible: list[Path] = []
+    eligible_rels: list[str] = []
+    for p in written_paths:
+        rel = _rel(p)
+        if rel is None:
+            continue
+        requested_rels.append(rel)
+        if in_excluded_scan_dir(rel):
+            continue
+        eligible.append(p)
+        eligible_rels.append(rel)
+    requested_report, requested_truncated = _bounded_paths(requested_rels)
+    eligible_report, eligible_truncated = _bounded_paths(eligible_rels)
+    if not eligible:
+        return IndexSyncReport(
+            "upsert",
+            requested_report,
+            eligible_report,
+            (),
+            requested_truncated or eligible_truncated,
+        )
+    states = dict(semantic_states or {})
+    for path, rel in zip(eligible, eligible_rels, strict=True):
+        if path.suffix.lower() != ".md" or rel in states:
+            continue
+        active = semantic_index.parent_state_for_path(vault_root, path)
+        if active is not None:
+            states[rel] = active
+            continue
+        try:
+            states[rel] = semantic_index.build_parent_index_state(vault_root, path)
+        except (OSError, UnicodeError, ValueError):
+            continue
+    token = semantic_index.set_parent_states(states)
+    try:
+        components = _dispatch_upsert_components(
+            vault_root, eligible, defer_semantic=defer_semantic
+        )
+    finally:
+        semantic_index.reset_parent_states(token)
     return IndexSyncReport(
         "upsert",
         requested_report,

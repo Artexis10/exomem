@@ -10,12 +10,12 @@ from __future__ import annotations
 import hashlib
 import re
 import unicodedata
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any
+from typing import Any, Protocol
 
 import yaml
 
@@ -111,6 +111,29 @@ class LabelResolution:
             "replacement": self.replacement,
             "findings": [item.as_dict() for item in self.findings],
         }
+
+
+class LanguageRegistryView(Protocol):
+    """Resolution surface accepted by the semantic-unit parser."""
+
+    @property
+    def findings(self) -> Iterable[Mapping[str, str]]: ...
+
+    def resolve_heading(
+        self,
+        raw: str,
+        *,
+        project: str | None = None,
+        page_type: str | None = None,
+    ) -> LabelResolution: ...
+
+    def resolve_category(
+        self,
+        raw: str,
+        *,
+        project: str | None = None,
+        page_type: str | None = None,
+    ) -> LabelResolution: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -272,6 +295,64 @@ class SemanticLanguageRegistry:
         return LabelResolution(
             str(raw), key, canonical, status, definition, definition.replaced_by
         )
+
+
+@dataclass(frozen=True, slots=True)
+class AttachedProjectsLanguageRegistry:
+    """Resolve a page label against every project attached to that page."""
+
+    registry: SemanticLanguageRegistry
+    projects: tuple[str, ...]
+
+    @property
+    def findings(self) -> tuple[RegistryFinding, ...]:
+        return self.registry.findings
+
+    def resolve_heading(
+        self,
+        raw: str,
+        *,
+        project: str | None = None,
+        page_type: str | None = None,
+    ) -> LabelResolution:
+        return self._resolve(self.registry.resolve_heading, raw, page_type=page_type)
+
+    def resolve_category(
+        self,
+        raw: str,
+        *,
+        project: str | None = None,
+        page_type: str | None = None,
+    ) -> LabelResolution:
+        return self._resolve(self.registry.resolve_category, raw, page_type=page_type)
+
+    def _resolve(
+        self,
+        resolver: Callable[..., LabelResolution],
+        raw: str,
+        *,
+        page_type: str | None,
+    ) -> LabelResolution:
+        resolutions = tuple(
+            resolver(raw, project=project, page_type=page_type)
+            for project in self.projects or (None,)
+        )
+        return next(
+            (
+                resolution
+                for resolution in resolutions
+                if resolution.status != "scope_violation"
+            ),
+            resolutions[0],
+        )
+
+
+def for_attached_projects(
+    registry: SemanticLanguageRegistry,
+    projects: tuple[str, ...],
+) -> AttachedProjectsLanguageRegistry:
+    """Return the shared language view used by writes and derived indexes."""
+    return AttachedProjectsLanguageRegistry(registry, tuple(sorted(set(projects))))
 
 
 def normalize_label(raw: str) -> str:

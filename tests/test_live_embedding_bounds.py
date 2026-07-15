@@ -40,6 +40,9 @@ def test_live_embedding_slices_oversized_file_in_order(vault, monkeypatch) -> No
         def delete_file(self, _rel_path):
             raise AssertionError("existing file must not be deleted")
 
+        def delete_semantic_units(self, _rel_path):
+            return None
+
     monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: _Index())
     embeddings.upsert_after_write(vault, [path])
 

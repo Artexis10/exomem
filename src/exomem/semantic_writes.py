@@ -20,6 +20,7 @@ from . import (
     relation_registry,
     relation_review,
     semantic_contract,
+    semantic_index,
     semantic_language_registry,
     vault,
 )
@@ -644,6 +645,7 @@ class CreationPreflight:
     mutated: Literal[False]
     contract_result: semantic_contract.SemanticContractResult | None
     creation_validation: relation_review.CreationDraftValidation | None
+    semantic_state: semantic_contract.SemanticPageState
 
     @property
     def draft_hash(self) -> str | None:
@@ -1472,6 +1474,9 @@ def _commit_existing_locked(
         vault_root=root,
         required_guards=required_guards,
         index_reports=reports,
+        semantic_states={
+            preflight.path: semantic_index.from_semantic_page_state(preflight.after)
+        },
     )
     report = reports[0] if reports else None
     return ExistingCommit(
@@ -2515,7 +2520,10 @@ def _evaluate_structural(
     destination: str,
     source: str,
     operation: str,
-) -> semantic_contract.SemanticContractResult:
+) -> tuple[
+    semantic_contract.SemanticContractResult,
+    semantic_contract.SemanticPageState,
+]:
     registry = relation_registry.load_registry(root)
     language = semantic_language_registry.load_registry(root)
     contracts = memory_schema.load_saved_contracts(root)
@@ -2535,15 +2543,18 @@ def _evaluate_structural(
         page_type=candidate.page_type,
         language_registry=language,
     )
-    return semantic_contract.evaluate(
-        before=None,
-        after=candidate,
-        operation=operation,
-        mode="precommit",
-        before_contracts=resolved,
-        after_contracts=resolved,
-        before_corpus=before,
-        after_corpus=before.with_candidate(candidate),
+    return (
+        semantic_contract.evaluate(
+            before=None,
+            after=candidate,
+            operation=operation,
+            mode="precommit",
+            before_contracts=resolved,
+            after_contracts=resolved,
+            before_corpus=before,
+            after_corpus=before.with_candidate(candidate),
+        ),
+        candidate,
     )
 
 
@@ -2581,7 +2592,9 @@ def preflight_creation(
     except vault.FrontmatterError as error:
         raise SemanticWriteError(error.code, "draft frontmatter is invalid") from error
     page_type = frontmatter.get("type")
-    result = _evaluate_structural(root, destination=path, source=source, operation=operation)
+    result, state = _evaluate_structural(
+        root, destination=path, source=source, operation=operation
+    )
     if result.should_block and not (
         page_type in _COMPILED_TYPES
         and result.relation_disposition.kind in {"missing", "stale"}
@@ -2593,7 +2606,6 @@ def preflight_creation(
         raise SemanticWriteError(
             "SEMANTIC_CONTRACT_BLOCKED", "semantic contract has blocking findings"
         )
-    state = semantic_contract.build_page_state(root, path, source)
     if page_type in _COMPILED_TYPES and state.eligible_compiled:
         if draft_id is None:
             raise SemanticWriteError("DRAFT_IDENTITY_MISMATCH", "active draft requires identity")
@@ -2610,13 +2622,13 @@ def preflight_creation(
         )
         return CreationPreflight(
             "full", path, source, draft_id, draft_token, False,
-            validation.contract_result, validation,
+            validation.contract_result, validation, state,
         )
     applicability: Literal["structural", "not_semantic"] = (
         "structural" if page_type is not None else "not_semantic"
     )
     return CreationPreflight(
-        applicability, path, source, draft_id, draft_token, False, result, None
+        applicability, path, source, draft_id, draft_token, False, result, None, state
     )
 
 
@@ -2648,6 +2660,9 @@ def commit_creation(
             draft_token=preflight.draft_token,
             predecessor_path=predecessor_path,
             predecessor_content_hash=predecessor_content_hash,
+            semantic_state=semantic_index.from_semantic_page_state(
+                preflight.semantic_state
+            ),
         )
         return CreationCommit(
             "full", True, committed.written_paths, committed.contract_result, committed
@@ -2663,7 +2678,17 @@ def commit_creation(
             ),
         )
     )
-    written = vault.batch_atomic_write(writes, vault_root=root)
+    token = semantic_index.set_parent_states(
+        {
+            preflight.destination: semantic_index.from_semantic_page_state(
+                preflight.semantic_state
+            )
+        }
+    )
+    try:
+        written = vault.batch_atomic_write(writes, vault_root=root)
+    finally:
+        semantic_index.reset_parent_states(token)
     paths = tuple(path.relative_to(root).as_posix() for path in written)
     return CreationCommit(
         preflight.applicability,

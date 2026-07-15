@@ -3498,6 +3498,7 @@ def commit_creation_draft(
     draft_token: str = "",
     predecessor_path: str | None = None,
     predecessor_content_hash: str | None = None,
+    semantic_state: Any | None = None,
 ) -> CreationDraftCommit:
     root = Path(vault_root).absolute()
     try:
@@ -3680,9 +3681,26 @@ def commit_creation_draft(
                 )
             )
             try:
-                written = vault.batch_atomic_write(
-                    writes, vault_root=root, required_guards=required_guards
-                )
+                if semantic_state is None:
+                    written = vault.batch_atomic_write(
+                        writes,
+                        vault_root=root,
+                        required_guards=required_guards,
+                    )
+                else:
+                    from . import semantic_index
+
+                    state_token = semantic_index.set_parent_states(
+                        {destination: semantic_state}
+                    )
+                    try:
+                        written = vault.batch_atomic_write(
+                            writes,
+                            vault_root=root,
+                            required_guards=required_guards,
+                        )
+                    finally:
+                        semantic_index.reset_parent_states(state_token)
             except vault.CreateOnlyConflict as error:
                 if error.target == destination:
                     raise RelationReviewError(

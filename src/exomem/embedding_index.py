@@ -16,12 +16,13 @@ from typing import NamedTuple
 
 import numpy as np
 
-from . import index_paths, sidecar_store, vecstore
+from . import index_paths, semantic_index, sidecar_store, vecstore
 from .vector_index_common import vec_gate
 
 log = logging.getLogger(__name__)
 
 VECTOR_DIM = 768
+SEMANTIC_UNIT_SCHEMA_VERSION = 1
 
 # --------------------------------------------------------------- generation meta
 #
@@ -106,7 +107,45 @@ class EmbeddingIndex:
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS semantic_unit_vectors (
+                unit_key TEXT NOT NULL,
+                record_type TEXT NOT NULL CHECK(record_type = 'semantic_unit'),
+                unit_ref TEXT NOT NULL,
+                parent_path TEXT NOT NULL,
+                parent_ref TEXT,
+                parent_generation TEXT NOT NULL,
+                parent_source_hash TEXT NOT NULL,
+                parser_version INTEGER NOT NULL,
+                form TEXT NOT NULL,
+                category TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                content TEXT NOT NULL,
+                unit_source_hash TEXT NOT NULL,
+                source_order INTEGER NOT NULL,
+                vector BLOB NOT NULL,
+                file_mtime REAL NOT NULL,
+                PRIMARY KEY (parent_path, unit_key)
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS semantic_unit_vectors_parent "
+            "ON semantic_unit_vectors(parent_path, parent_generation)"
+        )
         sidecar_store.ensure_meta_table(conn, "chunks", self.path.name)
+        stored_unit_schema = conn.execute(
+            "SELECT value FROM meta WHERE key = 'semantic_unit_schema_version'"
+        ).fetchone()
+        if stored_unit_schema != (SEMANTIC_UNIT_SCHEMA_VERSION,):
+            with conn:
+                conn.execute("DELETE FROM semantic_unit_vectors")
+                conn.execute(
+                    "INSERT OR REPLACE INTO meta(key, value) VALUES (?, ?)",
+                    ("semantic_unit_schema_version", SEMANTIC_UNIT_SCHEMA_VERSION),
+                )
+                sidecar_store.bump_meta(conn, "semantic_unit_generation")
         return conn
 
     def upsert_file(
@@ -165,11 +204,94 @@ class EmbeddingIndex:
                 if vec_on:
                     self._vec.dual_delete(conn, "file_path = ?", (rel_path,))
                 conn.execute("DELETE FROM chunks WHERE file_path = ?", (rel_path,))
+                conn.execute(
+                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
+                    (rel_path,),
+                )
                 sidecar_store.bump_meta(conn, "generation")
+                sidecar_store.bump_meta(conn, "semantic_unit_generation")
                 own_epoch, own_gen, own_instance = sidecar_store.read_meta_token(conn)
         finally:
             conn.close()
         self._patch_cache(rel_path, [], None, own_epoch, own_gen, own_instance)
+
+    def upsert_semantic_units(
+        self,
+        state: semantic_index.SemanticParentIndexState,
+        vectors: np.ndarray,
+        mtime: float,
+    ) -> None:
+        """Replace one parent's unit vectors in a single sidecar transaction."""
+        rows = self._semantic_unit_rows(state, vectors, mtime)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
+                    (state.path,),
+                )
+                if rows:
+                    conn.executemany(
+                        "INSERT INTO semantic_unit_vectors("
+                        "unit_key, record_type, unit_ref, parent_path, parent_ref, "
+                        "parent_generation, parent_source_hash, parser_version, form, "
+                        "category, kind, content, unit_source_hash, source_order, vector, "
+                        "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        rows,
+                    )
+                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+        finally:
+            conn.close()
+
+    def delete_semantic_units(self, parent_path: str) -> None:
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM semantic_unit_vectors WHERE parent_path = ?",
+                    (parent_path,),
+                )
+                sidecar_store.bump_meta(conn, "semantic_unit_generation")
+        finally:
+            conn.close()
+
+    @staticmethod
+    def _semantic_unit_rows(
+        state: semantic_index.SemanticParentIndexState,
+        vectors: np.ndarray,
+        mtime: float,
+    ) -> list[tuple]:
+        units = [
+            (source_order, unit)
+            for source_order, unit in enumerate(state.document.units)
+            if unit.unit_ref is not None
+        ]
+        if len(units) != len(vectors):
+            raise ValueError(
+                f"semantic-unit/vector length mismatch for {state.path}: "
+                f"{len(units)} vs {len(vectors)}"
+            )
+        return [
+            (
+                unit.unit_ref,
+                "semantic_unit",
+                unit.unit_ref,
+                state.path,
+                state.parent_ref,
+                state.parent_generation,
+                state.parent_source_hash,
+                state.parser_version,
+                unit.form,
+                unit.category,
+                unit.kind,
+                unit.content,
+                unit.source_hash,
+                source_order,
+                vectors[vector_order].astype(np.float32).tobytes(),
+                mtime,
+            )
+            for vector_order, (source_order, unit) in enumerate(units)
+        ]
 
     def _patch_cache(
         self,
@@ -459,6 +581,32 @@ class EmbeddingIndex:
             conn.close()
         return {r[0]: r[1] for r in rows if isinstance(r[0], str) and r[1] is not None}
 
+    def semantic_unit_parent_states(
+        self,
+    ) -> dict[str, tuple[frozenset[str], frozenset[str]]]:
+        """Return stored generations and unit refs for incremental parity checks."""
+        if not self.path.exists():
+            return {}
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT parent_path, parent_generation, unit_ref "
+                "FROM semantic_unit_vectors"
+            ).fetchall()
+        finally:
+            conn.close()
+        grouped: dict[str, tuple[set[str], set[str]]] = {}
+        for parent_path, generation, unit_ref in rows:
+            generations, unit_refs = grouped.setdefault(
+                str(parent_path), (set(), set())
+            )
+            generations.add(str(generation))
+            unit_refs.add(str(unit_ref))
+        return {
+            parent_path: (frozenset(generations), frozenset(unit_refs))
+            for parent_path, (generations, unit_refs) in grouped.items()
+        }
+
     def rebuild_all(self) -> int:
         """Wipe + re-embed every compiled .md the index scope covers. Returns row count.
 
@@ -486,11 +634,13 @@ class EmbeddingIndex:
                 if vec_on:
                     self._vec.wipe(conn)
                 conn.execute("DELETE FROM chunks")
+                conn.execute("DELETE FROM semantic_unit_vectors")
         finally:
             conn.close()
         self._cache = None
 
         all_chunks: list[tuple[str, list[str], float]] = []
+        all_unit_states: list[tuple[semantic_index.SemanticParentIndexState, float]] = []
         for md in index_paths.iter_index_markdown(self.vault_root):
             if not index_paths.is_embeddable_path(md):
                 continue
@@ -500,20 +650,43 @@ class EmbeddingIndex:
             if not access.is_indexable(self.vault_root, page.rel_path):
                 continue  # excluded tree (_access.yaml) — keep it out of the index
             chunks = embeddings_module._chunks_for_page(self.vault_root, page)
-            if not chunks:
+            if chunks:
+                all_chunks.append((page.rel_path, chunks, page.mtime))
+            try:
+                state = semantic_index.build_parent_index_state(self.vault_root, md)
+            except (OSError, UnicodeError, ValueError):
                 continue
-            all_chunks.append((page.rel_path, chunks, page.mtime))
+            if any(unit.unit_ref is not None for unit in state.document.units):
+                all_unit_states.append((state, page.mtime))
 
-        if not all_chunks:
+        if not all_chunks and not all_unit_states:
             return 0
 
         # Batch-embed across all files at once for GPU efficiency.
         flat_texts: list[str] = []
         for _, chunks, _ in all_chunks:
             flat_texts.extend(chunks)
-        log.info("rebuild_embeddings: embedding %d chunks from %d files",
-                 len(flat_texts), len(all_chunks))
-        vectors = embeddings_module.embed_texts(flat_texts, is_query=False)
+        log.info(
+            "rebuild_embeddings: embedding %d chunks from %d files",
+            len(flat_texts),
+            len(all_chunks),
+        )
+        vectors = (
+            embeddings_module.embed_texts(flat_texts, is_query=False)
+            if flat_texts
+            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        )
+        unit_texts = [
+            unit.content
+            for state, _mtime in all_unit_states
+            for unit in state.document.units
+            if unit.unit_ref is not None
+        ]
+        unit_vectors = (
+            embeddings_module.embed_texts(unit_texts, is_query=False)
+            if unit_texts
+            else np.zeros((0, VECTOR_DIM), dtype=np.float32)
+        )
 
         # Bulk write in ONE transaction. Per-file upsert_file() calls would each
         # open a connection, fsync, and splice the in-memory matrix — O(N²) copies
@@ -529,16 +702,37 @@ class EmbeddingIndex:
                 )
             offset += len(chunks)
             total += len(chunks)
+        unit_insert_rows: list[tuple] = []
+        unit_offset = 0
+        for state, mtime in all_unit_states:
+            count = sum(unit.unit_ref is not None for unit in state.document.units)
+            unit_insert_rows.extend(
+                self._semantic_unit_rows(
+                    state,
+                    unit_vectors[unit_offset : unit_offset + count],
+                    mtime,
+                )
+            )
+            unit_offset += count
         conn = self._connect()
         try:
             vec_on = vec_gate(self, conn)
             with conn:
                 conn.execute("DELETE FROM chunks")
+                conn.execute("DELETE FROM semantic_unit_vectors")
                 conn.executemany(
                     "INSERT INTO chunks "
                     "(file_path, chunk_idx, chunk_text, vector, file_mtime) "
                     "VALUES (?, ?, ?, ?, ?)",
                     insert_rows,
+                )
+                conn.executemany(
+                    "INSERT INTO semantic_unit_vectors("
+                    "unit_key, record_type, unit_ref, parent_path, parent_ref, "
+                    "parent_generation, parent_source_hash, parser_version, form, "
+                    "category, kind, content, unit_source_hash, source_order, vector, "
+                    "file_mtime) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    unit_insert_rows,
                 )
                 if vec_on:
                     # One whole-table INSERT..SELECT from the fresh blobs — the
@@ -558,6 +752,7 @@ class EmbeddingIndex:
                 # file mtimes.
                 sidecar_store.bump_meta(conn, "generation")
                 sidecar_store.bump_meta(conn, "epoch")
+                sidecar_store.bump_meta(conn, "semantic_unit_generation")
         finally:
             conn.close()
         with self._lock:

@@ -18,6 +18,7 @@ from . import (
     access,
     activation,
     activation_manifest,
+    memory_refs,
     memory_schema,
     relation_registry,
     semantic_language_registry,
@@ -115,57 +116,13 @@ def _mapping_of_tuples(
 
 
 @dataclass(frozen=True, slots=True)
-class _AttachedProjectsLanguageRegistry:
-    registry: semantic_language_registry.SemanticLanguageRegistry
-    projects: tuple[str, ...]
-
-    @property
-    def findings(self):
-        return self.registry.findings
-
-    def resolve_heading(
-        self,
-        raw: str,
-        *,
-        project: str | None = None,
-        page_type: str | None = None,
-    ) -> semantic_language_registry.LabelResolution:
-        return self._resolve(
-            self.registry.resolve_heading, raw, page_type=page_type
-        )
-
-    def resolve_category(
-        self,
-        raw: str,
-        *,
-        project: str | None = None,
-        page_type: str | None = None,
-    ) -> semantic_language_registry.LabelResolution:
-        return self._resolve(
-            self.registry.resolve_category, raw, page_type=page_type
-        )
-
-    def _resolve(self, resolver, raw: str, *, page_type: str | None):
-        resolutions = tuple(
-            resolver(raw, project=project, page_type=page_type)
-            for project in self.projects or (None,)
-        )
-        return next(
-            (
-                resolution
-                for resolution in resolutions
-                if resolution.status != "scope_violation"
-            ),
-            resolutions[0],
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class SemanticPageState:
     path: str
     identity_kind: str
     identity: str
     source_hash: str
+    language_registry_hash: str
+    relation_registry_hash: str
     review_fingerprint: str | None
     frontmatter: Mapping[Any, Any]
     page_type: str | None
@@ -710,13 +667,21 @@ def build_page_state(
     page_type_value = frontmatter.get("type")
     page_type = str(page_type_value) if page_type_value else None
     projects = _page_projects(frontmatter)
+    normalized_id = normalize_id(frontmatter.get(ID_FIELD))
     registry = relation_registry or globals()["relation_registry"].core_registry()
     language = language_registry or semantic_language_registry.core_registry()
     document = semantic_units.parse_semantic_units(
         body,
         path=rel_path,
+        parent_ref=(
+            memory_refs.memory_ref(normalized_id)
+            if normalized_id is not None
+            else None
+        ),
         validate=True,
-        language_registry=_AttachedProjectsLanguageRegistry(language, projects),
+        language_registry=semantic_language_registry.for_attached_projects(
+            language, projects
+        ),
         relation_registry=registry,
         include_legacy_relations=True,
         retain_unknown_relations=True,
@@ -732,7 +697,6 @@ def build_page_state(
         title=title,
         mtime=0.0,
     )
-    normalized_id = normalize_id(frontmatter.get(ID_FIELD))
     identity_kind = "exomem_id" if normalized_id is not None else "path"
     identity = normalized_id or rel_path
     resolved_review_fingerprint = review_fingerprint
@@ -749,6 +713,12 @@ def build_page_state(
         identity_kind=identity_kind,
         identity=identity,
         source_hash=vault.content_hash(source),
+        language_registry_hash=(
+            f"{language.schema_version}:{language.content_hash}"
+        ),
+        relation_registry_hash=(
+            f"{registry.core_version}:{registry.extension_hash}"
+        ),
         review_fingerprint=(
             str(resolved_review_fingerprint)
             if resolved_review_fingerprint is not None

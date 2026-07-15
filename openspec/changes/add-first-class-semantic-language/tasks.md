@@ -29,14 +29,14 @@
 
 ## 4. Derived Unit Indexes And Freshness
 
-- [ ] 4.1 Add lexical-sidecar tests for parent-owned generation/source-hash rows, exact category/kind filters, same-content/different-category identity, and category-only queries.
-- [ ] 4.2 Add optional embedding-sidecar tests for unit keys, parent generation/linkage, replacement/deletion, disabled imports, warming, and post-start failure fallback.
-- [ ] 4.3 Add graph tests for generation-stamped compact/rich unit nodes, preserved rich node keys/relations, `derived_from` edges, and absence of inferred compact typed edges or duplicate rich nodes.
-- [ ] 4.4 Implement semantic-unit record discriminators, shared deterministic parent generation/source hash/parser version, and parent-transactional replacement in the lexical sidecar.
-- [ ] 4.5 Implement optional unit embedding upsert/delete/rebuild through the existing measurement-only embedding seam.
-- [ ] 4.6 Extend epistemic graph indexing and schema migration for compact units and normalized shared parser output.
-- [ ] 4.7 Update writer and watcher events for one-pass parse plus per-sidecar lexical/vector/graph refresh without duplicate self-write work; add query-time current-file generation validation that rejects stale/mixed joins.
-- [ ] 4.8 Extend reconcile to detect/repair missing, stale, mixed-generation, orphaned, moved, trashed, and recovered unit rows while separately reporting contract drift.
+- [x] 4.1 Add lexical-sidecar tests for parent-owned generation/source-hash rows, exact category/kind filters, same-content/different-category identity, and category-only queries.
+- [x] 4.2 Add optional embedding-sidecar tests for unit keys, parent generation/linkage, replacement/deletion, disabled imports, warming, and post-start failure fallback.
+- [x] 4.3 Add graph tests for generation-stamped compact/rich unit nodes, preserved rich node keys/relations, `derived_from` edges, and absence of inferred compact typed edges or duplicate rich nodes.
+- [x] 4.4 Implement semantic-unit record discriminators, shared deterministic parent generation/source hash/parser version, and parent-transactional replacement in the lexical sidecar.
+- [x] 4.5 Implement optional unit embedding upsert/delete/rebuild through the existing measurement-only embedding seam.
+- [x] 4.6 Extend epistemic graph indexing and schema migration for compact units and normalized shared parser output.
+- [x] 4.7 Update writer and watcher events for one-pass parse plus per-sidecar lexical/vector/graph refresh without duplicate self-write work; add query-time current-file generation validation that rejects stale/mixed joins.
+- [x] 4.8 Extend reconcile to detect/repair missing, stale, mixed-generation, orphaned, moved, trashed, and recovered unit rows while separately reporting contract drift.
 
 ## 5. Structured Retrieval Filters
 

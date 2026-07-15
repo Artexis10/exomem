@@ -19,7 +19,7 @@ import stat
 import tempfile
 import threading
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -2331,6 +2331,7 @@ def _post_commit_batch_fanout(
     vault_root: Path | None,
     replaced: list[Path],
     index_reports: list[Any] | None,
+    semantic_states: Mapping[str, Any] | None,
 ) -> None:
     if vault_root is None or not replaced:
         return
@@ -2347,7 +2348,14 @@ def _post_commit_batch_fanout(
     try:
         from . import index_sync
 
-        report = index_sync.upsert_after_write(vault_root, replaced)
+        if semantic_states:
+            report = index_sync.upsert_after_write(
+                vault_root,
+                replaced,
+                semantic_states=semantic_states,
+            )
+        else:
+            report = index_sync.upsert_after_write(vault_root, replaced)
         if index_reports is not None:
             index_reports.append(report)
     except Exception:  # noqa: BLE001 — embeddings are best-effort
@@ -2407,6 +2415,7 @@ def batch_atomic_write(
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
     index_reports: list[Any] | None = None,
+    semantic_states: Mapping[str, Any] | None = None,
 ) -> list[Path]:
     """Commit one batch while serializing all in-process vault writers.
 
@@ -2421,6 +2430,7 @@ def batch_atomic_write(
             vault_root=vault_root,
             required_guards=required_guards,
             index_reports=index_reports,
+            semantic_states=semantic_states,
         )
 
 
@@ -2430,6 +2440,7 @@ def _batch_atomic_write_locked(
     vault_root: Path | None = None,
     required_guards: Iterable[PathGuard | DirectoryCensusGuard] = (),
     index_reports: list[Any] | None = None,
+    semantic_states: Mapping[str, Any] | None = None,
 ) -> list[Path]:
     """Stage writes in private workspaces, then replace destinations in order.
 
@@ -2762,7 +2773,12 @@ def _batch_atomic_write_locked(
     else:
         cleanup_retained = _cleanup_batch_workspaces(workspace_by_parent.values())
 
-    _post_commit_batch_fanout(vault_root, replaced, index_reports)
+    _post_commit_batch_fanout(
+        vault_root,
+        replaced,
+        index_reports,
+        semantic_states,
+    )
     if cleanup_retained:
         raise BatchWriteError(
             "BATCH_CLEANUP_INCOMPLETE",

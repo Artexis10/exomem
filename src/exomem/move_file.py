@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import semantic_writes
+from . import semantic_index, semantic_writes
 from .kbdir import kb_dirname
 from .vault import (
     PathGuard,
@@ -223,6 +223,7 @@ def move_file(
                 wikilinks_updated += n_changed
 
     semantic: dict | None = None
+    semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
     if old_rel.lower().endswith(".md") and new_rel.lower().endswith(".md"):
         try:
             source, source_guard = read_guarded_text(vault_root, old_abs)
@@ -257,6 +258,10 @@ def move_file(
                 destination_guard=destination_guard,
                 rewrites=writes,
             )
+            semantic_states = {
+                item.after.path: semantic_index.from_semantic_page_state(item.after)
+                for item in preflight.evaluations
+            }
 
             def mutate(
                 lifecycle_writes: tuple[PlannedWrite, ...],
@@ -287,6 +292,14 @@ def move_file(
                             vault_root=vault_root,
                             required_guards=required_guards,
                             index_reports=batch_index_reports,
+                            semantic_states={
+                                write.path.relative_to(vault_root).as_posix(): semantic_states[
+                                    write.path.relative_to(vault_root).as_posix()
+                                ]
+                                for write in combined
+                                if write.path.relative_to(vault_root).as_posix()
+                                in semantic_states
+                            },
                         )
                 except Exception as error:
                     log.exception(
@@ -370,7 +383,14 @@ def move_file(
             )
     if semantic is None or source == moved_source:
         try:
-            report = index_sync.upsert_after_write(vault_root, [new_abs])
+            if new_rel in semantic_states:
+                report = index_sync.upsert_after_write(
+                    vault_root,
+                    [new_abs],
+                    semantic_states={new_rel: semantic_states[new_rel]},
+                )
+            else:
+                report = index_sync.upsert_after_write(vault_root, [new_abs])
         except Exception:  # noqa: BLE001 — move remains authoritative
             log.exception("index upsert failed for moved destination %s", new_rel)
             upsert_reports.append(
