@@ -459,20 +459,36 @@ def test_built_image_packages_exact_read_only_single_head_migrations() -> None:
 import hashlib
 import json
 from pathlib import Path
+import stat
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from exomem_provisioner.database import DATABASE_REVISION
 root = Path('/opt/exomem/provisioner-migrations')
 payload = {}
-for path in sorted(item for item in root.rglob('*') if item.is_file()):
-    if path.is_symlink() or path.stat().st_uid != 0 or path.stat().st_gid != 0:
+directories = set()
+for path in (root, *sorted(root.rglob('*'))):
+    if path.is_symlink():
         raise SystemExit(2)
-    if path.stat().st_mode & 0o222:
+    metadata = path.stat()
+    if metadata.st_uid != 0 or metadata.st_gid != 0:
+        raise SystemExit(2)
+    if metadata.st_mode & 0o222:
         raise SystemExit(3)
-    payload[str(path.relative_to(root))] = hashlib.sha256(path.read_bytes()).hexdigest()
+    relative = '.' if path == root else str(path.relative_to(root))
+    if stat.S_ISDIR(metadata.st_mode):
+        directories.add(relative)
+    elif stat.S_ISREG(metadata.st_mode):
+        payload[relative] = hashlib.sha256(path.read_bytes()).hexdigest()
+    else:
+        raise SystemExit(2)
 config = Config(str(root / 'alembic.ini'))
 heads = ScriptDirectory.from_config(config).get_heads()
-print(json.dumps({'files': payload, 'heads': heads, 'runtime': DATABASE_REVISION}, sort_keys=True))
+print(json.dumps({
+    'directories': sorted(directories),
+    'files': payload,
+    'heads': heads,
+    'runtime': DATABASE_REVISION,
+}, sort_keys=True))
 """
     inspected = _run(
         [
@@ -494,7 +510,17 @@ print(json.dumps({'files': payload, 'heads': heads, 'runtime': DATABASE_REVISION
             expected[str(source.relative_to(PROVISIONER_ROOT))] = hashlib.sha256(
                 source.read_bytes()
             ).hexdigest()
+    expected_directories = {
+        ".",
+        "alembic",
+        *{
+            str(source.relative_to(PROVISIONER_ROOT))
+            for source in (PROVISIONER_ROOT / "alembic").rglob("*")
+            if source.is_dir() and "__pycache__" not in source.parts
+        },
+    }
 
+    assert set(payload["directories"]) == expected_directories
     assert payload["files"] == expected
     assert payload["heads"] == [DATABASE_REVISION]
     assert payload["runtime"] == DATABASE_REVISION
