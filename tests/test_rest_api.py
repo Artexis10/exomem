@@ -135,6 +135,7 @@ def test_rest_remember_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -
             "note_type": "insight",
             "title": "REST facade is scriptable",
             "content": "# REST facade is scriptable\n\n## Claim\n\nScripts can write to the KB over HTTP.\n",
+            "status": "draft",
         },
         headers={"Authorization": "Bearer sekret"},
     )

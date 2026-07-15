@@ -749,7 +749,9 @@ def test_replace_partial_after_predecessor_patch_recovers_exact_batch(
     assert (vault / result.new_path).exists()
 
 
-def test_tier2_semantic_overwrite_is_deferred_on_either_side(vault: Path) -> None:
+def test_tier2_semantic_overwrite_uses_structural_contract_on_either_side(
+    vault: Path,
+) -> None:
     arbitrary = "Knowledge Base/Identity/arbitrary-before.md"
     create_file.create_file(vault, path=arbitrary, content="# Arbitrary\n", today=TODAY)
     semantic = (
@@ -762,24 +764,28 @@ def test_tier2_semantic_overwrite_is_deferred_on_either_side(vault: Path) -> Non
         "---\n"
         "# Semantic after\n"
     )
-    with pytest.raises(create_file.CreateFileError) as after_exc:
-        create_file.create_file(
-            vault, path=arbitrary, content=semantic, overwrite=True, today=TODAY
-        )
-    assert after_exc.value.code == "SEMANTIC_OVERWRITE_NOT_WIRED"
+    after_result = create_file.create_file(
+        vault, path=arbitrary, content=semantic, overwrite=True, today=TODAY
+    )
+    assert after_result.semantic is not None
+    assert after_result.semantic["applicability"] == "structural"
+    assert after_result.semantic["operation"] == "tier2_overwrite"
+    assert (vault / arbitrary).read_text(encoding="utf-8") == semantic
 
     before_path = vault / "Knowledge Base/Notes/Insights/semantic-before.md"
     before_path.parent.mkdir(parents=True, exist_ok=True)
     before_path.write_text(semantic, encoding="utf-8")
-    with pytest.raises(create_file.CreateFileError) as before_exc:
-        create_file.create_file(
-            vault,
-            path=before_path.relative_to(vault).as_posix(),
-            content="# Arbitrary after\n",
-            overwrite=True,
-            today=TODAY,
-        )
-    assert before_exc.value.code == "SEMANTIC_OVERWRITE_NOT_WIRED"
+    before_result = create_file.create_file(
+        vault,
+        path=before_path.relative_to(vault).as_posix(),
+        content="# Arbitrary after\n",
+        overwrite=True,
+        today=TODAY,
+    )
+    assert before_result.semantic is not None
+    assert before_result.semantic["applicability"] == "structural"
+    assert before_result.semantic["operation"] == "tier2_overwrite"
+    assert before_path.read_text(encoding="utf-8") == "# Arbitrary after\n"
 
 
 def test_tier2_draft_token_freezes_validation_date_across_commit_day(

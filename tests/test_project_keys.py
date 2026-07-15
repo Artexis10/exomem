@@ -236,12 +236,13 @@ def test_set_frontmatter_field_autoregisters_new_project(vault: Path) -> None:
     """Patching `project` to a genuinely new (distance ≥3) key should auto-register."""
     from exomem import project_keys as pk_module
     from exomem import set_frontmatter_field as sff_module
-    r = _reviewed_note(
+    r = note_module.note(
         vault,
         content="# Note\n\n## Question\n\nbody",
         note_type="research-note",
         title="Reassign probe",
         project="health",
+        status="draft",
         today=TODAY,
     )
     sff_module.set_frontmatter_field(
