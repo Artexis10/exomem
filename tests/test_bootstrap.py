@@ -89,6 +89,30 @@ def test_bootstrap_compact_contract_is_public_safe(vault: Path) -> None:
     assert "Progressive disclosure" not in serialized
 
 
+def test_bootstrap_teaches_human_readable_memory_citations(vault: Path) -> None:
+    out = commands.op_bootstrap(vault)
+    guidance = json.dumps(out["workflow"]).lower()
+
+    assert out["contract_version"] == "2026-07-15.1"
+    for required in (
+        "show the note title by default",
+        "normal user-facing prose",
+        "do not expose the raw canonical ref by default",
+        "current vault-relative path",
+        "clarity or disambiguation",
+        "path or file name as the visible fallback",
+        "tool arguments",
+        "durable machine state",
+        "machine-readable automation",
+        "user explicitly asks",
+        "identifier itself is being inspected or debugged",
+        "do not embed the canonical ref as a markdown link target",
+        "plain title-first citation",
+    ):
+        assert required in guidance
+    assert "exomem://memory/<uuid>" in guidance
+
+
 def test_bootstrap_profiles_and_validation(vault: Path) -> None:
     full = commands.op_bootstrap(vault, profile="full", workflow="research")
     assert full["workflow"]["requested"] == "research"
