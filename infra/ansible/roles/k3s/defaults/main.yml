@@ -1,0 +1,11 @@
+---
+k3s_version: "v1.35.6+k3s1"
+k3s_sha256_amd64: 2b52a2c1ca6eb502e2a0ffa1a4cf79eef94875926577c1e43347ed292cc92432
+k3s_release_url_amd64: https://github.com/k3s-io/k3s/releases/download/v1.35.6%2Bk3s1/k3s
+k3s_private_interface: ens10
+k3s_server_token: ""
+k3s_etcd_s3_endpoint: ""
+k3s_etcd_s3_region: ""
+k3s_etcd_s3_bucket: ""
+k3s_etcd_s3_access_key: ""
+k3s_etcd_s3_secret_key: ""

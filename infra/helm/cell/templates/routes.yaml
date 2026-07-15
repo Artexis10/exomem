@@ -1,0 +1,52 @@
+{{- if and (eq .Values.workloadMode "serve") .Values.routes.enabled }}
+apiVersion: traefik.io/v1alpha1
+kind: Middleware
+metadata:
+  name: {{ .Values.resourceName }}-strip-cell
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "stripCellMiddleware") | nindent 4 }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+spec:
+  stripPrefix:
+    prefixes:
+      - /cells/{{ .Values.cellId }}
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Values.resourceName }}-control
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "controlIngressRoute") | nindent 4 }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.routes.controlHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/private/exomem/v1`) || PathPrefix(`/cells/{{ .Values.cellId }}/private/exomem/v1/`))
+      middlewares:
+        - name: {{ .Values.resourceName }}-strip-cell
+      services:
+        - name: {{ .Values.resourceName }}
+          port: 8765
+---
+apiVersion: traefik.io/v1alpha1
+kind: IngressRoute
+metadata:
+  name: {{ .Values.resourceName }}-transfer
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "transferIngressRoute") | nindent 4 }}
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+spec:
+  entryPoints: [web]
+  routes:
+    - kind: Rule
+      match: Host(`{{ .Values.transferHostname }}`) && (Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/upload`) || Path(`/cells/{{ .Values.cellId }}/public/exomem/v2/transfers/download`))
+      middlewares:
+        - name: {{ .Values.resourceName }}-strip-cell
+      services:
+        - name: {{ .Values.resourceName }}
+          port: 8765
+{{- end }}

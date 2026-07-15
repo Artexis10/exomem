@@ -1,0 +1,50 @@
+{
+  "schema_version": 1,
+  "currency": "EUR",
+  "vat_recoverable": true,
+  "live_costs_verified": false,
+  "receipt_authentication": {
+    "algorithm": "ed25519",
+    "capacity_domain": "exomem.capacity-live-receipt.v1",
+    "economics_domain": "exomem.capacity-economics-receipt.v1",
+    "capacity_ttl_seconds": 300,
+    "economics_ttl_seconds": 2678400,
+    "capacity_private_key_custody": "kubernetes-hcloud-collector-only",
+    "capacity_public_key_id": null,
+    "economics_private_key_custody": "provider-paddle-collector-only",
+    "economics_public_key_id": null,
+    "gate_material": "public-keys-only"
+  },
+  "limits": {
+    "active_user_cells": 6,
+    "reserved_volume_attachments": 2,
+    "provider_volume_attachment_limit": 16,
+    "minimum_unused_provider_headroom": 8
+  },
+  "pricing": {
+    "friend_price_eur_gross": 5,
+    "public_price_eur_gross_range": [10, 15],
+    "friend_tier_is_subsidized": true
+  },
+  "monthly_costs_eur_ex_vat": {
+    "cx33_server": null,
+    "primary_ipv4": null,
+    "volume_per_active_cell_10_gib": null,
+    "b2_storage_and_operations": null,
+    "neon_marginal": null,
+    "vercel_marginal": null,
+    "alerting": null
+  },
+  "paddle": {
+    "actual_fee_tax_verified": false,
+    "fee_model": null,
+    "tax_treatment": null,
+    "net_receipt_eur_for_friend_price": null,
+    "evidence_recorded_at": null
+  },
+  "evidence": {
+    "provider_invoice_reference": null,
+    "paddle_statement_reference": null,
+    "recorded_at": null
+  }
+}

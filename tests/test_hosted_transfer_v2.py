@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import hashlib
 import hmac
 import json
@@ -186,6 +187,7 @@ def _app(
         source_schema=load_source_schema(config.vault_root),
         transfer_security_authority=security,
         preserve_stream_func=preserve_stream_func,
+        mutation_guard_factory=lambda _vault: contextlib.nullcontext(),
         runtime_temp_authority=runtime_temp_authority,
     )
     return app.http_app(), config, lifecycle

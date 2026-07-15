@@ -1,0 +1,27 @@
+{{- include "exomem-cell.validateProviderRecovery" . -}}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Release.Namespace }}
+  labels:
+    exomem.io/tenant-cell: "true"
+    exomem.io/cell-resource: {{ .Values.resourceName | quote }}
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/enforce-version: v1.35
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/audit-version: v1.35
+    pod-security.kubernetes.io/warn: restricted
+    pod-security.kubernetes.io/warn-version: v1.35
+  annotations:
+    helm.sh/resource-policy: keep
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "namespace") | nindent 4 }}
+    exomem.io/resource-name: {{ .Values.resourceName | quote }}
+    exomem.io/pvc-name: {{ printf "%s-data" .Values.resourceName | quote }}
+    exomem.io/credentials-secret-name: {{ .Values.credentialsSecretName | quote }}
+    exomem.io/init-request-configmap-name: {{ printf "%s-init-request" .Values.resourceName | quote }}
+    exomem.io/provision-mode: {{ .Values.provisionMode | quote }}
+    exomem.io/vault-id: {{ .Values.vaultId | quote }}
+    exomem.io/expected-release: {{ .Values.expectedRelease | quote }}
+    exomem.io/worker-policy-digest: {{ .Values.workerPolicyDigest | quote }}
+    exomem.io/browser-origin: {{ .Values.browserOrigin | quote }}
+    exomem.io/transfer-hostname: {{ .Values.transferHostname | quote }}

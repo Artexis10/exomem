@@ -228,9 +228,9 @@ def test_restart_with_no_changes_skips_the_walk_verify(tmp_path):
     assert calls["n"] == 0
 
 
-def test_manual_row_drift_self_heals(tmp_path):
-    """Rows deleted out from under the sidecar (count mismatch, markdown
-    untouched) are rebuilt from the markdown walk by the next fresh store."""
+def test_manual_row_drift_self_heals(tmp_path, monkeypatch):
+    """Highest page rowids deleted while their index rows remain are restored
+    incrementally by the next fresh store."""
     for i in range(4):
         _write_page(
             tmp_path,
@@ -253,11 +253,26 @@ def test_manual_row_drift_self_heals(tmp_path):
     finally:
         conn.close()
     assert _count(side, "pages") == 2
+    assert _count(side, "fts") == 4
+    assert _count(side, "tri") == 4
     lexstore.clear_stores()
+
+    rebuilds = 0
+    real_rebuild = lexstore.LexicalStore._rebuild
+
+    def _counting_rebuild(self, conn):
+        nonlocal rebuilds
+        rebuilds += 1
+        return real_rebuild(self, conn)
+
+    monkeypatch.setattr(lexstore.LexicalStore, "_rebuild", _counting_rebuild)
     hits = lexstore.search_bm25(tmp_path, "payload", k=10, scope="kb")
     assert hits is not None and len(hits) == 4
     assert _count(side, "pages") == 4
     assert _count(side, "semantic_units") == 4
+    assert _count(side, "fts") == 4
+    assert _count(side, "tri") == 4
+    assert rebuilds == 0
 
 
 def test_out_of_band_single_edit_heals_incrementally_not_full_rebuild(tmp_path):

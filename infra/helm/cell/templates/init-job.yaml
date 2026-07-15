@@ -1,0 +1,78 @@
+{{- if eq .Values.workloadMode "initialize" }}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ .Values.resourceName }}-init
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+    exomem.io/storage-init: "true"
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "initJob") | nindent 4 }}
+spec:
+  backoffLimit: 1
+  activeDeadlineSeconds: 120
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        {{- include "exomem-cell.selectorLabels" . | nindent 8 }}
+        exomem.io/storage-init: "true"
+    spec:
+      runtimeClassName: exomem-storage-init
+      serviceAccountName: {{ .Values.resourceName }}
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: exomem
+          image: {{ .Values.image }}
+          imagePullPolicy: IfNotPresent
+          terminationMessagePath: /dev/termination-log
+          terminationMessagePolicy: File
+          args:
+            - hosted
+            - init
+            - --contract-version
+            - "1"
+            - --request-file
+            - /run/exomem/operator-requests/init.json
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 1
+              memory: 1Gi
+          securityContext:
+            runAsUser: 0
+            runAsGroup: 0
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, DAC_OVERRIDE, FOWNER]
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/exomem
+            - name: credentials
+              mountPath: /run/exomem/credentials
+              readOnly: true
+            - name: init-request
+              mountPath: /run/exomem/operator-requests/init.json
+              subPath: init.json
+              readOnly: true
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Values.resourceName }}-data
+        - name: credentials
+          secret:
+            secretName: {{ .Values.credentialsSecretName }}
+            defaultMode: 0444
+        - name: init-request
+          configMap:
+            name: {{ .Values.resourceName }}-init-request
+            defaultMode: 0444
+{{- end }}

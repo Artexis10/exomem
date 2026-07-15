@@ -1,0 +1,52 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.resourceName }}-default-deny
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "defaultDenyNetworkPolicy") | nindent 4 }}
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+{{- if eq .Values.workloadMode "serve" }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Values.resourceName }}-traefik-ingress
+  labels:
+    {{- include "exomem-cell.labels" . | nindent 4 }}
+  annotations:
+    {{- include "exomem-cell.providerAnnotationsFor" (dict "root" . "key" "traefikIngressNetworkPolicy") | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "exomem-cell.selectorLabels" . | nindent 6 }}
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: exomem-platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: traefik
+              exomem.io/ingress: traefik
+      ports:
+        - protocol: TCP
+          port: 8765
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: exomem-platform
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/name: exomem-durability-actions
+      ports:
+        - protocol: TCP
+          port: 8765
+{{- end }}

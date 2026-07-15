@@ -12,3 +12,16 @@
 !uv.lock
 !README.md
 !LICENSE
+!infra/
+infra/*
+!infra/provisioner/
+infra/provisioner/*
+!infra/provisioner/pyproject.toml
+!infra/provisioner/uv.lock
+!infra/provisioner/README.md
+!infra/provisioner/src/
+!infra/provisioner/src/**
+!infra/helm/
+infra/helm/*
+!infra/helm/cell/
+!infra/helm/cell/**

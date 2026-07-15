@@ -1,0 +1,1164 @@
+{{- $release := include "exomem.hostedReleaseJson" . | mustFromJson -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-provisioner-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["", "apps", "batch", "coordination.k8s.io", "networking.k8s.io", "traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*"]
+        scope: "*"
+  matchConditions:
+    - name: provisioner-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-cell-provisioner'
+  variables:
+    - name: target
+      expression: >-
+        request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)
+    - name: name
+      expression: variables.target.metadata.name
+    - name: labels
+      expression: >-
+        has(variables.target.metadata.labels) ? variables.target.metadata.labels : {}
+    - name: annotations
+      expression: >-
+        has(variables.target.metadata.annotations) ? variables.target.metadata.annotations : {}
+    - name: helmRelease
+      expression: >-
+        request.resource.resource == 'configmaps' &&
+        variables.name.matches('^sh\\.helm\\.release\\.v1\\.' +
+          request.namespace + '\\.v[1-9][0-9]*$')
+  validations:
+    - expression: >-
+        request.resource.resource == 'namespaces'
+          ? (request.operation == 'DELETE'
+              ? oldObject.metadata.name.startsWith('exo-')
+              : object.metadata.name.startsWith('exo-'))
+          : (request.namespace.startsWith('exo-') &&
+              (request.resource.resource != 'secrets' ||
+                (request.operation == 'DELETE'
+                  ? oldObject.metadata.name == 'exomem-cell-credentials'
+                  : object.metadata.name == 'exomem-cell-credentials')))
+      message: The hosted provisioner may mutate only fixed resources in opaque exo-* tenant namespaces.
+    - expression: >-
+        request.resource.resource in [
+          'namespaces', 'configmaps', 'limitranges', 'persistentvolumeclaims',
+          'resourcequotas', 'serviceaccounts', 'services', 'secrets', 'leases',
+          'statefulsets', 'statefulsets/scale', 'jobs', 'networkpolicies',
+          'ingressroutes', 'middlewares'
+        ]
+      message: The hosted provisioner may mutate only the fixed cell resource kinds.
+    - expression: >-
+        request.resource.resource == 'namespaces' ||
+        (request.namespace.startsWith('exo-') &&
+          (
+            (request.resource.resource == 'configmaps' &&
+              (variables.name == request.namespace + '-init-request' ||
+                variables.name.matches('^exo-op-[a-f0-9]{20}$') ||
+                variables.helmRelease)) ||
+            (request.resource.resource == 'limitranges' &&
+              variables.name == request.namespace + '-limits') ||
+            (request.resource.resource == 'persistentvolumeclaims' &&
+              variables.name == request.namespace + '-data') ||
+            (request.resource.resource == 'resourcequotas' &&
+              variables.name == request.namespace + '-quota') ||
+            (request.resource.resource == 'serviceaccounts' &&
+              variables.name == request.namespace) ||
+            (request.resource.resource == 'services' &&
+              variables.name == request.namespace) ||
+            (request.resource.resource == 'secrets' &&
+              variables.name == 'exomem-cell-credentials') ||
+            (request.resource.resource == 'leases' &&
+              variables.name == request.namespace + '-maintenance') ||
+            (request.resource.resource in ['statefulsets', 'statefulsets/scale'] &&
+              variables.name == request.namespace) ||
+            (request.resource.resource == 'jobs' &&
+              variables.name == request.namespace + '-init') ||
+            (request.resource.resource == 'networkpolicies' &&
+              variables.name in [request.namespace + '-default-deny',
+                request.namespace + '-traefik-ingress']) ||
+            (request.resource.resource == 'ingressroutes' &&
+              variables.name in [request.namespace + '-control', request.namespace + '-transfer']) ||
+            (request.resource.resource == 'middlewares' &&
+              variables.name == request.namespace + '-strip-cell')
+          ))
+      message: The hosted provisioner may mutate only exact fixed names derived from the tenant namespace.
+    - expression: >-
+        request.resource.resource != 'namespaces' || request.operation == 'DELETE' ||
+        (variables.labels['exomem.io/tenant-cell'] == 'true' &&
+          variables.labels['exomem.io/cell-resource'] ==
+            variables.annotations['exomem.io/resource-name'] &&
+          variables.labels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.35' &&
+          variables.labels['pod-security.kubernetes.io/audit'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/audit-version'] == 'v1.35' &&
+          variables.labels['pod-security.kubernetes.io/warn'] == 'restricted' &&
+          variables.labels['pod-security.kubernetes.io/warn-version'] == 'v1.35' &&
+          variables.annotations['helm.sh/resource-policy'] == 'keep' &&
+          variables.annotations['exomem.io/pvc-name'] ==
+            variables.annotations['exomem.io/resource-name'] + '-data' &&
+          variables.annotations['exomem.io/credentials-secret-name'] ==
+            'exomem-cell-credentials' &&
+          variables.annotations['exomem.io/init-request-configmap-name'] ==
+            variables.annotations['exomem.io/resource-name'] + '-init-request' &&
+          !('exomem.io/approved-image' in variables.annotations) &&
+          'exomem.io/tenant-id' in variables.annotations &&
+          'exomem.io/cell-id' in variables.annotations &&
+          'exomem.io/operation-id' in variables.annotations &&
+          'exomem.io/tenant-digest' in variables.annotations &&
+          'exomem.io/subject-digest' in variables.annotations &&
+          'exomem.io/operation-digest' in variables.annotations &&
+          'exomem.io/fence' in variables.annotations &&
+          'exomem.io/recovery-envelope' in variables.annotations)
+      message: The hosted provisioner may mutate only the exact restricted tenant namespace contract.
+    - expression: >-
+        !variables.helmRelease ||
+        (variables.labels['owner'] == 'helm' &&
+          variables.labels['name'] == request.namespace &&
+          variables.labels['status'] in [
+            'pending-install', 'pending-upgrade', 'deployed', 'superseded', 'failed'
+          ] &&
+          variables.labels['version'].matches('^[1-9][0-9]*$') &&
+          variables.name == 'sh.helm.release.v1.' + request.namespace +
+            '.v' + variables.labels['version'] &&
+          size(variables.target.data) == 1 &&
+          'release' in variables.target.data &&
+          variables.target.data['release'].size() > 0 &&
+          variables.target.data['release'].size() <= 1048576)
+      message: Helm state is limited to one bounded ConfigMap for this exact tenant release revision.
+    - expression: >-
+        !(request.resource.resource in [
+          'persistentvolumeclaims', 'services', 'secrets', 'statefulsets', 'jobs',
+          'networkpolicies', 'ingressroutes', 'middlewares'
+        ]) ||
+        (variables.labels['exomem.io/cell'] == request.namespace &&
+          'exomem.io/tenant-id' in variables.annotations &&
+          'exomem.io/cell-id' in variables.annotations &&
+          'exomem.io/fence' in variables.annotations &&
+          'exomem.io/recovery-envelope' in variables.annotations)
+      message: Fixed tenant resources must carry their namespace-bound provider identity.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (variables.target.spec.accessModes == ['ReadWriteOnce'] &&
+          variables.target.spec.volumeMode == 'Filesystem' &&
+          variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
+          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+      message: The hosted provisioner may manage only the exact encrypted 10 GiB tenant PVC.
+    - expression: >-
+        request.resource.resource != 'services' || request.operation == 'DELETE' ||
+        (variables.target.spec.type == 'ClusterIP' &&
+          variables.target.spec.selector == {
+            'app.kubernetes.io/name': 'exomem-cell',
+            'exomem.io/cell': request.namespace
+          } &&
+          size(variables.target.spec.ports) == 1 &&
+          variables.target.spec.ports[0].name == 'http' &&
+          variables.target.spec.ports[0].port == 8765 &&
+          variables.target.spec.ports[0].targetPort == 'http' &&
+          variables.target.spec.ports[0].protocol == 'TCP')
+      message: The hosted provisioner may manage only the exact private ClusterIP cell service.
+    - expression: >-
+        request.resource.resource != 'statefulsets' || request.operation == 'DELETE' ||
+        (variables.target.spec.serviceName == request.namespace &&
+          variables.target.spec.replicas in [0, 1] &&
+          variables.target.spec.selector.matchLabels == {
+            'app.kubernetes.io/name': 'exomem-cell',
+            'exomem.io/cell': request.namespace
+          } &&
+          variables.target.spec.template.metadata.labels ==
+            variables.target.spec.selector.matchLabels &&
+          variables.target.spec.template.spec.serviceAccountName == request.namespace &&
+          size(variables.target.spec.template.spec.containers) == 1 &&
+          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}')
+      message: The hosted provisioner may manage only the exact pinned single-cell StatefulSet.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation != 'DELETE'
+      message: NetworkPolicy deletion is reserved for namespace destruction.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        (variables.name == request.namespace + '-default-deny'
+          ? (variables.target.spec.podSelector == {} &&
+              variables.target.spec.policyTypes == ['Ingress', 'Egress'] &&
+              !has(variables.target.spec.ingress) && !has(variables.target.spec.egress))
+          : (variables.target.spec.podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'exomem-cell',
+                'exomem.io/cell': request.namespace
+              } &&
+              variables.target.spec.policyTypes == ['Ingress'] &&
+              size(variables.target.spec.ingress) == 2 &&
+              size(variables.target.spec.ingress[0].from) == 1 &&
+              variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels == {
+                'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
+              } &&
+              variables.target.spec.ingress[0].from[0].podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'traefik',
+                'exomem.io/ingress': 'traefik'
+              } &&
+              size(variables.target.spec.ingress[0].ports) == 1 &&
+              variables.target.spec.ingress[0].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[0].ports[0].port == 8765 &&
+              size(variables.target.spec.ingress[1].from) == 1 &&
+              variables.target.spec.ingress[1].from[0].namespaceSelector.matchLabels == {
+                'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'
+              } &&
+              variables.target.spec.ingress[1].from[0].podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'exomem-durability-actions'
+              } &&
+              size(variables.target.spec.ingress[1].ports) == 1 &&
+              variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              !has(variables.target.spec.egress)))
+      message: The hosted provisioner may manage only the exact default-deny and platform ingress policies.
+    - expression: >-
+        request.resource.resource != 'middlewares' || request.operation == 'DELETE' ||
+        (size(variables.target.spec.stripPrefix.prefixes) == 1 &&
+          variables.target.spec.stripPrefix.prefixes[0] ==
+            '/cells/' + variables.annotations['exomem.io/cell-id'])
+      message: The hosted provisioner may manage only the exact cell path-stripping middleware.
+    - expression: >-
+        request.resource.resource != 'ingressroutes' || request.operation == 'DELETE' ||
+        (variables.target.spec.entryPoints == ['web'] &&
+          size(variables.target.spec.routes) == 1 &&
+          variables.target.spec.routes[0].kind == 'Rule' &&
+          size(variables.target.spec.routes[0].middlewares) == 1 &&
+          variables.target.spec.routes[0].middlewares[0].name == request.namespace + '-strip-cell' &&
+          size(variables.target.spec.routes[0].services) == 1 &&
+          variables.target.spec.routes[0].services[0].name == request.namespace &&
+          variables.target.spec.routes[0].services[0].port == 8765 &&
+          (variables.name == request.namespace + '-control'
+            ? variables.target.spec.routes[0].match ==
+                'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1`) || PathPrefix(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] + '/private/exomem/v1/`))'
+            : variables.target.spec.routes[0].match ==
+                'Host(`{{ .Values.provisioner.transferHostname }}`) && (Path(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] +
+                '/public/exomem/v2/transfers/upload`) || Path(`/cells/' +
+                variables.annotations['exomem.io/cell-id'] +
+                '/public/exomem/v2/transfers/download`))'))
+      message: The hosted provisioner may manage only exact private cell routes to the same namespace service.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-provisioner-scope
+spec:
+  policyName: exomem-provisioner-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-durability-actions-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["", "apps", "batch", "coordination.k8s.io", "networking.k8s.io", "traefik.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["*"]
+        scope: Namespaced
+  matchConditions:
+    - name: durability-actions-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-durability-actions'
+  variables:
+    - name: target
+      expression: >-
+        request.operation == 'DELETE' ? dyn(oldObject) : dyn(object)
+    - name: name
+      expression: variables.target.metadata.name
+    - name: labels
+      expression: >-
+        has(variables.target.metadata.labels) ? variables.target.metadata.labels : {}
+    - name: annotations
+      expression: >-
+        has(variables.target.metadata.annotations) ? variables.target.metadata.annotations : {}
+    - name: resourceName
+      expression: namespaceObject.metadata.annotations['exomem.io/resource-name']
+    - name: restoreResource
+      expression: >-
+        (request.resource.resource == 'configmaps' &&
+          variables.name.matches('^restore-[a-f0-9]{20}-request$')) ||
+        (request.resource.resource == 'secrets' &&
+          variables.name.matches('^restore-[a-f0-9]{20}-source$')) ||
+        (request.resource.resource == 'networkpolicies' &&
+          variables.name.matches('^restore-[a-f0-9]{20}-egress$')) ||
+        (request.resource.resource == 'jobs' &&
+          variables.name.matches('^restore-[a-f0-9]{20}$'))
+    - name: restorePod
+      expression: >-
+        request.resource.resource == 'pods' &&
+        'job-name' in variables.labels &&
+        variables.labels['job-name'].matches('^restore-[a-f0-9]{20}$') &&
+        variables.name.startsWith(variables.labels['job-name'] + '-') &&
+        variables.name.size() == variables.labels['job-name'].size() + 6
+    - name: helmRelease
+      expression: >-
+        request.resource.resource == 'configmaps' &&
+        variables.name.matches('^sh\\.helm\\.release\\.v1\\.' +
+          variables.resourceName + '\\.v[1-9][0-9]*$')
+    - name: chartResource
+      expression: >-
+        (request.resource.resource == 'persistentvolumeclaims' &&
+          variables.name == variables.resourceName + '-data') ||
+        (request.resource.resource == 'limitranges' &&
+          variables.name == variables.resourceName + '-limits') ||
+        (request.resource.resource == 'resourcequotas' &&
+          variables.name == variables.resourceName + '-quota') ||
+        (request.resource.resource == 'serviceaccounts' &&
+          variables.name == variables.resourceName) ||
+        (request.resource.resource == 'services' &&
+          variables.name == variables.resourceName) ||
+        (request.resource.resource == 'statefulsets' &&
+          variables.name == variables.resourceName) ||
+        (request.resource.resource == 'networkpolicies' &&
+          variables.name in [variables.resourceName + '-default-deny',
+            variables.resourceName + '-traefik-ingress']) ||
+        (request.resource.resource == 'ingressroutes' &&
+          variables.name in [variables.resourceName + '-control',
+            variables.resourceName + '-transfer']) ||
+        (request.resource.resource == 'middlewares' &&
+          variables.name == variables.resourceName + '-strip-cell')
+  validations:
+    - expression: >-
+        has(namespaceObject.metadata.labels) &&
+        namespaceObject.metadata.labels['exomem.io/tenant-cell'] == 'true' &&
+        request.namespace.startsWith('exo-') &&
+        has(namespaceObject.metadata.annotations) &&
+        'exomem.io/resource-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/pvc-name' in namespaceObject.metadata.annotations &&
+        'exomem.io/credentials-secret-name' in namespaceObject.metadata.annotations &&
+        namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] ==
+          'exomem-cell-credentials' &&
+        'exomem.io/tenant-id' in namespaceObject.metadata.annotations &&
+        'exomem.io/cell-id' in namespaceObject.metadata.annotations
+      message: Durability actions may mutate only authenticated opaque tenant namespaces.
+    - expression: >-
+        (request.operation == 'CREATE' &&
+          ((request.resource.resource == 'configmaps' &&
+              (variables.name.matches('^restore-[a-f0-9]{20}-request$') ||
+                variables.helmRelease)) ||
+            (request.resource.resource == 'secrets' &&
+              variables.name.matches('^restore-[a-f0-9]{20}-source$')) ||
+            (request.resource.resource == 'networkpolicies' &&
+              (variables.name.matches('^restore-[a-f0-9]{20}-egress$') ||
+                variables.name == variables.resourceName + '-traefik-ingress')) ||
+            (request.resource.resource == 'jobs' &&
+              variables.name.matches('^restore-[a-f0-9]{20}$')) ||
+            (request.resource.resource == 'leases' &&
+              variables.name == variables.resourceName + '-maintenance') ||
+            (request.resource.resource == 'services' &&
+              variables.name == variables.resourceName) ||
+            (request.resource.resource == 'statefulsets' &&
+              variables.name == variables.resourceName) ||
+            (request.resource.resource == 'ingressroutes' &&
+              variables.name in [variables.resourceName + '-control',
+                variables.resourceName + '-transfer']) ||
+            (request.resource.resource == 'middlewares' &&
+              variables.name == variables.resourceName + '-strip-cell'))) ||
+        (request.operation == 'UPDATE' &&
+          ((request.resource.resource == 'configmaps' && variables.helmRelease) ||
+            (request.resource.resource in [
+                'serviceaccounts', 'services', 'statefulsets', 'statefulsets/scale'
+              ] &&
+              variables.name == variables.resourceName) ||
+            (request.resource.resource == 'persistentvolumeclaims' &&
+              variables.name == variables.resourceName + '-data') ||
+            (request.resource.resource == 'limitranges' &&
+              variables.name == variables.resourceName + '-limits') ||
+            (request.resource.resource == 'resourcequotas' &&
+              variables.name == variables.resourceName + '-quota') ||
+            (request.resource.resource == 'networkpolicies' &&
+              variables.name in [variables.resourceName + '-default-deny',
+                variables.resourceName + '-traefik-ingress']) ||
+            (request.resource.resource == 'leases' &&
+              variables.name == variables.resourceName + '-maintenance') ||
+            (request.resource.resource == 'ingressroutes' &&
+              variables.name in [variables.resourceName + '-control',
+                variables.resourceName + '-transfer']) ||
+            (request.resource.resource == 'middlewares' &&
+              variables.name == variables.resourceName + '-strip-cell'))) ||
+        (request.operation == 'DELETE' &&
+          ((request.resource.resource == 'configmaps' &&
+              (variables.name.matches('^restore-[a-f0-9]{20}-request$') ||
+                variables.name == variables.resourceName + '-init-request' ||
+                variables.helmRelease)) ||
+            (request.resource.resource == 'secrets' &&
+              variables.name.matches('^restore-[a-f0-9]{20}-source$')) ||
+            (request.resource.resource == 'networkpolicies' &&
+              (variables.name.matches('^restore-[a-f0-9]{20}-egress$') ||
+                variables.name == variables.resourceName + '-traefik-ingress')) ||
+            (request.resource.resource == 'jobs' &&
+              (variables.name.matches('^restore-[a-f0-9]{20}$') ||
+                variables.name == variables.resourceName + '-init')) ||
+            (request.resource.resource in ['services', 'statefulsets'] &&
+              variables.name == variables.resourceName) ||
+            (request.resource.resource == 'pods' &&
+              (variables.name == variables.resourceName + '-0' ||
+                variables.restorePod)) ||
+            (request.resource.resource == 'leases' &&
+              variables.name == variables.resourceName + '-maintenance') ||
+            (request.resource.resource == 'ingressroutes' &&
+              variables.name in [variables.resourceName + '-control',
+                variables.resourceName + '-transfer']) ||
+            (request.resource.resource == 'middlewares' &&
+              variables.name == variables.resourceName + '-strip-cell')))
+      message: Durability actions may mutate only exact restore, maintenance, promotion, and route resources.
+    - expression: >-
+        !variables.chartResource ||
+        (variables.labels['app.kubernetes.io/name'] == 'exomem-cell' &&
+          variables.labels['exomem.io/cell'] == variables.resourceName &&
+          variables.annotations['exomem.io/tenant-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/tenant-id'] &&
+          variables.annotations['exomem.io/cell-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/cell-id'] &&
+          'exomem.io/operation-id' in variables.annotations &&
+          'exomem.io/operation-digest' in variables.annotations &&
+          'exomem.io/fence' in variables.annotations &&
+          'exomem.io/recovery-envelope' in variables.annotations)
+      message: Helm reconciliation is limited to authenticated fixed cell-chart resources.
+    - expression: >-
+        !variables.helmRelease ||
+        (variables.labels['owner'] == 'helm' &&
+          variables.labels['name'] == variables.resourceName &&
+          variables.labels['status'] in [
+            'pending-install', 'pending-upgrade', 'deployed', 'superseded', 'failed'
+          ] &&
+          variables.labels['version'].matches('^[1-9][0-9]*$') &&
+          variables.name == 'sh.helm.release.v1.' + variables.resourceName +
+            '.v' + variables.labels['version'] &&
+          size(variables.target.data) == 1 &&
+          'release' in variables.target.data &&
+          variables.target.data['release'].size() > 0 &&
+          variables.target.data['release'].size() <= 1048576)
+      message: Helm state is limited to one bounded ConfigMap for this exact tenant release revision.
+    - expression: >-
+        !variables.restoreResource ||
+        (variables.labels['app.kubernetes.io/name'] == 'exomem-restore-candidate' &&
+          variables.labels['exomem.io/cell'] == request.namespace &&
+          variables.labels['exomem.io/restore-candidate'] == 'true' &&
+          variables.labels['exomem.io/cell-id'] ==
+            variables.annotations['exomem.io/cell-id'] &&
+          variables.labels['exomem.io/operation-digest'].matches('^[a-f0-9]{32}$') &&
+          variables.labels['exomem.io/fence'] == variables.annotations['exomem.io/fence'] &&
+          variables.annotations['exomem.io/tenant-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/tenant-id'] &&
+          variables.annotations['exomem.io/cell-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/cell-id'] &&
+          variables.annotations['exomem.io/operation-id'].matches('^[A-Za-z0-9][A-Za-z0-9._:-]{0,255}$') &&
+          variables.annotations['exomem.io/fence'].matches('^[1-9][0-9]{0,15}$') &&
+          int(variables.annotations['exomem.io/fence']) <= 9007199254740991)
+      message: Restore resources must carry the exact authenticated candidate identity.
+    - expression: >-
+        !variables.restorePod ||
+        (variables.labels['app.kubernetes.io/name'] == 'exomem-restore-candidate' &&
+          variables.labels['exomem.io/cell'] == request.namespace &&
+          variables.labels['exomem.io/restore-candidate'] == 'true' &&
+          variables.labels['exomem.io/cell-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/cell-id'] &&
+          variables.labels['exomem.io/operation-digest'].matches('^[a-f0-9]{32}$') &&
+          variables.labels['exomem.io/fence'].matches('^[1-9][0-9]{0,15}$') &&
+          int(variables.labels['exomem.io/fence']) <= 9007199254740991)
+      message: Restore Pod deletion is limited to the exact authenticated candidate Job Pod.
+    - expression: >-
+        request.resource.resource != 'configmaps' || request.operation == 'DELETE' ||
+        variables.helmRelease ||
+        (variables.restoreResource && variables.target.immutable == true &&
+          size(variables.target.data) == 1 &&
+          'restore-candidate.json' in variables.target.data &&
+          variables.target.data['restore-candidate.json'].size() <= 65536 &&
+          variables.annotations['exomem.io/restore-request-sha256'].matches('^[a-f0-9]{64}$'))
+      message: Durability actions may create only one immutable bounded restore request ConfigMap.
+    - expression: >-
+        request.resource.resource != 'secrets' || request.operation == 'DELETE' ||
+        (variables.target.type == 'Opaque' && variables.target.immutable == true &&
+          has(variables.target.stringData) && size(variables.target.stringData) == 1 &&
+          variables.target.stringData['url'].startsWith('https://') &&
+          variables.target.stringData['url'].contains('?') &&
+          variables.target.stringData['url'].size() <= 4096 &&
+          variables.annotations['exomem.io/restore-source-sha256'].matches('^[a-f0-9]{64}$'))
+      message: Durability actions may create only the immutable presigned restore-source Secret.
+    - expression: >-
+        request.resource.resource != 'networkpolicies' || request.operation == 'DELETE' ||
+        (variables.name == variables.resourceName + '-default-deny'
+          ? (variables.target.spec.podSelector == {} &&
+              variables.target.spec.policyTypes == ['Ingress', 'Egress'] &&
+              !has(variables.target.spec.ingress) && !has(variables.target.spec.egress))
+          : variables.name == variables.resourceName + '-traefik-ingress'
+          ? (variables.target.spec.podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'exomem-cell',
+                'exomem.io/cell': variables.resourceName
+              } &&
+              variables.target.spec.policyTypes == ['Ingress'] &&
+              size(variables.target.spec.ingress) == 2 &&
+              variables.target.spec.ingress[0].from[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
+              variables.target.spec.ingress[0].from[0].podSelector.matchLabels == {
+                'app.kubernetes.io/name': 'traefik', 'exomem.io/ingress': 'traefik'
+              } &&
+              size(variables.target.spec.ingress[0].ports) == 1 &&
+              variables.target.spec.ingress[0].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[0].ports[0].port == 8765 &&
+              variables.target.spec.ingress[1].from[0].namespaceSelector.matchLabels ==
+                {'kubernetes.io/metadata.name': '{{ .Release.Namespace }}'} &&
+              variables.target.spec.ingress[1].from[0].podSelector.matchLabels ==
+                {'app.kubernetes.io/name': 'exomem-durability-actions'} &&
+              size(variables.target.spec.ingress[1].ports) == 1 &&
+              variables.target.spec.ingress[1].ports[0].protocol == 'TCP' &&
+              variables.target.spec.ingress[1].ports[0].port == 8765 &&
+              !has(variables.target.spec.egress))
+          : (variables.target.spec.podSelector.matchLabels == variables.labels &&
+          variables.target.spec.policyTypes == ['Egress'] &&
+          size(variables.target.spec.egress) == 2 &&
+          size(variables.target.spec.egress[0].to) == 1 &&
+          variables.target.spec.egress[0].to[0].namespaceSelector.matchLabels ==
+            {'kubernetes.io/metadata.name': 'kube-system'} &&
+          variables.target.spec.egress[0].to[0].podSelector.matchLabels ==
+            {'k8s-app': 'kube-dns'} &&
+          size(variables.target.spec.egress[0].ports) == 2 &&
+          variables.target.spec.egress[0].ports[0].protocol == 'UDP' &&
+          variables.target.spec.egress[0].ports[0].port == 53 &&
+          variables.target.spec.egress[0].ports[1].protocol == 'TCP' &&
+          variables.target.spec.egress[0].ports[1].port == 53 &&
+          size(variables.target.spec.egress[1].to) == 1 &&
+          variables.target.spec.egress[1].to[0].ipBlock.cidr == '0.0.0.0/0' &&
+          variables.target.spec.egress[1].to[0].ipBlock.except ==
+            ['10.0.0.0/8', '100.64.0.0/10', '127.0.0.0/8', '169.254.0.0/16',
+              '172.16.0.0/12', '192.168.0.0/16'] &&
+          size(variables.target.spec.egress[1].ports) == 1 &&
+          variables.target.spec.egress[1].ports[0].protocol == 'TCP' &&
+          variables.target.spec.egress[1].ports[0].port == 443 &&
+          variables.annotations['exomem.io/restore-egress-sha256'].matches('^[a-f0-9]{64}$')))
+      message: Restore egress is limited to cluster DNS and public HTTPS excluding private and metadata ranges.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        (variables.target.spec.backoffLimit == 0 &&
+          variables.target.spec.activeDeadlineSeconds == 3600 &&
+          variables.target.spec.ttlSecondsAfterFinished == 300 &&
+          variables.target.spec.template.spec.serviceAccountName == variables.resourceName &&
+          variables.target.spec.template.spec.automountServiceAccountToken == false &&
+          variables.target.spec.template.spec.restartPolicy == 'Never' &&
+          variables.target.spec.template.spec.securityContext.runAsNonRoot == true &&
+          variables.target.spec.template.spec.securityContext.seccompProfile.type == 'RuntimeDefault' &&
+          variables.target.spec.template.spec.securityContext.fsGroup == 10001 &&
+          variables.target.spec.template.spec.securityContext.fsGroupChangePolicy == 'OnRootMismatch' &&
+          size(variables.target.spec.template.spec.initContainers) == 1 &&
+          size(variables.target.spec.template.spec.containers) == 1 &&
+          variables.annotations['exomem.io/restore-job-sha256'].matches('^[a-f0-9]{64}$'))
+      message: Restore Jobs must use the exact bounded no-token candidate pod contract.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        (variables.target.spec.template.spec.initContainers[0].name == 'fetch-restore-source' &&
+          variables.target.spec.template.spec.initContainers[0].image ==
+            {{ .Values.provisioner.image | quote }} &&
+          variables.target.spec.template.spec.initContainers[0].imagePullPolicy == 'IfNotPresent' &&
+          size(variables.target.spec.template.spec.initContainers[0].command) == 11 &&
+          variables.target.spec.template.spec.initContainers[0].command[0] == 'exomem-restore-fetch' &&
+          variables.target.spec.template.spec.initContainers[0].command[1] == '--url-file' &&
+          variables.target.spec.template.spec.initContainers[0].command[2] == '/run/exomem/restore-source/url' &&
+          variables.target.spec.template.spec.initContainers[0].command[3] == '--output' &&
+          variables.target.spec.template.spec.initContainers[0].command[4].matches('^/system-scratch/[A-Za-z0-9][A-Za-z0-9._-]{0,127}$') &&
+          variables.target.spec.template.spec.initContainers[0].command[5] == '--expected-sha256' &&
+          variables.target.spec.template.spec.initContainers[0].command[6].matches('^[a-f0-9]{64}$') &&
+          variables.target.spec.template.spec.initContainers[0].command[7] == '--expected-size' &&
+          variables.target.spec.template.spec.initContainers[0].command[8].matches('^[1-9][0-9]{0,9}$') &&
+          int(variables.target.spec.template.spec.initContainers[0].command[8]) <= 6442450944 &&
+          variables.target.spec.template.spec.initContainers[0].command[9] == '--allowed-host' &&
+          variables.target.spec.template.spec.initContainers[0].command[10].matches('^[A-Za-z0-9.-]{1,253}$'))
+      message: Restore fetch init must use the exact pinned provisioner fetch command.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        (variables.target.spec.template.spec.containers[0].name == 'restore-candidate' &&
+          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}' &&
+          variables.target.spec.template.spec.containers[0].imagePullPolicy == 'IfNotPresent' &&
+          variables.target.spec.template.spec.containers[0].command ==
+            ['exomem', 'hosted', 'restore-candidate', '--contract-version', '1',
+              '--request-file', '/run/exomem/operator-requests/restore-candidate.json'] &&
+          variables.target.spec.template.spec.containers[0].securityContext.allowPrivilegeEscalation == false &&
+          variables.target.spec.template.spec.containers[0].securityContext.readOnlyRootFilesystem == true &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsNonRoot == true &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsUser == 10001 &&
+          variables.target.spec.template.spec.containers[0].securityContext.runAsGroup == 10001 &&
+          variables.target.spec.template.spec.containers[0].securityContext.capabilities.drop == ['ALL'])
+      message: Restore candidate must use the exact pinned runtime command and restricted identity.
+    - expression: >-
+        request.resource.resource != 'jobs' || request.operation == 'DELETE' ||
+        (size(variables.target.spec.template.spec.volumes) == 6 &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'operator-request' &&
+            volume.configMap.name == variables.name + '-request' &&
+            volume.configMap.defaultMode == 292 &&
+            size(volume.configMap.items) == 1 &&
+            volume.configMap.items[0].key == 'restore-candidate.json' &&
+            volume.configMap.items[0].path == 'restore-candidate.json' &&
+            volume.configMap.items[0].mode == 292) &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'restore-source' &&
+            volume.secret.secretName == variables.name + '-source' &&
+            volume.secret.defaultMode == 256 &&
+            size(volume.secret.items) == 1 &&
+            volume.secret.items[0].key == 'url' &&
+            volume.secret.items[0].path == 'url' &&
+            volume.secret.items[0].mode == 256) &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'system-scratch' &&
+            dyn(volume.emptyDir).sizeLimit == '6Gi') &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'target-data' &&
+            volume.persistentVolumeClaim.claimName ==
+              namespaceObject.metadata.annotations['exomem.io/pvc-name']) &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'credentials' &&
+            volume.secret.secretName ==
+              namespaceObject.metadata.annotations['exomem.io/credentials-secret-name'] &&
+            volume.secret.defaultMode == 292) &&
+          variables.target.spec.template.spec.volumes.exists(volume,
+            volume.name == 'tmp' && dyn(volume.emptyDir).sizeLimit == '512Mi'))
+      message: Restore Jobs may mount only the exact request, source, scratch, candidate PVC, credentials, and tmp volumes.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (variables.name == variables.resourceName + '-data' &&
+          variables.target.spec.accessModes == ['ReadWriteOnce'] &&
+          variables.target.spec.volumeMode == 'Filesystem' &&
+          variables.target.spec.storageClassName == 'exomem-hcloud-encrypted-retain' &&
+          variables.target.spec.resources.requests.storage == quantity('10Gi'))
+      message: Durability actions may reconcile only the exact retained encrypted tenant PVC.
+    - expression: >-
+        request.resource.resource != 'serviceaccounts' ||
+        (variables.name == variables.resourceName &&
+          variables.target.automountServiceAccountToken == false)
+      message: Durability actions may reconcile only the no-token cell ServiceAccount.
+    - expression: >-
+        request.resource.resource != 'resourcequotas' ||
+        (variables.name == variables.resourceName + '-quota' &&
+          variables.target.spec.hard['persistentvolumeclaims'] == quantity('1') &&
+          variables.target.spec.hard['requests.storage'] == quantity('10Gi') &&
+          variables.target.spec.hard['pods'] == quantity('2') &&
+          variables.target.spec.hard['requests.cpu'] == quantity('1500m') &&
+          variables.target.spec.hard['requests.memory'] == quantity('1536Mi') &&
+          variables.target.spec.hard['limits.cpu'] == quantity('2') &&
+          variables.target.spec.hard['limits.memory'] == quantity('2Gi'))
+      message: Durability actions may reconcile only the exact bounded cell ResourceQuota.
+    - expression: >-
+        request.resource.resource != 'limitranges' ||
+        (variables.name == variables.resourceName + '-limits' &&
+          size(variables.target.spec.limits) == 1 &&
+          variables.target.spec.limits[0].type == 'Container' &&
+          variables.target.spec.limits[0].defaultRequest.cpu == quantity('100m') &&
+          variables.target.spec.limits[0].defaultRequest.memory == quantity('128Mi') &&
+          variables.target.spec.limits[0].default.cpu == quantity('1') &&
+          variables.target.spec.limits[0].default.memory == quantity('1Gi'))
+      message: Durability actions may reconcile only the exact bounded cell LimitRange.
+    - expression: >-
+        request.resource.resource != 'leases' ||
+        (variables.name == variables.resourceName + '-maintenance' &&
+          variables.annotations['exomem.io/tenant-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/tenant-id'] &&
+          variables.annotations['exomem.io/cell-id'] ==
+            namespaceObject.metadata.annotations['exomem.io/cell-id'])
+      message: Durability actions may coordinate only the authenticated per-cell maintenance lease.
+    - expression: >-
+        request.resource.resource != 'pods' ||
+        (request.operation == 'DELETE' &&
+          (variables.restorePod ||
+            (variables.name == variables.resourceName + '-0' &&
+              variables.labels['app.kubernetes.io/name'] == 'exomem-cell' &&
+              variables.labels['exomem.io/cell'] == variables.resourceName &&
+              variables.labels['statefulset.kubernetes.io/pod-name'] == variables.name &&
+              size(variables.target.metadata.ownerReferences) == 1 &&
+              variables.target.metadata.ownerReferences[0].apiVersion == 'apps/v1' &&
+              variables.target.metadata.ownerReferences[0].kind == 'StatefulSet' &&
+              variables.target.metadata.ownerReferences[0].name == variables.resourceName &&
+              variables.target.metadata.ownerReferences[0].controller == true)))
+      message: Pod deletion is limited to the exact candidate StatefulSet or restore Job Pod.
+    - expression: >-
+        request.resource.resource != 'statefulsets/scale' ||
+        (variables.name == variables.resourceName && variables.target.spec.replicas in [0, 1])
+      message: Durability actions may only stop or start the exact candidate StatefulSet.
+    - expression: >-
+        request.resource.resource != 'statefulsets' ||
+        (variables.name == variables.resourceName &&
+          variables.target.spec.serviceName == variables.resourceName &&
+          variables.target.spec.replicas in [0, 1] &&
+          variables.target.spec.selector.matchLabels ==
+            {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.resourceName} &&
+          variables.target.spec.template.spec.serviceAccountName == variables.resourceName &&
+          variables.target.spec.template.spec.automountServiceAccountToken == false &&
+          size(variables.target.spec.template.spec.containers) == 1 &&
+          variables.target.spec.template.spec.containers[0].image == '{{ $release.runtimeImage }}')
+      message: Durability actions may promote only the exact pinned candidate StatefulSet.
+    - expression: >-
+        request.resource.resource != 'services' ||
+        (variables.name == variables.resourceName &&
+          variables.target.spec.type == 'ClusterIP' &&
+          variables.target.spec.selector ==
+            {'app.kubernetes.io/name': 'exomem-cell', 'exomem.io/cell': variables.resourceName} &&
+          size(variables.target.spec.ports) == 1 &&
+          variables.target.spec.ports[0].name == 'http' &&
+          variables.target.spec.ports[0].port == 8765 &&
+          variables.target.spec.ports[0].targetPort == 'http' &&
+          variables.target.spec.ports[0].protocol == 'TCP')
+      message: Durability actions may promote only the exact private candidate Service.
+    - expression: >-
+        request.resource.resource != 'middlewares' ||
+        (variables.name == variables.resourceName + '-strip-cell' &&
+          variables.target.spec.stripPrefix.prefixes ==
+            ['/cells/' + namespaceObject.metadata.annotations['exomem.io/cell-id']])
+      message: Durability actions may restore only the exact candidate path middleware.
+    - expression: >-
+        request.resource.resource != 'ingressroutes' ||
+        (variables.name in [variables.resourceName + '-control',
+            variables.resourceName + '-transfer'] &&
+          variables.target.spec.entryPoints == ['web'] &&
+          size(variables.target.spec.routes) == 1 &&
+          variables.target.spec.routes[0].kind == 'Rule' &&
+          variables.target.spec.routes[0].middlewares ==
+            [{'name': variables.resourceName + '-strip-cell'}] &&
+          size(variables.target.spec.routes[0].services) == 1 &&
+          variables.target.spec.routes[0].services[0].name == variables.resourceName &&
+          variables.target.spec.routes[0].services[0].port == 8765 &&
+          (variables.name == variables.resourceName + '-control'
+            ? variables.target.spec.routes[0].match ==
+                'Host(`{{ .Values.provisioner.controlHostname }}`) && (Path(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1`) || PathPrefix(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/private/exomem/v1/`))'
+            : variables.target.spec.routes[0].match ==
+                'Host(`{{ .Values.provisioner.transferHostname }}`) && (Path(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/public/exomem/v2/transfers/upload`) || Path(`/cells/' +
+                namespaceObject.metadata.annotations['exomem.io/cell-id'] +
+                '/public/exomem/v2/transfers/download`))'))
+      message: Durability actions may close or promote only the exact candidate routes.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-durability-actions-scope
+spec:
+  policyName: exomem-durability-actions-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-durability-actions-namespace-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces"]
+        scope: Cluster
+  matchConditions:
+    - name: durability-actions-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-durability-actions'
+  variables:
+    - name: labels
+      expression: >-
+        has(object.metadata.labels) ? object.metadata.labels : {}
+    - name: annotations
+      expression: >-
+        has(object.metadata.annotations) ? object.metadata.annotations : {}
+    - name: oldAnnotations
+      expression: >-
+        has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+  validations:
+    - expression: >-
+        object.metadata.name.startsWith('exo-') &&
+        object.metadata.name == oldObject.metadata.name &&
+        variables.labels['exomem.io/tenant-cell'] == 'true' &&
+        variables.labels['exomem.io/cell-resource'] ==
+          variables.annotations['exomem.io/resource-name'] &&
+        variables.labels['pod-security.kubernetes.io/enforce'] == 'restricted' &&
+        variables.labels['pod-security.kubernetes.io/enforce-version'] == 'v1.35' &&
+        variables.labels['pod-security.kubernetes.io/audit'] == 'restricted' &&
+        variables.labels['pod-security.kubernetes.io/audit-version'] == 'v1.35' &&
+        variables.labels['pod-security.kubernetes.io/warn'] == 'restricted' &&
+        variables.labels['pod-security.kubernetes.io/warn-version'] == 'v1.35' &&
+        variables.annotations['helm.sh/resource-policy'] == 'keep' &&
+        variables.annotations['exomem.io/pvc-name'] ==
+          variables.annotations['exomem.io/resource-name'] + '-data' &&
+        variables.annotations['exomem.io/credentials-secret-name'] ==
+          'exomem-cell-credentials' &&
+        variables.annotations['exomem.io/init-request-configmap-name'] ==
+          variables.annotations['exomem.io/resource-name'] + '-init-request' &&
+        !('exomem.io/approved-image' in variables.annotations) &&
+        variables.annotations['exomem.io/tenant-id'] ==
+          variables.oldAnnotations['exomem.io/tenant-id'] &&
+        variables.annotations['exomem.io/cell-id'] ==
+          variables.oldAnnotations['exomem.io/cell-id'] &&
+        variables.annotations['exomem.io/tenant-digest'] ==
+          variables.oldAnnotations['exomem.io/tenant-digest'] &&
+        variables.annotations['exomem.io/subject-digest'] ==
+          variables.oldAnnotations['exomem.io/subject-digest'] &&
+        'exomem.io/operation-id' in variables.annotations &&
+        'exomem.io/operation-digest' in variables.annotations &&
+        'exomem.io/fence' in variables.annotations &&
+        'exomem.io/recovery-envelope' in variables.annotations
+      message: Durability actions may update only the exact authenticated tenant namespace contract.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-durability-actions-namespace-scope
+spec:
+  policyName: exomem-durability-actions-namespace-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-durability-backup-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["coordination.k8s.io"]
+        apiVersions: ["*"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["leases"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["*"]
+        operations: ["UPDATE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+  matchConditions:
+    - name: durability-backup-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-durability-backup'
+  validations:
+    - expression: request.namespace.startsWith('exo-')
+      message: The durability worker may coordinate only opaque exo-* tenant namespaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-durability-backup-scope
+spec:
+  policyName: exomem-durability-backup-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-deletion-worker-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["namespaces", "persistentvolumes"]
+        scope: Cluster
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["DELETE"]
+        resources: ["secrets"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["DELETE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["namespaces"]
+        scope: Cluster
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["UPDATE"]
+        resources: ["statefulsets"]
+        scope: Namespaced
+      - apiGroups: ["traefik.io"]
+        apiVersions: ["v1alpha1"]
+        operations: ["UPDATE"]
+        resources: ["ingressroutes"]
+        scope: Namespaced
+  matchConditions:
+    - name: deletion-worker-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-deletion-worker'
+  validations:
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        (request.resource.resource == 'namespaces' &&
+          oldObject.metadata.name == object.metadata.name &&
+          object.metadata.name.startsWith('exo-') &&
+          oldObject.metadata.labels == object.metadata.labels &&
+          dyn(oldObject).spec == dyn(object).spec)
+      message: The deletion worker may update only metadata on an exo-* tenant namespace.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        (has(oldObject.metadata.annotations) &&
+          has(object.metadata.annotations) &&
+          oldObject.metadata.annotations.all(k,
+            k == 'exomem.io/credential-deletion-operation-digest' ||
+            k == 'exomem.io/credential-deletion-fence' ||
+            (k in object.metadata.annotations &&
+              oldObject.metadata.annotations[k] == object.metadata.annotations[k])) &&
+          object.metadata.annotations.all(k,
+            k == 'exomem.io/credential-deletion-operation-digest' ||
+            k == 'exomem.io/credential-deletion-fence' ||
+            (k in oldObject.metadata.annotations &&
+              object.metadata.annotations[k] == oldObject.metadata.annotations[k])))
+      message: The deletion worker may change only the credential-deletion receipt annotations.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        ('exomem.io/credentials-secret-name' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credentials-secret-name'] == 'exomem-cell-credentials' &&
+          'exomem.io/credential-deletion-operation-digest' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credential-deletion-operation-digest'].matches('^[a-f0-9]{64}$') &&
+          'exomem.io/credential-deletion-fence' in object.metadata.annotations &&
+          object.metadata.annotations['exomem.io/credential-deletion-fence'].matches('^[1-9][0-9]{0,15}$') &&
+          int(object.metadata.annotations['exomem.io/credential-deletion-fence']) <= 9007199254740991)
+      message: The deletion worker must write a bounded content-free credential-deletion receipt.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource != 'namespaces' ||
+        ((('exomem.io/credential-deletion-operation-digest' in oldObject.metadata.annotations) ==
+            ('exomem.io/credential-deletion-fence' in oldObject.metadata.annotations)) &&
+          (!('exomem.io/credential-deletion-fence' in oldObject.metadata.annotations) ||
+            (oldObject.metadata.annotations['exomem.io/credential-deletion-fence'].matches('^[1-9][0-9]{0,15}$') &&
+              int(oldObject.metadata.annotations['exomem.io/credential-deletion-fence']) <= 9007199254740991 &&
+              (int(object.metadata.annotations['exomem.io/credential-deletion-fence']) >
+                int(oldObject.metadata.annotations['exomem.io/credential-deletion-fence']) ||
+                (object.metadata.annotations['exomem.io/credential-deletion-fence'] ==
+                  oldObject.metadata.annotations['exomem.io/credential-deletion-fence'] &&
+                  object.metadata.annotations['exomem.io/credential-deletion-operation-digest'] ==
+                    oldObject.metadata.annotations['exomem.io/credential-deletion-operation-digest'])))))
+      message: The deletion worker receipt must be idempotent or advance its fencing token.
+    - expression: >-
+        request.operation != 'UPDATE' || request.resource.resource == 'namespaces'
+      message: The deletion worker may update only the namespace deletion receipt.
+    - expression: >-
+        request.operation != 'DELETE' ||
+        ((request.resource.resource == 'persistentvolumes' &&
+            has(oldObject.metadata.annotations) &&
+            'exomem.io/recovery-envelope' in oldObject.metadata.annotations &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() >= 64 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$')) ||
+          (request.resource.resource == 'namespaces' &&
+            oldObject.metadata.name.startsWith('exo-')) ||
+          (request.resource.resource == 'secrets' &&
+            request.namespace.startsWith('exo-') &&
+            oldObject.metadata.name == 'exomem-cell-credentials') ||
+          (request.resource.resource == 'ingressroutes' &&
+            request.namespace.startsWith('exo-') &&
+            has(oldObject.metadata.labels) &&
+            oldObject.metadata.labels['exomem.io/tenant-route'] == 'true' &&
+            has(oldObject.metadata.annotations) &&
+              'exomem.io/recovery-envelope' in oldObject.metadata.annotations &&
+              oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() >= 64 &&
+              oldObject.metadata.annotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+            oldObject.metadata.annotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$')))
+      message: The deletion worker may delete only authenticated resources in opaque exo-* tenant namespaces.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-deletion-worker-scope
+spec:
+  policyName: exomem-deletion-worker-scope
+  validationActions: [Deny]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: exomem-volume-worker-scope
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["persistentvolumes", "persistentvolumeclaims"]
+        scope: "*"
+  matchConditions:
+    - name: volume-worker-service-account
+      expression: >-
+        request.userInfo.username ==
+        'system:serviceaccount:{{ .Release.Namespace }}:exomem-volume-worker'
+  variables:
+    - name: newAnnotations
+      expression: >-
+        object != null && has(object.metadata.annotations) ? object.metadata.annotations : {}
+    - name: oldAnnotations
+      expression: >-
+        oldObject != null && has(oldObject.metadata.annotations) ? oldObject.metadata.annotations : {}
+    - name: newIdentity
+      expression: >-
+        'exomem.io/recovery-envelope' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].size() >= 64 &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+        variables.newAnnotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$') &&
+        'exomem.io/tenant-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/cell-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/operation-id' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/tenant-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/tenant-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/subject-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/subject-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/operation-digest' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/fence' in variables.newAnnotations &&
+        variables.newAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
+    - name: oldIdentity
+      expression: >-
+        'exomem.io/recovery-envelope' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].size() >= 64 &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].size() <= 8192 &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'].matches('^[A-Za-z0-9_-]+$') &&
+        'exomem.io/tenant-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/tenant-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/cell-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/cell-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/operation-id' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/operation-id'].matches('^[A-Za-z0-9_.:/-]{1,256}$') &&
+        'exomem.io/tenant-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/tenant-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/subject-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/subject-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/operation-digest' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/operation-digest'].matches('^[a-f0-9]{64}$') &&
+        'exomem.io/fence' in variables.oldAnnotations &&
+        variables.oldAnnotations['exomem.io/fence'].matches('^[1-9][0-9]{0,18}$')
+    - name: identityUnchanged
+      expression: >-
+        variables.oldIdentity && variables.newIdentity &&
+        variables.oldAnnotations['exomem.io/recovery-envelope'] == variables.newAnnotations['exomem.io/recovery-envelope'] &&
+        variables.oldAnnotations['exomem.io/tenant-id'] == variables.newAnnotations['exomem.io/tenant-id'] &&
+        variables.oldAnnotations['exomem.io/cell-id'] == variables.newAnnotations['exomem.io/cell-id'] &&
+        variables.oldAnnotations['exomem.io/operation-id'] == variables.newAnnotations['exomem.io/operation-id'] &&
+        variables.oldAnnotations['exomem.io/tenant-digest'] == variables.newAnnotations['exomem.io/tenant-digest'] &&
+        variables.oldAnnotations['exomem.io/subject-digest'] == variables.newAnnotations['exomem.io/subject-digest'] &&
+        variables.oldAnnotations['exomem.io/operation-digest'] == variables.newAnnotations['exomem.io/operation-digest'] &&
+        variables.oldAnnotations['exomem.io/fence'] == variables.newAnnotations['exomem.io/fence']
+  validations:
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.namespace.startsWith('exo-') &&
+          (request.operation == 'DELETE'
+            ? oldObject.metadata.name == request.namespace + '-data'
+            : object.metadata.name == request.namespace + '-data') &&
+          (request.operation == 'DELETE' ? variables.oldIdentity : variables.newIdentity) &&
+          (request.operation == 'DELETE'
+            ? (has(oldObject.metadata.labels) &&
+                oldObject.metadata.labels['exomem.io/resource-name'] == request.namespace)
+            : (has(object.metadata.labels) &&
+                object.metadata.labels['exomem.io/resource-name'] == request.namespace)))
+      message: The volume worker requires an immutable authenticated hosted PVC identity.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).storageClassName == 'exomem-hcloud-encrypted-retain'
+          : dyn(object.spec).storageClassName == 'exomem-hcloud-encrypted-retain')
+      message: The volume worker requires the encrypted Retain storage class.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).accessModes == ['ReadWriteOnce']
+          : dyn(object.spec).accessModes == ['ReadWriteOnce'])
+      message: The volume worker requires exactly ReadWriteOnce access.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? quantity(dyn(oldObject.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0
+          : quantity(dyn(object.spec).resources.requests['storage']).compareTo(quantity('10Gi')) == 0)
+      message: The volume worker requires exactly 10 GiB of requested storage.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? dyn(oldObject.spec).volumeMode == 'Filesystem'
+          : dyn(object.spec).volumeMode == 'Filesystem')
+      message: The volume worker requires Filesystem volume mode.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        (request.operation == 'DELETE'
+          ? (has(dyn(oldObject.spec).volumeName) &&
+              dyn(oldObject.spec).volumeName.matches('^[a-z0-9][a-z0-9-]{0,252}$'))
+          : (has(dyn(object.spec).volumeName) &&
+              dyn(object.spec).volumeName.matches('^[a-z0-9][a-z0-9-]{0,252}$')))
+      message: The volume worker requires a statically bound volume name.
+    - expression: >-
+        request.resource.resource != 'persistentvolumeclaims' ||
+        request.operation != 'UPDATE' ||
+        (variables.identityUnchanged && oldObject.spec == object.spec)
+      message: The volume worker may not change a hosted PVC identity or specification.
+    - expression: >-
+        request.resource.resource != 'persistentvolumes' ||
+        ((request.operation == 'DELETE' ? variables.oldIdentity : variables.newIdentity) &&
+          (request.operation != 'UPDATE' ||
+            (oldObject.spec == object.spec &&
+              (!variables.oldIdentity || variables.identityUnchanged))))
+      message: The volume worker requires an immutable authenticated hosted PV identity.
+    - expression: >-
+        request.resource.resource != 'persistentvolumes' ||
+        (request.operation == 'DELETE'
+          ? (has(dyn(oldObject.spec).csi) &&
+              dyn(oldObject.spec).csi.driver == 'csi.hetzner.cloud' &&
+              dyn(oldObject.spec).csi.fsType == 'ext4' &&
+              has(dyn(oldObject.spec).csi.nodePublishSecretRef) &&
+              dyn(oldObject.spec).csi.nodePublishSecretRef.name == {{ .Values.storage.encryptionSecretName | quote }} &&
+              dyn(oldObject.spec).csi.nodePublishSecretRef.namespace == {{ .Values.storage.encryptionSecretNamespace | quote }} &&
+              dyn(oldObject.spec).csi.volumeHandle.matches('^[1-9][0-9]{0,19}$') &&
+              dyn(oldObject.spec).accessModes == ['ReadWriteOnce'] &&
+              quantity(dyn(oldObject.spec).capacity['storage']).compareTo(quantity('10Gi')) == 0 &&
+              dyn(oldObject.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+              dyn(oldObject.spec).storageClassName == 'exomem-hcloud-encrypted-retain' &&
+              dyn(oldObject.spec).volumeMode == 'Filesystem' &&
+              has(dyn(oldObject.spec).claimRef) &&
+              dyn(oldObject.spec).claimRef.namespace.startsWith('exo-') &&
+              dyn(oldObject.spec).claimRef.name == dyn(oldObject.spec).claimRef.namespace + '-data' &&
+              has(oldObject.metadata.labels) &&
+              oldObject.metadata.labels['exomem.io/resource-name'] == dyn(oldObject.spec).claimRef.namespace)
+          : (has(dyn(object.spec).csi) &&
+              dyn(object.spec).csi.driver == 'csi.hetzner.cloud' &&
+              dyn(object.spec).csi.fsType == 'ext4' &&
+              has(dyn(object.spec).csi.nodePublishSecretRef) &&
+              dyn(object.spec).csi.nodePublishSecretRef.name == {{ .Values.storage.encryptionSecretName | quote }} &&
+              dyn(object.spec).csi.nodePublishSecretRef.namespace == {{ .Values.storage.encryptionSecretNamespace | quote }} &&
+              dyn(object.spec).csi.volumeHandle.matches('^[1-9][0-9]{0,19}$') &&
+              dyn(object.spec).accessModes == ['ReadWriteOnce'] &&
+              quantity(dyn(object.spec).capacity['storage']).compareTo(quantity('10Gi')) == 0 &&
+              dyn(object.spec).persistentVolumeReclaimPolicy == 'Retain' &&
+              dyn(object.spec).storageClassName == 'exomem-hcloud-encrypted-retain' &&
+              dyn(object.spec).volumeMode == 'Filesystem' &&
+              has(dyn(object.spec).claimRef) &&
+              dyn(object.spec).claimRef.namespace.startsWith('exo-') &&
+              dyn(object.spec).claimRef.name == dyn(object.spec).claimRef.namespace + '-data' &&
+              has(object.metadata.labels) &&
+              object.metadata.labels['exomem.io/resource-name'] == dyn(object.spec).claimRef.namespace))
+      message: The volume worker requires the exact encrypted 10 GiB Retain HCloud PV specification.
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: exomem-volume-worker-scope
+spec:
+  policyName: exomem-volume-worker-scope
+  validationActions: [Deny]

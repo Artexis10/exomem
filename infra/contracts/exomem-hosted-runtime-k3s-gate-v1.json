@@ -1,0 +1,12 @@
+{
+  "artifact": "exomem-hosted-runtime-k3s-gate",
+  "schemaVersion": 1,
+  "k3sImage": "rancher/k3s@sha256:9d6b9c15e8031c1aea7dd7f0cdc019f5e74a23c53b9eada564b7a8dc94efc14c",
+  "sourceRepository": "https://github.com/Artexis10/exomem",
+  "sourceCommit": "54618b931dec8f0ad053dce48dd80cc36c95c549",
+  "release": "0.22.0",
+  "hostedProtocol": "1",
+  "dockerTarget": "hosted",
+  "releaseBuildTime": "2026-07-14T05:37:15Z",
+  "operatorContractSha256": "407799e723e9d996e5ab15ca76c071c3ae497041a1096f106690712ce6fe4ca6"
+}

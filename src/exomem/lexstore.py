@@ -644,8 +644,8 @@ class LexicalStore:
             for row in conn.execute("SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages")
         }
         with conn:
-            # Manual owner-row deletion can leave contentless FTS rows behind.
-            # Purge them before SQLite reuses one of the missing rowids.
+            # External owner-row corruption can leave page and semantic-unit
+            # index rows behind; purge them before SQLite reuses rowids.
             self._delete_orphan_rows(conn)
             for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
                 w = walk.get(rel)

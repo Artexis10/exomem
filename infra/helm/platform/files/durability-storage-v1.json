@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "terraformRoot": "durability",
+  "kubernetes": {
+    "namespace": "exomem-platform",
+    "configMap": "exomem-durability-storage"
+  },
+  "bindings": {
+    "recovery_bucket_name": {
+      "configMapKey": "recovery-bucket",
+      "workerEnvironmentVariable": "EXOMEM_DURABILITY_RECOVERY_BUCKET"
+    },
+    "user_export_bucket_name": {
+      "configMapKey": "user-export-bucket",
+      "workerEnvironmentVariable": "EXOMEM_DURABILITY_USER_EXPORT_BUCKET"
+    },
+    "database_backup_bucket_name": {
+      "configMapKey": "database-backup-bucket",
+      "workerEnvironmentVariable": "EXOMEM_DURABILITY_DATABASE_BACKUP_BUCKET"
+    }
+  },
+  "operatorBindings": {
+    "s3Endpoint": {
+      "configMapKey": "s3-endpoint",
+      "workerEnvironmentVariable": "EXOMEM_DURABILITY_B2_ENDPOINT_URL"
+    },
+    "s3Region": {
+      "configMapKey": "s3-region",
+      "workerEnvironmentVariable": "EXOMEM_DURABILITY_B2_REGION"
+    }
+  }
+}

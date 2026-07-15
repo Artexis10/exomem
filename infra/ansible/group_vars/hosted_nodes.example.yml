@@ -1,0 +1,12 @@
+---
+base_admin_ssh_cidrs:
+  - 192.0.2.1/32
+base_administrator_authorized_keys:
+  - ssh-ed25519 replace-with-operator-public-key
+
+k3s_server_token: replace-with-high-entropy-cluster-token
+k3s_etcd_s3_endpoint: s3.eu-central-003.backblazeb2.com
+k3s_etcd_s3_region: eu-central-003
+k3s_etcd_s3_bucket: replace-with-database-backup-bucket
+k3s_etcd_s3_access_key: replace-with-database-backup-key-id
+k3s_etcd_s3_secret_key: replace-with-database-backup-application-key
