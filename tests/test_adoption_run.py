@@ -514,3 +514,49 @@ def test_verify_counts_absent_before_any_apply(tmp_path: Path) -> None:
     status = adoption_run.status(vault, run_id=run["run_id"])
     assert "verified_unchanged" not in status
     assert "verified_total" not in status
+
+
+def _nested_vault(root: Path) -> Path:
+    """A vault whose selection needs rule specificity: parent off, child on."""
+    vault = _legacy_vault(root)
+    work = vault / "Old Notes" / "work"
+    work.mkdir()
+    (work / "goals.md").write_text("# Goals\n\nShip it.\n", encoding="utf-8")
+    recipes = vault / "Recipes"
+    recipes.mkdir()
+    (recipes / "carbonara.md").write_text("# Carbonara\n", encoding="utf-8")
+    return vault
+
+
+def test_select_rules_apply_by_specificity(tmp_path: Path) -> None:
+    """A deeper rule overrides its ancestor regardless of include/exclude order.
+
+    This is the UI's tri-state contract: unchecking a folder then re-checking a
+    subfolder sends include=[child], exclude=[parent] and must keep the child.
+    """
+    vault = _nested_vault(tmp_path)
+    run = adoption_run.start(vault, today=TODAY)
+    run_id = run["run_id"]
+
+    ok = adoption_run.select(
+        vault,
+        run_id=run_id,
+        include=["Old Notes/work", "Recipes"],
+        exclude=["Old Notes"],
+    )
+    assert set(ok["selection"]["paths"]) == {
+        "Old Notes/work/goals.md",
+        "Recipes/carbonara.md",
+    }
+
+    # A file-path exclude is the deepest rule of all: it wins over its folder.
+    ok = adoption_run.select(
+        vault,
+        run_id=run_id,
+        include=["Old Notes"],
+        exclude=["Old Notes/standup.txt"],
+    )
+    assert set(ok["selection"]["paths"]) == {
+        "Old Notes/quarterly-planning.md",
+        "Old Notes/work/goals.md",
+    }

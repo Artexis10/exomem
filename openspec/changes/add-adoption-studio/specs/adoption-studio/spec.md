@@ -44,6 +44,12 @@ An adoption run SHALL be a canonical-file-backed object stored under `Knowledge 
 - **THEN** the server materializes the concrete selected paths from the depth-capped tree and records them
 - **AND** any unsupported, missing, or already-governed path is returned in a per-path rejection list with its code
 
+#### Scenario: A deeper rule overrides its ancestor
+
+- **WHEN** `select` is called with `exclude` of a folder and `include` of one of its subfolders (the UI's uncheck-parent, re-check-child gesture)
+- **THEN** rules apply in ascending path depth so the subfolder's files stay selected while the rest of the excluded folder is dropped
+- **AND** a file-path `exclude` is the deepest rule of all and wins over its folder's rule
+
 #### Scenario: Changing the selection invalidates the plan
 
 - **WHEN** a run in phase `planned` receives a `select` call that changes the materialized set

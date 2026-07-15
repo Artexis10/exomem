@@ -67,14 +67,19 @@ def test_tristate_selection_math_with_nested_override_and_junk_default_off() -> 
       const overridden = {{
         counts: selectionCounts(inventory, sel),
         archive: folderState(sel, tree, 'Archive'),
-        payload: selectionPayload(sel),
+        payload: selectionPayload(sel, ['Docs', 'Archive']),
       }};
+
+      // An OFF file override under a default-on folder rides `exclude`.
+      const fileOff = selectionPayload(
+        overrideFile(initialSelection(tree, {{}}), 'Docs/Notes/b.md', false),
+        ['Docs', 'Archive']);
 
       // A child folder toggled off makes the parent tri-state mixed.
       const childMixed = folderState(
         toggleFolder(initialSelection(tree, {{}}), 'Docs/Notes', false), tree, 'Docs');
 
-      console.log(JSON.stringify({{base, archiveOff, overridden, childMixed}}));
+      console.log(JSON.stringify({{base, archiveOff, overridden, childMixed, fileOff}}));
     """
 
     result = _node(source)
@@ -90,10 +95,19 @@ def test_tristate_selection_math_with_nested_override_and_junk_default_off() -> 
 
     assert result["overridden"]["counts"]["selectedNotes"] == 3
     assert result["overridden"]["archive"] == "mixed"
+    # Untouched default-on roots become explicit includes; the explicit
+    # Archive-off rule stays an exclude; the ON file override is add-only.
     assert result["overridden"]["payload"] == {
-        "include": [],
+        "include": ["Docs"],
         "exclude": ["Archive"],
         "overrides": ["Archive/c.md"],
+        "include_junk": False,
+    }
+
+    assert result["fileOff"] == {
+        "include": ["Archive", "Docs"],
+        "exclude": ["Docs/Notes/b.md"],
+        "overrides": [],
         "include_junk": False,
     }
 

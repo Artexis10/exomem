@@ -83,14 +83,23 @@ export function selectionCounts(inventory, sel) {
   };
 }
 
-export function selectionPayload(sel) {
+export function selectionPayload(sel, roots = []) {
   const include = [];
   const exclude = [];
   for (const [key, value] of Object.entries(sel.folders)) (value ? include : exclude).push(key);
+  // Folders default ON, but the engine materializes additively from explicit
+  // rules — so every untouched top-level root becomes an explicit include,
+  // and deeper OFF rules win by the engine's specificity ordering.
+  for (const root of roots) {
+    if (!Object.prototype.hasOwnProperty.call(sel.folders, root)) include.push(root);
+  }
+  // Engine overrides are add-only: an OFF file override is a file-path exclude.
+  const overrides = [];
+  for (const [key, value] of Object.entries(sel.files)) (value ? overrides : exclude).push(key);
   return {
     include: include.sort(),
     exclude: exclude.sort(),
-    overrides: Object.keys(sel.files).sort(),
+    overrides: overrides.sort(),
     include_junk: !!sel.includeJunk,
   };
 }

@@ -526,9 +526,20 @@ function effectiveOn(path) {
   return counts.selectedNotes === 1;
 }
 
+function selectionRoots() {
+  const roots = new Set();
+  for (const row of inventoryRows()) {
+    if (!row || !row.eligible) continue;
+    const path = String(row.path || "");
+    const cut = path.indexOf("/");
+    roots.add(cut === -1 ? path : path.slice(0, cut));
+  }
+  return [...roots].sort();
+}
+
 async function persistSelection() {
   if (!run) return;
-  const payload = selectionPayload(selection);
+  const payload = selectionPayload(selection, selectionRoots());
   const result = await adoptionApi.select(run.run_id, payload);
   if (result && typeof result.selected_count === "number") {
     setStatus(`${result.selected_count} of ${result.selectable_count} text notes selected · junk ${selection.includeJunk ? "included" : "skipped"}`);
@@ -1149,7 +1160,9 @@ function leaveToReview() {
 function wireRovingTabindex(container) {
   container.addEventListener("keydown", (event) => {
     if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
-    const inputs = [...container.querySelectorAll("input[type=checkbox]")];
+    // Disabled boxes (non-importable files) can't take focus — skip them so
+    // arrowing never dead-ends and silently drops keyboard focus.
+    const inputs = [...container.querySelectorAll("input[type=checkbox]:not(:disabled)")];
     const current = inputs.indexOf(document.activeElement);
     let next = event.key === "End" ? inputs.length - 1 : 0;
     if (event.key === "ArrowDown") next = Math.min(inputs.length - 1, current + 1);

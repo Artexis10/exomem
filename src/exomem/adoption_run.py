@@ -304,23 +304,35 @@ def _materialize_selection(
     overrides: list[str],
     include_junk: bool,
 ) -> tuple[list[str], list[dict]]:
-    """Materialize the concrete file set from folder rules, validating per-path."""
+    """Materialize the concrete file set from folder rules, validating per-path.
+
+    Include/exclude entries are subtree (or exact-file) rules applied in
+    ascending path depth, so a deeper rule always overrides its ancestor —
+    the UI's tri-state contract (uncheck a folder, re-check a subfolder).
+    At equal depth an exclude wins over an include of the same path.
+    """
     eligible = {r["path"] for r in run.get("inventory") or [] if r.get("eligible")}
     junk = set(run.get("scan_summary", {}).get("junk_paths") or [])
     accepted: set[str] = set()
     rejected: list[dict] = []
 
+    rules: list[tuple[int, int, str, bool]] = []
     for inc in include:
         incn = _clean(inc)
-        matches = {p for p in eligible if p == incn or p.startswith(incn + "/")}
-        if matches:
-            accepted |= matches
+        if any(p == incn or p.startswith(incn + "/") for p in eligible):
+            rules.append((len(incn.split("/")), 0, incn, True))
         else:
             rejected.append(_reject(incn, _classify_path(run, incn)))
-
     for exc in exclude:
         excn = _clean(exc)
-        accepted = {p for p in accepted if not (p == excn or p.startswith(excn + "/"))}
+        rules.append((len(excn.split("/")), 1, excn, False))
+
+    for _depth, _tie, pathn, on in sorted(rules):
+        subtree = {p for p in eligible if p == pathn or p.startswith(pathn + "/")}
+        if on:
+            accepted |= subtree
+        else:
+            accepted -= subtree
 
     override_set = {_clean(o) for o in overrides}
     for ov in sorted(override_set):
