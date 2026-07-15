@@ -210,11 +210,28 @@ def test_path_guard_rejects_pending_parent_swap_after_prior_replacement(
 
     monkeypatch.setattr(vault.os, "replace", swap_after_first)
 
-    with pytest.raises(vault.PathGuardError):
+    with pytest.raises(vault.BatchWriteError) as incomplete:
         vault.batch_atomic_write(writes, vault_root=tmp_path)
 
+    assert incomplete.value.code == "BATCH_CLEANUP_INCOMPLETE"
+    assert incomplete.value.committed is False
+    assert incomplete.value.as_public_dict()["outcome"] == {
+        "kind": "cleanup_incomplete",
+        "committed": False,
+        "incomplete": True,
+        "affected_count": 2,
+        "targets": ["first/one.md", "pending/two.md"],
+        "omitted_target_count": 0,
+    }
+    assert isinstance(incomplete.value.__cause__, vault.PathGuardError)
+    assert incomplete.value.__cause__.code == "PATH_GUARD_CHANGED"
     assert not first.exists()
     assert not pending.exists()
+    assert list(first_dir.glob(".exomem-batch-*")) == []
+    retained = list((tmp_path / "pending-old").glob(".exomem-batch-*"))
+    assert len(retained) == 1
+    assert [path.name for path in retained[0].iterdir()] == ["stage-1.tmp"]
+    assert (retained[0] / "stage-1.tmp").read_text(encoding="utf-8") == "two"
 
 
 def test_vault_creation_lock_rejects_nested_namespaces_and_hashes_filename(
