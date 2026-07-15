@@ -198,6 +198,8 @@ class Hit:
     graph_provenance: GraphProvenance | None = None
     matched_units: list[dict[str, Any]] | None = None
     matched_units_truncated: int = 0
+    result_type: str | None = None
+    mixed_units_truncated: int = 0
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -236,6 +238,10 @@ class Hit:
             out["matched_units"] = self.matched_units
             if self.matched_units_truncated:
                 out["matched_units_truncated"] = self.matched_units_truncated
+        if self.result_type is not None:
+            out["result_type"] = self.result_type
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
         signals: dict = {}
         if self.bm25_rank is not None:
             signals["bm25_rank"] = self.bm25_rank
@@ -301,6 +307,10 @@ class Hit:
             out["matched_units"] = self.matched_units
             if self.matched_units_truncated:
                 out["matched_units_truncated"] = self.matched_units_truncated
+        if self.result_type is not None:
+            out["result_type"] = self.result_type
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
         return out
 
 
@@ -330,6 +340,9 @@ class SemanticUnitHit:
     parent_superseded_by: list[str] = field(default_factory=list)
     bm25_rank: int | None = None
     bm25_score: float | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+    mixed_units_truncated: int = 0
 
     def as_dict(self) -> dict[str, Any]:
         out: dict[str, Any] = {
@@ -356,17 +369,23 @@ class SemanticUnitHit:
         }
         if self.parent_superseded_by:
             out["parent_superseded_by"] = self.parent_superseded_by
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
         signals: dict[str, Any] = {}
         if self.bm25_rank is not None:
             signals["bm25_rank"] = self.bm25_rank
         if self.bm25_score is not None:
             signals["bm25_score"] = round(self.bm25_score, 6)
+        if self.vector_rank is not None:
+            signals["vector_rank"] = self.vector_rank
+        if self.vector_score is not None:
+            signals["vector_score"] = round(self.vector_score, 6)
         if signals:
             out["signals"] = signals
         return out
 
     def as_compact_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "result_type": "semantic_unit",
             "unit_ref": self.unit_ref,
             "category": self.category,
@@ -380,6 +399,9 @@ class SemanticUnitHit:
             "parent_status": self.parent_status,
             "parent_updated": self.parent_updated,
         }
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
+        return out
 
 
 class FindTimings:

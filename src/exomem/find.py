@@ -337,7 +337,7 @@ def find(
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
-) -> list[Hit] | list[SemanticUnitHit]:
+) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
     `degraded_out`: optional caller-owned list. While the background warm-up
@@ -518,6 +518,8 @@ def find(
 
     walk_scope = "vault" if scope == "vault" else "kb"
     resolved_config = config if config is not None else _active_ranking()
+    degraded = degraded_out if degraded_out is not None else []
+    failed = failed_out if failed_out is not None else []
     if effective_result_level == "unit":
         if timings is not None:
             timings.cache["enabled"] = False
@@ -530,16 +532,16 @@ def find(
             snapshot=snapshot,
             prefer_active=prefer_active,
             config=resolved_config,
+            mode=mode,
+            degraded_out=degraded,
+            failed_out=failed,
         )
-    if effective_result_level == "mixed":
-        raise NotImplementedError(
-            "mixed semantic-unit recall is implemented in the next recall slice"
-        )
+    mixed = effective_result_level == "mixed"
 
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
     # log freshness never has to enter the cache key.
-    cache_size = 0 if prefer_used else _find_cache_size()
+    cache_size = 0 if prefer_used or mixed else _find_cache_size()
     cache_key: tuple | None = None
     if timings is not None:
         timings.cache["enabled"] = cache_size > 0
@@ -574,11 +576,25 @@ def find(
     # Track warm-window degradation even when the caller passed no list —
     # internal callers (suggest_links, evolution, note/add sweeps) must never
     # cache a lexical-only ranking that would outlive the warm.
-    degraded = degraded_out if degraded_out is not None else []
     # Same rationale for POST-WARM lane failures: a BM25-only result produced
     # because the vector lane threw must not be cached and served after the
     # sidecar/model recovers. Tracked internally even when the caller passes None.
-    failed = failed_out if failed_out is not None else []
+    mixed_unit_hits: list[SemanticUnitHit] = []
+    if mixed:
+        with _span(timings, "semantic_units"):
+            mixed_unit_hits = _find_semantic_units(
+                vault_root,
+                query=query,
+                limit=None,
+                scope=walk_scope,
+                plan=filter_plan,
+                snapshot=snapshot,
+                prefer_active=prefer_active,
+                config=resolved_config,
+                mode=mode,
+                degraded_out=degraded,
+                failed_out=failed,
+            )
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -683,6 +699,14 @@ def find(
         with _span(timings, "matched_units"):
             _annotate_matched_units(vault_root, hits, filter_plan)
 
+    if mixed:
+        return _merge_mixed_hits(
+            hits,
+            mixed_unit_hits,
+            limit=limit,
+            config=resolved_config,
+        )
+
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
     # A result produced with warm-deferred lanes is lexical-only — caching it
     # would keep serving the degraded ranking after the warm completes. A
@@ -715,6 +739,9 @@ def _collapse_frame_children(
 
 
 _MATCHED_UNITS_CAP = 5
+_MIXED_UNITS_PER_PARENT_CAP = 3
+_MIXED_PAGE_WEIGHT = 1.0
+_MIXED_UNIT_WEIGHT = 1.0
 _UNIT_EXCERPT_MAX = 320
 
 
@@ -853,6 +880,8 @@ def _semantic_unit_hit(
     *,
     bm25_rank: int | None,
     bm25_score: float | None,
+    vector_rank: int | None = None,
+    vector_score: float | None = None,
 ) -> SemanticUnitHit:
     return SemanticUnitHit(
         unit_ref=unit.unit_ref,
@@ -877,6 +906,8 @@ def _semantic_unit_hit(
         parent_superseded_by=page.superseded_by,
         bm25_rank=bm25_rank,
         bm25_score=bm25_score,
+        vector_rank=vector_rank,
+        vector_score=vector_score,
     )
 
 
@@ -884,14 +915,17 @@ def _find_semantic_units(
     vault_root: Path,
     *,
     query: str,
-    limit: int,
+    limit: int | None,
     scope: str,
     plan: structured_filters.FilterPlan,
     snapshot: FreshnessSnapshot,
     prefer_active: bool,
     config: RankingConfig,
+    mode: str,
+    degraded_out: list[str] | None,
+    failed_out: list[str] | None,
 ) -> list[SemanticUnitHit]:
-    """Lexical/filter-only unit recall with exact pre-ranking eligibility."""
+    """Rank current, exactly eligible units through lexical and vector lanes."""
     records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
     if not records:
         return []
@@ -906,10 +940,34 @@ def _find_semantic_units(
             ),
             reverse=True,
         )
-        return [
+        ordered_hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
-            for page, unit, _source_order in ordered[:limit]
+            for page, unit, _source_order in ordered
         ]
+        return ordered_hits if limit is None else ordered_hits[:limit]
+
+    if mode == "keyword":
+        tokens = query.lower().split()
+        ordered = sorted(
+            (
+                record
+                for record in records.values()
+                if all(token in record[1].content.lower() for token in tokens)
+            ),
+            key=lambda record: (
+                record[0].updated or "0000-00-00",
+                record[0].rel_path,
+                -record[2],
+            ),
+            reverse=True,
+        )
+        if prefer_active:
+            ordered.sort(key=lambda record: record[0].status == "superseded")
+        hits = [
+            _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
+            for page, unit, _source_order in ordered
+        ]
+        return hits if limit is None else hits[:limit]
 
     from . import lexstore
 
@@ -939,43 +997,208 @@ def _find_semantic_units(
             if set(indexed_scores) == _unit_text_match_refs(records, query)
             else _python_unit_scores(records, query)
         )
-    ranked = sorted(
-        (
-            (
+
+    def _raw_ranking(lane_scores: dict[str, float]) -> list[str]:
+        return sorted(
+            lane_scores,
+            key=lambda unit_ref: (
+                -lane_scores[unit_ref],
+                records[unit_ref][0].rel_path,
+                records[unit_ref][2],
                 unit_ref,
-                raw_score,
-                _unit_rank_score(
-                    raw_score,
+            ),
+        )
+
+    def _preferred_ranking(lane_scores: dict[str, float]) -> list[str]:
+        return sorted(
+            lane_scores,
+            key=lambda unit_ref: (
+                -_unit_rank_score(
+                    lane_scores[unit_ref],
                     page=records[unit_ref][0],
                     prefer_active=prefer_active,
                     config=config,
                 ),
-            )
-            for unit_ref, raw_score in scores.items()
-        ),
-        key=lambda item: (
-            -item[2],
-            bool(
-                prefer_active
-                and records[item[0]][0].status == "superseded"
+                bool(prefer_active and records[unit_ref][0].status == "superseded"),
+                records[unit_ref][0].rel_path,
+                records[unit_ref][2],
+                unit_ref,
             ),
-            records[item[0]][0].rel_path,
-            records[item[0]][2],
-            item[0],
-        ),
-    )
+        )
+
+    lexical_ranking = _raw_ranking(scores)
+    lexical_rank = {unit_ref: rank for rank, unit_ref in enumerate(lexical_ranking, 1)}
+
+    vector_scores: dict[str, float] = {}
+    if mode in ("hybrid", "vector") and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        from . import readiness
+
+        if readiness.should_defer("embeddings"):
+            if degraded_out is not None:
+                degraded_out.append("embeddings")
+        else:
+            try:
+                from . import embeddings
+
+                index = embeddings.get_embedding_index(vault_root)
+                query_vector = embeddings.embed_texts([query], is_query=True)[0]
+                vector_eligible_refs = set(records)
+                if embeddings.index_scope() == "kb":
+                    vector_eligible_refs = {
+                        unit_ref
+                        for unit_ref, (page, _unit, _source_order) in records.items()
+                        if page.rel_path.startswith(kb_prefix())
+                    }
+                vector_hits = (
+                    index.search_semantic_units(
+                        query_vector,
+                        k=len(vector_eligible_refs),
+                        allowed_unit_refs=vector_eligible_refs,
+                    )
+                    if vector_eligible_refs
+                    else []
+                )
+                vector_scores = {
+                    hit.unit_ref: hit.cosine for hit in vector_hits if hit.unit_ref in records
+                }
+                index_path = getattr(index, "path", None)
+                if (
+                    index_path is not None
+                    and index_path.exists()
+                    and set(vector_scores) != vector_eligible_refs
+                ):
+                    log.warning(
+                        "semantic-unit vector coverage is stale/incomplete "
+                        "(%d/%d current rows); using lexical ranking",
+                        len(vector_scores),
+                        len(vector_eligible_refs),
+                    )
+                    _record_degradation("vector")
+                    if failed_out is not None:
+                        failed_out.append("vector")
+                    vector_scores = {}
+            except ImportError as error:
+                log.info(
+                    "semantic-unit vector search unavailable (%s); using lexical ranking",
+                    error,
+                )
+            except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
+                log.warning(
+                    "semantic-unit vector search failed: %s; using lexical ranking",
+                    error,
+                )
+                _record_degradation("vector")
+                if failed_out is not None:
+                    failed_out.append("vector")
+
+    vector_ranking = _raw_ranking(vector_scores)
+    vector_rank = {unit_ref: rank for rank, unit_ref in enumerate(vector_ranking, 1)}
+
+    if not vector_ranking:
+        final_ranking = _preferred_ranking(scores)
+    elif mode == "vector":
+        final_ranking = _preferred_ranking(vector_scores)
+    else:
+        from . import fusion
+
+        weights = config.intent_weights(find_policy.classify_intent(query))
+        fused = fusion.reciprocal_rank_fusion_weighted(
+            [vector_ranking, lexical_ranking],
+            [weights[0], weights[1]],
+            k=config.rrf_k,
+        )
+        final_ranking = [
+            unit_ref
+            for unit_ref, _fused_score in sorted(
+                fused,
+                key=lambda item: (
+                    -_unit_rank_score(
+                        item[1],
+                        page=records[item[0]][0],
+                        prefer_active=prefer_active,
+                        config=config,
+                    ),
+                    bool(prefer_active and records[item[0]][0].status == "superseded"),
+                    records[item[0]][0].rel_path,
+                    records[item[0]][2],
+                    item[0],
+                ),
+            )
+        ]
+
+    if limit is not None:
+        final_ranking = final_ranking[:limit]
+    vector_succeeded = bool(vector_ranking)
     return [
         _semantic_unit_hit(
             records[unit_ref][0],
             records[unit_ref][1],
-            bm25_rank=rank,
-            bm25_score=raw_score,
+            bm25_rank=(
+                lexical_rank.get(unit_ref) if mode != "vector" or not vector_succeeded else None
+            ),
+            bm25_score=(scores.get(unit_ref) if mode != "vector" or not vector_succeeded else None),
+            vector_rank=vector_rank.get(unit_ref),
+            vector_score=vector_scores.get(unit_ref),
         )
-        for rank, (unit_ref, raw_score, _adjusted) in enumerate(
-            ranked[:limit],
-            start=1,
-        )
+        for unit_ref in final_ranking
     ]
+
+
+def _merge_mixed_hits(
+    page_hits: list[Hit],
+    unit_hits: list[SemanticUnitHit],
+    *,
+    limit: int,
+    config: RankingConfig,
+) -> list[Hit | SemanticUnitHit]:
+    """Fuse independent page/unit rankings after exact per-parent unit caps."""
+    kept_units: list[SemanticUnitHit] = []
+    units_by_parent: dict[str, int] = {}
+    omitted_by_parent: dict[str, int] = {}
+    for hit in unit_hits:
+        count = units_by_parent.get(hit.parent_path, 0)
+        if count >= _MIXED_UNITS_PER_PARENT_CAP:
+            omitted_by_parent[hit.parent_path] = omitted_by_parent.get(hit.parent_path, 0) + 1
+            continue
+        units_by_parent[hit.parent_path] = count + 1
+        kept_units.append(hit)
+
+    ranked: list[tuple[float, int, str, Hit | SemanticUnitHit]] = []
+    ranked.extend(
+        (
+            _MIXED_PAGE_WEIGHT / (config.rrf_k + rank),
+            0,
+            hit.path,
+            hit,
+        )
+        for rank, hit in enumerate(page_hits, start=1)
+    )
+    ranked.extend(
+        (
+            _MIXED_UNIT_WEIGHT / (config.rrf_k + rank),
+            1,
+            hit.unit_ref,
+            hit,
+        )
+        for rank, hit in enumerate(kept_units, start=1)
+    )
+    merged = [
+        item[3] for item in sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
+    ]
+
+    first_unit_by_parent: dict[str, SemanticUnitHit] = {}
+    page_by_path: dict[str, Hit] = {}
+    for hit in merged:
+        if isinstance(hit, Hit):
+            hit.result_type = "page"
+            page_by_path[hit.path] = hit
+        else:
+            first_unit_by_parent.setdefault(hit.parent_path, hit)
+    for parent_path, omitted in omitted_by_parent.items():
+        target = page_by_path.get(parent_path) or first_unit_by_parent.get(parent_path)
+        if target is not None:
+            target.mixed_units_truncated = omitted
+    return merged
 
 
 def _annotate_matched_units(

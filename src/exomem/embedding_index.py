@@ -7,6 +7,7 @@ caching, and sqlite-vec fallback behavior. Model loading and encoding stay in
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import sys
@@ -56,6 +57,17 @@ class _EmbCache(NamedTuple):
     mtime: float
     metadata: list[tuple[str, int]]
     matrix: np.ndarray
+
+
+class SemanticUnitVectorHit(NamedTuple):
+    """One current semantic-unit vector candidate with its raw cosine."""
+
+    unit_ref: str
+    parent_path: str
+    parent_generation: str
+    parent_source_hash: str
+    parser_version: int
+    cosine: float
 
 
 class EmbeddingIndex:
@@ -496,6 +508,106 @@ class EmbeddingIndex:
             log.warning("chunk-text fetch failed (%s); returning hits without text", e)
             texts = {}
         return [(fp, ci, texts.get((fp, ci), ""), score) for fp, ci, score in top]
+
+    def search_semantic_units(
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_unit_refs: set[str] | None = None,
+    ) -> list[SemanticUnitVectorHit]:
+        """Return current unit rows ranked by cosine after exact eligibility.
+
+        Semantic-unit rows deliberately use the exact numpy rung even when the
+        optional vec0 page backend is enabled. The allowlist and parent
+        generation/source/parser validation are applied before scoring and
+        top-k, so stale or ineligible high-cosine rows cannot consume the
+        bounded candidate window.
+        """
+        if k <= 0 or not self.path.exists():
+            return []
+        if allowed_unit_refs is not None and not allowed_unit_refs:
+            return []
+
+        conn = self._connect()
+        try:
+            if allowed_unit_refs is None:
+                rows = conn.execute(
+                    "SELECT unit_ref, parent_path, parent_generation, "
+                    "parent_source_hash, parser_version, vector "
+                    "FROM semantic_unit_vectors"
+                ).fetchall()
+            else:
+                rows = conn.execute(
+                    "SELECT unit_ref, parent_path, parent_generation, "
+                    "parent_source_hash, parser_version, vector "
+                    "FROM semantic_unit_vectors "
+                    "WHERE unit_ref IN (SELECT value FROM json_each(?))",
+                    (json.dumps(sorted(allowed_unit_refs), ensure_ascii=False),),
+                ).fetchall()
+        finally:
+            conn.close()
+
+        current_rows: list[tuple[str, str, str, str, int, np.ndarray]] = []
+        freshness_by_stamp: dict[tuple[str, str, str, int], bool] = {}
+        for unit_ref, parent_path, generation, source_hash, parser_version, blob in rows:
+            stamp = (
+                str(parent_path),
+                str(generation),
+                str(source_hash),
+                int(parser_version),
+            )
+            accepted = freshness_by_stamp.get(stamp)
+            if accepted is None:
+                accepted = semantic_index.validate_parent_record(
+                    self.vault_root,
+                    parent_path=stamp[0],
+                    parent_generation_value=stamp[1],
+                    parent_source_hash=stamp[2],
+                    parser_version=stamp[3],
+                ).current
+                freshness_by_stamp[stamp] = accepted
+            if not accepted:
+                continue
+            vector = np.frombuffer(blob, dtype=np.float32)
+            if vector.shape != (VECTOR_DIM,):
+                continue
+            current_rows.append(
+                (
+                    str(unit_ref),
+                    stamp[0],
+                    stamp[1],
+                    stamp[2],
+                    stamp[3],
+                    vector,
+                )
+            )
+        if not current_rows:
+            return []
+
+        query = query_vec.astype(np.float32, copy=False)
+        ranked = sorted(
+            (
+                SemanticUnitVectorHit(
+                    unit_ref,
+                    parent_path,
+                    generation,
+                    source_hash,
+                    parser_version,
+                    float(vector @ query),
+                )
+                for (
+                    unit_ref,
+                    parent_path,
+                    generation,
+                    source_hash,
+                    parser_version,
+                    vector,
+                ) in current_rows
+            ),
+            key=lambda hit: (-hit.cosine, hit.unit_ref),
+        )
+        return ranked[:k]
 
     def _texts_for(self, pairs: list[tuple[str, int]]) -> dict[tuple[str, int], str]:
         """chunk_text for `(file_path, chunk_idx)` pairs — search's top-k only.

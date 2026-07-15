@@ -50,10 +50,10 @@
 
 ## 6. First-Class Recall, Explanation, Read, And Context
 
-- [ ] 6.1 Add failing recall tests for `auto|page|unit|mixed`, byte-compatible default page recall, OR-within-list/AND-across text-category-kind-structured-filter axes, empty-query filter lookup, parent caps, and truncation.
+- [x] 6.1 Add failing recall tests for `auto|page|unit|mixed`, byte-compatible default page recall, OR-within-list/AND-across text-category-kind-structured-filter axes, empty-query filter lookup, parent caps, and truncation.
 - [ ] 6.2 Define page/unit hit and exact-read response models with parent citation, anchor/span/hash, lifecycle, ranking, degradation, and optional explanation fields.
-- [ ] 6.3 Implement unit lexical/vector candidate lanes and metadata filters before ranking; keep default page ranking unchanged.
-- [ ] 6.4 Implement page `matched_units`, independently ranked unit results, and bounded mixed fusion/grouping.
+- [x] 6.3 Implement unit lexical/vector candidate lanes and metadata filters before ranking; keep default page ranking unchanged.
+- [x] 6.4 Implement page `matched_units`, independently ranked unit results, and bounded mixed fusion/grouping.
 - [ ] 6.5 Preserve raw BM25 backend scores through candidate collection; preserve vector/CLIP cosine, keyword/graph/temporal ranks, fusion inputs/contributions, boost factors, reranker values, and final sortable values without overloading one score.
 - [ ] 6.6 Add failing `explain=false|true` tests for byte-compatible defaults, compact no-content-leak behavior, top-level retrieval plan, effective filters/result level, lane availability/degradation/nonparticipation, filter-only/single-lane no-fusion behavior, actual sort tuples/tie-breaks, and bounded response size.
 - [ ] 6.7 Implement versioned `retrieval_profile` with intent, requested/effective modes, normalized filters, lanes/reasons/weights, backend/model/metric direction/range/rounding, fusion constants, rerank decision, compute context needed for interpretation, and final-order/tie-break policy.
