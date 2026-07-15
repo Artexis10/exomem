@@ -237,7 +237,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-10.1",
+        "contract_version": "2026-07-15.1",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -273,6 +273,15 @@ def op_bootstrap(
                 "adopt_vault or browse_memory when first seeing an existing vault",
                 "ask_memory for cheap product recall",
                 "read_memory or ask_memory(deep=true) when more context is needed",
+                (
+                    "show the note title by default in normal user-facing prose and do not "
+                    "expose the raw canonical ref by default; add the current vault-relative "
+                    "path for clarity or disambiguation, or use the path or file name as the "
+                    "visible fallback when the title is unusable; keep the canonical "
+                    "exomem://memory/<uuid> ref for tool arguments, durable machine state, "
+                    "and machine-readable automation; show it only when the user explicitly "
+                    "asks for it or the identifier itself is being inspected or debugged"
+                ),
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",
                 "remember, edit_memory, or replace_memory when there is a durable conclusion",

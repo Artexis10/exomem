@@ -239,9 +239,15 @@ Examples:
 
 New governed pages and evidence sidecars carry an immutable `exomem_id`, and
 write responses return both a current `path` and a canonical
-`exomem://memory/<uuid>` reference. Use the reference when a later workflow must
-survive moves or renames; paths remain valid and are usually easier to show to a
-person. Never invent, copy, or edit an `exomem_id` by hand.
+`exomem://memory/<uuid>` reference. In normal user-facing prose, show the note
+title by default and do not expose the raw canonical ref by default. Add the
+current vault-relative path for clarity or disambiguation; if the title is
+missing or unusable, use the path or file name as the visible fallback.
+
+Keep the canonical ref for tool arguments, durable machine state, and
+machine-readable automation so identity survives moves and renames. Show the
+raw ref only when the user explicitly asks for it or the identifier itself is
+being inspected or debugged. Never invent, copy, or edit an `exomem_id` by hand.
 
 Legacy pages are not rewritten automatically. To add IDs, first run
 `maintain_memory(mode="backfill-ids")` in its default dry-run mode, inspect the

@@ -51,9 +51,16 @@ index + log update is implicit.
 Every new governed page and evidence Markdown sidecar receives an immutable
 `exomem_id` UUID. Writers return both its current vault-relative `path` and a
 canonical `exomem://memory/<uuid>` reference. Commands that accept a governed
-page identifier accept either form. Prefer the reference for durable automation
-or citations that must survive moves; keep showing paths when they are clearer
-to a person.
+page identifier accept either form. In normal user-facing prose, show the note
+title by default and do not expose the raw canonical ref by default. Add the
+current vault-relative path for clarity or disambiguation; if the title is
+missing or unusable, use the path or file name as the visible fallback.
+
+Keep the canonical ref for tool arguments, durable machine state, and
+machine-readable automation so identity survives moves and renames. Show the
+raw ref only when the user explicitly asks for it or the identifier itself is
+being inspected or debugged. Do not embed the canonical ref as a Markdown link
+target when a client could expose its UUID; use a plain title-first citation.
 
 Do not manually create, copy, or modify IDs. Legacy pages remain untouched until
 `maintain_memory(mode="backfill-ids")` is requested. That mode is a dry run by
