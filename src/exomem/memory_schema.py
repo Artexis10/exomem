@@ -1301,12 +1301,12 @@ def resolve_contracts(
                 ),
                 provenance=tuple(sorted((*types.provenance, *enum.provenance))),
             )
-        )
+    )
     for namespace in _NAMESPACES:
-        allowed = constraint_map.get((namespace, "*", "allowed"))
-        if allowed is None or allowed.value is None:
+        allowed_constraint = constraint_map.get((namespace, "*", "allowed"))
+        if allowed_constraint is None or allowed_constraint.value is None:
             continue
-        allowed_set = set(allowed.value)
+        allowed_set = set(allowed_constraint.value)
         for constraint in resolved_constraints:
             if (
                 constraint.namespace != namespace
@@ -1316,13 +1316,19 @@ def resolve_contracts(
                 or constraint.element in allowed_set
             ):
                 continue
-            provenance = tuple(sorted((*constraint.provenance, *allowed.provenance)))
+            provenance = tuple(
+                sorted((*constraint.provenance, *allowed_constraint.provenance))
+            )
             conflicts.append(
                 ContractResolutionConflict(
                     code="CONTRACT_RULE_CONFLICT",
                     resolved_rule=constraint.identity,
                     contracts=tuple(
-                        sorted(set((*constraint.contracts, *allowed.contracts)))
+                        sorted(
+                            set(
+                                (*constraint.contracts, *allowed_constraint.contracts)
+                            )
+                        )
                     ),
                     detail=(
                         f"required {namespace} element {constraint.element!r} is "
@@ -1463,24 +1469,26 @@ def _resolve_constraint(
     if constraint == "required":
         value = any(values)
     elif constraint == "types":
-        intersection = set(values[0])
+        type_intersection = set(values[0])
         for candidate in values[1:]:
-            intersection &= set(candidate)
-        value = tuple(sorted(intersection, key=_TYPE_INDEX.__getitem__))
+            type_intersection &= set(candidate)
+        value = tuple(sorted(type_intersection, key=_TYPE_INDEX.__getitem__))
         if not value:
             conflict_detail = "equal-specificity type constraints have an empty intersection"
     elif constraint == "enum":
-        intersection = {
+        enum_intersection = {
             _typed_scalar_identity(item, label="enum"): item for item in values[0]
         }
         for candidate in values[1:]:
             candidate_ids = {
                 _typed_scalar_identity(item, label="enum") for item in candidate
             }
-            intersection = {
-                key: item for key, item in intersection.items() if key in candidate_ids
+            enum_intersection = {
+                key: item
+                for key, item in enum_intersection.items()
+                if key in candidate_ids
             }
-        value = tuple(sorted(intersection.values(), key=_typed_scalar_sort_key))
+        value = tuple(sorted(enum_intersection.values(), key=_typed_scalar_sort_key))
         if not value:
             conflict_detail = "equal-specificity enum constraints have an empty intersection"
     elif constraint == "allowed":
@@ -1492,10 +1500,10 @@ def _resolve_constraint(
         elif has_unbounded:
             value = None
         else:
-            intersection = set(values[0])
+            allowed_intersection = set(values[0])
             for candidate in values[1:]:
-                intersection &= set(candidate)
-            value = tuple(sorted(intersection))
+                allowed_intersection &= set(candidate)
+            value = tuple(sorted(allowed_intersection))
             distinct = {tuple(candidate) for candidate in values}
             if len(distinct) > 1 and not value:
                 conflict_detail = "equal-specificity finite allowed sets have an empty intersection"
