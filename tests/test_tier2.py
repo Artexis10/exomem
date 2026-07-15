@@ -294,7 +294,8 @@ def test_move_file_updates_inbound_wikilinks(vault: Path) -> None:
     # Set up: drop a file that wikilinks to a known insight.
     referrer_path = vault / "Knowledge Base" / "Notes" / "Insights" / "referrer.md"
     referrer_path.write_text(
-        "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n"
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-05-23\n"
+        "updated: 2026-05-23\ntags: []\n---\n"
         "# Referrer\n\nSee [[Knowledge Base/Notes/Insights/"
         "progressive-disclosure-without-mode-fragmentation]] for context.\n",
         encoding="utf-8",
@@ -320,7 +321,8 @@ def test_move_file_rewrites_wikilinks_with_anchor(vault: Path) -> None:
     """
     referrer_path = vault / "Knowledge Base" / "Notes" / "Insights" / "anchor-referrer.md"
     referrer_path.write_text(
-        "---\ntype: insight\ncreated: 2026-05-28\nupdated: 2026-05-28\ntags: []\n---\n"
+        "---\ntype: insight\nstatus: draft\ncreated: 2026-05-28\n"
+        "updated: 2026-05-28\ntags: []\n---\n"
         "# Anchor Referrer\n\n"
         "See [[Knowledge Base/Notes/Insights/"
         "progressive-disclosure-without-mode-fragmentation"
@@ -369,7 +371,11 @@ def test_move_file_allows_intra_sources_relocation(vault: Path) -> None:
     src_rel = "Knowledge Base/Sources/Articles/2026-05-04-best-egcg-supplements.md"
     dst_rel = "Knowledge Base/Sources/Articles/Health/2026-05-04-best-egcg-supplements.md"
     result = move_module.move_file(
-        vault, old_path=src_rel, new_path=dst_rel, today=TODAY
+        vault,
+        old_path=src_rel,
+        new_path=dst_rel,
+        update_wikilinks=False,
+        today=TODAY,
     )
     assert not (vault / src_rel).exists()
     assert (vault / dst_rel).exists()
@@ -751,7 +757,8 @@ def _trash_a_file(vault: Path, rel: str) -> tuple[str, str]:
     abs_path = vault / rel
     if not abs_path.exists():
         abs_path.write_text(
-            "---\ntype: insight\ncreated: 2026-05-23\nupdated: 2026-05-23\ntags: []\n---\n# x\n",
+            "---\ntype: insight\nstatus: draft\ncreated: 2026-05-23\n"
+            "updated: 2026-05-23\ntags: []\n---\n# x\n",
             encoding="utf-8",
         )
     result = delete_module.delete_file(
