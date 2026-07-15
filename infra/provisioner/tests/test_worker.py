@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -289,12 +288,26 @@ async def test_expired_claim_is_resumed_after_worker_restart(
 @pytest.mark.asyncio
 async def test_worker_renews_claim_while_long_provider_effect_is_running(
     worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _, repository, _ = worker_context
-    repository.claim_seconds = 0.15
+    repository.claim_seconds = 5
     operation = await repository.submit("provision", "long-effect", _request())
     entered = asyncio.Event()
+    renewed_twice = asyncio.Event()
     release = asyncio.Event()
+    real_renew_claim = repository.renew_claim
+    renewal_count = 0
+
+    async def observed_renew_claim(*args, **kwargs):
+        nonlocal renewal_count
+        snapshot = await real_renew_claim(*args, **kwargs)
+        renewal_count += 1
+        if renewal_count >= 2:
+            renewed_twice.set()
+        return snapshot
+
+    monkeypatch.setattr(repository, "renew_claim", observed_renew_claim)
 
     class SlowDriver:
         async def observed_fence(self, _tenant_id: str) -> int:
@@ -322,12 +335,16 @@ async def test_worker_renews_claim_while_long_provider_effect_is_running(
         capacity_admission=_AllowingAdmission(),
     )
     running = asyncio.create_task(worker.run_once())
-    await entered.wait()
-    await asyncio.sleep(0.25)
-    stolen = await repository.claim_next("thief-worker")
-    release.set()
-    with suppress(Exception):
-        await running
+    try:
+        await entered.wait()
+        await asyncio.wait_for(renewed_twice.wait(), timeout=10)
+        stolen = await repository.claim_next("thief-worker")
+        release.set()
+        assert await running is True
+    finally:
+        release.set()
+        if not running.done():
+            await running
 
     assert stolen is None
     final = await repository.get_by_id(operation.id)
