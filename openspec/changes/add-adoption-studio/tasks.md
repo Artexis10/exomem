@@ -34,4 +34,4 @@
 - [x] V.1 Real-vault end-to-end journey via `exomem studio` on a messy sample vault: start → scan → findings → choose → preview → apply → verify → (skip) organize → ask → done, with byte-snapshot proof that originals are untouched at every step.
 - [x] V.2 Deterministic-only journey completed with NO assistant connected; `finish` `recall_check.ok` true on the sample vault.
 - [x] V.3 `openspec validate --all --strict`, `pytest tests/test_scaffold_no_leak.py -q` (all new UI strings clear the scaffold-leak gate), the full 29 new tests + existing suites (`pytest -q` lean), the latency gate, the golden-schema gate naming exactly the four intended tools, and Ruff on changed files.
-- [ ] V.4 Confirm the branch diff is within the scope allowlist (`tests/golden/` untouched except the documented regen; `.github/`, `writer_lease.py` untouched) and hand the Substrate Home integration spec to the concurrent hosted session.
+- [x] V.4 Confirm the branch diff is within the scope allowlist (`tests/golden/` untouched except the documented regen; `.github/`, `writer_lease.py` untouched) and hand the Substrate Home integration spec to the concurrent hosted session.
