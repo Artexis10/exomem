@@ -501,10 +501,10 @@ class LexicalStore:
             for row in conn.execute("SELECT path, rowid, mtime_ns, in_kb, in_vault FROM pages")
         }
         with conn:
-            # Manual/content-table drift can leave FTS rows whose page row no
-            # longer exists. Remove them before SQLite reuses a deleted page
-            # rowid, otherwise the replacement FTS insert fails its rowid
-            # constraint and retires the sidecar instead of healing it.
+            # External page-row corruption can leave index rowids that SQLite
+            # will reuse for missing pages. Clear those orphans before inserts,
+            # or the replacement FTS insert can fail its rowid constraint and
+            # retire the sidecar instead of healing it.
             conn.execute("DELETE FROM fts WHERE rowid NOT IN (SELECT rowid FROM pages)")
             conn.execute("DELETE FROM tri WHERE rowid NOT IN (SELECT rowid FROM pages)")
             for rel, (rowid, mtime_ns, in_kb, in_vault) in stored.items():
