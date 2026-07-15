@@ -31,6 +31,8 @@ def test_shipped_scaffold_teaches_human_readable_memory_citations() -> None:
             "machine-readable automation",
             "user explicitly asks",
             "identifier itself is being inspected or debugged",
+            "do not embed the canonical ref as a markdown link target",
+            "plain title-first citation",
         ):
             assert required in guidance
         assert "exomem://memory/<uuid>" in guidance

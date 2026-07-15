@@ -280,7 +280,9 @@ def op_bootstrap(
                     "visible fallback when the title is unusable; keep the canonical "
                     "exomem://memory/<uuid> ref for tool arguments, durable machine state, "
                     "and machine-readable automation; show it only when the user explicitly "
-                    "asks for it or the identifier itself is being inspected or debugged"
+                    "asks for it or the identifier itself is being inspected or debugged; "
+                    "do not embed the canonical ref as a Markdown link target; use a plain "
+                    "title-first citation"
                 ),
                 "reason in the agent",
                 "use connect_memory(operation='suggest-links' or 'suggest-relations') before important compiled writes",

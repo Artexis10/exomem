@@ -29,4 +29,4 @@
   human-readable-memory-citations`.
 - [x] 3.3 Review the final diff against every OpenSpec scenario, mark completed tasks,
   and commit the implementation on the isolated feature branch.
-- [ ] 3.4 Obtain an independent code/spec review and resolve all substantive findings.
+- [x] 3.4 Obtain an independent code/spec review and resolve all substantive findings.

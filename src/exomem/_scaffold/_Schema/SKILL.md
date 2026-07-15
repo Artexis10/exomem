@@ -247,7 +247,9 @@ missing or unusable, use the path or file name as the visible fallback.
 Keep the canonical ref for tool arguments, durable machine state, and
 machine-readable automation so identity survives moves and renames. Show the
 raw ref only when the user explicitly asks for it or the identifier itself is
-being inspected or debugged. Never invent, copy, or edit an `exomem_id` by hand.
+being inspected or debugged. Do not embed the canonical ref as a Markdown link
+target; use a plain title-first citation. Never invent, copy, or edit an
+`exomem_id` by hand.
 
 Legacy pages are not rewritten automatically. To add IDs, first run
 `maintain_memory(mode="backfill-ids")` in its default dry-run mode, inspect the
