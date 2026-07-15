@@ -6,6 +6,7 @@ import asyncio
 from datetime import datetime
 from typing import Any, Protocol
 
+from .capacity import CapacityIdentityConflict
 from .driver import (
     DriverFinal,
     DriverPending,
@@ -153,16 +154,27 @@ class ProvisionerWorker:
         if operation.action is OperationAction.PROVISION:
             if self._capacity_admission is None:
                 raise RuntimeError("PROVISION-capable worker has no capacity admission")
-            block_reason = await self._capacity_admission.admit(
-                operation,
-                request,
-                worker_id=self._worker_id,
-                claim_token=claim["claim_token"],
-                claim_generation=claim["claim_generation"],
-                provider_operation_id=operation.external_operation_id,
-                provider_fence_generation=operation.fence_generation,
-                now=now,
-            )
+            try:
+                block_reason = await self._capacity_admission.admit(
+                    operation,
+                    request,
+                    worker_id=self._worker_id,
+                    claim_token=claim["claim_token"],
+                    claim_generation=claim["claim_generation"],
+                    provider_operation_id=operation.external_operation_id,
+                    provider_fence_generation=operation.fence_generation,
+                    now=now,
+                )
+            except CapacityIdentityConflict:
+                if claim_lost.is_set():
+                    return True
+                await self._repository.fail(
+                    operation.id,
+                    self._worker_id,
+                    code="PROVISIONER_CAPACITY_CONFLICT",
+                    **claim,
+                )
+                return True
             if claim_lost.is_set():
                 return True
             if block_reason is not None:

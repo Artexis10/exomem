@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem_provisioner.capacity import CapacityIdentityConflict
 from exomem_provisioner.config import ProvisionerSettings
 from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
@@ -542,6 +543,53 @@ async def test_blocked_capacity_never_calls_driver_or_consumes_failure_attempt(
     assert pending.checkpoint == "capacity-user-exhausted"
     assert pending.retry_after_seconds == 300
     assert pending.progress.get("failure_attempts", 0) == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("volume_checkpoint", [False, True])
+async def test_expected_capacity_identity_conflict_fails_closed_without_crashing_worker(
+    worker_context: tuple[ProvisionerDatabase, OperationRepository, FakeDriver],
+    volume_checkpoint: bool,
+) -> None:
+    _, repository, driver = worker_context
+    operation = await repository.submit(
+        "provision",
+        f"capacity-conflict-{volume_checkpoint}",
+        _request(operationId=f"operation-capacity-conflict-{volume_checkpoint}"),
+    )
+    if volume_checkpoint:
+        claimed = await repository.claim_next("checkpoint-preparer", now=datetime(2030, 1, 1, tzinfo=UTC))
+        assert claimed is not None and claimed.claim_token
+        await repository.mark_pending(
+            operation.id,
+            "checkpoint-preparer",
+            claim_token=claimed.claim_token,
+            claim_generation=claimed.claim_generation,
+            checkpoint="volume-registration-required",
+            retry_after_seconds=0,
+            now=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+
+    class ConflictingAdmission:
+        async def admit(self, operation, request, **claim):
+            del operation, request, claim
+            raise CapacityIdentityConflict("active reservation identity conflict")
+
+    worker = ProvisionerWorker(
+        repository,
+        driver,
+        worker_id=f"capacity-conflict-worker-{volume_checkpoint}",
+        include_checkpoints=(
+            frozenset({"volume-registration-required"}) if volume_checkpoint else None
+        ),
+        capacity_admission=ConflictingAdmission(),
+    )
+
+    assert await worker.run_once(now=datetime(2030, 1, 1, tzinfo=UTC)) is True
+    failed = await repository.get_by_id(operation.id)
+    assert driver.effect_count("provision", operation.id) == 0
+    assert failed is not None and failed.state is OperationState.ERROR
+    assert failed.error_code == "PROVISIONER_CAPACITY_CONFLICT"
 
 
 @pytest.mark.asyncio

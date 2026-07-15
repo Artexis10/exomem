@@ -56,6 +56,7 @@ def test_alembic_upgrades_empty_sqlite_database_to_head(tmp_path: Path) -> None:
         "cell_operation_locks",
         "capacity_ledger",
         "capacity_reservations",
+        "capacity_destructive_fences",
     } <= tables
     assert revision == ("0005_capacity_reservations",)
     assert ledger == [(1, 0)]
@@ -104,9 +105,14 @@ def test_capacity_migration_downgrade_upgrade_round_trip(tmp_path: Path) -> None
         if target == "0004_export_delivery_ledger":
             assert "capacity_ledger" not in tables
             assert "capacity_reservations" not in tables
+            assert "capacity_destructive_fences" not in tables
             assert revision == (target,)
         else:
-            assert {"capacity_ledger", "capacity_reservations"} <= tables
+            assert {
+                "capacity_ledger",
+                "capacity_reservations",
+                "capacity_destructive_fences",
+            } <= tables
             assert revision == ("0005_capacity_reservations",)
 
 

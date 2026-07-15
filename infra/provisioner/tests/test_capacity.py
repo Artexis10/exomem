@@ -21,6 +21,7 @@ from exomem_provisioner.capacity import (
     CapacityReceiptVerifier,
     CapacityReservationAuthority,
     KubernetesCapacityObserver,
+    LiveCapacityAdmission,
     VerifiedCapacityReceipt,
     canonical_contract_digest,
 )
@@ -29,12 +30,17 @@ from exomem_provisioner.crypto import AesGcmEnvelopeCodec
 from exomem_provisioner.database import ProvisionerDatabase
 from exomem_provisioner.lifecycle import OpaqueProviderMetadata
 from exomem_provisioner.models import (
+    CapacityDestructiveFence,
     CapacityLedger,
     CapacityReservation,
     CapacityReservationClass,
     OperationAction,
 )
-from exomem_provisioner.repository import OperationRepository, StaleFence
+from exomem_provisioner.repository import (
+    ImmutableMetadataConflict,
+    OperationRepository,
+    StaleFence,
+)
 
 NOW = datetime(2030, 1, 1, 12, 0, tzinfo=UTC)
 
@@ -266,6 +272,121 @@ async def test_reservation_is_idempotent_and_changed_identity_conflicts(
     async with database.session_factory() as session:
         assert await session.scalar(select(func.count()).select_from(CapacityReservation)) == 1
         assert (await session.get(CapacityLedger, 1)).revision == 1  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+async def test_idempotent_reservation_rejects_observed_class_disagreement(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    _, repository, authority = capacity_context
+    claimed, worker, reservation = await _reserve(
+        repository,
+        authority,
+        operation="operation-class",
+        tenant="tenant-class",
+        cell="cell-class",
+        fence=1,
+    )
+    opposite = _observation(recovery={reservation.resource_name})
+    with pytest.raises(CapacityBlocked) as mismatch:
+        await authority.reserve(
+            claimed,
+            _request(
+                operation="operation-class",
+                tenant="tenant-class",
+                cell="cell-class",
+                fence=1,
+            ),
+            receipt=_receipt(opposite),
+            observation=opposite,
+            worker_id=worker,
+            claim_token=claimed.claim_token or "",
+            claim_generation=claimed.claim_generation,
+            now=NOW,
+        )
+    assert mismatch.value.reason == "capacity-live-observation-mismatch"
+
+    dual = _observation(
+        users={reservation.resource_name}, recovery={reservation.resource_name}
+    )
+    with pytest.raises(CapacityBlocked) as ambiguous:
+        await authority.reserve(
+            claimed,
+            _request(
+                operation="operation-class",
+                tenant="tenant-class",
+                cell="cell-class",
+                fence=1,
+            ),
+            receipt=_receipt(dual),
+            observation=dual,
+            worker_id=worker,
+            claim_token=claimed.claim_token or "",
+            claim_generation=claimed.claim_generation,
+            now=NOW,
+        )
+    assert ambiguous.value.reason == "capacity-live-observation-mismatch"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tenant", "cell"),
+    [
+        ("tenant-conflict", "cell-conflict"),
+        ("tenant-other", "cell-conflict"),
+    ],
+)
+async def test_active_capacity_identity_conflict_is_detected_before_flush(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+    tenant: str,
+    cell: str,
+) -> None:
+    _, repository, authority = capacity_context
+    existing, existing_worker, _ = await _reserve(
+        repository,
+        authority,
+        operation="operation-existing-conflict",
+        tenant="tenant-conflict",
+        cell="cell-conflict",
+        fence=1,
+    )
+    await repository.mark_pending(
+        existing.id,
+        existing_worker,
+        claim_token=existing.claim_token or "",
+        claim_generation=existing.claim_generation,
+        checkpoint="namespace-ready",
+        retry_after_seconds=300,
+        now=NOW,
+    )
+    contender, worker = await _claimed(
+        repository,
+        operation=f"operation-contender-{tenant}",
+        tenant=tenant,
+        cell=cell,
+        fence=2,
+    )
+    observation = _observation()
+    with pytest.raises(CapacityConflict):
+        await authority.reserve(
+            contender,
+            _request(
+                operation=f"operation-contender-{tenant}",
+                tenant=tenant,
+                cell=cell,
+                fence=2,
+            ),
+            receipt=_receipt(observation),
+            observation=observation,
+            worker_id=worker,
+            claim_token=contender.claim_token or "",
+            claim_generation=contender.claim_generation,
+            now=NOW,
+        )
 
 
 @pytest.mark.asyncio
@@ -598,6 +719,68 @@ async def test_discard_release_is_atomic_proof_bound_and_history_is_immutable(
 
 
 @pytest.mark.asyncio
+async def test_discard_rejects_tampered_reservation_resource_before_finalize(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    provision, provision_worker, reservation = await _reserve(
+        repository,
+        authority,
+        operation="provision-tampered-resource",
+        tenant="tenant-tampered-resource",
+        cell="cell-tampered-resource",
+        fence=1,
+    )
+    await repository.mark_pending(
+        provision.id,
+        provision_worker,
+        claim_token=provision.claim_token or "",
+        claim_generation=provision.claim_generation,
+        checkpoint="namespace-ready",
+        retry_after_seconds=300,
+        now=NOW,
+    )
+    async with database.session_factory.begin() as session:
+        row = await session.get(CapacityReservation, reservation.id)
+        assert row is not None
+        row.resource_name = "exo-00000000000000000000"
+
+    discard = await repository.submit(
+        "discard",
+        "discard-tampered-resource",
+        _request(
+            operation="discard-tampered-resource",
+            tenant="tenant-tampered-resource",
+            cell="cell-tampered-resource",
+            fence=2,
+        ),
+    )
+    claimed = await repository.claim_next(
+        "discard-tampered-worker",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction.DISCARD}),
+    )
+    assert claimed is not None and claimed.id == discard.id and claimed.claim_token
+    with pytest.raises(ImmutableMetadataConflict, match="resource"):
+        await repository.complete(
+            discard.id,
+            {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": True},
+            worker_id="discard-tampered-worker",
+            claim_token=claimed.claim_token,
+            claim_generation=claimed.claim_generation,
+            now=NOW,
+        )
+    async with database.session_factory() as session:
+        row = await session.get(CapacityReservation, reservation.id)
+        ledger = await session.get(CapacityLedger, 1)
+        assert row is not None and row.released_at is None
+        assert ledger is not None and ledger.revision == 1
+    assert (await repository.get_by_id(discard.id)).state.name == "CLAIMED"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
 async def test_malformed_proof_retains_and_equal_fence_release_rolls_back_completion(
     capacity_context: tuple[
         ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
@@ -708,6 +891,170 @@ async def test_malformed_proof_retains_and_equal_fence_release_rolls_back_comple
         row = await session.get(CapacityReservation, equal_reservation.id)
         assert row is not None and row.released_at is None
     assert (await repository.get_by_id(destroy.id)).state.name == "CLAIMED"  # type: ignore[union-attr]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "proof"),
+    [
+        (
+            "discard",
+            {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": True},
+        ),
+        (
+            "destroy",
+            {
+                "computeDestroyed": True,
+                "storageDestroyed": True,
+                "keysDestroyed": True,
+                "tenantResourcesDestroyed": True,
+            },
+        ),
+    ],
+)
+async def test_destructive_completion_without_reservation_blocks_equal_fence_resurrection(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+    action: str,
+    proof: dict[str, bool],
+) -> None:
+    database, repository, authority = capacity_context
+    operation_id = f"operation-{action}-first"
+    destructive = await repository.submit(
+        action,
+        f"key-{action}-first",
+        _request(
+            operation=operation_id,
+            tenant="tenant-destroy-first",
+            cell="cell-destroy-first",
+            fence=4,
+        ),
+    )
+    claimed = await repository.claim_next(
+        f"worker-{action}-first",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction(action)}),
+    )
+    assert claimed is not None and claimed.id == destructive.id and claimed.claim_token
+    await repository.complete(
+        claimed.id,
+        proof,
+        worker_id=f"worker-{action}-first",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        now=NOW,
+    )
+
+    equal, worker = await _claimed(
+        repository,
+        operation=f"operation-provision-after-{action}",
+        tenant="tenant-destroy-first",
+        cell=(
+            "cell-destroy-first"
+            if action == "discard"
+            else "cell-after-tenant-destroy"
+        ),
+        fence=4,
+    )
+    observation = _observation()
+    with pytest.raises(CapacityConflict):
+        await authority.reserve(
+            equal,
+            _request(
+                operation=f"operation-provision-after-{action}",
+                tenant="tenant-destroy-first",
+                cell=(
+                    "cell-destroy-first"
+                    if action == "discard"
+                    else "cell-after-tenant-destroy"
+                ),
+                fence=4,
+            ),
+            receipt=_receipt(observation),
+            observation=observation,
+            worker_id=worker,
+            claim_token=equal.claim_token or "",
+            claim_generation=equal.claim_generation,
+            now=NOW,
+        )
+
+    async with database.session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(CapacityDestructiveFence)
+            )
+            == 1
+        )
+
+
+@pytest.mark.asyncio
+async def test_malformed_destructive_proof_writes_no_fence_and_allows_same_fence_provision(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, authority = capacity_context
+    destructive = await repository.submit(
+        "discard",
+        "key-malformed-first",
+        _request(
+            operation="operation-malformed-first",
+            tenant="tenant-malformed-first",
+            cell="cell-malformed-first",
+            fence=4,
+        ),
+    )
+    claimed = await repository.claim_next(
+        "worker-malformed-first",
+        now=NOW,
+        allowed_actions=frozenset({OperationAction.DISCARD}),
+    )
+    assert claimed is not None and claimed.id == destructive.id and claimed.claim_token
+    await repository.complete(
+        claimed.id,
+        {
+            "computeDestroyed": True,
+            "storageDestroyed": True,
+            "keysDestroyed": True,
+            "callerProof": True,
+        },
+        worker_id="worker-malformed-first",
+        claim_token=claimed.claim_token,
+        claim_generation=claimed.claim_generation,
+        now=NOW,
+    )
+    provision, worker = await _claimed(
+        repository,
+        operation="operation-after-malformed",
+        tenant="tenant-malformed-first",
+        cell="cell-malformed-first",
+        fence=4,
+    )
+    observation = _observation()
+    reserved = await authority.reserve(
+        provision,
+        _request(
+            operation="operation-after-malformed",
+            tenant="tenant-malformed-first",
+            cell="cell-malformed-first",
+            fence=4,
+        ),
+        receipt=_receipt(observation),
+        observation=observation,
+        worker_id=worker,
+        claim_token=provision.claim_token or "",
+        claim_generation=provision.claim_generation,
+        now=NOW,
+    )
+    assert reserved.fence_generation == 4
+    async with database.session_factory() as session:
+        assert (
+            await session.scalar(
+                select(func.count()).select_from(CapacityDestructiveFence)
+            )
+            == 0
+        )
 
 
 def _contract(private_key: Ed25519PrivateKey) -> dict[str, object]:
@@ -839,7 +1186,10 @@ def _namespace(metadata: OpaqueProviderMetadata, mode: str):
         metadata=SimpleNamespace(
             name=metadata.resource_name,
             uid=f"uid-{metadata.subject_id}",
-            labels={"exomem.io/tenant-cell": "true"},
+            labels={
+                "exomem.io/tenant-cell": "true",
+                "exomem.io/cell-resource": metadata.resource_name,
+            },
             annotations={
                 **metadata.kubernetes_annotations,
                 "exomem.io/resource-name": metadata.resource_name,
@@ -884,8 +1234,7 @@ async def test_kubernetes_observer_classifies_modes_and_binds_exact_hcloud_node(
     )
 
     class Core:
-        def list_namespace(self, *, label_selector):
-            assert label_selector == "exomem.io/tenant-cell=true"
+        def list_namespace(self):
             return SimpleNamespace(items=namespaces)
 
         def read_namespace(self, name):
@@ -941,7 +1290,7 @@ async def test_kubernetes_observer_rejects_unknown_duplicate_or_malformed_identi
     namespace = _namespace(metadata, "unknown")
 
     class Core:
-        def list_namespace(self, *, label_selector):
+        def list_namespace(self):
             return SimpleNamespace(items=[namespace, namespace])
 
         def read_namespace(self, name):
@@ -982,6 +1331,301 @@ async def test_kubernetes_observer_rejects_unknown_duplicate_or_malformed_identi
     namespace.metadata.annotations["exomem.io/resource-name"] = "forged"
     with pytest.raises(CapacityReceiptError):
         await observer.observe()
+
+
+@pytest.mark.asyncio
+async def test_kubernetes_observer_lists_broadly_and_ignores_only_unrelated_namespaces() -> None:
+    identity = OpaqueProviderMetadata("tenant-broad", "cell-broad", "operation-broad", 1)
+    valid = _namespace(identity, "serve")
+    unrelated = SimpleNamespace(
+        metadata=SimpleNamespace(name="kube-public", labels={}, annotations={})
+    )
+    returned = [valid, unrelated]
+
+    class Core:
+        def list_namespace(self):
+            return SimpleNamespace(items=returned)
+
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[])
+
+        def list_node(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="node-one"),
+                        spec=SimpleNamespace(provider_id="hcloud://101"),
+                    )
+                ]
+            )
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[])
+
+    observer = KubernetesCapacityObserver(
+        core_v1=Core(),
+        storage_v1=Storage(),
+        expected_server_id=101,
+        expected_location="fsn1",
+        now=lambda: NOW,
+    )
+    observation = await observer.observe()
+    assert observation.user_resource_names == {identity.resource_name}
+
+    valid.metadata.labels.pop("exomem.io/tenant-cell")
+    with pytest.raises(CapacityReceiptError, match="namespace identity"):
+        await observer.observe()
+
+    returned[:] = [
+        SimpleNamespace(
+            metadata=SimpleNamespace(
+                name="ordinary-namespace",
+                labels={"exomem.io/tenant-cell": "false"},
+                annotations={},
+            )
+        )
+    ]
+    with pytest.raises(CapacityReceiptError, match="namespace identity"):
+        await observer.observe()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("include_pv", "include_pvc", "include_namespace"),
+    [
+        (False, False, False),
+        (True, False, True),
+        (True, True, False),
+    ],
+)
+async def test_kubernetes_observer_counts_only_clean_missing_object_combinations_as_orphans(
+    include_pv: bool,
+    include_pvc: bool,
+    include_namespace: bool,
+) -> None:
+    identity = OpaqueProviderMetadata("tenant-orphan", "cell-orphan", "operation-orphan", 1)
+    namespace = _namespace(identity, "serve")
+    pv = SimpleNamespace(
+        metadata=SimpleNamespace(name="pv-orphan", uid="pv-uid-orphan"),
+        spec=SimpleNamespace(
+            csi=SimpleNamespace(driver="csi.hetzner.cloud", volume_handle="601"),
+            claim_ref=SimpleNamespace(
+                namespace=identity.resource_name,
+                name=identity.resource_name + "-data",
+                uid="pvc-uid-orphan",
+            ),
+        ),
+    )
+    pvc = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=identity.resource_name + "-data",
+            namespace=identity.resource_name,
+            uid="pvc-uid-orphan",
+        ),
+        spec=SimpleNamespace(volume_name="pv-orphan"),
+    )
+    attachment = SimpleNamespace(
+        metadata=SimpleNamespace(name="va-orphan", uid="va-uid-orphan"),
+        spec=SimpleNamespace(
+            attacher="csi.hetzner.cloud",
+            node_name="node-one",
+            source=SimpleNamespace(persistent_volume_name="pv-orphan"),
+        ),
+        status=SimpleNamespace(attached=True),
+    )
+
+    class Core:
+        def list_namespace(self):
+            return SimpleNamespace(items=[namespace] if include_namespace else [])
+
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[pv] if include_pv else [])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[pvc] if include_pvc else [])
+
+        def list_node(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="node-one"),
+                        spec=SimpleNamespace(provider_id="hcloud://101"),
+                    )
+                ]
+            )
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[attachment])
+
+    observation = await KubernetesCapacityObserver(
+        core_v1=Core(),
+        storage_v1=Storage(),
+        expected_server_id=101,
+        expected_location="fsn1",
+        now=lambda: NOW,
+    ).observe()
+    assert observation.attached_hcloud_volumes == 1
+    assert len(observation.orphan_attachment_ids) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("pvc_uid", "volume_name"), [("wrong-uid", "pv-one"), ("pvc-uid-one", "wrong-pv")])
+async def test_kubernetes_observer_rejects_contradictory_present_pvc_without_namespace(
+    pvc_uid: str,
+    volume_name: str,
+) -> None:
+    identity = OpaqueProviderMetadata("tenant-pvc", "cell-pvc", "operation-pvc", 1)
+    pv = SimpleNamespace(
+        metadata=SimpleNamespace(name="pv-one", uid="pv-uid-one"),
+        spec=SimpleNamespace(
+            csi=SimpleNamespace(driver="csi.hetzner.cloud", volume_handle="701"),
+            claim_ref=SimpleNamespace(
+                namespace=identity.resource_name,
+                name=identity.resource_name + "-data",
+                uid="pvc-uid-one",
+            ),
+        ),
+    )
+    pvc = SimpleNamespace(
+        metadata=SimpleNamespace(
+            name=identity.resource_name + "-data",
+            namespace=identity.resource_name,
+            uid=pvc_uid,
+        ),
+        spec=SimpleNamespace(volume_name=volume_name),
+    )
+    attachment = SimpleNamespace(
+        metadata=SimpleNamespace(name="va-one", uid="va-uid-one"),
+        spec=SimpleNamespace(
+            attacher="csi.hetzner.cloud",
+            node_name="node-one",
+            source=SimpleNamespace(persistent_volume_name="pv-one"),
+        ),
+        status=SimpleNamespace(attached=True),
+    )
+
+    class Core:
+        def list_namespace(self):
+            return SimpleNamespace(items=[])
+
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[pv])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[pvc])
+
+        def list_node(self):
+            return SimpleNamespace(
+                items=[
+                    SimpleNamespace(
+                        metadata=SimpleNamespace(name="node-one"),
+                        spec=SimpleNamespace(provider_id="hcloud://101"),
+                    )
+                ]
+            )
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[attachment])
+
+    with pytest.raises(CapacityReceiptError, match="PVC ownership"):
+        await KubernetesCapacityObserver(
+            core_v1=Core(),
+            storage_v1=Storage(),
+            expected_server_id=101,
+            expected_location="fsn1",
+            now=lambda: NOW,
+        ).observe()
+
+
+@pytest.mark.asyncio
+async def test_live_admission_converts_transient_kubernetes_read_error_to_pending(
+    capacity_context: tuple[
+        ProvisionerDatabase, OperationRepository, CapacityReservationAuthority
+    ],
+) -> None:
+    database, repository, _ = capacity_context
+    private_key = Ed25519PrivateKey.generate()
+    contract = _contract(private_key)
+    public_key = base64.urlsafe_b64encode(
+        private_key.public_key().public_bytes(
+            serialization.Encoding.Raw,
+            serialization.PublicFormat.Raw,
+        )
+    ).decode().rstrip("=")
+
+    class Core:
+        def list_namespace(self):
+            raise RuntimeError("transient Kubernetes read failure")
+
+        def read_namespace(self, name):
+            return SimpleNamespace(metadata=SimpleNamespace(uid="cluster-uid-0001"))
+
+        def list_persistent_volume(self):
+            return SimpleNamespace(items=[])
+
+        def list_persistent_volume_claim_for_all_namespaces(self):
+            return SimpleNamespace(items=[])
+
+        def list_node(self):
+            return SimpleNamespace(items=[])
+
+        def read_namespaced_config_map(self, name, namespace):
+            raise AssertionError("receipt must not be read after observation failure")
+
+    class Storage:
+        def list_volume_attachment(self):
+            return SimpleNamespace(items=[])
+
+    claimed, worker = await _claimed(
+        repository,
+        operation="operation-transient-observer",
+        tenant="tenant-transient-observer",
+        cell="cell-transient-observer",
+        fence=1,
+    )
+    admission = LiveCapacityAdmission(
+        core_v1=Core(),
+        storage_v1=Storage(),
+        sessions=database.session_factory,
+        contract=contract,
+        public_key=public_key,
+        receipt_namespace="exomem-platform",
+        receipt_config_map="capacity-receipt",
+        expected_server_id=101,
+        expected_location="fsn1",
+        now=lambda: NOW,
+    )
+    reason = await admission.admit(
+        claimed,
+        _request(
+            operation="operation-transient-observer",
+            tenant="tenant-transient-observer",
+            cell="cell-transient-observer",
+            fence=1,
+        ),
+        worker_id=worker,
+        claim_token=claimed.claim_token or "",
+        claim_generation=claimed.claim_generation,
+        provider_operation_id=claimed.external_operation_id,
+        provider_fence_generation=claimed.fence_generation,
+        now=NOW,
+    )
+    assert reason == "capacity-live-observation-mismatch"
 
 
 def test_capacity_model_enums_are_exact() -> None:

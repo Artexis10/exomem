@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Private-alpha capacity is hard-capped until measured
-The first deployment SHALL use one x86 Hetzner CX33 and SHALL stop automatic provisioning at six active USER cells, two RECOVERY/restore-candidate cells, and eight potential/attached cell volumes. It MUST preserve at least eight unused attachments beneath Hetzner's 16-volume server limit. Admission SHALL reconcile a fresh signed cluster/server/location-bound live receipt with a strict local Kubernetes observation and SHALL serialize durable PostgreSQL reservations. Increasing the cap SHALL require a fresh resource/latency soak and reviewed cost sheet.
+The first deployment SHALL use one x86 Hetzner CX33 and SHALL stop automatic provisioning at six active USER cells, two RECOVERY/restore-candidate cells, and eight potential/attached cell volumes. It MUST preserve at least eight unused attachments beneath Hetzner's 16-volume server limit. Admission SHALL reconcile a fresh signed cluster/server/location-bound live receipt with a strict local Kubernetes observation and SHALL serialize durable PostgreSQL reservations. Both observations SHALL list namespaces broadly, ignore only namespaces with neither an exact cell resource-name shape nor any owned cell marker, and reject a candidate whose complete identity or USER/RECOVERY class is stripped, malformed, ambiguous, or inconsistent with its reservation. Increasing the cap SHALL require a fresh resource/latency soak and reviewed cost sheet.
 
 #### Scenario: Seventh user cell is requested
 - **WHEN** six user cells are already active and no reviewed cap increase exists
@@ -18,6 +18,10 @@ The first deployment SHALL use one x86 Hetzner CX33 and SHALL stop automatic pro
 #### Scenario: Collector sequence restarts after reconstruction
 - **WHEN** a newly signed, fresh, cluster/server-bound receipt has a lower sequence after clean-cluster reconstruction and matches the fresh local observation
 - **THEN** it remains admissible because no worker-local or PostgreSQL monotonic-sequence state is required
+
+#### Scenario: A cell label is stripped before collection
+- **WHEN** a cell-shaped or otherwise Exomem-marked namespace no longer has the exact tenant-cell label and complete immutable identity
+- **THEN** both signed collection and local admission still discover the candidate and fail closed instead of undercounting it
 
 ### Requirement: EUR 5 pricing is treated as measured subsidy
 Before activating the friend Paddle catalog or inviting a paid account, the operator SHALL record actual server, IPv4, per-cell volume, B2 retained storage/operations, Neon/Vercel marginal cost, alerting, actual Paddle account fee, and VAT-inclusive/exclusive treatment. The sheet SHALL show expected net receipt for EUR 5 and SHALL distinguish this private-alpha subsidy from a later EUR 10-15 public tier.

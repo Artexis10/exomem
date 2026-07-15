@@ -34,6 +34,19 @@ _VERSION = re.compile(r"v[1-9][0-9]*\Z")
 _BASE64URL = re.compile(r"[A-Za-z0-9_-]+\Z")
 _OPAQUE_PROVIDER_ID = re.compile(r"[A-Za-z0-9_.:/-]{1,64}\Z")
 _HCLOUD_LOCATION = re.compile(r"[a-z0-9][a-z0-9-]{1,31}\Z")
+_CELL_RESOURCE_NAME = re.compile(r"exo-[0-9a-f]{20}\Z")
+_CELL_NAMESPACE_MARKERS = frozenset(
+    {
+        "exomem.io/tenant-cell",
+        "exomem.io/cell-resource",
+        "exomem.io/resource-name",
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/fence",
+        "exomem.io/provision-mode",
+    }
+)
 
 
 class ReceiptCollectorError(RuntimeError):
@@ -198,6 +211,8 @@ def capacity_snapshot_from_documents(
     location = datacenter.get("location") if isinstance(datacenter, dict) else None
     if (
         not isinstance(server, dict)
+        or not isinstance(server.get("id"), int)
+        or isinstance(server.get("id"), bool)
         or server.get("id") != expected_server_id
         or not isinstance(location, dict)
         or location.get("name") != expected_location
@@ -210,15 +225,24 @@ def capacity_snapshot_from_documents(
     active_recovery_cells = 0
     for item in items:
         namespace_metadata = item.get("metadata")
-        labels = namespace_metadata.get("labels") if isinstance(namespace_metadata, dict) else None
-        annotations = (
-            namespace_metadata.get("annotations")
-            if isinstance(namespace_metadata, dict)
-            else None
+        raw_labels = (
+            namespace_metadata.get("labels") if isinstance(namespace_metadata, dict) else None
+        )
+        raw_annotations = (
+            namespace_metadata.get("annotations") if isinstance(namespace_metadata, dict) else None
         )
         name = namespace_metadata.get("name") if isinstance(namespace_metadata, dict) else None
-        if not isinstance(labels, dict) or not isinstance(annotations, dict):
+        if raw_labels is not None and not isinstance(raw_labels, dict):
             raise ReceiptCollectorError("tenant namespace identity is invalid")
+        if raw_annotations is not None and not isinstance(raw_annotations, dict):
+            raise ReceiptCollectorError("tenant namespace identity is invalid")
+        labels = raw_labels or {}
+        annotations = raw_annotations or {}
+        candidate = (
+            isinstance(name, str) and _CELL_RESOURCE_NAME.fullmatch(name) is not None
+        ) or bool(_CELL_NAMESPACE_MARKERS & (labels.keys() | annotations.keys()))
+        if not candidate:
+            continue
         tenant_id = annotations.get("exomem.io/tenant-id")
         cell_id = annotations.get("exomem.io/cell-id")
         operation_id = annotations.get("exomem.io/operation-id")
@@ -226,6 +250,7 @@ def capacity_snapshot_from_documents(
         mode = annotations.get("exomem.io/provision-mode")
         if (
             labels.get("exomem.io/tenant-cell") != "true"
+            or labels.get("exomem.io/cell-resource") != name
             or not all(
                 isinstance(value, str) and _OPAQUE_PROVIDER_ID.fullmatch(value) is not None
                 for value in (tenant_id, cell_id, operation_id)
@@ -279,7 +304,14 @@ def capacity_snapshot_from_documents(
                 or isinstance(identifier, bool)
                 or identifier < 1
                 or identifier in volume_ids
-                or (server is not None and (not isinstance(server, int) or server < 1))
+                or (
+                    server is not None
+                    and (
+                        not isinstance(server, int)
+                        or isinstance(server, bool)
+                        or server < 1
+                    )
+                )
             ):
                 raise ReceiptCollectorError("HCloud capacity observation is invalid")
             volume_ids.add(identifier)
@@ -609,7 +641,7 @@ def _capacity_live_documents(
     kube = "https://kubernetes.default.svc"
     kube_headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     tenant_namespaces = _json_request(
-        kube + "/api/v1/namespaces?labelSelector=exomem.io%2Ftenant-cell%3Dtrue",
+        kube + "/api/v1/namespaces",
         headers=kube_headers,
         ca_file=ca_path,
     )

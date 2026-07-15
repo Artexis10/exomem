@@ -27,6 +27,7 @@ if PROVISIONER_TEST_IMAGE is None:
     import exomem_provisioner.repository as repository_module
     from exomem_provisioner.capacity import (
         CapacityBlocked,
+        CapacityConflict,
         CapacityObservation,
         CapacityReservationAuthority,
         VerifiedCapacityReceipt,
@@ -35,9 +36,11 @@ if PROVISIONER_TEST_IMAGE is None:
     from exomem_provisioner.crypto import AesGcmEnvelopeCodec
     from exomem_provisioner.database import DATABASE_REVISION, ProvisionerDatabase
     from exomem_provisioner.models import (
+        CapacityDestructiveFence,
         CapacityLedger,
         CapacityReservation,
         Operation,
+        OperationAction,
         TenantFence,
     )
     from exomem_provisioner.repository import OperationRepository, StaleFence
@@ -417,7 +420,11 @@ async def test_fresh_postgresql17_bootstrap_creates_owned_schema_before_version_
         assert owner == target.role
         assert revisions == [DATABASE_REVISION]
         assert {"operations", "tenant_fences", "resources", "credential_metadata"} <= tables
-        assert {"capacity_ledger", "capacity_reservations"} <= tables
+        assert {
+            "capacity_ledger",
+            "capacity_reservations",
+            "capacity_destructive_fences",
+        } <= tables
         assert ledger_rows == 1
         assert await database.ready() is True
 
@@ -581,13 +588,15 @@ def test_built_image_bootstrap_is_concurrent_retryable_and_runtime_exact(
             "rolreplication, rolbypassrls FROM pg_roles "
             f"WHERE rolname = '{target.role}'; "
             f"SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = '{target.schema}'; "
-            f'SELECT version_num FROM "{target.schema}".alembic_version;'
+            f'SELECT version_num FROM "{target.schema}".alembic_version; '
+            f"SELECT to_regclass('{target.schema}.capacity_destructive_fences');"
         ),
         database=target.name,
     )
     assert "t|f|f|f|f|f" in state.stdout.replace(" ", "")
     assert target.role in state.stdout
     assert DATABASE_REVISION in state.stdout
+    assert "capacity_destructive_fences" in state.stdout
 
     _psql(
         postgresql17,
@@ -1026,5 +1035,217 @@ async def test_postgresql17_capacity_ledger_serializes_two_sixth_slot_attempts(
             )
         assert active == 6
         assert revision == 6
+    finally:
+        await database.dispose()
+
+
+@ASYNCIO_POSTGRESQL17
+@pytest.mark.parametrize(
+    ("action", "proof"),
+    [
+        (
+            "discard",
+            {"computeDestroyed": True, "storageDestroyed": True, "keysDestroyed": True},
+        ),
+        (
+            "destroy",
+            {
+                "computeDestroyed": True,
+                "storageDestroyed": True,
+                "keysDestroyed": True,
+                "tenantResourcesDestroyed": True,
+            },
+        ),
+    ],
+)
+async def test_postgresql17_destructive_and_reservation_orders_linearize(
+    postgresql17: PostgreSQL17,
+    action: str,
+    proof: dict[str, bool],
+) -> None:
+    target = _new_database(postgresql17, f"capacity_order_{action}")
+    migrated = _migrate(postgresql17, target)
+    assert migrated.returncode == 0, migrated.stdout + migrated.stderr
+    database = ProvisionerDatabase(target.settings)
+    repository = _repository(database, target.settings)
+    authority = CapacityReservationAuthority(database.session_factory)
+    observed_at = datetime.now(UTC).replace(microsecond=0)
+    observation = CapacityObservation(
+        observed_at=observed_at,
+        cluster_uid=f"cluster-capacity-order-{action}",
+        hcloud_server_id=101,
+        hcloud_location="fsn1",
+        user_resource_names=frozenset(),
+        recovery_resource_names=frozenset(),
+        orphan_attachment_ids=frozenset(),
+        attached_hcloud_volumes=0,
+    )
+    receipt = VerifiedCapacityReceipt(
+        receipt_id=str(uuid.uuid4()),
+        sequence=1,
+        observed_at=observed_at,
+        expires_at=observed_at + timedelta(seconds=300),
+        cluster_uid=observation.cluster_uid,
+        hcloud_server_id=101,
+        hcloud_location="fsn1",
+        active_user_cells=0,
+        active_recovery_cells=0,
+        attached_volumes=0,
+    )
+
+    async def claim_provision(
+        *, operation_id: str, tenant_id: str, cell_id: str, fence: int, worker: str
+    ):
+        request = _request(
+            operationId=operation_id,
+            tenantId=tenant_id,
+            cellId=cell_id,
+            fenceGeneration=fence,
+            provisionMode="serve",
+        )
+        await repository.submit("provision", f"key-{operation_id}", request)
+        claimed = await repository.claim_next(
+            worker, allowed_actions=frozenset({OperationAction.PROVISION})
+        )
+        assert claimed is not None and claimed.claim_token
+        return claimed, request
+
+    async def reserve(claimed: object, request: dict[str, object], worker: str):
+        return await authority.reserve(
+            claimed,
+            request,
+            receipt=receipt,
+            observation=observation,
+            worker_id=worker,
+            claim_token=claimed.claim_token,
+            claim_generation=claimed.claim_generation,
+        )
+
+    try:
+        destructive = await repository.submit(
+            action,
+            f"key-{action}-first",
+            _request(
+                operationId=f"operation-{action}-first",
+                tenantId="tenant-destructive-first",
+                cellId="cell-destructive-first",
+                fenceGeneration=4,
+            ),
+        )
+        destructive_claim = await repository.claim_next(
+            f"worker-{action}-first",
+            allowed_actions=frozenset({OperationAction(action)}),
+        )
+        assert destructive_claim is not None and destructive_claim.claim_token
+        await repository.complete(
+            destructive.id,
+            proof,
+            worker_id=f"worker-{action}-first",
+            claim_token=destructive_claim.claim_token,
+            claim_generation=destructive_claim.claim_generation,
+        )
+        with pytest.raises(StaleFence):
+            await repository.submit(
+                "provision",
+                f"key-after-{action}-older",
+                _request(
+                    operationId=f"operation-after-{action}-older",
+                    tenantId="tenant-destructive-first",
+                    cellId="cell-destructive-first",
+                    fenceGeneration=3,
+                    provisionMode="serve",
+                ),
+            )
+        equal, equal_request = await claim_provision(
+            operation_id=f"operation-after-{action}-equal",
+            tenant_id="tenant-destructive-first",
+            cell_id="cell-destructive-first",
+            fence=4,
+            worker=f"worker-after-{action}-equal",
+        )
+        with pytest.raises(CapacityConflict):
+            await reserve(equal, equal_request, f"worker-after-{action}-equal")
+        await repository.fail(
+            equal.id,
+            f"worker-after-{action}-equal",
+            code="PROVISIONER_CAPACITY_CONFLICT",
+            claim_token=equal.claim_token,
+            claim_generation=equal.claim_generation,
+        )
+        later, later_request = await claim_provision(
+            operation_id=f"operation-after-{action}-later",
+            tenant_id="tenant-destructive-first",
+            cell_id="cell-destructive-first",
+            fence=5,
+            worker=f"worker-after-{action}-later",
+        )
+        assert (
+            await reserve(later, later_request, f"worker-after-{action}-later")
+        ).fence_generation == 5
+
+        first, first_request = await claim_provision(
+            operation_id=f"operation-before-{action}",
+            tenant_id="tenant-reservation-first",
+            cell_id="cell-reservation-first",
+            fence=7,
+            worker=f"worker-before-{action}",
+        )
+        reserved = await reserve(first, first_request, f"worker-before-{action}")
+        await repository.mark_pending(
+            first.id,
+            f"worker-before-{action}",
+            claim_token=first.claim_token,
+            claim_generation=first.claim_generation,
+            checkpoint="namespace-ready",
+            retry_after_seconds=300,
+        )
+        second = await repository.submit(
+            action,
+            f"key-{action}-second",
+            _request(
+                operationId=f"operation-{action}-second",
+                tenantId="tenant-reservation-first",
+                cellId="cell-reservation-first",
+                fenceGeneration=7,
+            ),
+        )
+        second_claim = await repository.claim_next(
+            f"worker-{action}-second",
+            allowed_actions=frozenset({OperationAction(action)}),
+        )
+        assert second_claim is not None and second_claim.claim_token
+        with pytest.raises(StaleFence):
+            await repository.complete(
+                second.id,
+                proof,
+                worker_id=f"worker-{action}-second",
+                claim_token=second_claim.claim_token,
+                claim_generation=second_claim.claim_generation,
+            )
+        async with database.session_factory() as session:
+            row = await session.get(CapacityReservation, reserved.id)
+            assert row is not None and row.released_at is None
+            assert (
+                await session.scalar(
+                    select(func.count())
+                    .select_from(CapacityDestructiveFence)
+                    .where(
+                        CapacityDestructiveFence.tenant_id
+                        == "tenant-reservation-first"
+                    )
+                )
+                == 0
+            )
+            tables = set(
+                (
+                    await session.execute(
+                        text(
+                            "SELECT tablename FROM pg_tables WHERE schemaname=:schema"
+                        ),
+                        {"schema": target.schema},
+                    )
+                ).scalars()
+            )
+        assert "capacity_destructive_fences" in tables
     finally:
         await database.dispose()

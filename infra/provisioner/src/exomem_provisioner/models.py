@@ -249,6 +249,53 @@ class CapacityReservation(Base):
     )
 
 
+class CapacityDestructiveFence(Base):
+    """Immutable proof-valid DISCARD/DESTROY completion history."""
+
+    __tablename__ = "capacity_destructive_fences"
+    __table_args__ = (
+        UniqueConstraint(
+            "destructive_operation_id",
+            name="uq_capacity_destructive_fence_operation",
+        ),
+        CheckConstraint(
+            "fence_generation >= 1",
+            name="ck_capacity_destructive_fence_positive_fence",
+        ),
+        CheckConstraint(
+            "(release_reason = 'DISCARD' AND cell_id IS NOT NULL) OR "
+            "(release_reason = 'DESTROY' AND cell_id IS NULL)",
+            name="ck_capacity_destructive_fence_scope",
+        ),
+        Index(
+            "ix_capacity_destructive_fence_tenant_fence",
+            "tenant_id",
+            "fence_generation",
+        ),
+        Index(
+            "ix_capacity_destructive_fence_tenant_cell_fence",
+            "tenant_id",
+            "cell_id",
+            "fence_generation",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        Uuid(as_uuid=False), primary_key=True, default=lambda: str(uuid.uuid4())
+    )
+    tenant_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    cell_id: Mapped[str | None] = mapped_column(String(256))
+    release_reason: Mapped[CapacityReleaseReason] = mapped_column(
+        Enum(CapacityReleaseReason, native_enum=False, length=16), nullable=False
+    )
+    destructive_operation_id: Mapped[str] = mapped_column(
+        ForeignKey("operations.id", ondelete="RESTRICT"), nullable=False
+    )
+    provider_operation_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    fence_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
+    completed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Resource(Base):
     __tablename__ = "resources"
     __table_args__ = (

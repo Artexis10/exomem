@@ -115,9 +115,52 @@ def upgrade() -> None:
         ["reservation_class", "released_at"],
         schema=schema,
     )
+    op.create_table(
+        "capacity_destructive_fences",
+        sa.Column("id", sa.Uuid(as_uuid=False), primary_key=True),
+        sa.Column("tenant_id", sa.String(256), nullable=False),
+        sa.Column("cell_id", sa.String(256)),
+        sa.Column("release_reason", sa.String(16), nullable=False),
+        sa.Column(
+            "destructive_operation_id",
+            sa.String(36),
+            sa.ForeignKey(_foreign_key("operations", "id"), ondelete="RESTRICT"),
+            nullable=False,
+        ),
+        sa.Column("provider_operation_id", sa.String(256), nullable=False),
+        sa.Column("fence_generation", sa.BigInteger(), nullable=False),
+        sa.Column("completed_at", sa.DateTime(timezone=True), nullable=False),
+        sa.CheckConstraint(
+            "fence_generation >= 1",
+            name="ck_capacity_destructive_fence_positive_fence",
+        ),
+        sa.CheckConstraint(
+            "(release_reason = 'DISCARD' AND cell_id IS NOT NULL) OR "
+            "(release_reason = 'DESTROY' AND cell_id IS NULL)",
+            name="ck_capacity_destructive_fence_scope",
+        ),
+        sa.UniqueConstraint(
+            "destructive_operation_id",
+            name="uq_capacity_destructive_fence_operation",
+        ),
+        schema=schema,
+    )
+    op.create_index(
+        "ix_capacity_destructive_fence_tenant_fence",
+        "capacity_destructive_fences",
+        ["tenant_id", "fence_generation"],
+        schema=schema,
+    )
+    op.create_index(
+        "ix_capacity_destructive_fence_tenant_cell_fence",
+        "capacity_destructive_fences",
+        ["tenant_id", "cell_id", "fence_generation"],
+        schema=schema,
+    )
 
 
 def downgrade() -> None:
     schema = _schema()
+    op.drop_table("capacity_destructive_fences", schema=schema)
     op.drop_table("capacity_reservations", schema=schema)
     op.drop_table("capacity_ledger", schema=schema)

@@ -997,7 +997,10 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
         return {
             "metadata": {
                 "name": resource_name,
-                "labels": {"exomem.io/tenant-cell": "true"},
+                "labels": {
+                    "exomem.io/tenant-cell": "true",
+                    "exomem.io/cell-resource": resource_name,
+                },
                 "annotations": {
                     "exomem.io/tenant-id": tenant_id,
                     "exomem.io/cell-id": cell_id,
@@ -1061,9 +1064,41 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
     assert capacity["expires_at"] == "2026-07-14T12:05:00Z"
     assert "tenant-1" not in json.dumps(capacity)
 
+    with_unrelated = module.capacity_snapshot_from_documents(
+        tenant_namespaces={
+            "kind": "NamespaceList",
+            "items": [
+                *namespaces,
+                {"metadata": {"name": "kube-public", "labels": {}, "annotations": {}}},
+                {"metadata": {"name": "local-path-storage"}},
+            ],
+        },
+        cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+        hcloud_server=server,
+        hcloud_pages=pages,
+        expected_server_id=101,
+        expected_location="fsn1",
+    )
+    assert with_unrelated.active_user_cells == 3
+    assert with_unrelated.active_recovery_cells == 1
+
     invalid_namespace = json.loads(json.dumps(namespaces[0]))
     del invalid_namespace["metadata"]["annotations"]["exomem.io/provision-mode"]
-    for invalid_namespaces in ([invalid_namespace], [namespaces[0], namespaces[0]]):
+    stripped_label = json.loads(json.dumps(namespaces[0]))
+    del stripped_label["metadata"]["labels"]["exomem.io/tenant-cell"]
+    malformed_marker = {
+        "metadata": {
+            "name": "ordinary-namespace",
+            "labels": {"exomem.io/tenant-cell": "false"},
+            "annotations": {},
+        }
+    }
+    for invalid_namespaces in (
+        [invalid_namespace],
+        [stripped_label],
+        [malformed_marker],
+        [namespaces[0], namespaces[0]],
+    ):
         with pytest.raises(module.ReceiptCollectorError, match="namespace identity"):
             module.capacity_snapshot_from_documents(
                 tenant_namespaces={"kind": "NamespaceList", "items": invalid_namespaces},
@@ -1080,6 +1115,35 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
             hcloud_server=server,
             hcloud_pages=pages,
             expected_server_id=102,
+            expected_location="fsn1",
+        )
+
+    with pytest.raises(module.ReceiptCollectorError, match="HCloud server"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": []},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server={
+                "server": {
+                    "id": True,
+                    "datacenter": {"location": {"name": "fsn1"}},
+                }
+            },
+            hcloud_pages=[{"volumes": []}],
+            expected_server_id=1,
+            expected_location="fsn1",
+        )
+    with pytest.raises(module.ReceiptCollectorError, match="HCloud capacity"):
+        module.capacity_snapshot_from_documents(
+            tenant_namespaces={"kind": "NamespaceList", "items": []},
+            cluster_namespace={"metadata": {"uid": "cluster-uid-1234"}},
+            hcloud_server={
+                "server": {
+                    "id": 1,
+                    "datacenter": {"location": {"name": "fsn1"}},
+                }
+            },
+            hcloud_pages=[{"volumes": [{"id": 1, "server": True}]}],
+            expected_server_id=1,
             expected_location="fsn1",
         )
 
@@ -1124,6 +1188,45 @@ def test_operational_receipt_collectors_issue_only_domain_bound_attestations(
         public_key.verify(bytes.fromhex(authentication["signature"]), domain + canonical)
         with pytest.raises(InvalidSignature):
             public_key.verify(bytes.fromhex(authentication["signature"]), canonical)
+
+
+def test_capacity_collector_lists_namespaces_without_label_selector(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load(
+        "infra/helm/platform/files/operational_receipt_collector.py",
+        "operational_receipt_collector_broad_list_test",
+    )
+    token = tmp_path / "token"
+    token.write_text("kubernetes-token", encoding="ascii")
+    requested: list[str] = []
+
+    def fake_request(url: str, **kwargs: object) -> dict[str, object]:
+        del kwargs
+        requested.append(url)
+        if url.endswith("/api/v1/namespaces"):
+            return {"kind": "NamespaceList", "items": []}
+        if url.endswith("/api/v1/namespaces/kube-system"):
+            return {"metadata": {"uid": "cluster-uid-1234"}}
+        if "/configmaps/" in url:
+            return {"metadata": {"resourceVersion": "1"}, "data": {"state.json": "{}"}}
+        if "/servers/" in url:
+            return {"server": {"id": 101}}
+        if "/volumes?" in url:
+            return {"volumes": [], "meta": {"pagination": {"next_page": None}}}
+        raise AssertionError(url)
+
+    monkeypatch.setattr(module, "_json_request", fake_request)
+    module._capacity_live_documents(
+        token_path=token,
+        ca_path=tmp_path / "unused-ca",
+        hcloud_token="hcloud-token",
+        hcloud_server_id=101,
+        namespace="exomem-platform",
+        state_name="capacity-state",
+    )
+    assert requested[0] == "https://kubernetes.default.svc/api/v1/namespaces"
 
 
 def test_rotation_collector_rejects_uncontracted_or_failed_observations(tmp_path: Path) -> None:

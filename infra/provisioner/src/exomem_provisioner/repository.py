@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .crypto import EnvelopeCodec
 from .models import (
     BackupRecord,
+    CapacityDestructiveFence,
     CapacityLedger,
     CapacityReleaseReason,
     CapacityReservation,
@@ -29,6 +30,7 @@ from .models import (
     ResourceKind,
     TenantFence,
 )
+from .provider_identity import cell_resource_name
 
 
 class RepositoryConflict(RuntimeError):
@@ -388,6 +390,11 @@ async def _release_completed_capacity(
         return
     if operation.action is OperationAction.DISCARD and operation.cell_id is None:
         raise ImmutableMetadataConflict("discard capacity release has no authenticated cell")
+    reason = (
+        CapacityReleaseReason.DISCARD
+        if operation.action is OperationAction.DISCARD
+        else CapacityReleaseReason.DESTROY
+    )
     ledger = await session.get(CapacityLedger, 1, with_for_update=True)
     if ledger is None:
         raise ImmutableMetadataConflict("capacity ledger singleton is missing")
@@ -405,19 +412,28 @@ async def _release_completed_capacity(
         for reservation in reservations
     ):
         raise StaleFence("destructive operation cannot release an equal-or-newer reservation")
-    if not reservations:
-        return
-    reason = (
-        CapacityReleaseReason.DISCARD
-        if operation.action is OperationAction.DISCARD
-        else CapacityReleaseReason.DESTROY
-    )
+    if operation.action is OperationAction.DISCARD and any(
+        reservation.resource_name != cell_resource_name(reservation.cell_id)
+        for reservation in reservations
+    ):
+        raise ImmutableMetadataConflict("discard reservation resource identity differs")
     for reservation in reservations:
         reservation.released_at = completed_at
         reservation.releasing_operation_id = operation.id
         reservation.releasing_provider_operation_id = operation.external_operation_id
         reservation.releasing_fence_generation = operation.fence_generation
         reservation.release_reason = reason
+    session.add(
+        CapacityDestructiveFence(
+            tenant_id=operation.tenant_id,
+            cell_id=(operation.cell_id if reason is CapacityReleaseReason.DISCARD else None),
+            release_reason=reason,
+            destructive_operation_id=operation.id,
+            provider_operation_id=operation.external_operation_id,
+            fence_generation=operation.fence_generation,
+            completed_at=completed_at,
+        )
+    )
     ledger.revision += 1
     ledger.updated_at = completed_at
 

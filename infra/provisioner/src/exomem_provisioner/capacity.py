@@ -17,12 +17,14 @@ from typing import Any
 from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .lifecycle import MetadataConflict, OpaqueProviderMetadata
 from .models import (
+    CapacityDestructiveFence,
     CapacityLedger,
+    CapacityReleaseReason,
     CapacityReservation,
     CapacityReservationClass,
     OperationAction,
@@ -42,6 +44,19 @@ _RECEIPT_ID = re.compile(
 _TIMESTAMP = re.compile(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z\Z")
 _MAX_RECEIPT_BYTES = 65_536
 _HCLOUD_CSI_DRIVER = "csi.hetzner.cloud"
+_CELL_RESOURCE_NAME = re.compile(r"exo-[0-9a-f]{20}\Z")
+_CELL_NAMESPACE_MARKERS = frozenset(
+    {
+        "exomem.io/tenant-cell",
+        "exomem.io/cell-resource",
+        "exomem.io/resource-name",
+        "exomem.io/tenant-id",
+        "exomem.io/cell-id",
+        "exomem.io/operation-id",
+        "exomem.io/fence",
+        "exomem.io/provision-mode",
+    }
+)
 
 
 class CapacityError(RuntimeError):
@@ -52,8 +67,16 @@ class CapacityReceiptError(CapacityError):
     pass
 
 
+class CapacityObservationError(CapacityError):
+    pass
+
+
 class CapacityConflict(CapacityError):
     pass
+
+
+class CapacityIdentityConflict(CapacityConflict):
+    """Expected immutable reservation/fence conflict safe for terminal handling."""
 
 
 class CapacityBlocked(CapacityError):
@@ -344,17 +367,21 @@ class KubernetesCapacityObserver:
         self._now = now
 
     async def observe(self) -> CapacityObservation:
-        namespaces, cluster, pvs, pvcs, attachments, nodes = await asyncio.gather(
-            asyncio.to_thread(
-                self._core.list_namespace,
-                label_selector="exomem.io/tenant-cell=true",
-            ),
-            asyncio.to_thread(self._core.read_namespace, "kube-system"),
-            asyncio.to_thread(self._core.list_persistent_volume),
-            asyncio.to_thread(self._core.list_persistent_volume_claim_for_all_namespaces),
-            asyncio.to_thread(self._storage.list_volume_attachment),
-            asyncio.to_thread(self._core.list_node),
-        )
+        try:
+            namespaces, cluster, pvs, pvcs, attachments, nodes = await asyncio.gather(
+                asyncio.to_thread(self._core.list_namespace),
+                asyncio.to_thread(self._core.read_namespace, "kube-system"),
+                asyncio.to_thread(self._core.list_persistent_volume),
+                asyncio.to_thread(
+                    self._core.list_persistent_volume_claim_for_all_namespaces
+                ),
+                asyncio.to_thread(self._storage.list_volume_attachment),
+                asyncio.to_thread(self._core.list_node),
+            )
+        except Exception as error:  # noqa: BLE001 - exact provider-read boundary
+            raise CapacityObservationError(
+                "Kubernetes capacity observation is unavailable"
+            ) from error
         cluster_uid = _attr(_metadata(cluster), "uid")
         if not isinstance(cluster_uid, str) or len(cluster_uid) < 8:
             raise CapacityReceiptError("Kubernetes cluster identity is invalid")
@@ -377,8 +404,17 @@ class KubernetesCapacityObserver:
         for item in (_attr(namespaces, "items", ()) or ()):
             metadata = _metadata(item)
             name = _attr(metadata, "name")
-            labels = dict(_attr(metadata, "labels", {}) or {})
-            annotations = dict(_attr(metadata, "annotations", {}) or {})
+            raw_labels = _attr(metadata, "labels", {}) or {}
+            raw_annotations = _attr(metadata, "annotations", {}) or {}
+            if not isinstance(raw_labels, dict) or not isinstance(raw_annotations, dict):
+                raise CapacityReceiptError("tenant namespace identity is invalid")
+            labels = dict(raw_labels)
+            annotations = dict(raw_annotations)
+            candidate = (
+                isinstance(name, str) and _CELL_RESOURCE_NAME.fullmatch(name) is not None
+            ) or bool(_CELL_NAMESPACE_MARKERS & (labels.keys() | annotations.keys()))
+            if not candidate:
+                continue
             try:
                 identity = OpaqueProviderMetadata.from_kubernetes_annotations(annotations)
             except (MetadataConflict, TypeError, ValueError) as error:
@@ -386,6 +422,7 @@ class KubernetesCapacityObserver:
             mode = annotations.get("exomem.io/provision-mode")
             if (
                 labels.get("exomem.io/tenant-cell") != "true"
+                or labels.get("exomem.io/cell-resource") != name
                 or not isinstance(name, str)
                 or name != identity.resource_name
                 or annotations.get("exomem.io/resource-name") != name
@@ -468,15 +505,17 @@ class KubernetesCapacityObserver:
             seen_handles.add(handle)
             pvc = pvc_by_identity.get((claim_namespace, claim_name))
             namespace_identity = namespace_by_name.get(claim_namespace)
+            if pvc is not None:
+                pvc_metadata = _metadata(pvc)
+                if (
+                    _attr(pvc_metadata, "uid") != claim_uid
+                    or _attr(_attr(pvc, "spec", {}), "volume_name") != pv_name
+                ):
+                    raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
             if pvc is None or namespace_identity is None:
                 orphan_ids.add(f"volume:{handle}")
                 continue
-            pvc_metadata = _metadata(pvc)
-            if (
-                _attr(pvc_metadata, "uid") != claim_uid
-                or _attr(_attr(pvc, "spec", {}), "volume_name") != pv_name
-                or claim_name != namespace_identity.resource_name + "-data"
-            ):
+            if claim_name != namespace_identity.resource_name + "-data":
                 raise CapacityReceiptError("HCloud PVC ownership observation is invalid")
         return CapacityObservation(
             observed_at=_as_utc(self._now()),
@@ -568,7 +607,9 @@ class CapacityReservationAuthority:
                     )
                 )
             if consumed is not None:
-                raise CapacityConflict("reserving operation was permanently released") from None
+                raise CapacityIdentityConflict(
+                    "reserving operation was permanently released"
+                ) from None
             raise
 
     async def _reserve(
@@ -627,6 +668,33 @@ class CapacityReservationAuthority:
                     or receipt.attached_volumes != observation.attached_hcloud_volumes
                 ):
                     raise CapacityBlocked("capacity-live-observation-mismatch")
+                users = set(observation.user_resource_names)
+                recovery = set(observation.recovery_resource_names)
+                if users & recovery:
+                    raise CapacityBlocked("capacity-live-observation-mismatch")
+                destructive = await session.scalar(
+                    select(CapacityDestructiveFence)
+                    .where(
+                        CapacityDestructiveFence.tenant_id == active.tenant_id,
+                        CapacityDestructiveFence.fence_generation
+                        >= active.fence_generation,
+                        or_(
+                            CapacityDestructiveFence.release_reason
+                            == CapacityReleaseReason.DESTROY,
+                            and_(
+                                CapacityDestructiveFence.release_reason
+                                == CapacityReleaseReason.DISCARD,
+                                CapacityDestructiveFence.cell_id == active.cell_id,
+                            ),
+                        ),
+                    )
+                    .order_by(CapacityDestructiveFence.fence_generation.desc())
+                    .with_for_update()
+                )
+                if destructive is not None:
+                    raise CapacityIdentityConflict(
+                        "proof-valid destructive fence blocks capacity admission"
+                    )
                 existing = await session.scalar(
                     select(CapacityReservation)
                     .where(CapacityReservation.reserving_operation_id == active.id)
@@ -650,8 +718,9 @@ class CapacityReservationAuthority:
                         existing.reserving_fence_generation,
                     )
                     if existing_identity != identity or existing.released_at is not None:
-                        raise CapacityConflict("reserving operation identity is immutable")
-                    return _snapshot(existing)
+                        raise CapacityIdentityConflict(
+                            "reserving operation identity is immutable"
+                        )
                 reservations = list(
                     await session.scalars(
                         select(CapacityReservation)
@@ -660,8 +729,30 @@ class CapacityReservationAuthority:
                         .with_for_update()
                     )
                 )
-                users = set(observation.user_resource_names)
-                recovery = set(observation.recovery_resource_names)
+                for reserved in reservations:
+                    observed_user = reserved.resource_name in users
+                    observed_recovery = reserved.resource_name in recovery
+                    if (
+                        observed_user
+                        and reserved.reservation_class is not CapacityReservationClass.USER
+                    ) or (
+                        observed_recovery
+                        and reserved.reservation_class is not CapacityReservationClass.RECOVERY
+                    ):
+                        raise CapacityBlocked("capacity-live-observation-mismatch")
+                if existing is not None:
+                    return _snapshot(existing)
+                if any(
+                    (
+                        reserved.tenant_id == active.tenant_id
+                        and reserved.cell_id == active.cell_id
+                    )
+                    or reserved.resource_name == resource_name
+                    for reserved in reservations
+                ):
+                    raise CapacityIdentityConflict(
+                        "active capacity reservation identity conflicts"
+                    )
                 potential = set(observation.potential_resource_names)
                 for reserved in reservations:
                     potential.add(reserved.resource_name)
@@ -801,7 +892,7 @@ class LiveCapacityAdmission:
             raise CapacityConflict("worker provider identity differs from claimed operation")
         try:
             observation = await self._observer.observe()
-        except CapacityReceiptError:
+        except (CapacityObservationError, CapacityReceiptError):
             return "capacity-live-observation-mismatch"
         try:
             config_map = await asyncio.to_thread(
