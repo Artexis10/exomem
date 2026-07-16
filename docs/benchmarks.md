@@ -15,6 +15,32 @@ benchmark.
 > same regression floors are asserted in `tests/test_retrieval_golden.py`. See
 > [Reproduction](#reproduction) to re-run it or point it at your own vault.
 
+## Pinned local-core comparison
+
+The retrieval eval below measures Exomem against a golden set. A separate
+cross-product harness, `scripts/graph_value_benchmark.py`, executes Exomem and a
+pinned Basic Memory checkout over one neutral manifest rendered into each
+product's native Markdown. It reconciles runtime MCP/CLI inventories, isolates
+all state, uses persistent public MCP sessions, preserves raw envelopes, and
+reports shared core, lifecycle integrity, explanation truth, performance, and
+Exomem extensions independently—never as a weighted score.
+
+The corrected lean direct run on 2026-07-16 passed all 22 required Exomem probes
+and kept shared core, lifecycle integrity, explanation truth, and Exomem
+extensions green. Operation-level preflight separately proved all 21 active
+Exomem MCP operations and all 16 MCP plus 5 CLI operations assigned to Basic
+Memory's lean probes; renderer facts and per-probe state transitions are
+recorded independently of probe-ID coverage. The fresh run retained 242 raw
+request/response artifacts for 121 public calls and exercised strict lifecycle
+generation/removal plus reconcile/full-maintenance equivalence. It emitted no full
+local-core-advantage claim because learned models, paired performance, and media
+are outside the lean profile. The current WSL2 full-profile attempt is invalid
+at native model setup (`SIGABRT` while SentenceTransformers loads BGE on either
+CPU or CUDA), so it is recorded as an environment failure rather than a product
+result. See
+[Exomem vs Basic Memory: graph-value comparison](comparison-basic-memory-graph.md)
+for exact revisions, gates, limitations, and reproduction commands.
+
 ## Methodology
 
 - **Harness.** `scripts/eval_retrieval.py --report markdown` runs the golden set
