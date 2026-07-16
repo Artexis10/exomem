@@ -1047,10 +1047,14 @@ class _BatchWorkspace:
             for _attempt in range(16):
                 name = f".exomem-batch-{secrets.token_hex(16)}"
                 try:
+                    # Python 3.13 gives mode 0700 special restrictive ACL
+                    # semantics on Windows. A LocalSystem service would then
+                    # move that SYSTEM-only ACL onto the user's final note.
+                    workspace_mode = 0o700 if os.name != "nt" else 0o777
                     if os.mkdir in getattr(os, "supports_dir_fd", set()):
-                        os.mkdir(name, 0o700, dir_fd=parent_descriptor)
+                        os.mkdir(name, workspace_mode, dir_fd=parent_descriptor)
                     else:  # pragma: no cover - Windows fallback
-                        os.mkdir(absolute_parent / name, 0o700)
+                        os.mkdir(absolute_parent / name, workspace_mode)
                 except FileExistsError:
                     continue
                 created = True

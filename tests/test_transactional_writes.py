@@ -213,7 +213,7 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert existing.read_bytes() == b"existing\nexact"
     assert created.read_bytes() == b"created\nexact"
     assert flips == ["existing.md", "created.md"]
-    assert workspace_mkdir_modes == [0o700]
+    assert workspace_mkdir_modes == [0o777 if os.name == "nt" else 0o700]
     assert backup_creations == []
     assert watcher_calls == [(existing, created)]
     assert index_calls == [(existing, created)]
