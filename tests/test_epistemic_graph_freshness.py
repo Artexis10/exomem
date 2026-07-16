@@ -803,6 +803,18 @@ def test_graph_drift_is_audited_and_reconciled_without_markdown_mutation(tmp_pat
     assert all(f["category"] != "graph_drift" for f in reconciled.remaining_drift)
 
 
+def test_reconcile_rebuilds_a_deleted_graph_sidecar(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    epistemic_graph.EpistemicGraphIndex(vault).rebuild_all()
+    epistemic_graph.sidecar_path(vault).unlink()
+
+    reconciled = reconcile.reconcile(vault)
+
+    assert reconciled.graph_status == "refreshed"
+    assert epistemic_graph.EpistemicGraphIndex(vault).available()
+
+
 def test_disabled_graph_indexing_makes_drift_check_noop(tmp_path: Path, monkeypatch) -> None:
     vault = tmp_path / "vault"
     _seed(vault)

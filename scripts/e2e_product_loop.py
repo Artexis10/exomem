@@ -443,8 +443,17 @@ async def _stdio_session(
                     relation_ref=state["relation_ref"],
                     timeout=timeout,
                 )
-                if reconcile.get("graph_status") != "refreshed":
-                    raise RuntimeError("deleted graph sidecar was not rebuilt after restart")
+                from exomem import epistemic_graph
+
+                graph_status = reconcile.get("graph_status")
+                graph_available = epistemic_graph.EpistemicGraphIndex(
+                    Path(env["EXOMEM_VAULT_PATH"])
+                ).available()
+                if graph_status not in {"current", "refreshed"} or not graph_available:
+                    raise RuntimeError(
+                        "deleted graph sidecar was not rebuilt after restart: "
+                        f"status={graph_status!r}, available={graph_available!r}"
+                    )
     return state
 
 
