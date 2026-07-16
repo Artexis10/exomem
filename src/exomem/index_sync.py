@@ -87,7 +87,12 @@ def clear_deferred_work(
     )
 
 
-def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
+def drain_deferred_work(
+    vault_root: Path,
+    *,
+    limit: int | None = None,
+    paths: list[Path] | list[str] | None = None,
+) -> int:
     """Process queued semantic upserts now and clear them on dispatch.
 
     The embedding layer is best-effort and logs/soft-fails internally, matching
@@ -95,15 +100,35 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
     and explicit reconcile/index.
     """
     processed = 0
-    full_pending = deferred_index.list_full_paths(vault_root, limit=limit)
+    full_pending = deferred_index.list_full_paths(
+        vault_root, limit=limit if paths is None else None
+    )
+    if paths is not None:
+        requested: set[str] = set()
+        for item in paths:
+            if isinstance(item, Path):
+                requested.update(_rel_md_paths(vault_root, [item]))
+            else:
+                requested.add(str(item).replace("\\", "/"))
+        full_pending = [rel for rel in full_pending if rel in requested]
+        if limit is not None:
+            full_pending = full_pending[: max(0, limit)]
     if full_pending:
         full_paths = [vault_root / rel for rel in full_pending]
         try:
-            upsert_after_write(vault_root, full_paths)
+            dispatched = upsert_after_write(vault_root, full_paths)
         except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
             log.warning("deferred full-index dispatch failed; work remains queued", exc_info=True)
         else:
+            if dispatched is not True:
+                log.warning(
+                    "deferred full-index dispatch incomplete; work remains queued"
+                )
+                return processed
             processed += deferred_index.clear_full(vault_root, full_pending)
+
+    if paths is not None:
+        return processed
 
     remaining_limit = None if limit is None else max(0, limit - processed)
     pending = deferred_index.list_paths(vault_root, limit=remaining_limit)
@@ -125,7 +150,7 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
 
 def upsert_after_write(
     vault_root: Path, written_paths: list[Path], *, defer_semantic: bool = False
-) -> None:
+) -> bool:
     """Fan a writer's markdown change out to every index sidecar.
 
     Paths under excluded scan dirs (`_trash/`, `_archive/`, `_Schema/`, ...) are
@@ -151,7 +176,7 @@ def upsert_after_write(
             continue
         eligible.append(p)
     if not eligible:
-        return
+        return True
     lexstore.upsert_after_write(vault_root, eligible)
     memory_refs.upsert_after_write(vault_root, eligible)
     try:
@@ -165,10 +190,13 @@ def upsert_after_write(
         added = _record_deferred_semantic_upserts(vault_root, eligible)
         if added:
             log.info("deferred semantic indexing for %d markdown file(s)", added)
-        return
+        return False
     from . import embeddings
 
-    embeddings.upsert_after_write(vault_root, eligible)
+    completed = embeddings.upsert_after_write(vault_root, eligible)
+    if completed is False:
+        _record_deferred_semantic_upserts(vault_root, eligible)
+    return completed
 
 
 def delete_after_remove(vault_root: Path, removed_rel_paths: list[str]) -> None:

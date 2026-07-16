@@ -844,6 +844,8 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
         "state": media_jobs.PENDING,
         "sidecar_path": f"{relative}.md",
         "job_id": processed["job_id"],
+        "index_refreshed": 0,
+        "index_refresh_remaining": 0,
     }
     assert processed["job_id"] is not None
 
@@ -862,6 +864,39 @@ def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: P
     assert retried["path"] == relative
     assert retried["state"] == media_jobs.PENDING
     assert retried["requeued"] == 1
+
+
+def test_process_media_surfaces_and_retries_targeted_full_index_work(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index, index_sync
+
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "product-index-retry.m4a")
+    relative = binary.relative_to(vault).as_posix()
+    result = media_processing.reconcile_media(vault, binary)
+    other = vault / "Knowledge Base" / "Evidence" / "Audio" / "other.m4a.md"
+    other.write_text("# other\n", encoding="utf-8")
+    deferred_index.add_full(
+        vault,
+        [
+            result.sidecar_path.relative_to(vault).as_posix(),
+            other.relative_to(vault).as_posix(),
+        ],
+    )
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+
+    status = commands_module.op_process_media(vault, operation="status")
+    assert status["index_refresh"]["count"] == 2
+    assert status["index_refresh"]["retryable"] is True
+
+    retried = commands_module.op_process_media(vault, path=relative, operation="retry")
+
+    assert retried["index_refreshed"] == 1
+    assert retried["index_refresh_remaining"] == 1
+    assert deferred_index.full_status(vault)["paths"] == [
+        other.relative_to(vault).as_posix()
+    ]
 
 
 def test_process_media_product_status_is_stably_bounded(vault: Path) -> None:
@@ -904,8 +939,18 @@ def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
     processed = commands_module.op_process_media(vault, operation="process")
     retried = commands_module.op_process_media(vault, operation="retry")
 
-    assert processed == {"operation": "process", "reconciled": 3}
-    assert retried == {"operation": "retry", "requeued": 2}
+    assert processed == {
+        "operation": "process",
+        "reconciled": 3,
+        "index_refreshed": 0,
+        "index_refresh_remaining": 0,
+    }
+    assert retried == {
+        "operation": "retry",
+        "requeued": 2,
+        "index_refreshed": 0,
+        "index_refresh_remaining": 0,
+    }
     assert calls == [
         ("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT),
         ("retry", media_jobs.STATUS_JOB_LIMIT),

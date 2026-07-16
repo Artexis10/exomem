@@ -257,6 +257,8 @@ def test_process_media_cli_process_status_and_retry(vault: Path, capsys) -> None
     assert code == 0, err
     status = json.loads(out.strip().splitlines()[-1])["data"]
     assert status["counts"][media_jobs.BLOCKED] == 1
+    assert status["index_refresh"]["count"] == 0
+    assert status["index_refresh"]["retryable"] is False
 
     code, out, err = _run(
         ["process_media", "--path", relative, "--operation", "retry", "--json"], capsys

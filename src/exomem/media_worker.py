@@ -238,15 +238,17 @@ class MediaWorker:
 
     def _run_extraction(self, job: _Job) -> _ProcessOutcome:
         # A startup/watcher race may complete the transcript after this job was
-        # queued or even claimed. Reconcile under the canonical leaf before ASR;
-        # valid completed text wins and is never overwritten.
+        # queued or even claimed. Re-read before ASR; the final commit repeats
+        # this check under mutation authority to close the compute-window race.
         from . import media_processing
 
-        with get_manager().mutation_guard(self._vault_root):
-            reconciled = media_processing.reconcile_media(
-                self._vault_root, job.binary_path, explicit=False
-            )
-        if reconciled is not None and reconciled.state == "completed":
+        try:
+            claimed_content = job.sidecar_path.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            claimed_content = ""
+        if media_processing.has_completed_transcript(
+            claimed_content, media_type=job.media_type
+        ):
             return _ProcessOutcome(_COMPLETE)
         expected_sidecar = _content_digest(job.sidecar_path)
         expected_binary = _binary_identity(job.binary_path)
@@ -326,7 +328,13 @@ class MediaWorker:
         speaker_verification: str | None = None,
     ) -> bool:
         with get_manager().mutation_guard(self._vault_root):
-            current_sidecar = _content_digest(job.sidecar_path)
+            try:
+                current_content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                current_content = ""
+            from . import media_processing
+
+            current_sidecar = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
             current_binary = _binary_identity(job.binary_path)
             if current_sidecar != expected_sidecar or current_binary != expected_binary:
                 log.warning(
@@ -339,6 +347,14 @@ class MediaWorker:
                         job.sidecar_path,
                         attempts=max(1, job.attempts),
                     )
+                return False
+            if media_processing.has_completed_transcript(
+                current_content, media_type=job.media_type
+            ):
+                log.info(
+                    "completed transcript appeared before commit for %s; preserving it",
+                    job.sidecar_path.name,
+                )
                 return False
             preserve.update_sidecar_extraction(
                 self._vault_root,

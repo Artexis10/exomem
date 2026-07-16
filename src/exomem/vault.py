@@ -460,15 +460,19 @@ def _batch_atomic_write_locked(
             from . import file_watcher
             file_watcher.register_self_write(vault_root, replaced)
         except Exception:  # noqa: BLE001 — suppression is best-effort
-            import logging
             logging.getLogger(__name__).debug(
                 "self-write suppression registration failed", exc_info=True
             )
         try:
             from . import index_sync
-            index_sync.upsert_after_write(vault_root, replaced)
+
+            dispatched = index_sync.upsert_after_write(vault_root, replaced)
+            if dispatched is False:
+                logging.getLogger(__name__).warning(
+                    "semantic index upsert incomplete after batch_atomic_write; "
+                    "semantic retry remains deferred"
+                )
         except Exception:  # noqa: BLE001 — embeddings are best-effort
-            import logging
             try:
                 index_sync.record_failed_refresh(vault_root, replaced)
             except Exception:  # noqa: BLE001 - canonical commit must still survive

@@ -3376,7 +3376,7 @@ def op_process_media(
         path: Optional governed Knowledge Base media path. Omit for bounded all-media work.
         operation: process, status, or retry.
     """
-    from . import media_jobs
+    from . import index_sync, media_jobs
     from .cli_ops import OpError
 
     if operation not in {"process", "status", "retry"}:
@@ -3386,8 +3386,26 @@ def op_process_media(
         )
 
     vault_root = Path(vault_root).resolve()
+
+    def _drain_index_refresh(paths: list[Path] | list[str] | None = None) -> tuple[int, int]:
+        current = index_sync.deferred_work_status(vault_root)["full_upserts"]
+        selected = current["paths"] if paths is None else paths
+        refreshed = index_sync.drain_deferred_work(
+            vault_root,
+            limit=media_jobs.STATUS_JOB_LIMIT,
+            paths=selected,
+        )
+        remaining = index_sync.deferred_work_status(vault_root)["full_upserts"][
+            "count"
+        ]
+        return refreshed, remaining
+
     if operation == "status":
-        return {"operation": operation, **media_jobs.status(vault_root)}
+        return {
+            "operation": operation,
+            **media_jobs.status(vault_root),
+            "index_refresh": index_sync.deferred_work_status(vault_root)["full_upserts"],
+        }
 
     if path is None:
         if operation == "retry":
@@ -3397,7 +3415,13 @@ def op_process_media(
                 vault_root,
                 limit=media_jobs.STATUS_JOB_LIMIT,
             )
-            return {"operation": operation, "requeued": requeued}
+            refreshed, remaining = _drain_index_refresh()
+            return {
+                "operation": operation,
+                "requeued": requeued,
+                "index_refreshed": refreshed,
+                "index_refresh_remaining": remaining,
+            }
         from . import media_processing
 
         if operation == "process":
@@ -3405,7 +3429,13 @@ def op_process_media(
                 vault_root,
                 limit=media_processing.DEFAULT_RECONCILE_LIMIT,
             )
-            return {"operation": operation, "reconciled": reconciled}
+            refreshed, remaining = _drain_index_refresh()
+            return {
+                "operation": operation,
+                "reconciled": reconciled,
+                "index_refreshed": refreshed,
+                "index_refresh_remaining": remaining,
+            }
 
     from . import media_processing
 
@@ -3445,6 +3475,9 @@ def op_process_media(
     }
     if operation == "retry":
         payload["requeued"] = result.requeued
+    refreshed, remaining = _drain_index_refresh([result.sidecar_path])
+    payload["index_refreshed"] = refreshed
+    payload["index_refresh_remaining"] = remaining
     return payload
 
 

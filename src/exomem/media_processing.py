@@ -11,6 +11,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -28,6 +29,8 @@ from .vault import (
 
 log = logging.getLogger(__name__)
 DEFAULT_RECONCILE_LIMIT = 100
+_RUNTIME_LOCK = threading.Lock()
+_RUNTIME_UNAVAILABLE: dict[str, tuple[str, str]] = {}
 
 
 class MediaProcessingError(Exception):
@@ -83,6 +86,25 @@ def _preserve_module():
     from . import preserve
 
     return preserve
+
+
+def set_media_runtime_available(vault_root: Path) -> None:
+    """Mark this process's worker available without creating vault state."""
+    with _RUNTIME_LOCK:
+        _RUNTIME_UNAVAILABLE.pop(str(Path(vault_root).resolve()), None)
+
+
+def set_media_runtime_unavailable(
+    vault_root: Path, *, reason: str, next_action: str
+) -> None:
+    """Keep later automatic discoveries actionable for this server lifetime."""
+    with _RUNTIME_LOCK:
+        _RUNTIME_UNAVAILABLE[str(Path(vault_root).resolve())] = (reason, next_action)
+
+
+def _runtime_unavailable(vault_root: Path) -> tuple[str, str] | None:
+    with _RUNTIME_LOCK:
+        return _RUNTIME_UNAVAILABLE.get(str(Path(vault_root).resolve()))
 
 
 def reconcile_media(
@@ -177,6 +199,24 @@ def reconcile_media(
     )
     durable_job = store.get(job_id)
     state = durable_job.state if durable_job is not None else media_jobs.PENDING
+    unavailable = _runtime_unavailable(vault)
+    if unavailable is not None:
+        reason, next_action = unavailable
+        store.mark(job_id, media_jobs.BLOCKED, reason)
+        current_sidecar = sidecar.read_text(encoding="utf-8")
+        if not _has_runtime_unavailable_state(
+            current_sidecar, reason=reason, next_action=next_action
+        ):
+            _preserve_module().update_sidecar_processing_failure(
+                vault,
+                sidecar,
+                state=media_jobs.BLOCKED,
+                attempts=durable_job.attempts if durable_job is not None else 0,
+                error=reason,
+                retryable=True,
+                next_action=next_action,
+            )
+        state = media_jobs.BLOCKED
     return ReconcileResult(media_type, state, sidecar, job_id)
 
 
@@ -397,6 +437,14 @@ def _is_completed_transcript_shape(
     )
 
 
+def has_completed_transcript(content: str, *, media_type: str) -> bool:
+    """Final-commit guard for a transcript completed out of band."""
+    frontmatter, body, raw_frontmatter = parse_frontmatter(content)
+    return raw_frontmatter is not None and _is_completed_transcript_shape(
+        frontmatter, body, media_type
+    )
+
+
 def _is_nonnegative_int(value: object) -> bool:
     return isinstance(value, int) and not isinstance(value, bool) and value >= 0
 
@@ -411,6 +459,8 @@ def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
 
     result = reconcile_media(vault, binary)
     if result.state == "completed" or result.job_id is None:
+        return result
+    if _runtime_unavailable(vault) is not None:
         return result
 
     store = media_jobs.MediaJobStore(vault)
@@ -572,7 +622,10 @@ def _render_pending_sidecar(
         existing_id = memory_refs.normalize_id(frontmatter.get("exomem_id"))
         if _is_canonical_pending_shape(frontmatter, media_type, provenance):
             rendered = original
-            for field, value in _pending_fields(provenance):
+            pending_fields = _pending_fields(provenance)
+            if frontmatter.get("processing_state") == media_jobs.BLOCKED:
+                pending_fields = pending_fields[1:]
+            for field, value in pending_fields:
                 rendered = preserve._set_frontmatter_field(rendered, field, str(value))
             return rendered
         preserved_notes = body if raw_frontmatter is not None else original
@@ -611,6 +664,19 @@ def _pending_fields(provenance: _BinaryProvenance) -> tuple[tuple[str, object], 
         ("binary_size", provenance.size),
         ("binary_mtime_ns", provenance.mtime_ns),
         ("binary_ctime_ns", provenance.ctime_ns),
+    )
+
+
+def _has_runtime_unavailable_state(
+    content: str, *, reason: str, next_action: str
+) -> bool:
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(content)
+    return (
+        raw_frontmatter is not None
+        and frontmatter.get("processing_state") == media_jobs.BLOCKED
+        and frontmatter.get("processing_error") == reason
+        and frontmatter.get("processing_retryable") is True
+        and frontmatter.get("processing_next_action") == next_action
     )
 
 
@@ -703,6 +769,7 @@ def mark_processing_unavailable(
 ) -> int:
     """Make queued automatic work actionable when no runtime can consume it."""
     vault = Path(vault_root).resolve()
+    set_media_runtime_unavailable(vault, reason=reason, next_action=next_action)
     if not media_jobs.job_store_path(vault).exists():
         return 0
     store = media_jobs.MediaJobStore(vault, create=False)

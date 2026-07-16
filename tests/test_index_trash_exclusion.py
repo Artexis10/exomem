@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import index_sync
+from exomem import deferred_index, index_sync
 from exomem.vault import in_excluded_scan_dir
 
 
@@ -277,3 +277,50 @@ def test_drain_deferred_work_preserves_failed_semantic_upserts(
     index_sync.upsert_after_write(vault, [good])
     assert index_sync.drain_deferred_work(vault) == 0
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
+
+
+def test_full_index_drain_keeps_work_when_embeddings_report_incomplete(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    from exomem import embeddings, epistemic_graph, find, lexstore, memory_refs
+
+    target = vault / "Knowledge Base" / "Notes" / "Insights" / "full-retry.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("# full retry\n", encoding="utf-8")
+    deferred_index.add_full(vault, [target.relative_to(vault).as_posix()])
+    monkeypatch.setattr(lexstore, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(memory_refs, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_a, **_kw: None)
+    monkeypatch.setattr(epistemic_graph, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *_a, **_kw: False)
+
+    assert index_sync.drain_deferred_work(vault) == 0
+    assert deferred_index.full_status(vault)["paths"] == [
+        target.relative_to(vault).as_posix()
+    ]
+
+    monkeypatch.setattr(embeddings, "upsert_after_write", lambda *_a, **_kw: True)
+    assert index_sync.drain_deferred_work(vault) == 2
+    assert deferred_index.full_status(vault)["count"] == 0
+    assert deferred_index.status(vault)["count"] == 0
+
+
+def test_full_index_drain_can_target_one_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = vault / "Knowledge Base" / "Evidence" / "Audio" / "first.m4a.md"
+    second = vault / "Knowledge Base" / "Evidence" / "Audio" / "second.m4a.md"
+    first.parent.mkdir(parents=True, exist_ok=True)
+    first.write_text("# first\n", encoding="utf-8")
+    second.write_text("# second\n", encoding="utf-8")
+    deferred_index.add_full(
+        vault,
+        [first.relative_to(vault).as_posix(), second.relative_to(vault).as_posix()],
+    )
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+
+    assert index_sync.drain_deferred_work(vault, paths=[first]) == 1
+    assert deferred_index.full_status(vault)["paths"] == [
+        second.relative_to(vault).as_posix()
+    ]

@@ -332,6 +332,14 @@ def _start_media_worker(vault_root: Path) -> Any | None:
             unavailable_action = (
                 "fix the media runtime configuration, restart the service, then retry"
             )
+    if unavailable_reason is not None and unavailable_action is not None:
+        media_processing.set_media_runtime_unavailable(
+            vault_root,
+            reason=unavailable_reason,
+            next_action=unavailable_action,
+        )
+    else:
+        media_processing.set_media_runtime_available(vault_root)
     try:
         from .writer_lease import get_manager
 

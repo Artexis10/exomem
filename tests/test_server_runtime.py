@@ -218,3 +218,47 @@ def test_failed_media_runtime_start_persists_actionable_blocked_state(
     assert job["retryable"] is True
     assert job["error"].startswith("MediaRuntimeUnavailable: OSError:")
     assert "restart the service" in job["next_action"]
+
+
+def test_later_drop_is_immediately_blocked_after_runtime_start_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_jobs
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+
+    class Worker:
+        def start(self):
+            raise OSError("worker boot failed")
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: Worker())
+
+    assert server_runtime._start_media_worker(vault) is None
+    assert not media_jobs.job_store_path(vault).exists()
+
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "later.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"later audio")
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result.state == media_jobs.BLOCKED
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == media_jobs.BLOCKED
+    assert "worker boot failed" in job["error"]
+    assert "restart the service" in job["next_action"]
+    sidecar = binary.with_name(binary.name + ".md").read_text(encoding="utf-8")
+    assert "processing_state: blocked" in sidecar
+    sidecar_path = binary.with_name(binary.name + ".md")
+    before = sidecar_path.read_bytes()
+    before_mtime = sidecar_path.stat().st_mtime_ns
+
+    repeated = media_processing.reconcile_media(vault, binary)
+
+    assert repeated.state == media_jobs.BLOCKED
+    assert sidecar_path.read_bytes() == before
+    assert sidecar_path.stat().st_mtime_ns == before_mtime

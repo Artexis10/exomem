@@ -992,6 +992,41 @@ def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
     assert media_jobs.status(vault)["jobs"] == []
 
 
+def test_external_completed_transcript_written_during_asr_wins_final_commit_race(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="commit-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    external_bytes: bytes | None = None
+
+    def external_completion(*_args, **_kwargs):
+        nonlocal external_bytes
+        completed = sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending", "extracted_by: external-asr+timed"
+        ).replace("processing_state: pending", "processing_state: completed")
+        completed += "\n[0:00] External transcript must win.\n"
+        sidecar.write_text(completed, encoding="utf-8")
+        external_bytes = sidecar.read_bytes()
+        return extract.ExtractResult(
+            text="[0:00] Worker transcript must lose.",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", external_completion)
+    monkeypatch.setattr(media_worker, "_content_digest", lambda _path: "stable")
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "stale"
+    assert external_bytes is not None
+    assert sidecar.read_bytes() == external_bytes
+    assert "Worker transcript must lose" not in sidecar.read_text(encoding="utf-8")
+
+
 def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1012,7 +1047,6 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
         )
 
     monkeypatch.setattr(extract, "extract_text", transcribe)
-    original_upsert = index_sync.upsert_after_write
     monkeypatch.setattr(
         index_sync,
         "upsert_after_write",
@@ -1031,7 +1065,7 @@ def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     assert status["count"] == 1
     assert status["next_action"] == "retry deferred index refresh"
 
-    monkeypatch.setattr(index_sync, "upsert_after_write", original_upsert)
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
     assert index_sync.drain_deferred_work(vault) == 1
     assert deferred_index.full_status(vault)["count"] == 0
     assert calls == 1
