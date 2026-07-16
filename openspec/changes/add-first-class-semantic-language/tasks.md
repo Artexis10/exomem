@@ -93,26 +93,44 @@
 
 ## 10. Layered Basic Memory Local-Core Benchmark
 
-- [ ] 10.1 Replace the narrow semantic manifest with a versioned local-core capability inventory reconciled against Exomem's command registry and each pinned contender's runtime MCP/public-CLI inventory, failing on unclassified operations and requiring every supported in-scope capability to have an executed public-path probe backed by a deterministic fixture; only verified unsupported or justified exclusion may replace execution.
-- [ ] 10.2 Extend neutral fixtures/native renderers with notes/entities, observations/categories, duplicate content, tags/context, nested metadata, schemas, typed/directional multi-hop relations, provenance, lifecycle, distractors, mutations, datasets, and deterministic media-extension artifacts.
-- [ ] 10.3 Add a benchmark-managed pinned Basic Memory environment setup/verification path that records revision/dependency/config hashes plus resolved embedding/reranker model revisions/artifact hashes, backend/device/dtype/quantization/runtime versions and supported seeds, and never uses its global home, database, cache, project, or a live vault.
-- [ ] 10.4 Extend both adapters to perform full indexing and use one persistent public MCP session for agent-facing cases; classify and label any genuinely CLI-only maintenance probe without treating it as MCP parity, and capture raw envelopes, resolved model/artifact/backend/device metadata, cold/warm latency, response bytes, index duration, and before/after state evidence.
-- [ ] 10.5 Add shared authoring/read/update, title/permalink/exact, rare-token/phrase/stemming/full-text, no-overlap semantic, adversarial hybrid, structured-filter, filter-only, graph depth/direction, and bounded-context cases with predeclared identities/order constraints.
-- [ ] 10.6 Add isolated BM25/vector/keyword/graph/CLIP/temporal probes plus public hybrid probes and verify backend/model identities, metric direction/range, raw measurements, fusion math, boosts, reranking, degradation, deterministic tie-breaks, and final ordering from recorded evidence.
-- [ ] 10.7 Add schema infer/diff/validate/save, invalid public write, direct filesystem edit, watcher/reconcile/full-reindex, edit/move/delete/recovery, history/supersession, stale-row, mixed-generation, and content-preservation cases.
-- [ ] 10.8 Add separate Exomem extension probes for durable refs, Sources/Evidence provenance, governed note/block relations, semantic units, review/audit/adoption/reconcile, context packs, dataset query, and capability-gated PDF/image/audio/video ingestion/search/read.
-- [ ] 10.9 Implement controlled cold/warm performance sampling with host/compute/resolved-model-artifact/backend/device/dtype/runtime/cache fingerprints, supported seeds, predeclared numeric/order tolerances, warmups, repeated counterbalanced order, timeouts, median/p95 latency, index duration, response bytes/context size, and immutable paired non-inferiority bands.
-- [ ] 10.10 Implement independent `shared_core`, `lifecycle_integrity`, `explanation_truth`, `performance_envelope`, and `exomem_extensions` reports with immutable thresholds and no weighted aggregate.
-- [ ] 10.11 Implement the revision/corpus-bound local-core-advantage gate: valid preflight and completed required probes for both contenders; every required Exomem shared case/outcome green; shared unsupported/mutual failure counts as not passed; case-level no-regression wherever Basic Memory passes; paired performance thresholds and every required advertised full-profile extension green; and at least one proved public extension absent from Basic Memory. Harness/setup/adapter/environment failure invalidates the claim, coarse ratios cannot hide case failures, lean missing-extras runs cannot claim the full gate, and no result generalizes to hosting or overall superiority.
-- [ ] 10.12 Keep a fast Exomem-only fixture gate in the normal suite and document the explicit desk-side direct command, unavailable-sibling behavior, environment setup, quiesced-machine protocol, and raw artifact locations.
-- [ ] 10.13 Run the direct benchmark against the pinned sibling revision and fix or explicitly record every shared-core gap, unsupported capability, environment difference, and threshold failure before making only the permitted recorded claim.
+- [x] 10.1 Replace the narrow semantic manifest with a versioned local-core capability inventory reconciled against Exomem's command registry and each pinned contender's runtime MCP/public-CLI inventory, failing on unclassified operations and requiring every supported in-scope capability to have an executed public-path probe backed by a deterministic fixture; only verified unsupported or justified exclusion may replace execution.
+- [x] 10.2 Extend neutral fixtures/native renderers with notes/entities, observations/categories, duplicate content, tags/context, nested metadata, schemas, typed/directional multi-hop relations, provenance, lifecycle, distractors, mutations, datasets, and deterministic media-extension artifacts.
+- [x] 10.3 Add a benchmark-managed pinned Basic Memory environment setup/verification path that records revision/dependency/config hashes plus resolved embedding/reranker model revisions/artifact hashes, backend/device/dtype/quantization/runtime versions and supported seeds, and never uses its global home, database, cache, project, or a live vault.
+- [x] 10.4 Extend both adapters to perform full indexing and use one persistent public MCP session for agent-facing cases; classify and label any genuinely CLI-only maintenance probe without treating it as MCP parity, and capture raw envelopes, resolved model/artifact/backend/device metadata, cold/warm latency, response bytes, index duration, and before/after state evidence.
+- [x] 10.5 Add shared authoring/read/update, title/permalink/exact, rare-token/phrase/stemming/full-text, no-overlap semantic, adversarial hybrid, structured-filter, filter-only, graph depth/direction, and bounded-context cases with predeclared identities/order constraints.
+- [x] 10.6 Isolate keyword and text-vector lanes through public controls; use same-request controlled differences for graph and vector/hybrid plus CLIP vector/hybrid comparisons; explicitly record BM25 and temporal isolation as unsupported by the public API; and verify backend/model identities, metric direction/range, raw measurements, fusion math, boosts, reranking, degradation, deterministic tie-breaks, and final ordering from recorded evidence.
+- [x] 10.7 Add schema infer/diff/validate/save, invalid public write, direct filesystem edit, watcher/reconcile/full-reindex, edit/move/delete/recovery, history/supersession, stale-row, mixed-generation, and content-preservation cases.
+- [x] 10.8 Add separate Exomem extension probes for durable refs, Sources/Evidence provenance, governed note/block relations, semantic units, review/audit/adoption/reconcile, context packs, dataset query, and capability-gated PDF/image/audio/video ingestion/search/read.
+- [x] 10.9 Implement controlled cold/warm performance sampling with host/compute/resolved-model-artifact/backend/device/dtype/runtime/cache fingerprints, supported seeds, predeclared numeric/order tolerances, warmups, repeated counterbalanced order, timeouts, median/p95 latency, index duration, response bytes/context size, and immutable paired non-inferiority bands.
+- [x] 10.10 Implement independent `shared_core`, `lifecycle_integrity`, `explanation_truth`, `performance_envelope`, and `exomem_extensions` reports with immutable thresholds and no weighted aggregate.
+- [x] 10.11 Implement the revision/corpus-bound local-core-advantage gate: valid preflight and completed required probes for both contenders; every required Exomem shared case/outcome green; shared unsupported/mutual failure counts as not passed; case-level no-regression wherever Basic Memory passes; paired performance thresholds and every required advertised full-profile extension green; and at least one proved public extension absent from Basic Memory. Harness/setup/adapter/environment failure invalidates the claim, coarse ratios cannot hide case failures, lean missing-extras runs cannot claim the full gate, and no result generalizes to hosting or overall superiority.
+- [x] 10.12 Keep a fast Exomem-only fixture gate in the normal suite and document the explicit desk-side direct command, unavailable-sibling behavior, environment setup, quiesced-machine protocol, and raw artifact locations.
+- [x] 10.13 Run the direct benchmark against the pinned sibling revision and fix or explicitly record every shared-core gap, unsupported capability, environment difference, and threshold failure before making only the permitted recorded claim.
 
 ## 11. Verification And Delivery
 
-- [ ] 11.1 Run focused parser/registry/contract/index/filter/recall/explanation/context/mutation/surface/adoption/benchmark tests with embeddings disabled.
-- [ ] 11.2 Run schema validation, OpenSpec validation, capability generation checks, OpenAPI/MCP fidelity, scaffold leak tests, and Ruff on every changed Python file.
-- [ ] 11.3 Run the complete lean suite with embeddings disabled and record totals plus any unrelated baseline failures.
-- [ ] 11.4 Run targeted desk-side semantic/hybrid, media-extension, and direct-contender benchmarks on a quiesced machine and record revisions/config/results/raw envelopes.
-- [ ] 11.5 Have an independent reviewer verify implementation against every OpenSpec scenario and inspect filter safety/parity, score truth, migration, mutation safety, backward compatibility, generation freshness, benchmark completeness, and claim scope.
-- [ ] 11.6 Update the product gap matrix and graph/semantic comparison docs only from recorded benchmark evidence; do not claim unscoped overall product superiority.
-- [ ] 11.7 Capture the durable final decision/results in Exomem with typed relations to the earlier comparison and semantic-block registry notes.
+- [x] 11.1 Run focused parser/registry/contract/index/filter/recall/explanation/context/mutation/surface/adoption/benchmark tests with embeddings disabled.
+- [x] 11.2 Run schema validation, OpenSpec validation, capability generation checks, OpenAPI/MCP fidelity, scaffold leak tests, and Ruff on every changed Python file.
+- [x] 11.3 Run the complete lean suite with embeddings disabled and record totals plus any unrelated baseline failures.
+- [ ] 11.4 Run the corrected full-profile semantic/hybrid, media-extension, and direct-contender benchmark on a quiesced host with a working native model stack, then record revisions/config/results/raw envelopes.
+- [x] 11.5 Have an independent reviewer verify implementation against every OpenSpec scenario and inspect filter safety/parity, score truth, migration, mutation safety, backward compatibility, generation freshness, benchmark completeness, and claim scope.
+- [x] 11.6 Update the product gap matrix and graph/semantic comparison docs only from recorded benchmark evidence; do not claim unscoped overall product superiority.
+- [x] 11.7 Capture the durable final decision/results in Exomem with typed relations to the earlier comparison and semantic-block registry notes.
+
+Verification record (2026-07-16): the benchmark slice passed 44/44 with
+embeddings disabled; changed Python files pass Ruff; manifest JSON, Python
+compilation, whitespace checks, and strict OpenSpec validation pass. The earlier
+complete semantic-language lean run reached 1,885 passes with one unrelated
+order-sensitive schema failure that passed immediately in isolation. The final
+pinned lean direct report executed 22/22 required probe IDs for both contenders,
+proved 21/21 active Exomem MCP operations plus 16/16 Basic Memory MCP and 5/5
+Basic Memory CLI operations, verified every rendered neutral fact, preserved
+authored Markdown, and recorded 242 scrubbed artifacts for 121 public calls. The
+corrected full profile is explicitly unclaimed: this WSL2 host aborts in the
+native Torch/SentenceTransformers BGE load before a valid report can be emitted;
+the unexecuted full media lane and superseded pre-correction performance failure
+remain recorded in the comparison docs.
+Independent adversarial re-review cleared the explanation, lifecycle/reconcile,
+performance-boundary, and content-bearing media-fixture proofs. The durable
+claim boundary is captured in Exomem at
+`Notes/Insights/semantic-local-core-benchmark-closes-lean-proof-full-profile-remains-host-gated.md`.

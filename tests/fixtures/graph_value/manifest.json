@@ -1,5 +1,192 @@
 {
-  "manifest_version": 1,
+  "manifest_version": 2,
+  "inventory_version": 1,
+  "scope": {
+    "name": "local knowledge engine",
+    "included": ["authoring", "retrieval", "graph", "schema", "lifecycle", "local extensions"],
+    "excluded": {
+      "accounts": "identity and account management are hosted-product concerns",
+      "billing": "commercial billing is outside the local engine",
+      "cloud_sync": "remote synchronization is outside the isolated local corpus",
+      "deployment": "deployment operations are not local knowledge behavior",
+      "graphical_interfaces": "GUI breadth is reported elsewhere and is not scored here",
+      "hosting": "hosted gateways and uptime are excluded",
+      "teams": "multi-user collaboration is outside the single-user local engine"
+    }
+  },
+  "profiles": {
+    "lean": {"full_claim": false, "description": "model-free native fixture and shared local-core gates"},
+    "full": {"full_claim": true, "description": "pinned direct contenders with models, media, and paired performance", "media_completion_timeout_seconds": 180}
+  },
+  "performance": {
+    "counterbalanced": true,
+    "index_duration_ratio_max": 2.0,
+    "order_tolerance": 0,
+    "query_median_ratio_max": 2.0,
+    "query_p95_ratio_max": 2.5,
+    "repetitions": 5,
+    "response_bytes_ratio_max": 2.0,
+    "seeds": [1729],
+    "timeout_seconds": 30.0,
+    "warmups": 1
+  },
+  "tolerances": {"score_absolute": 0.000002},
+  "contenders": {
+    "exomem": {"revision": "runtime", "python": "3.12", "model_policy": "resolved-at-run"},
+    "basic_memory": {
+      "revision": "0e59bbffaf7dbca8f0507d1c8cc15033332670ee",
+      "pyproject_sha256": "fd8564d7c22d232f5909a6c074f874e25fb4cdbcc68ecab1c99cb3db9deaae83",
+      "lock_sha256": "36292f662442627cc17364d0b5d3965fec8575fd175bdbd18c40d943c002f903",
+      "python": "3.12",
+      "model_policy": "resolved-at-run"
+    }
+  },
+  "capabilities": [
+    {"id": "shared-authoring", "gate": "shared_core", "fixture_ids": ["mutation-note"], "probe_ids": ["authoring-read-update", "cli-import"]},
+    {"id": "shared-retrieval", "gate": "shared_core", "fixture_ids": ["rare-token-note", "structured-active"], "probe_ids": ["exact-lookup", "retrieval-matrix", "structured-filter", "bounded-context"]},
+    {"id": "shared-graph", "gate": "shared_core", "fixture_ids": ["chain-start"], "probe_ids": ["graph-context"]},
+    {"id": "shared-schema", "gate": "shared_core", "fixture_ids": ["insight-contract"], "probe_ids": ["schema-workflow"]},
+    {"id": "lifecycle", "gate": "lifecycle_integrity", "fixture_ids": ["observation-category-change"], "probe_ids": ["lifecycle-mutations", "direct-edit-reconcile", "history-supersession", "maintenance-cli"]},
+    {"id": "retrieval-truth", "gate": "explanation_truth", "fixture_ids": ["semantic-target"], "probe_ids": ["retrieval-lanes", "hybrid-explanation", "degradation-truth"]},
+    {"id": "performance", "gate": "performance_envelope", "fixture_ids": ["rare-token-note"], "probe_ids": ["performance-sampling"]},
+    {"id": "assistant-bootstrap", "gate": "exomem_extensions", "fixture_ids": ["common-start"], "probe_ids": ["assistant-bootstrap"]},
+    {"id": "durable-provenance", "gate": "exomem_extensions", "fixture_ids": ["governed-claim"], "probe_ids": ["durable-refs", "provenance"]},
+    {"id": "semantic-language", "gate": "exomem_extensions", "fixture_ids": ["decision-unit"], "probe_ids": ["semantic-units"]},
+    {"id": "governance", "gate": "exomem_extensions", "fixture_ids": ["schema-invalid-direct-edit"], "probe_ids": ["governance-review", "context-packs"]},
+    {"id": "datasets", "gate": "exomem_extensions", "fixture_ids": ["latency-dataset"], "probe_ids": ["dataset-query"]},
+    {"id": "media", "gate": "exomem_extensions", "fixture_ids": ["pdf-sample", "image-sample", "audio-sample", "video-sample"], "probe_ids": ["media-pdf", "media-image", "media-audio", "media-video"]}
+  ],
+  "probes": [
+    {"id": "authoring-read-update", "gate": "shared_core", "fixture_ids": ["mutation-note"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "cli-import", "gate": "shared_core", "fixture_ids": ["architecture-source"], "required_profiles": ["lean", "full"], "surface": "cli", "basic_memory": "supported"},
+    {"id": "exact-lookup", "gate": "shared_core", "fixture_ids": ["exact-lookup-note"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "retrieval-matrix", "gate": "shared_core", "fixture_ids": ["rare-token-note", "phrase-note", "stemming-note", "semantic-target", "hybrid-distractor"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "structured-filter", "gate": "shared_core", "fixture_ids": ["structured-active", "structured-inactive", "decision-unit", "config-unit"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "graph-context", "gate": "shared_core", "fixture_ids": ["common-start", "chain-start", "direction-center"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "bounded-context", "gate": "shared_core", "fixture_ids": ["common-start"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "schema-workflow", "gate": "shared_core", "fixture_ids": ["insight-contract"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "lifecycle-mutations", "gate": "lifecycle_integrity", "fixture_ids": ["observation-category-change"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "direct-edit-reconcile", "gate": "lifecycle_integrity", "fixture_ids": ["schema-invalid-direct-edit"], "required_profiles": ["lean", "full"], "surface": "cli", "basic_memory": "supported"},
+    {"id": "history-supersession", "gate": "lifecycle_integrity", "fixture_ids": ["old-policy", "current-policy"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "maintenance-cli", "gate": "lifecycle_integrity", "fixture_ids": ["mutation-note"], "required_profiles": ["lean", "full"], "surface": "cli", "basic_memory": "supported"},
+    {"id": "retrieval-lanes", "gate": "explanation_truth", "fixture_ids": ["rare-token-note", "semantic-target"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "hybrid-explanation", "gate": "explanation_truth", "fixture_ids": ["hybrid-distractor"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "degradation-truth", "gate": "explanation_truth", "fixture_ids": ["semantic-target"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "performance-sampling", "gate": "performance_envelope", "fixture_ids": ["rare-token-note"], "required_profiles": ["full"], "surface": "mcp", "basic_memory": "supported"},
+    {"id": "assistant-bootstrap", "gate": "exomem_extensions", "fixture_ids": ["common-start"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "durable-refs", "gate": "exomem_extensions", "fixture_ids": ["governed-claim"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "provenance", "gate": "exomem_extensions", "fixture_ids": ["governed-claim", "architecture-source", "test-evidence"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "semantic-units", "gate": "exomem_extensions", "fixture_ids": ["decision-unit", "config-unit"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "governance-review", "gate": "exomem_extensions", "fixture_ids": ["schema-invalid-direct-edit"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "context-packs", "gate": "exomem_extensions", "fixture_ids": ["governed-claim"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "dataset-query", "gate": "exomem_extensions", "fixture_ids": ["latency-dataset"], "required_profiles": ["lean", "full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "media-pdf", "gate": "exomem_extensions", "fixture_ids": ["pdf-sample"], "required_profiles": ["full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "media-image", "gate": "exomem_extensions", "fixture_ids": ["image-sample"], "required_profiles": ["full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "media-audio", "gate": "exomem_extensions", "fixture_ids": ["audio-sample"], "required_profiles": ["full"], "surface": "mcp", "basic_memory": "unsupported"},
+    {"id": "media-video", "gate": "exomem_extensions", "fixture_ids": ["video-sample"], "required_profiles": ["full"], "surface": "mcp", "basic_memory": "unsupported"}
+  ],
+  "operation_inventory": {
+    "exomem": {
+      "mcp": {
+        "coordination_status": {"classification": "excluded", "reason": "process coordination is harness preflight, not knowledge behavior"},
+        "bootstrap": {"classification": "probe", "probe": "assistant-bootstrap"},
+        "ask_memory": {"classification": "probe", "probe": "retrieval-matrix"},
+        "read_memory": {"classification": "probe", "probe": "exact-lookup"},
+        "browse_memory": {"classification": "probe", "probe": "retrieval-matrix"},
+        "remember": {"classification": "probe", "probe": "authoring-read-update"},
+        "edit_memory": {"classification": "probe", "probe": "authoring-read-update"},
+        "observe_memory": {"classification": "probe", "probe": "lifecycle-mutations"},
+        "replace_memory": {"classification": "probe", "probe": "lifecycle-mutations"},
+        "capture_source": {"classification": "probe", "probe": "cli-import"},
+        "compile_source": {"classification": "probe", "probe": "provenance"},
+        "preserve_evidence": {"classification": "probe", "probe": "provenance"},
+        "transfer_artifact": {"classification": "excluded", "reason": "the local stdio benchmark pre-seeds deterministic binary fixtures; HTTP upload transport is outside the knowledge-behavior comparison"},
+        "process_media": {"classification": "probe", "probe": "media-pdf"},
+        "review_memory": {"classification": "probe", "probe": "governance-review"},
+        "review_item_context": {"classification": "probe", "probe": "governance-review"},
+        "triage_memory": {"classification": "probe", "probe": "governance-review"},
+        "connect_memory": {"classification": "probe", "probe": "graph-context"},
+        "adopt_vault": {"classification": "probe", "probe": "governance-review"},
+        "adoption_studio": {"classification": "probe", "probe": "governance-review"},
+        "maintain_memory": {"classification": "probe", "probe": "direct-edit-reconcile"},
+        "schema_memory": {"classification": "probe", "probe": "schema-workflow"},
+        "manage_memory_file": {"classification": "probe", "probe": "lifecycle-mutations"},
+        "query_dataset": {"classification": "probe", "probe": "dataset-query"},
+        "read_media": {"classification": "probe", "probe": "media-video"}
+      },
+      "cli": {
+        "coordination_status": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "bootstrap": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "ask_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "read_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "browse_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "remember": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "edit_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "observe_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "replace_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "capture_source": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "compile_source": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "preserve_evidence": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "transfer_artifact": {"classification": "excluded", "reason": "the local stdio benchmark pre-seeds deterministic binary fixtures; HTTP upload transport is outside the knowledge-behavior comparison"},
+        "process_media": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "review_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "review_item_context": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "triage_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "connect_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "adopt_vault": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "adoption_studio": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "maintain_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "schema_memory": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "manage_memory_file": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"},
+        "query_dataset": {"classification": "mirror", "reason": "same registry operation is exercised over MCP"}
+      }
+    },
+    "basic_memory": {
+      "mcp": {
+        "build_context": {"classification": "probe", "probe": "graph-context"},
+        "canvas": {"classification": "excluded", "reason": "graphical canvas is outside the local-engine boundary"},
+        "cloud_info": {"classification": "excluded", "reason": "hosting is outside the local-engine boundary"},
+        "create_memory_project": {"classification": "excluded", "reason": "disposable project creation is benchmark preflight"},
+        "delete_note": {"classification": "probe", "probe": "lifecycle-mutations"},
+        "delete_project": {"classification": "excluded", "reason": "disposable project deletion is benchmark cleanup"},
+        "edit_note": {"classification": "probe", "probe": "authoring-read-update"},
+        "fetch": {"classification": "probe", "probe": "exact-lookup"},
+        "list_directory": {"classification": "probe", "probe": "exact-lookup"},
+        "list_memory_projects": {"classification": "excluded", "reason": "project routing is benchmark preflight"},
+        "list_workspaces": {"classification": "excluded", "reason": "workspace and account breadth is excluded"},
+        "move_note": {"classification": "probe", "probe": "lifecycle-mutations"},
+        "read_content": {"classification": "probe", "probe": "exact-lookup"},
+        "read_note": {"classification": "probe", "probe": "exact-lookup"},
+        "release_notes": {"classification": "excluded", "reason": "release discovery is packaging, not knowledge behavior"},
+        "recent_activity": {"classification": "probe", "probe": "history-supersession"},
+        "schema_diff": {"classification": "probe", "probe": "schema-workflow"},
+        "schema_infer": {"classification": "probe", "probe": "schema-workflow"},
+        "schema_validate": {"classification": "probe", "probe": "schema-workflow"},
+        "search": {"classification": "probe", "probe": "retrieval-matrix"},
+        "search_notes": {"classification": "probe", "probe": "retrieval-matrix"},
+        "view_note": {"classification": "probe", "probe": "exact-lookup"},
+        "write_note": {"classification": "probe", "probe": "authoring-read-update"}
+      },
+      "cli": {
+        "status": {"classification": "probe", "probe": "maintenance-cli"},
+        "reset": {"classification": "excluded", "reason": "database destruction is setup cleanup, not a knowledge outcome"},
+        "reindex": {"classification": "probe", "probe": "direct-edit-reconcile"},
+        "doctor": {"classification": "probe", "probe": "maintenance-cli"},
+        "mcp": {"classification": "excluded", "reason": "server launcher is the transport used by MCP probes"},
+        "orphans": {"classification": "probe", "probe": "graph-context"},
+        "format": {"classification": "excluded", "reason": "formatting is presentation maintenance"},
+        "update": {"classification": "excluded", "reason": "self-update is deployment behavior"},
+        "workspace": {"classification": "excluded", "reason": "cloud workspace routing is excluded"},
+        "import": {"classification": "probe", "probe": "cli-import"},
+        "cloud": {"classification": "excluded", "reason": "hosting is outside the local-engine boundary"},
+        "ci": {"classification": "excluded", "reason": "GitHub delivery capture is an external integration"},
+        "man": {"classification": "excluded", "reason": "manual-page management is packaging"},
+        "tool": {"classification": "mirror", "reason": "tool subcommands mirror MCP operations"},
+        "project": {"classification": "excluded", "reason": "disposable project configuration is preflight"},
+        "schema": {"classification": "mirror", "reason": "schema subcommands mirror MCP schema probes"}
+      }
+    }
+  },
   "notes": [
     {"id": "common-start", "title": "Common Start", "kind": "insight", "status": "active", "text": "The common graph path begins here."},
     {"id": "common-target", "title": "Common Target", "kind": "insight", "status": "active", "text": "The common one-hop target is reachable."},
@@ -21,7 +208,26 @@
     {"id": "recall-vis-seed-1", "title": "Retry Budget Design", "kind": "insight", "status": "active", "text": "Retries should use exponential backoff with jitter to avoid synchronized retry storms."},
     {"id": "recall-vis-target-1", "title": "Coffee Roasting Notes", "kind": "insight", "status": "active", "text": "Light roasts preserve more origin flavor than dark roasts which taste more uniformly bitter."},
     {"id": "recall-vis-seed-2", "title": "Segment Compaction", "kind": "insight", "status": "active", "text": "Periodic compaction merges small segment files into larger ones to reduce read amplification."},
-    {"id": "recall-vis-target-2", "title": "Migratory Bird Patterns", "kind": "insight", "status": "active", "text": "Many songbird species migrate thousands of miles between breeding and wintering grounds each year."}
+    {"id": "recall-vis-target-2", "title": "Migratory Bird Patterns", "kind": "insight", "status": "active", "text": "Many songbird species migrate thousands of miles between breeding and wintering grounds each year."},
+    {"id": "exact-lookup-note", "title": "Exact Lookup Beacon", "kind": "insight", "status": "active", "text": "A stable title and permalink identify this exact page."},
+    {"id": "rare-token-note", "title": "Rare Token", "kind": "insight", "status": "active", "text": "The diagnostic token quasarneedle-7f3a appears only here."},
+    {"id": "phrase-note", "title": "Phrase Match", "kind": "insight", "status": "active", "text": "amber circuit breaker protocol is an exact phrase."},
+    {"id": "stemming-note", "title": "Stemming", "kind": "insight", "status": "active", "text": "The runner was running repeated retrieval experiments."},
+    {"id": "semantic-target", "title": "Semantic Target", "kind": "insight", "status": "active", "text": "A portable computer conserves energy by suspending vector indexing when unplugged."},
+    {"id": "hybrid-distractor", "title": "Hybrid Distractor", "kind": "insight", "status": "active", "text": "Laptop battery vector indexing words appear here without the intended policy."},
+    {"id": "structured-active", "title": "Structured Active", "kind": "insight", "status": "active", "text": "The active structured candidate.", "tags": ["benchmark", "alpha"], "context": "local core", "metadata": {"priority": 7, "nested": {"score": 0.9}}},
+    {"id": "structured-inactive", "title": "Structured Inactive", "kind": "insight", "status": "superseded", "text": "The inactive structured distractor.", "tags": ["benchmark", "beta"], "context": "archive", "metadata": {"priority": 2, "nested": {"score": 0.2}}},
+    {"id": "duplicate-decision", "title": "Duplicate Decision", "kind": "insight", "status": "active", "text": "Identical observation text lives under different categories."},
+    {"id": "duplicate-config", "title": "Duplicate Config", "kind": "insight", "status": "active", "text": "Identical observation text lives under different categories."},
+    {"id": "mutation-note", "title": "Mutation Target", "kind": "insight", "status": "active", "text": "Original mutation content cedar-token."},
+    {"id": "dataset-note", "title": "Latency Dataset", "kind": "insight", "status": "active", "text": "A deterministic tabular dataset supports bounded queries."},
+    {"id": "media-note", "title": "Media Fixtures", "kind": "source", "status": "active", "text": "Deterministic local media artifacts exercise optional extensions."}
+  ],
+  "observations": [
+    {"id": "decision-unit", "note": "structured-active", "anchor": "decision-unit", "category": "decision", "kind": "observation", "content": "Keep derived indexes rebuildable.", "tags": ["architecture"], "context": "local core"},
+    {"id": "config-unit", "note": "structured-active", "anchor": "config-unit", "category": "config", "kind": "observation", "content": "Keep derived indexes rebuildable.", "tags": ["runtime"], "context": "desktop"},
+    {"id": "duplicate-decision-unit", "note": "duplicate-decision", "anchor": "duplicate-decision", "category": "decision", "kind": "observation", "content": "Use the portable index policy.", "tags": ["duplicate"], "context": "comparison"},
+    {"id": "duplicate-config-unit", "note": "duplicate-config", "anchor": "duplicate-config", "category": "config", "kind": "observation", "content": "Use the portable index policy.", "tags": ["duplicate"], "context": "comparison"}
   ],
   "relations": [
     {"from": "common-start", "to": "common-target", "type": "relates_to"},
@@ -32,7 +238,8 @@
     {"from": "direction-source", "to": "direction-center", "type": "depends_on"},
     {"from": "direction-center", "to": "direction-target", "type": "depends_on"},
     {"from": "recall-vis-seed-1", "to": "recall-vis-target-1", "type": "mentions"},
-    {"from": "recall-vis-seed-2", "to": "recall-vis-target-2", "type": "relates_to"}
+    {"from": "recall-vis-seed-2", "to": "recall-vis-target-2", "type": "relates_to"},
+    {"from": "chain-end", "to": "chain-start", "type": "related_to"}
   ],
   "provenance": [
     {"from": "governed-claim", "to": "architecture-source", "type": "derived_from", "channel": "sources"},
@@ -40,6 +247,22 @@
   ],
   "blocks": [
     {"note": "governed-claim", "id": "claim-anchor", "kind": "claim", "text": "A precise claim supports the verified result.", "relations": [{"to": "verified-result", "type": "supports"}]}
+  ],
+  "schemas": [
+    {"id": "insight-contract", "page_type": "insight", "required": ["status"], "properties": {"status": {"enum": ["active", "superseded"]}, "benchmark_metadata.priority": {"type": "integer", "minimum": 1}}}
+  ],
+  "mutations": [
+    {"id": "observation-category-change", "note": "structured-active", "unit": "decision-unit", "from_category": "decision", "to_category": "config", "from_text": "Keep derived indexes rebuildable.", "to_text": "Keep current indexes rebuildable."},
+    {"id": "schema-invalid-direct-edit", "note": "mutation-note", "edit": "remove required status and replace cedar-token with birch-token", "repair": "restore status while preserving birch-token"}
+  ],
+  "datasets": [
+    {"id": "latency-dataset", "note": "dataset-note", "columns": ["case", "latency_ms", "passed"], "rows": [{"case": "alpha", "latency_ms": 12, "passed": true}, {"case": "beta", "latency_ms": 18, "passed": false}], "query": "SELECT case FROM data WHERE latency_ms < 15 ORDER BY case", "expected": ["alpha"]}
+  ],
+  "media": [
+    {"id": "pdf-sample", "kind": "pdf", "filename": "sample.pdf", "expected_text": "benchmark pdf semantic evidence"},
+    {"id": "image-sample", "kind": "image", "filename": "sample.png", "expected_text": "quasar image"},
+    {"id": "audio-sample", "kind": "audio", "filename": "sample.ogg", "expected_text": "copper lantern audio benchmark"},
+    {"id": "video-sample", "kind": "video", "filename": "sample.mp4", "expected_text": "ember video"}
   ],
   "tasks": [
     {"id": "common-one-hop", "dimension": "one_hop_reachability", "seed": "common-start", "depth": 1, "expected_nodes": ["common-target"]},
