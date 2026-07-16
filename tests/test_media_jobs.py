@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -8,6 +9,12 @@ import pytest
 
 from exomem import media_jobs
 from exomem.media_worker_child import _VaultLock
+
+
+def _cantopen() -> sqlite3.OperationalError:
+    error = sqlite3.OperationalError("unable to open database file")
+    error.sqlite_errorcode = sqlite3.SQLITE_CANTOPEN
+    return error
 
 
 def _job(
@@ -37,6 +44,135 @@ def test_status_does_not_create_store(vault: Path) -> None:
     status = media_jobs.status(vault)
     assert status["counts"]["pending"] == 0
     assert not path.exists()
+
+
+def test_status_diagnostic_snapshot_falls_back_to_stable_immutable_database(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    real_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def cantopen_readonly(database, *args, **kwargs):
+        uri = str(database)
+        calls.append(uri)
+        if "mode=ro" in uri and "immutable=1" not in uri:
+            raise _cantopen()
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_readonly)
+
+    snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
+
+    assert snapshot["healthy"] is True
+    assert len(calls) == 2
+    assert "mode=ro" in calls[0] and "immutable=1" not in calls[0]
+    assert "mode=ro" in calls[1] and "immutable=1" in calls[1]
+    assert not path.with_name(f"{path.name}-wal").exists()
+    assert not path.with_name(f"{path.name}-shm").exists()
+
+
+def test_normal_status_does_not_use_immutable_fallback(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    real_connect = sqlite3.connect
+    calls: list[str] = []
+
+    def cantopen_readonly(database, *args, **kwargs):
+        uri = str(database)
+        calls.append(uri)
+        if "mode=ro" in uri:
+            raise _cantopen()
+        return real_connect(database, *args, **kwargs)
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_readonly)
+
+    snapshot = media_jobs.status(vault)
+
+    assert snapshot["healthy"] is False
+    assert len(calls) == 1
+    assert "immutable=1" not in calls[0]
+
+
+@pytest.mark.parametrize("live_suffix", ["-wal", "-shm"])
+def test_diagnostic_snapshot_refuses_immutable_with_live_sqlite_sidecar(
+    vault: Path, monkeypatch: pytest.MonkeyPatch, live_suffix: str
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    path.with_name(f"{path.name}{live_suffix}").write_bytes(b"live")
+    calls: list[str] = []
+
+    def cantopen_readonly(database, *args, **kwargs):
+        calls.append(str(database))
+        raise _cantopen()
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_readonly)
+
+    snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
+
+    assert snapshot["healthy"] is False
+    assert len(calls) == 1
+
+
+def test_diagnostic_snapshot_refuses_immutable_when_main_database_is_not_readable(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    real_open = Path.open
+    calls: list[str] = []
+
+    def cantopen_readonly(database, *args, **kwargs):
+        calls.append(str(database))
+        raise _cantopen()
+
+    def deny_main_database(self: Path, *args, **kwargs):
+        if self == path and args and args[0] == "rb":
+            raise PermissionError("database bytes denied")
+        return real_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_readonly)
+    monkeypatch.setattr(Path, "open", deny_main_database)
+
+    snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
+
+    assert snapshot["healthy"] is False
+    assert len(calls) == 1
+
+
+def test_diagnostic_snapshot_refuses_identity_drift_after_immutable_queries(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    real_connect = sqlite3.connect
+
+    class DriftingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self.connection, name)
+
+        def close(self) -> None:
+            self.connection.close()
+            with path.open("ab") as stream:
+                stream.write(b"drift")
+
+    def cantopen_then_drift(database, *args, **kwargs):
+        uri = str(database)
+        if "mode=ro" in uri and "immutable=1" not in uri:
+            raise _cantopen()
+        return DriftingConnection(real_connect(database, *args, **kwargs))
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_then_drift)
+
+    snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
+
+    assert snapshot["healthy"] is False
 
 
 def test_pid_alive_handles_current_and_missing_processes() -> None:

@@ -362,8 +362,9 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
             "on first search (or by warm-up).",
         )
     try:
-        conn = sqlite3.connect(side)
+        conn = sqlite3.connect(f"{side.resolve().as_uri()}?mode=ro", uri=True)
         try:
+            conn.execute("PRAGMA query_only = ON")
             n = conn.execute("SELECT count(*) FROM pages").fetchone()[0]
         finally:
             conn.close()
@@ -561,7 +562,7 @@ def _check_media_runtime(vault_root: Path | None) -> DoctorCheck | None:
         return None
     from . import media_jobs
 
-    status = media_jobs.status(vault_root)
+    status = media_jobs.status(vault_root, diagnostic_snapshot=True)
     if not status["healthy"]:
         return _check(
             "media.runtime",

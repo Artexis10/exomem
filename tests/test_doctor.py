@@ -9,6 +9,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,6 +43,66 @@ def test_doctor_lean_passes_with_fixture_vault(vault: Path) -> None:
     assert checks["python.version"].status == "pass"
     assert checks["vault.path"].status == "pass"
     assert checks["command.registry"].status == "pass"
+
+
+def test_lexical_check_uses_escaped_readonly_query_only_connection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import lexstore
+
+    vault = tmp_path / "vault #% name"
+    sidecar = lexstore.lexical_path(vault)
+    sidecar.parent.mkdir(parents=True)
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute("CREATE TABLE pages (id INTEGER PRIMARY KEY)")
+        conn.commit()
+    finally:
+        conn.close()
+
+    real_connect = sqlite3.connect
+    connections: list[tuple[object, dict[str, object]]] = []
+    statements: list[str] = []
+
+    def traced_connect(database, *args, **kwargs):
+        connections.append((database, kwargs.copy()))
+        opened = real_connect(database, *args, **kwargs)
+        opened.set_trace_callback(statements.append)
+        return opened
+
+    monkeypatch.setattr(lexstore, "backend", lambda: "fts5")
+    monkeypatch.setattr(lexstore, "fts5_available", lambda: True)
+    monkeypatch.setattr(doctor_module.sqlite3, "connect", traced_connect)
+
+    check = doctor_module._check_lexical(vault)
+
+    assert check.status == "pass"
+    [(database, kwargs)] = connections
+    assert database == f"{sidecar.resolve().as_uri()}?mode=ro"
+    assert kwargs["uri"] is True
+    assert any(statement.upper().startswith("PRAGMA QUERY_ONLY") for statement in statements)
+
+
+def test_media_runtime_requests_diagnostic_snapshot(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_jobs
+
+    calls: list[bool] = []
+
+    def fake_status(_vault: Path, *, diagnostic_snapshot: bool = False):
+        calls.append(diagnostic_snapshot)
+        return {
+            "healthy": True,
+            "counts": {state: 0 for state in media_jobs.STATES},
+        }
+
+    monkeypatch.setattr(media_jobs, "status", fake_status)
+
+    check = doctor_module._check_media_runtime(vault)
+
+    assert check is not None and check.status == "pass"
+    assert calls == [True]
 
 
 def test_doctor_json_cli(vault: Path, capsys) -> None:
