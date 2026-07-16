@@ -79,3 +79,56 @@ def test_media_worker_startup_reconciles_media_missed_while_service_was_stopped(
     root, limit = discovery[0]
     assert root == vault
     assert isinstance(limit, int) and limit > 0
+
+
+def test_media_startup_reconciles_when_worker_is_disabled(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    calls: list[tuple[object, int]] = []
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _vault: None)
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        lambda root, *, limit: calls.append((root, limit)),
+    )
+
+    result = server_runtime._start_media_worker(vault)
+
+    assert result is None
+    assert len(calls) == 1
+    assert calls[0][0] == vault
+    assert calls[0][1] > 0
+
+
+def test_media_startup_reconciles_after_worker_start_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    events: list[str] = []
+
+    class Worker:
+        def start(self) -> None:
+            events.append("start")
+            raise RuntimeError("worker unavailable")
+
+        def stop(self) -> None:
+            events.append("stop")
+
+        def scan_pending(self) -> int:
+            pytest.fail("failed worker must not scan pending sidecars")
+
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _vault: Worker())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        lambda root, *, limit: events.append(f"reconcile:{root}:{limit}"),
+    )
+
+    result = server_runtime._start_media_worker(vault)
+
+    assert result is None
+    assert events[:2] == ["start", "stop"]
+    assert len([event for event in events if event.startswith("reconcile:")]) == 1

@@ -302,17 +302,16 @@ def _start_compute_runtime(vault_root: Path) -> None:
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
     worker = _create_media_worker(vault_root)
-    if worker is None:
-        return None
-    try:
-        worker.start()
-    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+    if worker is not None:
         try:
-            worker.stop()
-        except Exception:  # noqa: BLE001 - startup degradation must remain soft
-            pass
-        log.warning("media runtime unavailable; core service continuing: %s", exc)
-        return None
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+            try:
+                worker.stop()
+            except Exception:  # noqa: BLE001 - startup degradation must remain soft
+                pass
+            log.warning("media runtime unavailable; core service continuing: %s", exc)
+            worker = None
     try:
         media_processing.reconcile_all_media(
             vault_root,
@@ -320,6 +319,8 @@ def _start_media_worker(vault_root: Path) -> Any | None:
         )
     except Exception as exc:  # noqa: BLE001 - startup discovery is best-effort
         log.warning("media worker startup discovery failed: %s", exc)
+    if worker is None:
+        return None
     try:
         worker.scan_pending()
     except Exception as exc:  # noqa: BLE001 - startup scan is best-effort

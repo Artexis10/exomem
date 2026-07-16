@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import extract, media_jobs, memory_refs, preserve
+from . import access, extract, media_jobs, memory_refs, preserve
 from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -98,6 +98,16 @@ def reconcile_media(
             f"unsupported media type for {binary.name!r}",
         )
 
+    rel_binary = binary.relative_to(vault).as_posix()
+    tier = access.access_tier(vault, rel_binary)
+    if tier in {access.TIER_EXCLUDED, access.TIER_READONLY}:
+        if not explicit:
+            return None
+        raise MediaProcessingError(
+            "MEDIA_PATH_ACCESS_DENIED",
+            f"media path is {tier} under _access.yaml: {rel_binary}",
+        )
+
     provenance = _read_provenance(vault, binary, resolved_binary)
     sidecar = binary.with_name(binary.name + ".md")
     _confine_sidecar(vault, sidecar)
@@ -159,8 +169,16 @@ def reconcile_all_media(
     if not kb.is_dir():
         return 0
 
+    store = (
+        media_jobs.MediaJobStore(vault, create=False)
+        if media_jobs.job_store_path(vault).exists()
+        else None
+    )
+
     attempted = 0
-    for binary in _iter_governed_media(kb):
+    for binary in _iter_governed_media(vault, kb):
+        if not _needs_reconciliation(vault, binary, store):
+            continue
         if attempted >= limit:
             break
         attempted += 1
@@ -171,7 +189,7 @@ def reconcile_all_media(
     return attempted
 
 
-def _iter_governed_media(kb_root: Path):
+def _iter_governed_media(vault: Path, kb_root: Path):
     """Yield supported binaries from a deterministic, hidden/pruned KB walk."""
     stack = [kb_root]
     while stack:
@@ -189,10 +207,69 @@ def _iter_governed_media(kb_root: Path):
                     if not child.is_symlink() and child.name not in VAULT_SCAN_SKIP_DIRS:
                         directories.append(child)
                 elif child.is_file() and not child.is_symlink() and classify_media(child):
-                    yield child
+                    rel = child.relative_to(vault).as_posix()
+                    if access.access_tier(vault, rel) not in {
+                        access.TIER_EXCLUDED,
+                        access.TIER_READONLY,
+                    }:
+                        yield child
             except OSError:
                 continue
         stack.extend(reversed(directories))
+
+
+def _needs_reconciliation(
+    vault: Path,
+    binary: Path,
+    store: media_jobs.MediaJobStore | None,
+) -> bool:
+    sidecar = binary.with_name(binary.name + ".md")
+    try:
+        original = sidecar.read_text(encoding="utf-8")
+    except (FileNotFoundError, OSError, UnicodeError):
+        return True
+
+    media_type = classify_media(binary)
+    if media_type is None:
+        return False
+    try:
+        resolved_binary = binary.resolve(strict=True)
+        provenance = _read_provenance(vault, binary, resolved_binary)
+    except (OSError, MediaProcessingError):
+        return True
+    if _is_valid_completed_sidecar(
+        original,
+        media_type=media_type,
+        provenance=provenance,
+    ):
+        return False
+
+    frontmatter, _body, raw_frontmatter = parse_frontmatter(original)
+    if raw_frontmatter is None or store is None:
+        return True
+    return not (
+        _is_converged_pending_shape(frontmatter, media_type, provenance)
+        and store.has_binary(binary)
+    )
+
+
+def _is_converged_pending_shape(
+    frontmatter: dict[str, object],
+    media_type: str,
+    provenance: _BinaryProvenance,
+) -> bool:
+    if not _is_canonical_pending_shape(frontmatter, media_type, provenance):
+        return False
+    expected = {
+        "processing_state": "pending",
+        "evidence_file": provenance.relative_path,
+        "original_filename": provenance.original_filename,
+        "binary_sha256": provenance.sha256,
+        "binary_size": provenance.size,
+        "binary_mtime_ns": provenance.mtime_ns,
+        "binary_ctime_ns": provenance.ctime_ns,
+    }
+    return all(str(frontmatter.get(field)) == str(value) for field, value in expected.items())
 
 
 def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:

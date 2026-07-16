@@ -337,11 +337,94 @@ def test_reconcile_all_media_repeats_without_duplicate_work(vault: Path) -> None
     sidecar = binary.with_name(binary.name + ".md")
     first_bytes = sidecar.read_bytes()
     first_mtime = sidecar.stat().st_mtime_ns
-    assert media_processing.reconcile_all_media(vault, limit=10) == 1
+    assert media_processing.reconcile_all_media(vault, limit=10) == 0
 
     assert sidecar.read_bytes() == first_bytes
     assert sidecar.stat().st_mtime_ns == first_mtime
     assert _job_count(vault) == 1
+
+
+def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    pending = [
+        _drop_media(vault, name)
+        for name in ("a#pending.mp3", "a-pending-1.mp3", "a-pending-2.mp3")
+    ]
+    for binary in pending:
+        media_processing.reconcile_media(vault, binary)
+
+    completed_binary = _drop_media(vault, "b-completed.mp3")
+    completed = media_processing.reconcile_media(vault, completed_binary)
+    completed_text = completed.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed_text += "\n## Extracted text\n\n[0:00] Already complete.\n"
+    completed.sidecar_path.write_text(completed_text, encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=completed_binary,
+            sidecar_path=completed.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    orphan = _drop_media(vault, "x-orphan-pending.mp3")
+    orphan_result = media_processing.reconcile_media(vault, orphan)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=orphan,
+            sidecar_path=orphan_result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    malformed = _drop_media(vault, "y-malformed.mp3")
+    malformed_sidecar = malformed.with_name(malformed.name + ".md")
+    malformed_sidecar.write_text("Waiting for canonical repair.\n", encoding="utf-8")
+    missing = _drop_media(vault, "z-missing.mp3")
+
+    assert media_processing.reconcile_all_media(vault, limit=2) == 2
+    assert store.has_binary(orphan) is True
+    assert "type: source" in malformed_sidecar.read_text(encoding="utf-8")
+    assert not missing.with_name(missing.name + ".md").exists()
+
+    assert media_processing.reconcile_all_media(vault, limit=2) == 1
+    assert missing.with_name(missing.name + ".md").exists()
+    assert store.has_binary(missing) is True
+
+
+def test_reconciliation_honors_access_policy_and_allows_normal_evidence(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    access_config = vault / "Knowledge Base" / "_access.yaml"
+    access_config.write_text(
+        "readonly:\n  - Reference\nexcluded:\n  - Private\n",
+        encoding="utf-8",
+    )
+
+    excluded = vault / "Knowledge Base" / "Private" / "secret.m4a"
+    readonly = vault / "Knowledge Base" / "Reference" / "recording.m4a"
+    for binary in (excluded, readonly):
+        binary.parent.mkdir(parents=True, exist_ok=True)
+        binary.write_bytes(b"protected")
+        assert media_processing.reconcile_media(vault, binary, explicit=False) is None
+        assert not binary.with_name(binary.name + ".md").exists()
+        with pytest.raises(media_processing.MediaProcessingError) as exc:
+            media_processing.reconcile_media(vault, binary, explicit=True)
+        assert exc.value.code == "MEDIA_PATH_ACCESS_DENIED"
+
+    evidence = _drop_media(vault, "allowed.m4a")
+    result = media_processing.reconcile_media(vault, evidence, explicit=False)
+    assert result is not None
+    assert result.sidecar_path.exists()
+    assert _job_count(vault) == 1
+
+    assert media_processing.reconcile_all_media(vault, limit=10) == 0
+    assert not excluded.with_name(excluded.name + ".md").exists()
+    assert not readonly.with_name(readonly.name + ".md").exists()
 
 
 @pytest.mark.parametrize("terminal_state", [media_jobs.BLOCKED, media_jobs.FAILED])

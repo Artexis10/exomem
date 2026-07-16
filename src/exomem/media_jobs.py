@@ -302,6 +302,18 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def has_binary(self, binary_path: Path) -> bool:
+        """Whether the ledger has work for this exact vault-relative binary."""
+        binary_rel = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
+                (binary_rel,),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
         states = [RUNNING]
         if retry_blocked:

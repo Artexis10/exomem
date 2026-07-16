@@ -57,6 +57,17 @@ def test_enqueue_deduplicates_and_merges_stages(vault: Path) -> None:
     assert store.claim_next() is None
 
 
+def test_has_binary_uses_exact_vault_relative_path(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault, name="exact.mp3")
+    store.enqueue(job)
+    sibling = job.binary_path.with_name("exact-copy.mp3")
+    sibling.write_bytes(b"x")
+
+    assert store.has_binary(job.binary_path) is True
+    assert store.has_binary(sibling) is False
+
+
 def test_recover_and_retry_states(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))

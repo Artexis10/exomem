@@ -52,12 +52,15 @@ def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPat
     assert "extracted_by: pending" in body
 
 
-def test_preserve_media_no_stub_when_extraction_disabled(
+def test_preserve_media_writes_actionable_stub_when_extraction_disabled(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     result = _preserve_media_stub(vault, filename="rec2.mp3")
-    assert result.sidecar_path is None  # nothing would fill it → don't write a stub
+    assert result.sidecar_path is not None
+    body = (vault / result.sidecar_path).read_text(encoding="utf-8")
+    assert "media_type: audio" in body
+    assert "extracted_by: pending" in body
 
 
 def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -186,19 +186,19 @@ def register_transfer_routes(
                 status_code=http_status_for(error["code"]),
             )
 
-        if media_worker is not None:
-            try:
-                _media_processing_module().reconcile_media(
-                    vault_root,
-                    vault_root / result.path,
-                    explicit=False,
-                )
-            except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
-                log.warning(
-                    "media reconciliation failed for %s; evidence remains recoverable",
-                    result.path,
-                    exc_info=True,
-                )
+        try:
+            await run_in_threadpool(
+                _media_processing_module().reconcile_media,
+                vault_root,
+                vault_root / result.path,
+                explicit=False,
+            )
+        except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
+            log.warning(
+                "media reconciliation failed for %s; evidence remains recoverable",
+                result.path,
+                exc_info=True,
+            )
         return JSONResponse(result.as_dict(), status_code=201)
 
     @mcp_app.custom_route("/upload", methods=["GET"])

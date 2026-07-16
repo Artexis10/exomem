@@ -266,10 +266,11 @@ def preserve(
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
-        # text later. Only when server extraction is enabled (else nothing fills it).
+        # text later. The actionable stub is independent of worker availability:
+        # a disabled/unavailable worker can be remediated and retried later.
         extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
-        want_stub = media_type is not None and not text_clean and extract.extraction_enabled()
+        want_stub = media_type is not None and artifact_text is None and not text_clean
         if desc_clean or text_clean or want_stub:
             if filename_safe.lower().endswith(".md"):
                 stem = filename_safe[:-3]
