@@ -223,26 +223,41 @@ class EpistemicGraphIndex:
         return conn
 
     def available(self) -> bool:
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return False
+        conn.close()
+        return True
+
+    def _open_read_snapshot(self) -> sqlite3.Connection | None:
+        """Open one validated read transaction without creating or migrating schema."""
         if not graph_enabled() or not self.path.exists():
-            return False
+            return None
+        conn: sqlite3.Connection | None = None
         try:
-            conn = sqlite3.connect(self.path)
-            try:
-                values = dict(
-                    conn.execute(
-                        "SELECT key, value FROM graph_meta WHERE key IN "
-                        "('schema_version', 'core_registry_version', 'extension_registry_hash')"
-                    ).fetchall()
-                )
-            finally:
-                conn.close()
+            uri = f"{self.path.resolve().as_uri()}?mode=ro"
+            conn = sqlite3.connect(uri, uri=True)
+            conn.execute("BEGIN")
+            # This marker validation MUST remain the first read in the transaction.
+            values = dict(
+                conn.execute(
+                    "SELECT key, value FROM graph_meta WHERE key IN "
+                    "('schema_version', 'core_registry_version', 'extension_registry_hash')"
+                ).fetchall()
+            )
         except sqlite3.Error:
-            return False
-        return (
+            if conn is not None:
+                conn.close()
+            return None
+        current = (
             values.get("schema_version") == str(SCHEMA_VERSION)
             and values.get("core_registry_version") == str(self.registry.core_version)
             and values.get("extension_registry_hash") == self.registry.extension_hash
         )
+        if not current:
+            conn.close()
+            return None
+        return conn
 
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
@@ -385,42 +400,59 @@ class EpistemicGraphIndex:
             conn.close()
 
     def nodes(self, *, path: str | None = None) -> list[dict[str, Any]]:
-        if not self.path.exists():
+        conn = self._open_read_snapshot()
+        if conn is None:
             return []
-        conn = self._connect()
         try:
-            select = (
-                "SELECT node_key, kind, path, anchor, title, text, source_hash, "
-                "line_start, line_end, metadata FROM graph_nodes"
-            )
-            if path is None:
-                rows = conn.execute(select + " ORDER BY node_key").fetchall()
-            else:
-                rows = conn.execute(
-                    select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
-                ).fetchall()
+            return self._nodes_from_snapshot(conn, path=path)
         finally:
             conn.close()
+
+    def _nodes_from_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        select = (
+            "SELECT node_key, kind, path, anchor, title, text, source_hash, "
+            "line_start, line_end, metadata FROM graph_nodes"
+        )
+        if path is None:
+            rows = conn.execute(select + " ORDER BY node_key").fetchall()
+        else:
+            rows = conn.execute(
+                select + " WHERE path = ? ORDER BY node_key", (_with_md(path),)
+            ).fetchall()
         return [_node_row_to_dict(r) for r in rows]
 
     def edges(self, *, source_path: str | None = None) -> list[dict[str, Any]]:
-        if not self.path.exists():
+        conn = self._open_read_snapshot()
+        if conn is None:
             return []
-        conn = self._connect()
         try:
-            select = (
-                "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
-                "parent_relation, registry_status, registry_version, registry_hash, "
-                "origin, source_path, source_anchor, metadata FROM graph_edges"
-            )
-            if source_path is None:
-                rows = conn.execute(select + " ORDER BY edge_key").fetchall()
-            else:
-                rows = conn.execute(
-                    select + " WHERE source_path = ? ORDER BY edge_key", (_with_md(source_path),)
-                ).fetchall()
+            return self._edges_from_snapshot(conn, source_path=source_path)
         finally:
             conn.close()
+
+    def _edges_from_snapshot(
+        self,
+        conn: sqlite3.Connection,
+        *,
+        source_path: str | None = None,
+    ) -> list[dict[str, Any]]:
+        select = (
+            "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
+            "parent_relation, registry_status, registry_version, registry_hash, "
+            "origin, source_path, source_anchor, metadata FROM graph_edges"
+        )
+        if source_path is None:
+            rows = conn.execute(select + " ORDER BY edge_key").fetchall()
+        else:
+            rows = conn.execute(
+                select + " WHERE source_path = ? ORDER BY edge_key",
+                (_with_md(source_path),),
+            ).fetchall()
         return [_edge_row_to_dict(r) for r in rows]
 
     def _index_path(
@@ -529,7 +561,7 @@ class EpistemicGraphIndex:
         Self-edges (a block's own `derived_from` edge to its owning file) drop
         out via the same-path check below.
         """
-        if not seeds or not self.available():
+        if not seeds:
             return []
         seed_order: dict[str, int] = {}
         for i, seed in enumerate(seeds):
@@ -537,7 +569,9 @@ class EpistemicGraphIndex:
             if rel not in seed_order:
                 seed_order[rel] = i
         seed_paths = list(seed_order)
-        conn = self._connect()
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return []
         try:
             path_placeholders = ",".join("?" for _ in seed_paths)
             node_rows = conn.execute(
@@ -594,10 +628,12 @@ class EpistemicGraphIndex:
         it (reachable under `scope="vault"`) is never in this set — the
         find-lane hybrid branch uses that to run legacy wikilink expansion for
         seeds the sidecar never covered, instead of silently dropping them."""
-        if not paths or not self.available():
+        if not paths:
             return set()
         rels = [_with_md(p) for p in paths]
-        conn = self._connect()
+        conn = self._open_read_snapshot()
+        if conn is None:
+            return set()
         try:
             placeholders = ",".join("?" for _ in rels)
             rows = conn.execute(
@@ -627,15 +663,6 @@ def graph_context(
 ) -> dict[str, Any]:
     """Return a bounded, read-only graph neighborhood for a path or query."""
     idx = EpistemicGraphIndex(vault_root)
-    if not idx.available():
-        return {
-            "available": False,
-            "reason": "graph sidecar unavailable",
-            "seeds": [],
-            "nodes": [],
-            "edges": [],
-            "truncation": [],
-        }
     profile_registry = traversal_profiles.load_profiles(vault_root, registry=idx.registry)
     profile = profile_registry.resolve(traversal_profile)
     depth = min(max(0, int(depth)), profile.max_depth, traversal_profiles.MAX_DEPTH)
@@ -649,7 +676,16 @@ def graph_context(
     narrowed = traversal_profiles.narrow_relations(profile, relation_types, idx.registry)
     if narrowed is not None:
         allowed &= set(narrowed)
-    conn = idx._connect()
+    conn = idx._open_read_snapshot()
+    if conn is None:
+        return {
+            "available": False,
+            "reason": "graph sidecar unavailable",
+            "seeds": [],
+            "nodes": [],
+            "edges": [],
+            "truncation": [],
+        }
     try:
         drift_counts: dict[str, int] = {}
         freshness_cache: dict[tuple[str, str, str, int], bool] = {}
@@ -1017,10 +1053,8 @@ def _bump_generation(conn: sqlite3.Connection) -> None:
     Self-initializing upsert (no separate "seed the row" step): a fresh sidecar
     has no `generation` row yet, so the first bump inserts '1'; every
     subsequent bump increments in place. This keeps row initialization scoped
-    to genuine write paths — `_connect()` (shared by read-only callers like
-    `neighbors_for`/`nodes`/`edges`) must never open a write transaction just
-    to guarantee this row exists (a read connection holding the writer lock
-    would contend with a real concurrent writer).
+    to genuine write paths. Trusted readers use `_open_read_snapshot()` instead
+    of the schema-creating `_connect()` writer helper.
     """
     conn.execute(
         "INSERT INTO graph_meta(key, value) VALUES ('generation', '1') "
@@ -1036,21 +1070,20 @@ def cache_token(vault_root: Path) -> tuple | None:
     absent-sentinel so typed-mode and fallback-mode entries never collide.
     """
     idx = EpistemicGraphIndex(vault_root)
-    if not idx.available():
+    conn = idx._open_read_snapshot()
+    if conn is None:
         return None
     try:
-        conn = sqlite3.connect(idx.path)
-        try:
-            values = dict(
-                conn.execute(
-                    "SELECT key, value FROM graph_meta WHERE key IN "
-                    "('schema_version', 'extension_registry_hash', 'generation')"
-                ).fetchall()
-            )
-        finally:
-            conn.close()
+        values = dict(
+            conn.execute(
+                "SELECT key, value FROM graph_meta WHERE key IN "
+                "('schema_version', 'extension_registry_hash', 'generation')"
+            ).fetchall()
+        )
     except sqlite3.Error:
         return None
+    finally:
+        conn.close()
     return (
         values.get("schema_version"),
         values.get("extension_registry_hash"),
@@ -1084,7 +1117,8 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
     if not graph_enabled():
         return []
     idx = EpistemicGraphIndex(vault_root)
-    if not idx.path.exists() or not idx.available():
+    conn = idx._open_read_snapshot()
+    if conn is None:
         return [
             {
                 "path": kb_prefix(),
@@ -1094,7 +1128,14 @@ def graph_drift(vault_root: Path) -> list[dict[str, Any]]:
                 ),
             }
         ]
-    by_path = {n["path"]: n for n in idx.nodes() if n["kind"] == "file"}
+    try:
+        by_path = {
+            node["path"]: node
+            for node in idx._nodes_from_snapshot(conn)
+            if node["kind"] == "file"
+        }
+    finally:
+        conn.close()
     drift: list[dict[str, Any]] = []
     kb = vault_root / kb_dirname()
     if not kb.is_dir():
@@ -2033,9 +2074,9 @@ def indexed_unit_parent_path_resolution(
     vault_root: Path, unit_ref: str
 ) -> tuple[list[str], bool]:
     idx = EpistemicGraphIndex(vault_root)
-    if not idx.available():
+    conn = idx._open_read_snapshot()
+    if conn is None:
         return [], False
-    conn = idx._connect()
     try:
         _status, paths, _seeds, _drift_counts, work_exhausted = _current_unit_status(
             conn, vault_root, unit_ref
@@ -2177,9 +2218,9 @@ def _frontmatter_source_candidates(page) -> list[dict[str, Any]]:
 
 def _shared_source_candidates(vault_root: Path, rel_path: str) -> list[dict[str, Any]]:
     idx = EpistemicGraphIndex(vault_root)
-    if not idx.available():
+    conn = idx._open_read_snapshot()
+    if conn is None:
         return []
-    conn = idx._connect()
     try:
         src_key = _file_key(rel_path)
         rows = conn.execute(

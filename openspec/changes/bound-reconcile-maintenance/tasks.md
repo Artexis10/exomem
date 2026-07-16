@@ -9,6 +9,7 @@
 - [x] 1.7 Add marker-publication regressions for stable passes, post-check failure, an already-admitted refresh overlapping a failed rebuild, and missing-sidecar refresh.
 - [x] 1.8 Add a spawned-process serialization regression and assert graph coordination state is vault-rooted and shared.
 - [x] 1.9 Add regressions for walker exclusion, pre-mutation lock failure, and degraded index-sync reporting of structured lock errors.
+- [x] 1.10 Add deterministic reader races proving complete-old snapshots before rebuild and unavailable/empty results after marker removal.
 
 ## 2. Bounded Graph Implementation
 
@@ -19,6 +20,7 @@
 - [x] 2.5 Make stable full-rebuild completion the only schema-version publisher and route non-current incremental refresh through a full rebuild.
 - [x] 2.6 Serialize all public graph mutators with one vault-rooted re-entrant OS-backed mutation coordinator.
 - [x] 2.7 Exclude coordination state from both walkers and propagate structured lock failures to the index-sync degradation boundary.
+- [x] 2.8 Route every trusted graph read through one read-only validated SQLite transaction without taking the mutation lock.
 
 ## 3. Freshness and Fanout Regressions
 

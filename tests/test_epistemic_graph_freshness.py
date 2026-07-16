@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sqlite3
 import threading
 from pathlib import Path
 
@@ -197,6 +198,123 @@ def test_spawned_mutator_waits_for_full_rebuild_mutation_boundary(
     assert rebuild_errors == []
     assert completed.is_set()
     assert child.exitcode == 0
+
+
+def test_neighbor_reader_admitted_before_rebuild_sees_complete_old_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    expected = index.neighbors_for([A])
+    assert expected
+    snapshot_admitted = threading.Event()
+    writer_entered = threading.Event()
+    reader_results: list[list[epistemic_graph.GraphNeighbor]] = []
+    reader_errors: list[Exception] = []
+    writer_errors: list[Exception] = []
+    real_rebuild_pass = index._rebuild_all_pass
+
+    def open_snapshot():
+        conn = sqlite3.connect(index.path)
+        conn.execute("BEGIN")
+        markers = dict(
+            conn.execute(
+                "SELECT key, value FROM graph_meta WHERE key IN "
+                "('schema_version', 'core_registry_version', 'extension_registry_hash')"
+            ).fetchall()
+        )
+        assert markers["schema_version"] == str(epistemic_graph.SCHEMA_VERSION)
+        snapshot_admitted.set()
+        if not writer_entered.wait(5.0):
+            conn.close()
+            raise RuntimeError("writer did not enter rebuild")
+        return conn
+
+    def rebuild_pass(resolver):
+        writer_entered.set()
+        return real_rebuild_pass(resolver)
+
+    def read_neighbors() -> None:
+        try:
+            reader_results.append(index.neighbors_for([A]))
+        except Exception as exc:  # noqa: BLE001 - asserted in parent thread
+            reader_errors.append(exc)
+
+    def rebuild() -> None:
+        try:
+            index.rebuild_all()
+        except Exception as exc:  # noqa: BLE001 - asserted in parent thread
+            writer_errors.append(exc)
+
+    monkeypatch.setattr(index, "_open_read_snapshot", open_snapshot, raising=False)
+    monkeypatch.setattr(index, "_rebuild_all_pass", rebuild_pass)
+    reader = threading.Thread(target=read_neighbors)
+    writer = threading.Thread(target=rebuild)
+    reader.start()
+    try:
+        assert snapshot_admitted.wait(3.0)
+        writer.start()
+        reader.join(timeout=8.0)
+        writer.join(timeout=8.0)
+    finally:
+        if writer.is_alive():
+            writer.join(timeout=3.0)
+        if reader.is_alive():
+            reader.join(timeout=3.0)
+
+    assert not reader.is_alive()
+    assert not writer.is_alive()
+    assert reader_errors == []
+    assert writer_errors == []
+    assert reader_results == [expected]
+
+
+def test_trusted_reads_after_marker_removal_never_expose_partial_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_index_path = index._index_path
+    partial_written = threading.Event()
+    release_rebuild = threading.Event()
+    writer_errors: list[Exception] = []
+    indexed = 0
+
+    def pause_after_first_path(*args, **kwargs):
+        nonlocal indexed
+        result = real_index_path(*args, **kwargs)
+        indexed += 1
+        if indexed == 1:
+            partial_written.set()
+            if not release_rebuild.wait(5.0):
+                raise RuntimeError("test rebuild release signal was not received")
+        return result
+
+    def rebuild() -> None:
+        try:
+            index.rebuild_all()
+        except Exception as exc:  # noqa: BLE001 - asserted in parent thread
+            writer_errors.append(exc)
+
+    monkeypatch.setattr(index, "_index_path", pause_after_first_path)
+    writer = threading.Thread(target=rebuild)
+    writer.start()
+    try:
+        assert partial_written.wait(3.0)
+        assert index.nodes() == []
+        assert index.edges() == []
+        assert index.neighbors_for([A]) == []
+        assert epistemic_graph.graph_context(vault, path=A)["available"] is False
+    finally:
+        release_rebuild.set()
+        writer.join(timeout=8.0)
+
+    assert not writer.is_alive()
+    assert writer_errors == []
 
 
 def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(

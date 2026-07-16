@@ -125,6 +125,39 @@ mutation, stabilization checks, and final availability-marker publication.
 - **THEN** it does not mutate graph rows or availability
 - **AND** its structured lock error reaches index-sync reporting as a degraded graph component rather than accepted success
 
+### Requirement: Trusted graph reads use one validated SQLite snapshot
+
+The system SHALL perform each trusted graph read operation through one explicit
+SQLite read transaction without acquiring the OS mutation lock. It MUST open a
+read-only connection, `BEGIN` the transaction, and validate schema-version,
+core-registry-version, and extension-registry-hash markers as the first read in
+that transaction. Every row and metadata query for the operation MUST use that
+same connection and snapshot. Read operations MUST NOT use the schema-creating
+or schema-migrating writer connection helper.
+
+This boundary applies to public node, edge, neighbor, indexed-path, graph
+context, cache-token, graph-drift, and indexed unit-parent reads, plus
+graph-backed relation-suggestion reads.
+
+#### Scenario: Reader snapshot precedes rebuild mutation
+
+- **WHEN** a trusted reader validates current markers before a rebuild removes them
+- **AND** the rebuild mutates graph rows while the read operation remains active
+- **THEN** every query in that read operation observes the complete previously committed graph snapshot
+- **AND** the reader never mixes old and rebuilt rows
+
+#### Scenario: Reader snapshot follows marker removal
+
+- **WHEN** a trusted reader begins after a rebuild has removed the schema-version marker
+- **THEN** marker validation rejects the snapshot as unavailable
+- **AND** the operation returns its unavailable or empty result without querying partial graph rows
+
+#### Scenario: Readers remain lock-free
+
+- **WHEN** a trusted graph read overlaps a serialized writer
+- **THEN** the reader does not acquire the OS mutation coordinator
+- **AND** SQLite snapshot isolation supplies complete-old-or-unavailable behavior
+
 ### Requirement: Bounded graph maintenance preserves correctness and failure ordering
 
 The system SHALL preserve the same graph nodes and edges produced from an equivalent stable vault, including ambiguous-link behavior. It MUST acquire initial disk freshness and the resolver before deleting or replacing existing graph rows so an initial acquisition failure leaves the prior graph intact. Once a rebuild pass begins, every exceptional exit MUST mark the graph unavailable/non-current before propagating, including pass failures, post-pass freshness failures, and freshness or resolver failures while acquiring a required retry.

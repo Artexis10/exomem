@@ -80,6 +80,22 @@ resolver scans. Structured lock failures (`MUTATION_BUSY` and
 canonical Markdown write and other index lanes to complete. Unstructured graph
 leaf failures retain the existing soft-failure behavior.
 
+Trusted graph readers do not take the mutation lock. Instead, each public read
+opens the graph sidecar read-only, begins one explicit SQLite read transaction,
+and validates `schema_version`, `core_registry_version`, and
+`extension_registry_hash` as the first read in that transaction. Every graph
+row and metadata query for that operation then uses the same connection and
+snapshot. `_connect()` is deliberately excluded from this path because it may
+create or migrate schema.
+
+This gives readers SQLite's complete-old-or-unavailable contract without
+serializing them behind writers. A reader whose marker validation precedes a
+rebuild sees the complete previously committed graph for its whole operation;
+a reader whose first snapshot read follows marker removal returns
+unavailable/empty and never observes partially rebuilt rows. The boundary is
+shared by nodes, edges, neighbors, indexed paths and unit-parent resolution,
+graph context, cache tokens, graph drift, and graph-backed relation suggestions.
+
 Failure ordering follows the same mutation boundary. An initial disk-freshness
 or resolver acquisition failure occurs before the first pass and preserves the
 previously current graph. Once a pass starts, any exceptional exit—including
