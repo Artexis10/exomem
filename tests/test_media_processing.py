@@ -499,6 +499,50 @@ def test_valid_completed_sidecar_without_job_is_skipped_by_periodic_scan(
     assert store.has_binary(binary) is False
 
 
+def test_legacy_completed_sidecar_without_any_provenance_is_preserved(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "completed-legacy-no-provenance.mp3")
+    result = media_processing.reconcile_media(vault, binary)
+    completed_text = result.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: legacy-transcriber"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed_text += "\n## Extracted text\n\n[0:00] Preserve this legacy transcript.\n"
+    provenance_fields = {
+        "evidence_file",
+        "original_filename",
+        "binary_sha256",
+        "binary_size",
+        "binary_mtime_ns",
+        "binary_ctime_ns",
+    }
+    completed_text = "\n".join(
+        line
+        for line in completed_text.splitlines()
+        if line.partition(":")[0] not in provenance_fields
+    ) + "\n"
+    result.sidecar_path.write_text(completed_text, encoding="utf-8")
+    store = media_jobs.MediaJobStore(vault)
+    store.discard(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    before = result.sidecar_path.read_bytes()
+
+    def reject_reconcile(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("legacy completed media must remain skipped")
+
+    monkeypatch.setattr(media_processing, "reconcile_media", reject_reconcile)
+
+    assert media_processing.reconcile_all_media(vault, limit=1) == 0
+    assert result.sidecar_path.read_bytes() == before
+    assert store.has_binary(binary) is False
+
+
 def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
     vault: Path,
 ) -> None:

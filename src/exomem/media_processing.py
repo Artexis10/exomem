@@ -63,6 +63,14 @@ _EXTRACTED_SECTION_RE = re.compile(
     r"(?ms)^## Extracted text\s*\n(.*?)(?=^## |\Z)"
 )
 _INCOMPLETE_ENGINES = {"", "none", "pending"}
+_PROVENANCE_FIELDS = (
+    "evidence_file",
+    "original_filename",
+    "binary_sha256",
+    "binary_size",
+    "binary_mtime_ns",
+    "binary_ctime_ns",
+)
 
 
 def classify_media(path: str | Path) -> str | None:
@@ -324,6 +332,11 @@ def _is_completed_sidecar_shape(
     media_type: str,
 ) -> bool:
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
+        return False
+    present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
+    if not any(present):
+        return True
+    if not all(present):
         return False
     try:
         current = binary.stat()
@@ -589,6 +602,11 @@ def _is_valid_completed_sidecar(
     if raw_frontmatter is None:
         return False
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
+        return False
+    present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
+    if not any(present):
+        return True
+    if not all(present):
         return False
     expected = {
         "evidence_file": provenance.relative_path,
