@@ -18,6 +18,7 @@ from typing import Any
 
 from . import find as find_module
 from . import (
+    memory_refs,
     relation_registry,
     semantic_blocks,
     semantic_index,
@@ -31,6 +32,7 @@ from .markdown_relations import MarkdownRelation
 
 SCHEMA_VERSION = 4
 UNIT_SEED_MAX_BATCHES = 4
+UNIT_PARENT_REF_MAX_CANDIDATES = 16
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -611,20 +613,38 @@ def graph_context(
         unit_filter_status: str | None = None
         seed_cap_hit = False
         unit_work_exhausted = False
+        unit_parent_work_exhausted = False
         if unit_ref is not None:
             indexed = _seed_nodes(
-                conn, path=None, query=None, unit_ref=unit_ref, limit=2
+                conn,
+                path=None,
+                query=None,
+                unit_ref=unit_ref,
+                limit=UNIT_PARENT_REF_MAX_CANDIDATES,
             )
             current = [
                 seed
                 for seed in indexed
                 if _current_record(seed, parent_path=str(seed.get("path") or ""))
             ]
-            resolved_status = _current_unit_status(conn, vault_root, unit_ref)
+            (
+                resolved_status,
+                current_parent_paths,
+                parent_drift_counts,
+                unit_parent_work_exhausted,
+            ) = _current_unit_status(conn, vault_root, unit_ref)
+            for code, count in parent_drift_counts.items():
+                drift_counts[code] = max(drift_counts.get(code, 0), count)
+            current = [
+                seed for seed in current if str(seed.get("path") or "") in current_parent_paths
+            ]
             if resolved_status == "ambiguous" or len(current) > 1:
                 unit_status = "ambiguous"
                 seeds = []
-            elif current:
+            elif unit_parent_work_exhausted:
+                unit_status = "stale"
+                seeds = []
+            elif current and resolved_status == "found":
                 unit_status = "found"
                 seeds = _filter_unit_nodes(
                     current, categories=category_filter, kinds=kind_filter
@@ -664,10 +684,10 @@ def graph_context(
                 "seeds": [],
                 "nodes": [],
                 "edges": [],
-                "truncation": (
-                    [_unit_seed_work_truncation(max_nodes)]
-                    if unit_work_exhausted
-                    else []
+                "truncation": _unit_seed_truncation(
+                    max_nodes=max_nodes,
+                    unit_work_exhausted=unit_work_exhausted,
+                    unit_parent_work_exhausted=unit_parent_work_exhausted,
                 ),
             }
             if unit_status is not None:
@@ -758,6 +778,8 @@ def graph_context(
             truncation.append(f"seed nodes capped at {max_nodes}")
         if unit_work_exhausted:
             truncation.append(_unit_seed_work_truncation(max_nodes))
+        if unit_parent_work_exhausted:
+            truncation.append(_unit_parent_work_truncation())
         if len(nodes) > max_nodes:
             truncation.append(
                 f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)"
@@ -1680,6 +1702,28 @@ def _unit_seed_work_truncation(max_nodes: int) -> str:
     )
 
 
+def _unit_parent_work_truncation() -> str:
+    return (
+        "unit parent-ref validation work capped at "
+        f"{UNIT_PARENT_REF_MAX_CANDIDATES}; "
+        "additional indexed parents were not checked"
+    )
+
+
+def _unit_seed_truncation(
+    *,
+    max_nodes: int,
+    unit_work_exhausted: bool,
+    unit_parent_work_exhausted: bool,
+) -> list[str]:
+    truncation: list[str] = []
+    if unit_work_exhausted:
+        truncation.append(_unit_seed_work_truncation(max_nodes))
+    if unit_parent_work_exhausted:
+        truncation.append(_unit_parent_work_truncation())
+    return truncation
+
+
 def _filter_unit_nodes(
     nodes: list[dict[str, Any]],
     *,
@@ -1717,47 +1761,101 @@ def _resolved_unit_filters(
 
 def _current_unit_status(
     conn: sqlite3.Connection, vault_root: Path, unit_ref: str
-) -> str:
+) -> tuple[str, list[str], dict[str, int], bool]:
     parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
     if not separator or not parent_ref:
-        return "missing"
-    paths = _indexed_unit_parent_paths(conn, parent_ref)
+        return "missing", [], {}, False
+    paths, drift_counts, work_exhausted = _current_unit_parent_paths(
+        conn,
+        vault_root,
+        parent_ref=parent_ref,
+        unit_ref=unit_ref,
+    )
+    if work_exhausted:
+        drift_counts["parent_ref_validation_work_exhausted"] = 1
+        return "stale", paths, drift_counts, True
     if len(paths) > 1:
-        return "ambiguous"
+        return "ambiguous", paths, drift_counts, False
     if not paths:
-        return "missing"
-    rel = paths[0]
-    path = vault_root / rel
-    try:
-        source = path.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return "missing"
-    state = semantic_index.current_parent_index_state(vault_root, path, source=source)
-    return state.document.resolve_unit(unit_ref).status
+        return "missing", [], drift_counts, False
+    return "found", paths, drift_counts, False
 
 
-def _indexed_unit_parent_paths(
-    conn: sqlite3.Connection, parent_ref: str
-) -> list[str]:
+def _current_unit_parent_paths(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    *,
+    parent_ref: str,
+    unit_ref: str,
+) -> tuple[list[str], dict[str, int], bool]:
     rows = conn.execute(
-        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? ORDER BY path LIMIT 2",
-        (parent_ref,),
+        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? "
+        "ORDER BY path LIMIT ?",
+        (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
     ).fetchall()
-    return [str(row[0]) for row in rows]
+    current_paths: list[str] = []
+    drift_counts: dict[str, int] = {}
+    for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
+        rel = str(row[0])
+        path = vault_root / rel
+        try:
+            source = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
+            continue
+        except (OSError, UnicodeError):
+            drift_counts["parent_unavailable"] = (
+                drift_counts.get("parent_unavailable", 0) + 1
+            )
+            continue
+        if memory_refs.ref_from_markdown(source) != parent_ref:
+            drift_counts["parent_ref_mismatch"] = (
+                drift_counts.get("parent_ref_mismatch", 0) + 1
+            )
+            continue
+        try:
+            state = semantic_index.current_parent_index_state(
+                vault_root, path, source=source
+            )
+        except (TypeError, ValueError):
+            drift_counts["invalid_current_parent"] = (
+                drift_counts.get("invalid_current_parent", 0) + 1
+            )
+            continue
+        if state.document.resolve_unit(unit_ref).status != "found":
+            drift_counts["missing_current_unit"] = (
+                drift_counts.get("missing_current_unit", 0) + 1
+            )
+            continue
+        current_paths.append(rel)
+        if len(current_paths) == 2:
+            return current_paths, drift_counts, False
+    return (
+        current_paths,
+        drift_counts,
+        len(rows) > UNIT_PARENT_REF_MAX_CANDIDATES,
+    )
+
+
+def indexed_unit_parent_path_resolution(
+    vault_root: Path, unit_ref: str
+) -> tuple[list[str], bool]:
+    idx = EpistemicGraphIndex(vault_root)
+    if not idx.available():
+        return [], False
+    conn = idx._connect()
+    try:
+        _status, paths, _drift_counts, work_exhausted = _current_unit_status(
+            conn, vault_root, unit_ref
+        )
+        return paths, work_exhausted
+    finally:
+        conn.close()
 
 
 def indexed_unit_parent_paths(vault_root: Path, unit_ref: str) -> list[str]:
-    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
-    if not separator or not parent_ref:
-        return []
-    idx = EpistemicGraphIndex(vault_root)
-    if not idx.available():
-        return []
-    conn = idx._connect()
-    try:
-        return _indexed_unit_parent_paths(conn, parent_ref)
-    finally:
-        conn.close()
+    paths, _work_exhausted = indexed_unit_parent_path_resolution(vault_root, unit_ref)
+    return paths
 
 
 def _drift_warning(drift_counts: dict[str, int]) -> dict[str, Any]:

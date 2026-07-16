@@ -213,11 +213,18 @@ def _hits_for_graph_seeds(
 
 
 def _validate_unit_parent_path(vault_root: Path, *, unit_ref: str, path: str) -> None:
-    parent_paths = epistemic_graph.indexed_unit_parent_paths(vault_root, unit_ref)
-    if len(parent_paths) == 1 and parent_paths[0] != path:
+    parent_paths, work_exhausted = epistemic_graph.indexed_unit_parent_path_resolution(
+        vault_root, unit_ref
+    )
+    if work_exhausted:
+        raise ValueError(
+            "INVALID_CONTEXT: unit_ref parent validation work capped at "
+            f"{epistemic_graph.UNIT_PARENT_REF_MAX_CANDIDATES}; cannot verify path"
+        )
+    if parent_paths and path not in parent_paths:
         raise ValueError(
             "INVALID_CONTEXT: unit_ref parent "
-            f"{parent_paths[0]} does not match path {path}"
+            f"{', '.join(parent_paths)} does not match path {path}"
         )
 
 

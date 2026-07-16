@@ -193,6 +193,108 @@ def test_graph_context_reports_ambiguous_unit_ref_without_selecting_a_collision(
     assert context["seeds"] == []
 
 
+def test_graph_context_ignores_deleted_parent_ref_collision(
+    tmp_path: Path,
+) -> None:
+    _write(tmp_path, _TARGET, "---\ntype: insight\n---\n# Target\n")
+    first = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/first.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# First\n\n- [config] First unit ^shared\n",
+    )
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/second.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Second\n\n- [config] Second unit ^shared\n",
+    )
+    unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
+        0
+    ].unit_ref
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    first.unlink()
+
+    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=0)
+
+    assert context["unit_status"] == "found"
+    assert _seed_refs(context) == [unit_ref]
+    with pytest.raises(ValueError, match="INVALID_CONTEXT.*unit_ref.*path"):
+        commands.op_connect_memory(
+            tmp_path,
+            operation="graph-context",
+            path=_TARGET,
+            unit_ref=unit_ref,
+            depth=0,
+        )
+
+
+@pytest.mark.parametrize("mutation", ["ref_changed", "unit_removed"])
+def test_graph_context_ignores_noncurrent_parent_ref_collision(
+    tmp_path: Path,
+    mutation: str,
+) -> None:
+    first = _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/first.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# First\n\n- [config] First unit ^shared\n",
+    )
+    _write(
+        tmp_path,
+        "Knowledge Base/Notes/Insights/second.md",
+        f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+        "# Second\n\n- [config] Second unit ^shared\n",
+    )
+    unit_ref = semantic_index.build_parent_index_state(tmp_path, first).document.units[
+        0
+    ].unit_ref
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    source = first.read_text(encoding="utf-8")
+    if mutation == "ref_changed":
+        source = source.replace(_PAGE_ID, "44444444-4444-4444-8444-444444444444")
+    else:
+        source = source.replace("^shared", "^replacement")
+    first.write_text(source, encoding="utf-8")
+
+    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=0)
+
+    assert context["unit_status"] == "found"
+    assert _seed_refs(context) == [unit_ref]
+
+
+def test_graph_context_reports_parent_ref_validation_work_exhaustion(
+    tmp_path: Path,
+) -> None:
+    paths = [
+        _write(
+            tmp_path,
+            f"Knowledge Base/Notes/Insights/collision-{index:02d}.md",
+            f"---\ntype: insight\nexomem_id: {_PAGE_ID}\n---\n"
+            f"# Collision {index}\n\n- [config] Unit {index} ^shared\n",
+        )
+        for index in range(epistemic_graph.UNIT_PARENT_REF_MAX_CANDIDATES + 1)
+    ]
+    unit_ref = semantic_index.build_parent_index_state(
+        tmp_path, paths[-1]
+    ).document.units[0].unit_ref
+    epistemic_graph.EpistemicGraphIndex(tmp_path).rebuild_all()
+    for path in paths[:-1]:
+        path.unlink()
+
+    context = epistemic_graph.graph_context(tmp_path, unit_ref=unit_ref, depth=0)
+
+    assert context["unit_status"] == "stale"
+    assert context["seeds"] == []
+    assert context["truncation"] == [
+        "unit parent-ref validation work capped at 16; "
+        "additional indexed parents were not checked"
+    ]
+    assert context["warnings"][0]["reasons"][
+        "parent_ref_validation_work_exhausted"
+    ] == 1
+
+
 def test_graph_context_applies_freshness_before_the_unit_seed_cap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
