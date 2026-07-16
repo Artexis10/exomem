@@ -330,12 +330,16 @@ def clear_deferred_work(
     vault_root: Path | None = None,
     *,
     paths: list[Path] | list[str] | None = None,
+    include_full: bool = False,
 ) -> int:
-    """Clear deferred semantic work after an explicit index/reconcile heal."""
+    """Clear embedding work, preserving full-index retries unless explicitly requested."""
     if vault_root is None:
         return 0
     if paths is None:
-        return deferred_index.clear(vault_root) + deferred_index.clear_full(vault_root)
+        cleared = deferred_index.clear(vault_root)
+        if include_full:
+            cleared += deferred_index.clear_full(vault_root)
+        return cleared
     rels: list[str] = []
     for item in paths:
         if isinstance(item, Path):
@@ -344,9 +348,10 @@ def clear_deferred_work(
             rel = str(item).replace("\\", "/")
             if rel.lower().endswith(".md"):
                 rels.append(rel)
-    return deferred_index.clear(vault_root, rels) + deferred_index.clear_full(
-        vault_root, rels
-    )
+    cleared = deferred_index.clear(vault_root, rels)
+    if include_full:
+        cleared += deferred_index.clear_full(vault_root, rels)
+    return cleared
 
 
 def drain_deferred_work(

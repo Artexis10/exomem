@@ -292,6 +292,16 @@ def test_drain_deferred_work_preserves_failed_semantic_upserts(
     assert index_sync.deferred_work_status(vault)["semantic_upserts"]["count"] == 1
 
 
+def test_embedding_only_clear_preserves_full_index_retry(vault: Path) -> None:
+    rel = "Knowledge Base/Evidence/Audio/preserve-full-retry.m4a.md"
+    deferred_index.add(vault, [rel])
+    deferred_index.add_full(vault, [rel])
+
+    assert index_sync.clear_deferred_work(vault) == 1
+    assert deferred_index.status(vault)["count"] == 0
+    assert deferred_index.full_status(vault)["paths"] == [rel]
+
+
 def test_full_index_drain_keeps_work_when_embeddings_report_incomplete(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
