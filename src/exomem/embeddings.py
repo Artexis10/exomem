@@ -20,6 +20,7 @@ import gc
 import logging
 import math
 import os
+import sqlite3
 import threading
 import time
 from dataclasses import dataclass
@@ -1037,7 +1038,10 @@ class EmbeddingSyncStatus:
 
 
 def upsert_after_write_status(
-    vault_root: Path, written_paths: list[Path]
+    vault_root: Path,
+    written_paths: list[Path],
+    *,
+    defer_during_warm: bool = True,
 ) -> EmbeddingSyncStatus:
     """Re-embed eligible files and return an observable bounded outcome."""
     global _IMPORT_FAILED
@@ -1060,13 +1064,40 @@ def upsert_after_write_status(
     # write on the singleton lock — park the batch; the warm thread drains it
     # right after the model lands (readiness.mark_ready("embeddings")). If the
     # process dies before draining, audit/reconcile recover the stale sidecar.
-    from . import readiness
-    if readiness.defer("embeddings", (vault_root, tuple(md_paths))):
-        log.info(
-            "write-embed deferred until the embedding model is warm (%d file(s))",
-            len(md_paths),
-        )
-        return EmbeddingSyncStatus("deferred", "deferred_warmup", eligible_count)
+    race_receipts = []
+    if defer_during_warm:
+        from . import deferred_index, readiness
+
+        if readiness.should_defer("embeddings"):
+            rels: list[str] = []
+            root = vault_root.resolve()
+            for path in md_paths:
+                try:
+                    rels.append(path.resolve().relative_to(root).as_posix())
+                except (OSError, ValueError):
+                    continue
+            try:
+                race_receipts = deferred_index.add_receipts(vault_root, rels)
+            except (OSError, sqlite3.Error):
+                log.warning("durable warm defer failed; embedding inline")
+                race_receipts = []
+            if race_receipts and readiness.defer(
+                "embeddings", (vault_root, tuple(md_paths), tuple(race_receipts))
+            ):
+                log.info(
+                    "write-embed deferred until the embedding model is warm (%d file(s))",
+                    len(md_paths),
+                )
+                return EmbeddingSyncStatus(
+                    "deferred", "deferred_warmup", eligible_count
+                )
+
+    def finish(status: EmbeddingSyncStatus) -> EmbeddingSyncStatus:
+        if race_receipts and status.status == "completed":
+            from . import deferred_index
+
+            deferred_index.clear_receipts(vault_root, race_receipts)
+        return status
 
     try:
         get_model()  # triggers the heavy import; cheap thereafter.
@@ -1078,13 +1109,17 @@ def upsert_after_write_status(
                 e,
             )
             _IMPORT_FAILED = True
-        return EmbeddingSyncStatus(
-            "disabled", "embeddings_import_unavailable", eligible_count
+        return finish(
+            EmbeddingSyncStatus(
+                "disabled", "embeddings_import_unavailable", eligible_count
+            )
         )
     except Exception as e:  # noqa: BLE001 - model backends soft-fail by contract
         log.warning("embedding model load failed: %s; skipping upsert", e)
-        return EmbeddingSyncStatus(
-            "degraded", "embedding_model_load_failed", eligible_count
+        return finish(
+            EmbeddingSyncStatus(
+                "degraded", "embedding_model_load_failed", eligible_count
+            )
         )
 
     from . import find as find_module
@@ -1093,8 +1128,10 @@ def upsert_after_write_status(
         index = get_embedding_index(vault_root)
     except Exception as e:  # noqa: BLE001 - derived index open is best-effort
         log.warning("could not open embedding sidecar for upsert: %s", e)
-        return EmbeddingSyncStatus(
-            "degraded", "embedding_index_open_failed", eligible_count
+        return finish(
+            EmbeddingSyncStatus(
+                "degraded", "embedding_index_open_failed", eligible_count
+            )
         )
     per_file: list[tuple[Path, Any, list[str], float]] = []
     failure_code: str | None = None
@@ -1134,10 +1171,12 @@ def upsert_after_write_status(
         per_file.append((md, page, chunks, mtime))
 
     if not per_file:
-        return EmbeddingSyncStatus(
-            "completed" if failure_code is None else "degraded",
-            failure_code or "embedding_upsert_completed",
-            eligible_count,
+        return finish(
+            EmbeddingSyncStatus(
+                "completed" if failure_code is None else "degraded",
+                failure_code or "embedding_upsert_completed",
+                eligible_count,
+            )
         )
 
     from . import semantic_index
@@ -1192,10 +1231,12 @@ def upsert_after_write_status(
     except Exception as e:  # noqa: BLE001
         log.debug("claim sidecar upsert skipped (%s)", e)
         failure_code = failure_code or "embedding_auxiliary_failed"
-    return EmbeddingSyncStatus(
-        "completed" if failure_code is None else "degraded",
-        failure_code or "embedding_upsert_completed",
-        eligible_count,
+    return finish(
+        EmbeddingSyncStatus(
+            "completed" if failure_code is None else "degraded",
+            failure_code or "embedding_upsert_completed",
+            eligible_count,
+        )
     )
 
 

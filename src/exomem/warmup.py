@@ -190,6 +190,19 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             log.debug("%s warm-encode skipped", step, exc_info=True)
         return True
 
+    def _replay_deferred_embeddings(items: list) -> None:
+        from . import index_sync
+
+        for item in items:
+            item_vault, paths, *receipt_payload = item
+            receipts = receipt_payload[0] if receipt_payload else None
+            try:
+                index_sync.replay_deferred_embedding(
+                    item_vault, list(paths), receipts
+                )
+            except Exception:  # noqa: BLE001 — durable receipt survives retry
+                log.warning("deferred embed drain failed", exc_info=True)
+
     disabled = bool(os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"))
     if disabled or not preload:
         # Skip model preloads: either a lexical-only install (DISABLE_EMBEDDINGS,
@@ -205,15 +218,9 @@ def warm_all(vault_root: Path) -> dict[str, float]:
         # Quiet mode: embeddings ARE available (just lazy), so replay any write
         # parked during the brief lexical warm — mirror the real-preload branch so
         # those edits aren't stranded. Under DISABLE_EMBEDDINGS there's nothing to
-        # embed (upsert_after_write no-ops), so the drain is discarded.
+        # embed, so the in-memory drain is discarded and its durable receipt remains.
         if not disabled and drained:
-            from . import embeddings
-
-            for item_vault, paths in drained:
-                try:
-                    embeddings.upsert_after_write(item_vault, list(paths))
-                except Exception:  # noqa: BLE001 — drain is best-effort
-                    log.warning("deferred embed drain failed", exc_info=True)
+            _replay_deferred_embeddings(drained)
             log.info("drained %d deferred write-embed batch(es)", len(drained))
     else:
         from . import embeddings
@@ -233,11 +240,7 @@ def warm_all(vault_root: Path) -> dict[str, float]:
             drained = readiness.mark_ready("embeddings")
         else:
             drained = readiness.drain_deferred("embeddings")
-        for item_vault, paths in drained:
-            try:
-                embeddings.upsert_after_write(item_vault, list(paths))
-            except Exception:  # noqa: BLE001 — drain is best-effort
-                log.warning("deferred embed drain failed", exc_info=True)
+        _replay_deferred_embeddings(drained)
         if drained:
             log.info("drained %d deferred write-embed batch(es)", len(drained))
 

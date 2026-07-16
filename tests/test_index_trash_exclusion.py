@@ -16,6 +16,7 @@ Deletes stay UNfiltered so legacy pollution can still be purged.
 
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 
 import pytest
@@ -198,6 +199,139 @@ def test_index_sync_explicit_defer_semantic_upserts(
         index_sync.clear_deferred_work(vault)
 
 
+def test_bulk_defer_skips_only_proven_current_without_clearing_existing_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    from exomem import epistemic_graph, find, lexstore, memory_refs
+
+    for module in (lexstore, memory_refs, epistemic_graph):
+        monkeypatch.setattr(module, "upsert_after_write", lambda *_a, **_kw: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_a, **_kw: None)
+    root = vault / "Knowledge Base" / "Notes" / "Insights"
+    root.mkdir(parents=True, exist_ok=True)
+    current = root / "current.md"
+    current_with_receipt = root / "current-receipt.md"
+    stale = root / "stale.md"
+    for path in (current, current_with_receipt, stale):
+        path.write_text("# note\n", encoding="utf-8")
+    sidecar = vault / "Knowledge Base" / ".embeddings.sqlite"
+    conn = sqlite3.connect(sidecar)
+    try:
+        conn.execute(
+            "CREATE TABLE chunks (file_path TEXT, chunk_idx INTEGER, file_mtime REAL)"
+        )
+        conn.executemany(
+            "INSERT INTO chunks VALUES (?, 0, ?)",
+            [
+                (path.relative_to(vault).as_posix(), path.stat().st_mtime)
+                for path in (current, current_with_receipt)
+            ],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    receipt_rel = current_with_receipt.relative_to(vault).as_posix()
+    [existing] = deferred_index.add_receipts(vault, [receipt_rel])
+
+    index_sync.upsert_after_write(
+        vault, [current, current_with_receipt, stale], defer_semantic=True
+    )
+
+    receipts = {item.rel_path: item for item in deferred_index.snapshot(vault)}
+    assert current.relative_to(vault).as_posix() not in receipts
+    assert receipts[receipt_rel] == existing
+    assert stale.relative_to(vault).as_posix() in receipts
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "cleared"),
+    [
+        ("completed", "embedding_upsert_completed", True),
+        ("disabled", "embeddings_disabled", False),
+        ("deferred", "deferred_warmup", False),
+        ("degraded", "embedding_upsert_failed", False),
+        ("degraded", "embedding_auxiliary_failed", False),
+    ],
+)
+def test_replay_clears_only_completed_receipt(
+    vault: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    status: str,
+    code: str,
+    cleared: bool,
+) -> None:
+    from exomem import embeddings
+
+    path = vault / "Knowledge Base" / "Notes" / "replay.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# replay\n", encoding="utf-8")
+    [receipt] = deferred_index.add_receipts(
+        vault, [path.relative_to(vault).as_posix()]
+    )
+    calls: list[bool] = []
+
+    def replay_status(_vault, _paths, *, defer_during_warm=True):
+        calls.append(defer_during_warm)
+        return embeddings.EmbeddingSyncStatus(status, code, 1)
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", replay_status)
+
+    result = index_sync.replay_deferred_embedding(vault, [path], [receipt])
+
+    assert result.status == status
+    assert calls == [False]
+    assert (deferred_index.snapshot(vault) == []) is cleared
+
+
+def test_old_replay_cannot_clear_newer_same_path_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import embeddings
+
+    path = vault / "Knowledge Base" / "Notes" / "race.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# race\n", encoding="utf-8")
+    rel = path.relative_to(vault).as_posix()
+    [old] = deferred_index.add_receipts(vault, [rel])
+    newer: list[deferred_index.DeferredReceipt] = []
+
+    def replay_status(*_args, **_kwargs):
+        newer.extend(deferred_index.add_receipts(vault, [rel]))
+        return embeddings.EmbeddingSyncStatus(
+            "completed", "embedding_upsert_completed", 1
+        )
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", replay_status)
+
+    index_sync.replay_deferred_embedding(vault, [path], [old])
+
+    assert deferred_index.snapshot(vault) == newer
+
+
+
+def test_replay_exception_preserves_receipt(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import embeddings
+
+    path = vault / "Knowledge Base" / "Notes" / "exception.md"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("# exception\n", encoding="utf-8")
+    [receipt] = deferred_index.add_receipts(
+        vault, [path.relative_to(vault).as_posix()]
+    )
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="boom"):
+        index_sync.replay_deferred_embedding(vault, [path], [receipt])
+
+    assert deferred_index.snapshot(vault) == [receipt]
+
 
 def test_index_sync_nonquiet_keeps_immediate_embedding_upsert(
     vault: Path, monkeypatch: pytest.MonkeyPatch
@@ -254,10 +388,16 @@ def test_drain_deferred_work_processes_and_clears_semantic_upserts(
         lambda root, changed, deleted: None,
     )
     calls: list[list[Path]] = []
+
+    def completed(root, paths, *, defer_during_warm=True):
+        assert defer_during_warm is False
+        calls.append(list(paths))
+        return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
+
     monkeypatch.setattr(
         embeddings,
-        "upsert_after_write",
-        lambda root, paths: calls.append(list(paths)),
+        "upsert_after_write_status",
+        completed,
     )
     good = vault / "Knowledge Base" / "Notes" / "Insights" / "drain-me.md"
     good.parent.mkdir(parents=True, exist_ok=True)

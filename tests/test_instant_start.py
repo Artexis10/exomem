@@ -32,7 +32,15 @@ from pathlib import Path
 
 import pytest
 
-from exomem import bm25, commands, embeddings, readiness, server, warmup
+from exomem import (
+    bm25,
+    commands,
+    deferred_index,
+    embeddings,
+    readiness,
+    server,
+    warmup,
+)
 from exomem import doctor as doctor_module
 from exomem import find as find_module
 from exomem.__main__ import main
@@ -322,9 +330,14 @@ def test_warm_all_quiet_mode_replays_deferred_write_embeds(
     monkeypatch.setenv("EXOMEM_MODE", "quiet")
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: {})
     drained_calls: list[tuple] = []
+
+    def completed(vr, paths, *, defer_during_warm=True):
+        assert defer_during_warm is False
+        drained_calls.append((vr, list(paths)))
+        return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
+
     monkeypatch.setattr(
-        embeddings, "upsert_after_write",
-        lambda vr, paths: drained_calls.append((vr, list(paths))),
+        embeddings, "upsert_after_write_status", completed
     )
 
     readiness.begin_warm()
@@ -437,9 +450,14 @@ def test_warm_all_drains_deferred_write_embeds_after_embeddings_ready(
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
     drained_calls: list[tuple] = []
+
+    def completed(vr, paths, *, defer_during_warm=True):
+        assert defer_during_warm is False
+        drained_calls.append((vr, list(paths)))
+        return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
+
     monkeypatch.setattr(
-        embeddings, "upsert_after_write",
-        lambda vr, paths: drained_calls.append((vr, list(paths))),
+        embeddings, "upsert_after_write_status", completed
     )
 
     readiness.begin_warm()  # so the manual defer() below actually records
@@ -471,9 +489,14 @@ def test_warm_all_drains_deferred_write_embeds_even_when_bge_preload_fails(
     monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
     drained_calls: list[tuple] = []
+
+    def completed(vr, paths, *, defer_during_warm=True):
+        assert defer_during_warm is False
+        drained_calls.append((vr, list(paths)))
+        return embeddings.EmbeddingSyncStatus("completed", "test", len(paths))
+
     monkeypatch.setattr(
-        embeddings, "upsert_after_write",
-        lambda vr, paths: drained_calls.append((vr, list(paths))),
+        embeddings, "upsert_after_write_status", completed
     )
 
     readiness.begin_warm()  # so the manual defer() below actually records
@@ -843,10 +866,130 @@ def test_upsert_after_write_defers_during_warm_without_loading_model(
 
     drained = readiness.mark_ready("embeddings")
     assert len(drained) == 1
-    drained_vault, drained_paths = drained[0]
+    drained_vault, drained_paths, receipts = drained[0]
     assert drained_vault == tmp_path
     assert list(drained_paths) == [md_path]
+    assert [receipt.rel_path for receipt in receipts] == [
+        "Knowledge Base/Notes/probe.md"
+    ]
     assert readiness.mark_ready("embeddings") == []  # drained exactly once
+
+
+def test_warm_defer_is_durable_before_in_memory_item_is_visible(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    readiness.begin_warm()
+    path = tmp_path / "Knowledge Base" / "Notes" / "durable-first.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# durable\n", encoding="utf-8")
+    real_defer = readiness.defer
+
+    def assert_durable(component, item):
+        item_vault, item_paths, receipts = item
+        assert item_vault == tmp_path
+        assert list(item_paths) == [path]
+        assert deferred_index.snapshot(tmp_path) == list(receipts)
+        return real_defer(component, item)
+
+    monkeypatch.setattr(readiness, "defer", assert_durable)
+    monkeypatch.setattr(
+        embeddings,
+        "get_model",
+        lambda: pytest.fail("warm-deferred write loaded the model"),
+    )
+
+    status = embeddings.upsert_after_write_status(tmp_path, [path])
+
+    assert status.status == "deferred"
+    assert deferred_index.status(tmp_path)["count"] == 1
+
+
+@pytest.mark.parametrize(
+    ("mode_name", "preload_succeeds", "status_name", "receipt_cleared"),
+    [
+        ("quiet", True, "completed", True),
+        ("normal", True, "completed", True),
+        ("normal", False, "degraded", False),
+    ],
+)
+def test_warm_replay_receipt_outcomes_and_no_second_defer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode_name: str,
+    preload_succeeds: bool,
+    status_name: str,
+    receipt_cleared: bool,
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", mode_name)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_kw: {})
+    path = tmp_path / "Knowledge Base" / "Notes" / "warm-replay.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# warm\n", encoding="utf-8")
+    rel = path.relative_to(tmp_path).as_posix()
+    [receipt] = deferred_index.add_receipts(tmp_path, [rel])
+    readiness.begin_warm()
+    assert readiness.defer(
+        "embeddings", (tmp_path, (path,), (receipt,))
+    ) is True
+
+    if preload_succeeds:
+        monkeypatch.setattr(embeddings, "get_model", lambda: object())
+    else:
+        monkeypatch.setattr(
+            embeddings,
+            "get_model",
+            lambda: (_ for _ in ()).throw(RuntimeError("preload failed")),
+        )
+    monkeypatch.setattr(embeddings, "get_reranker", lambda: object())
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: False)
+    monkeypatch.setattr(embeddings, "clip_enabled", lambda: False)
+    defer_flags: list[bool] = []
+
+    def replay_status(_vault, _paths, *, defer_during_warm=True):
+        defer_flags.append(defer_during_warm)
+        code = (
+            "embedding_upsert_completed"
+            if status_name == "completed"
+            else "embedding_model_load_failed"
+        )
+        return embeddings.EmbeddingSyncStatus(status_name, code, 1)
+
+    monkeypatch.setattr(embeddings, "upsert_after_write_status", replay_status)
+
+    warmup.warm_all(tmp_path)
+
+    assert defer_flags == [False]
+    assert (deferred_index.snapshot(tmp_path) == []) is receipt_cleared
+    assert readiness.snapshot()["deferred_counts"]["embeddings"] == 0
+
+
+def test_disabled_warm_drains_memory_but_preserves_durable_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_a, **_kw: {})
+    path = tmp_path / "Knowledge Base" / "Notes" / "disabled.md"
+    path.parent.mkdir(parents=True)
+    path.write_text("# disabled\n", encoding="utf-8")
+    [receipt] = deferred_index.add_receipts(
+        tmp_path, [path.relative_to(tmp_path).as_posix()]
+    )
+    readiness.begin_warm()
+    assert readiness.defer(
+        "embeddings", (tmp_path, (path,), (receipt,))
+    ) is True
+    monkeypatch.setattr(
+        embeddings,
+        "upsert_after_write_status",
+        lambda *_a, **_kw: pytest.fail("disabled warm must not replay"),
+    )
+
+    warmup.warm_all(tmp_path)
+
+    assert deferred_index.snapshot(tmp_path) == [receipt]
+    assert readiness.snapshot()["deferred_counts"]["embeddings"] == 0
 
 
 def test_upsert_after_write_defer_after_embeddable_filter_logmd_defers_nothing(

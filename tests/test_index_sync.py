@@ -37,7 +37,7 @@ def test_embedding_upsert_status_distinguishes_disabled_and_warmup(
         assert warmup.status == "deferred"
         assert warmup.code == "deferred_warmup"
         assert readiness.snapshot()["deferred_counts"]["embeddings"] == 1
-        assert deferred_index.status(tmp_path)["count"] == 0
+        assert deferred_index.status(tmp_path)["count"] == 1
     finally:
         readiness.reset()
         deferred_index.clear(tmp_path)
