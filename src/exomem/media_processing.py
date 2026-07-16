@@ -407,6 +407,29 @@ def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
     )
 
 
+def retry_all_media(
+    vault_root: Path,
+    *,
+    limit: int = media_jobs.STATUS_JOB_LIMIT,
+) -> int:
+    """Reconcile then retry a bounded snapshot of actionable terminal work."""
+    if isinstance(limit, bool) or limit <= 0:
+        raise ValueError("media retry limit must be a positive integer")
+    vault = Path(vault_root).resolve()
+    if not media_jobs.job_store_path(vault).exists():
+        return 0
+    store = media_jobs.MediaJobStore(vault, create=False)
+    requeued = 0
+    for job in store.retryable_jobs(limit=limit):
+        try:
+            result = retry_media(vault, job.binary_path)
+        except Exception:  # noqa: BLE001 - one stale artifact must not abort the pass
+            log.warning("media retry reconciliation failed for %s", job.binary_path, exc_info=True)
+            continue
+        requeued += result.requeued
+    return requeued
+
+
 def _discard_stale_job(
     vault: Path, binary: Path, sidecar: Path, media_type: str
 ) -> None:

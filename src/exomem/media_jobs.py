@@ -399,6 +399,21 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def retryable_jobs(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJob]:
+        """Return a bounded, deterministic snapshot of blocked/failed work."""
+        if isinstance(limit, bool) or limit <= 0:
+            raise ValueError("media retry limit must be a positive integer")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state IN ('blocked', 'failed') "
+                "ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
     def counts(self) -> dict[str, int]:
         conn = self._connect()
         try:

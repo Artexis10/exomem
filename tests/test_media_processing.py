@@ -703,6 +703,51 @@ def test_retry_media_requeues_only_the_targeted_terminal_artifact(vault: Path) -
     assert jobs[blocked_binary.relative_to(vault).as_posix()]["state"] == media_jobs.BLOCKED
 
 
+def test_retry_all_media_reconciles_stale_completed_before_requeue(vault: Path) -> None:
+    media_processing = _media_processing()
+    stale_binary = _drop_media(vault, "retry-all-stale-completed.m4a")
+    failed_binary = _drop_media(vault, "retry-all-real-failure.m4a")
+    stale = media_processing.reconcile_media(vault, stale_binary)
+    failed = media_processing.reconcile_media(vault, failed_binary)
+    store = media_jobs.MediaJobStore(vault)
+    stale_claim = store.claim_next()
+    assert stale_claim is not None and stale_claim.id == stale.job_id
+    store.mark(stale_claim.id, media_jobs.FAILED, "InvalidDataError: stale ledger row")
+    failed_claim = store.claim_next()
+    assert failed_claim is not None and failed_claim.id == failed.job_id
+    store.mark(failed_claim.id, media_jobs.FAILED, "InvalidDataError: real failure")
+    completed = stale.sidecar_path.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: faster-whisper:test+timed"
+    ).replace("processing_state: pending", "processing_state: completed")
+    completed += "\n## Extracted text\n\n[0:00] Preserve this completed transcript.\n"
+    stale.sidecar_path.write_text(completed, encoding="utf-8")
+    before = stale.sidecar_path.read_bytes()
+
+    requeued = media_processing.retry_all_media(vault, limit=10)
+
+    assert requeued == 1
+    assert stale.sidecar_path.read_bytes() == before
+    jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
+    assert stale_binary.relative_to(vault).as_posix() not in jobs
+    assert jobs[failed_binary.relative_to(vault).as_posix()]["state"] == media_jobs.PENDING
+
+
+def test_retry_all_media_caps_each_pass(vault: Path) -> None:
+    media_processing = _media_processing()
+    store = media_jobs.MediaJobStore(vault)
+    binaries = [_drop_media(vault, f"retry-all-bounded-{index}.m4a") for index in range(3)]
+    for binary in binaries:
+        reconciled = media_processing.reconcile_media(vault, binary)
+        claimed = store.claim_next()
+        assert claimed is not None and claimed.id == reconciled.job_id
+        store.mark(claimed.id, media_jobs.FAILED, "InvalidDataError: retryable")
+
+    assert media_processing.retry_all_media(vault, limit=2) == 2
+    counts = media_jobs.status(vault)["counts"]
+    assert counts[media_jobs.PENDING] == 2
+    assert counts[media_jobs.FAILED] == 1
+
+
 def test_process_media_product_leaf_dispatches_process_status_and_retry(vault: Path) -> None:
     binary = _drop_media(vault, "product-leaf.m4a")
     relative = binary.relative_to(vault).as_posix()
@@ -768,11 +813,9 @@ def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
         lambda vault_root, *, limit: calls.append(("reconcile", limit)) or 3,
     )
     monkeypatch.setattr(
-        media_jobs.MediaJobStore,
-        "retry",
-        lambda self, *, include_failed, binary_path=None: (
-            calls.append(("retry", (include_failed, binary_path))) or 2
-        ),
+        media_processing,
+        "retry_all_media",
+        lambda vault_root, *, limit: calls.append(("retry", limit)) or 2,
     )
 
     processed = commands_module.op_process_media(vault, operation="process")
@@ -780,7 +823,10 @@ def test_process_media_product_leaf_reconciles_and_retries_all_without_asr_wait(
 
     assert processed == {"operation": "process", "reconciled": 3}
     assert retried == {"operation": "retry", "requeued": 2}
-    assert calls == [("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT), ("retry", (True, None))]
+    assert calls == [
+        ("reconcile", media_processing.DEFAULT_RECONCILE_LIMIT),
+        ("retry", media_jobs.STATUS_JOB_LIMIT),
+    ]
 
 
 def test_process_media_product_leaf_preserves_a_completed_transcript(vault: Path) -> None:

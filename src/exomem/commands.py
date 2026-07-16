@@ -3391,7 +3391,12 @@ def op_process_media(
 
     if path is None:
         if operation == "retry":
-            requeued = media_jobs.MediaJobStore(vault_root).retry(include_failed=True)
+            from . import media_processing
+
+            requeued = media_processing.retry_all_media(
+                vault_root,
+                limit=media_jobs.STATUS_JOB_LIMIT,
+            )
             return {"operation": operation, "requeued": requeued}
         from . import media_processing
 
@@ -4315,6 +4320,7 @@ _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
     {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
+_PROCESS_MEDIA_READ_ONLY_OPERATIONS = frozenset({"status"})
 _MISSING_SELECTOR_DEFAULT = object()
 
 
@@ -4335,7 +4341,7 @@ def _resolved_invocation_selector(
 def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     """Classify one resolved product-command invocation for lease gating.
 
-    Write-capable product commands default to requiring the lease. The two
+    Write-capable product commands default to requiring the lease. Mixed
     mixed read/write commands opt into a finite read-only allowlist, with their
     Python signature defaults applied only when the selector was truly omitted.
     """
@@ -4350,6 +4356,12 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     if command.name == "adopt_vault":
         mode = _resolved_invocation_selector(command, kwargs, "mode")
         return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
+    if command.name == "process_media":
+        operation = _resolved_invocation_selector(command, kwargs, "operation")
+        return (
+            isinstance(operation, str)
+            and operation in _PROCESS_MEDIA_READ_ONLY_OPERATIONS
+        )
     return False
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
 from exomem import command_surface
@@ -39,3 +40,34 @@ def test_bound_mcp_tool_passes_retry_scope(monkeypatch) -> None:
     monkeypatch.setattr("exomem.writer_lease.invoke_command", fake_invoke)
     assert bound(value=1) == "ok"
     assert seen["kwargs"] == {"value": 1, "implicit_idempotency_scope": "bearer:abc"}
+
+
+def test_bound_process_media_status_skips_mutation_retry_scope(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from exomem.commands import product_commands_for
+
+    command = next(
+        command for command in product_commands_for("mcp") if command.name == "process_media"
+    )
+    bound = command_surface.bind_vault(command.leaf, tmp_path, command=command)
+    scopes: list[str] = []
+    calls: list[dict] = []
+    monkeypatch.setattr(
+        command_surface,
+        "mcp_retry_scope",
+        lambda: scopes.append("requested") or "bearer:abc",
+    )
+
+    def fake_invoke(cmd, *injected, **kwargs):  # noqa: ANN001
+        calls.append(kwargs)
+        return {"operation": kwargs["operation"]}
+
+    monkeypatch.setattr("exomem.writer_lease.invoke_command", fake_invoke)
+
+    assert bound(operation="status") == {"operation": "status"}
+    assert calls[-1]["implicit_idempotency_scope"] is None
+    assert scopes == []
+    assert bound(operation="process") == {"operation": "process"}
+    assert calls[-1]["implicit_idempotency_scope"] == "bearer:abc"
+    assert scopes == ["requested"]

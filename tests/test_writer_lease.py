@@ -463,6 +463,30 @@ def test_read_only_product_operations_bypass_unreachable_coordinator(
         reset_managers_for_tests()
 
 
+def test_process_media_status_bypasses_writer_but_mutations_fail_closed(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from exomem.commands import product_commands_for
+
+    _unreachable_coordinator(monkeypatch, tmp_path)
+    command = next(
+        command for command in product_commands_for("mcp") if command.name == "process_media"
+    )
+    calls: list[dict] = []
+    command = replace(
+        command,
+        leaf=lambda _vault_root, **kwargs: calls.append(kwargs) or kwargs["operation"],
+    )
+    try:
+        assert invoke_command(command, tmp_path, operation="status") == "status"
+        for operation in ("process", "retry"):
+            with pytest.raises(OpError, match="WRITER_COORDINATOR_UNAVAILABLE"):
+                invoke_command(command, tmp_path, operation=operation)
+        assert calls == [{"operation": "status"}]
+    finally:
+        reset_managers_for_tests()
+
+
 def test_default_connect_and_adopt_calls_run_during_coordinator_outage(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, vault: Path
 ) -> None:

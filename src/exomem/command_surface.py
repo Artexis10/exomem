@@ -143,12 +143,16 @@ def bind_vault(
     def wrapper(**kwargs):
         if command is None:
             return leaf(*injected, **kwargs)
+        from .commands import invocation_is_read_only
         from .writer_lease import invoke_command
 
+        invocation_read_only = invocation_is_read_only(command, kwargs)
         return invoke_command(
             command,
             *injected,
-            implicit_idempotency_scope=(None if command.read_only else mcp_retry_scope()),
+            implicit_idempotency_scope=(
+                None if invocation_read_only else mcp_retry_scope()
+            ),
             **kwargs,
         )
 
