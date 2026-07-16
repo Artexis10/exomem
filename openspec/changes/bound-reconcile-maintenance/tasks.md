@@ -5,12 +5,14 @@
 - [x] 1.3 Add failing failure-ordering and snapshot-parity tests covering existing-row preservation, ambiguous links, and isolation from shared-resolver patches.
 - [x] 1.4 Add deterministic stabilization regressions for target creation after snapshot acquisition and repeated two-pass churn.
 - [x] 1.5 Mutate the shared cached resolver after detached acquisition and prove the active graph pass remains isolated.
+- [x] 1.6 Add failure-ordering regressions for retry freshness/resolver acquisition and partial-pass failures while preserving initial acquisition behavior.
 
 ## 2. Bounded Graph Implementation
 
 - [x] 2.1 Acquire the detached resolver before graph mutation and thread it explicitly through full rebuild and batched refresh indexing.
 - [x] 2.2 Keep direct edge-extraction compatibility while preventing graph maintenance from performing per-page resolver freshness work.
 - [x] 2.3 Bracket full rebuild passes with disk-truth freshness, retry once on movement, and mark repeated churn unavailable before raising.
+- [x] 2.4 Invalidate every exceptional exit after a rebuild pass starts without invalidating failures before the first mutation boundary.
 
 ## 3. Freshness and Fanout Regressions
 

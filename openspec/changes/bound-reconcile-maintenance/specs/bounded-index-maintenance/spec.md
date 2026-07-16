@@ -53,13 +53,26 @@ of exposing the unstable result as trusted.
 
 ### Requirement: Bounded graph maintenance preserves correctness and failure ordering
 
-The system SHALL preserve the same graph nodes and edges produced from an equivalent stable vault, including ambiguous-link behavior. It MUST acquire the resolver before deleting or replacing existing graph rows so a resolver acquisition failure leaves the prior graph intact.
+The system SHALL preserve the same graph nodes and edges produced from an equivalent stable vault, including ambiguous-link behavior. It MUST acquire initial disk freshness and the resolver before deleting or replacing existing graph rows so an initial acquisition failure leaves the prior graph intact. Once a rebuild pass begins, every exceptional exit MUST mark the graph unavailable/non-current before propagating, including pass failures, post-pass freshness failures, and freshness or resolver failures while acquiring a required retry.
 
 #### Scenario: Resolver acquisition fails before graph mutation
 
 - **WHEN** resolver snapshot acquisition fails at the start of a full graph rebuild
 - **THEN** the rebuild reports the failure
 - **AND** the previously committed graph rows remain unchanged
+
+#### Scenario: Retry acquisition fails after a moved pass
+
+- **WHEN** a completed graph pass observes changed disk freshness
+- **AND** disk-freshness or resolver acquisition for the required retry fails
+- **THEN** the rebuild marks the graph unavailable/non-current
+- **AND** it propagates the acquisition failure
+
+#### Scenario: Graph pass fails after mutation begins
+
+- **WHEN** a full rebuild pass fails during indexing or its post-pass freshness check
+- **THEN** the rebuild marks the partial graph unavailable/non-current
+- **AND** it propagates the original failure
 
 #### Scenario: Resolver reuse preserves graph output
 

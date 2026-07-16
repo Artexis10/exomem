@@ -47,6 +47,13 @@ unavailable/non-current, so readers cannot trust the unstable graph and a later
 refresh or reconcile rebuilds it. The first attempt still acquires its resolver
 before any graph mutation.
 
+Failure ordering follows the same mutation boundary. An initial disk-freshness
+or resolver acquisition failure occurs before the first pass and preserves the
+previously current graph. Once a pass starts, any exceptional exit—including
+partial indexing, the post-pass freshness check, or acquisition for a required
+retry—removes the schema-version marker before propagating. A partial or
+known-moved pass can therefore never remain advertised as current.
+
 Alternatives rejected:
 
 - Reusing only the global shared resolver would still require freshness validation at the wrong per-page boundary and would allow concurrent mutation during a rebuild.

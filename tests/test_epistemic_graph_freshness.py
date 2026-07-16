@@ -152,6 +152,86 @@ def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
     assert index.available() is False
 
 
+def test_full_rebuild_retry_acquisition_failure_marks_graph_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_snapshot = find_module.writer_resolver_snapshot
+    acquisitions = 0
+
+    def acquire(root: Path, **kwargs):
+        nonlocal acquisitions
+        acquisitions += 1
+        if acquisitions == 2:
+            raise RuntimeError("retry resolver failed")
+        snapshot = real_snapshot(root, **kwargs)
+        _write(vault, "Knowledge Base/Notes/Insights/moved.md", "# Moved\n")
+        return snapshot
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+
+    with pytest.raises(RuntimeError, match="retry resolver failed"):
+        index.rebuild_all()
+
+    assert acquisitions == 2
+    assert index.available() is False
+
+
+def test_full_rebuild_retry_freshness_failure_marks_graph_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_freshness = epistemic_graph._disk_vault_freshness
+    real_snapshot = find_module.writer_resolver_snapshot
+    freshness_checks = 0
+
+    def freshness(root: Path):
+        nonlocal freshness_checks
+        freshness_checks += 1
+        if freshness_checks == 3:
+            raise RuntimeError("retry freshness failed")
+        return real_freshness(root)
+
+    def acquire(root: Path, **kwargs):
+        snapshot = real_snapshot(root, **kwargs)
+        _write(vault, "Knowledge Base/Notes/Insights/moved.md", "# Moved\n")
+        return snapshot
+
+    monkeypatch.setattr(epistemic_graph, "_disk_vault_freshness", freshness)
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+
+    with pytest.raises(RuntimeError, match="retry freshness failed"):
+        index.rebuild_all()
+
+    assert freshness_checks == 3
+    assert index.available() is False
+
+
+def test_full_rebuild_pass_failure_marks_partial_graph_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+
+    def fail_index(*_args, **_kwargs):
+        raise RuntimeError("index pass failed")
+
+    monkeypatch.setattr(index, "_index_path", fail_index)
+
+    with pytest.raises(RuntimeError, match="index pass failed"):
+        index.rebuild_all()
+
+    assert index.available() is False
+
+
 def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -229,6 +309,30 @@ def test_rebuild_resolver_failure_preserves_committed_graph_rows(
     with pytest.raises(RuntimeError, match="resolver failed"):
         index.rebuild_all()
 
+    assert index.available() is True
+    assert index.nodes() == before_nodes
+    assert index.edges() == before_edges
+
+
+def test_rebuild_initial_freshness_failure_preserves_committed_graph_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    before_nodes = index.nodes()
+    before_edges = index.edges()
+    monkeypatch.setattr(
+        epistemic_graph,
+        "_disk_vault_freshness",
+        lambda *_args: (_ for _ in ()).throw(RuntimeError("freshness failed")),
+    )
+
+    with pytest.raises(RuntimeError, match="freshness failed"):
+        index.rebuild_all()
+
+    assert index.available() is True
     assert index.nodes() == before_nodes
     assert index.edges() == before_edges
 

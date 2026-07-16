@@ -238,19 +238,26 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
-            before = _disk_vault_freshness(self.vault_root)
-            resolver = find_module.writer_resolver_snapshot(
-                self.vault_root,
-                freshness_key=before,
+        pass_started = False
+        stable = False
+        try:
+            for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
+                before = _disk_vault_freshness(self.vault_root)
+                resolver = find_module.writer_resolver_snapshot(
+                    self.vault_root,
+                    freshness_key=before,
+                )
+                pass_started = True
+                report = self._rebuild_all_pass(resolver)
+                if _disk_vault_freshness(self.vault_root) == before:
+                    stable = True
+                    return report
+            raise RuntimeError(
+                "epistemic graph rebuild did not stabilize after 2 attempts"
             )
-            report = self._rebuild_all_pass(resolver)
-            if _disk_vault_freshness(self.vault_root) == before:
-                return report
-        self._mark_unavailable()
-        raise RuntimeError(
-            "epistemic graph rebuild did not stabilize after 2 attempts"
-        )
+        finally:
+            if pass_started and not stable:
+                self._mark_unavailable()
 
     def _rebuild_all_pass(
         self,
