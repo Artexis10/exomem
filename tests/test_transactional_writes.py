@@ -252,6 +252,40 @@ def test_batch_atomic_write_replaces_and_creates_on_windows(
     assert _workspaces(parent) == []
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows closed-stage cleanup regression")
+def test_batch_atomic_write_cleans_closed_stage_after_windows_replace_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    first.write_text("first-old\n", encoding="utf-8")
+    second.write_text("second-old\n", encoding="utf-8")
+    real_replace = os.replace
+    flips = 0
+
+    def fail_second_flip(source, destination, *args, **kwargs):
+        nonlocal flips
+        if _leaf(source).startswith("stage-"):
+            flips += 1
+            if flips == 2:
+                raise OSError("injected Windows replace failure")
+        return real_replace(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_second_flip)
+
+    with pytest.raises(OSError, match="injected Windows replace failure"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new\n"),
+                vault_module.PlannedWrite(second, "second-new\n"),
+            ]
+        )
+
+    assert first.read_text(encoding="utf-8") == "first-old\n"
+    assert second.read_text(encoding="utf-8") == "second-old\n"
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_target_summary_is_bounded_safe_and_vault_relative(
     tmp_path: Path,
 ) -> None:

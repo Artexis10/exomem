@@ -1268,7 +1268,43 @@ class _BatchWorkspace:
         try:
             self.recheck_identity()
             if artifact.closed:
-                return None
+                if os.path.lexists(artifact.path):
+                    descriptor = os.open(
+                        artifact.path,
+                        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                    )
+                    try:
+                        descriptor_info = os.fstat(descriptor)
+                        path_info = artifact.path.lstat()
+                        if (
+                            not stat.S_ISREG(descriptor_info.st_mode)
+                            or _is_reparse(descriptor_info)
+                            or not _same_identity(artifact.identity, descriptor_info)
+                            or not _same_identity(artifact.identity, path_info)
+                            or stat.S_ISLNK(path_info.st_mode)
+                            or _is_reparse(path_info)
+                            or _descriptor_hash(descriptor, artifact.identity)
+                            != artifact.content_hash
+                        ):
+                            return None
+                        artifact.descriptor = descriptor
+                        artifact.closed = False
+                        descriptor = -1
+                        artifact.recheck()
+                        self.recheck()
+                        return None
+                    finally:
+                        if descriptor >= 0:
+                            os.close(descriptor)
+                installed = _BatchArtifactGuard.capture(
+                    final,
+                    expected_content_hash=artifact.content_hash,
+                    expected_identity=artifact.identity,
+                )
+                installed.recheck()
+                self.artifacts.pop(artifact.name)
+                self.recheck()
+                return artifact.identity
             descriptor_info = os.fstat(artifact.descriptor)
             final_info = final.lstat()
             if (
@@ -1296,6 +1332,8 @@ class _BatchWorkspace:
             self.recheck()
             artifact.bind_initializing_content()
             artifact.recheck()
+            if os.name == "nt":  # Windows cannot unlink an open CRT file
+                artifact.close()
             if os.unlink in getattr(os, "supports_dir_fd", set()):
                 os.unlink(artifact.name, dir_fd=self.descriptor)
             else:  # pragma: no cover - Windows fallback
