@@ -44,7 +44,7 @@
 
 ### Task 10
 
-- [ ] 4.1 Run focused media, watcher, preservation, command-surface, API, and CLI tests plus strict OpenSpec validation and lint; fix any regressions.
+- [x] 4.1 Run focused media, watcher, preservation, command-surface, API, and CLI tests plus strict OpenSpec validation and lint; fix any regressions.
 
 ### Task 11
 
