@@ -580,7 +580,11 @@ def _verify_binary_identity(
     try:
         if binary.resolve(strict=True) != resolved_binary:
             raise OSError("media path target changed")
-        current = resolved_binary.stat()
+        # Keep the identity source consistent with _read_provenance. On Windows,
+        # stat(path) and fstat(open_handle) can report different st_ctime_ns
+        # precision for the same unchanged file.
+        with resolved_binary.open("rb") as stream:
+            current = os.fstat(stream.fileno())
     except OSError as exc:
         raise MediaProcessingError(
             "MEDIA_CHANGED_DURING_RECONCILIATION",

@@ -7,6 +7,7 @@ import importlib
 import os
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import yaml
@@ -261,6 +262,32 @@ def test_revalidates_binary_before_no_write_terminal_paths(
     assert exc.value.code == "MEDIA_CHANGED_DURING_RECONCILIATION"
     assert first.sidecar_path.read_bytes() == sidecar_before
     assert _job_count(vault) == jobs_before
+
+
+def test_binary_verification_uses_open_handle_identity_on_windows_like_stat_disagreement(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "windows-stat-disagreement.m4a")
+    resolved = binary.resolve(strict=True)
+    provenance = media_processing._read_provenance(vault, binary, resolved)
+    original_stat = Path.stat
+
+    def _windows_like_path_stat(self: Path, *args, **kwargs):
+        result = original_stat(self, *args, **kwargs)
+        if self == resolved:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size,
+                st_mtime_ns=result.st_mtime_ns,
+                st_ctime_ns=result.st_ctime_ns - 1_000_000_000,
+            )
+        return result
+
+    monkeypatch.setattr(Path, "stat", _windows_like_path_stat)
+
+    media_processing._verify_binary_identity(binary, resolved, provenance)
 
 
 def test_completed_sidecar_clears_stale_crash_window_job(vault: Path) -> None:
