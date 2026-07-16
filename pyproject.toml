@@ -170,6 +170,11 @@ markers = [
 # break lockfile reproducibility across the desktop + laptop hosts — the explicit
 # pinned index keeps both boxes on the same wheel. `explicit = true` keeps this
 # index out of general resolution. Multi-host GPU bring-up is documented in README.
+[tool.uv]
+# A single writer version prevents harmless-but-noisy marker normalization
+# differences between Windows, WSL, Docker, and CI.
+required-version = "==0.11.28"
+
 [tool.uv.sources]
 torch = [
   { index = "pytorch-cu132", marker = "sys_platform == 'win32' or sys_platform == 'linux'" },
