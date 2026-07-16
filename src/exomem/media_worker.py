@@ -392,6 +392,20 @@ class MediaWorker:
                         attempts=max(1, job.attempts),
                     )
                 return False
+            try:
+                current_content = job.sidecar_path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError):
+                current_content = ""
+            from . import media_processing
+
+            if media_processing.has_completed_transcript(
+                current_content, media_type=job.media_type
+            ):
+                log.info(
+                    "completed transcript appeared before failure commit for %s; preserving it",
+                    job.sidecar_path.name,
+                )
+                return False
             preserve.update_sidecar_processing_failure(
                 self._vault_root,
                 job.sidecar_path,

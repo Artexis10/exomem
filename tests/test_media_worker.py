@@ -1027,6 +1027,52 @@ def test_external_completed_transcript_written_during_asr_wins_final_commit_race
     assert "Worker transcript must lose" not in sidecar.read_text(encoding="utf-8")
 
 
+def test_external_completed_transcript_survives_asr_failure_commit_race(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="failure-commit-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    external_bytes: bytes | None = None
+
+    def external_completion_then_failure(*_args, **_kwargs):
+        nonlocal external_bytes
+        preserve.update_sidecar_extraction(
+            vault,
+            sidecar,
+            text="[0:00] External transcript must survive ASR failure.",
+            engine="external-asr+timed",
+            speaker_verification="unavailable",
+        )
+        external_bytes = sidecar.read_bytes()
+        raise ValueError("decoder failed after external completion")
+
+    monkeypatch.setattr(extract, "extract_text", external_completion_then_failure)
+    monkeypatch.setattr(media_worker, "_content_digest", lambda _path: "stable")
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "stale"
+    assert external_bytes is not None
+    assert sidecar.read_bytes() == external_bytes
+    content = sidecar.read_text(encoding="utf-8")
+    assert "extracted_by: external-asr+timed" in content
+    assert "processing_state: completed" in content
+    assert "External transcript must survive ASR failure" in content
+    assert "extracted_by: failed" not in content
+    assert "decoder failed after external completion" not in content
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail("completed transcript must not be reprocessed"),
+    )
+    assert worker._process(job).state == "complete"
+    assert sidecar.read_bytes() == external_bytes
+
+
 def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
