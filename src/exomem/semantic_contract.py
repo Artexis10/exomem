@@ -223,15 +223,18 @@ class StableIdentityCensus:
         states: Iterable[SemanticPageState],
     ) -> StableIdentityCensus:
         """Derive stable UUID ownership from already-built page states."""
-        return cls(
-            tuple(
-                StableIdentityEntry(
-                    state.path,
-                    state.identity if state.identity_kind == "exomem_id" else None,
-                )
-                for state in states
-            )
-        )
+        entries: list[StableIdentityEntry] = []
+        for state in states:
+            raw_identity = state.frontmatter.get(ID_FIELD)
+            identity: str | None = None
+            if raw_identity is not None:
+                if not isinstance(raw_identity, str) or normalize_id(raw_identity) is None:
+                    raise ValueError(
+                        f"stable identity is invalid at {state.path}"
+                    )
+                identity = normalize_id(raw_identity)
+            entries.append(StableIdentityEntry(state.path, identity))
+        return cls(tuple(entries))
 
     def as_dict(self) -> dict[str, Any]:
         return {

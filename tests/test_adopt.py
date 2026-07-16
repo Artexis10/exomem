@@ -460,15 +460,18 @@ tags: []
     assert len(parser_calls) == len(set(parser_calls))
     assert markdown_path_reads == []
     assert census["coverage"]["metadata_work"] == {
-        "bounded": True,
+        "status": "unbounded",
+        "bounded": False,
         "counted_as_markdown_bytes": False,
         "sources": [
+            "activation_manifest",
             "relation_registry",
             "relation_review_state",
             "saved_contracts",
             "semantic_language_registry",
         ],
     }
+    assert census["governance"]["resource_status"] == "unbounded_metadata"
 
 
 def test_adopt_semantic_census_governance_uses_exact_scanned_page_state(
@@ -560,6 +563,96 @@ def test_adopt_semantic_census_separates_general_registry_findings_from_category
         str(finding.get("path", "")).startswith("categories.")
         for finding in aliases
     )
+
+
+def test_adopt_semantic_census_hidden_markdown_makes_governance_partial(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    notes = vault / "Knowledge Base" / "Notes"
+    page_id = "00000000-0000-4000-8000-000000000313"
+    visible = notes / "visible.md"
+    visible.write_text(
+        f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Visible\n---\n\n# Visible\n",
+        encoding="utf-8",
+    )
+    (notes / ".duplicate.md").write_text(
+        f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Hidden\n---\n\n# Hidden\n",
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert census["coverage"]["governance_complete"] is False
+    assert census["governance"]["saved_contracts"]["status"] == "partial"
+    assert census["governance"]["relation_dispositions"]["status"] == "partial"
+    assert census["governance"]["resource_status"] == "partial_corpus"
+
+
+def test_adopt_semantic_census_separates_identity_ownership_from_corpus_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page_id = "00000000-0000-4000-8000-000000000314"
+    paths = (
+        "Knowledge Base/Notes/ordinary.md",
+        "Knowledge Base/_Schema/ownership.md",
+        "Knowledge Base/_trash/ownership.md",
+        "Knowledge Base/Notes/ordinary.sync-conflict-20260716.md",
+    )
+    for relative in paths:
+        page = vault / relative
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Owner\n---\n\n# Owner\n",
+            encoding="utf-8",
+        )
+    real_evaluate = semantic_census.semantic_writes.evaluate_posthoc_batch
+    captured: list[object] = []
+
+    def capture_corpus(*args: object, **kwargs: object) -> object:
+        captured.append(kwargs["corpus"])
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        semantic_census.semantic_writes,
+        "evaluate_posthoc_batch",
+        capture_corpus,
+    )
+
+    census = semantic_census.scan(vault, include_hidden=True)
+
+    assert census["governance"]["saved_contracts"]["status"] == "current"
+    [corpus] = captured
+    assert corpus.identity_census.paths_by_identity[page_id] == tuple(sorted(paths))
+    assert "Knowledge Base/Notes/ordinary.md" in corpus.pages
+    assert set(paths[1:]).isdisjoint(corpus.pages)
+
+
+def test_adopt_semantic_census_malformed_raw_id_fails_governance_identity_census(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "malformed-id.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: definitely-not-a-uuid
+title: Malformed identity
+---
+
+# Malformed identity
+""",
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert census["governance"]["saved_contracts"]["status"] == "error"
+    assert census["governance"]["saved_contracts"]["error"] == "ValueError"
+    assert census["governance"]["relation_dispositions"]["status"] == "error"
+    assert census["governance"]["resource_status"] == "partial_identity_error"
 
 
 def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> None:

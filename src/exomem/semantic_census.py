@@ -15,6 +15,7 @@ from . import (
     semantic_contract,
     semantic_language_registry,
     semantic_writes,
+    vault,
 )
 from .kbdir import kb_dirname, kb_prefix
 
@@ -253,18 +254,36 @@ def _governance_report(
     if not kb_present:
         return unavailable, metadata_work
     if not complete_root_scan:
+        unavailable["resource_status"] = "partial_corpus"
         return unavailable, metadata_work
 
-    metadata_work.add("saved_contracts")
+    kb_states = tuple(
+        state for state in states if state.path.startswith(kb_prefix())
+    )
+    try:
+        identity_census = semantic_contract.StableIdentityCensus.from_states(kb_states)
+    except ValueError as error:
+        unavailable["saved_contracts"].update(
+            {"status": "error", "error": type(error).__name__}
+        )
+        unavailable["relation_dispositions"].update(
+            {"status": "error", "error": type(error).__name__}
+        )
+        unavailable["resource_status"] = "partial_identity_error"
+        return unavailable, metadata_work
+
+    corpus_states = tuple(
+        state
+        for state in states
+        if not vault.in_excluded_scan_dir(state.path)
+        and ".sync-conflict-" not in Path(state.path).name
+    )
+    metadata_work.update({"activation_manifest", "saved_contracts"})
     try:
         saved = memory_schema.load_saved_contracts(root)
-        kb_states = tuple(
-            state for state in states if state.path.startswith(kb_prefix())
-        )
-        identity_census = semantic_contract.StableIdentityCensus.from_states(kb_states)
         corpus = semantic_contract.SemanticCorpusContext.from_states(
             root,
-            states,
+            corpus_states,
             registry=relations,
             identity_census=identity_census,
         )
@@ -291,6 +310,7 @@ def _governance_report(
                 "error": type(error).__name__,
             }
         )
+        unavailable["resource_status"] = "partial_metadata_error"
         return unavailable, metadata_work
 
     debt: Counter[str] = Counter()
@@ -314,6 +334,7 @@ def _governance_report(
                 "status": "current",
                 "counts": dict(sorted(dispositions.items())),
             },
+            "resource_status": "unbounded_metadata",
         },
         metadata_work,
     )
@@ -600,12 +621,13 @@ def scan(
         and unreadable_files == 0
         and unreadable_directories == 0
     )
+    governance_complete = complete_root_scan and hidden_omitted == 0
     governance, governance_metadata_work = _governance_report(
         root_path,
         states=tuple(page_states),
         relations=relations,
         language=language,
-        complete_root_scan=complete_root_scan,
+        complete_root_scan=governance_complete,
     )
     metadata_work = {
         "relation_registry",
@@ -634,6 +656,7 @@ def scan(
         },
         "coverage": {
             "complete": coverage_complete,
+            "governance_complete": governance_complete,
             "omitted_is_lower_bound": enumeration_incomplete,
             "markdown_files_seen": markdown_seen,
             "markdown_files_seen_is_lower_bound": enumeration_incomplete,
@@ -648,7 +671,8 @@ def scan(
             "directory_entries_enumerated": directory_entries_enumerated,
             "directory_entry_budget_exhausted": directory_entry_budget_exhausted,
             "metadata_work": {
-                "bounded": True,
+                "status": "unbounded",
+                "bounded": False,
                 "counted_as_markdown_bytes": False,
                 "sources": sorted(metadata_work),
             },
