@@ -21,6 +21,7 @@ from .vault import (
     PlannedWrite,
     escape_wikilinks_for_log,
     kb_root,
+    read_guarded_text,
     render_wikilinks_for_vault,
 )
 
@@ -270,6 +271,8 @@ def _prepend_recent_activity(
     preamble = lines[:bullet_start]
 
     new_bullet = f"- {date_iso} — {summary}"
+    if new_bullet in bullets:
+        return text, None
     bullets.insert(0, new_bullet)
 
     trim_note: str | None = None
@@ -573,6 +576,7 @@ def compute_subindex_writes(
     *,
     top_index_text: str | None = None,
     pending_paths: list[str] | None = None,
+    include_unchanged: bool = False,
 ) -> tuple[list[PlannedWrite], str | None]:
     """Build the planned writes for sub-folder + top-index count refreshes.
 
@@ -656,7 +660,7 @@ def compute_subindex_writes(
     sources_index = sources_dir / "index.md"
     if sources_index.exists():
         try:
-            current = sources_index.read_text(encoding="utf-8")
+            current, guard = read_guarded_text(vault_root, sources_index)
         except OSError:
             current = None
         if current is not None:
@@ -667,14 +671,14 @@ def compute_subindex_writes(
                 counts=sources_counts,
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if new != current:
-                writes.append(PlannedWrite(path=sources_index, content=new))
+            if include_unchanged or new != current:
+                writes.append(PlannedWrite(path=sources_index, content=new, guard=guard))
 
     # Notes/index.md refresh.
     notes_index = notes_dir / "index.md"
     if notes_index.exists():
         try:
-            current = notes_index.read_text(encoding="utf-8")
+            current, guard = read_guarded_text(vault_root, notes_index)
         except OSError:
             current = None
         if current is not None:
@@ -684,14 +688,14 @@ def compute_subindex_writes(
                 counts_by_subfolder=notes_by_subfolder,
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if new != current:
-                writes.append(PlannedWrite(path=notes_index, content=new))
+            if include_unchanged or new != current:
+                writes.append(PlannedWrite(path=notes_index, content=new, guard=guard))
 
     # Entities/index.md refresh.
     entities_index = entities_dir / "index.md"
     if entities_index.exists():
         try:
-            current = entities_index.read_text(encoding="utf-8")
+            current, guard = read_guarded_text(vault_root, entities_index)
         except OSError:
             current = None
         if current is not None:
@@ -699,8 +703,8 @@ def compute_subindex_writes(
                 current, counts_by_type=entities_counts
             )
             new = render_wikilinks_for_vault(new, vault_root)
-            if new != current:
-                writes.append(PlannedWrite(path=entities_index, content=new))
+            if include_unchanged or new != current:
+                writes.append(PlannedWrite(path=entities_index, content=new, guard=guard))
 
     return writes, new_top_text
 

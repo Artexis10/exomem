@@ -242,8 +242,12 @@ def test_warm_all_marks_components_ready_in_lexical_embeddings_reranker_clip_ord
     monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     call_order: list[str] = []
     monkeypatch.setattr(warmup, "warm_caches", lambda vr, **_kw: call_order.append("lexical") or {})
-    monkeypatch.setattr(embeddings, "get_model", lambda: call_order.append("embeddings") or object())
-    monkeypatch.setattr(embeddings, "get_reranker", lambda: call_order.append("reranker") or object())
+    monkeypatch.setattr(
+        embeddings, "get_model", lambda: call_order.append("embeddings") or object()
+    )
+    monkeypatch.setattr(
+        embeddings, "get_reranker", lambda: call_order.append("reranker") or object()
+    )
     monkeypatch.setattr(embeddings, "get_clip_model", lambda: call_order.append("clip") or object())
     monkeypatch.setattr(embeddings, "clip_enabled", lambda: True)
 
@@ -663,6 +667,7 @@ def test_find_defers_vector_lane_mid_warm_without_calling_embed_texts(
     degraded_out, and rank identically to the natural post-warm fallback —
     proven below: torch is absent in this sandbox, so the post-warm call
     ImportErrors its way to the exact same BM25/keyword-lane ranking."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     real_embed_texts = embeddings.embed_texts
     guard = {"forbidden": True}
@@ -748,6 +753,7 @@ def test_op_find_warming_envelope_mid_warm_then_bare_list_after_finish(
 ) -> None:
     """op_find returns {"hits": [...], "warming": {...}} while a lane was
     deferred mid-warm, and reverts to a bare list once finish_warm() runs."""
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
     monkeypatch.setenv("EXOMEM_FIND_CACHE_SIZE", "0")
     readiness.begin_warm()
     out = commands.op_find(vault, query="metabolism", mode="hybrid")

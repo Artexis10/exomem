@@ -10,8 +10,8 @@ from __future__ import annotations
 import pytest
 from starlette.testclient import TestClient
 
+from exomem import commands, semantic_index, server
 from exomem import find as find_module
-from exomem import server
 
 
 def _client(vault, monkeypatch: pytest.MonkeyPatch, **env: str) -> TestClient:
@@ -117,6 +117,41 @@ def test_rest_read_memory_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -> N
     assert "links" not in body  # links default off
 
 
+def test_rest_read_memory_resolves_exact_semantic_unit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rel = "Knowledge Base/Notes/Insights/rest-exact-unit.md"
+    (vault / rel).write_text(
+        "---\n"
+        "type: insight\n"
+        "exomem_id: 12345678-1234-5678-1234-567812345678\n"
+        "title: REST exact unit\n"
+        "status: active\n"
+        "updated: 2026-07-16\n"
+        "---\n\n"
+        "- [config] REST can read this unit ^rest-unit\n",
+        encoding="utf-8",
+    )
+    state = semantic_index.current_parent_index_state(vault, rel)
+    unit_ref = state.document.units[0].unit_ref
+    assert unit_ref is not None
+    expected = commands.op_read_memory(vault, path=rel, unit_ref=unit_ref)
+    client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
+
+    response = client.post(
+        "/api/read_memory",
+        json={"path": rel, "unit_ref": unit_ref},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 200, response.text
+    data = response.json()["data"]
+    assert data == expected
+    assert data["status"] == "found"
+    assert data["unit"]["unit_ref"] == unit_ref
+    assert data["unit"]["content"] == "REST can read this unit"
+
+
 def test_rest_read_memory_not_found(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     client = _client(vault, monkeypatch, EXOMEM_REST_API_KEY="sekret")
     r = client.post(
@@ -135,6 +170,7 @@ def test_rest_remember_write_roundtrip(vault, monkeypatch: pytest.MonkeyPatch) -
             "note_type": "insight",
             "title": "REST facade is scriptable",
             "content": "# REST facade is scriptable\n\n## Claim\n\nScripts can write to the KB over HTTP.\n",
+            "status": "draft",
         },
         headers={"Authorization": "Bearer sekret"},
     )

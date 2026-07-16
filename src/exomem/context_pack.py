@@ -3,12 +3,14 @@
 `find` normally returns ranked hit *excerpts*; to reason over them a caller then fans out
 `get` calls, chases wikilinks by hand, and has no view of contradictions among the hits.
 This module assembles, in one pass over the top hits, a **context pack**: each note's key
-claims, the 1-hop wikilink neighbourhood of those notes, and the contradictions /
-supersessions among them.
+claims, bounded citable semantic units, the 1-hop wikilink neighbourhood of those notes,
+and the contradictions / supersessions among them.
 
 It is PURE ASSEMBLY (measurement), mirroring `attention.py`:
 - "Key claims" are extracted STRUCTURALLY from the note's own markdown (lede, recognized
   headline-section lines, the `##` outline) — never generated or summarized by a model.
+- Compact and rich semantic units come from the same parent snapshot and canonical parser,
+  grouped under bounded provenance/lifecycle context. Selected unit hits are packed first.
 - The neighbourhood reuses `find`'s outbound-link resolution + `vault`'s inbound search.
 - Contradictions are recorded supersession edges (frontmatter) plus proximity "tension"
   pairs whose cosine sits in the existing `[floor, dup)` band (reusing
@@ -22,20 +24,45 @@ that drops content is reported in `truncation` — never a silent truncation.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from . import corpus_aware, epistemic_graph, semantic_blocks
+from . import (
+    corpus_aware,
+    epistemic_graph,
+    find_corpus,
+    semantic_index,
+    semantic_units,
+)
 from . import find as find_module
 from . import vault as vault_module
-from .find import Hit, ParsedPage
+from .find_types import Hit, ParsedPage, SemanticUnitHit
 
 # --- bounds (env-overridable at call time so tests can monkeypatch) ---
 _DEFAULT_MAX_HITS = 5
 _DEFAULT_MAX_NEIGHBORS = 10
 _DEFAULT_MAX_TENSION = 10
 _DEFAULT_CLAIM_CHARS = 280
+_DEFAULT_MAX_UNITS_PER_PAGE = 8
+_DEFAULT_MAX_UNITS = 24
+_DEFAULT_UNIT_CHARS = 360
+_DEFAULT_MAX_UNIT_TOTAL_CHARS = 12_000
+
+_MAX_UNIT_TAGS = 16
+_MAX_UNIT_TAG_CHARS = 64
+_MAX_UNIT_CONTEXT_CHARS = 240
+_MAX_UNIT_RELATIONS = 8
+_MAX_UNIT_RELATION_TARGET_CHARS = 240
+_MAX_UNIT_RELATION_RAW_CHARS = 320
+_MAX_PARENT_PROVENANCE = 8
+_MAX_PARENT_PROVENANCE_CHARS = 240
+_MAX_LEGACY_METADATA = 8
+_MAX_LEGACY_METADATA_KEY_CHARS = 64
+_MAX_LEGACY_METADATA_VALUE_CHARS = 160
 
 # Per-note claim shaping — small, fixed (claims are inherently bounded by note structure).
 _SECTION_MAX_LINES = 3
@@ -97,6 +124,8 @@ def _collapse(text: str) -> str:
 
 def _cap(text: str, n: int) -> str:
     text = text.strip()
+    if n <= 0:
+        return ""
     if len(text) <= n:
         return text
     return text[:n].rstrip() + "…"
@@ -200,9 +229,230 @@ def _extract_claims(page: ParsedPage, *, claim_chars: int = _DEFAULT_CLAIM_CHARS
     }
 
 
-def _extract_semantic_blocks(page: ParsedPage) -> list[dict]:
-    document = semantic_blocks.parse_semantic_blocks(page.body, validate=False)
-    return [block.to_dict() for block in document.blocks]
+def _hit_parent_path(hit: Hit | SemanticUnitHit) -> str:
+    return hit.parent_path if isinstance(hit, SemanticUnitHit) else hit.path
+
+
+def _selected_unit_refs(hit: Hit | SemanticUnitHit) -> list[str]:
+    if isinstance(hit, SemanticUnitHit):
+        return [hit.unit_ref]
+    return [
+        str(item["unit_ref"])
+        for item in (hit.matched_units or [])
+        if item.get("unit_ref")
+    ]
+
+
+def _load_parent_snapshot(
+    vault_root: Path,
+    rel_path: str,
+) -> tuple[ParsedPage, semantic_index.SemanticParentIndexState] | None:
+    """Read one parent once, then derive page and semantic state from those bytes."""
+    try:
+        root = vault_root.resolve()
+        path = (root / rel_path).resolve()
+        path.relative_to(root)
+        content = path.read_bytes()
+        mtime = path.stat().st_mtime
+        source = content.decode("utf-8")
+    except (FileNotFoundError, OSError, UnicodeError, ValueError):
+        return None
+    page = find_corpus.parse_page(path, mtime, root, content=content)
+    if page is None:
+        return None
+    try:
+        state = semantic_index.build_parent_index_state(root, path, source=source)
+    except (OSError, UnicodeError, ValueError):
+        return None
+    return page, state
+
+
+def _bounded_values(value: Any, *, limit: int, chars: int) -> tuple[list[str], int]:
+    if value is None:
+        values: list[Any] = []
+    elif isinstance(value, list):
+        values = value
+    else:
+        values = [value]
+    cap = max(0, limit)
+    shown = [_cap(str(item), chars) for item in values[:cap]]
+    clipped = sum(len(str(item).strip()) > chars for item in values[:cap])
+    return shown, max(0, len(values) - len(shown)) + clipped
+
+
+def _parent_context(page: ParsedPage, parent_ref: str | None) -> tuple[dict, int]:
+    sources, dropped_sources = _bounded_values(
+        page.frontmatter.get("sources"),
+        limit=_MAX_PARENT_PROVENANCE,
+        chars=_MAX_PARENT_PROVENANCE_CHARS,
+    )
+    evidence_values: list[Any] = []
+    for key in ("evidence", "evidence_file"):
+        value = page.frontmatter.get(key)
+        if isinstance(value, list):
+            evidence_values.extend(value)
+        elif value is not None:
+            evidence_values.append(value)
+    evidence, dropped_evidence = _bounded_values(
+        evidence_values,
+        limit=_MAX_PARENT_PROVENANCE,
+        chars=_MAX_PARENT_PROVENANCE_CHARS,
+    )
+    return (
+        {
+            "path": page.rel_path,
+            "ref": parent_ref,
+            "title": _cap(page.title, _MAX_PARENT_PROVENANCE_CHARS),
+            "type": _cap(page.page_type, 64) if page.page_type else None,
+            "status": _cap(page.status or "active", 64),
+            "updated": _cap(page.updated, 64),
+            "supersedes": [
+                _cap(value, _MAX_PARENT_PROVENANCE_CHARS)
+                for value in page.supersedes[:_MAX_PARENT_PROVENANCE]
+            ],
+            "superseded_by": [
+                _cap(value, _MAX_PARENT_PROVENANCE_CHARS)
+                for value in page.superseded_by[:_MAX_PARENT_PROVENANCE]
+            ],
+            "sources": sources,
+            "evidence": evidence,
+        },
+        dropped_sources
+        + dropped_evidence
+        + max(0, len(page.supersedes) - _MAX_PARENT_PROVENANCE)
+        + max(0, len(page.superseded_by) - _MAX_PARENT_PROVENANCE),
+    )
+
+
+def _pack_unit(
+    unit: semantic_units.SemanticUnit,
+    *,
+    unit_chars: int,
+) -> tuple[dict, int]:
+    relations: list[dict] = []
+    for relation in unit.relations[:_MAX_UNIT_RELATIONS]:
+        relations.append(
+            {
+                "kind": relation.kind,
+                "target": _cap(relation.target, _MAX_UNIT_RELATION_TARGET_CHARS),
+                "line": relation.line,
+                "origin": "authored_rich_unit",
+                "direction": "outbound",
+                "source_anchor": unit.anchor,
+            }
+        )
+    tags = [_cap(tag, _MAX_UNIT_TAG_CHARS) for tag in unit.tags[:_MAX_UNIT_TAGS]]
+    clipped_fields = int(len(unit.content.strip()) > max(0, unit_chars))
+    if unit.context:
+        clipped_fields += int(
+            len(unit.context.strip()) > _MAX_UNIT_CONTEXT_CHARS
+        )
+    clipped_fields += sum(
+        len(str(tag).strip()) > _MAX_UNIT_TAG_CHARS for tag in unit.tags[:_MAX_UNIT_TAGS]
+    )
+    clipped_fields += sum(
+        len(relation.target.strip()) > _MAX_UNIT_RELATION_TARGET_CHARS
+        for relation in unit.relations[:_MAX_UNIT_RELATIONS]
+    )
+    return (
+        {
+            "unit_ref": unit.unit_ref,
+            "fingerprint": unit.fingerprint,
+            "form": unit.form,
+            "category_raw": unit.category_raw,
+            "category_key": unit.category_key,
+            "category": unit.category,
+            "kind": unit.kind,
+            "excerpt": _cap(unit.content, max(0, unit_chars)),
+            "tags": tags,
+            "context": _cap(unit.context, _MAX_UNIT_CONTEXT_CHARS)
+            if unit.context
+            else None,
+            "source_anchor": unit.anchor,
+            "source_span": {
+                "start_line": unit.span.start_line,
+                "start_column": unit.span.start_column,
+                "end_line": unit.span.end_line,
+                "end_column": unit.span.end_column,
+                "start_offset": unit.span.start_offset,
+                "end_offset": unit.span.end_offset,
+            },
+            "source_hash": unit.source_hash,
+            "relations": relations,
+        },
+        max(0, len(unit.tags) - len(tags))
+        + max(0, len(unit.relations) - len(relations))
+        + clipped_fields,
+    )
+
+
+def _bounded_legacy_metadata(unit: semantic_units.SemanticUnit) -> tuple[dict[str, str], int]:
+    items = list(unit.metadata.items())
+    shown = {
+        _cap(str(key), _MAX_LEGACY_METADATA_KEY_CHARS): _cap(
+            str(value), _MAX_LEGACY_METADATA_VALUE_CHARS
+        )
+        for key, value in items[:_MAX_LEGACY_METADATA]
+    }
+    clipped = sum(
+        len(str(key).strip()) > _MAX_LEGACY_METADATA_KEY_CHARS
+        or len(str(value).strip()) > _MAX_LEGACY_METADATA_VALUE_CHARS
+        for key, value in items[:_MAX_LEGACY_METADATA]
+    )
+    return shown, max(0, len(items) - len(shown)) + clipped
+
+
+def _legacy_block_from_packed_unit(
+    unit: semantic_units.SemanticUnit,
+    packed: dict,
+) -> tuple[dict | None, int]:
+    if unit.form != "rich":
+        return None, 0
+    metadata, dropped = _bounded_legacy_metadata(unit)
+    relations: list[dict[str, Any]] = []
+    for authored, relation in zip(
+        unit.relations,
+        packed["relations"],
+        strict=False,
+    ):
+        relations.append(
+            {
+                "kind": relation["kind"],
+                "target": relation["target"],
+                "raw": _cap(authored.raw, _MAX_UNIT_RELATION_RAW_CHARS),
+                "line": relation["line"],
+            }
+        )
+        dropped += int(len(authored.raw.strip()) > _MAX_UNIT_RELATION_RAW_CHARS)
+    out: dict[str, Any] = {
+        "type": unit.kind,
+        "title": _cap(unit.title, 160) if unit.title else None,
+        "level": unit.level,
+        "line": packed["source_span"]["start_line"],
+        "end_line": packed["source_span"]["end_line"],
+        "body": packed["excerpt"],
+        "metadata": metadata,
+        "relations": relations,
+    }
+    if unit.anchor:
+        out["id"] = unit.anchor
+    return out, dropped
+
+
+@dataclass
+class _UnitPackPlan:
+    page: ParsedPage
+    parent: dict[str, Any]
+    selected: list[tuple[int, int, semantic_units.SemanticUnit]]
+    fillers: list[semantic_units.SemanticUnit]
+    dropped_provenance: int = 0
+    packed_units: list[dict[str, Any]] = field(default_factory=list)
+    legacy_blocks: list[dict[str, Any]] = field(default_factory=list)
+    chosen_units: list[tuple[semantic_units.SemanticUnit, dict[str, Any]]] = field(
+        default_factory=list
+    )
+    omitted_reasons: set[str] = field(default_factory=set)
+    dropped_fields: int = 0
 
 
 # ----------------------------- neighbourhood -----------------------------
@@ -340,61 +590,230 @@ def _tension_pairs(
 
 def assemble_pack(
     vault_root: Path,
-    hits: list[Hit],
+    hits: list[Hit | SemanticUnitHit],
     *,
     max_hits: int | None = None,
     max_neighbors: int | None = None,
     max_tension: int | None = None,
+    max_units_per_page: int | None = None,
+    max_units: int | None = None,
+    unit_chars: int | None = None,
+    max_unit_total_chars: int | None = None,
     graph_enrich: bool = False,
 ) -> dict:
     """Assemble a reasoning-ready context pack over the top `hits`. Pure measurement.
 
-    Returns ``{packed_paths, claims, neighborhood, contradictions, embeddings_available,
-    truncation}``. Reads note content, frontmatter, wikilinks, and precomputed sidecar
-    embeddings only — no mutation, no generative model, `find` ordering untouched.
+    Returns ``{packed_paths, claims, semantic_units, semantic_blocks, neighborhood,
+    contradictions, embeddings_available, truncation}``. Reads note content,
+    frontmatter, wikilinks, and precomputed sidecar embeddings only — no mutation,
+    no generative model, `find` ordering untouched.
     """
     max_hits = _resolve_cap(max_hits, "EXOMEM_PACK_MAX_HITS", _DEFAULT_MAX_HITS)
     max_neighbors = _resolve_cap(max_neighbors, "EXOMEM_PACK_MAX_NEIGHBORS", _DEFAULT_MAX_NEIGHBORS)
     max_tension = _resolve_cap(max_tension, "EXOMEM_PACK_MAX_TENSION", _DEFAULT_MAX_TENSION)
     claim_chars = _resolve_cap(None, "EXOMEM_PACK_CLAIM_CHARS", _DEFAULT_CLAIM_CHARS)
+    max_units_per_page = max(
+        0,
+        _resolve_cap(
+            max_units_per_page,
+            "EXOMEM_PACK_MAX_UNITS_PER_PAGE",
+            _DEFAULT_MAX_UNITS_PER_PAGE,
+        ),
+    )
+    max_units = max(
+        0,
+        _resolve_cap(max_units, "EXOMEM_PACK_MAX_UNITS", _DEFAULT_MAX_UNITS),
+    )
+    unit_chars = max(
+        0,
+        _resolve_cap(unit_chars, "EXOMEM_PACK_UNIT_CHARS", _DEFAULT_UNIT_CHARS),
+    )
+    max_unit_total_chars = max(
+        0,
+        _resolve_cap(
+            max_unit_total_chars,
+            "EXOMEM_PACK_MAX_UNIT_TOTAL_CHARS",
+            _DEFAULT_MAX_UNIT_TOTAL_CHARS,
+        ),
+    )
 
     truncation: list[str] = []
-    # De-dupe by canonical path up front: `find` rarely emits the same path twice, but a
-    # duplicate would otherwise double-count in `packed_paths` and the supersession edges.
-    seen: set[str] = set()
-    unique_hits: list[Hit] = []
-    for hit in hits:
-        canon = corpus_aware._canon(hit.path)
-        if canon in seen:
-            continue
-        seen.add(canon)
-        unique_hits.append(hit)
+    # Group page/unit/mixed results by parent before applying max_hits. Repeated unit
+    # hits from one parent therefore cannot starve lower-ranked parents.
+    groups: list[dict[str, Any]] = []
+    by_parent: dict[str, dict[str, Any]] = {}
+    for hit_rank, hit in enumerate(hits):
+        parent_path = _hit_parent_path(hit)
+        canon = corpus_aware._canon(parent_path)
+        group = by_parent.get(canon)
+        if group is None:
+            group = {"path": parent_path, "selected_refs": []}
+            by_parent[canon] = group
+            groups.append(group)
+        selected_refs = group["selected_refs"]
+        known_refs = {item[2] for item in selected_refs}
+        for unit_order, unit_ref in enumerate(_selected_unit_refs(hit)):
+            if unit_ref not in known_refs:
+                selected_refs.append((hit_rank, unit_order, unit_ref))
+                known_refs.add(unit_ref)
 
-    total = len(unique_hits)
-    packed_hits = unique_hits[:max_hits] if max_hits > 0 else unique_hits
-    if total > len(packed_hits):
+    total = len(groups)
+    packed_groups = groups[:max_hits] if max_hits > 0 else groups
+    if total > len(packed_groups):
         truncation.append(
-            f"packed {len(packed_hits)} of {total} hits "
-            f"({total - len(packed_hits)} more not packed; raise EXOMEM_PACK_MAX_HITS)"
+            f"packed {len(packed_groups)} of {total} parent hits "
+            f"({total - len(packed_groups)} more not packed; raise EXOMEM_PACK_MAX_HITS)"
         )
 
     packed_pages: list[ParsedPage] = []
+    semantic_states: dict[str, semantic_index.SemanticParentIndexState] = {}
+    selected_by_path: dict[str, list[tuple[int, int, str]]] = {}
     missing = 0
-    for hit in packed_hits:
-        page = find_module._CACHE.get(vault_root / hit.path, vault_root)
-        if page is None:
+    for group in packed_groups:
+        snapshot = _load_parent_snapshot(vault_root, str(group["path"]))
+        if snapshot is None:
             missing += 1  # a packed hit whose file is gone/unreadable — surface it.
             continue
+        page, state = snapshot
         packed_pages.append(page)
+        semantic_states[page.rel_path] = state
+        selected_by_path[page.rel_path] = list(group["selected_refs"])
     if missing:
         truncation.append(f"{missing} packed hit(s) unreadable or missing, not packed")
 
     claims = {p.rel_path: _extract_claims(p, claim_chars=claim_chars) for p in packed_pages}
+    semantic_unit_map: dict[str, dict[str, Any]] = {}
     semantic_block_map: dict[str, list[dict]] = {}
+    plans: list[_UnitPackPlan] = []
     for page in packed_pages:
-        blocks = _extract_semantic_blocks(page)
-        if blocks:
-            semantic_block_map[page.rel_path] = blocks
+        document = semantic_states[page.rel_path].document
+        by_ref = {
+            unit.unit_ref: unit for unit in document.units if unit.unit_ref is not None
+        }
+        selected: list[tuple[int, int, semantic_units.SemanticUnit]] = []
+        unresolved = 0
+        for hit_rank, unit_order, unit_ref in selected_by_path.get(page.rel_path, []):
+            unit = by_ref.get(unit_ref)
+            if unit is None:
+                unresolved += 1
+            elif all(existing[2] is not unit for existing in selected):
+                selected.append((hit_rank, unit_order, unit))
+        if unresolved:
+            truncation.append(
+                f"{page.rel_path}: {unresolved} selected semantic unit(s) stale or missing"
+            )
+
+        selected_ids = {id(item[2]) for item in selected}
+        parent, dropped_provenance = _parent_context(
+            page, semantic_states[page.rel_path].parent_ref
+        )
+        plans.append(
+            _UnitPackPlan(
+                page=page,
+                parent=parent,
+                selected=selected,
+                fillers=[
+                    unit for unit in document.units if id(unit) not in selected_ids
+                ],
+                dropped_provenance=dropped_provenance,
+            )
+        )
+
+    packed_unit_count = 0
+
+    def _try_pack(
+        plan: _UnitPackPlan,
+        unit: semantic_units.SemanticUnit,
+    ) -> None:
+        nonlocal packed_unit_count
+        if len(plan.packed_units) >= max_units_per_page:
+            plan.omitted_reasons.add("per-page cap")
+            return
+        if packed_unit_count >= max_units:
+            plan.omitted_reasons.add("pack-wide cap")
+            return
+
+        packed, dropped = _pack_unit(unit, unit_chars=unit_chars)
+        block, dropped_metadata = _legacy_block_from_packed_unit(unit, packed)
+        candidate_unit_map = {
+            **semantic_unit_map,
+            plan.page.rel_path: {
+                "parent": plan.parent,
+                "units": plan.packed_units + [packed],
+            },
+        }
+        candidate_block_map = dict(semantic_block_map)
+        if block is not None:
+            candidate_block_map[plan.page.rel_path] = plan.legacy_blocks + [block]
+        encoded = json.dumps(
+            {
+                "semantic_units": candidate_unit_map,
+                "semantic_blocks": candidate_block_map,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        if len(encoded) > max_unit_total_chars:
+            plan.omitted_reasons.add("character cap")
+            return
+
+        plan.packed_units.append(packed)
+        plan.chosen_units.append((unit, packed))
+        if block is not None:
+            plan.legacy_blocks.append(block)
+        plan.dropped_fields += dropped + dropped_metadata
+        packed_unit_count += 1
+        semantic_unit_map[plan.page.rel_path] = {
+            "parent": plan.parent,
+            "units": plan.packed_units,
+        }
+        if plan.legacy_blocks:
+            semantic_block_map[plan.page.rel_path] = plan.legacy_blocks
+
+    selected_candidates = sorted(
+        (
+            (hit_rank, unit_order, plan_index, plan, unit)
+            for plan_index, plan in enumerate(plans)
+            for hit_rank, unit_order, unit in plan.selected
+        ),
+        key=lambda item: (item[0], item[1], item[2]),
+    )
+    for _hit_rank, _unit_order, _plan_index, plan, unit in selected_candidates:
+        _try_pack(plan, unit)
+    for plan in plans:
+        for unit in plan.fillers:
+            _try_pack(plan, unit)
+
+    for plan in plans:
+        total_units = len(plan.selected) + len(plan.fillers)
+        omitted = total_units - len(plan.packed_units)
+        if omitted:
+            reason = ", ".join(sorted(plan.omitted_reasons)) or "configured bounds"
+            truncation.append(
+                f"{plan.page.rel_path}: {omitted} semantic units omitted by {reason}"
+            )
+        selected_included = {
+            packed["unit_ref"]
+            for _unit, packed in plan.chosen_units
+            if packed["unit_ref"]
+        }
+        selected_omitted = sum(
+            1
+            for _hit_rank, _unit_order, unit in plan.selected
+            if unit.unit_ref not in selected_included
+        )
+        if selected_omitted:
+            truncation.append(
+                f"{plan.page.rel_path}: {selected_omitted} selected semantic unit(s) omitted by bounds"
+            )
+        if plan.dropped_provenance:
+            truncation.append(
+                f"{plan.page.rel_path}: {plan.dropped_provenance} provenance/lifecycle value(s) omitted"
+            )
+        if plan.dropped_fields:
+            truncation.append(
+                f"{plan.page.rel_path}: {plan.dropped_fields} semantic-unit field value(s) omitted by bounds"
+            )
 
     neighborhood, n_dropped = _neighborhood(vault_root, packed_pages, max_neighbors)
     if n_dropped > 0:
@@ -414,6 +833,7 @@ def assemble_pack(
     result = {
         "packed_paths": [p.rel_path for p in packed_pages],
         "claims": claims,
+        "semantic_units": semantic_unit_map,
         "semantic_blocks": semantic_block_map,
         "neighborhood": neighborhood,
         "contradictions": {"superseded": superseded, "tension": tension},

@@ -105,4 +105,6 @@ def test_product_mcp_retrieval_surface_replaces_portable_primitives(
     read_inputs = tools["read_memory"]["inputSchema"]["properties"]
     assert {"query", "detail", "deep", "include_timings"} <= set(ask_inputs)
     assert "pack" not in ask_inputs
-    assert {"path", "frontmatter_only", "include_raw", "links"} <= set(read_inputs)
+    assert {"path", "frontmatter_only", "include_raw", "links", "unit_ref"} <= set(
+        read_inputs
+    )

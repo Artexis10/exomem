@@ -396,14 +396,28 @@ class ClipIndex:
             self._vec_failed = True
             return None
 
-    def search(self, query_vec: np.ndarray, k: int) -> list[tuple[str, float | None, float]]:
+    def search(
+        self,
+        query_vec: np.ndarray,
+        k: int,
+        *,
+        allowed_paths: set[str] | None = None,
+    ) -> list[tuple[str, float | None, float]]:
         """Top-k visual hits: `(file_path, frame_ts, score)` by cosine similarity."""
-        vec_hits = self._vec_search(query_vec, k)
-        if vec_hits is not None:
-            return vec_hits
+        if allowed_paths is None:
+            vec_hits = self._vec_search(query_vec, k)
+            if vec_hits is not None:
+                return vec_hits
         paths, frame_ts, matrix = self.all_vectors()
         if not paths:
             return []
+        if allowed_paths is not None:
+            keep = [index for index, path in enumerate(paths) if path in allowed_paths]
+            if not keep:
+                return []
+            paths = [paths[index] for index in keep]
+            frame_ts = [frame_ts[index] for index in keep]
+            matrix = matrix[keep]
         scores = matrix @ query_vec.astype(np.float32, copy=False)
         k_eff = min(k, len(scores))
         if k_eff <= 0:

@@ -16,7 +16,7 @@
 # Every stage builds from the checked-out source tree (COPY src/ pyproject.toml
 # uv.lock), never a published PyPI wheel — see design.md D1.
 
-ARG UV_VERSION=0.9.7
+ARG UV_VERSION=0.11.28
 
 # COPY --from does not support ARG expansion; a global-scope FROM alias does
 # (buildx's documented workaround), so the pin lives in one place above.

@@ -48,6 +48,12 @@ from pathlib import Path
 from typing import Protocol
 
 from . import accel
+from .media_types import (
+    DOC_EXTS as _DOC_EXTS,
+)
+from .media_types import (
+    media_type_for as _registry_media_type_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,22 +75,10 @@ def _semantic_segments_module():
 
     return semantic_segments
 
-# Media-type buckets by extension. Extension-based is deliberate: no libmagic dep, and
-# the uploader names the file. Unknown extension → not extractable (returns None).
-_AUDIO_EXTS = frozenset({".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".wma", ".opus"})
-_VIDEO_EXTS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"})
-_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic"})
-_PDF_EXTS = frozenset({".pdf"})
 # Documents → MarkItDown (Microsoft, MIT) renders office/html to markdown, fully local.
 # PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest). The rest are
 # tiny native parsers — no dependency. Only formats the vault actually holds.
-_DOC_EXTS: dict[str, str] = {
-    ".docx": "docx", ".xlsx": "xlsx", ".pptx": "pptx", ".html": "html", ".htm": "html",
-}
 _MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values())  # {"docx", "xlsx", "pptx", "html"}
-_TEXT_EXTS = frozenset({".txt", ".text", ".log"})  # plain UTF-8 read
-_EMAIL_EXTS = frozenset({".eml"})                  # stdlib email parser
-_CAL_EXTS = frozenset({".ics"})                    # native VEVENT parse
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 # A PDF page yielding fewer than this many characters of embedded text is treated as
@@ -103,10 +97,23 @@ class ExtractResult:
     # None so every existing call site and engine is unchanged; only set when
     # diarization is enabled AND succeeds (else the plain transcript flows through).
     speakers: list[dict] | None = None
+    # Governed attribution state. Automatic media processing persists this alongside
+    # the transcript; profile matching is deliberately distinct from human review.
+    speaker_verification: str | None = None
 
 
 class ExtractionUnavailable(Exception):
     """No engine is installed/importable for this media type (soft-fail signal)."""
+
+
+class TimestampRenderingUnavailable(Exception):
+    """ASR succeeded but the required canonical timestamp rendering did not."""
+
+
+@dataclass(frozen=True)
+class _ResolvedSpeakerLabels:
+    labels: dict[str, str]
+    profile_matched: bool
 
 
 # ---------------- public API ----------------
@@ -118,24 +125,7 @@ def media_type_for(path: str | Path) -> str | None:
     audio/video → ASR, image → OCR (+CLIP), pdf → PyMuPDF, docx/xlsx/pptx/html →
     MarkItDown, text → plain read, email → stdlib parse, calendar → VEVENT parse.
     """
-    ext = Path(path).suffix.lower()
-    if ext in _AUDIO_EXTS:
-        return "audio"
-    if ext in _VIDEO_EXTS:
-        return "video"
-    if ext in _IMAGE_EXTS:
-        return "image"
-    if ext in _PDF_EXTS:
-        return "pdf"
-    if ext in _DOC_EXTS:
-        return _DOC_EXTS[ext]
-    if ext in _TEXT_EXTS:
-        return "text"
-    if ext in _EMAIL_EXTS:
-        return "email"
-    if ext in _CAL_EXTS:
-        return "calendar"
-    return None
+    return _registry_media_type_for(path)
 
 
 def is_extractable(path: str | Path) -> bool:
@@ -148,7 +138,11 @@ def extraction_enabled() -> bool:
 
 
 def extract_text(
-    path: str | Path, *, media_type: str | None = None, vault_root: Path | None = None
+    path: str | Path,
+    *,
+    media_type: str | None = None,
+    vault_root: Path | None = None,
+    timestamps: bool = False,
 ) -> ExtractResult:
     """Extract text from a media file. Raises ExtractionUnavailable if no engine fits/installed.
 
@@ -159,6 +153,8 @@ def extract_text(
     p = Path(path)
     mt = media_type or media_type_for(p)
     if mt in ("audio", "video"):
+        if timestamps:
+            return _transcribe(p, mt, vault_root=vault_root, timestamps=True)
         return _transcribe(p, mt, vault_root=vault_root)
     if mt == "image":
         return _ocr_image(p)
@@ -467,7 +463,13 @@ def log_diarization_readiness(vault_root: Path | None = None) -> None:
         log.debug("diarization readiness check failed", exc_info=True)
 
 
-def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> ExtractResult:
+def _transcribe(
+    path: Path,
+    media_type: str,
+    vault_root: Path | None = None,
+    *,
+    timestamps: bool = False,
+) -> ExtractResult:
     # A silent video (no audio stream) can't be transcribed — that's NOT a failure.
     # Return an empty transcript cleanly; its visual content is still searchable via
     # per-keyframe CLIP (embeddings.embed_video_frames). A video IS a sequence of images.
@@ -487,29 +489,57 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
         # guards can't cover everything (a mid-run source change once escaped via an
         # unguarded import). Any exception here degrades to the plain transcript.
         try:
-            labeled = _diarize(path, seg_list, vault_root=vault_root)
+            if timestamps:
+                labeled = _diarize(
+                    path, seg_list, vault_root=vault_root, timestamps=True
+                )
+            else:
+                labeled = _diarize(path, seg_list, vault_root=vault_root)
         except Exception:  # noqa: BLE001 — diarization must never break extraction
             log.warning(
                 "diarization failed for %s; using plain transcript", path.name, exc_info=True
             )
             labeled = None
         if labeled is not None:
-            text, speakers = labeled
+            if len(labeled) == 3:
+                text, speakers, speaker_verification = labeled
+            else:
+                # Compatibility for tests/extensions that still return the historical
+                # `(text, speakers)` pair. Without explicit resolver provenance, the
+                # conservative state is anonymous.
+                text, speakers = labeled
+                speaker_verification = "anonymous"
             # `+timed` is detected from the rendered text (not re-checked from the
             # gate) so a soft-failed timed render can never mislabel the engine —
             # the marker is backfill's idempotency key. Order matters:
             # `_needs_rediarize` matches endswith("+diarized").
             timed = "+timed" if _is_timed_text(text) else ""
-            return ExtractResult(
-                text=text, media_type=media_type, engine=f"{engine}{timed}+diarized",
-                speakers=speakers,
-            )
+            if timestamps and not timed:
+                log.warning(
+                    "timed diarized rendering unavailable for %s; using timed plain transcript",
+                    path.name,
+                )
+            else:
+                return ExtractResult(
+                    text=text,
+                    media_type=media_type,
+                    engine=f"{engine}{timed}+diarized",
+                    speakers=speakers,
+                    speaker_verification=speaker_verification,
+                )
 
     # Timed rendering (EXOMEM_SEMANTIC_SEGMENTS, default OFF): one line per ASR
     # segment with a `[m:ss]` prefix — the substrate for semantic segmentation
     # and `transcript_match_at`. Soft-fail: any renderer error falls back to the
     # flat join below; gate unset is byte-identical to it.
-    if _semantic_segments_enabled():
+    if timestamps or _semantic_segments_enabled():
+        if timestamps and not seg_list:
+            return ExtractResult(
+                text="[0:00] (no speech detected)",
+                media_type=media_type,
+                engine=f"{engine}+timed",
+                speaker_verification="unavailable" if _diarize_enabled() else None,
+            )
         try:
             semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(
@@ -525,13 +555,31 @@ def _transcribe(path: Path, media_type: str, vault_root: Path | None = None) -> 
             ).strip()
             if timed_text:
                 return ExtractResult(
-                    text=timed_text, media_type=media_type, engine=f"{engine}+timed"
+                    text=timed_text,
+                    media_type=media_type,
+                    engine=f"{engine}+timed",
+                    speaker_verification="unavailable" if _diarize_enabled() else None,
                 )
-        except Exception:  # noqa: BLE001 — timed rendering must never block extraction
+            if timestamps:
+                raise TimestampRenderingUnavailable(
+                    "timed transcript rendering produced no output"
+                )
+        except Exception as exc:  # noqa: BLE001 — legacy rendering remains soft-fail
+            if timestamps:
+                if isinstance(exc, TimestampRenderingUnavailable):
+                    raise
+                raise TimestampRenderingUnavailable(
+                    "timed transcript rendering failed"
+                ) from exc
             log.warning("timed transcript rendering failed for %s; using flat text", path.name)
 
     text = " ".join(seg.text.strip() for seg in seg_list).strip()
-    return ExtractResult(text=text, media_type=media_type, engine=engine)
+    return ExtractResult(
+        text=text,
+        media_type=media_type,
+        engine=engine,
+        speaker_verification="unavailable" if _diarize_enabled() else None,
+    )
 
 
 def _is_timed_text(text: str) -> bool:
@@ -712,14 +760,14 @@ def _run_diarization(path: Path) -> list[tuple[float, float, str]] | None:
 
 def _resolve_named_labels(
     path: Path, turns: list[tuple[float, float, str]], vault_root: Path | None = None
-) -> dict[str, str] | None:
+) -> _ResolvedSpeakerLabels | None:
     """Resolve raw diarization labels → enrolled speaker names, or None to stay anonymous.
 
     Optional named-attribution layer over the anonymous turns (default-OFF, soft-fail). When
     ≥1 voice profile is enrolled AND voice embedding is available, each raw cluster's spans are
     ECAPA-embedded into a centroid and matched against the profiles by cosine
-    (`speaker_attribution.attribute_clusters`). Returns `{raw_label: display_label}` where a
-    matched cluster gets the profile name and the rest get stable `Speaker A/B…` (by first
+    (`speaker_attribution.attribute_clusters`). Returns labels plus explicit match provenance:
+    a matched cluster gets the profile name and the rest get stable `Speaker A/B…` (by first
     onset). Returns None — falling through to today's anonymous output — when there are no
     profiles, the embedder is unavailable, or anything fails. Never raises.
     """
@@ -754,15 +802,22 @@ def _resolve_named_labels(
             centroids[raw] = vec
 
         attributions = attribute_clusters(centroids, first_onset, profiles)
-        return {raw: attr.label for raw, attr in attributions.items()}
+        return _ResolvedSpeakerLabels(
+            labels={raw: attr.label for raw, attr in attributions.items()},
+            profile_matched=any(attr.matched_profile is not None for attr in attributions.values()),
+        )
     except Exception:  # noqa: BLE001 — attribution must never break extraction
         log.warning("named speaker attribution failed; using anonymous diarization", exc_info=True)
         return None
 
 
 def _diarize(
-    path: Path, seg_list: list, vault_root: Path | None = None
-) -> tuple[str, list[dict]] | None:
+    path: Path,
+    seg_list: list,
+    vault_root: Path | None = None,
+    *,
+    timestamps: bool = False,
+) -> tuple[str, list[dict], str] | None:
     """Label ASR segments with speakers and render `[Speaker A]: …` (or `[<name>]: …`) turns.
 
     Maps each whisper segment to the diarization speaker whose turn overlaps it most, relabels
@@ -770,8 +825,9 @@ def _diarize(
     same-speaker segments into one turn. When voice profiles are enrolled and embedding succeeds
     (`_resolve_named_labels`), matched clusters render with the enrolled name instead; everything
     else (no profiles / soft-fail) is byte-identical to the anonymous output. Returns
-    `(labeled_text, speakers)` where `speakers` is the structured turn list, or None on soft-fail
-    (no diarization output / no segments) so the caller uses the plain transcript.
+    `(labeled_text, speakers, speaker_verification)` where `speakers` is the structured turn
+    list and verification comes from resolver provenance, or None on soft-fail (no diarization
+    output / no segments) so the caller uses the plain transcript.
     """
     turns = _run_diarization(path)
     if not turns or not seg_list:
@@ -779,13 +835,21 @@ def _diarize(
 
     # Optional named layer: raw cluster label → enrolled name (or None → stay anonymous).
     resolved = _resolve_named_labels(path, turns, vault_root=vault_root)
+    if isinstance(resolved, _ResolvedSpeakerLabels):
+        resolved_labels = resolved.labels
+        verification = "profile-matched" if resolved.profile_matched else "anonymous"
+    else:
+        # Compatibility for monkeypatched/private callers that return the historical
+        # mapping. A non-empty resolver result explicitly means the named layer ran.
+        resolved_labels = resolved
+        verification = "profile-matched" if resolved else "anonymous"
 
     # First-appearance map of raw pyannote labels → "Speaker A", "Speaker B", …
     label_names: dict[str, str] = {}
 
     def _name(raw: str) -> str:
-        if resolved is not None and raw in resolved:
-            return resolved[raw]
+        if resolved_labels is not None and raw in resolved_labels:
+            return resolved_labels[raw]
         if raw not in label_names:
             label_names[raw] = f"Speaker {chr(ord('A') + len(label_names))}"
         return label_names[raw]
@@ -823,16 +887,18 @@ def _diarize(
     # and match localization. The structured `merged` list keeps the merged-turn
     # shape either way (speakers: frontmatter + filters are unaffected). Soft-fail
     # to the merged-turn rendering below.
-    if _semantic_segments_enabled():
+    if timestamps or _semantic_segments_enabled():
         try:
             semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(timed_segs).strip()
             if timed_text:
-                return timed_text, merged
-        except Exception:  # noqa: BLE001 — timed rendering must never block diarization
+                return timed_text, merged, verification
+            if timestamps:
+                raise RuntimeError("timed diarized rendering produced no output")
+        except Exception:  # noqa: BLE001 — diarization is optional and soft-failing
             log.warning("timed diarized rendering failed for %s; using merged turns", path.name)
     labeled_text = "\n".join(f"[{m['speaker']}]: {m['text']}" for m in merged).strip()
-    return labeled_text, merged
+    return labeled_text, merged, verification
 
 
 def _has_audio_stream(path: Path) -> bool:

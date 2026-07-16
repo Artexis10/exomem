@@ -37,6 +37,7 @@ from typing import BinaryIO
 from . import indexes, memory_refs, privacy_log
 from .kbdir import kb_prefix
 from .vault import (
+    ContentHashMismatchError,
     PlannedWrite,
     batch_atomic_write,
     escape_wikilinks_for_log,
@@ -266,10 +267,11 @@ def preserve(
         # A media binary (audio/video/image/pdf) with no provided text gets a STUB
         # sidecar — pointer + media_type + `extracted_by: pending` — so it's a
         # first-class find() result immediately and the extraction worker fills the
-        # text later. Only when server extraction is enabled (else nothing fills it).
+        # text later. The actionable stub is independent of worker availability:
+        # a disabled/unavailable worker can be remediated and retried later.
         extract = _extract_module()
         media_type = extract.media_type_for(filename_safe)
-        want_stub = media_type is not None and not text_clean and extract.extraction_enabled()
+        want_stub = media_type is not None and artifact_text is None and not text_clean
         if desc_clean or text_clean or want_stub:
             if filename_safe.lower().endswith(".md"):
                 stem = filename_safe[:-3]
@@ -642,6 +644,8 @@ _EXTRACTED_HEADING = "## Extracted text"
 def update_sidecar_extraction(
     vault_root: Path, sidecar_path: Path, *, text: str, engine: str,
     speakers: list[dict] | None = None,
+    speaker_verification: str | None = None,
+    attempts: int | None = None,
 ) -> None:
     """Fill a pending media sidecar with extracted text + engine, and re-embed.
 
@@ -659,6 +663,19 @@ def update_sidecar_extraction(
     """
     content = sidecar_path.read_text(encoding="utf-8")
     content = _set_frontmatter_field(content, "extracted_by", engine)
+    content = _set_frontmatter_field(content, "processing_state", "completed")
+    content = _set_frontmatter_field(content, "processing_error", "null")
+    content = _set_frontmatter_field(content, "processing_retryable", "false")
+    content = _set_frontmatter_field(content, "processing_next_action", "null")
+    if attempts is not None:
+        content = _set_frontmatter_field(content, "processing_attempts", str(attempts))
+    current_verification = re.search(r"(?m)^speaker_verification:\s*(\S+)\s*$", content)
+    if speaker_verification and not (
+        current_verification and current_verification.group(1) == "human-verified"
+    ):
+        content = _set_frontmatter_field(
+            content, "speaker_verification", yaml_scalar(speaker_verification)
+        )
     if speakers:
         labels: list[str] = []
         for turn in speakers:
@@ -669,6 +686,68 @@ def update_sidecar_extraction(
             content = _set_frontmatter_field(content, "speakers", f"[{', '.join(labels)}]")
     content = _set_extracted_text(content, _cap_extracted_text(text))
     batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+
+
+def update_sidecar_processing_failure(
+    vault_root: Path,
+    sidecar_path: Path,
+    *,
+    state: str,
+    attempts: int,
+    error: str,
+    retryable: bool,
+    next_action: str,
+) -> None:
+    """Persist actionable worker state without replacing a pending transcript."""
+    content = sidecar_path.read_text(encoding="utf-8")
+    fields = (
+        ("processing_state", state),
+        ("processing_attempts", str(attempts)),
+        ("processing_error", yaml_scalar(error)),
+        ("processing_retryable", "true" if retryable else "false"),
+        ("processing_next_action", yaml_scalar(next_action)),
+    )
+    if state == "failed":
+        error_type = error.split(":", 1)[0].strip() or "Error"
+        content = _set_frontmatter_field(content, "extracted_by", f"failed:{error_type}")
+    for field, value in fields:
+        content = _set_frontmatter_field(content, field, value)
+    batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+
+
+def update_sidecar_processing_pending(
+    vault_root: Path,
+    sidecar_path: Path,
+    *,
+    attempts: int,
+    expected_hash: str | None = None,
+) -> bool:
+    """Keep changed-in-flight media automatic and actionable until reconciliation."""
+    content = sidecar_path.read_text(encoding="utf-8")
+    fields = (
+        ("extracted_by", "pending"),
+        ("processing_state", "pending"),
+        ("processing_attempts", str(attempts)),
+        ("processing_error", "null"),
+        ("processing_retryable", "true"),
+        ("processing_next_action", "wait for media reconciliation"),
+    )
+    for field, value in fields:
+        content = _set_frontmatter_field(content, field, value)
+    try:
+        batch_atomic_write(
+            [
+                PlannedWrite(
+                    path=sidecar_path,
+                    content=content,
+                    expected_hash=expected_hash,
+                )
+            ],
+            vault_root=vault_root,
+        )
+    except ContentHashMismatchError:
+        return False
+    return True
 
 
 def _set_frontmatter_field(content: str, field: str, value: str) -> str:

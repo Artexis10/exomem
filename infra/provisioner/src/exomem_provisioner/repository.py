@@ -16,6 +16,10 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from .crypto import EnvelopeCodec
 from .models import (
     BackupRecord,
+    CapacityDestructiveFence,
+    CapacityLedger,
+    CapacityReleaseReason,
+    CapacityReservation,
     CellOperationLock,
     CredentialMetadata,
     ExportRecord,
@@ -26,6 +30,7 @@ from .models import (
     ResourceKind,
     TenantFence,
 )
+from .provider_identity import cell_resource_name
 
 
 class RepositoryConflict(RuntimeError):
@@ -360,6 +365,79 @@ async def _lock_active_claim(
     return active, checked_at
 
 
+async def _release_completed_capacity(
+    session: AsyncSession,
+    operation: Operation,
+    result: dict[str, Any],
+    *,
+    completed_at: datetime,
+) -> None:
+    proof_fields = {
+        OperationAction.DISCARD: {
+            "computeDestroyed",
+            "storageDestroyed",
+            "keysDestroyed",
+        },
+        OperationAction.DESTROY: {
+            "computeDestroyed",
+            "storageDestroyed",
+            "keysDestroyed",
+            "tenantResourcesDestroyed",
+        },
+    }
+    required = proof_fields.get(operation.action)
+    if required is None or set(result) != required or any(result[key] is not True for key in required):
+        return
+    if operation.action is OperationAction.DISCARD and operation.cell_id is None:
+        raise ImmutableMetadataConflict("discard capacity release has no authenticated cell")
+    reason = (
+        CapacityReleaseReason.DISCARD
+        if operation.action is OperationAction.DISCARD
+        else CapacityReleaseReason.DESTROY
+    )
+    ledger = await session.get(CapacityLedger, 1, with_for_update=True)
+    if ledger is None:
+        raise ImmutableMetadataConflict("capacity ledger singleton is missing")
+    statement = select(CapacityReservation).where(
+        CapacityReservation.tenant_id == operation.tenant_id,
+        CapacityReservation.released_at.is_(None),
+    )
+    if operation.action is OperationAction.DISCARD:
+        statement = statement.where(CapacityReservation.cell_id == operation.cell_id)
+    reservations = list(
+        await session.scalars(statement.order_by(CapacityReservation.id).with_for_update())
+    )
+    if any(
+        reservation.reserving_fence_generation >= operation.fence_generation
+        for reservation in reservations
+    ):
+        raise StaleFence("destructive operation cannot release an equal-or-newer reservation")
+    if operation.action is OperationAction.DISCARD and any(
+        reservation.resource_name != cell_resource_name(reservation.cell_id)
+        for reservation in reservations
+    ):
+        raise ImmutableMetadataConflict("discard reservation resource identity differs")
+    for reservation in reservations:
+        reservation.released_at = completed_at
+        reservation.releasing_operation_id = operation.id
+        reservation.releasing_provider_operation_id = operation.external_operation_id
+        reservation.releasing_fence_generation = operation.fence_generation
+        reservation.release_reason = reason
+    session.add(
+        CapacityDestructiveFence(
+            tenant_id=operation.tenant_id,
+            cell_id=(operation.cell_id if reason is CapacityReleaseReason.DISCARD else None),
+            release_reason=reason,
+            destructive_operation_id=operation.id,
+            provider_operation_id=operation.external_operation_id,
+            fence_generation=operation.fence_generation,
+            completed_at=completed_at,
+        )
+    )
+    ledger.revision += 1
+    ledger.updated_at = completed_at
+
+
 def _require_operation_identity(
     operation: Operation,
     *,
@@ -390,6 +468,10 @@ class OperationRepository:
         self._codec = codec
         self.claim_seconds = claim_seconds
         self.max_failure_attempts = max_failure_attempts
+
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        return self._sessions
 
     async def get(self, action: str, idempotency_key: str) -> OperationSnapshot | None:
         action_value = OperationAction(action)
@@ -667,6 +749,67 @@ class OperationRepository:
             await session.flush()
             return _operation_snapshot(operation)
 
+    async def resume_claim(
+        self,
+        worker_id: str,
+        *,
+        now: datetime | None = None,
+        include_checkpoints: frozenset[str] | None = None,
+        exclude_checkpoints: frozenset[str] = frozenset(),
+        allowed_actions: frozenset[OperationAction] | None = None,
+        excluded_actions: frozenset[OperationAction] = frozenset(),
+    ) -> OperationSnapshot | None:
+        """Resume the one unexpired claim already bound to ``worker_id``."""
+
+        if allowed_actions is not None and not allowed_actions:
+            raise ValueError("allowed action claim scope cannot be empty")
+        if allowed_actions is not None and allowed_actions & excluded_actions:
+            raise ValueError("claim action scopes overlap")
+        async with self._sessions.begin() as session:
+            checked_at = await _database_now(session, now)
+            claim_scope = and_(
+                Operation.state == OperationState.CLAIMED,
+                Operation.claim_owner == worker_id,
+                Operation.claim_token.is_not(None),
+                Operation.claim_expires_at > checked_at,
+            )
+            if include_checkpoints is not None:
+                claim_scope &= Operation.checkpoint.in_(include_checkpoints)
+            if exclude_checkpoints:
+                claim_scope &= Operation.checkpoint.not_in(exclude_checkpoints)
+            if allowed_actions is not None:
+                claim_scope &= Operation.action.in_(allowed_actions)
+            if excluded_actions:
+                claim_scope &= Operation.action.not_in(excluded_actions)
+            rows = (
+                await session.execute(
+                    select(
+                        Operation.id,
+                        Operation.claim_token,
+                        Operation.claim_generation,
+                    )
+                    .where(claim_scope)
+                    .order_by(Operation.created_at, Operation.id)
+                    .limit(2)
+                )
+            ).all()
+            if not rows:
+                return None
+            if len(rows) != 1:
+                raise ClaimConflict("worker identity owns multiple active operation claims")
+            row = rows[0]
+            if not isinstance(row.claim_token, str) or not row.claim_token:
+                raise ClaimConflict("claimed operation has no claim token")
+            operation, _ = await _lock_active_claim(
+                session,
+                str(row.id),
+                worker_id=worker_id,
+                claim_token=row.claim_token,
+                claim_generation=int(row.claim_generation),
+                now=checked_at,
+            )
+            return _operation_snapshot(operation)
+
     async def renew_claim(
         self,
         operation_id: str,
@@ -834,6 +977,12 @@ class OperationRepository:
                 claim_token=claim_token,
                 claim_generation=claim_generation,
                 now=now,
+            )
+            await _release_completed_capacity(
+                session,
+                operation,
+                result,
+                completed_at=completed_at,
             )
             operation.result_ciphertext = self._codec.encrypt_json(
                 result,

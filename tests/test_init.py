@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from exomem import activation_manifest
 from exomem import init as init_module
 from exomem import vault as vault_module
 
@@ -24,6 +25,11 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     assert (kb / "log.md").exists()
     assert (kb / "_Schema" / "SKILL.md").exists()
     assert (kb / "_Schema" / "workflow-skills" / "index.yaml").exists()
+    semantic_registry = kb / "_Schema" / "semantic-language-registry.yaml"
+    assert semantic_registry.exists()
+    assert semantic_registry.read_text(encoding="utf-8") == (
+        "schema_version: 1\ncategories: {}\nkinds: {}\n"
+    )
     assert (
         kb / "_Schema" / "workflow-skills" / "exomem-capture" / "SKILL.md"
     ).exists()
@@ -40,6 +46,36 @@ def test_init_scaffolds_a_fresh_vault(tmp_path: Path) -> None:
     # The report names what it created.
     assert report["vault"] == str(tmp_path)
     assert any("index.md" in p for p in report["created"])
+    manifest = activation_manifest.load_manifest(tmp_path)
+    assert manifest.pages == ()
+    later = kb / "Notes/Insights/first-later-page.md"
+    later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8")
+    assert not activation_manifest.is_grandfathered(tmp_path, later, manifest=manifest)
+
+
+def test_force_init_snapshots_existing_compiled_pages_once_without_editing_them(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Knowledge Base/Notes/Insights/existing.md"
+    page.parent.mkdir(parents=True)
+    page.write_text("---\ntype: insight\nstatus: active\n---\n\n# Existing\n", encoding="utf-8")
+    before = page.read_bytes()
+
+    init_module.init_vault(tmp_path, force=True)
+    manifest_path = activation_manifest.manifest_path(tmp_path)
+    first_bytes = manifest_path.read_bytes()
+    loaded = activation_manifest.load_manifest(tmp_path)
+    assert loaded is not None
+    assert [entry.path_at_activation for entry in loaded.pages] == [
+        "Knowledge Base/Notes/Insights/existing.md"
+    ]
+    assert page.read_bytes() == before
+    assert not (tmp_path / "Knowledge Base/.review-state.json").exists()
+    assert "exomem_id:" not in page.read_text(encoding="utf-8")
+
+    init_module.init_vault(tmp_path, force=True)
+    assert manifest_path.read_bytes() == first_bytes
+    assert page.read_bytes() == before
 
 
 def test_init_refuses_existing_kb_without_force(tmp_path: Path) -> None:

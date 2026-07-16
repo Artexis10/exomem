@@ -28,6 +28,7 @@ GUARDED_WRITE_FIELDS: dict[str, tuple[str, ...]] = {
     "capture_source": ("content",),
     "preserve_evidence": ("content",),
     "edit_memory": ("new_body", "new_string"),
+    "observe_memory": ("content",),
     "replace_memory": ("content",),
     "manage_memory_file": ("content",),
 }
@@ -45,6 +46,7 @@ DESTRUCTIVE_OPS: frozenset[str] = frozenset(
         "move_file",
         "audit_fix",
         "edit_memory",
+        "observe_memory",
         "replace_memory",
         "manage_memory_file",
         "maintain_memory",
@@ -59,6 +61,7 @@ def mcp_tool_annotations(name: str, *, read_only: bool) -> ToolAnnotations:
         title=name,
         readOnlyHint=read_only,
         destructiveHint=False if read_only else (name in DESTRUCTIVE_OPS),
+        idempotentHint=False,
         openWorldHint=False,
     )
 
@@ -72,6 +75,7 @@ class Param:
     required: bool = False
     help: str = ""
     cli_positional: bool = False
+    choices: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -141,12 +145,16 @@ def bind_vault(
     def wrapper(**kwargs):
         if command is None:
             return leaf(*injected, **kwargs)
+        from .commands import invocation_is_read_only
         from .writer_lease import invoke_command
 
+        invocation_read_only = invocation_is_read_only(command, kwargs)
         return invoke_command(
             command,
             *injected,
-            implicit_idempotency_scope=(None if command.read_only else mcp_retry_scope()),
+            implicit_idempotency_scope=(
+                None if invocation_read_only else mcp_retry_scope()
+            ),
             **kwargs,
         )
 
@@ -222,6 +230,11 @@ def parse_args_help(doc: str | None) -> dict[str, str]:
 def type_tag(annotation: object) -> str:
     """Map a resolved type annotation to a REST/CLI coercion tag."""
     origin = typing.get_origin(annotation)
+    if origin is typing.Literal:
+        values = typing.get_args(annotation)
+        if values and all(isinstance(value, str) for value in values):
+            return "str"
+        return "json"
     if origin is typing.Union or origin is types.UnionType:
         non_none = [a for a in typing.get_args(annotation) if a is not type(None)]
         if len(non_none) == 1:
@@ -254,6 +267,7 @@ def derive_params(
     params: list[Param] = []
     for p in list(sig.parameters.values())[skip:]:
         ann = hints.get(p.name, p.annotation)
+        literal_values = typing.get_args(ann) if typing.get_origin(ann) is typing.Literal else ()
         params.append(
             Param(
                 name=p.name,
@@ -261,6 +275,12 @@ def derive_params(
                 required=p.default is inspect.Parameter.empty,
                 help=helps.get(p.name, ""),
                 cli_positional=(p.name == positional),
+                choices=(
+                    tuple(literal_values)
+                    if literal_values
+                    and all(isinstance(value, str) for value in literal_values)
+                    else ()
+                ),
             )
         )
     return tuple(params)

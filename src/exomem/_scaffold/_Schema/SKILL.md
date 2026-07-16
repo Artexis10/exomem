@@ -158,13 +158,14 @@ The KB tools may be **deferred** — the client lists them by name and you load 
 tool's schema before you can call it. Load the product surface up front, in one
 shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 `read_memory` (open a page), `browse_memory` (vault shape), `remember`
-(compiled conclusions), `edit_memory`, `replace_memory`, `capture_source`,
+(compiled conclusions), `observe_memory` (one semantic unit), `edit_memory`,
+`replace_memory`, `capture_source`,
 `compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
 `triage_memory`, `connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
-`query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
+`process_media`, `query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
 single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,observe_memory,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,process_media,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -239,9 +240,17 @@ Examples:
 
 New governed pages and evidence sidecars carry an immutable `exomem_id`, and
 write responses return both a current `path` and a canonical
-`exomem://memory/<uuid>` reference. Use the reference when a later workflow must
-survive moves or renames; paths remain valid and are usually easier to show to a
-person. Never invent, copy, or edit an `exomem_id` by hand.
+`exomem://memory/<uuid>` reference. In normal user-facing prose, show the note
+title by default and do not expose the raw canonical ref by default. Add the
+current vault-relative path for clarity or disambiguation; if the title is
+missing or unusable, use the path or file name as the visible fallback.
+
+Keep the canonical ref for tool arguments, durable machine state, and
+machine-readable automation so identity survives moves and renames. Show the
+raw ref only when the user explicitly asks for it or the identifier itself is
+being inspected or debugged. Do not embed the canonical ref as a Markdown link
+target; use a plain title-first citation. Never invent, copy, or edit an
+`exomem_id` by hand.
 
 Legacy pages are not rewritten automatically. To add IDs, first run
 `maintain_memory(mode="backfill-ids")` in its default dry-run mode, inspect the
@@ -275,6 +284,7 @@ and index updates are determined by the operation, not the caller.
 | **link** | Create or update an entity, wire backlinks | `Entities/<type>/` |
 | **preserve** | Capture a **text** factual artifact for an incident scope. Binaries (PDF / image / any file) go out-of-band via upload (see below), not this tool | `Evidence/<scope>/` |
 | **edit** | In-place edit of a compiled page. One mode per call: whole `body` / `tags` / surgical `old_string`→`new_string`; `edits=[…]` several surgical pairs in one atomic batch; `row_key`+`take` fill a `[take: ]` row by its leading text; `field`+`value` patch ONE frontmatter field (requires `why:`). Bumps `updated:`. Optional `expected_hash` (drift guard) + `validate_only` | the page |
+| **observe_memory** | Add, update, remove, or validate one compact observation or rich semantic unit. Update/remove require the current parent `expected_hash` and unit `expected_fingerprint`. Compact is `- [category] content #tags (context) ^anchor`; typed unit relations require an explicit governed rich `kind` | the compiled page |
 | **find** | Type-aware search across the KB (read-only). Supports compact lookups, packed reasoning context, and diagnostics via `include_timings` / `rerank` when needed | — |
 | **suggest_links** | Surface existing pages a draft or page should link to, hub-aware (read-only) | — |
 | **graph_context** | Return a bounded typed graph neighborhood for a page or query from the derived graph sidecar. Read-only | — |
@@ -332,6 +342,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   extraction; it takes precedence. Upload responses return concrete metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`, `content_type`) so agents can report exactly what landed. The write tools take text only and reject
   inline byte blobs (`BINARY_BLOB_REJECTED`). Full workflow:
   `references/operations.md` § preserve.
+- **Media processing is automatic and actionable — `process_media`.** Supported
+  audio and video preserved through Exomem or copied directly into the governed
+  Knowledge Base are reconciled into durable timestamped transcription work.
+  Call `process_media(path=..., operation="process")` for immediate targeted
+  reconciliation, `operation="status"` for bounded per-artifact state and next
+  actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
+  These actions enqueue or inspect work; they do not wait for model completion or
+  overwrite an existing valid transcript.
 - **Pull a vault file back out — the download channel.** Call
   **`transfer_artifact(mode="download")`** for a short-lived `{token, download_url}`, then GET
   `download_url?path=<vault-relative path>` with `Authorization: Bearer <token>`.
@@ -471,6 +489,16 @@ Performance presets:
   intentionally measuring reranking or spending latency for precision. Interpret
   timing output with the returned compute mode, embedding backend, cache state,
   rerank flag, and search profile.
+
+**Semantic units are first-class.** A compact observation uses
+`- [category] content #tags (context) ^anchor`; its governed kind is always
+`observation`, while category remains open vocabulary. Rich `## Kind` blocks use
+a governed non-observation kind and may carry typed relation metadata. Use
+`observe_memory(operation="add"|"update"|"remove"|"validate")` for one unit
+instead of brittle whole-page string surgery. Update/remove must echo the parent
+`content_hash` and current unit fingerprint. Compact units cannot carry typed unit
+relations: select rich form or author one reviewed note-level relation under
+`## Relations`.
 
 **Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded and raw
 data files aren't `find`-searchable. To make a dataset findable, write a

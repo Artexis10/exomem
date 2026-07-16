@@ -1,0 +1,65 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: exomem-provisioner-database-migration
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: exomem-provisioner-database-migration
+    app.kubernetes.io/part-of: exomem-hosted
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-10"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: exomem-provisioner-database-migration
+        app.kubernetes.io/part-of: exomem-hosted
+    spec:
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: database-migration
+          image: {{ .Values.provisioner.image }}
+          imagePullPolicy: IfNotPresent
+          {{- if .Release.IsUpgrade }}
+          command: ["exomem-provisioner-database-validate"]
+          {{- else }}
+          command: ["exomem-provisioner-database-migrate"]
+          {{- end }}
+          env:
+            - name: EXOMEM_PROVISIONER_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: exomem-provisioner-database
+                  key: url
+            - name: EXOMEM_PROVISIONER_DATABASE_SCHEMA
+              value: {{ .Values.provisioner.databaseSchema | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_ROLE
+              value: {{ .Values.provisioner.databaseRole | quote }}
+            - name: EXOMEM_PROVISIONER_DATABASE_LOCK_TIMEOUT_SECONDS
+              value: "60"
+          resources:
+            requests:
+              cpu: 10m
+              memory: 64Mi
+            limits:
+              cpu: 250m
+              memory: 128Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            capabilities:
+              drop: [ALL]

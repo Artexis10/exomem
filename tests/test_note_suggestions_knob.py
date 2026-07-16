@@ -49,6 +49,7 @@ def test_default_runs_suggestions_and_guardrail(
         content="# Knob default probe\n\nBody.",
         note_type="insight",
         title="Knob default probe",
+        status="draft",
     )
     assert corpus_spies == {"suggest": 1, "cosine": 1}
 
@@ -62,5 +63,6 @@ def test_suggestions_false_skips_related_keeps_dedupe(
         note_type="insight",
         title="Knob off probe",
         suggestions=False,
+        status="draft",
     )
     assert corpus_spies == {"suggest": 0, "cosine": 1}

@@ -4,12 +4,20 @@ import os
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+import pytest
+
 from exomem import media_jobs
 from exomem.media_worker_child import _VaultLock
 
 
-def _job(vault: Path, *, ocr: bool = True, clip: bool = False) -> media_jobs.MediaJob:
-    binary = vault / "Knowledge Base" / "Evidence" / "item.mp4"
+def _job(
+    vault: Path,
+    *,
+    name: str = "item.mp4",
+    ocr: bool = True,
+    clip: bool = False,
+) -> media_jobs.MediaJob:
+    binary = vault / "Knowledge Base" / "Evidence" / name
     sidecar = binary.with_name(binary.name + ".md")
     binary.parent.mkdir(parents=True, exist_ok=True)
     binary.write_bytes(b"x")
@@ -17,7 +25,7 @@ def _job(vault: Path, *, ocr: bool = True, clip: bool = False) -> media_jobs.Med
     return media_jobs.MediaJob(
         binary_path=binary,
         sidecar_path=sidecar,
-        media_type="video",
+        media_type="audio" if binary.suffix == ".mp3" else "video",
         do_ocr=ocr,
         do_clip=clip,
     )
@@ -49,6 +57,41 @@ def test_enqueue_deduplicates_and_merges_stages(vault: Path) -> None:
     assert store.claim_next() is None
 
 
+def test_has_binary_uses_exact_vault_relative_path(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault, name="exact.mp3")
+    store.enqueue(job)
+    sibling = job.binary_path.with_name("exact-copy.mp3")
+    sibling.write_bytes(b"x")
+
+    assert store.has_binary(job.binary_path) is True
+    assert store.has_binary(sibling) is False
+
+
+def test_has_binary_uses_binary_relative_index(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    conn = store._connect(readonly=True)
+    try:
+        plan = conn.execute(
+            "EXPLAIN QUERY PLAN SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
+            ("Knowledge Base/Evidence/exact.mp3",),
+        ).fetchall()
+    finally:
+        conn.close()
+
+    assert any("jobs_binary_rel" in str(row[3]) for row in plan)
+
+
+def test_discovery_cursor_is_durable_and_vault_relative(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    binary = _job(vault, name="cursor.mp3").binary_path
+
+    store.set_discovery_cursor(binary)
+
+    reopened = media_jobs.MediaJobStore(vault, create=False)
+    assert reopened.discovery_cursor() == binary.relative_to(vault).as_posix()
+
+
 def test_recover_and_retry_states(vault: Path) -> None:
     store = media_jobs.MediaJobStore(vault)
     store.enqueue(_job(vault))
@@ -62,6 +105,95 @@ def test_recover_and_retry_states(vault: Path) -> None:
     assert store.counts()["blocked"] == 1
     assert store.retry() == 1
     assert store.counts()["pending"] == 1
+
+
+def test_status_reports_actionable_per_path_failure_details(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    blocked = _job(vault, name="missing-engine.mp3")
+    failed = _job(vault, name="corrupt-audio.mp3")
+    store.enqueue(blocked)
+    blocked_claim = store.claim_next()
+    assert blocked_claim is not None and blocked_claim.id is not None
+    store.mark(blocked_claim.id, media_jobs.BLOCKED, "ExtractionUnavailable: engine absent")
+    store.enqueue(failed)
+    failed_claim = store.claim_next()
+    assert failed_claim is not None and failed_claim.id is not None
+    store.mark(failed_claim.id, media_jobs.FAILED, "InvalidDataError: corrupt container")
+
+    jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
+
+    assert jobs["Knowledge Base/Evidence/missing-engine.mp3"] == {
+        "id": blocked_claim.id,
+        "path": "Knowledge Base/Evidence/missing-engine.mp3",
+        "sidecar_path": "Knowledge Base/Evidence/missing-engine.mp3.md",
+        "media_type": "audio",
+        "state": "blocked",
+        "attempts": 1,
+        "error": "ExtractionUnavailable: engine absent",
+        "retryable": True,
+        "next_action": "install the required media dependency, then retry",
+    }
+    assert jobs["Knowledge Base/Evidence/corrupt-audio.mp3"] == {
+        "id": failed_claim.id,
+        "path": "Knowledge Base/Evidence/corrupt-audio.mp3",
+        "sidecar_path": "Knowledge Base/Evidence/corrupt-audio.mp3.md",
+        "media_type": "audio",
+        "state": "failed",
+        "attempts": 1,
+        "error": "InvalidDataError: corrupt container",
+        "retryable": True,
+        "next_action": "repair or replace the media artifact, then retry",
+    }
+
+
+@pytest.mark.parametrize("target_state", [media_jobs.BLOCKED, media_jobs.FAILED])
+def test_targeted_retry_requeues_only_the_exact_terminal_job(
+    vault: Path, target_state: str
+) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    blocked = _job(vault, name="blocked.mp3")
+    failed = _job(vault, name="failed.mp3")
+    blocked_id = store.enqueue(blocked)
+    blocked_claim = store.claim_next()
+    assert blocked_claim is not None and blocked_claim.id == blocked_id
+    store.mark(blocked_id, media_jobs.BLOCKED, "engine absent")
+    failed_id = store.enqueue(failed)
+    failed_claim = store.claim_next()
+    assert failed_claim is not None and failed_claim.id == failed_id
+    store.mark(failed_id, media_jobs.FAILED, "corrupt container")
+
+    target = blocked if target_state == media_jobs.BLOCKED else failed
+    untouched = failed if target_state == media_jobs.BLOCKED else blocked
+    assert store.retry(binary_path=target.binary_path, include_failed=True) == 1
+
+    jobs = {job["path"]: job for job in media_jobs.status(vault)["jobs"]}
+    target_status = jobs[target.binary_path.relative_to(vault).as_posix()]
+    untouched_status = jobs[untouched.binary_path.relative_to(vault).as_posix()]
+    assert target_status["id"] == (blocked_id if target is blocked else failed_id)
+    assert target_status["state"] == media_jobs.PENDING
+    assert target_status["attempts"] == 1
+    assert target_status["error"] is None
+    assert untouched_status["state"] == (
+        media_jobs.FAILED if untouched is failed else media_jobs.BLOCKED
+    )
+    assert sum(store.counts().values()) == 2
+
+
+def test_duplicate_enqueue_does_not_implicitly_retry_terminal_job(vault: Path) -> None:
+    store = media_jobs.MediaJobStore(vault)
+    job = _job(vault, name="retained-failure.mp3")
+    job_id = store.enqueue(job)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == job_id
+    store.mark(job_id, media_jobs.FAILED, "DecodeError: retained failure")
+
+    assert store.enqueue(job) == job_id
+
+    [retained] = media_jobs.status(vault)["jobs"]
+    assert retained["state"] == media_jobs.FAILED
+    assert retained["attempts"] == 1
+    assert retained["error"] == "DecodeError: retained failure"
+    assert store.claim_next() is None
 
 
 def test_live_worker_prevents_duplicate_recovery(vault: Path) -> None:

@@ -23,7 +23,7 @@ from typing import Any
 from . import activation as activation_module
 from . import epistemic_graph as epistemic_graph_module
 from . import find as find_module
-from . import markdown_relations
+from . import relation_registry, semantic_language_registry, semantic_units
 from . import review_state as review_state_module
 from . import vault as vault_module
 from .vault import kb_root
@@ -133,9 +133,15 @@ def _candidate_fingerprint(
 
 def _authored_targets(page: Any, vault_root: Path) -> set[tuple[str, str]]:
     """Set of `(relation_type, target.md)` already authored under ``## Relations``."""
-    document = markdown_relations.parse_markdown_relations(page.body)
+    document = semantic_units.parse_semantic_units(
+        page.body,
+        validate=False,
+        language_registry=semantic_language_registry.load_registry(vault_root),
+        relation_registry=relation_registry.load_registry(vault_root),
+        page_type=page.page_type,
+    )
     authored: set[tuple[str, str]] = set()
-    for relation in document.canonical_relations:
+    for relation in document.canonical_note_relations:
         try:
             canonical, warning = vault_module.normalize_wikilink(
                 relation.target, vault_root, strict=False

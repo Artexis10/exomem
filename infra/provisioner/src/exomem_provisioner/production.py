@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import httpx
 
@@ -15,6 +15,7 @@ from .adapters import (
     PrivateCellApiAdapter,
     TraefikRoutingAdapter,
 )
+from .capacity import LiveCapacityAdmission, load_capacity_contract
 from .config import (
     HostedReleaseManifest,
     ProviderWorkerSettings,
@@ -27,7 +28,6 @@ from .durability_driver import DurabilityActionDriver
 from .entrypoint import help_requested
 from .lifecycle import CellLifecycleDriver, LifecycleConfig
 from .live import (
-    KubernetesCapacityGate,
     KubernetesProviderRegistry,
     LiveLifecyclePlane,
 )
@@ -44,6 +44,38 @@ class LiveProviderComponents:
     release: HostedReleaseManifest
     plane: LiveLifecyclePlane
     driver: CellLifecycleDriver
+    capacity: LiveCapacityAdmission
+
+
+class CapacityVerifierSettings(Protocol):
+    capacity_receipt_public_key: str
+    capacity_contract_path: str
+    capacity_receipt_namespace: str
+    capacity_receipt_config_map: str
+    hcloud_server_id: int
+    location: str
+
+
+def build_live_capacity_admission(
+    *,
+    repository: OperationRepository,
+    settings: CapacityVerifierSettings,
+    core_v1: Any,
+    storage_v1: Any,
+) -> LiveCapacityAdmission:
+    """Build the shared public-only capacity authority for PROVISION workers."""
+
+    return LiveCapacityAdmission(
+        core_v1=core_v1,
+        storage_v1=storage_v1,
+        sessions=repository.session_factory,
+        contract=load_capacity_contract(settings.capacity_contract_path),
+        public_key=settings.capacity_receipt_public_key,
+        receipt_namespace=settings.capacity_receipt_namespace,
+        receipt_config_map=settings.capacity_receipt_config_map,
+        expected_server_id=settings.hcloud_server_id,
+        expected_location=settings.location,
+    )
 
 
 def build_routine_operation_worker(
@@ -51,6 +83,7 @@ def build_routine_operation_worker(
     repository: OperationRepository,
     driver: Any,
     worker_id: str,
+    capacity_admission: Any,
 ) -> ProvisionerWorker:
     """Build the routine owner for every non-destructive operation action."""
 
@@ -60,6 +93,7 @@ def build_routine_operation_worker(
         worker_id=worker_id,
         exclude_checkpoints=frozenset({"volume-registration-required"}),
         allowed_actions=ROUTINE_OPERATION_ACTIONS,
+        capacity_admission=capacity_admission,
     )
 
 
@@ -121,6 +155,12 @@ def build_live_provider_components(
         apps_v1=apps_v1,
         identity_verifier=identity_verifier,
     )
+    capacity = build_live_capacity_admission(
+        repository=repository,
+        settings=settings,
+        core_v1=core_v1,
+        storage_v1=storage_v1,
+    )
     plane = LiveLifecyclePlane(
         repository=repository,
         registry=KubernetesProviderRegistry(
@@ -150,10 +190,7 @@ def build_live_provider_components(
         maintenance=KubernetesMaintenanceLeaseAdapter(
             coordination_v1=coordination_v1,
         ),
-        capacity=KubernetesCapacityGate(
-            core_v1=core_v1,
-            storage_v1=storage_v1,
-        ),
+        capacity=capacity,
         identity_verifier=identity_verifier,
         config=lifecycle_config,
     )
@@ -165,6 +202,7 @@ def build_live_provider_components(
             volume_worker=None,
             config=lifecycle_config,
         ),
+        capacity=capacity,
     )
 
 
@@ -217,6 +255,7 @@ async def _run_worker() -> None:
             repository=repository,
             driver=components.driver,
             worker_id=provider.worker_id,
+            capacity_admission=components.capacity,
         )
         try:
             while True:

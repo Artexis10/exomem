@@ -174,6 +174,16 @@ def test_destination_matrix_enforces_named_secret_boundaries() -> None:
     database_backup_upload = secrets["database_backup_upload_key"]["destinations"]
     assert set(database_backup_upload) == {"k3s.provisioner.database-backup-upload-key.active"}
 
+    capacity_verifier = secrets["capacity_receipt_public_key"]["destinations"]
+    assert capacity_verifier["k3s.capacity-workers.capacity-receipt-verifier.active"] == {
+        "kind": "sops_k8s_secret",
+        "slot": "active",
+        "target": "infra/secrets/provisioner/capacity-receipt-verifier.{version}.sops.json",
+        "namespace": "exomem-platform",
+        "kubernetes_secret": "exomem-capacity-receipt-verifier",
+        "key": "public-key",
+    }
+
     assert "cell_credential" not in secrets
 
 

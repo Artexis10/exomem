@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -35,15 +36,20 @@ FIXTURE_PATH = REPO_ROOT / "tests" / "fixtures" / "mcp_tool_schemas.json"
 FIXTURE_VAULT = REPO_ROOT / "tests" / "fixtures"
 
 
-def _build_server(monkeypatch: pytest.MonkeyPatch):
+def _build_server(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     """Build the server exactly as the fixture was captured (see module docstring)."""
+    vault_root = tmp_path / "schema_vault"
+    shutil.copytree(FIXTURE_VAULT, vault_root)
     monkeypatch.setattr(server_module, "load_dotenv", lambda *a, **k: None)
     monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_RELEVANCE_CHECK", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
     monkeypatch.delenv("EXOMEM_DISABLE_TIER2", raising=False)
-    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(FIXTURE_VAULT))
+    monkeypatch.setenv(
+        "EXOMEM_WRITER_LEASE_STATE_DIR", str(tmp_path / "writer-lease")
+    )
+    monkeypatch.setenv("EXOMEM_VAULT_PATH", str(vault_root))
     return server_module.build_server(require_auth=False)
 
 
@@ -63,9 +69,11 @@ def _canonical(entry: dict) -> str:
     return json.dumps(entry, ensure_ascii=False, sort_keys=False, indent=2)
 
 
-def test_live_tools_match_committed_baseline(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_tools_match_committed_baseline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     baseline = json.loads(FIXTURE_PATH.read_text(encoding="utf-8"))
-    live = _live_schemas(_build_server(monkeypatch))
+    live = _live_schemas(_build_server(monkeypatch, tmp_path))
 
     # Same set of tools — nothing added, nothing dropped.
     assert set(live) == set(baseline), (
@@ -91,7 +99,9 @@ def test_live_tools_match_committed_baseline(monkeypatch: pytest.MonkeyPatch) ->
     )
 
 
-def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hand_registered_exceptions_are_explicit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Every live tool is either registry-generated or a named hand-registered
     exception — no silent gaps, no overlap. Skips cleanly until the registry exists
     (pre-refactor), so this stays green at every step of the migration."""
@@ -100,7 +110,7 @@ def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch
     except ImportError:
         pytest.skip("registry (commands.py) not introduced yet")
 
-    mcp = _build_server(monkeypatch)
+    mcp = _build_server(monkeypatch, tmp_path)
     live = set(_live_schemas(mcp))
 
     generated = {c.name for c in commands_module.PRODUCT_COMMANDS if "mcp" in c.surfaces}
@@ -121,3 +131,37 @@ def test_hand_registered_exceptions_are_explicit(monkeypatch: pytest.MonkeyPatch
         f"HAND_REGISTERED_EXCEPTIONS names a tool that isn't registered: "
         f"{sorted(exceptions - live)}"
     )
+
+
+def test_process_media_mcp_schema_annotations_and_leaf_result(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from exomem import commands as commands_module
+    from exomem import media_jobs
+
+    mcp = _build_server(monkeypatch, tmp_path)
+    vault = tmp_path / "schema_vault"
+    tools = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    tool = tools["process_media"].to_mcp_tool().model_dump(mode="json")
+    schema = tool["inputSchema"]
+    [command] = [cmd for cmd in commands_module.PRODUCT_COMMANDS if cmd.name == "process_media"]
+    operation_param = next(param for param in command.params if param.name == "operation")
+    assert set(schema["properties"]) == {"path", "operation"}
+    assert schema.get("required", []) == []
+    assert schema["properties"]["operation"]["enum"] == list(operation_param.choices)
+    assert "governed" in schema["properties"]["path"]["description"].lower()
+    assert "process" in schema["properties"]["operation"]["description"].lower()
+    assert tool["annotations"] == {
+        "title": "process_media",
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": False,
+    }
+
+    result = asyncio.run(
+        mcp.call_tool("process_media", {"operation": "status"}, run_middleware=False)
+    )
+    structured = result.structured_content
+    assert structured["operation"] == "status"
+    assert structured["counts"] == media_jobs.status(vault)["counts"]

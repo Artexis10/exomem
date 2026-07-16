@@ -661,6 +661,7 @@ def test_writer_updates_sidecar(vault, embeddings_enabled) -> None:
         ),
         note_type="insight",
         title="Glycemic variability and morning fog",
+        status="draft",
     )
     idx = embeddings.EmbeddingIndex(vault)
     metadata, matrix = idx.all_vectors()

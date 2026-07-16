@@ -14,7 +14,7 @@ Use when the user asks to find media evidence, look inside a recording, inspect 
 
 ## Workflow
 1. Search with media-aware filters or artifact terms using `ask_memory`.
-2. Use artifact-specific product tools: extracted text/OCR/transcripts, `read_media`, `transfer_artifact`, upload metadata, or preserved evidence paths.
+2. Use artifact-specific product tools: extracted text/OCR/transcripts, `process_media` status/retry, `read_media`, `transfer_artifact`, upload metadata, or preserved evidence paths.
 3. Cite raw artifact paths and timestamps/pages/frames when available.
 4. Compile textual conclusions with `remember` only when there is a durable finding.
 5. Preserve new raw artifacts with `capture_source`, `preserve_evidence`, or `transfer_artifact` before analyzing them.

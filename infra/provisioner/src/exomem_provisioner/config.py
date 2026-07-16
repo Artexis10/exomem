@@ -23,6 +23,7 @@ _TRUSTED_IPV4_RANGES = tuple(
 )
 _TRUSTED_IPV6_RANGES = tuple(ipaddress.ip_network(value) for value in ("fc00::/7", "::1/128"))
 _RELEASE_MANIFEST_FILENAME = "exomem-hosted-release-v1.json"
+_CAPACITY_CONTRACT_FILENAME = "private-alpha-capacity-v1.json"
 _RELEASE_MANIFEST_MAX_BYTES = 1_048_576
 _RELEASE_BUILD_TIME = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?Z$")
 
@@ -237,6 +238,23 @@ class ProviderWorkerSettings(BaseSettings):
         pattern=r"^[A-Za-z0-9_-]+$",
         validation_alias="EXOMEM_PROVIDER_RECOVERY_PUBLIC_KEY",
     )
+    capacity_receipt_public_key: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    capacity_contract_path: str = Field(min_length=1, max_length=4096)
+    capacity_receipt_namespace: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    capacity_receipt_config_map: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    hcloud_server_id: int = Field(gt=0)
 
     @field_validator("release_manifest_path")
     @classmethod
@@ -244,6 +262,14 @@ class ProviderWorkerSettings(BaseSettings):
         path = Path(value)
         if not path.is_absolute() or path.name != _RELEASE_MANIFEST_FILENAME:
             raise ValueError("release manifest path must be absolute and use the v1 filename")
+        return value
+
+    @field_validator("capacity_contract_path")
+    @classmethod
+    def validate_capacity_contract_path(cls, value: str) -> str:
+        path = Path(value)
+        if not path.is_absolute() or path.name != _CAPACITY_CONTRACT_FILENAME:
+            raise ValueError("capacity contract path must be absolute and use the v1 filename")
         return value
 
     @field_validator("control_hostname", "transfer_hostname")
@@ -314,7 +340,6 @@ class VolumeWorkerSettings(BaseSettings):
     provider_recovery_signing_key: SecretStr = Field(
         min_length=43,
         max_length=43,
-        pattern=r"^[A-Za-z0-9_-]{43}$",
         validation_alias="EXOMEM_PROVIDER_RECOVERY_SIGNING_KEY",
     )
     volume_encryption_secret_name: str = Field(min_length=1, max_length=63)
@@ -322,6 +347,38 @@ class VolumeWorkerSettings(BaseSettings):
     location: str = Field(pattern=r"^[a-z0-9][a-z0-9-]{1,31}$")
     worker_id: str = Field(min_length=1, max_length=128)
     poll_seconds: float = Field(default=1.0, ge=0.05, le=30)
+    capacity_receipt_public_key: str = Field(
+        min_length=43,
+        max_length=43,
+        pattern=r"^[A-Za-z0-9_-]{43}$",
+    )
+    capacity_contract_path: str = Field(min_length=1, max_length=4096)
+    capacity_receipt_namespace: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    capacity_receipt_config_map: str = Field(
+        min_length=1,
+        max_length=63,
+        pattern=r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$",
+    )
+    hcloud_server_id: int = Field(gt=0)
+
+    @field_validator("provider_recovery_signing_key")
+    @classmethod
+    def validate_provider_recovery_signing_key(cls, value: SecretStr) -> SecretStr:
+        if re.fullmatch(r"[A-Za-z0-9_-]{43}", value.get_secret_value()) is None:
+            raise ValueError("provider recovery signing key is invalid")
+        return value
+
+    @field_validator("capacity_contract_path")
+    @classmethod
+    def validate_capacity_contract_path(cls, value: str) -> str:
+        path = Path(value)
+        if not path.is_absolute() or path.name != _CAPACITY_CONTRACT_FILENAME:
+            raise ValueError("capacity contract path must be absolute and use the v1 filename")
+        return value
 
 
 def secrets_equal(first: SecretStr, second: SecretStr) -> bool:

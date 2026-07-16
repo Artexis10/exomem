@@ -65,4 +65,12 @@ def init_vault(vault_root: Path, *, force: bool = False) -> dict:
     for folder in _FOLDERS:
         (kb / folder).mkdir(parents=True, exist_ok=True)
 
+    from .activation_manifest import ensure_manifest, manifest_path
+
+    activation_path = manifest_path(vault_root)
+    activation_missing = not activation_path.exists()
+    ensure_manifest(vault_root)
+    if activation_missing:
+        created.append(activation_path.relative_to(vault_root).as_posix())
+
     return {"vault": str(vault_root), "kb": str(kb), "created": created}

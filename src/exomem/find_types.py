@@ -196,6 +196,10 @@ class Hit:
     activation: float | None = None
     usage_boost_applied: float | None = None
     graph_provenance: GraphProvenance | None = None
+    matched_units: list[dict[str, Any]] | None = None
+    matched_units_truncated: int = 0
+    result_type: str | None = None
+    mixed_units_truncated: int = 0
 
     def as_dict(self) -> dict:
         out: dict = {
@@ -230,6 +234,14 @@ class Hit:
             out["status"] = self.status
         if self.superseded_by:
             out["superseded_by"] = self.superseded_by
+        if self.matched_units is not None:
+            out["matched_units"] = self.matched_units
+            if self.matched_units_truncated:
+                out["matched_units_truncated"] = self.matched_units_truncated
+        if self.result_type is not None:
+            out["result_type"] = self.result_type
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
         signals: dict = {}
         if self.bm25_rank is not None:
             signals["bm25_rank"] = self.bm25_rank
@@ -291,6 +303,104 @@ class Hit:
             out["status"] = self.status
         if self.superseded_by:
             out["superseded_by"] = self.superseded_by
+        if self.matched_units is not None:
+            out["matched_units"] = self.matched_units
+            if self.matched_units_truncated:
+                out["matched_units_truncated"] = self.matched_units_truncated
+        if self.result_type is not None:
+            out["result_type"] = self.result_type
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
+        return out
+
+
+@dataclass
+class SemanticUnitHit:
+    """One independently ranked, parent-citable semantic-unit result."""
+
+    unit_ref: str
+    form: str
+    category_raw: str
+    category_key: str
+    category: str
+    kind: str
+    content: str
+    excerpt: str
+    tags: list[str]
+    context: str | None
+    source_anchor: str | None
+    source_span: dict[str, int]
+    source_hash: str
+    parent_path: str
+    parent_ref: str | None
+    parent_title: str
+    parent_type: str | None
+    parent_status: str | None
+    parent_updated: str
+    parent_superseded_by: list[str] = field(default_factory=list)
+    bm25_rank: int | None = None
+    bm25_score: float | None = None
+    vector_rank: int | None = None
+    vector_score: float | None = None
+    mixed_units_truncated: int = 0
+
+    def as_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
+            "result_type": "semantic_unit",
+            "unit_ref": self.unit_ref,
+            "form": self.form,
+            "category_raw": self.category_raw,
+            "category_key": self.category_key,
+            "category": self.category,
+            "kind": self.kind,
+            "content": self.content,
+            "excerpt": self.excerpt,
+            "tags": self.tags,
+            "context": self.context,
+            "source_anchor": self.source_anchor,
+            "source_span": self.source_span,
+            "source_hash": self.source_hash,
+            "parent_path": self.parent_path,
+            "parent_ref": self.parent_ref,
+            "parent_title": self.parent_title,
+            "parent_type": self.parent_type,
+            "parent_status": self.parent_status,
+            "parent_updated": self.parent_updated,
+        }
+        if self.parent_superseded_by:
+            out["parent_superseded_by"] = self.parent_superseded_by
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
+        signals: dict[str, Any] = {}
+        if self.bm25_rank is not None:
+            signals["bm25_rank"] = self.bm25_rank
+        if self.bm25_score is not None:
+            signals["bm25_score"] = round(self.bm25_score, 6)
+        if self.vector_rank is not None:
+            signals["vector_rank"] = self.vector_rank
+        if self.vector_score is not None:
+            signals["vector_score"] = round(self.vector_score, 6)
+        if signals:
+            out["signals"] = signals
+        return out
+
+    def as_compact_dict(self) -> dict[str, Any]:
+        out = {
+            "result_type": "semantic_unit",
+            "unit_ref": self.unit_ref,
+            "category": self.category,
+            "kind": self.kind,
+            "excerpt": self.excerpt,
+            "source_anchor": self.source_anchor,
+            "parent_path": self.parent_path,
+            "parent_ref": self.parent_ref,
+            "parent_title": self.parent_title,
+            "parent_type": self.parent_type,
+            "parent_status": self.parent_status,
+            "parent_updated": self.parent_updated,
+        }
+        if self.mixed_units_truncated:
+            out["mixed_units_truncated"] = self.mixed_units_truncated
         return out
 
 

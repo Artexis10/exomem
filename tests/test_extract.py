@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import extract, voice_profiles
+from exomem import extract, speaker_attribution, voice_embed, voice_profiles
 
 
 @pytest.mark.parametrize(
@@ -119,6 +119,46 @@ def test_extract_text_routes_by_media_type(monkeypatch: pytest.MonkeyPatch) -> N
     assert extract.extract_text("x.txt").text == "X"
     assert extract.extract_text("x.eml").engine == "email"
     assert extract.extract_text("x.ics").media_type == "calendar"
+
+
+@pytest.mark.parametrize(
+    ("filename", "media_type"),
+    [("recording.m4a", "audio"), ("recording.mp4", "video")],
+)
+def test_extract_text_explicit_timestamp_request_reaches_asr(
+    filename: str,
+    media_type: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[tuple[str, bool]] = []
+
+    def _transcribe_spy(path, kind, vault_root=None, *, timestamps=False):
+        seen.append((kind, timestamps))
+        return extract.ExtractResult("[0:00] transcript", kind, "whisper+timed")
+
+    monkeypatch.setattr(extract, "_transcribe", _transcribe_spy)
+
+    result = extract.extract_text(filename, timestamps=True)
+
+    assert result.media_type == media_type
+    assert seen == [(media_type, True)]
+
+
+def test_extract_text_default_does_not_request_timestamps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    seen: list[bool] = []
+
+    def _transcribe_spy(path, kind, vault_root=None, *, timestamps=False):
+        seen.append(timestamps)
+        return extract.ExtractResult("legacy transcript", kind, "whisper")
+
+    monkeypatch.setattr(extract, "_transcribe", _transcribe_spy)
+
+    result = extract.extract_text("recording.m4a")
+
+    assert result.text == "legacy transcript"
+    assert seen == [False]
 
 
 def test_extract_text_unknown_type_raises() -> None:
@@ -278,6 +318,133 @@ def test_transcribe_timed_plain_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     assert r.speakers is None
 
 
+def test_transcribe_explicit_timestamps_override_environment_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    segs = [_FakeSeg("automatic transcript", 65.0, 67.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+
+    result = extract._transcribe(Path("automatic.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[1:05] automatic transcript"
+    assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
+
+
+def test_transcribe_diarization_records_anonymous_verification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("unknown participant", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")]
+    )
+    monkeypatch.setattr(extract, "_resolve_named_labels", lambda *_a, **_kw: None)
+
+    result = extract._transcribe(Path("anonymous.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[0:00] [Speaker A]: unknown participant"
+    assert result.speaker_verification == "anonymous"
+
+
+def test_transcribe_profile_label_is_only_used_when_resolver_returns_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("known participant", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")]
+    )
+    monkeypatch.setattr(
+        extract,
+        "_resolve_named_labels",
+        lambda *_a, **_kw: {"SPEAKER_00": "Enrolled Speaker"},
+    )
+
+    result = extract._transcribe(Path("profile.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[0:00] [Enrolled Speaker]: known participant"
+    assert result.speaker_verification == "profile-matched"
+
+
+@pytest.mark.parametrize(
+    ("label", "matched_profile", "verification"),
+    [
+        ("Speaker A", "Speaker A", "profile-matched"),
+        ("Speaker 27", None, "anonymous"),
+    ],
+)
+def test_speaker_verification_uses_resolver_match_metadata_not_label_shape(
+    label: str,
+    matched_profile: str | None,
+    verification: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("speaker line", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")]
+    )
+    monkeypatch.setattr(voice_profiles, "voice_profiles_path", lambda root: root / "profiles")
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda _path: {"profile": object()})
+    monkeypatch.setattr(voice_embed, "embed_spans", lambda *_a, **_kw: object())
+    monkeypatch.setattr(
+        speaker_attribution,
+        "attribute_clusters",
+        lambda *_a, **_kw: {
+            "SPEAKER_00": speaker_attribution.Attribution(label, 0.9, matched_profile)
+        },
+    )
+
+    result = extract._transcribe(
+        Path("metadata.m4a"), "audio", vault_root=tmp_path, timestamps=True
+    )
+
+    assert f"[{label}]: speaker line" in result.text
+    assert result.speaker_verification == verification
+
+
+def test_transcribe_accepts_legacy_two_tuple_diarization_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("legacy seam", 0.0, 1.0)]
+    speakers = [{"speaker": "Speaker A", "start": 0.0, "end": 1.0, "text": "legacy seam"}]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract,
+        "_diarize",
+        lambda *_a, **_kw: ("[0:00] [Speaker A]: legacy seam", speakers),
+    )
+
+    result = extract._transcribe(Path("legacy.m4a"), "audio", timestamps=True)
+
+    assert result.speaker_verification == "anonymous"
+
+
+def test_transcribe_records_unavailable_when_configured_diarization_cannot_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("plain fallback", 2.0, 3.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
+
+    result = extract._transcribe(Path("no-diarizer.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[0:02] plain fallback"
+    assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
+    assert result.speaker_verification == "unavailable"
+
+
 def test_transcribe_timed_diarized_per_segment_lines(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXOMEM_SEMANTIC_SEGMENTS", "1")
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")
@@ -347,6 +514,40 @@ def test_transcribe_timed_render_failure_falls_back_flat(
     r = extract._transcribe(Path("x.wav"), "audio")
     assert r.text == "hello there"
     assert r.engine == f"faster-whisper:{extract.WHISPER_MODEL}"  # no lying +timed marker
+
+
+def test_explicit_timestamp_render_failure_does_not_return_untimed_transcript(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    segs = [_FakeSeg("must stay timed", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+
+    class _BoomSemanticSegments:
+        @staticmethod
+        def render_timed_lines(_segments):
+            raise RuntimeError("renderer exploded")
+
+    monkeypatch.setattr(extract, "_semantic_segments_module", lambda: _BoomSemanticSegments)
+
+    with pytest.raises(
+        extract.TimestampRenderingUnavailable, match="timed transcript rendering failed"
+    ):
+        extract._transcribe(Path("automatic.m4a"), "audio", timestamps=True)
+
+
+def test_explicit_timestamp_transcription_treats_silent_audio_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper([]))
+
+    result = extract._transcribe(Path("silent.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[0:00] (no speech detected)"
+    assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
 
 
 # ---------------- optional: vision captioning (EXOMEM_VISION_CAPTION, default OFF) ----

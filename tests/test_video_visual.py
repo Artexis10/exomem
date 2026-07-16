@@ -333,7 +333,7 @@ def test_worker_reembed_gate_off_not_enqueued(vault, monkeypatch: pytest.MonkeyP
 def test_process_reembed_calls_upsert(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     called = {}
     monkeypatch.setattr(
-        media_worker.embeddings, "upsert_after_write",
+        media_worker.index_sync, "upsert_after_write",
         lambda root, paths: called.setdefault("paths", paths),
     )
     sidecar = vault / "Knowledge Base/Evidence/T/clips/demo.mp4.md"

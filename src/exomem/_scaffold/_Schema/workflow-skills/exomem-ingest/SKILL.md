@@ -15,7 +15,7 @@ Use when the user asks to ingest, add, import, process, or preserve an external 
 ## Workflow
 1. Identify the artifact type: text, article, PDF, dataset, image, audio, video, or mixed media.
 2. Preserve the raw source first with `capture_source`, `preserve_evidence`, or `transfer_artifact`.
-3. For media, use `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`; do not pretend the artifact is plain text.
+3. Media processing is automatic; use `process_media` for immediate reconciliation, actionable status, or retry, then inspect via `read_media`, extracted text/OCR/transcripts, or media-aware `ask_memory`.
 4. If the source is worth distilling, use `compile_source` for planning and `remember` for the compiled note.
 5. Link related prior notes with `connect_memory(operation="suggest-links")`.
 

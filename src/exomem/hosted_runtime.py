@@ -101,6 +101,18 @@ class HostedProcessSettings:
     usage_logging_disabled: bool = True
 
 
+def _current_uid() -> int:
+    """Return the process uid where POSIX ownership exists; stay import-safe on Windows."""
+    getter = getattr(os, "geteuid", None)
+    return int(getter()) if getter is not None else 0
+
+
+def _current_gid() -> int:
+    """Return the process gid where POSIX ownership exists; stay import-safe on Windows."""
+    getter = getattr(os, "getegid", None)
+    return int(getter()) if getter is not None else 0
+
+
 @dataclass(frozen=True)
 class HostedCellConfig:
     """Immutable trusted binding for exactly one hosted cell and vault."""
@@ -111,8 +123,8 @@ class HostedCellConfig:
     log_root: Path
     service_credential: str | None = field(repr=False)
     vault_id: str | None = None
-    runtime_uid: int = field(default_factory=os.geteuid)
-    runtime_gid: int = field(default_factory=os.getegid)
+    runtime_uid: int = field(default_factory=_current_uid)
+    runtime_gid: int = field(default_factory=_current_gid)
     worker_policy_digest: str | None = None
     protocol_version: str = HOSTED_PROTOCOL_VERSION
     feature_grants: tuple[str, ...] = ()

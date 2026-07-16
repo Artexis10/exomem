@@ -1,5 +1,6 @@
 """media_worker — the async extraction pipeline (extract engines stubbed; no GPU)."""
 
+import hashlib
 import os
 import threading
 import time
@@ -7,9 +8,11 @@ from contextlib import contextmanager
 
 import numpy as np
 import pytest
+import yaml
 
-from exomem import embeddings, extract, media_worker, preserve, server_runtime
+from exomem import embeddings, extract, media_jobs, media_worker, preserve, server_runtime
 from exomem import find as find_module
+from exomem.vault import content_hash
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +45,15 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
     )
 
 
+def _parsed_frontmatter(path) -> dict[str, object]:
+    content = path.read_text(encoding="utf-8")
+    assert content.startswith("---\n")
+    raw, _body = content.removeprefix("---\n").split("\n---\n", 1)
+    parsed = yaml.safe_load(raw)
+    assert isinstance(parsed, dict)
+    return parsed
+
+
 def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault)
@@ -52,12 +64,15 @@ def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPat
     assert "extracted_by: pending" in body
 
 
-def test_preserve_media_no_stub_when_extraction_disabled(
+def test_preserve_media_writes_actionable_stub_when_extraction_disabled(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
     result = _preserve_media_stub(vault, filename="rec2.mp3")
-    assert result.sidecar_path is None  # nothing would fill it → don't write a stub
+    assert result.sidecar_path is not None
+    body = (vault / result.sidecar_path).read_text(encoding="utf-8")
+    assert "media_type: audio" in body
+    assert "extracted_by: pending" in body
 
 
 def test_worker_fills_pending_sidecar(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -191,6 +206,240 @@ def test_parent_media_change_during_extraction_skips_stale_sidecar_commit(
     assert "STALE BINARY TRANSCRIPT" not in body
     assert "extracted_by: failed:" not in body
     assert "extracted_by: pending" in body
+
+
+def test_changed_media_identity_is_automatically_reconciled_without_retry(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing
+
+    result = _preserve_media_stub(vault, filename="durable-stale.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    replacement = b"replacement identity"
+
+    def _replace_during_asr(*_args, **_kwargs):
+        binary.write_bytes(replacement)
+        return extract.ExtractResult(
+            text="[0:00] stale transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", _replace_during_asr)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+    assert media_jobs.status(vault)["jobs"] == []
+    assert "processing_state: pending" in sidecar.read_text(encoding="utf-8")
+
+    reconciled = media_processing.reconcile_media(vault, binary)
+
+    assert reconciled.state == media_jobs.PENDING
+    assert reconciled.job_id is not None
+    [pending] = media_jobs.status(vault)["jobs"]
+    assert pending["state"] == media_jobs.PENDING
+    frontmatter = _parsed_frontmatter(sidecar)
+    assert frontmatter["binary_sha256"] == hashlib.sha256(replacement).hexdigest()
+
+
+def test_pending_sidecar_edit_during_durable_asr_is_persisted_as_retryable_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="durable-sidecar-stale.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+
+    def _edit_pending_sidecar(*_args, **_kwargs):
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8") + "\nUSER CANONICAL EDIT\n",
+            encoding="utf-8",
+        )
+        return extract.ExtractResult(
+            text="[0:00] stale transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", _edit_pending_sidecar)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [failed] = media_jobs.status(vault)["jobs"]
+    assert failed["state"] == media_jobs.FAILED
+    assert failed["retryable"] is True
+    assert failed["error"] == "stale extraction: sidecar content changed"
+    assert failed["next_action"] == "review the sidecar changes, then retry media processing"
+    assert "USER CANONICAL EDIT" in sidecar.read_text(encoding="utf-8")
+    assert "stale transcript" not in sidecar.read_text(encoding="utf-8")
+
+
+def test_combined_binary_and_sidecar_stale_remains_actionable(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="combined-stale.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+
+    def _change_both(*_args, **_kwargs):
+        binary.write_bytes(b"replacement media")
+        sidecar.write_text(
+            sidecar.read_text(encoding="utf-8") + "\nUSER CANONICAL EDIT\n",
+            encoding="utf-8",
+        )
+        return extract.ExtractResult(
+            text="[0:00] stale transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    monkeypatch.setattr(extract, "extract_text", _change_both)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [failed] = media_jobs.status(vault)["jobs"]
+    assert failed["state"] == media_jobs.FAILED
+    assert failed["error"] == (
+        "stale extraction: sidecar content changed, media identity changed"
+    )
+    assert failed["next_action"] == "review the sidecar changes, then retry media processing"
+
+
+def test_transient_stable_commit_precondition_is_retried_without_repeating_asr(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="transient-commit.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    extraction_calls = 0
+    commit_calls = 0
+    real_commit = worker._commit_sidecar_extraction
+
+    def _extract_once(*_args, **_kwargs):
+        nonlocal extraction_calls
+        extraction_calls += 1
+        return extract.ExtractResult(
+            text="[0:00] recovered transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    def _transient_commit(*args, **kwargs):
+        nonlocal commit_calls
+        commit_calls += 1
+        if commit_calls == 1:
+            return False
+        return real_commit(*args, **kwargs)
+
+    monkeypatch.setattr(extract, "extract_text", _extract_once)
+    monkeypatch.setattr(worker, "_commit_sidecar_extraction", _transient_commit)
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "complete"
+    assert extraction_calls == 1
+    assert commit_calls == 2
+    assert "[0:00] recovered transcript" in sidecar.read_text(encoding="utf-8")
+
+
+def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="windows-crlf.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Windows transcript committed.",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        ),
+    )
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "complete"
+    content = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: completed" in content
+    assert "[0:00] Windows transcript committed." in content
+
+
+def test_pending_state_cas_preserves_concurrent_completed_transcript(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="pending-cas.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+    completed_bytes: bytes | None = None
+    real_batch = preserve.batch_atomic_write
+
+    def _complete_before_pending_write(*args, **kwargs):
+        nonlocal completed_bytes
+        completed = sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending", "extracted_by: external-asr+timed"
+        )
+        completed += "\n[0:00] External completed transcript must survive.\n"
+        sidecar.write_text(completed, encoding="utf-8")
+        completed_bytes = sidecar.read_bytes()
+        return real_batch(*args, **kwargs)
+
+    monkeypatch.setattr(preserve, "batch_atomic_write", _complete_before_pending_write)
+
+    updated = preserve.update_sidecar_processing_pending(
+        vault,
+        sidecar,
+        attempts=1,
+        expected_hash=expected_hash,
+    )
+
+    assert updated is False
+    assert completed_bytes is not None
+    assert sidecar.read_bytes() == completed_bytes
+    assert "extracted_by: external-asr+timed" in sidecar.read_text(encoding="utf-8")
+
+
+def test_pending_state_cas_updates_unchanged_crlf_sidecar(vault) -> None:
+    result = _preserve_media_stub(vault, filename="pending-cas-crlf.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    expected_hash = content_hash(sidecar.read_text(encoding="utf-8"))
+
+    updated = preserve.update_sidecar_processing_pending(
+        vault,
+        sidecar,
+        attempts=2,
+        expected_hash=expected_hash,
+    )
+
+    assert updated is True
+    content = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: pending" in content
+    assert "processing_attempts: 2" in content
 
 
 def test_clip_compute_stays_outside_guard_and_index_commit_is_inside(
@@ -503,6 +752,123 @@ def test_run_extraction_passes_vault_root(vault, monkeypatch: pytest.MonkeyPatch
     assert seen["vault_root"] == vault
 
 
+@pytest.mark.parametrize(
+    ("filename", "media_type", "do_clip"),
+    [("automatic.m4a", "audio", False), ("automatic.mp4", "video", True)],
+)
+def test_automatic_audio_and_video_jobs_explicitly_require_timestamps(
+    vault,
+    filename: str,
+    media_type: str,
+    do_clip: bool,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    result = _preserve_media_stub(vault, filename=filename)
+    calls: list[tuple[str, bool]] = []
+    clip_calls: list[str] = []
+
+    def _extract_spy(path, media_type=None, vault_root=None, *, timestamps=False):
+        calls.append((media_type, timestamps))
+        return extract.ExtractResult(
+            text="[0:00] automatic transcript",
+            media_type=media_type,
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", _extract_spy)
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    monkeypatch.setattr(worker, "_run_clip", lambda job: clip_calls.append(job.media_type))
+
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type=media_type,
+            do_clip=do_clip,
+        )
+    )
+
+    assert calls == [(media_type, True)]
+    assert clip_calls == (["video"] if do_clip else [])
+    assert "extracted_by: faster-whisper:test+timed" in (
+        vault / result.sidecar_path
+    ).read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("verification", "label"),
+    [("anonymous", "Speaker A"), ("profile-matched", "Enrolled Speaker")],
+)
+def test_worker_persists_speaker_verification_metadata(
+    vault,
+    verification: str,
+    label: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = _preserve_media_stub(vault, filename=f"{verification}.m4a")
+    extracted = extract.ExtractResult(
+        text=f"[0:00] [{label}]: hello",
+        media_type="audio",
+        engine="faster-whisper:test+timed+diarized",
+        speakers=[{"speaker": label, "start": 0.0, "end": 1.0, "text": "hello"}],
+    )
+    extracted.speaker_verification = verification
+    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_kw: extracted)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    worker._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    body = (vault / result.sidecar_path).read_text(encoding="utf-8")
+    assert f"speaker_verification: {verification}" in body
+    assert f"[{label}]: hello" in body
+
+
+def test_worker_does_not_downgrade_human_verified_speaker_state(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="human-reviewed.m4a")
+    sidecar = vault / result.sidecar_path
+    sidecar.write_text(
+        sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending",
+            "extracted_by: pending\nspeaker_verification: human-verified",
+        ),
+        encoding="utf-8",
+    )
+    extracted = extract.ExtractResult(
+        text="[0:00] [Enrolled Speaker]: reviewed",
+        media_type="audio",
+        engine="faster-whisper:test+timed+diarized",
+        speakers=[
+            {
+                "speaker": "Enrolled Speaker",
+                "start": 0.0,
+                "end": 1.0,
+                "text": "reviewed",
+            }
+        ],
+    )
+    extracted.speaker_verification = "profile-matched"
+    monkeypatch.setattr(extract, "extract_text", lambda *_a, **_kw: extracted)
+
+    media_worker.MediaWorker(vault, execution_mode="inline")._process(
+        media_worker._Job(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert "speaker_verification: human-verified" in sidecar.read_text(encoding="utf-8")
+
+
 def test_worker_unavailable_leaves_pending(vault, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
     result = _preserve_media_stub(vault, filename="later.mp3")
@@ -614,6 +980,367 @@ def test_child_marks_unavailable_engine_blocked(vault, monkeypatch: pytest.Monke
 
     assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
     assert store.counts()["blocked"] == 1
+
+
+def test_child_retains_actionable_asr_dependency_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="dependency-blocked.m4a")
+
+    def _unavailable(*_args, **_kwargs):
+        raise extract.ExtractionUnavailable("ASR backend: install the media extra")
+
+    monkeypatch.setattr(extract, "extract_text", _unavailable)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert status["attempts"] == 1
+    assert status["retryable"] is True
+    expected_error = "ExtractionUnavailable: ASR backend: install the media extra"
+    assert status["error"] == expected_error
+    assert status["next_action"] == "install the required media dependency, then retry"
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "blocked"
+    assert frontmatter["processing_attempts"] == 1
+    assert frontmatter["processing_error"] == expected_error
+    assert frontmatter["processing_retryable"] is True
+    assert (
+        frontmatter["processing_next_action"]
+        == "install the required media dependency, then retry"
+    )
+    assert frontmatter["evidence_file"] == result.path
+
+
+def test_child_retains_actionable_corrupt_media_failure(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="corrupt.m4a")
+
+    def _corrupt(*_args, **_kwargs):
+        raise ValueError("invalid audio container: missing moov atom")
+
+    monkeypatch.setattr(extract, "extract_text", _corrupt)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.FAILED
+    assert status["attempts"] == 1
+    assert status["retryable"] is True
+    expected_error = "ValueError: invalid audio container: missing moov atom"
+    assert status["error"] == expected_error
+    assert status["next_action"] == "repair or replace the media artifact, then retry"
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "failed"
+    assert frontmatter["processing_attempts"] == 1
+    assert frontmatter["processing_error"] == expected_error
+    assert frontmatter["processing_retryable"] is True
+    assert (
+        frontmatter["processing_next_action"]
+        == "repair or replace the media artifact, then retry"
+    )
+    assert frontmatter["evidence_file"] == result.path
+
+
+def test_child_blocks_timestamp_renderer_failure_with_renderer_remediation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="renderer-blocked.m4a")
+
+    def _renderer_unavailable(*_args, **_kwargs):
+        raise extract.TimestampRenderingUnavailable("timed renderer: unavailable")
+
+    monkeypatch.setattr(extract, "extract_text", _renderer_unavailable)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    [status] = media_jobs.status(vault)["jobs"]
+    assert status["state"] == media_jobs.BLOCKED
+    assert status["error"] == (
+        "TimestampRenderingUnavailable: timed renderer: unavailable"
+    )
+    assert status["next_action"] == "check the timestamp renderer, then retry"
+    assert "repair or replace" not in status["next_action"]
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "blocked"
+    assert frontmatter["processing_next_action"] == "check the timestamp renderer, then retry"
+
+
+def test_success_refreshes_sidecar_before_completing_durable_job(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(extract, "asr_prewarm_enabled", lambda: False)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+    result = _preserve_media_stub(vault, filename="indexed-success.m4a")
+    sidecar = vault / result.sidecar_path
+    events: list[str] = []
+    original_write = preserve.batch_atomic_write
+    original_complete = media_jobs.MediaJobStore.complete
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: extract.ExtractResult(
+            text="[0:00] indexed transcript",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        ),
+    )
+
+    def _write_and_refresh(*args, **kwargs):
+        events.append("sidecar-write-and-index-refresh")
+        return original_write(*args, **kwargs)
+
+    def _complete_after_commit(store, job):
+        body = sidecar.read_text(encoding="utf-8")
+        assert "[0:00] indexed transcript" in body
+        assert "extracted_by: faster-whisper:test+timed" in body
+        events.append("durable-complete")
+        return original_complete(store, job)
+
+    monkeypatch.setattr(preserve, "batch_atomic_write", _write_and_refresh)
+    monkeypatch.setattr(media_jobs.MediaJobStore, "complete", _complete_after_commit)
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+
+    assert media_worker.run_child(vault, parent_pid=os.getpid(), idle_seconds=0.1) == 0
+
+    assert events == ["sidecar-write-and-index-refresh", "durable-complete"]
+    assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="claim-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: external-asr+timed"
+    )
+    completed += "\n[0:00] Transcript won the startup race.\n"
+    sidecar.write_text(completed, encoding="utf-8")
+    before_body = sidecar.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail("ASR must not run for a completed transcript"),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(claimed)
+
+    assert outcome.state == "complete"
+    after = sidecar.read_text(encoding="utf-8")
+    assert after.split("\n---\n", 1)[1] == before_body
+    assert "extracted_by: external-asr+timed" in after
+    store.complete(claimed)
+    assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_external_completed_transcript_written_during_asr_wins_final_commit_race(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="commit-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    external_bytes: bytes | None = None
+
+    def external_completion(*_args, **_kwargs):
+        nonlocal external_bytes
+        completed = sidecar.read_text(encoding="utf-8").replace(
+            "extracted_by: pending", "extracted_by: external-asr+timed"
+        ).replace("processing_state: pending", "processing_state: completed")
+        completed += "\n[0:00] External transcript must win.\n"
+        sidecar.write_text(completed, encoding="utf-8")
+        external_bytes = sidecar.read_bytes()
+        return extract.ExtractResult(
+            text="[0:00] Worker transcript must lose.",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", external_completion)
+    monkeypatch.setattr(media_worker, "_content_digest", lambda _path: "stable")
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "stale"
+    assert external_bytes is not None
+    assert sidecar.read_bytes() == external_bytes
+    assert "Worker transcript must lose" not in sidecar.read_text(encoding="utf-8")
+
+
+def test_external_completed_transcript_survives_asr_failure_commit_race(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="failure-commit-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    external_bytes: bytes | None = None
+
+    def external_completion_then_failure(*_args, **_kwargs):
+        nonlocal external_bytes
+        preserve.update_sidecar_extraction(
+            vault,
+            sidecar,
+            text="[0:00] External transcript must survive ASR failure.",
+            engine="external-asr+timed",
+            speaker_verification="unavailable",
+        )
+        external_bytes = sidecar.read_bytes()
+        raise ValueError("decoder failed after external completion")
+
+    monkeypatch.setattr(extract, "extract_text", external_completion_then_failure)
+    monkeypatch.setattr(media_worker, "_content_digest", lambda _path: "stable")
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "stale"
+    assert external_bytes is not None
+    assert sidecar.read_bytes() == external_bytes
+    content = sidecar.read_text(encoding="utf-8")
+    assert "extracted_by: external-asr+timed" in content
+    assert "processing_state: completed" in content
+    assert "External transcript must survive ASR failure" in content
+    assert "extracted_by: failed" not in content
+    assert "decoder failed after external completion" not in content
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail("completed transcript must not be reprocessed"),
+    )
+    assert worker._process(job).state == "complete"
+    assert sidecar.read_bytes() == external_bytes
+
+
+def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index, index_sync
+
+    result = _preserve_media_stub(vault, filename="index-retry.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    calls = 0
+
+    def transcribe(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return extract.ExtractResult(
+            text="[0:00] transcript survives index failure",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("lexical index offline")),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert outcome.state == "complete"
+    assert calls == 1
+    assert "transcript survives index failure" in sidecar.read_text(encoding="utf-8")
+    status = deferred_index.full_status(vault)
+    assert status["count"] == 1
+    assert status["next_action"] == "retry deferred index refresh"
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", lambda *_a, **_kw: True)
+    assert index_sync.drain_deferred_work(vault) == 1
+    assert deferred_index.full_status(vault)["count"] == 0
+    assert calls == 1
+
+
+def test_process_worker_restart_preserves_blocked_job_until_explicit_retry(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+    result = _preserve_media_stub(vault, filename="restart-blocked.mp3")
+    store = media_jobs.MediaJobStore(vault)
+    job_id = store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=vault / result.path,
+            sidecar_path=vault / result.sidecar_path,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == job_id
+    error = "ExtractionUnavailable: install the ASR extra"
+    store.mark(job_id, media_jobs.BLOCKED, error)
+    monkeypatch.setattr(media_worker.MediaWorker, "_supervise", lambda _self: None)
+    monkeypatch.setattr(extract, "log_diarization_readiness", lambda _vault: None)
+
+    worker = media_worker.MediaWorker(vault, execution_mode="process")
+    worker.start()
+    try:
+        [status] = media_jobs.status(vault)["jobs"]
+        assert status["state"] == media_jobs.BLOCKED
+        assert status["attempts"] == 1
+        assert status["error"] == error
+    finally:
+        worker.stop()
 
 
 def test_media_runtime_failure_does_not_deny_core_service(

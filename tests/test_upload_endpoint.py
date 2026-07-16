@@ -12,6 +12,7 @@ import hashlib
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from pathlib import Path
 
 import httpx
 import pytest
@@ -109,6 +110,130 @@ def test_upload_happy_path_lands_in_evidence(vault, monkeypatch: pytest.MonkeyPa
     assert written.read_bytes() == b"\x89PNGrealbytes"
 
 
+def test_upload_supported_media_routes_through_canonical_reconciliation(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, server_runtime
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    calls: list[tuple[Path, Path, bool]] = []
+
+    class Worker:
+        def enqueue(self, **_kwargs) -> None:
+            pytest.fail("upload bypassed canonical media reconciliation")
+
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: Worker())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda root, path, *, explicit=True: calls.append((root, path, explicit)),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.post(
+        "/upload",
+        files={"file": ("field-note.m4a", b"audio bytes", "audio/mp4")},
+        data={"scope": "Interviews", "category": "Raw"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    binary = vault / body["path"]
+    assert calls == [(vault, binary, False)]
+    assert body["stored_path"] == body["path"]
+    assert body["sidecar_path"].endswith("field-note.m4a.md")
+    assert body["size"] == len(b"audio bytes")
+    assert body["hash"] == hashlib.sha256(b"audio bytes").hexdigest()
+    assert body["media_id"] == f"sha256:{body['hash']}"
+    assert body["content_type"] == "audio/mp4"
+
+
+def test_upload_reconciles_when_media_worker_is_unavailable(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, server_runtime
+
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: None)
+    calls: list[tuple[Path, Path, bool]] = []
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda root, path, *, explicit=True: calls.append((root, path, explicit)),
+    )
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+
+    response = client.post(
+        "/upload",
+        files={"file": ("offline.mp3", b"offline audio", "audio/mpeg")},
+        data={"scope": "Interviews", "category": "Raw"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    body = response.json()
+    assert calls == [(vault, vault / body["path"], False)]
+    assert body["sidecar_path"].endswith("offline.mp3.md")
+    assert "extracted_by: pending" in (vault / body["sidecar_path"]).read_text(
+        encoding="utf-8"
+    )
+
+
+def test_upload_reconciliation_does_not_block_async_event_loop(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, server_runtime, server_transfer
+
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION")
+    monkeypatch.setattr(server_runtime, "_start_media_worker", lambda _vault: object())
+    entered = threading.Event()
+    release = threading.Event()
+    reconcile_threads: list[int] = []
+
+    def blocking_reconcile(root, path, *, explicit=True) -> None:
+        assert root == vault
+        assert path.name == "blocking.m4a"
+        reconcile_threads.append(threading.get_ident())
+        entered.set()
+        release.wait(0.5)
+
+    monkeypatch.setattr(media_processing, "reconcile_media", blocking_reconcile)
+    app = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret").app
+
+    async def real_threadpool(function, *args, **kwargs):
+        return await asyncio.to_thread(function, *args, **kwargs)
+
+    monkeypatch.setattr(server_transfer, "run_in_threadpool", real_threadpool)
+
+    async def scenario() -> httpx.Response:
+        loop_thread = threading.get_ident()
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            request = asyncio.create_task(
+                client.post(
+                    "/upload",
+                    files={"file": ("blocking.m4a", b"audio", "audio/mp4")},
+                    data={"scope": "Interviews", "category": "Raw"},
+                    headers={"Authorization": "Bearer sekret"},
+                )
+            )
+            deadline = asyncio.get_running_loop().time() + 2.0
+            while not entered.is_set() and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.01)
+            assert entered.is_set(), "reconciliation never started"
+            assert not request.done(), "blocking reconciliation stalled the event loop"
+            assert reconcile_threads == [reconcile_threads[0]]
+            assert reconcile_threads[0] != loop_thread
+            release.set()
+            return await request
+
+    response = asyncio.run(scenario())
+    assert response.status_code == 201, response.text
+
+
 def test_upload_parses_before_guard_and_preserves_inside_it(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -156,6 +281,43 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
 
     assert response.status_code == 201, response.text
     assert events == ["guard-enter", "preserve", "guard-exit"]
+
+
+def test_upload_media_reconciliation_uses_writer_authority(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, writer_lease
+
+    depth = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, guarded_vault):
+            nonlocal depth
+            assert guarded_vault == vault
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("post-upload reconciliation escaped mutation guard"),
+    )
+    response = client.post(
+        "/upload",
+        files={"file": ("guarded.m4a", b"audio", "audio/mp4")},
+        data={"scope": "S", "category": "C"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert depth == 0
 
 
 @pytest.mark.parametrize(

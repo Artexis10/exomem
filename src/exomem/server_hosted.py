@@ -1273,7 +1273,6 @@ def register_hosted_routes(
                                         text=metadata["text"],
                                         max_bytes=v1_file_max_bytes,
                                     ),
-                                    reclaim_pending=True,
                                 )
 
                     result = await run_in_threadpool(commit_upload)

@@ -80,6 +80,87 @@ def test_collisions_and_incomplete_semantics_are_stable_findings() -> None:
     ]
 
 
+@pytest.mark.parametrize(
+    ("extensions", "collision_path", "expected"),
+    [
+        (
+            {
+                "science.bad": {
+                    "parent": "supports",
+                    "description": "Short relation",
+                    "extra": True,
+                },
+                "science.bad.extra": "not an object",
+            },
+            "extensions.science.bad.extra",
+            {
+                ("unknown_field", "science.bad"),
+                ("invalid_key", "science.bad.extra"),
+                ("invalid_definition", "science.bad.extra"),
+            },
+        ),
+        (
+            {
+                "science.bad": {
+                    "parent": "supports",
+                    "description": "Short relation",
+                    "extra.parent": True,
+                },
+                "science.bad.extra": {
+                    "parent": "not_core",
+                    "description": "Long relation",
+                },
+            },
+            "extensions.science.bad.extra.parent",
+            {
+                ("unknown_field", "science.bad"),
+                ("invalid_parent", "science.bad.extra"),
+            },
+        ),
+    ],
+)
+def test_extension_findings_carry_raw_relation_identity_when_paths_collide(
+    extensions: dict[str, object],
+    collision_path: str,
+    expected: set[tuple[str, str]],
+) -> None:
+    registry = relation_registry.load_registry(
+        proposal={"schema_version": 1, "extensions": extensions}
+    )
+
+    collided = [
+        finding for finding in registry.findings if finding["path"] == collision_path
+    ]
+
+    assert {
+        (finding["code"], finding["relation"])
+        for finding in collided
+    } == expected
+    assert all(
+        {"code", "path", "span", "severity", "detail"} <= set(finding)
+        for finding in collided
+    )
+
+
+def test_root_registry_findings_have_no_relation_identity() -> None:
+    registry = relation_registry.load_registry(
+        proposal={
+            "schema_version": 2,
+            "extensions": ["not an object"],
+            "unexpected": True,
+        }
+    )
+
+    root_findings = [
+        finding
+        for finding in registry.findings
+        if finding["path"] in {"schema_version", "extensions", "unexpected"}
+    ]
+
+    assert len(root_findings) == 3
+    assert all("relation" not in finding for finding in root_findings)
+
+
 def test_unknown_semantic_relation_is_retained_but_validation_reports_it() -> None:
     body = "## Finding\n- relations: science.replicates: [[Target]]\n\nObserved."
     document = semantic_blocks.parse_semantic_blocks(body)

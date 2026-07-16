@@ -5,7 +5,11 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from exomem_provisioner.config import PROVISIONER_PROTOCOL, ProvisionerSettings
+from exomem_provisioner.config import (
+    PROVISIONER_PROTOCOL,
+    ProvisionerSettings,
+    VolumeWorkerSettings,
+)
 from exomem_provisioner.logging import ContentFreeFormatter
 
 
@@ -120,3 +124,36 @@ def test_settings_require_bounded_failure_ceiling_and_private_trusted_proxies() 
     for invalid in (0, 101):
         with pytest.raises(ValidationError):
             _settings(max_failure_attempts=invalid)
+
+
+def test_volume_worker_requires_public_capacity_verification_settings() -> None:
+    values = {
+        "hcloud_token": "h" * 32,
+        "provider_recovery_signing_key": "a" * 43,
+        "volume_encryption_secret_name": "volume-encryption",
+        "volume_encryption_secret_namespace": "exomem-platform",
+        "location": "fsn1",
+        "worker_id": "volume-worker",
+        "capacity_receipt_public_key": "b" * 43,
+        "capacity_contract_path": "/etc/exomem/capacity/private-alpha-capacity-v1.json",
+        "capacity_receipt_namespace": "exomem-platform",
+        "capacity_receipt_config_map": "exomem-capacity-receipt",
+        "hcloud_server_id": 101,
+    }
+
+    settings = VolumeWorkerSettings(**values)
+
+    assert settings.hcloud_server_id == 101
+    for field in (
+        "capacity_receipt_public_key",
+        "capacity_contract_path",
+        "capacity_receipt_namespace",
+        "capacity_receipt_config_map",
+        "hcloud_server_id",
+    ):
+        invalid = dict(values)
+        invalid.pop(field)
+        with pytest.raises(ValidationError):
+            VolumeWorkerSettings(**invalid)
+    with pytest.raises(ValidationError):
+        VolumeWorkerSettings(**{**values, "capacity_contract_path": "relative.json"})

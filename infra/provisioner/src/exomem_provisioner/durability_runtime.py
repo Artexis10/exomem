@@ -126,8 +126,8 @@ class BucketScopedB2Client:
             raise ValueError("bucket-scoped B2 clients require an exact allowlist")
         self._clients = dict(clients)
 
-    def list_objects_v2(self, **arguments: Any) -> dict[str, Any]:
-        return self._client(arguments).list_objects_v2(**arguments)
+    def list_object_versions(self, **arguments: Any) -> dict[str, Any]:
+        return self._client(arguments).list_object_versions(**arguments)
 
     def head_object(self, **arguments: Any) -> dict[str, Any]:
         return self._client(arguments).head_object(**arguments)
@@ -266,12 +266,43 @@ class RecoveryKeyRepository(Protocol):
 
     async def tenant_recovery_objects(self, tenant_id: str) -> list[Any]: ...
 
+    async def tenant_export_deliveries(self, tenant_id: str) -> list[Any]: ...
+
+    async def mark_export_delivery_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+    ) -> object: ...
+
 
 class RepositoryWrappedKeyStore:
     """Destroy a tenant-scoped wrapped key only after provider absence proof."""
 
     def __init__(self, repository: RecoveryKeyRepository) -> None:
         self._repository = repository
+
+    async def tenant_recovery_objects(self, tenant_id: str) -> list[Any]:
+        return await self._repository.tenant_recovery_objects(tenant_id)
+
+    async def tenant_export_deliveries(self, tenant_id: str) -> list[Any]:
+        return await self._repository.tenant_export_deliveries(tenant_id)
+
+    async def mark_recovery_object_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        await self._repository.mark_recovery_object_deleted(reference, tenant_id=tenant_id)
+
+    async def mark_export_delivery_deleted(
+        self,
+        reference: str,
+        *,
+        tenant_id: str,
+    ) -> None:
+        await self._repository.mark_export_delivery_deleted(reference, tenant_id=tenant_id)
 
     async def destroy(self, reference: str, *, tenant_id: str) -> None:
         # LiveDeletionProvider invokes this only after its independent object
@@ -287,6 +318,16 @@ class RepositoryWrappedKeyStore:
             and record.key_destroyed_at is not None
             for record in records
         )
+
+    async def deletion_complete(self, tenant_id: str) -> bool:
+        records = await self._repository.tenant_recovery_objects(tenant_id)
+        deliveries = await self._repository.tenant_export_deliveries(tenant_id)
+        return all(
+            record.deleted_at is not None
+            and record.wrapped_data_key is None
+            and record.key_destroyed_at is not None
+            for record in records
+        ) and all(record.deleted_at is not None for record in deliveries)
 
 
 class CurrentFenceAuthority(Protocol):
@@ -359,6 +400,7 @@ def build_deletion_operation_worker(
         DeletionOnlyDriver(authority=authority, workflow=workflow),
         worker_id=worker_id,
         allowed_actions=DELETION_OPERATION_ACTIONS,
+        resume_claim=True,
     )
 
 

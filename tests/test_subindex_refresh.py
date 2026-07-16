@@ -64,6 +64,7 @@ def test_note_updates_top_index_notes_count(vault: Path) -> None:
         content="# t\n\n## Claim\n\nBody.\n",
         note_type="insight",
         title="New insight for count",
+        status="draft",
         today=TODAY,
     )
     after = top.read_text(encoding="utf-8")
@@ -96,6 +97,7 @@ def test_note_updates_notes_subindex_h3_count(vault: Path) -> None:
         content="# t\n\n## Claim\n\nBody.\n",
         note_type="insight",
         title="Insight that bumps subindex",
+        status="draft",
         today=TODAY,
     )
     text = notes_idx.read_text(encoding="utf-8")
@@ -112,6 +114,7 @@ def test_note_updates_notes_subindex_subfolder_count(vault: Path) -> None:
         note_type="research-note",
         title="New project-alpha finding",
         project="project-alpha",
+        status="draft",
         today=TODAY,
     )
     text = notes_idx.read_text(encoding="utf-8")
@@ -147,6 +150,7 @@ def test_subindex_refresh_supports_nested_obsidian_root(vault: Path) -> None:
         note_type="research-note",
         title="Nested root subindex note",
         project="project-alpha",
+        status="draft",
         today=TODAY,
     )
     link_module.link(
@@ -174,6 +178,7 @@ def test_subindex_preserves_hand_curated_descriptions(vault: Path) -> None:
         note_type="research-note",
         title="Yet another project-alpha note",
         project="project-alpha",
+        status="draft",
         today=TODAY,
     )
     text = notes_idx.read_text(encoding="utf-8")
@@ -192,6 +197,7 @@ def test_subindex_skip_when_missing(vault: Path) -> None:
         content="# t\n\n## Claim\n\nBody.\n",
         note_type="insight",
         title="Works without subindex",
+        status="draft",
         today=TODAY,
     )
     assert (vault / result.path).exists()
@@ -224,6 +230,7 @@ def test_no_obsolete_counts_warning_on_note(vault: Path) -> None:
         content="# t\n\n## Claim\n\nB.\n",
         note_type="insight",
         title="No stale counts warning",
+        status="draft",
         today=TODAY,
     )
     for w in result.warnings:

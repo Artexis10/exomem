@@ -26,6 +26,7 @@ from exomem_provisioner.durability_repository import (
     RunKind,
 )
 from exomem_provisioner.durability_store import ProviderObjectHead
+from exomem_provisioner.provider_identity import ProviderReference
 
 
 class RestoreCapability:
@@ -47,6 +48,7 @@ class DeliveryCapability:
     def __init__(self) -> None:
         self.objects: dict[str, bytes] = {}
         self.ttls: list[int] = []
+        self.before_presign = None
 
     async def put_file(self, key, source, *, metadata, retain_until):
         assert retain_until is None
@@ -55,6 +57,8 @@ class DeliveryCapability:
 
     async def presigned_download(self, key: str, *, ttl_seconds: int) -> str:
         assert key in self.objects
+        if self.before_presign is not None:
+            await self.before_presign(key)
         self.ttls.append(ttl_seconds)
         return f"https://downloads.invalid/{key}?ttl={ttl_seconds}"
 
@@ -64,6 +68,7 @@ class DeleteCapability:
         self.key = key
         self.deleted = False
         self.delivery_objects: dict[str, ProviderObjectHead] = {}
+        self.forbid_listing = False
 
     async def head(self, key: str) -> ProviderObjectHead | None:
         return self.delivery_objects.get(key)
@@ -71,6 +76,7 @@ class DeleteCapability:
     async def list_page(
         self, *, prefix: str, continuation_token: str | None = None
     ) -> tuple[list[str], str | None]:
+        assert self.forbid_listing is False, "delivery GC used an unbounded provider listing"
         keys = sorted(key for key in self.delivery_objects if key.startswith(prefix))
         offset = int(continuation_token or "0")
         page = keys[offset : offset + 1]
@@ -143,7 +149,11 @@ async def export_service_context(tmp_path: Path):
         claim_generation=claim.claim_generation,
         value=RecoveryObjectInput(
             opaque_reference="export_opaque_reference",
-            provider_reference=f"b2://{key}#version-opaque",
+            provider_reference=ProviderReference.b2(
+                bucket="user-export-bucket",
+                key=key,
+                version_id="version-opaque",
+            ),
             wrapped_data_key=receipt.wrapped_data_key,
             archive_sha256=identity.archive_sha256,
             manifest_sha256="b" * 64,
@@ -197,7 +207,16 @@ async def export_service_context(tmp_path: Path):
 async def test_release_and_download_return_only_opaque_short_lived_product_values(
     export_service_context,
 ) -> None:
-    _, service, _, delivery, _, plaintext = export_service_context
+    repository, service, _, delivery, _, plaintext = export_service_context
+
+    async def assert_delivery_is_durable_before_presign(key: str) -> None:
+        records = await repository.tenant_export_deliveries("tenant-durable-alpha")
+        assert len(records) == 1
+        parsed = ProviderReference.parse(records[0].provider_reference)
+        assert parsed["key"] == key
+        assert parsed["objectVersionId"] == "delivery-v1"
+
+    delivery.before_presign = assert_delivery_is_durable_before_presign
     assert await service.release("export_opaque_reference", tenant_id="tenant-durable-alpha") == {
         "released": True
     }
@@ -210,6 +229,7 @@ async def test_release_and_download_return_only_opaque_short_lived_product_value
     assert result["expiresAt"].endswith("Z")
     assert delivery.ttls == [900]
     assert list(delivery.objects.values()) == [plaintext]
+    assert len(await repository.tenant_export_deliveries("tenant-durable-alpha")) == 1
     assert "b2://" not in str(result)
 
 
@@ -265,25 +285,52 @@ async def test_privileged_expiry_sweep_deletes_due_export_and_proves_absence(
 
 
 @pytest.mark.asyncio
-async def test_plaintext_delivery_sweep_is_paginated_and_preserves_unexpired_objects(
+async def test_plaintext_delivery_sweep_is_ledger_driven_and_preserves_unexpired_objects(
     export_service_context,
     tmp_path: Path,
 ) -> None:
     repository, _, restore, delivery, deletion, _ = export_service_context
+    source = await repository.get_recovery_object("export_opaque_reference")
+    assert source is not None
     expired = "user-export-delivery/aa/expired.portable"
     live = "user-export-delivery/bb/live.portable"
+    expired_at = source.verified_at + timedelta(minutes=10)
+    live_until = source.verified_at + timedelta(minutes=50)
+    checked_at = source.verified_at + timedelta(minutes=30)
+    await repository.record_export_delivery(
+        source_object_id=source.id,
+        tenant_id=source.tenant_id,
+        provider_reference=ProviderReference.b2(
+            bucket="user-export-bucket",
+            key=expired,
+            version_id="expired-v1",
+        ),
+        expires_at=expired_at,
+        verified_at=source.verified_at,
+    )
+    await repository.record_export_delivery(
+        source_object_id=source.id,
+        tenant_id=source.tenant_id,
+        provider_reference=ProviderReference.b2(
+            bucket="user-export-bucket",
+            key=live,
+            version_id="live-v1",
+        ),
+        expires_at=live_until,
+        verified_at=source.verified_at,
+    )
     deletion.delivery_objects = {
         expired: ProviderObjectHead(
             expired,
             10,
-            {"expires-at": "2030-01-01T00:00:00Z"},
+            {"expires-at": expired_at.isoformat()},
             "expired-v1",
             None,
         ),
         live: ProviderObjectHead(
             live,
             10,
-            {"expires-at": "2040-01-01T00:00:00Z"},
+            {"expires-at": live_until.isoformat()},
             "live-v1",
             None,
         ),
@@ -296,7 +343,7 @@ async def test_plaintext_delivery_sweep_is_paginated_and_preserves_unexpired_obj
         cipher=ChunkedArchiveCipher(chunk_size=16 * 1024),
         key_wrapper=AesGcmKeyWrapper.from_secret("export-delivery-root"),
         scratch_root=tmp_path / "delivery-scratch",
-        clock=lambda: datetime(2035, 1, 1, tzinfo=UTC),
+        clock=lambda: checked_at,
     )
 
     assert await service.delete_expired_deliveries() == 1
@@ -304,15 +351,75 @@ async def test_plaintext_delivery_sweep_is_paginated_and_preserves_unexpired_obj
 
 
 @pytest.mark.asyncio
+async def test_plaintext_delivery_sweep_uses_durable_exact_version_without_provider_listing(
+    export_service_context,
+    tmp_path: Path,
+) -> None:
+    repository, _, restore, delivery, deletion, _ = export_service_context
+    source = await repository.get_recovery_object("export_opaque_reference")
+    assert source is not None
+    key = "user-export-delivery/aa/ledger.portable"
+    exact_reference = ProviderReference.b2(
+        bucket="user-export-bucket",
+        key=key,
+        version_id="ledger-delivery-v1",
+    )
+    await repository.record_export_delivery(
+        source_object_id=source.id,
+        tenant_id=source.tenant_id,
+        provider_reference=exact_reference,
+        expires_at=source.expires_at - timedelta(seconds=1),
+        verified_at=source.verified_at,
+    )
+    deletion.delivery_objects[key] = ProviderObjectHead(
+        key,
+        10,
+        {"expires-at": (source.expires_at - timedelta(seconds=1)).isoformat()},
+        "ledger-delivery-v1",
+        None,
+    )
+    deletion.forbid_listing = True
+    service = ExportObjectService(
+        repository=repository,
+        restore_store=restore,
+        delivery_store=delivery,
+        deletion_store=deletion,
+        cipher=ChunkedArchiveCipher(chunk_size=16 * 1024),
+        key_wrapper=AesGcmKeyWrapper.from_secret("export-delivery-root"),
+        scratch_root=tmp_path / "delivery-scratch",
+        clock=lambda: source.expires_at + timedelta(seconds=1),
+    )
+
+    assert await service.delete_expired_deliveries() == 1
+    assert key not in deletion.delivery_objects
+    records = await repository.tenant_export_deliveries("tenant-durable-alpha")
+    assert records[0].deleted_at == source.expires_at + timedelta(seconds=1)
+
+
+@pytest.mark.asyncio
 async def test_least_privilege_gc_needs_no_restore_delivery_or_wrapping_capability(
     export_service_context,
 ) -> None:
     repository, _, _, _, deletion, _ = export_service_context
+    source = await repository.get_recovery_object("export_opaque_reference")
+    assert source is not None
     delivery_key = "user-export-delivery/aa/expired.portable"
+    delivery_expiry = source.expires_at - timedelta(seconds=1)
+    await repository.record_export_delivery(
+        source_object_id=source.id,
+        tenant_id=source.tenant_id,
+        provider_reference=ProviderReference.b2(
+            bucket="user-export-bucket",
+            key=delivery_key,
+            version_id="delivery-v1",
+        ),
+        expires_at=delivery_expiry,
+        verified_at=source.verified_at,
+    )
     deletion.delivery_objects[delivery_key] = ProviderObjectHead(
         delivery_key,
         10,
-        {"expires-at": "2030-01-01T00:00:00Z"},
+        {"expires-at": delivery_expiry.isoformat()},
         "delivery-v1",
         None,
     )

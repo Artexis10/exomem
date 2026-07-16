@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import env_compat, hosted_runtime, privacy_log, project_keys, schema
+from . import env_compat, hosted_runtime, media_processing, privacy_log, project_keys, schema
 from .hosted_runtime import (
     HostedBindingV2,
     HostedCellConfig,
@@ -302,16 +302,61 @@ def _start_compute_runtime(vault_root: Path) -> None:
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
     worker = _create_media_worker(vault_root)
+    unavailable_reason: str | None = None
+    unavailable_action: str | None = None
     if worker is None:
-        return None
-    try:
-        worker.start()
-    except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+        if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+            unavailable_reason = (
+                "MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+            )
+            unavailable_action = (
+                "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+                "restart the service, then retry"
+            )
+        else:
+            unavailable_reason = "MediaRuntimeUnavailable: media worker construction failed"
+            unavailable_action = (
+                "fix the media runtime configuration, restart the service, then retry"
+            )
+    if worker is not None:
         try:
-            worker.stop()
-        except Exception:  # noqa: BLE001 - startup degradation must remain soft
-            pass
-        log.warning("media runtime unavailable; core service continuing: %s", exc)
+            worker.start()
+        except Exception as exc:  # noqa: BLE001 - media must never deny the core service
+            try:
+                worker.stop()
+            except Exception:  # noqa: BLE001 - startup degradation must remain soft
+                pass
+            log.warning("media runtime unavailable; core service continuing: %s", exc)
+            worker = None
+            unavailable_reason = f"MediaRuntimeUnavailable: {type(exc).__name__}: {exc}"
+            unavailable_action = (
+                "fix the media runtime configuration, restart the service, then retry"
+            )
+    if unavailable_reason is not None and unavailable_action is not None:
+        media_processing.set_media_runtime_unavailable(
+            vault_root,
+            reason=unavailable_reason,
+            next_action=unavailable_action,
+        )
+    else:
+        media_processing.set_media_runtime_available(vault_root)
+    try:
+        from .writer_lease import get_manager
+
+        with get_manager().mutation_guard(vault_root):
+            media_processing.reconcile_all_media(
+                vault_root,
+                limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+            )
+            if unavailable_reason is not None and unavailable_action is not None:
+                media_processing.mark_processing_unavailable(
+                    vault_root,
+                    reason=unavailable_reason,
+                    next_action=unavailable_action,
+                )
+    except Exception as exc:  # noqa: BLE001 - startup discovery is best-effort
+        log.warning("media worker startup discovery failed: %s", exc)
+    if worker is None:
         return None
     try:
         worker.scan_pending()

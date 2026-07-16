@@ -183,22 +183,98 @@ class B2RestoreObjectStore(_B2StoreBase):
 class B2DeletionObjectStore(_B2StoreBase):
     """Short-lived privileged capability: delete and independently prove absence."""
 
+    _EXACT_MAX_KEYS = 100
+    _EXACT_MAX_PAGES = 10
+    _EXACT_MAX_ITEMS = 1000
+
     async def delete(
         self,
         key: str,
         *,
         version_id: str | None = None,
-        bypass_governance: bool = False,
     ) -> None:
-        arguments: dict[str, Any] = {"Bucket": self._bucket, "Key": key}
-        if version_id is not None:
-            arguments["VersionId"] = version_id
-        if bypass_governance:
-            arguments["BypassGovernanceRetention"] = True
+        if not version_id:
+            raise ProviderObjectConflict("B2 deletion requires an exact object version ID")
+        arguments: dict[str, Any] = {
+            "Bucket": self._bucket,
+            "Key": key,
+            "VersionId": version_id,
+        }
         await asyncio.to_thread(self._client.delete_object, **arguments)
 
     async def absent(self, key: str) -> bool:
-        return await self.head(key) is None
+        if not key:
+            raise ProviderObjectConflict("B2 absence proof requires an exact key")
+        key_marker: str | None = None
+        version_marker: str | None = None
+        seen_cursors: set[tuple[str, str]] = set()
+        total_items = 0
+        for _page_number in range(1, self._EXACT_MAX_PAGES + 1):
+            arguments: dict[str, Any] = {
+                "Bucket": self._bucket,
+                "Prefix": key,
+                "MaxKeys": self._EXACT_MAX_KEYS,
+            }
+            if key_marker is not None:
+                arguments["KeyMarker"] = key_marker
+            if version_marker is not None:
+                arguments["VersionIdMarker"] = version_marker
+            response = await asyncio.to_thread(self._client.list_object_versions, **arguments)
+            page_items = 0
+            moved_beyond_exact_key = False
+            for group in ("Versions", "DeleteMarkers"):
+                entries = response.get(group, [])
+                if not isinstance(entries, list):
+                    raise ProviderObjectConflict("provider returned invalid object-version listing")
+                page_items += len(entries)
+                previous_entry_key: str | None = None
+                for entry in entries:
+                    if not isinstance(entry, dict) or not isinstance(entry.get("Key"), str):
+                        raise ProviderObjectConflict(
+                            "provider returned invalid object-version listing"
+                        )
+                    entry_key = entry["Key"]
+                    if previous_entry_key is not None and entry_key < previous_entry_key:
+                        raise ProviderObjectConflict(
+                            "provider returned out-of-order object-version listing"
+                        )
+                    previous_entry_key = entry_key
+                    if entry_key < key:
+                        raise ProviderObjectConflict(
+                            "provider object-version listing moved backwards"
+                        )
+                    if entry["Key"] == key:
+                        if not isinstance(entry.get("VersionId"), str) or not entry["VersionId"]:
+                            raise ProviderObjectConflict(
+                                "provider returned invalid object-version identity"
+                            )
+                        return False
+                    moved_beyond_exact_key = True
+            if page_items > self._EXACT_MAX_KEYS:
+                raise ProviderObjectConflict("provider object-version page exceeded its bound")
+            total_items += page_items
+            if total_items > self._EXACT_MAX_ITEMS:
+                raise ProviderObjectConflict("provider object-version listing exceeded its bound")
+            if moved_beyond_exact_key:
+                return True
+            if not response.get("IsTruncated"):
+                return True
+            next_key = response.get("NextKeyMarker")
+            next_version = response.get("NextVersionIdMarker")
+            if not isinstance(next_key, str) or not next_key:
+                raise ProviderObjectConflict("provider returned invalid object-version cursor")
+            if next_key < key or (key_marker is not None and next_key < key_marker):
+                raise ProviderObjectConflict("provider object-version cursor moved backwards")
+            if next_key > key:
+                return True
+            if not isinstance(next_version, str) or not next_version:
+                raise ProviderObjectConflict("provider returned invalid object-version cursor")
+            cursor = (next_key, next_version)
+            if cursor in seen_cursors:
+                raise ProviderObjectConflict("provider object-version cursor did not advance")
+            seen_cursors.add(cursor)
+            key_marker, version_marker = cursor
+        raise ProviderObjectConflict("provider object-version listing exceeded its page bound")
 
 
 class B2PortableDeliveryStore(_B2StoreBase):

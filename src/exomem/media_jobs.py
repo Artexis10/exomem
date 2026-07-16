@@ -21,7 +21,10 @@ PENDING = "pending"
 RUNNING = "running"
 BLOCKED = "blocked"
 FAILED = "failed"
+COMPLETED = "completed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
+STATUS_JOB_LIMIT = 100
+DISCOVERY_CURSOR_KEY = "discovery_cursor"
 
 
 def job_store_path(vault_root: Path) -> Path:
@@ -137,12 +140,23 @@ class MediaJobStore:
                     "CREATE INDEX IF NOT EXISTS jobs_state_id ON jobs(state, id)"
                 )
                 conn.execute(
+                    "CREATE INDEX IF NOT EXISTS jobs_binary_rel ON jobs(binary_rel)"
+                )
+                conn.execute(
                     """
                     CREATE TABLE IF NOT EXISTS runtime (
                         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
                         worker_pid INTEGER,
                         idle_seconds REAL,
                         updated_at REAL NOT NULL
+                    )
+                    """
+                )
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS meta (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
                     )
                     """
                 )
@@ -175,15 +189,7 @@ class MediaJobStore:
                         do_ocr = MAX(jobs.do_ocr, excluded.do_ocr),
                         do_clip = MAX(jobs.do_clip, excluded.do_clip),
                         do_reembed = MAX(jobs.do_reembed, excluded.do_reembed),
-                        state = CASE
-                            WHEN jobs.state = 'running' THEN jobs.state
-                            ELSE 'pending'
-                        END,
-                        updated_at = excluded.updated_at,
-                        last_error = CASE
-                            WHEN jobs.state = 'running' THEN jobs.last_error
-                            ELSE NULL
-                        END
+                        updated_at = excluded.updated_at
                     """,
                     (
                         key,
@@ -199,6 +205,20 @@ class MediaJobStore:
                 )
                 row = conn.execute("SELECT id FROM jobs WHERE job_key = ?", (key,)).fetchone()
                 return int(row[0])
+        finally:
+            conn.close()
+
+    def discard(self, job: MediaJob) -> int:
+        """Remove the durable row for an artifact already completed in Markdown."""
+        binary_rel = self._relative(job.binary_path)
+        sidecar_rel = self._relative(job.sidecar_path)
+        key = self._key(binary_rel, sidecar_rel, job.media_type)
+        conn = self._connect()
+        try:
+            with conn:
+                return int(
+                    conn.execute("DELETE FROM jobs WHERE job_key = ?", (key,)).rowcount
+                )
         finally:
             conn.close()
 
@@ -287,6 +307,54 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def get(self, job_id: int) -> MediaJob | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            return self._row_to_job(row) if row is not None else None
+        finally:
+            conn.close()
+
+    def has_binary(self, binary_path: Path) -> bool:
+        """Whether the ledger has work for this exact vault-relative binary."""
+        binary_rel = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            return conn.execute(
+                "SELECT 1 FROM jobs WHERE binary_rel = ? LIMIT 1",
+                (binary_rel,),
+            ).fetchone() is not None
+        finally:
+            conn.close()
+
+    def discovery_cursor(self) -> str | None:
+        """Return the last vault-relative binary examined by bounded discovery."""
+        conn = self._connect()
+        try:
+            row = conn.execute(
+                "SELECT value FROM meta WHERE key = ?",
+                (DISCOVERY_CURSOR_KEY,),
+            ).fetchone()
+            return str(row[0]) if row is not None else None
+        finally:
+            conn.close()
+
+    def set_discovery_cursor(self, binary_path: Path) -> None:
+        """Durably advance bounded discovery to an exact vault-relative path."""
+        cursor = self._relative(binary_path)
+        conn = self._connect()
+        try:
+            with conn:
+                conn.execute(
+                    """
+                    INSERT INTO meta(key, value) VALUES (?, ?)
+                    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+                    """,
+                    (DISCOVERY_CURSOR_KEY, cursor),
+                )
+        finally:
+            conn.close()
+
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
         states = [RUNNING]
         if retry_blocked:
@@ -304,20 +372,59 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def retry(self, *, include_failed: bool = False) -> int:
+    def retry(
+        self,
+        *,
+        include_failed: bool = False,
+        binary_path: Path | None = None,
+    ) -> int:
         states = [BLOCKED]
         if include_failed:
             states.append(FAILED)
         placeholders = ",".join("?" for _ in states)
+        target_clause = ""
+        params: list[object] = [time.time(), *states]
+        if binary_path is not None:
+            target_clause = " AND binary_rel = ?"
+            params.append(self._relative(binary_path))
         conn = self._connect()
         try:
             with conn:
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                    f"WHERE state IN ({placeholders})",
-                    (time.time(), *states),
+                    f"WHERE state IN ({placeholders}){target_clause}",
+                    params,
                 ).rowcount
                 return int(changed)
+        finally:
+            conn.close()
+
+    def retryable_jobs(self, *, limit: int = STATUS_JOB_LIMIT) -> list[MediaJob]:
+        """Return a bounded, deterministic snapshot of blocked/failed work."""
+        if isinstance(limit, bool) or limit <= 0:
+            raise ValueError("media retry limit must be a positive integer")
+        conn = self._connect()
+        try:
+            rows = conn.execute(
+                "SELECT * FROM jobs WHERE state IN ('blocked', 'failed') "
+                "ORDER BY id LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
+    def pending_jobs(self, *, limit: int | None = None) -> list[MediaJob]:
+        """Return a bounded snapshot for runtime-unavailable state convergence."""
+        conn = self._connect()
+        try:
+            sql = "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id"
+            params: tuple[object, ...] = ()
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (max(0, limit),)
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_job(row) for row in rows]
         finally:
             conn.close()
 
@@ -419,6 +526,7 @@ def status(vault_root: Path | None) -> dict[str, Any]:
         "worker_active": False,
         "worker_pid": None,
         "idle_seconds": None,
+        "jobs": [],
         "errors": [],
     }
     if vault_root is None:
@@ -438,6 +546,11 @@ def status(vault_root: Path | None) -> dict[str, Any]:
                 "SELECT state, last_error FROM jobs "
                 "WHERE state IN ('blocked', 'failed') ORDER BY updated_at DESC LIMIT 5"
             ).fetchall()
+            jobs = conn.execute(
+                "SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error "
+                "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (STATUS_JOB_LIMIT,),
+            ).fetchall()
         finally:
             conn.close()
         counts = {state: 0 for state in STATES}
@@ -453,6 +566,7 @@ def status(vault_root: Path | None) -> dict[str, Any]:
             "idle_seconds": float(runtime["idle_seconds"])
             if runtime and runtime["idle_seconds"] is not None
             else None,
+            "jobs": [_status_job(row) for row in jobs],
             "errors": [
                 {"state": str(row["state"]), "message": str(row["last_error"] or "")}
                 for row in errors
@@ -460,3 +574,38 @@ def status(vault_root: Path | None) -> dict[str, Any]:
         }
     except (OSError, sqlite3.Error) as exc:
         return {**empty, "store": str(path), "healthy": False, "errors": [str(exc)]}
+
+
+def _status_job(row: Any) -> dict[str, Any]:
+    state = str(row["state"])
+    error = str(row["last_error"]) if row["last_error"] is not None else None
+    actions = {
+        PENDING: "wait for media processing",
+        RUNNING: "wait for media processing to finish",
+        BLOCKED: "install the required media dependency, then retry",
+        FAILED: "repair or replace the media artifact, then retry",
+    }
+    if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
+        actions[BLOCKED] = "check the timestamp renderer, then retry"
+    if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
+        actions[BLOCKED] = (
+            "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+            "restart the service, then retry"
+        )
+    if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
+        actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
+    if state == FAILED and error and "sidecar content changed" in error:
+        actions[FAILED] = "review the sidecar changes, then retry media processing"
+    elif state == FAILED and error and error.startswith("stale extraction:"):
+        actions[FAILED] = "retry media processing"
+    return {
+        "id": int(row["id"]),
+        "path": str(row["binary_rel"]),
+        "sidecar_path": str(row["sidecar_rel"]),
+        "media_type": str(row["media_type"]),
+        "state": state,
+        "attempts": int(row["attempts"]),
+        "error": error,
+        "retryable": state in {BLOCKED, FAILED},
+        "next_action": actions[state],
+    }

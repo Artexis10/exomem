@@ -17,7 +17,8 @@
   },
   "limits": {
     "active_user_cells": 6,
-    "reserved_volume_attachments": 2,
+    "active_recovery_cells": 2,
+    "maximum_potential_attachments": 8,
     "provider_volume_attachment_limit": 16,
     "minimum_unused_provider_headroom": 8
   },

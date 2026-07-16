@@ -81,6 +81,7 @@
 - [x] 9.4 Add failing API contract tests for bearer/protocol/content type, exact 14 paths, field/identifier bounds, no redirects, body limits, retry status, pending/final unions, and redaction.
 - [x] 9.5 Implement the FastAPI v1 surface and a database-backed worker that resumes claimed operations after restart, uses PostgreSQL time for leases, locks the tenant fence before claim writes, and binds durable side effects to the current operation claim and identity.
 - [x] 9.6 Add cross-language contract fixtures/tests against Substrate's real TypeScript parser for every request, pending response, final proof, and error class.
+- [x] 9.7 Package exact provisioner migrations and environment-only database commands; add serialized split-authority bootstrap with ephemeral admin cleanup, runtime-only install migration, validation-only upgrade gating, and built-image PostgreSQL 17 reconstruction/concurrency/failure proofs.
 
 ## 10. Implement HCloud retained-volume ownership and recovery
 
@@ -122,7 +123,7 @@
 - [x] 14.1 Add failing discard tests proving only the failed candidate is removed while the active cell and exports remain.
 - [x] 14.2 Implement candidate discard with independent compute/storage/key absence proofs.
 - [x] 14.3 Add failing tenant-destroy tests covering active/orphan compute, retained volumes, routes, credentials, exports, backups, provider rediscovery, and seven-day pending retention.
-- [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, lock-expiry override of 30-day retention, provider absence checks, wrapped-key destruction, and all four exact final booleans.
+- [x] 14.4 Implement immediate online revocation/destruction, non-attempt-consuming retained waiting, tenant-ledger-driven exact-version and associated-marker removal after the maximum durable/live lock expiry without governance bypass, explicit-page-size exact-key checks with hard page/item/cursor bounds and sibling stop, crash-safe provider-absence/key-erasure proof with a final ledger re-read, durable plaintext-delivery deletion, and a credential-free dispatcher that atomically binds one eligible operation to the exact admission-locked short-lived Job identity before launch and resumes only that claim, plus all four exact final booleans.
 
 ## 15. Add secret handoff, observability, and runbooks
 
@@ -130,7 +131,7 @@
 - [ ] 15.2 Add separate staged Cloudflare Access, Tunnel, provisioner, and cell rotation drills, a two-version Vercel receiver/single-version K3s sender `EXOMEM_HOSTED_SCHEDULER_SECRET` rotation proving old-sender overlap, new acceptance, old rejection after retirement, unrelated-route denial, and no missed cadence without changing global `CRON_SECRET`, plus a root wrapping-key dual-version rewrap/re-encryption drill; retire an old version only after destination or ciphertext-reference proof.
 - [ ] 15.3 Add external black-box availability and backup-freshness checks, external scheduler contract/outcome/last-success signals, Kubernetes event/resource signals, structured provisioner metrics, redacted logs, and actionable alerts.
 - [x] 15.4 Write executable backend, deploy, secret, cell, maintenance, volume-rebind, backup/restore, deletion, node-replacement, and break-glass runbooks. (Drafts are tracked; live owner-canary rehearsal remains.)
-- [ ] 15.5 Add the live monthly cost sheet, actual Paddle fee/tax record, six-user/two-reserved cap, and hard capacity gate.
+- [ ] 15.5 Add the live monthly cost sheet and actual Paddle fee/tax record, then retain them with invitation evidence. (The automated signed-live-receipt plus PostgreSQL six-USER/two-RECOVERY/eight-attachment capacity sub-gate is implemented and tested; live economics evidence remains open.)
 
 ## 16. Deploy and prove the private alpha
 

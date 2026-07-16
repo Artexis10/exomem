@@ -143,6 +143,7 @@ class RelationRegistry:
                         "scope_violation",
                         f"relations.{canonical}.{label_name}",
                         f"{actual!r} is outside {sorted(allowed)!r}",
+                        relation=canonical if not definition.core else None,
                     )
                 )
         if findings:
@@ -307,29 +308,63 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
         span = f"extensions.{key}"
         if not _KEY_RE.fullmatch(key):
             findings.append(
-                _finding("invalid_key", span, "must be lowercase namespaced <namespace>.<name>")
+                _finding(
+                    "invalid_key",
+                    span,
+                    "must be lowercase namespaced <namespace>.<name>",
+                    relation=key,
+                )
             )
         if key in occupied:
             findings.append(
-                _finding("collision", span, "canonical key collides with an existing relation")
+                _finding(
+                    "collision",
+                    span,
+                    "canonical key collides with an existing relation",
+                    relation=key,
+                )
             )
         occupied.add(key)
         if not isinstance(value, dict):
-            findings.append(_finding("invalid_definition", span, "must be an object"))
+            findings.append(
+                _finding(
+                    "invalid_definition",
+                    span,
+                    "must be an object",
+                    relation=key,
+                )
+            )
             continue
         for unknown in sorted(set(value) - allowed_fields):
             findings.append(
-                _finding("unknown_field", f"{span}.{unknown}", "unknown definition field")
+                _finding(
+                    "unknown_field",
+                    f"{span}.{unknown}",
+                    "unknown definition field",
+                    relation=key,
+                )
             )
         parent = value.get("parent")
         parent_key = parent if isinstance(parent, str) else ""
         description = str(value.get("description") or "").strip()
         if parent not in core.core:
             findings.append(
-                _finding("invalid_parent", f"{span}.parent", "must name exactly one core relation")
+                _finding(
+                    "invalid_parent",
+                    f"{span}.parent",
+                    "must name exactly one core relation",
+                    relation=key,
+                )
             )
         if not description:
-            findings.append(_finding("missing_description", f"{span}.description", "is required"))
+            findings.append(
+                _finding(
+                    "missing_description",
+                    f"{span}.description",
+                    "is required",
+                    relation=key,
+                )
+            )
         direction = str(
             value.get("direction")
             or core.core.get(parent_key, RelationDefinition("", "", "")).direction
@@ -340,25 +375,42 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     "invalid_direction",
                     f"{span}.direction",
                     f"must be one of {sorted(_DIRECTIONS)}",
+                    relation=key,
                 )
             )
         origins = _strings(
-            value.get("origins") or ["semantic_relation"], f"{span}.origins", findings
+            value.get("origins") or ["semantic_relation"],
+            f"{span}.origins",
+            findings,
+            relation=key,
         )
         if not origins or not set(origins) <= _ORIGINS:
             findings.append(
-                _finding("invalid_origins", f"{span}.origins", f"must use {sorted(_ORIGINS)}")
+                _finding(
+                    "invalid_origins",
+                    f"{span}.origins",
+                    f"must use {sorted(_ORIGINS)}",
+                    relation=key,
+                )
             )
         status = str(value.get("status") or "active")
         if status not in _STATUSES:
             findings.append(
-                _finding("invalid_status", f"{span}.status", f"must be one of {sorted(_STATUSES)}")
+                _finding(
+                    "invalid_status",
+                    f"{span}.status",
+                    f"must be one of {sorted(_STATUSES)}",
+                    relation=key,
+                )
             )
         scope = value.get("scope") or {}
         if not isinstance(scope, dict) or set(scope) - {"projects", "page_types"}:
             findings.append(
                 _finding(
-                    "invalid_scope", f"{span}.scope", "only projects and page_types are allowed"
+                    "invalid_scope",
+                    f"{span}.scope",
+                    "only projects and page_types are allowed",
+                    relation=key,
                 )
             )
             scope = {}
@@ -374,19 +426,44 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
             origins=frozenset(origins),
             aliases=tuple(
                 normalize_relation(alias)
-                for alias in _strings(value.get("aliases") or [], f"{span}.aliases", findings)
+                for alias in _strings(
+                    value.get("aliases") or [],
+                    f"{span}.aliases",
+                    findings,
+                    relation=key,
+                )
             ),
             source_kinds=frozenset(
-                _strings(value.get("source_kinds") or [], f"{span}.source_kinds", findings)
+                _strings(
+                    value.get("source_kinds") or [],
+                    f"{span}.source_kinds",
+                    findings,
+                    relation=key,
+                )
             ),
             target_kinds=frozenset(
-                _strings(value.get("target_kinds") or [], f"{span}.target_kinds", findings)
+                _strings(
+                    value.get("target_kinds") or [],
+                    f"{span}.target_kinds",
+                    findings,
+                    relation=key,
+                )
             ),
             projects=frozenset(
-                _strings(scope.get("projects") or [], f"{span}.scope.projects", findings)
+                _strings(
+                    scope.get("projects") or [],
+                    f"{span}.scope.projects",
+                    findings,
+                    relation=key,
+                )
             ),
             page_types=frozenset(
-                _strings(scope.get("page_types") or [], f"{span}.scope.page_types", findings)
+                _strings(
+                    scope.get("page_types") or [],
+                    f"{span}.scope.page_types",
+                    findings,
+                    relation=key,
+                )
             ),
             status=status,
             replaced_by=_optional(value.get("replaced_by")),
@@ -398,9 +475,23 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
         for alias in definition.aliases:
             span = f"extensions.{key}.aliases"
             if not _LABEL_RE.fullmatch(alias):
-                findings.append(_finding("invalid_alias", span, f"invalid alias {alias!r}"))
+                findings.append(
+                    _finding(
+                        "invalid_alias",
+                        span,
+                        f"invalid alias {alias!r}",
+                        relation=key,
+                    )
+                )
             if alias in occupied or alias in aliases:
-                findings.append(_finding("collision", span, f"alias {alias!r} collides"))
+                findings.append(
+                    _finding(
+                        "collision",
+                        span,
+                        f"alias {alias!r} collides",
+                        relation=key,
+                    )
+                )
             else:
                 aliases[alias] = key
                 occupied.add(alias)
@@ -410,6 +501,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     "invalid_inverse",
                     f"extensions.{key}.inverse",
                     "must resolve to a canonical relation",
+                    relation=key,
                 )
             )
         if definition.replaced_by and definition.replaced_by not in canonical:
@@ -418,6 +510,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     "invalid_replacement",
                     f"extensions.{key}.replaced_by",
                     "must resolve to a canonical relation",
+                    relation=key,
                 )
             )
         if definition.replaced_by:
@@ -428,6 +521,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                         "invalid_replacement",
                         f"extensions.{key}.replaced_by",
                         "replacement must be active",
+                        relation=key,
                     )
                 )
         if definition.status == "deprecated" and not definition.replaced_by:
@@ -436,6 +530,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     "missing_replacement",
                     f"extensions.{key}.replaced_by",
                     "deprecated relations require a replacement",
+                    relation=key,
                 )
             )
         if definition.status == "active" and definition.replaced_by:
@@ -444,11 +539,17 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                     "invalid_replacement",
                     f"extensions.{key}.replaced_by",
                     "only deprecated relations may declare a replacement",
+                    relation=key,
                 )
             )
         if definition.replaced_by == key or definition.inverse == key:
             findings.append(
-                _finding("relation_cycle", f"extensions.{key}", "self cycles are not allowed")
+                _finding(
+                    "relation_cycle",
+                    f"extensions.{key}",
+                    "self cycles are not allowed",
+                    relation=key,
+                )
             )
         for kind_field, kinds in (
             ("source_kinds", definition.source_kinds),
@@ -461,6 +562,7 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
                             "invalid_node_kind",
                             f"extensions.{key}.{kind_field}",
                             f"invalid node kind {kind!r}",
+                            relation=key,
                         )
                     )
     findings.extend(_cycle_findings(extensions, "replaced_by", allow_pair=False))
@@ -475,9 +577,22 @@ def _parse_extension_data(data: Any, digest: str, core: RelationRegistry) -> Rel
     )
 
 
-def _strings(value: Any, path: str, findings: list[dict[str, str]]) -> list[str]:
+def _strings(
+    value: Any,
+    path: str,
+    findings: list[dict[str, str]],
+    *,
+    relation: str,
+) -> list[str]:
     if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        findings.append(_finding("invalid_list", path, "must be a list of strings"))
+        findings.append(
+            _finding(
+                "invalid_list",
+                path,
+                "must be a list of strings",
+                relation=relation,
+            )
+        )
         return []
     return list(dict.fromkeys(item.strip() for item in value if item.strip()))
 
@@ -486,8 +601,23 @@ def _optional(value: Any) -> str | None:
     return str(value).strip() if value not in (None, "") else None
 
 
-def _finding(code: str, path: str, detail: str) -> dict[str, str]:
-    return {"code": code, "path": path, "span": path, "severity": "error", "detail": detail}
+def _finding(
+    code: str,
+    path: str,
+    detail: str,
+    *,
+    relation: str | None = None,
+) -> dict[str, str]:
+    finding = {
+        "code": code,
+        "path": path,
+        "span": path,
+        "severity": "error",
+        "detail": detail,
+    }
+    if relation is not None:
+        finding["relation"] = relation
+    return finding
 
 
 def _content_hash(raw: str) -> str:
@@ -522,6 +652,7 @@ def _cycle_findings(
                 "relation_cycle",
                 f"extensions.{start}.{field_name}",
                 f"{field_name} cycle is not allowed: {' -> '.join(cycle + [cycle[0]])}",
+                relation=start,
             )
         )
     return findings

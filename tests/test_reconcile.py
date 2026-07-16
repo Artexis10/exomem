@@ -7,12 +7,889 @@ remaining drift, without audit_fix's wikilink/frontmatter rewrites.
 
 from __future__ import annotations
 
+import hashlib
+import json
+from contextlib import contextmanager
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from exomem import (
+    activation_manifest,
+    commands,
+    index_sync,
+    relation_review,
+    semantic_contract,
+    semantic_writes,
+)
 from exomem import audit as audit_module
-from exomem import commands, index_sync
 from exomem import reconcile as reconcile_module
+from exomem import (
+    vault as vault_module,
+)
+
+_LIFECYCLE_IDS = {
+    "pending": "00000000-0000-4000-8000-000000000211",
+    "committed": "00000000-0000-4000-8000-000000000212",
+    "stale": "00000000-0000-4000-8000-000000000213",
+    "trashed_committed": "00000000-0000-4000-8000-000000000214",
+}
+
+
+def _semantic_page(page_id: str, *, status: str = "active") -> str:
+    return (
+        "---\n"
+        "title: Reconcile semantic\n"
+        "type: insight\n"
+        f"status: {status}\n"
+        f"exomem_id: {page_id}\n"
+        "---\n\n"
+        "# Reconcile semantic\n\n"
+        "- [config] Direct editor content.\n\n"
+        "## Relations\n"
+    )
+
+
+def _install_lifecycle_slot(
+    root: Path,
+    *,
+    state: str,
+    page_id: str,
+    path: str,
+) -> tuple[Path, Path, str, str]:
+    before = _semantic_page(page_id).replace(
+        "Direct editor content.", "Before lifecycle content."
+    )
+    after = _semantic_page(page_id).replace(
+        "Direct editor content.", "After lifecycle content."
+    )
+    current = {
+        "pending": before,
+        "committed": after,
+        "stale": _semantic_page(page_id).replace(
+            "Direct editor content.", "Unrelated lifecycle content."
+        ),
+        "trashed_committed": after,
+    }[state]
+    page = root / path
+    page.parent.mkdir(parents=True, exist_ok=True)
+    page.write_text(current, encoding="utf-8")
+    decision = relation_review.build_lifecycle_decision(
+        page_identity=page_id,
+        after_fingerprint=semantic_contract.review_content_fingerprint(
+            page_id, after
+        ),
+        reason="No honest relation exists",
+    )
+    prepared = relation_review.build_lifecycle_prepared_transition(
+        transition_id=page_id[:-3] + "9" + page_id[-2:],
+        operation="edit",
+        page_identity=page_id,
+        before_path=path,
+        before_source_hash=vault_module.content_hash(before),
+        after_path=path,
+        after_source_hash=vault_module.content_hash(after),
+        after_fingerprint=decision.after_fingerprint,
+        decision=decision,
+        transition_token=f"reconcile-{state}",
+        auxiliary_hash=hashlib.sha256(b"reconcile auxiliaries").hexdigest(),
+    )
+    decision_path = relation_review.lifecycle_decision_path(
+        root, page_id, decision.after_fingerprint
+    )
+    prepared_path = relation_review.lifecycle_prepared_path(root, page_id)
+    decision_path.parent.mkdir(parents=True, exist_ok=True)
+    decision_path.write_text(
+        relation_review.serialize_lifecycle_decision(decision), encoding="utf-8"
+    )
+    prepared_path.write_text(
+        relation_review.serialize_lifecycle_prepared(prepared), encoding="utf-8"
+    )
+    return page, prepared_path, before, after
+
+
+def _trash_exact_committed_page(
+    root: Path,
+    *,
+    page: Path,
+    original_path: str,
+    page_id: str,
+) -> tuple[Path, Path]:
+    trash = root / "Knowledge Base/_trash/2026-07-15/120000-lifecycle.md"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    page.replace(trash)
+    sidecar = trash.with_name(f"{trash.name}.meta.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "original_path": original_path,
+                "frontmatter_snapshot": {"exomem_id": page_id},
+            }
+        ),
+        encoding="utf-8",
+    )
+    return trash, sidecar
+
+
+def test_reconcile_dry_run_reports_semantic_drift_without_writing_manifest_or_markdown(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Knowledge Base/Notes/Insights/direct-current.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        _semantic_page("00000000-0000-4000-8000-000000000201"),
+        encoding="utf-8",
+    )
+    original = page.read_bytes()
+    manifest = activation_manifest.manifest_path(tmp_path)
+
+    report = reconcile_module.reconcile(tmp_path, dry_run=True)
+    payload = report.as_dict()
+
+    assert page.read_bytes() == original
+    assert not manifest.exists()
+    assert payload["semantic_activation"] == "prospective"
+    assert {
+        finding["code"] for finding in payload["semantic_contract_findings"]
+    } == {"RELATION_DISPOSITION_MISSING"}
+    assert payload["semantic_contract_summary"] == {
+        "RELATION_DISPOSITION_MISSING": 1
+    }
+    assert "semantic_contract_findings" not in {
+        finding.get("category") for finding in payload["remaining_drift"]
+    }
+    assert payload["semantic_contract_omitted_counts"] == {
+        "evaluated_paths": 0,
+        "semantic_contract_findings": 0,
+        "semantic_contract_summary": 0,
+    }
+    assert payload["semantic_contract_truncation"]["byte_budget"] == 120 * 1024
+
+
+def test_reconcile_marks_direct_post_activation_page_current_and_not_grandfathered(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "Knowledge Base").mkdir(parents=True)
+    activation_manifest.ensure_manifest(tmp_path)
+    page = tmp_path / "Knowledge Base/Notes/Insights/direct-new.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        _semantic_page("00000000-0000-4000-8000-000000000202"),
+        encoding="utf-8",
+    )
+
+    payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert payload["semantic_activation"] == "current"
+    assert payload["semantic_contract_findings"][0]["grandfathered"] is False
+
+
+def test_reconcile_does_not_report_relation_disposition_for_inactive_external_draft(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Knowledge Base/Notes/Insights/direct-draft.md"
+    page.parent.mkdir(parents=True)
+    page.write_text(
+        _semantic_page(
+            "00000000-0000-4000-8000-000000000203", status="draft"
+        ),
+        encoding="utf-8",
+    )
+
+    payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert payload["semantic_contract_findings"] == []
+
+
+def test_reconcile_recomputes_and_clears_repaired_semantic_finding(
+    tmp_path: Path,
+) -> None:
+    page = tmp_path / "Knowledge Base/Notes/Insights/repaired.md"
+    target = tmp_path / "Knowledge Base/Notes/Insights/reconcile-target.md"
+    anchor = tmp_path / "Knowledge Base/Notes/Insights/reconcile-anchor.md"
+    page.parent.mkdir(parents=True)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source = _semantic_page("00000000-0000-4000-8000-000000000204")
+    page.write_text(source, encoding="utf-8")
+    target.write_text(
+        _semantic_page("00000000-0000-4000-8000-000000000205").replace(
+            "## Relations\n",
+            "## Relations\n"
+            "- supports [[Knowledge Base/Notes/Insights/reconcile-anchor]]\n",
+        ),
+        encoding="utf-8",
+    )
+    anchor.write_text(
+        _semantic_page("00000000-0000-4000-8000-000000000206").replace(
+            "## Relations\n",
+            "## Relations\n"
+            "- supports [[Knowledge Base/Notes/Insights/reconcile-target]]\n",
+        ),
+        encoding="utf-8",
+    )
+
+    before = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+    page.write_text(
+        source.replace(
+            "## Relations\n",
+            "## Relations\n"
+            "- supports [[Knowledge Base/Notes/Insights/reconcile-target]]\n",
+        ),
+        encoding="utf-8",
+    )
+    after = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    relative = page.relative_to(tmp_path).as_posix()
+    assert any(
+        finding["path"] == relative
+        and finding["code"] == "RELATION_DISPOSITION_MISSING"
+        for finding in before["semantic_contract_findings"]
+    )
+    assert not any(
+        finding["path"] == relative
+        for finding in after["semantic_contract_findings"]
+    )
+
+
+def test_reconcile_classifies_prepared_slots_and_only_cleans_stale_in_write_mode(
+    tmp_path: Path,
+) -> None:
+    installed: dict[str, tuple[Path, Path, bytes, bytes]] = {}
+    for state in ("pending", "committed", "stale"):
+        page_id = _LIFECYCLE_IDS[state]
+        page, prepared, _, _ = _install_lifecycle_slot(
+            tmp_path,
+            state=state,
+            page_id=page_id,
+            path=f"Knowledge Base/Notes/Insights/{state}.md",
+        )
+        decision = next(
+            child for child in prepared.parent.iterdir() if child != prepared
+        )
+        installed[state] = (
+            page,
+            prepared,
+            page.read_bytes(),
+            decision.read_bytes(),
+        )
+
+    dry = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert {
+        item["page_identity"]: item["state"]
+        for item in dry["lifecycle_prepared"]
+    } == {
+        _LIFECYCLE_IDS["pending"]: "pending",
+        _LIFECYCLE_IDS["committed"]: "committed",
+        _LIFECYCLE_IDS["stale"]: "stale",
+    }
+    assert dry["lifecycle_prepared_summary"] == {
+        "committed": 1,
+        "pending": 1,
+        "stale": 1,
+        "trashed_committed": 0,
+    }
+    assert dry["lifecycle_prepared_cleaned"] == []
+    for page, prepared, page_bytes, decision_bytes in installed.values():
+        assert page.read_bytes() == page_bytes
+        assert prepared.exists()
+        decision = next(child for child in prepared.parent.iterdir() if child != prepared)
+        assert decision.read_bytes() == decision_bytes
+
+    written = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert written["lifecycle_prepared_cleaned"] == [
+        relation_review.lifecycle_prepared_path(
+            tmp_path, _LIFECYCLE_IDS["stale"]
+        ).relative_to(tmp_path).as_posix()
+    ]
+    for state, (page, prepared, page_bytes, decision_bytes) in installed.items():
+        assert page.read_bytes() == page_bytes
+        assert prepared.exists() is (state != "stale")
+        decision = next(
+            child for child in prepared.parent.iterdir() if child.name != "prepared.json"
+        )
+        assert decision.read_bytes() == decision_bytes
+
+    repeated = reconcile_module.reconcile(tmp_path).as_dict()
+    assert repeated["lifecycle_prepared_cleaned"] == []
+    assert not any(
+        item["page_identity"] == _LIFECYCLE_IDS["stale"]
+        for item in repeated["lifecycle_prepared"]
+    )
+
+
+def test_reconcile_preserves_exact_trashed_committed_slot(tmp_path: Path) -> None:
+    page_id = _LIFECYCLE_IDS["trashed_committed"]
+    original_path = "Knowledge Base/Notes/Insights/trashed-committed.md"
+    page, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="trashed_committed",
+        page_id=page_id,
+        path=original_path,
+    )
+    trash, sidecar = _trash_exact_committed_page(
+        tmp_path,
+        page=page,
+        original_path=original_path,
+        page_id=page_id,
+    )
+    prepared_bytes = prepared.read_bytes()
+    trash_bytes = trash.read_bytes()
+    sidecar_bytes = sidecar.read_bytes()
+
+    dry = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+    written = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert dry["lifecycle_prepared"] == [
+        {
+            "page_identity": page_id,
+            "state": "trashed_committed",
+            "reference": prepared.relative_to(tmp_path).as_posix(),
+            "cleanup_eligible": False,
+        }
+    ]
+    assert written["lifecycle_prepared_cleaned"] == []
+    assert prepared.read_bytes() == prepared_bytes
+    assert trash.read_bytes() == trash_bytes
+    assert sidecar.read_bytes() == sidecar_bytes
+
+
+def test_reconcile_recognizes_directory_trash_root_suffix_proof(
+    tmp_path: Path,
+) -> None:
+    page_id = "00000000-0000-4000-8000-000000000215"
+    original_path = "Knowledge Base/Notes/Insights/group/nested.md"
+    page, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="trashed_committed",
+        page_id=page_id,
+        path=original_path,
+    )
+    trash_root = tmp_path / "Knowledge Base/_trash/2026-07-15/120001-group"
+    trash = trash_root / "nested.md"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    page.replace(trash)
+    sidecar = trash_root.with_name(f"{trash_root.name}.meta.json")
+    sidecar.write_text(
+        json.dumps(
+            {
+                "original_path": "Knowledge Base/Notes/Insights/group",
+                "frontmatter_snapshot": {},
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert payload["lifecycle_prepared"][0]["state"] == "trashed_committed"
+    assert prepared.exists()
+
+
+@pytest.mark.parametrize(
+    "race",
+    [
+        "prepared_replacement",
+        "primary_change",
+        "trash_appearance",
+        "sidecar_change",
+        "trash_target_change",
+    ],
+)
+def test_reconcile_blocks_prepared_primary_and_trash_races(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    race: str,
+) -> None:
+    page_id = _LIFECYCLE_IDS["stale"]
+    original_path = "Knowledge Base/Notes/Insights/stale-race.md"
+    page, prepared_path, _, after = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=page_id,
+        path=original_path,
+    )
+    sidecar: Path | None = None
+    race_trash: Path | None = None
+    if race in {"sidecar_change", "trash_target_change"}:
+        race_trash = tmp_path / "Knowledge Base/_trash/2026-07-15/120002-race.md"
+        race_trash.parent.mkdir(parents=True, exist_ok=True)
+        race_trash.write_text(
+            after
+            if race == "sidecar_change"
+            else _semantic_page(page_id).replace(
+                "Direct editor content.", "Different trashed bytes."
+            ),
+            encoding="utf-8",
+        )
+        sidecar = race_trash.with_name(f"{race_trash.name}.meta.json")
+        sidecar.write_text(
+            json.dumps(
+                {
+                    "original_path": (
+                        "Knowledge Base/Notes/Insights/other.md"
+                        if race == "sidecar_change"
+                        else original_path
+                    ),
+                    "frontmatter_snapshot": {"exomem_id": page_id},
+                }
+            ),
+            encoding="utf-8",
+        )
+    real_cleanup = relation_review.cleanup_stale_lifecycle_prepared_batch
+
+    def race_then_cleanup(root: Path, inspections):
+        if race == "prepared_replacement":
+            current = relation_review.load_lifecycle_prepared(root, page_id)
+            assert current is not None
+            replacement = replace(
+                current,
+                transition_id="00000000-0000-4000-8000-000000000299",
+            )
+            prepared_path.write_text(
+                relation_review.serialize_lifecycle_prepared(replacement),
+                encoding="utf-8",
+            )
+        elif race == "primary_change":
+            page.write_text(after, encoding="utf-8")
+        elif race == "trash_appearance":
+            trash = root / "Knowledge Base/_trash/2026-07-15/120003-race.md"
+            trash.parent.mkdir(parents=True, exist_ok=True)
+            trash.write_text(after, encoding="utf-8")
+            trash.with_name(f"{trash.name}.meta.json").write_text(
+                json.dumps(
+                    {
+                        "original_path": original_path,
+                        "frontmatter_snapshot": {"exomem_id": page_id},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        elif race == "sidecar_change":
+            assert sidecar is not None
+            sidecar.write_text(
+                json.dumps(
+                    {
+                        "original_path": original_path,
+                        "frontmatter_snapshot": {"exomem_id": page_id},
+                    }
+                ),
+                encoding="utf-8",
+            )
+        else:
+            assert race_trash is not None
+            race_trash.write_text(after, encoding="utf-8")
+        return real_cleanup(root, inspections)
+
+    monkeypatch.setattr(
+        relation_review,
+        "cleanup_stale_lifecycle_prepared_batch",
+        race_then_cleanup,
+    )
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert payload["lifecycle_prepared_cleanup_blocked"] == [
+        {"page_identity": page_id, "code": "LIFECYCLE_RECONCILE_RACE"}
+    ]
+    assert prepared_path.exists()
+
+
+def test_lifecycle_batch_cleanup_blocks_late_unrelated_duplicate_owner(
+    tmp_path: Path,
+) -> None:
+    page_id = _LIFECYCLE_IDS["stale"]
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=page_id,
+        path="Knowledge Base/Notes/Insights/late-owner.md",
+    )
+    posthoc = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, operation="reconcile"
+    )
+    assert posthoc.corpus is not None
+    inspected = relation_review.inspect_lifecycle_prepared_slots(
+        tmp_path, corpus=posthoc.corpus
+    )
+    assert inspected.cleanup_safe
+    assert len(inspected.inspections) == 1
+    duplicate = tmp_path / "Knowledge Base/Notes/Insights/late-duplicate.md"
+    duplicate.write_text(
+        _semantic_page(page_id).replace(
+            "Direct editor content.", "Late duplicate owner."
+        ),
+        encoding="utf-8",
+    )
+
+    result = relation_review.cleanup_stale_lifecycle_prepared_batch(
+        tmp_path, inspected.inspections
+    )
+
+    assert result.cleaned == ()
+    assert [issue.as_dict() for issue in result.blocked] == [
+        {"code": "LIFECYCLE_PRIMARY_RACE", "page_identity": page_id}
+    ]
+    assert prepared.exists()
+
+
+def test_lifecycle_batch_cleanup_rechecks_shared_guards_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    prepared_paths: list[Path] = []
+    for page_id, name in (
+        (_LIFECYCLE_IDS["stale"], "batch-stale-one"),
+        ("00000000-0000-4000-8000-000000000218", "batch-stale-two"),
+    ):
+        _, prepared, _, _ = _install_lifecycle_slot(
+            tmp_path,
+            state="stale",
+            page_id=page_id,
+            path=f"Knowledge Base/Notes/Insights/{name}.md",
+        )
+        prepared_paths.append(prepared)
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/unrelated.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("unrelated trash", encoding="utf-8")
+    trash.with_name(f"{trash.name}.meta.json").write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/unrelated.txt"}),
+        encoding="utf-8",
+    )
+    posthoc = semantic_writes.evaluate_posthoc_batch(
+        tmp_path, operation="reconcile"
+    )
+    assert posthoc.corpus is not None
+    inspected = relation_review.inspect_lifecycle_prepared_slots(
+        tmp_path, corpus=posthoc.corpus
+    )
+    assert inspected.cleanup_safe
+    stale = tuple(item for item in inspected.inspections if item.cleanup_eligible)
+    assert len(stale) == 2
+    shared_directories = {id(guard) for guard in stale[0].trash_guards}
+    shared_sidecars = {id(guard) for guard in stale[0].trash_content_guards}
+    directory_rechecks = {guard_id: 0 for guard_id in shared_directories}
+    sidecar_rechecks = {guard_id: 0 for guard_id in shared_sidecars}
+    lock_count = 0
+    real_lock = vault_module.vault_creation_lock
+    real_directory_recheck = vault_module.DirectoryCensusGuard.recheck
+    real_sidecar_recheck = (
+        relation_review._BoundedLifecycleSidecarGuard.recheck
+    )
+
+    @contextmanager
+    def counted_lock(root: Path, namespace: str, *, timeout: float = 30.0):
+        nonlocal lock_count
+        lock_count += 1
+        with real_lock(root, namespace, timeout=timeout) as handle:
+            yield handle
+
+    def counted_directory_recheck(self, root: Path, *, allowed_changes=()):
+        if id(self) in directory_rechecks:
+            directory_rechecks[id(self)] += 1
+        return real_directory_recheck(
+            self, root, allowed_changes=allowed_changes
+        )
+
+    def counted_sidecar_recheck(self, root: Path):
+        if id(self) in sidecar_rechecks:
+            sidecar_rechecks[id(self)] += 1
+        return real_sidecar_recheck(self, root)
+
+    monkeypatch.setattr(vault_module, "vault_creation_lock", counted_lock)
+    monkeypatch.setattr(
+        vault_module.DirectoryCensusGuard,
+        "recheck",
+        counted_directory_recheck,
+    )
+    monkeypatch.setattr(
+        relation_review._BoundedLifecycleSidecarGuard,
+        "recheck",
+        counted_sidecar_recheck,
+    )
+
+    result = relation_review.cleanup_stale_lifecycle_prepared_batch(
+        tmp_path, stale
+    )
+
+    assert lock_count == 1
+    assert set(directory_rechecks.values()) == {1}
+    assert set(sidecar_rechecks.values()) == {1}
+    assert len(result.cleaned) == 2
+    assert result.blocked == ()
+    assert all(not path.exists() for path in prepared_paths)
+
+
+def test_reconcile_reports_malformed_state_and_deletes_nothing(tmp_path: Path) -> None:
+    malformed_id = "00000000-0000-4000-8000-000000000216"
+    malformed = relation_review.lifecycle_prepared_path(tmp_path, malformed_id)
+    malformed.parent.mkdir(parents=True, exist_ok=True)
+    malformed.write_text("not-json", encoding="utf-8")
+    stale_page, stale, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-malformed-trash.md",
+    )
+    stale_bytes = stale.read_bytes()
+    page_bytes = stale_page.read_bytes()
+    bad_sidecar = tmp_path / "Knowledge Base/_trash/2026-07-15/bad.meta.json"
+    bad_sidecar.parent.mkdir(parents=True, exist_ok=True)
+    bad_sidecar.write_text("not-json", encoding="utf-8")
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert {item["code"] for item in payload["lifecycle_prepared_issues"]} == {
+        "LIFECYCLE_TRASH_INVALID",
+        "RELATION_REVIEW_INVALID_JSON",
+        "LIFECYCLE_TRASH_INDETERMINATE",
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert malformed.read_text(encoding="utf-8") == "not-json"
+    assert stale.read_bytes() == stale_bytes
+    assert stale_page.read_bytes() == page_bytes
+
+
+@pytest.mark.parametrize("limit_kind", ["single", "aggregate"])
+def test_reconcile_sidecar_byte_limits_make_cleanup_indeterminate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    limit_kind: str,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-sidecar-limit.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15"
+    trash.mkdir(parents=True, exist_ok=True)
+    sidecar_count = 1 if limit_kind == "single" else 2
+    for index in range(sidecar_count):
+        target = trash / f"bounded-{index}.txt"
+        target.write_text("trash", encoding="utf-8")
+        target.with_name(f"{target.name}.meta.json").write_text(
+            json.dumps(
+                {
+                    "original_path": f"Knowledge Base/Notes/bounded-{index}.txt",
+                    "padding": "x" * 96,
+                }
+            ),
+            encoding="utf-8",
+        )
+    if limit_kind == "single":
+        monkeypatch.setattr(
+            relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 64
+        )
+    else:
+        monkeypatch.setattr(
+            relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 1_024
+        )
+        monkeypatch.setattr(
+            relation_review,
+            "_LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES",
+            200,
+        )
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert "LIFECYCLE_TRASH_LIMIT" in {
+        issue["code"] for issue in payload["lifecycle_prepared_issues"]
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert prepared.exists()
+
+
+def test_lifecycle_sidecar_snapshot_reads_only_bounded_descriptor_bytes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-bounded-read.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/bounded-read.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("trash", encoding="utf-8")
+    sidecar = trash.with_name(f"{trash.name}.meta.json")
+    sidecar.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/bounded-read.txt"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(
+        relation_review, "_LIFECYCLE_TRASH_MAX_SIDECAR_BYTES", 256
+    )
+    monkeypatch.setattr(
+        relation_review,
+        "_LIFECYCLE_TRASH_MAX_SIDECAR_AGGREGATE_BYTES",
+        512,
+    )
+    requested: list[int] = []
+    tracked_descriptors: set[int] = set()
+    real_open = relation_review.os.open
+    real_read = relation_review.os.read
+    real_close = relation_review.os.close
+
+    def tracked_open(path, flags, mode=0o777, *, dir_fd=None):
+        if dir_fd is None:
+            descriptor = real_open(path, flags, mode)
+        else:
+            descriptor = real_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(path) == sidecar:
+            tracked_descriptors.add(descriptor)
+        return descriptor
+
+    def counted_read(descriptor: int, size: int) -> bytes:
+        if descriptor in tracked_descriptors:
+            requested.append(size)
+        return real_read(descriptor, size)
+
+    def tracked_close(descriptor: int) -> None:
+        try:
+            real_close(descriptor)
+        finally:
+            tracked_descriptors.discard(descriptor)
+
+    monkeypatch.setattr(relation_review.os, "open", tracked_open)
+    monkeypatch.setattr(relation_review.os, "read", counted_read)
+    monkeypatch.setattr(relation_review.os, "close", tracked_close)
+
+    payload = reconcile_module.reconcile(tmp_path, dry_run=True).as_dict()
+
+    assert requested
+    assert max(requested) <= 257
+    assert payload["lifecycle_prepared_issues"] == []
+    assert prepared.exists()
+
+
+def test_lifecycle_issue_projection_keeps_one_batch_issue_beyond_identity_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(relation_review, "_LIFECYCLE_MAX_IDENTITIES", 2)
+    issues = [
+        relation_review.LifecyclePreparedIssue("IDENTITY_A", "a"),
+        relation_review.LifecyclePreparedIssue("IDENTITY_B", "b"),
+        relation_review.LifecyclePreparedIssue("BATCH"),
+        relation_review.LifecyclePreparedIssue("UNREACHABLE"),
+    ]
+
+    projected = relation_review._bounded_lifecycle_prepared_issues(issues)
+
+    assert projected == tuple(issues[:3])
+
+
+def test_lifecycle_sidecar_symlink_swap_fails_closed_before_cleanup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=_LIFECYCLE_IDS["stale"],
+        path="Knowledge Base/Notes/Insights/stale-sidecar-swap.md",
+    )
+    trash = tmp_path / "Knowledge Base/_trash/2026-07-15/swapped.txt"
+    trash.parent.mkdir(parents=True, exist_ok=True)
+    trash.write_text("trash", encoding="utf-8")
+    sidecar = trash.with_name(f"{trash.name}.meta.json")
+    sidecar.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
+        encoding="utf-8",
+    )
+    replacement = tmp_path / "replacement-sidecar.json"
+    replacement.write_text(
+        json.dumps({"original_path": "Knowledge Base/Notes/swapped.txt"}),
+        encoding="utf-8",
+    )
+    real_open = relation_review.os.open
+    swapped = False
+
+    def swap_then_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        if Path(path) == sidecar and not swapped:
+            sidecar.unlink()
+            sidecar.symlink_to(replacement)
+            swapped = True
+        if dir_fd is None:
+            return real_open(path, flags, mode)
+        return real_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(relation_review.os, "open", swap_then_open)
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert swapped
+    assert "LIFECYCLE_TRASH_RACE" in {
+        issue["code"] for issue in payload["lifecycle_prepared_issues"]
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert prepared.exists()
+
+
+def test_reconcile_lifecycle_projection_reports_each_omitted_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(reconcile_module, "_LIFECYCLE_REPORT_LIMIT", 1)
+
+    retained, omitted = reconcile_module._bounded_lifecycle_values(
+        ("one", "two", "three")
+    )
+    report = reconcile_module.ReconcileReport(
+        lifecycle_prepared=retained,
+        lifecycle_prepared_omitted_count=omitted,
+        lifecycle_prepared_omitted_counts={
+            "lifecycle_prepared": omitted,
+            "lifecycle_prepared_issues": 2,
+            "lifecycle_prepared_cleaned": 3,
+            "lifecycle_prepared_cleanup_blocked": 4,
+        },
+    ).as_dict()
+
+    assert retained == ["one"]
+    assert report["lifecycle_prepared_omitted_count"] == 2
+    assert report["lifecycle_prepared_omitted_counts"] == {
+        "lifecycle_prepared": 2,
+        "lifecycle_prepared_issues": 2,
+        "lifecycle_prepared_cleaned": 3,
+        "lifecycle_prepared_cleanup_blocked": 4,
+    }
+
+
+@pytest.mark.parametrize("failure", ["decision", "ambiguous_owner"])
+def test_reconcile_reports_noncleanable_lifecycle_issues(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    page_id = "00000000-0000-4000-8000-000000000217"
+    page, prepared, _, _ = _install_lifecycle_slot(
+        tmp_path,
+        state="stale",
+        page_id=page_id,
+        path="Knowledge Base/Notes/Insights/noncleanable.md",
+    )
+    if failure == "decision":
+        decision = next(child for child in prepared.parent.iterdir() if child != prepared)
+        decision.write_text("not-json", encoding="utf-8")
+        expected = "RELATION_REVIEW_INVALID_JSON"
+    else:
+        duplicate = tmp_path / "Knowledge Base/Notes/Insights/duplicate-owner.md"
+        duplicate.write_text(page.read_text(encoding="utf-8"), encoding="utf-8")
+        expected = "LIFECYCLE_PRIMARY_AMBIGUOUS"
+    prepared_bytes = prepared.read_bytes()
+
+    payload = reconcile_module.reconcile(tmp_path).as_dict()
+
+    assert {item["code"] for item in payload["lifecycle_prepared_issues"]} == {
+        expected
+    }
+    assert payload["lifecycle_prepared_cleaned"] == []
+    assert prepared.read_bytes() == prepared_bytes
 
 
 def test_reconcile_reports_embeddings_disabled_in_test_env(vault: Path) -> None:
@@ -113,6 +990,32 @@ def test_reconcile_dry_run_reports_without_writing(vault: Path) -> None:
     assert rep.dry_run is True
     assert "Knowledge Base/index.md" in rep.indexes_updated
     assert top.read_text(encoding="utf-8") == drifted, "dry_run must not write"
+
+
+def test_reconcile_creates_baseline_only_when_not_dry_run_and_never_refreshes_it(
+    vault: Path,
+) -> None:
+    path = activation_manifest.manifest_path(vault)
+    assert not path.exists()
+    page = vault / "Knowledge Base/Notes/Insights/legacy-reconcile.md"
+    page.write_text("---\ntype: insight\nstatus: active\n---\n\n# Legacy\n", encoding="utf-8")
+    before_page = page.read_bytes()
+
+    reconcile_module.reconcile(vault, dry_run=True)
+    assert not path.exists()
+
+    reconcile_module.reconcile(vault)
+    first_bytes = path.read_bytes()
+    assert activation_manifest.is_grandfathered(vault, page)
+    assert page.read_bytes() == before_page
+    assert "exomem_id:" not in page.read_text(encoding="utf-8")
+    assert not (vault / "Knowledge Base/.review-state.json").exists()
+
+    later = vault / "Knowledge Base/Notes/Insights/later-reconcile.md"
+    later.write_text("---\ntype: insight\nstatus: active\n---\n\n# Later\n", encoding="utf-8")
+    reconcile_module.reconcile(vault)
+    assert path.read_bytes() == first_bytes
+    assert not activation_manifest.is_grandfathered(vault, later)
 
 
 def test_reconcile_clears_deferred_semantic_work_after_embedding_refresh(

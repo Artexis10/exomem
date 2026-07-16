@@ -26,8 +26,12 @@ def _configuration() -> tuple[str, str | None, str | None]:
     url = os.environ.get("EXOMEM_PROVISIONER_DATABASE_URL") or config.get_main_option(
         "sqlalchemy.url"
     )
-    schema = os.environ.get("EXOMEM_PROVISIONER_DATABASE_SCHEMA")
-    role = os.environ.get("EXOMEM_PROVISIONER_DATABASE_ROLE")
+    schema = config.attributes.get("provisioner_schema") or os.environ.get(
+        "EXOMEM_PROVISIONER_DATABASE_SCHEMA"
+    )
+    role = config.attributes.get("provisioner_role") or os.environ.get(
+        "EXOMEM_PROVISIONER_DATABASE_ROLE"
+    )
     if url.startswith("sqlite"):
         return url, None, None
     if (
@@ -71,12 +75,6 @@ def _run_migrations(connection: Connection) -> None:
     )
     with context.begin_transaction():
         if provisioner_schema is not None and provisioner_role is not None:
-            connection.execute(
-                text(
-                    f'CREATE SCHEMA IF NOT EXISTS "{provisioner_schema}" '
-                    f'AUTHORIZATION "{provisioner_role}"'
-                )
-            )
             owner = connection.scalar(
                 text("SELECT pg_get_userbyid(nspowner) FROM pg_namespace WHERE nspname = :schema"),
                 {"schema": provisioner_schema},
@@ -110,6 +108,8 @@ async def run_async_migrations() -> None:
 
 if context.is_offline_mode():
     run_migrations_offline()
+elif config.attributes.get("connection") is not None:
+    _run_migrations(config.attributes["connection"])
 elif "+asyncpg" in database_url or "+aiosqlite" in database_url:
     asyncio.run(run_async_migrations())
 else:

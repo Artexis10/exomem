@@ -7,7 +7,7 @@
     "provisioner": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["image", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "releaseManifestJson", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret"],
+      "required": ["image", "replicas", "databaseSchema", "databaseRole", "trustedProxyIps", "cellChartPath", "cellChartVersion", "helmBinary", "helmVersion", "controlHostname", "transferHostname", "browserOrigin", "releaseManifestJson", "location", "internalOrigin", "pollSeconds", "providerRecoveryPublicKeySecret", "providerRecoverySigningKeySecret", "capacityReceiptPublicKeySecret"],
       "properties": {
         "image": {
           "type": "string",
@@ -44,6 +44,15 @@
           "properties": {
             "name": {"type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$"},
             "key": {"type": "string", "pattern": "^[A-Za-z0-9._-]+$"}
+          }
+        },
+        "capacityReceiptPublicKeySecret": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["name", "key"],
+          "properties": {
+            "name": {"const": "exomem-capacity-receipt-verifier"},
+            "key": {"const": "public-key"}
           }
         }
       }
@@ -82,10 +91,11 @@
     "capacityCollector": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["schedule", "contractSha256", "stateConfigMap", "privateKeySecret", "hcloudTokenSecret"],
+      "required": ["schedule", "contractSha256", "hcloudServerId", "stateConfigMap", "privateKeySecret", "hcloudTokenSecret"],
       "properties": {
         "schedule": {"const": "* * * * *"},
         "contractSha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "hcloudServerId": {"type": "integer", "minimum": 1},
         "stateConfigMap": {"const": "exomem-capacity-receipt"},
         "privateKeySecret": {
           "type": "object",

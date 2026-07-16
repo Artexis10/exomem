@@ -29,6 +29,7 @@ def test_note_writes_caller_h1_verbatim_no_duplicate(vault: Path) -> None:
         ),
         note_type="insight",
         title="A note about retrieval pipelines",
+        status="draft",
         today=TODAY,
     )
     text = (vault / result.path).read_text(encoding="utf-8")
@@ -53,6 +54,7 @@ def test_note_renders_links_for_kb_rooted_obsidian_vault(vault: Path) -> None:
         note_type="insight",
         title="KB-rooted Obsidian links",
         sources=[source],
+        status="draft",
         today=TODAY,
     )
 
@@ -70,6 +72,7 @@ def test_note_body_with_no_h1_gets_canonical_title(vault: Path) -> None:
         content="## Claim\n\nNo H1 today.\n",
         note_type="insight",
         title="No H1 today",
+        status="draft",
         today=TODAY,
     )
     text = (vault / result.path).read_text(encoding="utf-8")
@@ -114,6 +117,7 @@ def test_note_feedback_surfaces_relation_debt_without_blocking_write(vault: Path
         content="## Finding\n\nA durable but currently isolated conclusion.\n",
         note_type="insight",
         title="Isolated conclusion",
+        status="draft",
         today=TODAY,
     )
 
@@ -132,6 +136,7 @@ def test_note_slug_truncation_emits_warning(vault: Path) -> None:
         content="# title H1\n\n## Claim\n\nBody.\n",
         note_type="insight",
         title=very_long_title,
+        status="draft",
         today=TODAY,
     )
     # Path is on disk (truncated form).
@@ -148,6 +153,7 @@ def test_note_short_title_no_truncation_warning(vault: Path) -> None:
         content="# t\n\n## Claim\n\nB.\n",
         note_type="insight",
         title="Short title",
+        status="draft",
         today=TODAY,
     )
     assert not any(
@@ -164,6 +170,7 @@ def test_note_no_cap50_warning(vault: Path) -> None:
         content="# t\n",
         note_type="insight",
         title="cap warning test",
+        status="draft",
         today=TODAY,
     )
     assert not any("trimmed at cap-50" in w for w in result.warnings)

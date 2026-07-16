@@ -22,15 +22,17 @@ jobs:
         uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      - name: Verify lockfile is current
+        run: uv lock --check
       - name: Run tests (lean — BM25/keyword, server media extraction off)
         env:
           # The suite runs without the embeddings/media extras; these mirror the
           # conftest autouse defaults so a forgotten extra can't change behaviour.
           KB_MCP_DISABLE_EMBEDDINGS: "1"
           KB_MCP_DISABLE_MEDIA_EXTRACTION: "1"
-        run: uv run --python ${{ matrix.python-version }} python -m pytest -q
+        run: uv run --frozen --python ${{ matrix.python-version }} python -m pytest -q
       - name: Sample vault smoke (the exact command users run)
-        run: uv run --python ${{ matrix.python-version }} exomem demo --json
+        run: uv run --frozen --python ${{ matrix.python-version }} exomem demo --json
 
   product-e2e:
     name: product E2E (installed wheel, stdio + HTTP)
@@ -43,7 +45,7 @@ jobs:
         with:
           enable-cache: true
       - name: Governed lifecycle, restart persistence, and transport shutdown
-        run: uv run python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
+        run: uv run --frozen python scripts/e2e_product_loop.py --budget-seconds 240 --request-timeout 20
 
   retrieval-eval:
     name: retrieval eval (golden gate, embeddings)
@@ -69,14 +71,14 @@ jobs:
         # / recall@10 clear their floors. Kept OFF the fast 3-version matrix so
         # lean CI never pays the torch download. EXOMEM_DISABLE_EMBEDDINGS is
         # deliberately unset here — the test lifts it and loads the real model.
-        run: uv run --extra embeddings python -m pytest -m embeddings -v
+        run: uv run --frozen --extra embeddings python -m pytest -m embeddings -v
       - name: Per-lane latency ceiling gate (2000-note synthetic vault, model-free)
         # The anti-"hidden 14s" gate (tests/test_latency_gate.py): generates a
         # realistic densely-wikilinked 2000-note vault and asserts NO retrieval
         # lane exceeds its ceiling (graph rebuild → ~1.9s trips it). Model-free,
         # so it ALSO runs in the lean matrix; pinned here as the benchmark gate's
         # home next to the golden quality gate.
-        run: uv run python -m pytest tests/test_latency_gate.py -q
+        run: uv run --frozen python -m pytest tests/test_latency_gate.py -q
 
   onboarding:
     name: onboarding (wheel path)
@@ -91,7 +93,7 @@ jobs:
         # Proves the onboarding path works from the built wheel alone — the
         # packaged sample vault ships, `exomem demo` has no repo dependency,
         # and `exomem setup --yes` completes — with a hard wall-time budget.
-        run: uv run python scripts/time-to-value.py --budget-seconds 120
+        run: uv run --frozen python scripts/time-to-value.py --budget-seconds 120
 
   docker:
     name: docker (lean build + smoke)
@@ -167,7 +169,7 @@ jobs:
         with:
           enable-cache: true
       - name: Check generated capabilities doc
-        run: uv run python scripts/generate-capabilities.py --check
+        run: uv run --frozen python scripts/generate-capabilities.py --check
 
   lint:
     name: lint + targeted types
@@ -182,6 +184,7 @@ jobs:
         run: >-
           uvx ruff check
           src/exomem/memory_refs.py
+          src/exomem/observe_memory.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py
@@ -191,6 +194,7 @@ jobs:
           scripts/e2e_http_server.py
           scripts/smoke-media-pipeline.py
           tests/test_memory_refs.py
+          tests/test_observe_memory.py
           tests/test_memory_schema.py
           tests/test_relation_registry.py
           tests/test_traversal_profiles.py
@@ -199,6 +203,7 @@ jobs:
         run: >-
           uvx mypy --follow-imports skip --ignore-missing-imports --check-untyped-defs
           src/exomem/memory_refs.py
+          src/exomem/observe_memory.py
           src/exomem/memory_context.py
           src/exomem/memory_schema.py
           src/exomem/relation_registry.py

@@ -12,6 +12,7 @@ metadata:
     app.kubernetes.io/part-of: exomem-hosted-operations
   annotations:
     exomem.io/capacity-contract-sha256: {{ $contractRaw | sha256sum | quote }}
+immutable: true
 data:
   operational_receipt_collector.py: |
 {{ .Files.Get "files/operational_receipt_collector.py" | indent 4 }}
@@ -150,6 +151,10 @@ spec:
                 - {{ .Release.Namespace }}
                 - --state-configmap
                 - {{ $stateName }}
+                - --hcloud-server-id
+                - {{ .Values.capacityCollector.hcloudServerId | quote }}
+                - --hcloud-location
+                - {{ .Values.provisioner.location | quote }}
               env:
                 - name: EXOMEM_CAPACITY_RECEIPT_PRIVATE_KEY
                   valueFrom:
