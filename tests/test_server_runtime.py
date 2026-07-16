@@ -132,3 +132,89 @@ def test_media_startup_reconciles_after_worker_start_failure(
     assert result is None
     assert events[:2] == ["start", "stop"]
     assert len([event for event in events if event.startswith("reconcile:")]) == 1
+
+
+def test_media_startup_reconciliation_uses_writer_authority(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import writer_lease
+
+    vault = tmp_path / "vault"
+    (vault / "Knowledge Base").mkdir(parents=True)
+    depth = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, root):
+            nonlocal depth
+            assert root == vault
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: None)
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("startup media reconciliation escaped mutation guard"),
+    )
+
+    assert server_runtime._start_media_worker(vault) is None
+    assert depth == 0
+
+
+def test_disabled_media_runtime_persists_actionable_blocked_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_jobs
+
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "disabled.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"audio")
+    monkeypatch.setenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", "1")
+
+    assert server_runtime._start_media_worker(vault) is None
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == "blocked"
+    assert job["retryable"] is True
+    assert "enable media extraction" in job["next_action"]
+    frontmatter = (binary.with_name(binary.name + ".md")).read_text(encoding="utf-8")
+    assert "processing_state: blocked" in frontmatter
+    assert "EXOMEM_DISABLE_MEDIA_EXTRACTION" in frontmatter
+
+
+def test_failed_media_runtime_start_persists_actionable_blocked_state(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_jobs
+
+    vault = tmp_path / "vault"
+    binary = vault / "Knowledge Base" / "Evidence" / "Audio" / "failed-start.m4a"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"audio")
+    monkeypatch.delenv("EXOMEM_DISABLE_MEDIA_EXTRACTION", raising=False)
+
+    class Worker:
+        def start(self):
+            raise OSError("child executable unavailable")
+
+        def stop(self):
+            return None
+
+    monkeypatch.setattr(server_runtime, "_create_media_worker", lambda _root: Worker())
+
+    assert server_runtime._start_media_worker(vault) is None
+
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == "blocked"
+    assert job["retryable"] is True
+    assert job["error"].startswith("MediaRuntimeUnavailable: OSError:")
+    assert "restart the service" in job["next_action"]

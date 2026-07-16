@@ -14,7 +14,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import access, extract, media_jobs, memory_refs, preserve
+from . import access, media_jobs, media_types, memory_refs
 from .kbdir import kb_dirname
 from .vault import (
     MISSING_CONTENT_HASH,
@@ -76,7 +76,13 @@ _PROVENANCE_FIELDS = (
 
 def classify_media(path: str | Path) -> str | None:
     """Return the canonical extraction kind for ``path``, case-insensitively."""
-    return extract.media_type_for(path)
+    return media_types.media_type_for(path)
+
+
+def _preserve_module():
+    from . import preserve
+
+    return preserve
 
 
 def reconcile_media(
@@ -122,10 +128,23 @@ def reconcile_media(
     _confine_sidecar(vault, sidecar)
     original = sidecar.read_text(encoding="utf-8") if sidecar.exists() else None
 
-    completed = original is not None and _is_valid_completed_sidecar(
+    completed = original is not None and _completed_provenance_state(
         original, media_type=media_type, provenance=provenance
     )
-    if completed:
+    if completed in {"valid", "repairable"}:
+        if completed == "repairable":
+            repaired = _backfill_completed_provenance(original, provenance)
+            _verify_binary_identity(binary, resolved_binary, provenance)
+            batch_atomic_write(
+                [
+                    PlannedWrite(
+                        path=sidecar,
+                        content=repaired,
+                        expected_hash=content_hash(original),
+                    )
+                ],
+                vault_root=vault,
+            )
         _verify_binary_identity(binary, resolved_binary, provenance)
         _discard_stale_job(vault, binary, sidecar, media_type)
         return ReconcileResult(media_type, "completed", sidecar, None)
@@ -178,7 +197,9 @@ def reconcile_all_media(
     if not kb.is_dir():
         return 0
 
-    store = media_jobs.MediaJobStore(vault)
+    store: media_jobs.MediaJobStore | None = None
+    if media_jobs.job_store_path(vault).exists():
+        store = media_jobs.MediaJobStore(vault, create=False)
 
     examined = 0
     attempted = 0
@@ -186,8 +207,10 @@ def reconcile_all_media(
     for binary in _iter_rotating_governed_media(
         vault,
         kb,
-        after=store.discovery_cursor(),
+        after=store.discovery_cursor() if store is not None else None,
     ):
+        if store is None:
+            store = media_jobs.MediaJobStore(vault)
         if examined >= limit:
             break
         examined += 1
@@ -198,7 +221,7 @@ def reconcile_all_media(
                 reconcile_media(vault, binary, explicit=False)
             except Exception:  # noqa: BLE001 - one artifact must not abort discovery
                 log.warning("media reconciliation failed for %s", binary, exc_info=True)
-    if last_examined is not None:
+    if last_examined is not None and store is not None:
         store.set_discovery_cursor(last_examined)
     return attempted
 
@@ -263,7 +286,7 @@ def _iter_governed_media(vault: Path, kb_root: Path):
 def _needs_reconciliation(
     vault: Path,
     binary: Path,
-    store: media_jobs.MediaJobStore,
+    store: media_jobs.MediaJobStore | None,
 ) -> bool:
     sidecar = binary.with_name(binary.name + ".md")
     try:
@@ -279,9 +302,9 @@ def _needs_reconciliation(
     if raw_frontmatter is None:
         return True
     if _is_completed_sidecar_shape(vault, binary, frontmatter, body, media_type):
-        return store.has_binary(binary)
+        return store is not None and store.has_binary(binary)
     if _is_pending_sidecar_shape(vault, binary, frontmatter, media_type):
-        return not store.has_binary(binary)
+        return store is None or not store.has_binary(binary)
     return True
 
 
@@ -335,8 +358,6 @@ def _is_completed_sidecar_shape(
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
         return False
     present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
-    if not any(present):
-        return True
     if not all(present):
         return False
     try:
@@ -543,6 +564,7 @@ def _render_pending_sidecar(
     provenance: _BinaryProvenance,
     original: str | None,
 ) -> str:
+    preserve = _preserve_module()
     existing_id: str | None = None
     preserved_notes: str | None = None
     if original is not None:
@@ -629,16 +651,22 @@ def _is_valid_completed_sidecar(
     media_type: str,
     provenance: _BinaryProvenance,
 ) -> bool:
+    return _completed_provenance_state(
+        content, media_type=media_type, provenance=provenance
+    ) == "valid"
+
+
+def _completed_provenance_state(
+    content: str,
+    *,
+    media_type: str,
+    provenance: _BinaryProvenance,
+) -> str:
     frontmatter, body, raw_frontmatter = parse_frontmatter(content)
     if raw_frontmatter is None:
-        return False
+        return "not-completed"
     if not _is_completed_transcript_shape(frontmatter, body, media_type):
-        return False
-    present = tuple(field in frontmatter for field in _PROVENANCE_FIELDS)
-    if not any(present):
-        return True
-    if not all(present):
-        return False
+        return "not-completed"
     expected = {
         "evidence_file": provenance.relative_path,
         "original_filename": provenance.original_filename,
@@ -647,4 +675,53 @@ def _is_valid_completed_sidecar(
         "binary_mtime_ns": provenance.mtime_ns,
         "binary_ctime_ns": provenance.ctime_ns,
     }
-    return all(frontmatter.get(field) == value for field, value in expected.items())
+    for field, value in expected.items():
+        if field in frontmatter and frontmatter.get(field) != value:
+            return "conflict"
+    if all(field in frontmatter for field in _PROVENANCE_FIELDS):
+        return "valid"
+    return "repairable"
+
+
+def _backfill_completed_provenance(
+    content: str, provenance: _BinaryProvenance
+) -> str:
+    preserve = _preserve_module()
+    rendered = content
+    existing, _body, _raw = parse_frontmatter(content)
+    for field, value in _pending_fields(provenance)[1:]:
+        if field not in existing:
+            rendered = preserve._set_frontmatter_field(rendered, field, str(value))
+    return rendered
+
+
+def mark_processing_unavailable(
+    vault_root: Path,
+    *,
+    reason: str,
+    next_action: str,
+) -> int:
+    """Make queued automatic work actionable when no runtime can consume it."""
+    vault = Path(vault_root).resolve()
+    if not media_jobs.job_store_path(vault).exists():
+        return 0
+    store = media_jobs.MediaJobStore(vault, create=False)
+    jobs = store.pending_jobs()
+    preserve = _preserve_module()
+    changed = 0
+    for job in jobs:
+        if job.id is None:
+            continue
+        store.mark(job.id, media_jobs.BLOCKED, reason)
+        if job.sidecar_path.exists():
+            preserve.update_sidecar_processing_failure(
+                vault,
+                job.sidecar_path,
+                state=media_jobs.BLOCKED,
+                attempts=job.attempts,
+                error=reason,
+                retryable=True,
+                next_action=next_action,
+            )
+        changed += 1
+    return changed

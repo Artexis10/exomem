@@ -53,7 +53,15 @@ def _record_deferred_semantic_upserts(vault_root: Path, paths: list[Path]) -> in
 
 def deferred_work_status(vault_root: Path | None = None) -> dict:
     """No-allocation summary of durable expensive index work."""
-    return {"semantic_upserts": deferred_index.status(vault_root)}
+    return {
+        "semantic_upserts": deferred_index.status(vault_root),
+        "full_upserts": deferred_index.full_status(vault_root),
+    }
+
+
+def record_failed_refresh(vault_root: Path, paths: list[Path]) -> int:
+    """Persist a failed all-index dispatch without importing model modules."""
+    return deferred_index.add_full(vault_root, _rel_md_paths(vault_root, paths))
 
 
 def clear_deferred_work(
@@ -65,7 +73,7 @@ def clear_deferred_work(
     if vault_root is None:
         return 0
     if paths is None:
-        return deferred_index.clear(vault_root)
+        return deferred_index.clear(vault_root) + deferred_index.clear_full(vault_root)
     rels: list[str] = []
     for item in paths:
         if isinstance(item, Path):
@@ -74,7 +82,9 @@ def clear_deferred_work(
             rel = str(item).replace("\\", "/")
             if rel.lower().endswith(".md"):
                 rels.append(rel)
-    return deferred_index.clear(vault_root, rels)
+    return deferred_index.clear(vault_root, rels) + deferred_index.clear_full(
+        vault_root, rels
+    )
 
 
 def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
@@ -84,9 +94,21 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
     the normal writer path. Crash/restart recovery still comes from drift audit
     and explicit reconcile/index.
     """
-    pending = deferred_index.list_paths(vault_root, limit=limit)
+    processed = 0
+    full_pending = deferred_index.list_full_paths(vault_root, limit=limit)
+    if full_pending:
+        full_paths = [vault_root / rel for rel in full_pending]
+        try:
+            upsert_after_write(vault_root, full_paths)
+        except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
+            log.warning("deferred full-index dispatch failed; work remains queued", exc_info=True)
+        else:
+            processed += deferred_index.clear_full(vault_root, full_pending)
+
+    remaining_limit = None if limit is None else max(0, limit - processed)
+    pending = deferred_index.list_paths(vault_root, limit=remaining_limit)
     if not pending:
-        return 0
+        return processed
     from . import embeddings
 
     paths = [vault_root / rel for rel in pending]
@@ -94,11 +116,11 @@ def drain_deferred_work(vault_root: Path, *, limit: int | None = None) -> int:
         dispatched = embeddings.upsert_after_write(vault_root, paths)
     except Exception:  # noqa: BLE001 - durable work must survive a failed dispatch
         log.warning("deferred semantic dispatch failed; work remains queued", exc_info=True)
-        return 0
+        return processed
     if dispatched is False:
         log.warning("deferred semantic dispatch incomplete; work remains queued")
-        return 0
-    return clear_deferred_work(vault_root, paths=paths)
+        return processed
+    return processed + clear_deferred_work(vault_root, paths=paths)
 
 
 def upsert_after_write(

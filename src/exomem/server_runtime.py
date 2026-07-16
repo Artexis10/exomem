@@ -302,6 +302,22 @@ def _start_compute_runtime(vault_root: Path) -> None:
 def _start_media_worker(vault_root: Path) -> Any | None:
     """Start the optional off-request media extraction worker."""
     worker = _create_media_worker(vault_root)
+    unavailable_reason: str | None = None
+    unavailable_action: str | None = None
+    if worker is None:
+        if os.environ.get("EXOMEM_DISABLE_MEDIA_EXTRACTION"):
+            unavailable_reason = (
+                "MediaExtractionDisabled: EXOMEM_DISABLE_MEDIA_EXTRACTION is set"
+            )
+            unavailable_action = (
+                "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+                "restart the service, then retry"
+            )
+        else:
+            unavailable_reason = "MediaRuntimeUnavailable: media worker construction failed"
+            unavailable_action = (
+                "fix the media runtime configuration, restart the service, then retry"
+            )
     if worker is not None:
         try:
             worker.start()
@@ -312,11 +328,24 @@ def _start_media_worker(vault_root: Path) -> Any | None:
                 pass
             log.warning("media runtime unavailable; core service continuing: %s", exc)
             worker = None
+            unavailable_reason = f"MediaRuntimeUnavailable: {type(exc).__name__}: {exc}"
+            unavailable_action = (
+                "fix the media runtime configuration, restart the service, then retry"
+            )
     try:
-        media_processing.reconcile_all_media(
-            vault_root,
-            limit=media_processing.DEFAULT_RECONCILE_LIMIT,
-        )
+        from .writer_lease import get_manager
+
+        with get_manager().mutation_guard(vault_root):
+            media_processing.reconcile_all_media(
+                vault_root,
+                limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+            )
+            if unavailable_reason is not None and unavailable_action is not None:
+                media_processing.mark_processing_unavailable(
+                    vault_root,
+                    reason=unavailable_reason,
+                    next_action=unavailable_action,
+                )
     except Exception as exc:  # noqa: BLE001 - startup discovery is best-effort
         log.warning("media worker startup discovery failed: %s", exc)
     if worker is None:

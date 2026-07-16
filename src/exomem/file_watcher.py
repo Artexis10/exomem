@@ -41,6 +41,12 @@ from .kbdir import kb_dirname, kb_prefix
 
 log = logging.getLogger(__name__)
 
+
+def _media_mutation_guard(vault_root: Path):
+    from .writer_lease import get_manager
+
+    return get_manager().mutation_guard(vault_root)
+
 DEBOUNCE_SECONDS = 0.5
 # How often the watcher re-walks and reconciles the freshness registry against
 # disk truth, bounding how long a dropped watchdog event can leave it stale.
@@ -335,7 +341,8 @@ class FileWatcher:
 
         for path in media:
             try:
-                media_processing.reconcile_media(self._vault_root, path, explicit=False)
+                with _media_mutation_guard(self._vault_root):
+                    media_processing.reconcile_media(self._vault_root, path, explicit=False)
             except Exception:  # noqa: BLE001 - a bad artifact must never kill the watcher
                 log.exception("file watcher: media reconciliation failed for %s", path)
         if not (ups or del_rels):
@@ -423,10 +430,11 @@ class FileWatcher:
                 log.exception("file watcher: freshness reconcile failed (scope=%s)", scope)
         if not seed:
             try:
-                media_processing.reconcile_all_media(
-                    self._vault_root,
-                    limit=RECONCILE_MAX_MEDIA_FILES,
-                )
+                with _media_mutation_guard(self._vault_root):
+                    media_processing.reconcile_all_media(
+                        self._vault_root,
+                        limit=RECONCILE_MAX_MEDIA_FILES,
+                    )
             except Exception:  # noqa: BLE001 - discovery must never kill the watcher
                 log.exception("file watcher: periodic media reconciliation failed")
         if seed or not drifted:

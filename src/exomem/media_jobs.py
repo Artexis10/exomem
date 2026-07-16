@@ -414,6 +414,20 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def pending_jobs(self, *, limit: int | None = None) -> list[MediaJob]:
+        """Return a bounded snapshot for runtime-unavailable state convergence."""
+        conn = self._connect()
+        try:
+            sql = "SELECT * FROM jobs WHERE state = 'pending' ORDER BY id"
+            params: tuple[object, ...] = ()
+            if limit is not None:
+                sql += " LIMIT ?"
+                params = (max(0, limit),)
+            rows = conn.execute(sql, params).fetchall()
+            return [self._row_to_job(row) for row in rows]
+        finally:
+            conn.close()
+
     def counts(self) -> dict[str, int]:
         conn = self._connect()
         try:
@@ -573,6 +587,13 @@ def _status_job(row: Any) -> dict[str, Any]:
     }
     if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
         actions[BLOCKED] = "check the timestamp renderer, then retry"
+    if state == BLOCKED and error and error.startswith("MediaExtractionDisabled:"):
+        actions[BLOCKED] = (
+            "enable media extraction by clearing EXOMEM_DISABLE_MEDIA_EXTRACTION, "
+            "restart the service, then retry"
+        )
+    if state == BLOCKED and error and error.startswith("MediaRuntimeUnavailable:"):
+        actions[BLOCKED] = "fix the media runtime configuration, restart the service, then retry"
     return {
         "id": int(row["id"]),
         "path": str(row["binary_rel"]),

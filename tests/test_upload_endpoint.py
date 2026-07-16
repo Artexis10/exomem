@@ -283,6 +283,43 @@ def test_upload_parses_before_guard_and_preserves_inside_it(
     assert events == ["guard-enter", "preserve", "guard-exit"]
 
 
+def test_upload_media_reconciliation_uses_writer_authority(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import media_processing, writer_lease
+
+    depth = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, guarded_vault):
+            nonlocal depth
+            assert guarded_vault == vault
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    client = _client(vault, monkeypatch, EXOMEM_UPLOAD_TOKEN="sekret")
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("post-upload reconciliation escaped mutation guard"),
+    )
+    response = client.post(
+        "/upload",
+        files={"file": ("guarded.m4a", b"audio", "audio/mp4")},
+        data={"scope": "S", "category": "C"},
+        headers={"Authorization": "Bearer sekret"},
+    )
+
+    assert response.status_code == 201, response.text
+    assert depth == 0
+
+
 @pytest.mark.parametrize(
     ("code", "status"),
     [("MUTATION_BUSY", 409), ("MUTATION_LOCK_UNAVAILABLE", 503)],

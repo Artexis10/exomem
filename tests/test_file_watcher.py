@@ -122,6 +122,44 @@ def test_supported_audio_event_dispatches_media_only(
     assert calls["resolver"] == []
 
 
+def test_supported_audio_event_reconciles_under_writer_authority(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import writer_lease
+
+    depth = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, root: Path):
+            nonlocal depth
+            assert root == vault
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("watcher media reconciliation escaped mutation guard"),
+    )
+    recording = vault / "Knowledge Base" / "Evidence" / "Audio" / "guarded.m4a"
+    recording.parent.mkdir(parents=True, exist_ok=True)
+    recording.write_bytes(b"audio")
+
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._record(recording, deleted=False)
+    watcher._flush()
+
+    assert depth == 0
+
+
 def test_supported_audio_never_enters_markdown_freshness_or_embedding(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -625,6 +663,42 @@ def test_periodic_reconcile_discovers_missed_media_without_text_reembed(
     assert calls["resolver"] == []
     assert calls["upsert"] == []
     assert calls["delete"] == []
+
+
+def test_periodic_media_reconcile_runs_under_writer_authority(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from contextlib import contextmanager
+
+    from exomem import writer_lease
+
+    depth = 0
+
+    class Manager:
+        @contextmanager
+        def mutation_guard(self, root: Path):
+            nonlocal depth
+            assert root == vault
+            depth += 1
+            try:
+                yield
+            finally:
+                depth -= 1
+
+    monkeypatch.setattr(writer_lease, "get_manager", lambda: Manager())
+    monkeypatch.setattr(
+        media_processing,
+        "reconcile_all_media",
+        lambda *_a, **_kw: depth == 1
+        or pytest.fail("periodic media reconciliation escaped mutation guard"),
+    )
+    calls = _spy_reconcile_fanout(monkeypatch)
+    watcher = file_watcher.FileWatcher(vault)
+    watcher._reconcile_once(seed=True)
+    watcher._reconcile_once(seed=False)
+
+    assert depth == 0
+    assert calls["upsert"] == []
 
 
 def test_reconcile_delete_routes_to_delete_after_remove(vault, monkeypatch: pytest.MonkeyPatch) -> None:

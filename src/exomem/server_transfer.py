@@ -45,6 +45,18 @@ def _preserve_under_guard(
         return preserve_stream(vault_root, **kwargs)
 
 
+def _reconcile_under_guard(
+    manager: Any,
+    vault_root: Path,
+    binary_path: Path,
+) -> Any:
+    media_processing = _media_processing_module()
+    if media_processing.classify_media(binary_path) is None:
+        return None
+    with manager.mutation_guard(vault_root):
+        return media_processing.reconcile_media(vault_root, binary_path, explicit=False)
+
+
 @dataclass(frozen=True)
 class TransferConfig:
     upload_token: str | None
@@ -188,10 +200,10 @@ def register_transfer_routes(
 
         try:
             await run_in_threadpool(
-                _media_processing_module().reconcile_media,
+                _reconcile_under_guard,
+                manager,
                 vault_root,
                 vault_root / result.path,
-                explicit=False,
             )
         except Exception:  # noqa: BLE001 - preserved evidence remains recoverable
             log.warning(

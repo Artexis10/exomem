@@ -952,6 +952,91 @@ def test_success_refreshes_sidecar_before_completing_durable_job(
     assert media_jobs.status(vault)["jobs"] == []
 
 
+def test_claimed_job_skips_asr_when_sidecar_completed_before_worker_runs(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="claim-race.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    store = media_jobs.MediaJobStore(vault)
+    store.enqueue(
+        media_jobs.MediaJob(
+            binary_path=binary,
+            sidecar_path=sidecar,
+            media_type="audio",
+        )
+    )
+    claimed = store.claim_next()
+    assert claimed is not None
+    completed = sidecar.read_text(encoding="utf-8").replace(
+        "extracted_by: pending", "extracted_by: external-asr+timed"
+    )
+    completed += "\n[0:00] Transcript won the startup race.\n"
+    sidecar.write_text(completed, encoding="utf-8")
+    before_body = sidecar.read_text(encoding="utf-8").split("\n---\n", 1)[1]
+
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_a, **_kw: pytest.fail("ASR must not run for a completed transcript"),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(claimed)
+
+    assert outcome.state == "complete"
+    after = sidecar.read_text(encoding="utf-8")
+    assert after.split("\n---\n", 1)[1] == before_body
+    assert "extracted_by: external-asr+timed" in after
+    store.complete(claimed)
+    assert media_jobs.status(vault)["jobs"] == []
+
+
+def test_transcript_index_refresh_failure_is_durable_and_retryable_without_asr(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import deferred_index, index_sync
+
+    result = _preserve_media_stub(vault, filename="index-retry.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    calls = 0
+
+    def transcribe(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return extract.ExtractResult(
+            text="[0:00] transcript survives index failure",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        )
+
+    monkeypatch.setattr(extract, "extract_text", transcribe)
+    original_upsert = index_sync.upsert_after_write
+    monkeypatch.setattr(
+        index_sync,
+        "upsert_after_write",
+        lambda *_a, **_kw: (_ for _ in ()).throw(RuntimeError("lexical index offline")),
+    )
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+
+    outcome = worker._process(
+        media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    )
+
+    assert outcome.state == "complete"
+    assert calls == 1
+    assert "transcript survives index failure" in sidecar.read_text(encoding="utf-8")
+    status = deferred_index.full_status(vault)
+    assert status["count"] == 1
+    assert status["next_action"] == "retry deferred index refresh"
+
+    monkeypatch.setattr(index_sync, "upsert_after_write", original_upsert)
+    assert index_sync.drain_deferred_work(vault) == 1
+    assert deferred_index.full_status(vault)["count"] == 0
+    assert calls == 1
+
+
 def test_process_worker_restart_preserves_blocked_job_until_explicit_retry(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:

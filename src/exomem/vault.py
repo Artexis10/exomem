@@ -469,9 +469,14 @@ def _batch_atomic_write_locked(
             index_sync.upsert_after_write(vault_root, replaced)
         except Exception:  # noqa: BLE001 — embeddings are best-effort
             import logging
+            try:
+                index_sync.record_failed_refresh(vault_root, replaced)
+            except Exception:  # noqa: BLE001 - canonical commit must still survive
+                logging.getLogger(__name__).exception(
+                    "failed to persist deferred index refresh after dispatch failure"
+                )
             logging.getLogger(__name__).exception(
-                "embedding upsert failed after batch_atomic_write; "
-                "sidecar may be stale until audit_fix(rebuild_embeddings=True)"
+                "index upsert failed after batch_atomic_write; deferred refresh recorded"
             )
     return replaced
 

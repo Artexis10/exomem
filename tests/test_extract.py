@@ -537,6 +537,19 @@ def test_explicit_timestamp_render_failure_does_not_return_untimed_transcript(
         extract._transcribe(Path("automatic.m4a"), "audio", timestamps=True)
 
 
+def test_explicit_timestamp_transcription_treats_silent_audio_as_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("EXOMEM_SEMANTIC_SEGMENTS", raising=False)
+    monkeypatch.delenv("EXOMEM_DIARIZE", raising=False)
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper([]))
+
+    result = extract._transcribe(Path("silent.m4a"), "audio", timestamps=True)
+
+    assert result.text == "[0:00] (no speech detected)"
+    assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
+
+
 # ---------------- optional: vision captioning (EXOMEM_VISION_CAPTION, default OFF) ----
 
 

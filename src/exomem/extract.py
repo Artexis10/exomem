@@ -48,6 +48,12 @@ from pathlib import Path
 from typing import Protocol
 
 from . import accel
+from .media_types import (
+    DOC_EXTS as _DOC_EXTS,
+)
+from .media_types import (
+    media_type_for as _registry_media_type_for,
+)
 
 log = logging.getLogger(__name__)
 
@@ -69,22 +75,10 @@ def _semantic_segments_module():
 
     return semantic_segments
 
-# Media-type buckets by extension. Extension-based is deliberate: no libmagic dep, and
-# the uploader names the file. Unknown extension → not extractable (returns None).
-_AUDIO_EXTS = frozenset({".mp3", ".wav", ".m4a", ".flac", ".ogg", ".oga", ".aac", ".wma", ".opus"})
-_VIDEO_EXTS = frozenset({".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".wmv", ".flv", ".mpeg", ".mpg"})
-_IMAGE_EXTS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".tiff", ".tif", ".webp", ".heic"})
-_PDF_EXTS = frozenset({".pdf"})
 # Documents → MarkItDown (Microsoft, MIT) renders office/html to markdown, fully local.
 # PDF deliberately stays on PyMuPDF (markitdown's PDF path is its weakest). The rest are
 # tiny native parsers — no dependency. Only formats the vault actually holds.
-_DOC_EXTS: dict[str, str] = {
-    ".docx": "docx", ".xlsx": "xlsx", ".pptx": "pptx", ".html": "html", ".htm": "html",
-}
 _MARKITDOWN_KINDS = frozenset(_DOC_EXTS.values())  # {"docx", "xlsx", "pptx", "html"}
-_TEXT_EXTS = frozenset({".txt", ".text", ".log"})  # plain UTF-8 read
-_EMAIL_EXTS = frozenset({".eml"})                  # stdlib email parser
-_CAL_EXTS = frozenset({".ics"})                    # native VEVENT parse
 
 WHISPER_MODEL = os.environ.get("EXOMEM_WHISPER_MODEL", "large-v3")
 # A PDF page yielding fewer than this many characters of embedded text is treated as
@@ -131,24 +125,7 @@ def media_type_for(path: str | Path) -> str | None:
     audio/video → ASR, image → OCR (+CLIP), pdf → PyMuPDF, docx/xlsx/pptx/html →
     MarkItDown, text → plain read, email → stdlib parse, calendar → VEVENT parse.
     """
-    ext = Path(path).suffix.lower()
-    if ext in _AUDIO_EXTS:
-        return "audio"
-    if ext in _VIDEO_EXTS:
-        return "video"
-    if ext in _IMAGE_EXTS:
-        return "image"
-    if ext in _PDF_EXTS:
-        return "pdf"
-    if ext in _DOC_EXTS:
-        return _DOC_EXTS[ext]
-    if ext in _TEXT_EXTS:
-        return "text"
-    if ext in _EMAIL_EXTS:
-        return "email"
-    if ext in _CAL_EXTS:
-        return "calendar"
-    return None
+    return _registry_media_type_for(path)
 
 
 def is_extractable(path: str | Path) -> bool:
@@ -556,6 +533,13 @@ def _transcribe(
     # and `transcript_match_at`. Soft-fail: any renderer error falls back to the
     # flat join below; gate unset is byte-identical to it.
     if timestamps or _semantic_segments_enabled():
+        if timestamps and not seg_list:
+            return ExtractResult(
+                text="[0:00] (no speech detected)",
+                media_type=media_type,
+                engine=f"{engine}+timed",
+                speaker_verification="unavailable" if _diarize_enabled() else None,
+            )
         try:
             semantic_segments = _semantic_segments_module()
             timed_text = semantic_segments.render_timed_lines(

@@ -237,6 +237,17 @@ class MediaWorker:
             log.exception("re-embed failed for %s", job.sidecar_path.name)
 
     def _run_extraction(self, job: _Job) -> _ProcessOutcome:
+        # A startup/watcher race may complete the transcript after this job was
+        # queued or even claimed. Reconcile under the canonical leaf before ASR;
+        # valid completed text wins and is never overwritten.
+        from . import media_processing
+
+        with get_manager().mutation_guard(self._vault_root):
+            reconciled = media_processing.reconcile_media(
+                self._vault_root, job.binary_path, explicit=False
+            )
+        if reconciled is not None and reconciled.state == "completed":
+            return _ProcessOutcome(_COMPLETE)
         expected_sidecar = _content_digest(job.sidecar_path)
         expected_binary = _binary_identity(job.binary_path)
         if expected_sidecar is None or expected_binary is None:

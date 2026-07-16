@@ -80,9 +80,9 @@ def _cache_residency() -> dict[str, Any]:
 
 
 def _deferred_work(vault_root: Path | None) -> dict[str, Any]:
-    from . import deferred_index
+    from . import index_sync
 
-    return {"semantic_upserts": deferred_index.status(vault_root)}
+    return index_sync.deferred_work_status(vault_root)
 
 
 def cuda_accounting_if_initialized() -> dict[str, Any]:

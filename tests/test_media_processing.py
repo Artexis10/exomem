@@ -67,6 +67,15 @@ def test_unsupported_media_is_ignored_automatically_and_errors_explicitly(vault:
     assert _job_count(vault) == 0
 
 
+def test_empty_vault_reconcile_does_not_create_media_ledger(vault: Path) -> None:
+    media_processing = _media_processing()
+    ledger = media_jobs.job_store_path(vault)
+    assert not ledger.exists()
+
+    assert media_processing.reconcile_all_media(vault, limit=10) == 0
+
+    assert not ledger.exists()
+
 def test_missing_sidecar_becomes_canonical_pending_work(vault: Path) -> None:
     media_processing = _media_processing()
     binary = _drop_media(vault)
@@ -419,18 +428,19 @@ def test_periodic_reconciliation_discards_stale_job_for_completed_sidecar(
 
 
 @pytest.mark.parametrize(
-    ("field", "replacement"),
+    ("field", "replacement", "expected_state"),
     [
-        ("binary_sha256", None),
-        ("binary_sha256", "malformed"),
-        ("evidence_file", "Knowledge Base/Evidence/wrong.mp3"),
-        ("binary_size", "999999"),
+        ("binary_sha256", None, "completed"),
+        ("binary_sha256", "malformed", "pending"),
+        ("evidence_file", "Knowledge Base/Evidence/wrong.mp3", "pending"),
+        ("binary_size", "999999", "pending"),
     ],
 )
 def test_completed_sidecar_with_invalid_cheap_provenance_is_reconciled(
     vault: Path,
     field: str,
     replacement: str | None,
+    expected_state: str,
 ) -> None:
     media_processing = _media_processing()
     binary = _drop_media(vault, f"completed-invalid-{field}.mp3")
@@ -461,12 +471,12 @@ def test_completed_sidecar_with_invalid_cheap_provenance_is_reconciled(
     assert media_processing.reconcile_all_media(vault, limit=1) == 1
 
     repaired, body = _frontmatter_and_body(result.sidecar_path)
-    assert repaired["processing_state"] == "pending"
+    assert repaired["processing_state"] == expected_state
     assert repaired["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
     assert repaired["evidence_file"] == binary.relative_to(vault).as_posix()
     assert repaired["binary_size"] == binary.stat().st_size
     assert transcript in body
-    assert store.has_binary(binary) is True
+    assert store.has_binary(binary) is (expected_state == "pending")
 
 
 def test_valid_completed_sidecar_without_job_is_skipped_by_periodic_scan(
@@ -532,16 +542,89 @@ def test_legacy_completed_sidecar_without_any_provenance_is_preserved(
             media_type="audio",
         )
     )
-    before = result.sidecar_path.read_bytes()
+    before_body = result.sidecar_path.read_text(encoding="utf-8").split("\n---\n", 1)[1]
 
-    def reject_reconcile(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("legacy completed media must remain skipped")
-
-    monkeypatch.setattr(media_processing, "reconcile_media", reject_reconcile)
-
-    assert media_processing.reconcile_all_media(vault, limit=1) == 0
-    assert result.sidecar_path.read_bytes() == before
+    assert media_processing.reconcile_all_media(vault, limit=1) == 1
+    frontmatter, body = _frontmatter_and_body(result.sidecar_path)
+    assert body == before_body
+    assert frontmatter["evidence_file"] == binary.relative_to(vault).as_posix()
+    assert frontmatter["original_filename"] == binary.name
+    assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
     assert store.has_binary(binary) is False
+
+
+def test_legacy_completed_mp4_backfills_partial_provenance_without_rewriting_transcript(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "legacy-review.mp4", b"legacy mp4 evidence")
+    sidecar = binary.with_name(binary.name + ".md")
+    body = (
+        "\n# Incident review\n\n"
+        "## Extracted text\n\n"
+        "[0:00] [Speaker A]: Existing words stay byte-identical.\n"
+        "[0:07] [Speaker B]: Including timestamps and labels.\n"
+    )
+    sidecar.write_text(
+        "---\n"
+        "type: source\n"
+        "title: Legacy incident review\n"
+        "media_type: video\n"
+        "extracted_by: faster-whisper:large-v3+timed+diarized\n"
+        "processing_state: completed\n"
+        "evidence_file: Knowledge Base/Evidence/Audio/legacy-review.mp4\n"
+        "speakers: [Speaker A, Speaker B]\n"
+        "speaker_verification: anonymous\n"
+        "governed_custom: retain-me\n"
+        f"---{body}",
+        encoding="utf-8",
+    )
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result.state == "completed"
+    assert result.job_id is None
+    frontmatter, after_body = _frontmatter_and_body(sidecar)
+    assert after_body == body.removeprefix("\n")
+    assert frontmatter["extracted_by"] == "faster-whisper:large-v3+timed+diarized"
+    assert frontmatter["speakers"] == ["Speaker A", "Speaker B"]
+    assert frontmatter["speaker_verification"] == "anonymous"
+    assert frontmatter["governed_custom"] == "retain-me"
+    assert frontmatter["binary_sha256"] == hashlib.sha256(binary.read_bytes()).hexdigest()
+    assert _job_count(vault) == 0
+
+
+def test_caller_supplied_completed_text_backfills_missing_provenance_in_place(
+    vault: Path,
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, "agent-upload.m4a", b"agent supplied audio")
+    sidecar = binary.with_name(binary.name + ".md")
+    body = "\n# Uploaded recording\n\n## Extracted text\n\n[0:00] Supplied transcript.\n"
+    sidecar.write_text(
+        "---\n"
+        "type: source\n"
+        "title: Agent upload\n"
+        "media_type: audio\n"
+        "extracted_by: upload\n"
+        "processing_state: completed\n"
+        f"evidence_file: {binary.relative_to(vault).as_posix()}\n"
+        "speaker_verification: human-verified\n"
+        f"---{body}",
+        encoding="utf-8",
+    )
+
+    result = media_processing.reconcile_media(vault, binary)
+
+    assert result.state == "completed"
+    assert result.job_id is None
+    frontmatter, after_body = _frontmatter_and_body(sidecar)
+    assert after_body == body.removeprefix("\n")
+    assert frontmatter["extracted_by"] == "upload"
+    assert frontmatter["speaker_verification"] == "human-verified"
+    assert frontmatter["original_filename"] == binary.name
+    assert frontmatter["binary_size"] == len(b"agent supplied audio")
+    assert _job_count(vault) == 0
 
 
 def test_bounded_reconcile_skips_converged_prefix_and_advances_later_work(
