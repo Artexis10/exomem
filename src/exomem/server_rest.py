@@ -153,6 +153,8 @@ def register_rest_facade(
                 schema_obj = dict(_OPENAPI_TYPES.get(prm.type, {}))
                 if prm.help:
                     schema_obj["description"] = prm.help
+                if prm.choices:
+                    schema_obj["enum"] = list(prm.choices)
                 properties[prm.name] = schema_obj
                 if prm.required:
                     required.append(prm.name)

@@ -161,10 +161,10 @@ shot: you'll almost always need `bootstrap`, `ask_memory` (recall),
 (compiled conclusions), `edit_memory`, `replace_memory`, `capture_source`,
 `compile_source`, `preserve_evidence`, `transfer_artifact`, `review_memory`,
 `triage_memory`, `connect_memory`, `adopt_vault`, `maintain_memory`, `schema_memory`,
-`query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
+`process_media`, `query_dataset`, and `read_media`. In Claude Code, load them by exact name in a
 single call:
 
-`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,query_dataset,read_media")`
+`ToolSearch("select:bootstrap,ask_memory,read_memory,browse_memory,remember,edit_memory,replace_memory,capture_source,compile_source,preserve_evidence,transfer_artifact,review_memory,triage_memory,connect_memory,adopt_vault,maintain_memory,schema_memory,process_media,query_dataset,read_media")`
 
 On clients without a `select:` syntax (e.g. claude.ai), search by capability —
 "search the knowledge base", "read a KB page", "compile a note" — and each
@@ -340,6 +340,14 @@ These constraints apply equally to Tier 1 and Tier 2 — no escape hatch around 
   extraction; it takes precedence. Upload responses return concrete metadata (`stored_path`, `size`, `hash`, `hash_algorithm`, `media_id`, `content_type`) so agents can report exactly what landed. The write tools take text only and reject
   inline byte blobs (`BINARY_BLOB_REJECTED`). Full workflow:
   `references/operations.md` § preserve.
+- **Media processing is automatic and actionable — `process_media`.** Supported
+  audio and video preserved through Exomem or copied directly into the governed
+  Knowledge Base are reconciled into durable timestamped transcription work.
+  Call `process_media(path=..., operation="process")` for immediate targeted
+  reconciliation, `operation="status"` for bounded per-artifact state and next
+  actions, or `operation="retry"` after fixing a recorded blocked/failed reason.
+  These actions enqueue or inspect work; they do not wait for model completion or
+  overwrite an existing valid transcript.
 - **Pull a vault file back out — the download channel.** Call
   **`transfer_artifact(mode="download")`** for a short-lived `{token, download_url}`, then GET
   `download_url?path=<vault-relative path>` with `Authorization: Bearer <token>`.

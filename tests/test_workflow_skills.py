@@ -38,6 +38,7 @@ PRODUCT_COMMAND_HINTS = [
     "review_memory",
     "connect_memory",
     "maintain_memory",
+    "process_media",
     "read_media",
 ]
 
@@ -120,6 +121,7 @@ def test_core_skill_tool_loading_mentions_current_product_surface() -> None:
         "connect_memory",
         "adopt_vault",
         "maintain_memory",
+        "process_media",
         "query_dataset",
         "read_media",
     ]:

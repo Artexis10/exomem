@@ -1299,6 +1299,37 @@
       "type": "object"
     }
   },
+  "process_media": {
+    "description": "Process, inspect, or retry governed media without waiting for extraction.\n\nSupported media copied into the governed Knowledge Base or uploaded through\nExomem is processed automatically. Use this action to reconcile one artifact\nimmediately, inspect bounded durable status, or retry actionable blocked/failed\nwork after remediation. Existing valid transcripts are preserved.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional governed Knowledge Base media path. Omit for bounded all-media work."
+        },
+        "operation": {
+          "default": "process",
+          "description": "process, status, or retry.",
+          "enum": [
+            "process",
+            "status",
+            "retry"
+          ],
+          "type": "string"
+        }
+      },
+      "type": "object"
+    }
+  },
   "query_dataset": {
     "description": "Query a CSV, TSV, or JSON dataset under the vault.\n\nUse after `ask_memory` or `browse_memory` identifies a dataset card or raw\nfile. This returns exact rows or aggregates without dumping whole files.",
     "inputSchema": {

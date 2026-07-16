@@ -45,6 +45,7 @@ class ReconcileResult:
     state: str
     sidecar_path: Path
     job_id: int | None
+    requeued: int = 0
 
 
 @dataclass(frozen=True)
@@ -392,11 +393,18 @@ def retry_media(vault_root: Path, binary_path: str | Path) -> ReconcileResult:
         return result
 
     store = media_jobs.MediaJobStore(vault)
-    if store.retry(binary_path=binary, include_failed=True) == 0:
+    requeued = store.retry(binary_path=binary, include_failed=True)
+    if requeued == 0:
         return result
     durable_job = store.get(result.job_id)
     state = durable_job.state if durable_job is not None else media_jobs.PENDING
-    return ReconcileResult(result.media_type, state, result.sidecar_path, result.job_id)
+    return ReconcileResult(
+        result.media_type,
+        state,
+        result.sidecar_path,
+        result.job_id,
+        requeued=requeued,
+    )
 
 
 def _discard_stale_job(

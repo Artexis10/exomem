@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 22
-- Tier 1 commands: 19
+- Product commands: 23
+- Tier 1 commands: 20
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 22
-- REST commands: 21
-- CLI commands: 21
+- Registry-generated MCP commands: 23
+- REST commands: 22
+- CLI commands: 22
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -47,6 +47,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |
 | preserve_evidence | 1 | MCP, REST, CLI | write | no | - | preserve | scope*, category*, filename*, content*, description | Preserve text evidence as append-only proof material. |
 | transfer_artifact | 1 | MCP, REST, CLI | write | no | - | transfer_token | operation | Prepare out-of-band binary artifact transfer. |
+| process_media | 1 | MCP, REST, CLI | write | no | - | - | path, operation | Process, inspect, or retry governed media without waiting for extraction. |
 | review_memory | 1 | MCP, REST, CLI | read | no | - | attention, audit, evolution, provenance_report, propose_compilation | mode, categories, limit, query, sources, suggested_title, tag, key, value, path, state, ref | Review memory health, provenance, drift, or source backlog. |
 | review_item_context | 1 | MCP, REST, CLI | read | no | ref | review_item_context | ref*, expected_fingerprint, max_body_chars, max_related_pages, max_graph_nodes, max_graph_edges, max_history, max_evolution_versions | Inspect one stable review item with bounded recorded context. |
 | triage_memory | 1 | MCP, REST, CLI | write | no | ref | attention | ref*, action*, until, why, expected_fingerprint | Triage one Epistemic Inbox item explicitly. |

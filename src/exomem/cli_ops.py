@@ -43,6 +43,11 @@ _REMEDIATION: dict[str, str] = {
     "WRITER_COORDINATOR_UNAVAILABLE": "Check the coordinator URL, credentials, and service health; reads remain available.",
     "MUTATION_BUSY": "Retry after the active vault mutation finishes.",
     "MUTATION_LOCK_UNAVAILABLE": "Check that the runtime state root is writable and supports host file locking.",
+    "INVALID_MEDIA_OPERATION": "Use operation=process, operation=status, or operation=retry.",
+    "UNSUPPORTED_MEDIA": "Use a supported audio, video, image, document, or text-media extension.",
+    "MEDIA_NOT_FOUND": "Check the governed Knowledge Base path and original filename.",
+    "MEDIA_PATH_OUTSIDE_KB": "Choose a media artifact inside the governed Knowledge Base.",
+    "MEDIA_PATH_ACCESS_DENIED": "Move the artifact to a writable governed subtree or update _access.yaml policy.",
 }
 
 # Error codes whose HTTP status is NOT the default 400.

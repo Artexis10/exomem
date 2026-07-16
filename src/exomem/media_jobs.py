@@ -21,6 +21,7 @@ PENDING = "pending"
 RUNNING = "running"
 BLOCKED = "blocked"
 FAILED = "failed"
+COMPLETED = "completed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
 STATUS_JOB_LIMIT = 100
 DISCOVERY_CURSOR_KEY = "discovery_cursor"

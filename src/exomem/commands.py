@@ -24,7 +24,7 @@ import json
 import os
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
-from typing import Any, NotRequired
+from typing import Any, Literal, NotRequired
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image as FastMCPImage
@@ -3360,6 +3360,89 @@ def op_transfer_artifact(vault_root: Path, operation: str = "upload") -> dict:
     )
 
 
+def op_process_media(
+    vault_root: Path,
+    path: str | None = None,
+    operation: Literal["process", "status", "retry"] = "process",
+) -> dict:
+    """Process, inspect, or retry governed media without waiting for extraction.
+
+    Supported media copied into the governed Knowledge Base or uploaded through
+    Exomem is processed automatically. Use this action to reconcile one artifact
+    immediately, inspect bounded durable status, or retry actionable blocked/failed
+    work after remediation. Existing valid transcripts are preserved.
+
+    Args:
+        path: Optional governed Knowledge Base media path. Omit for bounded all-media work.
+        operation: process, status, or retry.
+    """
+    from . import media_jobs
+    from .cli_ops import OpError
+
+    if operation not in {"process", "status", "retry"}:
+        raise OpError(
+            "INVALID_MEDIA_OPERATION",
+            "process_media operation must be process, status, or retry",
+        )
+
+    vault_root = Path(vault_root).resolve()
+    if operation == "status":
+        return {"operation": operation, **media_jobs.status(vault_root)}
+
+    if path is None:
+        if operation == "retry":
+            requeued = media_jobs.MediaJobStore(vault_root).retry(include_failed=True)
+            return {"operation": operation, "requeued": requeued}
+        from . import media_processing
+
+        if operation == "process":
+            reconciled = media_processing.reconcile_all_media(
+                vault_root,
+                limit=media_processing.DEFAULT_RECONCILE_LIMIT,
+            )
+            return {"operation": operation, "reconciled": reconciled}
+
+    from . import media_processing
+
+    binary = Path(path)
+    if not binary.is_absolute():
+        binary = vault_root / binary
+    binary = Path(os.path.abspath(binary))
+    try:
+        binary.relative_to(vault_root / kb_dirname())
+    except ValueError as exc:
+        raise OpError(
+            "MEDIA_PATH_OUTSIDE_KB",
+            f"media path must be inside {kb_dirname()}: {path}",
+        ) from exc
+    if media_processing.classify_media(binary) is None:
+        raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    if not binary.exists():
+        raise OpError("MEDIA_NOT_FOUND", f"media artifact does not exist: {path}")
+
+    try:
+        if operation == "process":
+            result = media_processing.reconcile_media(vault_root, binary, explicit=True)
+        else:
+            result = media_processing.retry_media(vault_root, binary)
+    except media_processing.MediaProcessingError as exc:
+        raise OpError(exc.code, exc.reason) from exc
+
+    if result is None:  # explicit supported processing cannot be silently ignored
+        raise OpError("UNSUPPORTED_MEDIA", f"unsupported media type for {binary.name!r}")
+    payload = {
+        "operation": operation,
+        "path": binary.relative_to(vault_root).as_posix(),
+        "media_type": result.media_type,
+        "state": result.state,
+        "sidecar_path": result.sidecar_path.relative_to(vault_root).as_posix(),
+        "job_id": result.job_id,
+    }
+    if operation == "retry":
+        payload["requeued"] = result.requeued
+    return payload
+
+
 def op_read_media(
     vault_root: Path,
     path: str,
@@ -4589,6 +4672,21 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         {"surface": "primary", "actions": ("prove",), "first_run_safe": True},
     ),
     (
+        "process_media",
+        op_process_media,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        (),
+        {
+            "surface": "advanced",
+            "actions": ("prove", "review", "update"),
+            "first_run_safe": False,
+        },
+    ),
+    (
         "review_memory",
         op_review_memory,
         1,
@@ -4725,6 +4823,7 @@ def _build_product_commands() -> tuple[Command, ...]:
                     required=p.required,
                     help=p.help.replace("__PROJECT_KEYS_HINT__", generic_hint),
                     cli_positional=p.cli_positional,
+                    choices=p.choices,
                 )
                 for p in params
             )
