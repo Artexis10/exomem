@@ -22,6 +22,7 @@ RUNNING = "running"
 BLOCKED = "blocked"
 FAILED = "failed"
 STATES = (PENDING, RUNNING, BLOCKED, FAILED)
+STATUS_JOB_LIMIT = 100
 
 
 def job_store_path(vault_root: Path) -> Path:
@@ -175,15 +176,7 @@ class MediaJobStore:
                         do_ocr = MAX(jobs.do_ocr, excluded.do_ocr),
                         do_clip = MAX(jobs.do_clip, excluded.do_clip),
                         do_reembed = MAX(jobs.do_reembed, excluded.do_reembed),
-                        state = CASE
-                            WHEN jobs.state = 'running' THEN jobs.state
-                            ELSE 'pending'
-                        END,
-                        updated_at = excluded.updated_at,
-                        last_error = CASE
-                            WHEN jobs.state = 'running' THEN jobs.last_error
-                            ELSE NULL
-                        END
+                        updated_at = excluded.updated_at
                     """,
                     (
                         key,
@@ -301,6 +294,14 @@ class MediaJobStore:
         finally:
             conn.close()
 
+    def get(self, job_id: int) -> MediaJob | None:
+        conn = self._connect()
+        try:
+            row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+            return self._row_to_job(row) if row is not None else None
+        finally:
+            conn.close()
+
     def recover_interrupted(self, *, retry_blocked: bool = False) -> int:
         states = [RUNNING]
         if retry_blocked:
@@ -318,18 +319,28 @@ class MediaJobStore:
         finally:
             conn.close()
 
-    def retry(self, *, include_failed: bool = False) -> int:
+    def retry(
+        self,
+        *,
+        include_failed: bool = False,
+        binary_path: Path | None = None,
+    ) -> int:
         states = [BLOCKED]
         if include_failed:
             states.append(FAILED)
         placeholders = ",".join("?" for _ in states)
+        target_clause = ""
+        params: list[object] = [time.time(), *states]
+        if binary_path is not None:
+            target_clause = " AND binary_rel = ?"
+            params.append(self._relative(binary_path))
         conn = self._connect()
         try:
             with conn:
                 changed = conn.execute(
                     f"UPDATE jobs SET state = 'pending', last_error = NULL, updated_at = ? "
-                    f"WHERE state IN ({placeholders})",
-                    (time.time(), *states),
+                    f"WHERE state IN ({placeholders}){target_clause}",
+                    params,
                 ).rowcount
                 return int(changed)
         finally:
@@ -433,6 +444,7 @@ def status(vault_root: Path | None) -> dict[str, Any]:
         "worker_active": False,
         "worker_pid": None,
         "idle_seconds": None,
+        "jobs": [],
         "errors": [],
     }
     if vault_root is None:
@@ -452,6 +464,11 @@ def status(vault_root: Path | None) -> dict[str, Any]:
                 "SELECT state, last_error FROM jobs "
                 "WHERE state IN ('blocked', 'failed') ORDER BY updated_at DESC LIMIT 5"
             ).fetchall()
+            jobs = conn.execute(
+                "SELECT id, binary_rel, sidecar_rel, media_type, state, attempts, last_error "
+                "FROM jobs ORDER BY updated_at DESC, id DESC LIMIT ?",
+                (STATUS_JOB_LIMIT,),
+            ).fetchall()
         finally:
             conn.close()
         counts = {state: 0 for state in STATES}
@@ -467,6 +484,7 @@ def status(vault_root: Path | None) -> dict[str, Any]:
             "idle_seconds": float(runtime["idle_seconds"])
             if runtime and runtime["idle_seconds"] is not None
             else None,
+            "jobs": [_status_job(row) for row in jobs],
             "errors": [
                 {"state": str(row["state"]), "message": str(row["last_error"] or "")}
                 for row in errors
@@ -474,3 +492,24 @@ def status(vault_root: Path | None) -> dict[str, Any]:
         }
     except (OSError, sqlite3.Error) as exc:
         return {**empty, "store": str(path), "healthy": False, "errors": [str(exc)]}
+
+
+def _status_job(row: Any) -> dict[str, Any]:
+    state = str(row["state"])
+    actions = {
+        PENDING: "wait for media processing",
+        RUNNING: "wait for media processing to finish",
+        BLOCKED: "install the required media dependency, then retry",
+        FAILED: "repair or replace the media artifact, then retry",
+    }
+    return {
+        "id": int(row["id"]),
+        "path": str(row["binary_rel"]),
+        "sidecar_path": str(row["sidecar_rel"]),
+        "media_type": str(row["media_type"]),
+        "state": state,
+        "attempts": int(row["attempts"]),
+        "error": str(row["last_error"]) if row["last_error"] is not None else None,
+        "retryable": state in {BLOCKED, FAILED},
+        "next_action": actions[state],
+    }

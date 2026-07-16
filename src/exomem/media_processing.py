@@ -132,7 +132,9 @@ def reconcile_media(
             and not os.environ.get("EXOMEM_DISABLE_CLIP"),
         )
     )
-    return ReconcileResult(media_type, "pending", sidecar, job_id)
+    durable_job = store.get(job_id)
+    state = durable_job.state if durable_job is not None else media_jobs.PENDING
+    return ReconcileResult(media_type, state, sidecar, job_id)
 
 
 def _discard_stale_job(

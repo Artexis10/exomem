@@ -293,6 +293,31 @@ def test_reconciliation_is_byte_stable_and_job_deduplicated(vault: Path) -> None
     assert _job_count(vault) == 1
 
 
+@pytest.mark.parametrize("terminal_state", [media_jobs.BLOCKED, media_jobs.FAILED])
+def test_reconciliation_retains_actionable_terminal_ledger_state(
+    vault: Path, terminal_state: str
+) -> None:
+    media_processing = _media_processing()
+    binary = _drop_media(vault, f"retained-{terminal_state}.m4a")
+    first = media_processing.reconcile_media(vault, binary)
+    store = media_jobs.MediaJobStore(vault)
+    claimed = store.claim_next()
+    assert claimed is not None and claimed.id == first.job_id
+    error = "ExtractionUnavailable: engine absent" if terminal_state == media_jobs.BLOCKED else (
+        "InvalidDataError: corrupt container"
+    )
+    store.mark(claimed.id, terminal_state, error)
+
+    repeated = media_processing.reconcile_media(vault, binary)
+
+    assert repeated.job_id == first.job_id
+    assert repeated.state == terminal_state
+    [job] = media_jobs.status(vault)["jobs"]
+    assert job["state"] == terminal_state
+    assert job["attempts"] == 1
+    assert job["error"] == error
+
+
 @pytest.mark.parametrize(
     "location", ["outside-vault", "outside-knowledge-base", "symlink-escape"]
 )
