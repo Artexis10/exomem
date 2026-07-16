@@ -6,7 +6,7 @@
 
 ### Task 2
 
-- [ ] 1.2 Implement the lightweight canonical media-processing leaf and governed sidecar create/repair logic until the orchestration tests pass.
+- [x] 1.2 Implement the lightweight canonical media-processing leaf and governed sidecar create/repair logic until the orchestration tests pass.
 
 ### Task 3
 
