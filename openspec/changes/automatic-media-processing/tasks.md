@@ -48,7 +48,7 @@
 
 ### Task 11
 
-- [ ] 4.2 Run the broader test suite with embeddings disabled and complete independent whole-branch review, addressing all critical or important findings.
+- [x] 4.2 Run the broader test suite with embeddings disabled and complete independent whole-branch review, addressing all critical or important findings.
 
 ### Task 12
 
