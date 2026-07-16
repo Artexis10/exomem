@@ -1853,7 +1853,13 @@ def _find_semantic(
                     body = (pg.body if pg else "") or h.excerpt
                     passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
             scores = emb.rerank_pairs(query, passages)
-            for input_rank, (h, s) in enumerate(zip(hits, scores), start=1):
+            if len(scores) != len(hits):
+                raise ValueError(
+                    "reranker returned a score count that does not match its inputs"
+                )
+            for input_rank, (h, s) in enumerate(
+                zip(hits, scores, strict=True), start=1
+            ):
                 h.rerank_input_rank = input_rank
                 h.rerank_raw_score = float(s)
                 adjusted = h.rerank_raw_score

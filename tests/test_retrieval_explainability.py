@@ -747,6 +747,37 @@ def test_rerank_runtime_failure_reason_is_exact(
     assert profile["rerank"]["reason"] == "runtime_failure"
 
 
+def test_rerank_score_count_mismatch_fails_instead_of_partially_explaining(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="rerank-count-a", updated="2026-07-16", priority=3)
+    _write_page(tmp_path, name="rerank-count-b", updated="2026-07-15", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    monkeypatch.setattr(embeddings, "ranking_enabled", lambda: True)
+    monkeypatch.setattr(readiness, "should_defer", lambda _component: False)
+    monkeypatch.setattr(embeddings, "rerank_pairs", lambda _query, _passages: [0.9])
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="private page content",
+        mode="hybrid",
+        graph=False,
+        rerank=True,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    rerank = explained["retrieval_profile"]["rerank"]
+    assert rerank["decision"] == "failed"
+    assert rerank["reason"] == "runtime_failure"
+    assert rerank["ran"] is False
+    assert all(
+        "reranker" not in hit["ranking_explanation"] for hit in explained["hits"]
+    )
+
+
 def test_rerank_auto_declined_reason_is_exact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
