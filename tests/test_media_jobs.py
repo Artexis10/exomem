@@ -46,6 +46,29 @@ def test_status_does_not_create_store(vault: Path) -> None:
     assert not path.exists()
 
 
+def test_readonly_connection_uses_percent_safe_sqlite_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault #% üll"
+    store = media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    real_connect = sqlite3.connect
+    calls: list[tuple[object, dict[str, object]]] = []
+
+    def capture_connect(database, *args, **kwargs):
+        calls.append((database, kwargs.copy()))
+        return real_connect(path)
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", capture_connect)
+
+    conn = store._connect(readonly=True)
+    conn.close()
+
+    [(database, kwargs)] = calls
+    assert database == f"{path.resolve().as_uri()}?mode=ro"
+    assert kwargs["uri"] is True
+
+
 def test_status_diagnostic_snapshot_falls_back_to_stable_immutable_database(
     vault: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -173,6 +196,41 @@ def test_diagnostic_snapshot_refuses_identity_drift_after_immutable_queries(
     snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
 
     assert snapshot["healthy"] is False
+
+
+def test_diagnostic_snapshot_refuses_sidecar_created_during_immutable_query(
+    vault: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_jobs.MediaJobStore(vault)
+    path = media_jobs.job_store_path(vault)
+    wal = path.with_name(f"{path.name}-wal")
+    real_connect = sqlite3.connect
+
+    class SidecarCreatingConnection:
+        def __init__(self, connection: sqlite3.Connection) -> None:
+            self.connection = connection
+
+        def __getattr__(self, name: str):
+            return getattr(self.connection, name)
+
+        def execute(self, statement: str, *args, **kwargs):
+            result = self.connection.execute(statement, *args, **kwargs)
+            if statement.startswith("SELECT state, count"):
+                wal.write_bytes(b"appeared during snapshot")
+            return result
+
+    def cantopen_then_create_sidecar(database, *args, **kwargs):
+        uri = str(database)
+        if "mode=ro" in uri and "immutable=1" not in uri:
+            raise _cantopen()
+        return SidecarCreatingConnection(real_connect(database, *args, **kwargs))
+
+    monkeypatch.setattr(media_jobs.sqlite3, "connect", cantopen_then_create_sidecar)
+
+    snapshot = media_jobs.status(vault, diagnostic_snapshot=True)
+
+    assert snapshot["healthy"] is False
+    assert wal.exists()
 
 
 def test_pid_alive_handles_current_and_missing_processes() -> None:

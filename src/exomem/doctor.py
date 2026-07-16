@@ -326,6 +326,51 @@ def _check_resource_posture(profile: Profile) -> DoctorCheck:
         details=posture,
     )
 
+
+def _sqlite_snapshot_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns
+
+
+def _sqlite_companions(path: Path) -> tuple[Path, Path]:
+    return path.with_name(f"{path.name}-wal"), path.with_name(f"{path.name}-shm")
+
+
+def _sqlite_companion_exists(companions: tuple[Path, Path]) -> bool:
+    return any(os.path.lexists(item) for item in companions)
+
+
+def _lexical_page_count(path: Path) -> int:
+    companions = _sqlite_companions(path)
+    immutable = not _sqlite_companion_exists(companions)
+    identity: tuple[int, int, int, int] | None = None
+    if immutable:
+        identity = _sqlite_snapshot_identity(path)
+        with path.open("rb") as stream:
+            if not stream.read(1):
+                raise OSError("lexical sidecar is empty")
+        if (
+            _sqlite_snapshot_identity(path) != identity
+            or _sqlite_companion_exists(companions)
+        ):
+            raise OSError("lexical sidecar is not a stable standalone snapshot")
+
+    query = "mode=ro&immutable=1" if immutable else "mode=ro"
+    conn = sqlite3.connect(f"{path.resolve().as_uri()}?{query}", uri=True)
+    try:
+        conn.execute("PRAGMA query_only = ON")
+        count = int(conn.execute("SELECT count(*) FROM pages").fetchone()[0])
+    finally:
+        conn.close()
+
+    if immutable and (
+        _sqlite_snapshot_identity(path) != identity
+        or _sqlite_companion_exists(companions)
+    ):
+        raise OSError("lexical sidecar changed during diagnostic snapshot")
+    return count
+
+
 def _check_lexical(vault_root: Path | None) -> DoctorCheck:
     """Lexical FTS5 backend availability + sidecar health.
 
@@ -362,13 +407,8 @@ def _check_lexical(vault_root: Path | None) -> DoctorCheck:
             "on first search (or by warm-up).",
         )
     try:
-        conn = sqlite3.connect(f"{side.resolve().as_uri()}?mode=ro", uri=True)
-        try:
-            conn.execute("PRAGMA query_only = ON")
-            n = conn.execute("SELECT count(*) FROM pages").fetchone()[0]
-        finally:
-            conn.close()
-    except sqlite3.Error as e:
+        n = _lexical_page_count(side)
+    except (OSError, sqlite3.Error) as e:
         return _check(
             "dep.fts5-lexical",
             "warn",

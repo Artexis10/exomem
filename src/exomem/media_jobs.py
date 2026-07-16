@@ -102,7 +102,9 @@ class MediaJobStore:
 
     def _connect(self, *, readonly: bool = False) -> sqlite3.Connection:
         if readonly:
-            conn = sqlite3.connect(f"file:{self.path}?mode=ro", uri=True, timeout=5.0)
+            conn = sqlite3.connect(
+                f"{self.path.resolve().as_uri()}?mode=ro", uri=True, timeout=5.0
+            )
         else:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             conn = sqlite3.connect(self.path, timeout=5.0)
