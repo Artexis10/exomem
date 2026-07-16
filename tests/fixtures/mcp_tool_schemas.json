@@ -68,6 +68,21 @@
           ],
           "default": null,
           "description": "Explicit legacy files for copy/compile modes."
+        },
+        "semantic_max_files": {
+          "default": 512,
+          "description": "Maximum Markdown files read by the semantic census.",
+          "type": "integer"
+        },
+        "semantic_max_bytes": {
+          "default": 8388608,
+          "description": "Maximum total Markdown bytes read by the semantic census.",
+          "type": "integer"
+        },
+        "semantic_example_limit": {
+          "default": 12,
+          "description": "Maximum bounded semantic examples per grouping.",
+          "type": "integer"
         }
       },
       "type": "object"
@@ -506,6 +521,11 @@
           "default": false,
           "description": "Include retrieval timings for diagnostics.",
           "type": "boolean"
+        },
+        "explain": {
+          "default": false,
+          "description": "Add bounded retrieval-plan and per-hit ranking evidence.",
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -746,6 +766,48 @@
           ],
           "default": null,
           "description": "Query seed for graph-context."
+        },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact current semantic-unit seed for graph-context."
+        },
+        "categories": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Registry-resolved semantic-unit category allowlist."
+        },
+        "kinds": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Governed semantic-unit kind allowlist."
         },
         "draft_title": {
           "anyOf": [

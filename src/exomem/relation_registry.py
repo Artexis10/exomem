@@ -25,6 +25,7 @@ _ORIGINS = {
     "semantic_relation",
     "markdown_relation",
     "semantic_block",
+    "semantic_unit",
     "frontmatter",
     "wikilink",
 }

@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import compile_proposal as compile_proposal_module
-from . import context_refs, indexes, knowledge_packs
+from . import context_refs, indexes, knowledge_packs, semantic_census
 from . import overview as overview_module
 from .kbdir import kb_dirname, kb_prefix
 from .vault import (
@@ -792,6 +792,9 @@ def adopt(
     pack_limit: int = 6,
     manifest_path: str | None = None,
     selected_paths: list[str] | None = None,
+    semantic_max_files: int = semantic_census.DEFAULT_MAX_FILES,
+    semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
+    semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
     today: dt.date | None = None,
 ) -> dict:
     """Return an adoption report for an existing vault.
@@ -806,6 +809,9 @@ def adopt(
         pack_limit: Maximum pack suggestions to return.
         manifest_path: Optional markdown destination for ``save-manifest``.
         selected_paths: Explicit vault-relative files for ``copy-as-sources`` or ``compile-selected``.
+        semantic_max_files: Maximum Markdown files read by the scan-only semantic census.
+        semantic_max_bytes: Maximum total Markdown bytes read by the scan-only semantic census.
+        semantic_example_limit: Maximum examples per semantic census diagnostic grouping.
 
     Scan-only never writes. Unsupported modes fail explicitly instead of
     silently pretending to migrate content.
@@ -856,7 +862,21 @@ def adopt(
         "refs": {"root": context_refs.vault_ref(path or "")},
         "overview": scan,
     }
-    if mode == "save-manifest":
+    if mode == "scan-only":
+        try:
+            report["semantic_census"] = semantic_census.scan(
+                root_path,
+                path=path,
+                include_hidden=include_hidden,
+                max_files=semantic_max_files,
+                max_bytes=semantic_max_bytes,
+                example_limit=semantic_example_limit,
+            )
+        except (overview_module.OverviewError, ValueError) as e:
+            if isinstance(e, overview_module.OverviewError):
+                raise AdoptError(e.code, e.reason) from e
+            raise AdoptError("INVALID_SEMANTIC_CENSUS_LIMIT", str(e)) from e
+    elif mode == "save-manifest":
         report["manifest"] = _save_manifest(
             root_path,
             report,

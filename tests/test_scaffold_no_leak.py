@@ -78,6 +78,12 @@ _SOURCE_PERSONAL_TOKENS: list[tuple[str, str, bool]] = [
     ("Private Vault Label", r"private\s+vault\s+label", _CI),
 ]
 
+# Runtime and generic scaffold language must describe Exomem on its own terms.
+# Direct contender names belong only in maintainer benchmark scripts/docs.
+_SOURCE_COMPETITOR_TOKENS: list[tuple[str, str, bool]] = [
+    ("Basic Memory", r"\bbasic[-_ ]memory\b", _CI),
+]
+
 
 def _source_files() -> list[Path]:
     return [f for f in sorted(SOURCE.rglob("*")) if f.is_file()]
@@ -192,4 +198,28 @@ def test_source_ships_no_personal_tokens() -> None:
     assert not offenders, (
         "personal tokens found in the shipped Python source — genericize "
         "before open-sourcing:\n" + "\n".join(offenders)
+    )
+
+
+def test_source_ships_no_competitor_tokens() -> None:
+    """Contender names stay in maintainer comparison material, not runtime."""
+    compiled = [
+        (label, re.compile(rx, re.IGNORECASE if ci else 0))
+        for label, rx, ci in _SOURCE_COMPETITOR_TOKENS
+    ]
+    offenders: list[str] = []
+    for f in _source_files():
+        try:
+            text = f.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for i, line in enumerate(text.splitlines(), 1):
+            for label, pattern in compiled:
+                if pattern.search(line):
+                    offenders.append(
+                        f"{f.relative_to(SOURCE)}:{i}: token {label!r} -> {line.strip()[:80]}"
+                    )
+    assert not offenders, (
+        "competitor tokens found in shipped Python/scaffold source; keep direct "
+        "comparisons in maintainer benchmark scripts/docs:\n" + "\n".join(offenders)
     )

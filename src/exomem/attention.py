@@ -26,11 +26,15 @@ from .audit import AuditFinding
 
 # The queues this surface composes, in tiebreak-preference order (highest first):
 # a self-contradiction is the most actionable signal, an unprocessed source the least.
-ATTENTION_CATEGORIES: tuple[str, ...] = (
+DEFAULT_ATTENTION_CATEGORIES: tuple[str, ...] = (
     "corpus_contradictions",
     "stale_review",
     "unprocessed_source",
     "relation_debt",
+)
+ATTENTION_CATEGORIES: tuple[str, ...] = (
+    *DEFAULT_ATTENTION_CATEGORIES,
+    *audit_module.TYPED_SEMANTIC_CATEGORIES,
 )
 _SEVERITY_RANK: dict[str, int] = {"info": 0, "warn": 1, "error": 2}
 _SEVERITY_BY_RANK: dict[int, str] = {v: k for k, v in _SEVERITY_RANK.items()}
@@ -272,7 +276,7 @@ def attention(
     Runs a single `audit` pass over the selected categories, then ranks/dedups via
     `_rank`. `today` is threaded through for deterministic ACT-R dormancy in tests.
     """
-    resolved = set(ATTENTION_CATEGORIES) if not categories else set(categories)
+    resolved = set(DEFAULT_ATTENTION_CATEGORIES) if not categories else set(categories)
     invalid = resolved - set(ATTENTION_CATEGORIES)
     if invalid:
         raise ValueError(

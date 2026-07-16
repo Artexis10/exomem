@@ -18,6 +18,7 @@ from typing import Any
 
 from . import find as find_module
 from . import (
+    memory_refs,
     relation_registry,
     semantic_blocks,
     semantic_index,
@@ -29,7 +30,10 @@ from . import vault as vault_module
 from .kbdir import kb_dirname, kb_prefix
 from .markdown_relations import MarkdownRelation
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
+UNIT_SEED_MAX_BATCHES = 4
+UNIT_PARENT_REF_MAX_CANDIDATES = 16
+EDGE_INSPECTION_MULTIPLIER = 4
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -140,14 +144,23 @@ class EpistemicGraphIndex:
             embeddings._apply_sidecar_pragmas(conn)
         except Exception:  # noqa: BLE001 - sidecar pragmas are best-effort
             pass
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()}
-        if columns and "raw_relation" not in columns:
+        edge_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(graph_edges)").fetchall()
+        }
+        if edge_columns and "raw_relation" not in edge_columns:
             conn.execute("DROP TABLE graph_edges")
+        node_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(graph_nodes)").fetchall()
+        }
+        required_unit_columns = {"unit_ref", "unit_category", "unit_kind"}
+        if node_columns and not required_unit_columns <= node_columns:
+            conn.execute("DROP TABLE graph_nodes")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_nodes (
                 node_key TEXT PRIMARY KEY, kind TEXT NOT NULL, path TEXT NOT NULL,
                 anchor TEXT, title TEXT, text TEXT NOT NULL, source_hash TEXT NOT NULL,
-                line_start INTEGER, line_end INTEGER, metadata TEXT NOT NULL
+                line_start INTEGER, line_end INTEGER, metadata TEXT NOT NULL,
+                unit_ref TEXT, unit_category TEXT, unit_kind TEXT
             )
         """)
         conn.execute("""
@@ -160,11 +173,31 @@ class EpistemicGraphIndex:
             )
         """)
         conn.execute("""
+            CREATE TABLE IF NOT EXISTS graph_parent_refs (
+                path TEXT PRIMARY KEY, parent_ref TEXT NOT NULL
+            )
+        """)
+        conn.execute("""
             CREATE TABLE IF NOT EXISTS graph_meta (
                 key TEXT PRIMARY KEY, value TEXT NOT NULL
             )
         """)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_nodes_path ON graph_nodes(path)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_ref ON graph_nodes(unit_ref)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_category_kind "
+            "ON graph_nodes(unit_category, unit_kind, kind, path, node_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_nodes_unit_kind "
+            "ON graph_nodes(unit_kind, kind, path, node_key)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_graph_parent_refs_ref "
+            "ON graph_parent_refs(parent_ref, path)"
+        )
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_src ON graph_edges(src_key)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_graph_edges_dst ON graph_edges(dst_key)")
         conn.execute(
@@ -202,6 +235,7 @@ class EpistemicGraphIndex:
             with conn:
                 conn.execute("DELETE FROM graph_edges")
                 conn.execute("DELETE FROM graph_nodes")
+                conn.execute("DELETE FROM graph_parent_refs")
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
@@ -351,6 +385,7 @@ class EpistemicGraphIndex:
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
             conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
+            conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)),
@@ -374,6 +409,12 @@ class EpistemicGraphIndex:
             )
             for node in [file_node, *unit_nodes]:
                 _insert_node(conn, node)
+            if document.parent_ref is not None:
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_parent_refs(path, parent_ref) "
+                    "VALUES (?, ?)",
+                    (rel, document.parent_ref),
+                )
             for edge in edges:
                 _insert_edge(conn, edge)
             _bump_generation(conn)
@@ -383,6 +424,7 @@ class EpistemicGraphIndex:
         with conn:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel_path,))
             cur = conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel_path,))
+            conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel_path,))
             _bump_generation(conn)
         return cur.rowcount if cur.rowcount is not None else 0
 
@@ -492,6 +534,9 @@ def graph_context(
     *,
     path: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
@@ -559,23 +604,139 @@ def graph_context(
                     drift_counts[freshness.code] = drift_counts.get(freshness.code, 0) + 1
             return accepted
 
-        seeds = [
-            seed
-            for seed in _seed_nodes(conn, path=path, query=query)
-            if _current_record(seed, parent_path=str(seed.get("path") or ""))
-        ]
+        category_filter = _resolved_unit_filters(
+            idx.language_registry, categories, namespace="category"
+        )
+        kind_filter = _resolved_unit_filters(
+            idx.language_registry, kinds, namespace="kind"
+        )
+        unit_status: str | None = None
+        unit_filter_status: str | None = None
+        seed_cap_hit = False
+        unit_work_exhausted = False
+        unit_parent_work_exhausted = False
+        seed_node_overrides: dict[str, dict[str, Any]] = {}
+        seeds: list[dict[str, Any]]
+        if unit_ref is not None:
+            indexed = _seed_nodes(
+                conn,
+                path=None,
+                query=None,
+                unit_ref=unit_ref,
+                limit=UNIT_PARENT_REF_MAX_CANDIDATES,
+            )
+            current = [
+                seed
+                for seed in indexed
+                if _current_record(seed, parent_path=str(seed.get("path") or ""))
+            ]
+            (
+                resolved_status,
+                current_parent_paths,
+                canonical_seeds,
+                parent_drift_counts,
+                unit_parent_work_exhausted,
+            ) = _current_unit_status(conn, vault_root, unit_ref)
+            for code, count in parent_drift_counts.items():
+                drift_counts[code] = max(drift_counts.get(code, 0), count)
+            current = [
+                seed for seed in current if str(seed.get("path") or "") in current_parent_paths
+            ]
+            collision_candidate = (
+                resolved_status == "found"
+                and bool(indexed)
+                and bool(canonical_seeds)
+                and not any(
+                    str(seed.get("path") or "") in current_parent_paths
+                    for seed in indexed
+                )
+            )
+            recovery_seeds = (
+                [
+                    seed
+                    for seed in canonical_seeds
+                    if _current_unit_seed_has_graph_proof(conn, seed)
+                ]
+                if collision_candidate
+                else []
+            )
+            collision_recovery = bool(recovery_seeds)
+            if resolved_status == "ambiguous":
+                unit_status = "ambiguous"
+                seeds = []
+            elif unit_parent_work_exhausted:
+                unit_status = "stale"
+                seeds = []
+            elif resolved_status == "found" and (current or collision_recovery):
+                unit_status = "found"
+                if collision_recovery:
+                    drift_counts["current_graph_row_overwritten"] = 1
+                seeds = _filter_unit_nodes(
+                    current or recovery_seeds,
+                    categories=category_filter,
+                    kinds=kind_filter,
+                )
+                if collision_recovery:
+                    seed_node_overrides.update(
+                        (str(seed["node_key"]), seed) for seed in seeds
+                    )
+                if category_filter is not None or kind_filter is not None:
+                    unit_filter_status = "matched" if seeds else "excluded"
+            elif indexed:
+                unit_status = "stale"
+                seeds = []
+            else:
+                if resolved_status in {"found", "stale"}:
+                    unit_status = "stale"
+                    drift_counts["missing_graph_row"] = 1
+                else:
+                    unit_status = resolved_status
+                seeds = []
+        elif category_filter is not None or kind_filter is not None:
+            seeds, seed_cap_hit, unit_work_exhausted = _bounded_current_unit_seeds(
+                conn,
+                path=path,
+                query=query,
+                categories=category_filter,
+                kinds=kind_filter,
+                max_nodes=max_nodes,
+                current_record=_current_record,
+            )
+        else:
+            seeds = [
+                seed
+                for seed in _seed_nodes(conn, path=path, query=query)
+                if _current_record(seed, parent_path=str(seed.get("path") or ""))
+            ]
         if not seeds:
-            return {
+            empty: dict[str, Any] = {
                 "available": True,
                 "reason": None,
                 "seeds": [],
                 "nodes": [],
                 "edges": [],
-                "truncation": [],
+                "truncation": _unit_seed_truncation(
+                    max_nodes=max_nodes,
+                    unit_work_exhausted=unit_work_exhausted,
+                    unit_parent_work_exhausted=unit_parent_work_exhausted,
+                ),
             }
+            if unit_status is not None:
+                empty["unit_status"] = unit_status
+            if unit_filter_status is not None:
+                empty["unit_filter_status"] = unit_filter_status
+            if drift_counts:
+                empty["warnings"] = [_drift_warning(drift_counts)]
+            return empty
         type_filter = set(node_types or [])
         seen_nodes: set[str] = {s["node_key"] for s in seeds}
         seen_edges: dict[str, dict[str, Any]] = {}
+        edge_cap_hit = False
+        edge_inspection_cap_hit = False
+        edge_inspection_budget = _edge_inspection_budget(
+            max_nodes=max_nodes, max_edges=max_edges
+        )
+        inspected_edges = 0
         placeholder_nodes: dict[str, dict[str, Any]] = {}
         node_cap_hit = False
         excluded_profile = 0
@@ -585,7 +746,14 @@ def graph_context(
         for _ in range(max(0, depth)):
             if not frontier:
                 break
-            rows = _neighbor_edges(conn, frontier, set())
+            rows, inspection_overflow = _neighbor_edges(
+                conn,
+                frontier,
+                set(),
+                limit=max(0, edge_inspection_budget - inspected_edges),
+            )
+            inspected_edges += len(rows)
+            edge_inspection_cap_hit = edge_inspection_cap_hit or inspection_overflow
             rows.sort(key=lambda edge: _edge_priority(edge, profile, idx.registry))
             next_frontier: set[str] = set()
             for edge in rows:
@@ -619,8 +787,11 @@ def graph_context(
                     continue
                 if profile.direction == "incoming" and edge["dst_key"] not in frontier:
                     continue
-                if len(seen_edges) < max_edges:
-                    seen_edges.setdefault(edge["edge_key"], edge)
+                if edge["edge_key"] not in seen_edges:
+                    if len(seen_edges) >= max_edges:
+                        edge_cap_hit = True
+                        break
+                    seen_edges[edge["edge_key"]] = edge
                 for key in (edge["src_key"], edge["dst_key"]):
                     if key not in seen_nodes:
                         node = _node_by_key(conn, key)
@@ -640,16 +811,31 @@ def graph_context(
                             placeholder_nodes[key] = node
                         else:
                             next_frontier.add(key)
+            if edge_cap_hit or edge_inspection_cap_hit:
+                break
             frontier = next_frontier
         nodes = [
             node
             for node in _nodes_by_keys(conn, seen_nodes)
             if _current_record(node, parent_path=str(node.get("path") or ""))
-        ] + [
+        ]
+        present_node_keys = {str(node["node_key"]) for node in nodes}
+        nodes.extend(
+            seed_node_overrides[key]
+            for key in sorted(seed_node_overrides)
+            if key in seen_nodes and key not in present_node_keys
+        )
+        nodes += [
             placeholder_nodes[key] for key in sorted(placeholder_nodes)
         ]
         edges = list(seen_edges.values())
         truncation: list[str] = []
+        if seed_cap_hit:
+            truncation.append(f"seed nodes capped at {max_nodes}")
+        if unit_work_exhausted:
+            truncation.append(_unit_seed_work_truncation(max_nodes))
+        if unit_parent_work_exhausted:
+            truncation.append(_unit_parent_work_truncation())
         if len(nodes) > max_nodes:
             truncation.append(
                 f"nodes capped at {max_nodes} ({len(nodes) - max_nodes} more not shown)"
@@ -657,8 +843,12 @@ def graph_context(
             nodes = nodes[:max_nodes]
         elif node_cap_hit:
             truncation.append(f"nodes capped at {max_nodes}")
-        if len(seen_edges) >= max_edges:
+        if edge_cap_hit:
             truncation.append(f"edges capped at {max_edges}")
+        if edge_inspection_cap_hit:
+            truncation.append(
+                f"edge inspection capped at {edge_inspection_budget} records"
+            )
         warnings: list[dict[str, Any]] = []
         if unknown:
             warnings.append(
@@ -671,14 +861,8 @@ def graph_context(
         if excluded_scope:
             warnings.append({"code": "scope_violations", "count": excluded_scope})
         if drift_counts:
-            warnings.append(
-                {
-                    "code": "semantic_unit_index_drift",
-                    "count": sum(drift_counts.values()),
-                    "reasons": dict(sorted(drift_counts.items())),
-                }
-            )
-        return {
+            warnings.append(_drift_warning(drift_counts))
+        result: dict[str, Any] = {
             "available": True,
             "reason": None,
             "seeds": seeds,
@@ -699,6 +883,11 @@ def graph_context(
             },
             "warnings": warnings,
         }
+        if unit_status is not None:
+            result["unit_status"] = unit_status
+        if unit_filter_status is not None:
+            result["unit_filter_status"] = unit_filter_status
+        return result
     finally:
         conn.close()
 
@@ -1331,10 +1520,13 @@ def _edge(
 
 
 def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
+    metadata = node.metadata or {}
+    is_unit = metadata.get("record_type") == "semantic_unit"
     conn.execute(
         "INSERT OR REPLACE INTO graph_nodes "
         "(node_key, kind, path, anchor, title, text, source_hash, line_start, "
-        "line_end, metadata) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "line_end, metadata, unit_ref, unit_category, unit_kind) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (
             node.node_key,
             node.kind,
@@ -1345,7 +1537,10 @@ def _insert_node(conn: sqlite3.Connection, node: GraphNode) -> None:
             node.source_hash,
             node.line_start,
             node.line_end,
-            json.dumps(node.metadata or {}, sort_keys=True),
+            json.dumps(metadata, sort_keys=True),
+            metadata.get("unit_ref") if is_unit else None,
+            metadata.get("category") if is_unit else None,
+            metadata.get("kind") if is_unit else None,
         ),
     )
 
@@ -1417,44 +1612,399 @@ def _json(value: str | None) -> dict[str, Any]:
         return {}
 
 
-def _seed_nodes(conn: sqlite3.Connection, *, path: str | None, query: str | None):
+def _seed_nodes(
+    conn: sqlite3.Connection,
+    *,
+    path: str | None,
+    query: str | None,
+    unit_ref: str | None = None,
+    categories: set[str] | None = None,
+    kinds: set[str] | None = None,
+    limit: int | None = None,
+):
     select = (
         "SELECT node_key, kind, path, anchor, title, text, source_hash, "
         "line_start, line_end, metadata FROM graph_nodes"
     )
+    unit_controls = unit_ref is not None or bool(categories) or bool(kinds)
+    if not unit_controls:
+        if path:
+            rows = conn.execute(
+                select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)
+            ).fetchall()
+            return [_node_row_to_dict(row) for row in rows]
+        if query:
+            like = f"%{query}%"
+            rows = conn.execute(
+                select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5",
+                (like, like),
+            ).fetchall()
+            return [_node_row_to_dict(r) for r in rows]
+        return []
+
+    candidates, _has_more = _query_unit_seed_batch(
+        conn,
+        path=path,
+        query=query,
+        unit_ref=unit_ref,
+        categories=categories,
+        kinds=kinds,
+        limit=limit or 2,
+    )
+    return candidates
+
+
+def _query_unit_seed_batch(
+    conn: sqlite3.Connection,
+    *,
+    path: str | None,
+    query: str | None,
+    unit_ref: str | None,
+    categories: set[str] | None,
+    kinds: set[str] | None,
+    limit: int,
+    after: tuple[str, str, str] | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    select = (
+        "SELECT node_key, kind, path, anchor, title, text, source_hash, "
+        "line_start, line_end, metadata FROM graph_nodes"
+    )
+    clauses = ["unit_ref IS NOT NULL"]
+    params: list[Any] = []
+    if unit_ref is not None:
+        clauses.append("unit_ref = ?")
+        params.append(unit_ref)
     if path:
-        rows = conn.execute(
-            select + " WHERE path = ? ORDER BY kind, node_key", (_with_md(path),)
-        ).fetchall()
-        return [_node_row_to_dict(row) for row in rows]
+        clauses.append("path = ?")
+        params.append(_with_md(path))
     if query:
+        clauses.append("(title LIKE ? OR text LIKE ?)")
         like = f"%{query}%"
-        rows = conn.execute(
-            select + " WHERE title LIKE ? OR text LIKE ? ORDER BY kind, path LIMIT 5", (like, like)
-        ).fetchall()
-        return [_node_row_to_dict(r) for r in rows]
-    return []
+        params.extend((like, like))
+    if categories:
+        values = sorted(categories)
+        clauses.append(f"unit_category IN ({','.join('?' for _ in values)})")
+        params.extend(values)
+    if kinds:
+        values = sorted(kinds)
+        clauses.append(f"unit_kind IN ({','.join('?' for _ in values)})")
+        params.extend(values)
+    if after is not None:
+        after_kind, after_path, after_key = after
+        clauses.append(
+            "(kind > ? OR (kind = ? AND path > ?) OR "
+            "(kind = ? AND path = ? AND node_key > ?))"
+        )
+        params.extend(
+            (after_kind, after_kind, after_path, after_kind, after_path, after_key)
+        )
+    rows = conn.execute(
+        select
+        + " WHERE "
+        + " AND ".join(clauses)
+        + " ORDER BY kind, path, node_key LIMIT ?",
+        (*params, max(1, int(limit)) + 1),
+    ).fetchall()
+    has_more = len(rows) > limit
+    return [_node_row_to_dict(row) for row in rows[:limit]], has_more
+
+
+def _bounded_current_unit_seeds(
+    conn: sqlite3.Connection,
+    *,
+    path: str | None,
+    query: str | None,
+    categories: set[str] | None,
+    kinds: set[str] | None,
+    max_nodes: int,
+    current_record,
+) -> tuple[list[dict[str, Any]], bool, bool]:
+    work_budget = max_nodes * UNIT_SEED_MAX_BATCHES
+    checked = 0
+    seeds: list[dict[str, Any]] = []
+    after: tuple[str, str, str] | None = None
+    has_more = False
+    while checked < work_budget and len(seeds) < max_nodes:
+        batch_limit = min(max_nodes, work_budget - checked)
+        batch, has_more = _query_unit_seed_batch(
+            conn,
+            path=path,
+            query=query,
+            unit_ref=None,
+            categories=categories,
+            kinds=kinds,
+            limit=batch_limit,
+            after=after,
+        )
+        if not batch:
+            has_more = False
+            break
+        for index, seed in enumerate(batch):
+            checked += 1
+            if current_record(seed, parent_path=str(seed.get("path") or "")):
+                seeds.append(seed)
+                if len(seeds) >= max_nodes:
+                    capped = has_more or index < len(batch) - 1
+                    return seeds, capped, False
+        last = batch[-1]
+        after = (str(last["kind"]), str(last["path"]), str(last["node_key"]))
+        if not has_more:
+            break
+    work_exhausted = has_more and checked >= work_budget
+    return seeds, False, work_exhausted
+
+
+def _unit_seed_work_truncation(max_nodes: int) -> str:
+    work_budget = max_nodes * UNIT_SEED_MAX_BATCHES
+    return (
+        f"unit seed freshness work capped at {work_budget}; "
+        "additional matching rows were not checked"
+    )
+
+
+def _unit_parent_work_truncation() -> str:
+    return (
+        "unit parent-ref validation work capped at "
+        f"{UNIT_PARENT_REF_MAX_CANDIDATES}; "
+        "additional indexed parents were not checked"
+    )
+
+
+def _unit_seed_truncation(
+    *,
+    max_nodes: int,
+    unit_work_exhausted: bool,
+    unit_parent_work_exhausted: bool,
+) -> list[str]:
+    truncation: list[str] = []
+    if unit_work_exhausted:
+        truncation.append(_unit_seed_work_truncation(max_nodes))
+    if unit_parent_work_exhausted:
+        truncation.append(_unit_parent_work_truncation())
+    return truncation
+
+
+def _filter_unit_nodes(
+    nodes: list[dict[str, Any]],
+    *,
+    categories: set[str] | None,
+    kinds: set[str] | None,
+) -> list[dict[str, Any]]:
+    filtered: list[dict[str, Any]] = []
+    for node in nodes:
+        metadata = node.get("metadata") or {}
+        if metadata.get("record_type") != "semantic_unit":
+            continue
+        if categories and metadata.get("category") not in categories:
+            continue
+        if kinds and metadata.get("kind") not in kinds:
+            continue
+        filtered.append(node)
+    return filtered
+
+
+def _resolved_unit_filters(
+    registry: semantic_language_registry.SemanticLanguageRegistry,
+    values: list[str] | None,
+    *,
+    namespace: str,
+) -> set[str] | None:
+    if not values:
+        return None
+    resolver = registry.resolve_category if namespace == "category" else registry.resolve_kind
+    resolved: set[str] = set()
+    for value in values:
+        resolution = resolver(value)
+        resolved.add(resolution.resolved or resolution.key)
+    return resolved
+
+
+def _current_unit_status(
+    conn: sqlite3.Connection, vault_root: Path, unit_ref: str
+) -> tuple[str, list[str], list[dict[str, Any]], dict[str, int], bool]:
+    parent_ref, separator, _fragment = str(unit_ref or "").rpartition("#")
+    if not separator or not parent_ref:
+        return "missing", [], [], {}, False
+    paths, seeds, drift_counts, work_exhausted = _current_unit_parent_paths(
+        conn,
+        vault_root,
+        parent_ref=parent_ref,
+        unit_ref=unit_ref,
+    )
+    if work_exhausted:
+        drift_counts["parent_ref_validation_work_exhausted"] = 1
+        return "stale", paths, seeds, drift_counts, True
+    if len(paths) > 1:
+        return "ambiguous", paths, seeds, drift_counts, False
+    if not paths:
+        return "missing", [], [], drift_counts, False
+    return "found", paths, seeds, drift_counts, False
+
+
+def _current_unit_parent_paths(
+    conn: sqlite3.Connection,
+    vault_root: Path,
+    *,
+    parent_ref: str,
+    unit_ref: str,
+) -> tuple[list[str], list[dict[str, Any]], dict[str, int], bool]:
+    rows = conn.execute(
+        "SELECT path FROM graph_parent_refs WHERE parent_ref = ? "
+        "ORDER BY path LIMIT ?",
+        (parent_ref, UNIT_PARENT_REF_MAX_CANDIDATES + 1),
+    ).fetchall()
+    current_paths: list[str] = []
+    current_seeds: list[dict[str, Any]] = []
+    drift_counts: dict[str, int] = {}
+    for row in rows[:UNIT_PARENT_REF_MAX_CANDIDATES]:
+        rel = str(row[0])
+        path = vault_root / rel
+        try:
+            source = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            drift_counts["missing_parent"] = drift_counts.get("missing_parent", 0) + 1
+            continue
+        except (OSError, UnicodeError):
+            drift_counts["parent_unavailable"] = (
+                drift_counts.get("parent_unavailable", 0) + 1
+            )
+            continue
+        if memory_refs.ref_from_markdown(source) != parent_ref:
+            drift_counts["parent_ref_mismatch"] = (
+                drift_counts.get("parent_ref_mismatch", 0) + 1
+            )
+            continue
+        try:
+            state = semantic_index.current_parent_index_state(
+                vault_root, path, source=source
+            )
+        except (TypeError, ValueError):
+            drift_counts["invalid_current_parent"] = (
+                drift_counts.get("invalid_current_parent", 0) + 1
+            )
+            continue
+        resolution = state.document.resolve_unit(unit_ref)
+        if resolution.status != "found" or resolution.unit is None:
+            drift_counts["missing_current_unit"] = (
+                drift_counts.get("missing_current_unit", 0) + 1
+            )
+            continue
+        page = find_module._parse_page(
+            path,
+            0.0,
+            vault_root,
+            content=source.encode("utf-8"),
+        )
+        if page is None:
+            drift_counts["invalid_current_parent"] = (
+                drift_counts.get("invalid_current_parent", 0) + 1
+            )
+            continue
+        current_paths.append(rel)
+        current_seeds.append(_unit_node(page, resolution.unit, state).as_dict())
+        if len(current_paths) == 2:
+            return current_paths, current_seeds, drift_counts, False
+    return (
+        current_paths,
+        current_seeds,
+        drift_counts,
+        len(rows) > UNIT_PARENT_REF_MAX_CANDIDATES,
+    )
+
+
+def _current_unit_seed_has_graph_proof(
+    conn: sqlite3.Connection, seed: dict[str, Any]
+) -> bool:
+    metadata = seed.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    node_key = str(seed.get("node_key") or "")
+    parent_path = str(seed.get("path") or "")
+    if not node_key or not parent_path:
+        return False
+    origin = "semantic_block" if metadata.get("form") == "rich" else "semantic_unit"
+    rows = conn.execute(
+        "SELECT metadata FROM graph_edges "
+        "WHERE src_key = ? AND dst_key = ? AND relation_type = 'derived_from' "
+        "AND origin = ? AND source_path = ? ORDER BY edge_key LIMIT 2",
+        (node_key, _file_key(parent_path), origin, parent_path),
+    ).fetchall()
+    generation_fields = (
+        "record_type",
+        "unit_ref",
+        "parent_generation",
+        "parent_source_hash",
+        "parser_version",
+    )
+    return any(
+        all(_json(row[0]).get(field) == metadata.get(field) for field in generation_fields)
+        for row in rows
+    )
+
+
+def indexed_unit_parent_path_resolution(
+    vault_root: Path, unit_ref: str
+) -> tuple[list[str], bool]:
+    idx = EpistemicGraphIndex(vault_root)
+    if not idx.available():
+        return [], False
+    conn = idx._connect()
+    try:
+        _status, paths, _seeds, _drift_counts, work_exhausted = _current_unit_status(
+            conn, vault_root, unit_ref
+        )
+        return paths, work_exhausted
+    finally:
+        conn.close()
+
+
+def indexed_unit_parent_paths(vault_root: Path, unit_ref: str) -> list[str]:
+    paths, _work_exhausted = indexed_unit_parent_path_resolution(vault_root, unit_ref)
+    return paths
+
+
+def _drift_warning(drift_counts: dict[str, int]) -> dict[str, Any]:
+    return {
+        "code": "semantic_unit_index_drift",
+        "count": sum(drift_counts.values()),
+        "reasons": dict(sorted(drift_counts.items())),
+    }
 
 
 def _neighbor_edges(
-    conn: sqlite3.Connection, frontier: set[str], relation_filter: set[str]
-) -> list[dict[str, Any]]:
-    out: list[dict[str, Any]] = []
+    conn: sqlite3.Connection,
+    frontier: set[str],
+    relation_filter: set[str],
+    *,
+    limit: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if not frontier:
+        return [], False
     select = (
         "SELECT edge_key, src_key, dst_key, relation_type, raw_relation, "
         "parent_relation, registry_status, registry_version, registry_hash, "
         "origin, source_path, source_anchor, metadata FROM graph_edges"
     )
-    for key in sorted(frontier):
-        rows = conn.execute(
-            select + " WHERE src_key = ? OR dst_key = ? ORDER BY edge_key", (key, key)
-        ).fetchall()
-        for row in rows:
-            edge = _edge_row_to_dict(row)
-            if relation_filter and edge["relation_type"] not in relation_filter:
-                continue
-            out.append(edge)
-    return out
+    keys = sorted(frontier)
+    placeholders = ",".join("?" for _ in keys)
+    where = f" WHERE (src_key IN ({placeholders}) OR dst_key IN ({placeholders}))"
+    params: list[Any] = [*keys, *keys]
+    if relation_filter:
+        relations = sorted(relation_filter)
+        relation_placeholders = ",".join("?" for _ in relations)
+        where += f" AND relation_type IN ({relation_placeholders})"
+        params.extend(relations)
+    rows = conn.execute(
+        select + where + " ORDER BY edge_key LIMIT ?",
+        (*params, limit + 1),
+    ).fetchall()
+    overflow = len(rows) > limit
+    return [_edge_row_to_dict(row) for row in rows[:limit]], overflow
+
+
+def _edge_inspection_budget(*, max_nodes: int, max_edges: int) -> int:
+    """Bound raw adjacency work while leaving room for filtered/stale edges."""
+    return max(1, (max_nodes + max_edges) * EDGE_INSPECTION_MULTIPLIER)
 
 
 def _edge_priority(

@@ -7,7 +7,7 @@ OR contradict" — the cosine can't tell agreement from contradiction. This modu
 adds the missing axis: a **claim-level polarity check** on the specific pairs the
 proximity band already flagged.
 
-Deliberately NOT basic-memory's mechanism:
+The design keeps these constraints:
 - **No mandatory inline syntax.** Claims are extracted from the claim-bearing
   sections exomem pages *already* have (`## Claim`, `## Conclusion`, `## Decision`)
   with an H1 + lead-paragraph fallback, so the user is never asked to write in a

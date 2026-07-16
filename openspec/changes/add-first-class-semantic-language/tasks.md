@@ -20,8 +20,8 @@
 - [x] 3.2 Add failing lifecycle tests for every exact qualifying-relation predicate branch, normal origins, the frontmatter+supersession-only exception, family exclusions, target resolution, fingerprint-bound reviewed-none, empty-corpus bootstrap expiry, invalid placeholder, generic-link exclusion, and provenance separation.
 - [x] 3.3 Extend saved memory contracts and infer/validate/diff output to semantic-unit kinds/categories with deterministic scope resolution.
 - [x] 3.4 Implement one pure semantic contract result over fields, units, categories, typed relations, schema findings, page lifecycle, and review disposition, with precommit-blocking and posthoc-nonblocking caller modes.
-- [ ] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
-- [ ] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
+- [x] 3.5 Add portable fingerprint-bound reviewed-none state plus validate-only `draft_id`/`draft_hash`/candidate output, primary-page-last logical commit visibility, exact unchanged-draft crash recovery, and reuse guards.
+- [x] 3.6 Route remember/note, replace, edit, entity creation, Tier-2 compiled writes, and adoption compile through precommit evaluation; encode the move/delete/trash/other-KB/Sources/Evidence/watcher/reconcile applicability matrix.
 - [x] 3.7 Remove malformed `- (none yet)` generation and make empty Relations sections conditional on a valid non-edge disposition.
 - [x] 3.8 Grandfather existing pages into activation/review using stable finding keys and the mechanical after-errors-subset-of-before-errors rule while preventing invalidated accepted dispositions.
 - [x] 3.9 Replace pathname-addressed atomic-batch backup authority with descriptor-owned private per-parent workspaces and in-memory prior-byte/supported-metadata rollback snapshots, preserving ordinary caught-failure semantics and auxiliary-first/primary-last ordering.
@@ -46,23 +46,23 @@
 - [x] 5.4 Compile existing type/project/tag/speaker/file-type/date/category/kind shortcuts into the same normalized plan while preserving OR-within-list and AND-across-axis behavior and enforcing per-list/value/combined-plan bounds before deduplication or alias resolution.
 - [x] 5.5 Implement page and unit predicate evaluation before ranking, same-unit grouping for page results, unit-predicate `auto` resolution, and filter-only filtered-most-recent behavior.
 - [x] 5.6 Add conformance fixtures proving identical eligibility across keyword, BM25, vector, hybrid, graph-enriched, SQLite, and every optional backend for heterogeneous scalar/array/null/missing/mapping values, exact-type equality/inequality, array operators, numeric mapping keys, and continued-array-traversal nonmatch; fail rather than silently broaden when parity is impossible.
-- [ ] 5.7 Add adversarial surface/backend tests for nested metadata, Unicode values, explicit null, absent keys, strings that resemble dates/numbers, each independent generic and shortcut resource limit (including one huge leaf/list and duplicates counted raw), injection payloads, pre-candidate rejection, bounded explanation echo, and category alias conflicts.
+- [x] 5.7 Add adversarial surface/backend tests for nested metadata, Unicode values, explicit null, absent keys, strings that resemble dates/numbers, each independent generic and shortcut resource limit (including one huge leaf/list and duplicates counted raw), injection payloads, pre-candidate rejection, bounded explanation echo, and category alias conflicts.
 
 ## 6. First-Class Recall, Explanation, Read, And Context
 
 - [x] 6.1 Add failing recall tests for `auto|page|unit|mixed`, byte-compatible default page recall, OR-within-list/AND-across text-category-kind-structured-filter axes, empty-query filter lookup, parent caps, and truncation.
-- [ ] 6.2 Define page/unit hit and exact-read response models with parent citation, anchor/span/hash, lifecycle, ranking, degradation, and optional explanation fields.
+- [x] 6.2 Define page/unit hit and exact-read response models with parent citation, anchor/span/hash, lifecycle, ranking, degradation, and optional explanation fields.
 - [x] 6.3 Implement unit lexical/vector candidate lanes and metadata filters before ranking; keep default page ranking unchanged.
 - [x] 6.4 Implement page `matched_units`, independently ranked unit results, and bounded mixed fusion/grouping.
-- [ ] 6.5 Preserve raw BM25 backend scores through candidate collection; preserve vector/CLIP cosine, keyword/graph/temporal ranks, fusion inputs/contributions, boost factors, reranker values, and final sortable values without overloading one score.
-- [ ] 6.6 Add failing `explain=false|true` tests for byte-compatible defaults, compact no-content-leak behavior, top-level retrieval plan, effective filters/result level, lane availability/degradation/nonparticipation, filter-only/single-lane no-fusion behavior, actual sort tuples/tie-breaks, and bounded response size.
-- [ ] 6.7 Implement versioned `retrieval_profile` with intent, requested/effective modes, normalized filters, lanes/reasons/weights, backend/model/metric direction/range/rounding, fusion constants, rerank decision, compute context needed for interpretation, and final-order/tie-break policy.
-- [ ] 6.8 Implement per-hit explanations with only participating lanes, metric-labelled ranks/values, exact RRF math only when fusion runs, graph provenance, actual single-lane/filter-only sort tuples, ordered multipliers/reranking/tie-break chain, and final rank; keep unavailable/nonparticipating lanes top-level rather than fabricating hit entries or zero.
-- [ ] 6.9 Add isolated-lane fidelity tests proving public hybrid explanations reproduce candidate membership, ranks, fusion contributions, degradation, and final ordering within documented rounding.
+- [x] 6.5 Preserve raw BM25 backend scores through candidate collection; preserve vector/CLIP cosine, keyword/graph/temporal ranks, fusion inputs/contributions, boost factors, reranker values, and final sortable values without overloading one score.
+- [x] 6.6 Add failing `explain=false|true` tests for byte-compatible defaults, compact no-content-leak behavior, top-level retrieval plan, effective filters/result level, lane availability/degradation/nonparticipation, filter-only/single-lane no-fusion behavior, actual sort tuples/tie-breaks, and bounded response size.
+- [x] 6.7 Implement versioned `retrieval_profile` with intent, requested/effective modes, normalized filters, lanes/reasons/weights, backend/model/metric direction/range/rounding, fusion constants, rerank decision, compute context needed for interpretation, and final-order/tie-break policy.
+- [x] 6.8 Implement per-hit explanations with only participating lanes, metric-labelled ranks/values, exact RRF math only when fusion runs, graph provenance, actual single-lane/filter-only sort tuples, ordered multipliers/reranking/tie-break chain, and final rank; keep unavailable/nonparticipating lanes top-level rather than fabricating hit entries or zero.
+- [x] 6.9 Add isolated-lane fidelity tests proving public hybrid explanations reproduce candidate membership, ranks, fusion contributions, degradation, and final ordering within documented rounding.
 - [x] 6.10 Extend `read_memory` to resolve exact anchored/fingerprint-bound unit references and return bounded parent context or explicit stale/ambiguous status.
-- [ ] 6.11 Extend graph context to seed/filter compact and rich unit nodes by category/kind without inferring semantics.
+- [x] 6.11 Extend graph context to seed/filter compact and rich unit nodes by category/kind without inferring semantics.
 - [x] 6.12 Extend context packs with bounded cited semantic units, unit-seeded authored relations, provenance/lifecycle context, explicit truncation, and a nonduplicating legacy `semantic_blocks` projection.
-- [ ] 6.13 Add embeddings-disabled and degraded-path tests proving lexical/category/filter recall, explanations, and context remain useful without loading a model.
+- [x] 6.13 Add embeddings-disabled and degraded-path tests proving lexical/category/filter recall, explanations, and context remain useful without loading a model.
 
 ## 7. Structured Unit Mutation And Lifecycle
 
@@ -76,20 +76,20 @@
 
 ## 8. Product Surfaces And Agent Language
 
-- [ ] 8.1 Register `observe_memory`, creation draft-review fields, `filters`, `explain`, result levels, category/kind shortcuts, and all new recall/read/schema fields once in the command registry with MCP annotations and shared error codes.
-- [ ] 8.2 Regenerate/verify MCP, REST, CLI, OpenAPI, capability docs, parameter parity, structured-filter schemas, explanation schemas, and response fidelity snapshots.
-- [ ] 8.3 Extend compact/full bootstrap contracts and the hand-authored generic skill scaffold with category-versus-kind, observation authoring, page/unit filters, filter-only retrieval, score interpretation, canonical relation disposition, and review guidance.
-- [ ] 8.4 Update semantic-block, schema, graph, search, adoption, and AI-assistant documentation with compact/rich examples, the filter expression, explained retrieval examples, score caveats, and migration behavior.
-- [ ] 8.5 Run scaffold leak checks and verify no private or competitor-specific token enters `src/exomem/`; keep direct comparison names in maintainer benchmark/docs only.
+- [x] 8.1 Register `observe_memory`, creation draft-review fields, `filters`, `explain`, result levels, category/kind shortcuts, and all new recall/read/schema fields once in the command registry with MCP annotations and shared error codes.
+- [x] 8.2 Regenerate/verify MCP, REST, CLI, OpenAPI, capability docs, parameter parity, structured-filter schemas, explanation schemas, and response fidelity snapshots.
+- [x] 8.3 Extend compact/full bootstrap contracts and the hand-authored generic skill scaffold with category-versus-kind, observation authoring, page/unit filters, filter-only retrieval, score interpretation, canonical relation disposition, and review guidance.
+- [x] 8.4 Update semantic-block, schema, graph, search, adoption, and AI-assistant documentation with compact/rich examples, the filter expression, explained retrieval examples, score caveats, and migration behavior.
+- [x] 8.5 Run scaffold leak checks and verify no private or competitor-specific token enters `src/exomem/`; keep direct comparison names in maintainer benchmark/docs only.
 
 ## 9. Adoption, Audit, And Existing Corpus Activation
 
-- [ ] 9.1 Add read-only existing-vault census tests for compact observation coverage, category frequencies, false positives, malformed candidates, schema debt, and relation dispositions.
-- [ ] 9.2 Extend adoption scan-only output with semantic-language census and safe next actions; never rewrite originals or require categories.
+- [x] 9.1 Add read-only existing-vault census tests for compact observation coverage, category frequencies, false positives, malformed candidates, schema debt, and relation dispositions.
+- [x] 9.2 Extend adoption scan-only output with semantic-language census and safe next actions; never rewrite originals or require categories.
 - [x] 9.3 Implement the portable governed activation manifest that snapshots existing-page ID/hash baselines without page rewrites and survives rebuild/transfer.
-- [ ] 9.4 Extend audit/attention/review with malformed-unit, category-governance, strict-schema-drift, and stale relation-disposition findings using stable fingerprints.
-- [ ] 9.5 Add empty-vault, first-note, portable existing-vault activation-manifest, legacy-no-ID/move fallback, direct-editor/new-file, sync-conflict, rebuild/transfer, and registry-upgrade acceptance fixtures.
-- [ ] 9.6 Verify default installs and upgrades do not fabricate observations, categories, relations, IDs, or review decisions.
+- [x] 9.4 Extend audit/attention/review with malformed-unit, category-governance, strict-schema-drift, and stale relation-disposition findings using stable fingerprints.
+- [x] 9.5 Add empty-vault, first-note, portable existing-vault activation-manifest, legacy-no-ID/move fallback, direct-editor/new-file, sync-conflict, rebuild/transfer, and registry-upgrade acceptance fixtures.
+- [x] 9.6 Verify default installs and upgrades do not fabricate observations, categories, relations, IDs, or review decisions.
 
 ## 10. Layered Basic Memory Local-Core Benchmark
 

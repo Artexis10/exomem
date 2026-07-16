@@ -36,6 +36,12 @@ An empty search means "not found with that query and scope." It is not proof tha
 the knowledge does not exist. Try synonyms, adjacent terms, singular/plural
 forms, or `scope="vault"` before saying there is no relevant material.
 
+Use page recall for conclusions, unit recall for exact observations, and mixed
+recall when both are useful. An empty query with structured filters is a
+filter-only lookup. Set `explain=true` only to inspect ranking: BM25, cosine,
+RRF contributions, reranker values, and final rank are different labelled
+metrics, never confidence. See [first-class semantic language](semantic-language.md).
+
 Save durable conclusions when the conversation lands on one: a decision, solved
 problem, diagnosed failure, reusable pattern, stable project fact, or conclusion
 that future agents should find. Save a concise compiled note, not a transcript.
@@ -67,6 +73,7 @@ For CLI use, these actions are also available as friendly aliases:
 ```bash
 exomem ask "what did I conclude about onboarding?" --json
 exomem ask "warranty dispute context" --deep --graph-enrich --json
+exomem ask "battery policy" --category config --result-level mixed --explain --json
 exomem remember "# Decision\n\n## Claim\n\nUse simple actions first." --title "Use simple actions first" --json
 exomem capture "raw article excerpt" --title "Article title" --source-type article --url "https://example.com" --json
 exomem capture "receipt text" --as evidence --scope warranty --category receipts --filename receipt.txt --json
@@ -125,6 +132,10 @@ Agent behavior:
 1. Use `capture_source` for the raw article or excerpt.
 2. Keep the URL and capture rationale.
 3. Offer to compile a note only if there is a durable conclusion to extract.
+
+For one observation or rich unit, use `observe_memory` rather than page-wide
+string editing. For reviewed creation, validate first and commit the unchanged
+`draft_id`/`draft_hash`; never infer reviewed-none from a missing relation.
 
 ### Preserve proof
 

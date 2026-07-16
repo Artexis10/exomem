@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime as dt
 import hashlib
 import json
+import os
 from importlib import resources
 from pathlib import Path
 
@@ -12,7 +13,7 @@ import pytest
 import yaml
 
 from exomem import adopt as adopt_module
-from exomem import knowledge_packs
+from exomem import commands, knowledge_packs, semantic_census
 from exomem.__main__ import main
 
 
@@ -63,6 +64,710 @@ def test_adopt_scan_only_is_read_only_before_init(tmp_path: Path) -> None:
     assert report["governance"]["kb_present"] is False
     assert report["summary"]["kb"] == {"present": False}
     assert {a["action"] for a in report["next_actions"]} == {"scan-only", "initialize-kb"}
+
+
+def test_adopt_scan_only_reports_bounded_semantic_census_without_fabrication(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    notes = vault / "Legacy Notes"
+    notes.mkdir()
+    (notes / "semantic.md").write_text(
+        """# Semantic sample
+
+- [Config] Compact observation. ^config-one
+
+## Finding
+- category: Rule
+
+Rich semantic unit.
+
+- [bad/category] malformed candidate
+- [x] ordinary task box
+
+```markdown
+- [hidden] fenced example
+```
+""",
+        encoding="utf-8",
+    )
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(vault, mode="scan-only")
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["read_only"] is True
+    assert census["coverage"]["markdown_files_scanned"] == 4
+    assert census["coverage"]["parseable_pages"] == 3
+    assert census["units"] == {"total": 2, "compact": 1, "rich": 1}
+    assert census["categories"]["raw_frequencies"] == {"Config": 1, "Rule": 1}
+    assert census["categories"]["canonical_frequencies"] == {"config": 1, "rule": 1}
+    assert census["categories"]["resolved_frequencies"] == {"config": 1, "rule": 1}
+    assert census["categories"]["open_categories_valid"] is True
+    assert census["diagnostics"]["malformed_candidates"] == 1
+    [example] = census["diagnostics"]["examples"]
+    assert example["path"] == "Legacy Notes/semantic.md"
+    assert example["code"] == "invalid_compact_category"
+    assert example["span"]["start_line"] == 10
+    encoded = json.dumps(census, sort_keys=True)
+    assert "ordinary task box" not in encoded
+    assert "fenced example" not in encoded
+    assert census["governance"] == {
+        "kb_present": False,
+        "saved_contracts": {"status": "unavailable", "count": 0, "debt": {}},
+        "relation_dispositions": {"status": "unavailable", "counts": {}},
+    }
+    assert {item["action"] for item in census["safe_next_actions"]} >= {
+        "review-malformed-candidates",
+        "initialize-kb",
+    }
+
+
+def test_adopt_scan_only_semantic_census_honors_subtree_hidden_and_resource_bounds(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    (focus / "a.md").write_text("- [alpha] First.\n", encoding="utf-8")
+    (focus / "b.md").write_text("- [beta] Second.\n", encoding="utf-8")
+    (focus / ".hidden.md").write_text("- [secret] Hidden.\n", encoding="utf-8")
+    (vault / "outside.md").write_text("- [outside] Ignore.\n", encoding="utf-8")
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(
+        vault,
+        mode="scan-only",
+        path="Focus",
+        include_hidden=False,
+        semantic_max_files=1,
+        semantic_max_bytes=1024,
+        semantic_example_limit=1,
+    )
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["scope"] == "Focus"
+    assert census["limits"] == {
+        "max_files": 1,
+        "max_bytes": 1024,
+        "max_directory_entries": 32,
+        "example_limit": 1,
+        "include_hidden": False,
+    }
+    assert census["coverage"]["markdown_files_scanned"] == 1
+    assert census["coverage"]["markdown_files_omitted"] == 1
+    assert census["coverage"]["truncated"] is True
+    assert census["units"]["total"] == 1
+    assert set(census["categories"]["raw_frequencies"]) <= {"alpha", "beta"}
+    assert "secret" not in census["categories"]["raw_frequencies"]
+    assert "outside" not in census["categories"]["raw_frequencies"]
+
+
+def test_adopt_semantic_census_bounds_directory_entry_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    (focus / "00-semantic.md").write_text("- [bounded] First.\n", encoding="utf-8")
+    for index in range(80):
+        (focus / f"directory-{index:03d}").mkdir()
+        (focus / f"ordinary-{index:03d}.bin").write_bytes(b"not markdown")
+
+    real_scandir = os.scandir
+    enumerated = 0
+
+    class CountingScandir:
+        def __init__(self, target: object) -> None:
+            self._inner = real_scandir(target)
+
+        def __enter__(self) -> CountingScandir:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.__exit__(*args)
+
+        def __iter__(self) -> CountingScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal enumerated
+            entry = next(self._inner)
+            enumerated += 1
+            return entry
+
+    monkeypatch.setattr(semantic_census.os, "scandir", CountingScandir)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=1)
+
+    entry_budget = census["limits"].get("max_directory_entries")
+    assert isinstance(entry_budget, int)
+    assert enumerated == census["coverage"]["directory_entries_enumerated"]
+    assert enumerated <= entry_budget
+    assert census["coverage"]["omitted_is_lower_bound"] is True
+    assert census["coverage"]["truncated"] is True
+
+
+def test_adopt_semantic_census_rejects_symlink_and_identity_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    outside = vault / "outside.md"
+    outside.write_text("- [escaped] Outside.\n", encoding="utf-8")
+    (focus / "link.md").symlink_to(outside)
+    real_lstat = Path.lstat
+    swapped = False
+
+    def swapping_lstat(path: Path) -> os.stat_result:
+        nonlocal swapped
+        result = real_lstat(path)
+        if path == candidate and not swapped:
+            candidate.unlink()
+            candidate.symlink_to(outside)
+            swapped = True
+        return result
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=4)
+
+    assert census["categories"]["raw_frequencies"] == {}
+    assert census["coverage"]["unreadable_files"] >= 1
+
+
+def test_adopt_semantic_census_never_reads_past_remaining_byte_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    real_read_bytes = Path.read_bytes
+
+    def oversized_read(path: Path) -> bytes:
+        if path == candidate:
+            return b"x" * 4096
+        return real_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", oversized_read)
+
+    census = semantic_census.scan(
+        vault,
+        path="Focus",
+        max_files=1,
+        max_bytes=32,
+    )
+
+    assert census["coverage"]["bytes_scanned"] <= 32
+    assert census["categories"]["raw_frequencies"] == {"safe": 1}
+
+
+def test_adopt_semantic_census_rejects_file_growth_during_bounded_read(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    candidate = focus / "candidate.md"
+    candidate.write_text("- [safe] Original.\n", encoding="utf-8")
+    real_read = os.read
+    requested: list[int] = []
+    grown = False
+
+    def growing_read(descriptor: int, count: int) -> bytes:
+        nonlocal grown
+        requested.append(count)
+        if not grown:
+            with candidate.open("ab") as stream:
+                stream.write(b"x" * 4096)
+            grown = True
+        return real_read(descriptor, count)
+
+    monkeypatch.setattr(semantic_census.os, "read", growing_read)
+
+    census = semantic_census.scan(
+        vault,
+        path="Focus",
+        max_files=1,
+        max_bytes=32,
+    )
+
+    assert requested
+    assert max(requested) <= 33
+    assert census["coverage"]["bytes_scanned"] == 0
+    assert census["coverage"]["markdown_files_scanned"] == 0
+    assert census["categories"]["raw_frequencies"] == {}
+
+
+@pytest.mark.parametrize(
+    ("extra_entries", "expected_truncated"),
+    [(0, False), (1, True)],
+)
+def test_adopt_semantic_census_exact_entry_budget_uses_bounded_sentinel_probe(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_entries: int,
+    expected_truncated: bool,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    focus.mkdir()
+    entry_budget = semantic_census._directory_entry_budget(1)
+    for index in range(entry_budget + extra_entries):
+        (focus / f"ordinary-{index:03d}.bin").write_bytes(b"not markdown")
+    real_scandir = os.scandir
+    probes = 0
+
+    class ProbedScandir:
+        def __init__(self, target: object) -> None:
+            self._inner = real_scandir(target)
+
+        def __enter__(self) -> ProbedScandir:
+            self._inner.__enter__()
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._inner.__exit__(*args)
+
+        def __iter__(self) -> ProbedScandir:
+            return self
+
+        def __next__(self) -> os.DirEntry[str]:
+            nonlocal probes
+            probes += 1
+            return next(self._inner)
+
+    monkeypatch.setattr(semantic_census.os, "scandir", ProbedScandir)
+
+    census = semantic_census.scan(vault, path="Focus", max_files=1)
+
+    assert census["limits"]["max_directory_entries"] == entry_budget + 1
+    assert probes <= census["limits"]["max_directory_entries"]
+    assert census["coverage"]["truncated"] is expected_truncated
+    assert (
+        census["coverage"]["directory_entry_budget_exhausted"]
+        is expected_truncated
+    )
+
+
+def test_adopt_semantic_census_revalidates_parent_identity_after_enumeration(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+    focus = vault / "Focus"
+    child = focus / "child"
+    child.mkdir(parents=True)
+    (child / "candidate.md").write_text("- [safe] Inside.\n", encoding="utf-8")
+    outside = vault / "Outside"
+    outside.mkdir()
+    (outside / "candidate.md").write_text("- [escaped] Outside.\n", encoding="utf-8")
+    parked = focus / "parked"
+    real_open = semantic_census._open_regular_file_descriptor
+    received_ancestors: list[object] = []
+    swapped = False
+
+    def swap_parent_before_open(
+        root: Path,
+        path: Path,
+        **kwargs: object,
+    ) -> int:
+        nonlocal swapped
+        received_ancestors.append(kwargs.get("expected_ancestors"))
+        if not swapped:
+            child.rename(parked)
+            child.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        if kwargs:
+            return real_open(root, path, **kwargs)
+        return real_open(root, path)
+
+    monkeypatch.setattr(
+        semantic_census,
+        "_open_regular_file_descriptor",
+        swap_parent_before_open,
+    )
+
+    census = semantic_census.scan(vault, path="Focus")
+
+    assert received_ancestors and received_ancestors[0]
+    assert census["categories"]["raw_frequencies"] == {}
+    assert census["coverage"]["unreadable_files"] >= 1
+
+
+def test_adopt_scan_only_semantic_census_reports_saved_governance_read_only(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    schema = vault / "Knowledge Base" / "_Schema"
+    schema.mkdir(parents=True)
+    (schema / "semantic-language-registry.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "categories": {
+                    "config": {
+                        "description": "Configuration facts",
+                        "aliases": ["configuration"],
+                    }
+                },
+                "kinds": {},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    contracts = schema / "contracts"
+    contracts.mkdir()
+    (contracts / "census.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "name": "census",
+                "scope": {"page_type": "insight"},
+                "validation": "strict",
+                "sample_size": 0,
+                "fields": {},
+                "blocks": {},
+                "kinds": {},
+                "categories": {"must_have": {"required": True}},
+                "relations": {},
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000301
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [Config] Canonical spelling.
+- [configuration] Alias spelling.
+""",
+        encoding="utf-8",
+    )
+    before = _snapshot(vault)
+
+    report = adopt_module.adopt(vault, mode="scan-only")
+
+    assert _snapshot(vault) == before
+    census = report["semantic_census"]
+    assert census["categories"]["raw_frequencies"] == {
+        "Config": 1,
+        "configuration": 1,
+    }
+    assert census["categories"]["canonical_frequencies"] == {
+        "config": 1,
+        "configuration": 1,
+    }
+    assert census["categories"]["resolved_frequencies"] == {"config": 2}
+    assert census["categories"]["resolved_alias_collisions"] == [
+        {
+            "resolved": "config",
+            "canonical_labels": ["config", "configuration"],
+            "count": 2,
+        }
+    ]
+    governance = census["governance"]
+    assert governance["kb_present"] is True
+    assert governance["saved_contracts"] == {
+        "status": "current",
+        "count": 1,
+        "debt": {"CONTRACT_REQUIRED_CATEGORY": 1},
+    }
+    assert governance["relation_dispositions"] == {
+        "status": "current",
+        "counts": {"missing": 1},
+    }
+    assert not (schema / "semantic-contract-activation.json").exists()
+
+
+def test_adopt_semantic_census_parses_each_markdown_page_once_and_reports_metadata_work(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000311
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [config] Parse once.
+""",
+        encoding="utf-8",
+    )
+    real_build_page_state = semantic_census.semantic_contract.build_page_state
+    parser_calls: list[str] = []
+    markdown_path_reads: list[str] = []
+    real_read_text = Path.read_text
+
+    def counting_build_page_state(*args: object, **kwargs: object) -> object:
+        parser_calls.append(str(args[1]))
+        return real_build_page_state(*args, **kwargs)
+
+    def counting_read_text(path: Path, *args: object, **kwargs: object) -> str:
+        if path.suffix.casefold() == ".md":
+            markdown_path_reads.append(path.as_posix())
+        return real_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(
+        semantic_census.semantic_contract,
+        "build_page_state",
+        counting_build_page_state,
+    )
+    monkeypatch.setattr(Path, "read_text", counting_read_text)
+
+    census = semantic_census.scan(vault)
+
+    assert len(parser_calls) == census["coverage"]["markdown_files_scanned"]
+    assert len(parser_calls) == len(set(parser_calls))
+    assert markdown_path_reads == []
+    assert census["coverage"]["metadata_work"] == {
+        "status": "unbounded",
+        "bounded": False,
+        "counted_as_markdown_bytes": False,
+        "sources": [
+            "activation_manifest",
+            "relation_registry",
+            "relation_review_state",
+            "saved_contracts",
+            "semantic_language_registry",
+        ],
+    }
+    assert census["governance"]["resource_status"] == "unbounded_metadata"
+
+
+def test_adopt_semantic_census_governance_uses_exact_scanned_page_state(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "semantic.md"
+    original = """---
+type: insight
+exomem_id: 00000000-0000-4000-8000-000000000312
+title: Semantic
+status: active
+created: 2026-07-16
+updated: 2026-07-16
+sources: []
+tags: []
+---
+
+# Semantic
+
+- [before] Exact scanned bytes.
+"""
+    replacement = original.replace("[before] Exact scanned bytes", "[after] Replaced")
+    page.write_text(original, encoding="utf-8")
+    relative = page.relative_to(vault).as_posix()
+    real_build_page_state = semantic_census.semantic_contract.build_page_state
+    observed_texts: list[str] = []
+
+    def mutate_after_first_parse(*args: object, **kwargs: object) -> object:
+        state = real_build_page_state(*args, **kwargs)
+        if str(args[1]) == relative:
+            observed_texts.append(str(args[2]))
+            if len(observed_texts) == 1:
+                page.write_text(replacement, encoding="utf-8")
+        return state
+
+    monkeypatch.setattr(
+        semantic_census.semantic_contract,
+        "build_page_state",
+        mutate_after_first_parse,
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert observed_texts == [original]
+    assert census["categories"]["raw_frequencies"] == {"before": 1}
+    assert census["governance"]["relation_dispositions"] == {
+        "status": "current",
+        "counts": {"missing": 1},
+    }
+
+
+def test_adopt_semantic_census_separates_general_registry_findings_from_category_aliases(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    schema = vault / "Knowledge Base" / "_Schema"
+    schema.mkdir(parents=True)
+    (schema / "semantic-language-registry.yaml").write_text(
+        yaml.safe_dump(
+            {
+                "schema_version": 1,
+                "categories": {
+                    "config": {"aliases": ["shared-category"]},
+                    "policy": {"aliases": ["shared-category"]},
+                    "malformed": {"aliases": [123]},
+                },
+                "kinds": {
+                    "finding": {"aliases": ["shared-kind"]},
+                    "claim": {"aliases": ["shared-kind"]},
+                },
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    findings = census["categories"]["registry_findings"]
+    aliases = census["categories"]["alias_conflicts"]
+    assert len(findings) > len(aliases)
+    assert {finding["namespace"] for finding in findings} >= {"categories", "kinds"}
+    assert aliases
+    assert all(finding["code"] == "alias_conflict" for finding in aliases)
+    assert all(finding["namespace"] == "categories" for finding in aliases)
+    assert all(
+        str(finding.get("path", "")).startswith("categories.")
+        for finding in aliases
+    )
+
+
+def test_adopt_semantic_census_hidden_markdown_makes_governance_partial(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    notes = vault / "Knowledge Base" / "Notes"
+    page_id = "00000000-0000-4000-8000-000000000313"
+    visible = notes / "visible.md"
+    visible.write_text(
+        f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Visible\n---\n\n# Visible\n",
+        encoding="utf-8",
+    )
+    (notes / ".duplicate.md").write_text(
+        f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Hidden\n---\n\n# Hidden\n",
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert census["coverage"]["governance_complete"] is False
+    assert census["governance"]["saved_contracts"]["status"] == "partial"
+    assert census["governance"]["relation_dispositions"]["status"] == "partial"
+    assert census["governance"]["resource_status"] == "partial_corpus"
+
+
+def test_adopt_semantic_census_separates_identity_ownership_from_corpus_pages(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page_id = "00000000-0000-4000-8000-000000000314"
+    paths = (
+        "Knowledge Base/Notes/ordinary.md",
+        "Knowledge Base/_Schema/ownership.md",
+        "Knowledge Base/_trash/ownership.md",
+        "Knowledge Base/Notes/ordinary.sync-conflict-20260716.md",
+    )
+    for relative in paths:
+        page = vault / relative
+        page.parent.mkdir(parents=True, exist_ok=True)
+        page.write_text(
+            f"---\ntype: insight\nexomem_id: {page_id}\ntitle: Owner\n---\n\n# Owner\n",
+            encoding="utf-8",
+        )
+    real_evaluate = semantic_census.semantic_writes.evaluate_posthoc_batch
+    captured: list[object] = []
+
+    def capture_corpus(*args: object, **kwargs: object) -> object:
+        captured.append(kwargs["corpus"])
+        return real_evaluate(*args, **kwargs)
+
+    monkeypatch.setattr(
+        semantic_census.semantic_writes,
+        "evaluate_posthoc_batch",
+        capture_corpus,
+    )
+
+    census = semantic_census.scan(vault, include_hidden=True)
+
+    assert census["governance"]["saved_contracts"]["status"] == "current"
+    [corpus] = captured
+    assert corpus.identity_census.paths_by_identity[page_id] == tuple(sorted(paths))
+    assert "Knowledge Base/Notes/ordinary.md" in corpus.pages
+    assert set(paths[1:]).isdisjoint(corpus.pages)
+
+
+def test_adopt_semantic_census_malformed_raw_id_fails_governance_identity_census(
+    tmp_path: Path,
+) -> None:
+    vault = _legacy_vault(tmp_path, kb=True)
+    page = vault / "Knowledge Base" / "Notes" / "malformed-id.md"
+    page.write_text(
+        """---
+type: insight
+exomem_id: definitely-not-a-uuid
+title: Malformed identity
+---
+
+# Malformed identity
+""",
+        encoding="utf-8",
+    )
+
+    census = semantic_census.scan(vault)
+
+    assert census["governance"]["saved_contracts"]["status"] == "error"
+    assert census["governance"]["saved_contracts"]["error"] == "ValueError"
+    assert census["governance"]["relation_dispositions"]["status"] == "error"
+    assert census["governance"]["resource_status"] == "partial_identity_error"
+
+
+def test_adopt_vault_surface_exposes_semantic_census_bounds(tmp_path: Path) -> None:
+    vault = _legacy_vault(tmp_path, kb=False)
+
+    report = commands.op_adopt_vault(
+        vault,
+        semantic_max_files=1,
+        semantic_max_bytes=1024,
+        semantic_example_limit=1,
+    )
+
+    assert report["semantic_census"]["limits"] == {
+        "max_files": 1,
+        "max_bytes": 1024,
+        "max_directory_entries": 32,
+        "example_limit": 1,
+        "include_hidden": False,
+    }
 
 
 def test_adopt_suggests_builtin_packs_from_structure(tmp_path: Path) -> None:

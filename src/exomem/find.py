@@ -337,6 +337,7 @@ def find(
     timings: FindTimings | None = None,
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
+    retrieval_trace: Any | None = None,
 ) -> list[Hit] | list[SemanticUnitHit] | list[Hit | SemanticUnitHit]:
     """Search the vault. Returns up to `limit` hits.
 
@@ -498,6 +499,13 @@ def find(
         result_level,
         filter_plan,
     )
+    if retrieval_trace is not None:
+        retrieval_trace.record_plan(
+            query=query,
+            intent=intent or find_policy.classify_intent(query),
+            effective_result_level=effective_result_level,
+            normalized_filters=filter_plan.to_dict(),
+        )
     if filter_plan.root is not None:
         # Every shortcut is now represented in the shared typed plan.  Clear
         # the legacy arguments so no lane applies a second, divergent filter.
@@ -535,13 +543,14 @@ def find(
             mode=mode,
             degraded_out=degraded,
             failed_out=failed,
+            retrieval_trace=retrieval_trace,
         )
     mixed = effective_result_level == "mixed"
 
     # ---- Hot cache lookup (freshness-keyed; see _freshness_key above) ----
     # prefer_used bypasses the cache entirely — simplest correct interaction;
     # log freshness never has to enter the cache key.
-    cache_size = 0 if prefer_used or mixed else _find_cache_size()
+    cache_size = 0 if prefer_used or mixed or retrieval_trace is not None else _find_cache_size()
     cache_key: tuple | None = None
     if timings is not None:
         timings.cache["enabled"] = cache_size > 0
@@ -594,7 +603,10 @@ def find(
                 mode=mode,
                 degraded_out=degraded,
                 failed_out=failed,
+                retrieval_trace=retrieval_trace,
             )
+        if retrieval_trace is not None:
+            retrieval_trace.snapshot_result_plan("unit")
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -638,7 +650,11 @@ def find(
             degraded_out=degraded,
             failed_out=failed,
             eligible_paths=eligible_paths,
+            retrieval_trace=retrieval_trace,
         )
+
+    if retrieval_trace is not None and (mode == "keyword" or not query_norm):
+        retrieval_trace.record_keyword_hits(hits, filter_only=not query_norm)
 
     # Auto-widen: reach into the wider vault (sibling folders like Tracking/,
     # Reference/, plus curated trees) so content outside Knowledge Base/ isn't
@@ -666,6 +682,8 @@ def find(
                     file_types=file_types, exclude_file_types=exclude_file_types,
                     limit=limit, snapshot=snapshot,
                     filter_plan=filter_plan if filter_plan.root is not None else None,
+                    exclude_paths=seen,
+                    retrieval_trace=retrieval_trace,
                 )
                 if h.path not in seen
             ]
@@ -684,6 +702,18 @@ def find(
                 reserve = min(len(outside), max(1, limit // 5), max(0, limit - 1))
                 kb_keep = limit - reserve
                 hits = ((strong + weak)[:kb_keep] + outside)[:limit]
+                if retrieval_trace is not None:
+                    retrieval_trace.record_auto_widen(
+                        hits,
+                        strong_paths=[hit.path for hit in strong[:kb_keep]],
+                        weak_paths=[
+                            hit.path
+                            for hit in weak[: max(0, kb_keep - len(strong))]
+                        ],
+                        outside_paths=[hit.path for hit in outside],
+                        reserve=reserve,
+                        kb_keep=kb_keep,
+                    )
 
     # Explicit recency window (off by default) — drop out-of-window hits last,
     # after auto-widen, so it governs every mode uniformly.
@@ -695,6 +725,16 @@ def find(
             recency_days=recency_days,
         )
 
+    if retrieval_trace is not None:
+        retrieval_trace.finalize_page_results(
+            hits,
+            updated_after=updated_after,
+            updated_before=updated_before,
+            recency_days=recency_days,
+        )
+        if mixed:
+            retrieval_trace.snapshot_result_plan("page")
+
     if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
             _annotate_matched_units(vault_root, hits, filter_plan)
@@ -705,6 +745,7 @@ def find(
             mixed_unit_hits,
             limit=limit,
             config=resolved_config,
+            retrieval_trace=retrieval_trace,
         )
 
     # ---- Hot cache store (deep copies both ways; bounded LRU eviction) ----
@@ -924,6 +965,7 @@ def _find_semantic_units(
     mode: str,
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
+    retrieval_trace: Any | None = None,
 ) -> list[SemanticUnitHit]:
     """Rank current, exactly eligible units through lexical and vector lanes."""
     records = _eligible_unit_records(vault_root, scope=scope, plan=plan)
@@ -940,11 +982,14 @@ def _find_semantic_units(
             ),
             reverse=True,
         )
+        selected = ordered if limit is None else ordered[:limit]
         ordered_hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
-            for page, unit, _source_order in ordered
+            for page, unit, _source_order in selected
         ]
-        return ordered_hits if limit is None else ordered_hits[:limit]
+        if retrieval_trace is not None:
+            retrieval_trace.record_unit_filter_only(selected)
+        return ordered_hits
 
     if mode == "keyword":
         tokens = query.lower().split()
@@ -963,11 +1008,14 @@ def _find_semantic_units(
         )
         if prefer_active:
             ordered.sort(key=lambda record: record[0].status == "superseded")
+        selected = ordered if limit is None else ordered[:limit]
         hits = [
             _semantic_unit_hit(page, unit, bm25_rank=None, bm25_score=None)
-            for page, unit, _source_order in ordered
+            for page, unit, _source_order in selected
         ]
-        return hits if limit is None else hits[:limit]
+        if retrieval_trace is not None:
+            retrieval_trace.record_unit_keyword(selected)
+        return hits
 
     from . import lexstore
 
@@ -1030,10 +1078,33 @@ def _find_semantic_units(
     lexical_rank = {unit_ref: rank for rank, unit_ref in enumerate(lexical_ranking, 1)}
 
     vector_scores: dict[str, float] = {}
+    vector_profile: dict[str, Any]
+    if mode not in ("hybrid", "vector"):
+        vector_profile = {
+            "status": "non_applicable",
+            "reason": "requested_mode_keyword",
+        }
+    elif os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        vector_profile = {
+            "status": "disabled",
+            "reason": "embeddings_disabled",
+            "model": "BAAI/bge-base-en-v1.5",
+        }
+    else:
+        vector_profile = {
+            "status": "unavailable",
+            "reason": "not_attempted",
+            "model": "BAAI/bge-base-en-v1.5",
+        }
     if mode in ("hybrid", "vector") and not os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
         from . import readiness
 
         if readiness.should_defer("embeddings"):
+            vector_profile = {
+                "status": "warming",
+                "reason": "model_warming",
+                "model": "BAAI/bge-base-en-v1.5",
+            }
             if degraded_out is not None:
                 degraded_out.append("embeddings")
         else:
@@ -1061,6 +1132,19 @@ def _find_semantic_units(
                 vector_scores = {
                     hit.unit_ref: hit.cosine for hit in vector_hits if hit.unit_ref in records
                 }
+                vector_profile = {
+                    "status": (
+                        "participated" if vector_scores else "available_nonmatching"
+                    ),
+                    "backend": type(index).__name__,
+                    "model": embeddings.MODEL_NAME,
+                    "metric": {
+                        "name": "cosine_similarity",
+                        "direction": "higher",
+                        "range": [-1.0, 1.0],
+                        "rounding": 6,
+                    },
+                }
                 index_path = getattr(index, "path", None)
                 if (
                     index_path is not None
@@ -1077,12 +1161,27 @@ def _find_semantic_units(
                     if failed_out is not None:
                         failed_out.append("vector")
                     vector_scores = {}
+                    vector_profile = {
+                        "status": "failed",
+                        "reason": "stale_or_incomplete_index",
+                        "model": embeddings.MODEL_NAME,
+                    }
             except ImportError as error:
+                vector_profile = {
+                    "status": "unavailable",
+                    "reason": "dependency_unavailable",
+                    "model": "BAAI/bge-base-en-v1.5",
+                }
                 log.info(
                     "semantic-unit vector search unavailable (%s); using lexical ranking",
                     error,
                 )
             except Exception as error:  # noqa: BLE001 - vector lane soft-falls back
+                vector_profile = {
+                    "status": "failed",
+                    "reason": "search_failed",
+                    "model": "BAAI/bge-base-en-v1.5",
+                }
                 log.warning(
                     "semantic-unit vector search failed: %s; using lexical ranking",
                     error,
@@ -1093,10 +1192,11 @@ def _find_semantic_units(
 
     vector_ranking = _raw_ranking(vector_scores)
     vector_rank = {unit_ref: rank for rank, unit_ref in enumerate(vector_ranking, 1)}
+    raw_fused_score_by_ref: dict[str, float] = {}
 
     if not vector_ranking:
         final_ranking = _preferred_ranking(scores)
-    elif mode == "vector":
+    elif mode == "vector" or not lexical_ranking:
         final_ranking = _preferred_ranking(vector_scores)
     else:
         from . import fusion
@@ -1107,6 +1207,7 @@ def _find_semantic_units(
             [weights[0], weights[1]],
             k=config.rrf_k,
         )
+        raw_fused_score_by_ref = dict(fused)
         final_ranking = [
             unit_ref
             for unit_ref, _fused_score in sorted(
@@ -1129,6 +1230,25 @@ def _find_semantic_units(
     if limit is not None:
         final_ranking = final_ranking[:limit]
     vector_succeeded = bool(vector_ranking)
+    if retrieval_trace is not None:
+        intent_weights = config.intent_weights(find_policy.classify_intent(query))
+        retrieval_trace.record_unit_ranked(
+            records=records,
+            lexical_ranking=lexical_ranking,
+            lexical_scores=scores,
+            lexical_backend=lexstore.cache_token(vault_root),
+            vector_ranking=vector_ranking,
+            vector_scores=vector_scores,
+            vector_profile=vector_profile,
+            final_ranking=final_ranking,
+            raw_fused_score_by_ref=raw_fused_score_by_ref,
+            weights=(intent_weights[0], intent_weights[1]),
+            rrf_k=config.rrf_k,
+            prefer_active=prefer_active,
+            superseded_penalty=config.superseded_penalty,
+            lexical_used=(mode != "vector" or not vector_succeeded),
+            vector_used=vector_succeeded,
+        )
     return [
         _semantic_unit_hit(
             records[unit_ref][0],
@@ -1150,6 +1270,7 @@ def _merge_mixed_hits(
     *,
     limit: int,
     config: RankingConfig,
+    retrieval_trace: Any | None = None,
 ) -> list[Hit | SemanticUnitHit]:
     """Fuse independent page/unit rankings after exact per-parent unit caps."""
     kept_units: list[SemanticUnitHit] = []
@@ -1163,13 +1284,15 @@ def _merge_mixed_hits(
         units_by_parent[hit.parent_path] = count + 1
         kept_units.append(hit)
 
-    ranked: list[tuple[float, int, str, Hit | SemanticUnitHit]] = []
+    ranked: list[tuple[float, int, str, Hit | SemanticUnitHit, int, str]] = []
     ranked.extend(
         (
             _MIXED_PAGE_WEIGHT / (config.rrf_k + rank),
             0,
             hit.path,
             hit,
+            rank,
+            "page",
         )
         for rank, hit in enumerate(page_hits, start=1)
     )
@@ -1179,12 +1302,21 @@ def _merge_mixed_hits(
             1,
             hit.unit_ref,
             hit,
+            rank,
+            "unit",
         )
         for rank, hit in enumerate(kept_units, start=1)
     )
-    merged = [
-        item[3] for item in sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
-    ]
+    ranked_items = sorted(ranked, key=lambda item: (-item[0], item[1], item[2]))[:limit]
+    merged = [item[3] for item in ranked_items]
+    if retrieval_trace is not None:
+        retrieval_trace.record_mixed(
+            ranked_items,
+            rrf_k=config.rrf_k,
+            page_weight=_MIXED_PAGE_WEIGHT,
+            unit_weight=_MIXED_UNIT_WEIGHT,
+            unit_parent_cap=_MIXED_UNITS_PER_PARENT_CAP,
+        )
 
     first_unit_by_parent: dict[str, SemanticUnitHit] = {}
     page_by_path: dict[str, Hit] = {}
@@ -1445,6 +1577,7 @@ def _find_semantic(
     degraded_out: list[str] | None = None,
     failed_out: list[str] | None = None,
     eligible_paths: set[str] | None = None,
+    retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """Hybrid (BM25+vector) or vector-only mode.
 
@@ -1491,6 +1624,7 @@ def _find_semantic(
         degraded_out=degraded_out,
         failed_out=failed_out,
         eligible_paths=eligible_paths,
+        capture_trace=retrieval_trace is not None,
     )
 
     if not bundle.had_rankings:
@@ -1499,13 +1633,19 @@ def _find_semantic(
         _record_degradation("no_candidates")
         if failed_out is not None:
             failed_out.append("keyword")
-        return _find_keyword(
+        fallback_hits = _find_keyword(
             vault_root,
             query_norm=query_norm,
             types=types, projects=projects, tags=tags, speakers=speakers,
             file_types=file_types, exclude_file_types=exclude_file_types,
             limit=limit, scope=scope, eligible_paths=eligible_paths,
         )
+        if retrieval_trace is not None:
+            retrieval_trace.record_keyword_fallback(
+                fallback_hits,
+                lane_profiles=bundle.lane_statuses,
+            )
+        return fallback_hits
 
     fused = bundle.fused
     vector_ranking = bundle.vector_ranking
@@ -1658,21 +1798,42 @@ def _find_semantic(
     # Resolve the rerank decision. An explicit rerank=True/False always wins;
     # otherwise (rerank is None) auto_rerank consults should_rerank on the built
     # hits. Keeps the reranker model out of the default/test path.
-    if rerank is None:
-        do_rerank = auto_rerank and should_rerank(hits, query, config)
+    rerank_outcome: dict[str, Any]
+    if not hits:
+        do_rerank = False
+        rerank_outcome = {"decision": "skipped", "reason": "no_hits"}
+    elif rerank is False:
+        do_rerank = False
+        rerank_outcome = {"decision": "skipped", "reason": "explicit_false"}
+    elif rerank is None:
+        if not auto_rerank:
+            do_rerank = False
+            rerank_outcome = {
+                "decision": "skipped",
+                "reason": "auto_policy_not_allowed",
+            }
+        else:
+            do_rerank = should_rerank(hits, query, config)
+            rerank_outcome = {
+                "decision": "pending" if do_rerank else "skipped",
+                "reason": "auto_policy_selected" if do_rerank else "auto_policy_declined",
+            }
     else:
-        do_rerank = rerank
+        do_rerank = True
+        rerank_outcome = {"decision": "pending", "reason": "explicit_true"}
 
     if do_rerank and not embeddings.ranking_enabled():
         do_rerank = False  # EXOMEM_DISABLE_RANKING — hard off, even for explicit rerank=True
+        rerank_outcome = {"decision": "skipped", "reason": "hard_disabled"}
 
-    if do_rerank and hits and readiness.should_defer("reranker"):
+    if do_rerank and readiness.should_defer("reranker"):
         # Background warm-up owns the reranker load right now — calling
         # rerank_pairs would block on the singleton lock. Skip; caller marks
         # the response as warming.
         if degraded_out is not None:
             degraded_out.append("reranker")
         do_rerank = False
+        rerank_outcome = {"decision": "deferred", "reason": "model_warming"}
 
     if timings is not None and not (do_rerank and hits):
         timings.skipped("rerank")
@@ -1692,46 +1853,97 @@ def _find_semantic(
                     body = (pg.body if pg else "") or h.excerpt
                     passages.append(body[:1500])  # CrossEncoder caps at 512 tokens
             scores = emb.rerank_pairs(query, passages)
-            for h, s in zip(hits, scores):
-                h.rerank_score = float(s)
-            # Re-apply the type boost to rerank scores so prefer_compiled
-            # survives the post-rerank sort. This rescues compiled material
-            # that bge-reranker-base demotes — e.g. a "thoughts on..." query
-            # where the reranker preferred raw Source discussion over
-            # compiled Insights.
-            if prefer_compiled:
-                for h in hits:
-                    if h.rerank_score is not None:
-                        h.rerank_score *= _type_multiplier(h.type, config)
-            # Re-apply the supersession demotion to rerank scores too, so a
-            # superseded tombstone the reranker liked can't float back above
-            # its successor in the final sort.
-            if prefer_active:
-                for h in hits:
-                    if h.rerank_score is not None:
-                        h.rerank_score *= _status_multiplier(h.status, config)
-            # Re-apply the usage boost too, mirroring type/status, so an
-            # opted-in boost survives the post-rerank sort.
-            if usage_map:
-                for h in hits:
-                    if h.rerank_score is not None and h.usage_boost_applied:
-                        h.rerank_score *= h.usage_boost_applied
-            hits.sort(key=lambda h: -(h.rerank_score if h.rerank_score is not None else float("-inf")))
+            if len(scores) != len(hits):
+                raise ValueError(
+                    "reranker returned a score count that does not match its inputs"
+                )
+            for input_rank, (h, s) in enumerate(
+                zip(hits, scores, strict=True), start=1
+            ):
+                h.rerank_input_rank = input_rank
+                h.rerank_raw_score = float(s)
+                adjusted = h.rerank_raw_score
+                chain: list[dict[str, float | str]] | None = (
+                    [] if retrieval_trace is not None else None
+                )
+                if prefer_compiled:
+                    factor = _type_multiplier(h.type, config)
+                    before = adjusted
+                    adjusted *= factor
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "type",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
+                if prefer_active:
+                    factor = _status_multiplier(h.status, config)
+                    before = adjusted
+                    adjusted *= factor
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "status",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
+                if usage_map and h.usage_boost_applied:
+                    factor = h.usage_boost_applied
+                    before = adjusted
+                    adjusted *= factor
+                    if chain is not None:
+                        chain.append(
+                            {
+                                "name": "usage",
+                                "factor": factor,
+                                "before": before,
+                                "after": adjusted,
+                            }
+                        )
+                h.rerank_score = adjusted
+                if chain is not None:
+                    h.rerank_multiplier_chain = chain
+            hits.sort(
+                key=lambda h: -(
+                    h.rerank_score
+                    if h.rerank_score is not None
+                    else float("-inf")
+                )
+            )
+            rerank_outcome = {"decision": "ran", "reason": "ran"}
         except ImportError as e:
             log.warning("rerank requested but reranker unavailable: %s", e)
             if timings is not None:
                 timings.error("rerank", e)
+            rerank_outcome = {
+                "decision": "unavailable",
+                "reason": "dependency_unavailable",
+            }
         except Exception as e:
             log.warning("rerank failed: %s; returning fused order", e)
             if timings is not None:
                 timings.error("rerank", e)
+            rerank_outcome = {"decision": "failed", "reason": "runtime_failure"}
         finally:
             if timings is not None:
                 timings.stages.setdefault("rerank", {})["ms"] = round(
                     (time.perf_counter() - _rerank_t0) * 1000.0, 3
                 )
 
-    return hits[:limit]
+    final_hits = hits[:limit]
+    if retrieval_trace is not None:
+        retrieval_trace.record_page_candidates(
+            bundle,
+            final_hits,
+            reranker_model=embeddings.RERANKER_NAME,
+            rerank_outcome=rerank_outcome,
+        )
+    return final_hits
 
 
 def _find_outside_kb(
@@ -1748,6 +1960,8 @@ def _find_outside_kb(
     limit: int,
     snapshot: FreshnessSnapshot | None = None,
     filter_plan: structured_filters.FilterPlan | None = None,
+    exclude_paths: set[str] | None = None,
+    retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
     `Knowledge Base/`. Powers scope="kb" auto-widening.
@@ -1789,6 +2003,8 @@ def _find_outside_kb(
         else max(limit * 5, 100)
     )
     candidates: list[str] = []
+    score_by_path: dict[str, float] = {}
+    lexical_backend = "keyword_fallback"
     try:
         bm25_hits = (
             bm25.search(
@@ -1811,6 +2027,10 @@ def _find_outside_kb(
         for path, _score in bm25_hits:
             if not path.startswith(kb_prefix()):
                 candidates.append(path)
+                score_by_path[path] = float(_score)
+        from . import lexstore
+
+        lexical_backend = lexstore.cache_token(vault_root)
     except ImportError:
         candidates = _outside_kb_keyword_paths(vault_root, query_norm)
     except Exception as e:  # noqa: BLE001 — widening must never break find
@@ -1820,7 +2040,7 @@ def _find_outside_kb(
     hits: list[Hit] = []
     seen: set[str] = set()
     for rel_path in candidates:
-        if rel_path in seen:
+        if rel_path in seen or (exclude_paths is not None and rel_path in exclude_paths):
             continue
         seen.add(rel_path)
         if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:
@@ -1853,6 +2073,12 @@ def _find_outside_kb(
         ))
         if len(hits) >= limit:
             break
+    if retrieval_trace is not None:
+        retrieval_trace.record_outside_candidates(
+            hits,
+            scores=score_by_path,
+            backend=lexical_backend,
+        )
     return hits
 
 

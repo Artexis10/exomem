@@ -12,7 +12,7 @@ from typing import Any
 
 from . import find_policy, find_results, find_types
 from .find_types import FindTimings, GraphProvenance, ParsedPage
-from .ranking_config import RankingConfig
+from .ranking_config import LANE_ORDER, RankingConfig
 
 log = logging.getLogger(__name__)
 _span = find_types.timing_span
@@ -31,7 +31,9 @@ class CandidateBundle:
     keyword_ranking: list[str]
     clip_ranking: list[str]
     graph_ranking: list[str]
+    temporal_ranking: list[str]
     chunk_text_by_path: dict[str, str]
+    bm25_score_by_path: dict[str, float]
     vector_score_by_path: dict[str, float]
     clip_score_by_path: dict[str, float]
     clip_frame_ts_by_path: dict[str, float | None]
@@ -39,9 +41,21 @@ class CandidateBundle:
     graph_in_degree_by_path: dict[str, int]
     graph_provenance_by_path: dict[str, GraphProvenance]
     usage_map: dict[str, float]
+    lane_rankings: dict[str, list[str]]
+    lane_weights: dict[str, float]
+    lane_statuses: dict[str, dict[str, Any]]
+    rrf_k: int
+    raw_fused_score_by_path: dict[str, float]
+    adjusted_score_by_path: dict[str, float]
+    multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
 
 
-def empty_bundle(*, usage_map: dict[str, float] | None = None) -> CandidateBundle:
+def empty_bundle(
+    *,
+    usage_map: dict[str, float] | None = None,
+    lane_statuses: dict[str, dict[str, Any]] | None = None,
+    rrf_k: int = 60,
+) -> CandidateBundle:
     return CandidateBundle(
         fused=[],
         had_rankings=False,
@@ -50,7 +64,9 @@ def empty_bundle(*, usage_map: dict[str, float] | None = None) -> CandidateBundl
         keyword_ranking=[],
         clip_ranking=[],
         graph_ranking=[],
+        temporal_ranking=[],
         chunk_text_by_path={},
+        bm25_score_by_path={},
         vector_score_by_path={},
         clip_score_by_path={},
         clip_frame_ts_by_path={},
@@ -58,6 +74,13 @@ def empty_bundle(*, usage_map: dict[str, float] | None = None) -> CandidateBundl
         graph_in_degree_by_path={},
         graph_provenance_by_path={},
         usage_map=usage_map or {},
+        lane_rankings={name: [] for name in LANE_ORDER},
+        lane_weights={name: 1.0 for name in LANE_ORDER},
+        lane_statuses=lane_statuses or {},
+        rrf_k=rrf_k,
+        raw_fused_score_by_path={},
+        adjusted_score_by_path={},
+        multiplier_chain_by_path=None,
     )
 
 
@@ -117,6 +140,7 @@ def collect_candidates(
     degraded_out: list[str] | None,
     failed_out: list[str] | None,
     eligible_paths: set[str] | None = None,
+    capture_trace: bool = False,
 ) -> CandidateBundle:
     """Collect vector/BM25/keyword/CLIP/graph/temporal lanes and fuse them."""
     from . import bm25, embeddings, epistemic_graph, fusion, readiness
@@ -137,14 +161,27 @@ def collect_candidates(
             return ranking
         return [path for path in ranking if path in eligible_paths]
     frame_attribution: dict[str, tuple[str, float | None]] = {}
+    lane_statuses: dict[str, dict[str, Any]] = {}
 
     vector_ranking: list[str] = []
     chunk_text_by_path: dict[str, str] = {}
     vector_score_by_path: dict[str, float] = {}
     if os.environ.get("EXOMEM_DISABLE_EMBEDDINGS"):
+        if capture_trace:
+            lane_statuses["vector"] = {
+                "status": "disabled",
+                "reason": "embeddings_disabled",
+                "model": embeddings.MODEL_NAME,
+            }
         if timings is not None:
             timings.skipped("vector")
     elif readiness.should_defer("embeddings"):
+        if capture_trace:
+            lane_statuses["vector"] = {
+                "status": "warming",
+                "reason": "model_warming",
+                "model": embeddings.MODEL_NAME,
+            }
         if timings is not None:
             timings.skipped("vector")
         if degraded_out is not None:
@@ -173,11 +210,35 @@ def collect_candidates(
                 )[:candidate_k]
                 chunk_text_by_path = {p: best_per_file[p][1] for p in vector_ranking}
                 vector_score_by_path = {p: best_per_file[p][0] for p in vector_ranking}
+                if capture_trace:
+                    lane_statuses["vector"] = {
+                        "status": "participated" if vector_ranking else "available_nonmatching",
+                        "backend": type(idx).__name__,
+                        "model": embeddings.MODEL_NAME,
+                        "metric": {
+                            "name": "cosine_similarity",
+                            "direction": "higher",
+                            "range": [-1.0, 1.0],
+                            "rounding": 6,
+                        },
+                    }
         except ImportError as e:
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "unavailable",
+                    "reason": "dependency_unavailable",
+                    "model": embeddings.MODEL_NAME,
+                }
             log.info("vector search unavailable (%s); keyword/BM25-only ranking", e)
             if timings is not None:
                 timings.error("vector", e)
         except Exception as e:
+            if capture_trace:
+                lane_statuses["vector"] = {
+                    "status": "failed",
+                    "reason": "search_failed",
+                    "model": embeddings.MODEL_NAME,
+                }
             log.warning("vector search failed: %s; falling back to BM25-only", e)
             record_degradation("vector")
             if failed_out is not None:
@@ -198,6 +259,12 @@ def collect_candidates(
     clip_score_by_path: dict[str, float] = {}
     clip_frame_ts_by_path: dict[str, float | None] = {}
     if embeddings.clip_enabled() and query.strip() and readiness.should_defer("clip"):
+        if capture_trace:
+            lane_statuses["clip"] = {
+                "status": "warming",
+                "reason": "model_warming",
+                "model": embeddings.CLIP_MODEL_NAME,
+            }
         if timings is not None:
             timings.skipped("clip")
         if degraded_out is not None:
@@ -233,7 +300,25 @@ def collect_candidates(
                         clip_ranking.append(sidecar_rel)
                         clip_score_by_path[sidecar_rel] = score
                         clip_frame_ts_by_path[sidecar_rel] = frame_ts
+                if capture_trace:
+                    lane_statuses["clip"] = {
+                        "status": "participated" if clip_ranking else "available_nonmatching",
+                        "backend": type(clip_idx).__name__,
+                        "model": embeddings.CLIP_MODEL_NAME,
+                        "metric": {
+                            "name": "cosine_similarity",
+                            "direction": "higher",
+                            "range": [-1.0, 1.0],
+                            "rounding": 6,
+                        },
+                    }
         except embeddings.ClipUnavailable as e:
+            if capture_trace:
+                lane_statuses["clip"] = {
+                    "status": "unavailable",
+                    "reason": "dependency_unavailable",
+                    "model": embeddings.CLIP_MODEL_NAME,
+                }
             log.warning("CLIP search unavailable (%s); skipping image search", e)
             record_degradation("clip")
             if failed_out is not None:
@@ -241,6 +326,12 @@ def collect_candidates(
             if timings is not None:
                 timings.error("clip", e)
         except Exception as e:  # noqa: BLE001 - image search is best-effort
+            if capture_trace:
+                lane_statuses["clip"] = {
+                    "status": "failed",
+                    "reason": "search_failed",
+                    "model": embeddings.CLIP_MODEL_NAME,
+                }
             log.warning("CLIP search failed: %s; skipping image search", e)
             record_degradation("clip")
             if failed_out is not None:
@@ -249,6 +340,12 @@ def collect_candidates(
                 timings.error("clip", e)
     elif timings is not None:
         timings.skipped("clip")
+    if capture_trace and "clip" not in lane_statuses:
+        lane_statuses["clip"] = {
+            "status": "disabled",
+            "reason": "clip_disabled",
+            "model": embeddings.CLIP_MODEL_NAME,
+        }
     clip_ranking = collapse_frame_children(
         clip_ranking,
         vault_root,
@@ -260,8 +357,18 @@ def collect_candidates(
     clip_ranking = _eligible(clip_ranking)
 
     bm25_ranking: list[str] = []
+    bm25_score_by_path: dict[str, float] = {}
     keyword_ranking: list[str] = []
     if mode == "vector":
+        if capture_trace:
+            lane_statuses["bm25"] = {
+                "status": "non_applicable",
+                "reason": "requested_mode_vector",
+            }
+            lane_statuses["keyword"] = {
+                "status": "non_applicable",
+                "reason": "requested_mode_vector",
+            }
         if timings is not None:
             timings.skipped("bm25")
             timings.skipped("keyword")
@@ -288,16 +395,41 @@ def collect_candidates(
                     )
                 )
                 bm25_ranking = [p for p, _ in bm25_hits]
+                bm25_score_by_path = {p: float(score) for p, score in bm25_hits}
+                from . import lexstore
+
+                if capture_trace:
+                    lane_statuses["bm25"] = {
+                        "status": "participated" if bm25_ranking else "available_nonmatching",
+                        "backend": lexstore.cache_token(vault_root),
+                        "metric": {
+                            "name": "raw_bm25_score",
+                            "direction": "higher",
+                            "range": "backend_dependent",
+                            "rounding": 6,
+                            "caveat": "diagnostic; not comparable across backends or corpora",
+                        },
+                    }
         except ImportError as e:
+            if capture_trace:
+                lane_statuses["bm25"] = {
+                    "status": "unavailable",
+                    "reason": "dependency_unavailable",
+                }
             log.warning("BM25 unavailable (%s); using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
         except Exception as e:
+            if capture_trace:
+                lane_statuses["bm25"] = {
+                    "status": "failed",
+                    "reason": "search_failed",
+                }
             log.warning("BM25 search failed: %s; using vector-only", e)
             if timings is not None:
                 timings.error("bm25", e)
         bm25_ranking = collapse_frame_children(
-            bm25_ranking, vault_root, page_of, frame_attribution
+            bm25_ranking, vault_root, page_of, frame_attribution, bm25_score_by_path
         )
         bm25_ranking = _eligible(bm25_ranking)
 
@@ -309,6 +441,12 @@ def collect_candidates(
             keyword_ranking, vault_root, page_of, frame_attribution
         )
         keyword_ranking = _eligible(keyword_ranking)
+        if capture_trace:
+            lane_statuses["keyword"] = {
+                "status": "participated" if keyword_ranking else "available_nonmatching",
+                "backend": "case_insensitive_substring",
+                "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+            }
         rankings = [
             r for r in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking) if r
         ]
@@ -318,6 +456,12 @@ def collect_candidates(
     graph_provenance_by_path: dict[str, GraphProvenance] = {}
     if not graph and timings is not None:
         timings.skipped("graph")
+    if not graph:
+        if capture_trace:
+            lane_statuses["graph"] = {
+                "status": "non_applicable",
+                "reason": "request_disabled",
+            }
     graph_t0 = time.perf_counter()
     if graph:
         primary_set: set[str] = set(vector_ranking) | set(bm25_ranking)
@@ -415,6 +559,12 @@ def collect_candidates(
                         legacy_targets.append(target_rel)
 
             graph_ranking = typed_targets + legacy_targets
+            if capture_trace:
+                lane_statuses["graph"] = {
+                    "status": "participated" if graph_ranking else "available_nonmatching",
+                    "backend": "epistemic_graph",
+                    "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+                }
             if graph_ranking:
                 rankings.append(graph_ranking)
             if timings is not None:
@@ -455,6 +605,12 @@ def collect_candidates(
                     graph_ranking.append(target_rel)
             if graph_ranking:
                 rankings.append(graph_ranking)
+            if capture_trace:
+                lane_statuses["graph"] = {
+                    "status": "participated" if graph_ranking else "available_nonmatching",
+                    "backend": "wikilink_fallback",
+                    "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+                }
             if timings is not None:
                 graph_t_end = time.perf_counter()
                 timings.stages.setdefault("graph", {})["ms"] = round(
@@ -468,7 +624,11 @@ def collect_candidates(
                     timings.stages[name] = {"ms": round((t1 - t0) * 1000.0, 3)}
 
     if not rankings:
-        return empty_bundle(usage_map=usage_map)
+        return empty_bundle(
+            usage_map=usage_map,
+            lane_statuses=lane_statuses,
+            rrf_k=config.rrf_k,
+        )
 
     temporal_ranking: list[str] = []
     if temporal and find_policy.is_temporal_query(query):
@@ -477,8 +637,19 @@ def collect_candidates(
             for lane in (vector_ranking, bm25_ranking, keyword_ranking, clip_ranking):
                 pool.extend(lane)
             temporal_ranking = find_policy.recency_ranking(pool, page_of, candidate_k)
+        if capture_trace:
+            lane_statuses["temporal"] = {
+                "status": "participated" if temporal_ranking else "available_nonmatching",
+                "backend": "updated_frontmatter",
+                "metric": {"name": "rank", "direction": "lower", "rounding": "none"},
+            }
     elif timings is not None:
         timings.skipped("temporal")
+    if capture_trace and "temporal" not in lane_statuses:
+        lane_statuses["temporal"] = {
+            "status": "non_applicable",
+            "reason": "query_not_temporal" if temporal else "request_disabled",
+        }
 
     with _span(timings, "fusion"):
         intent_label = intent or find_policy.classify_intent(query)
@@ -500,6 +671,10 @@ def collect_candidates(
         fused = fusion.reciprocal_rank_fusion_weighted(
             active_lists, active_weights, k=config.rrf_k
         )
+        raw_fused_score_by_path = dict(fused) if capture_trace else {}
+        multiplier_chain_by_path: (
+            dict[str, list[dict[str, float | str]]] | None
+        ) = ({} if capture_trace else None)
         fused = find_policy.apply_post_rrf_multipliers(
             fused,
             query,
@@ -509,7 +684,16 @@ def collect_candidates(
             temporal=temporal,
             page_of=page_of,
             usage_map=usage_map,
+            evidence_out=multiplier_chain_by_path,
         )
+        adjusted_score_by_path = dict(fused) if capture_trace else {}
+
+    trace_lane_rankings = (
+        dict(zip(LANE_ORDER, lane_rankings, strict=True)) if capture_trace else {}
+    )
+    lane_weights = (
+        dict(zip(LANE_ORDER, weights, strict=True)) if capture_trace else {}
+    )
 
     return CandidateBundle(
         fused=fused,
@@ -519,7 +703,9 @@ def collect_candidates(
         keyword_ranking=keyword_ranking,
         clip_ranking=clip_ranking,
         graph_ranking=graph_ranking,
+        temporal_ranking=temporal_ranking,
         chunk_text_by_path=chunk_text_by_path,
+        bm25_score_by_path=bm25_score_by_path if capture_trace else {},
         vector_score_by_path=vector_score_by_path,
         clip_score_by_path=clip_score_by_path,
         clip_frame_ts_by_path=clip_frame_ts_by_path,
@@ -527,4 +713,11 @@ def collect_candidates(
         graph_in_degree_by_path=graph_in_degree_by_path,
         graph_provenance_by_path=graph_provenance_by_path,
         usage_map=usage_map,
+        lane_rankings=trace_lane_rankings,
+        lane_weights=lane_weights,
+        lane_statuses=lane_statuses,
+        rrf_k=config.rrf_k,
+        raw_fused_score_by_path=raw_fused_score_by_path,
+        adjusted_score_by_path=adjusted_score_by_path,
+        multiplier_chain_by_path=multiplier_chain_by_path,
     )

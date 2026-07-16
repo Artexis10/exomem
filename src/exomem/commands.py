@@ -68,13 +68,14 @@ from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, upload_tokens, vault
+from . import query_log, retrieval_models, semantic_census, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
+from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
 from . import semantic_language_registry as semantic_language_registry_module
@@ -134,31 +135,9 @@ def _video_frames_module():
 
 
 
-class FindHit(TypedDict):
-    path: str
-    type: str
-    scope: str
-    title: str
-    updated: str
-    excerpt: NotRequired[str]
-    outside_kb: NotRequired[bool]
-    status: NotRequired[str]
-    superseded_by: NotRequired[str]
-    signals: NotRequired[dict[str, Any]]
-    media_type: NotRequired[str]
-    media_file: NotRequired[str]
-    clip_match_at: NotRequired[str]
-    scene_frame: NotRequired[str]
-    scene_match_at: NotRequired[str]
-    transcript_match_at: NotRequired[str]
-
-
-class FindEnvelope(TypedDict):
-    hits: list[FindHit]
-    pack: NotRequired[dict[str, Any]]
-    timings: NotRequired[dict[str, Any]]
-    warming: NotRequired[dict[str, Any]]
-    degraded: NotRequired[list[str]]
+FindHit = retrieval_models.PageHit
+RetrievalHit = retrieval_models.RetrievalHit
+FindEnvelope = retrieval_models.FindEnvelope
 
 
 class SearchResult(TypedDict):
@@ -242,7 +221,7 @@ def op_bootstrap(
     requested_workflow = workflow.strip() if workflow and workflow.strip() else "general"
     selected_packs = knowledge_packs_module.selected_pack_state(vault_root)
     payload: dict = {
-        "contract_version": "2026-07-16.1",
+        "contract_version": "2026-07-16.2",
         "profile": profile,
         "server": {
             "name": "exomem",
@@ -352,6 +331,25 @@ def op_bootstrap(
                 "mutation_rule": "use observe_memory add/update/remove/validate instead of whole-page string surgery for one unit",
                 "drift_guards": "update/remove require the current parent content hash and unit fingerprint",
             },
+            "reviewed_creation": {
+                "validate_only": (
+                    "call the intended creation writer with validate_only=true and retain "
+                    "its draft_id, draft_hash, candidate, and semantic feedback"
+                ),
+                "commit": (
+                    "after review, call the same writer with the unchanged draft_id and "
+                    "draft_hash; changed candidates must be validated again"
+                ),
+                "reviewed_none": (
+                    "when a governed qualifying relation has no accepted edge, use the "
+                    "returned relation review hash and an explicit reason; never fabricate "
+                    "a none decision or infer review from missing relations"
+                ),
+                "adoption_handoff": (
+                    "adopt_vault(mode='compile-selected') returns a proposal only; review "
+                    "it, then call note() so normal semantic precommit still applies"
+                ),
+            },
         },
         "tool_defaults": {
             "normal_lookup": {
@@ -423,6 +421,29 @@ def op_bootstrap(
             "prefer_compiled_default": True,
             "compiled_types": ["research-note", "insight", "failure", "pattern", "entity"],
             "raw_types": ["source", "evidence"],
+            "semantic_recall": {
+                "result_levels": ["page", "unit", "mixed"],
+                "structured_filters": (
+                    "use filters for typed page.* or unit.* predicates; categories and "
+                    "kinds are shortcuts compiled into the same bounded filter plan"
+                ),
+                "filter_only": (
+                    "an empty query with filters is a filter-only lookup ordered by the "
+                    "documented filtered-most-recent tuple, not a fabricated text match"
+                ),
+                "explanation": (
+                    "set explain=true only when ranking interpretation is useful; it adds "
+                    "a bounded retrieval profile and per-hit evidence without changing recall"
+                ),
+                "score_interpretation": {
+                    "bm25": "backend relevance value; interpret using the returned direction and range",
+                    "cosine": "vector similarity measurement, not probability",
+                    "rrf": "rank-fusion contribution computed only for participating fused lanes",
+                    "reranker": "separate raw and adjusted reranker values when reranking runs",
+                    "final_rank": "the final deterministic order after boosts, reranking, and tie-breaks",
+                    "rule": "none of these metrics is confidence; compare only within its labelled profile",
+                },
+            },
             "retry_examples": [
                 "try synonyms and singular/plural forms",
                 "try adjacent domain terms",
@@ -515,7 +536,8 @@ def op_find(
     graph_enrich: bool = False,
     detail: str = "full",
     include_timings: bool = False,
-) -> list[FindHit] | FindEnvelope:
+    explain: bool = False,
+) -> list[RetrievalHit] | FindEnvelope:
     """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
 
     Args:
@@ -640,6 +662,8 @@ def op_find(
             lanes (skipped/failed optional lanes are marked, never fatal).
             Diagnostics only — timings never include note content. Omitted
             → the response shape is unchanged.
+        explain: Add a bounded retrieval profile and per-hit ranking evidence.
+            False by default; omitted/false preserves the existing response.
 
     Returns:
         With pack off (default): a list of {path, type, scope, title, updated,
@@ -679,6 +703,32 @@ def op_find(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    compute_profile: dict[str, str | bool] = {}
+    if explain:
+        from . import mode as mode_module
+
+        policy = mode_module.resolved()
+        compute_profile = {
+            key: policy[key]
+            for key in (
+                "mode",
+                "preload_models",
+                "retain_cpu_caches",
+                "defer_expensive_indexes",
+                "release_when_idle",
+            )
+        }
+    retrieval_trace = (
+        retrieval_explain_module.RetrievalTrace(
+            requested_mode=mode,
+            requested_result_level=result_level,
+            rerank_requested=rerank,
+            auto_rerank=auto_rerank,
+            compute_profile=compute_profile,
+        )
+        if explain
+        else None
+    )
     timings = find_module.FindTimings() if include_timings else None
     if timings is not None:
         from . import mode as mode_module
@@ -729,6 +779,7 @@ def op_find(
         timings=timings,
         degraded_out=degraded,
         failed_out=failed,
+        retrieval_trace=retrieval_trace,
     )
     pack_obj: dict | None = None
     if pack:
@@ -749,6 +800,8 @@ def op_find(
             ref = refs.get(str(hit.get("path") or ""))
             if ref:
                 hit["ref"] = ref
+        if retrieval_trace is not None:
+            retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -777,7 +830,12 @@ def op_find(
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
-    if timings_dict is None and warming is None and degraded_marker is None:
+    if (
+        timings_dict is None
+        and warming is None
+        and degraded_marker is None
+        and retrieval_trace is None
+    ):
         if not pack:
             return hit_dicts
         return {"hits": hit_dicts, "pack": pack_obj}
@@ -790,6 +848,8 @@ def op_find(
         out["warming"] = warming
     if degraded_marker is not None:
         out["degraded"] = degraded_marker
+    if retrieval_trace is not None:
+        out["retrieval_profile"] = retrieval_trace.profile()
     return out
 
 
@@ -1073,6 +1133,9 @@ def op_graph_context(
     vault_root: Path,
     path: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     depth: int = 1,
     relation_types: list[str] | None = None,
     node_types: list[str] | None = None,
@@ -1094,6 +1157,9 @@ def op_graph_context(
             is supplied.
         query: Text seed for matching graph node titles/content. Optional when
             `path` is supplied.
+        unit_ref: Exact current semantic-unit reference to use as the graph seed.
+        categories: Optional registry-resolved semantic-unit category allowlist.
+        kinds: Optional governed semantic-unit kind allowlist.
         depth: Traversal depth from seed nodes. Default 1.
         relation_types: Optional allowlist of relation types, e.g.
             `derived_from`, `evidenced_by`, `supports`, `contradicts`,
@@ -1115,6 +1181,9 @@ def op_graph_context(
         vault_root,
         path=path,
         query=query,
+        unit_ref=unit_ref,
+        categories=categories,
+        kinds=kinds,
         depth=depth,
         relation_types=relation_types,
         node_types=node_types,
@@ -2535,6 +2604,9 @@ def op_adopt(
     pack_limit: int = 6,
     manifest_path: str | None = None,
     selected_paths: list[str] | None = None,
+    semantic_max_files: int = semantic_census.DEFAULT_MAX_FILES,
+    semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
+    semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
 ) -> dict:
     """Adopt / import an existing vault safely: scan first, preserve originals.
 
@@ -2562,6 +2634,9 @@ def op_adopt(
         manifest_path: Optional markdown destination under Knowledge Base/ for
             save-manifest. A default under _Adoption/ is used when omitted.
         selected_paths: Explicit vault-relative legacy files for copy-as-sources or compile-selected.
+        semantic_max_files: Maximum Markdown files read by the scan-only semantic census.
+        semantic_max_bytes: Maximum total Markdown bytes read by the scan-only semantic census.
+        semantic_example_limit: Maximum examples per semantic census grouping.
     """
     try:
         return adopt_module.adopt(
@@ -2574,6 +2649,9 @@ def op_adopt(
             pack_limit=pack_limit,
             manifest_path=manifest_path,
             selected_paths=selected_paths,
+            semantic_max_files=semantic_max_files,
+            semantic_max_bytes=semantic_max_bytes,
+            semantic_example_limit=semantic_example_limit,
         )
     except adopt_module.AdoptError as e:
         raise ValueError(f"adopt: {e.code}: {e.reason}") from e
@@ -2981,7 +3059,8 @@ def op_ask_memory(
     prefer_used: bool = False,
     graph_enrich: bool = False,
     include_timings: bool = False,
-) -> list[dict] | dict:
+    explain: bool = False,
+) -> list[RetrievalHit] | FindEnvelope:
     """Recall durable knowledge from Exomem with product defaults.
 
     This is the normal first read: search compiled knowledge, sources,
@@ -3015,6 +3094,7 @@ def op_ask_memory(
         prefer_used: Apply usage boost when explicitly requested.
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
+        explain: Add bounded retrieval-plan and per-hit ranking evidence.
     """
     result = op_find(
         vault_root,
@@ -3041,6 +3121,7 @@ def op_ask_memory(
         graph_enrich=graph_enrich,
         detail=detail,
         include_timings=include_timings,
+        explain=explain,
     )
     return result
 
@@ -4045,6 +4126,9 @@ def op_connect_memory(
     path: str | None = None,
     target: str | None = None,
     query: str | None = None,
+    unit_ref: str | None = None,
+    categories: list[str] | None = None,
+    kinds: list[str] | None = None,
     draft_title: str | None = None,
     draft_body: str | None = None,
     limit: int = 8,
@@ -4092,6 +4176,9 @@ def op_connect_memory(
         path: Existing page path for link, graph, or relation context.
         target: Target path for inbound-links; defaults to path.
         query: Query seed for graph-context.
+        unit_ref: Exact current semantic-unit seed for graph-context.
+        categories: Registry-resolved semantic-unit category allowlist.
+        kinds: Governed semantic-unit kind allowlist.
         draft_title: Draft title for suggestion modes.
         draft_body: Draft body for suggestion modes.
         limit: Candidate cap for suggestion modes.
@@ -4189,6 +4276,9 @@ def op_connect_memory(
             vault_root,
             path=path,
             query=query,
+            unit_ref=unit_ref,
+            categories=categories,
+            kinds=kinds,
             depth=depth,
             relation_types=relation_types,
             node_types=node_types,
@@ -4248,6 +4338,9 @@ def op_adopt_vault(
     pack_limit: int = 6,
     manifest_path: str | None = None,
     selected_paths: list[str] | None = None,
+    semantic_max_files: int = semantic_census.DEFAULT_MAX_FILES,
+    semantic_max_bytes: int = semantic_census.DEFAULT_MAX_BYTES,
+    semantic_example_limit: int = semantic_census.DEFAULT_EXAMPLE_LIMIT,
 ) -> dict:
     """Adopt an existing vault safely without replacing originals.
 
@@ -4263,6 +4356,9 @@ def op_adopt_vault(
         pack_limit: Max suggested knowledge packs.
         manifest_path: Optional manifest destination.
         selected_paths: Explicit legacy files for copy/compile modes.
+        semantic_max_files: Maximum Markdown files read by the semantic census.
+        semantic_max_bytes: Maximum total Markdown bytes read by the semantic census.
+        semantic_example_limit: Maximum bounded semantic examples per grouping.
     """
     return op_adopt(
         vault_root,
@@ -4274,6 +4370,9 @@ def op_adopt_vault(
         pack_limit=pack_limit,
         manifest_path=manifest_path,
         selected_paths=selected_paths,
+        semantic_max_files=semantic_max_files,
+        semantic_max_bytes=semantic_max_bytes,
+        semantic_example_limit=semantic_example_limit,
     )
 
 

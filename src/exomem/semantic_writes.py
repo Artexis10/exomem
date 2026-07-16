@@ -433,6 +433,9 @@ def evaluate_posthoc_batch(
     *,
     paths: list[Path | str] | tuple[Path | str, ...] | None = None,
     operation: Literal["watcher", "audit", "reconcile"],
+    corpus: semantic_contract.SemanticCorpusContext | None = None,
+    language_registry: semantic_language_registry.SemanticLanguageRegistry | None = None,
+    saved_contracts: tuple[memory_schema.LoadedMemoryContract, ...] | None = None,
 ) -> PosthocBatch:
     """Evaluate current governed Markdown once without writing or repairing it."""
     if operation not in {"watcher", "audit", "reconcile"}:
@@ -441,14 +444,22 @@ def evaluate_posthoc_batch(
             "posthoc semantic operation is unsupported",
         )
     root = Path(vault_root)
-    registry = relation_registry.load_registry(root)
-    language = semantic_language_registry.load_registry(root)
-    saved_contracts = memory_schema.load_saved_contracts(root)
-    corpus = semantic_contract.build_corpus_context(
-        root,
-        registry=registry,
-        language_registry=language,
-    )
+    if corpus is None:
+        registry = relation_registry.load_registry(root)
+        language = semantic_language_registry.load_registry(root)
+        resolved_saved_contracts = memory_schema.load_saved_contracts(root)
+        corpus = semantic_contract.build_corpus_context(
+            root,
+            registry=registry,
+            language_registry=language,
+        )
+    else:
+        language = language_registry or semantic_language_registry.load_registry(root)
+        resolved_saved_contracts = (
+            saved_contracts
+            if saved_contracts is not None
+            else memory_schema.load_saved_contracts(root)
+        )
     manifest = activation_manifest.load_manifest(root)
     activation_status: Literal["current", "prospective"] = (
         "current" if manifest is not None else "prospective"
@@ -476,7 +487,7 @@ def evaluate_posthoc_batch(
         contracts = contracts_by_scope.get(scope)
         if contracts is None:
             contracts = memory_schema.resolve_contracts(
-                saved_contracts,
+                resolved_saved_contracts,
                 projects=state.projects,
                 page_type=state.page_type,
                 language_registry=language,

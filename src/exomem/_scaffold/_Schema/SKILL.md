@@ -500,6 +500,20 @@ instead of brittle whole-page string surgery. Update/remove must echo the parent
 relations: select rich form or author one reviewed note-level relation under
 `## Relations`.
 
+Recall semantic language through `result_level="page"|"unit"|"mixed"`.
+`categories` and `kinds` are convenience filters; use bounded `filters` for
+typed `page.*`, RFC-6901 frontmatter, and `unit.*` predicates. An empty query
+with filters is a filter-only lookup ordered by filtered recency, not a text
+match. Use `explain=true` only when ranking interpretation matters. Its bounded
+profile distinguishes raw BM25 values, cosine similarity, RRF contributions,
+reranker values, and final rank; none is confidence, and unavailable or
+nonparticipating lanes must never be invented as zero-valued hit evidence.
+
+Unit recall returns an exact `unit_ref` for `read_memory`. For authored graph
+context, pass that reference or category/kind filters to
+`connect_memory(operation="graph-context")`. Compact categories do not imply
+typed edges: traversal follows authored relations only.
+
 **Tabular data is card-based.** Raw CSV/JSON/TSV rows are never embedded and raw
 data files aren't `find`-searchable. To make a dataset findable, write a
 **dataset card** — a small `type: dataset` page (frontmatter `data_file:` +
@@ -514,7 +528,7 @@ drift, call `audit_fix(rebuild_embeddings=true)`.
 
 ### Assessing or adopting a vault you didn't build
 
-**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt_vault(mode="scan-only")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance.
+**Make this your first move in any unfamiliar vault.** For import/adoption questions, run **adopt_vault(mode="scan-only")** first: it wraps the bounded scan, states the read-only contract, suggests likely knowledge packs, reports a bounded semantic census, and lists safe next actions. It never rewrites originals in scan-only mode; explicit write modes stay under `Knowledge Base/` and either save the manifest or copy selected legacy text files as Sources with original path/hash provenance. `compile-selected` returns a proposal, not a compiled note: review it, then call `note()` so the normal semantic precommit contract still applies.
 
 For structural questions —
 "what does this vault look like," "how is this vault organized," "is there junk in
