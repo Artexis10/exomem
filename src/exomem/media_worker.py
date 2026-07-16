@@ -360,7 +360,7 @@ class MediaWorker:
                 current_content = ""
             from . import media_processing
 
-            current_sidecar = hashlib.sha256(current_content.encode("utf-8")).hexdigest()
+            current_sidecar = _content_digest(job.sidecar_path)
             current_binary = _binary_identity(job.binary_path)
             if current_sidecar != expected_sidecar or current_binary != expected_binary:
                 log.warning(

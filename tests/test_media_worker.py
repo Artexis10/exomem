@@ -360,6 +360,33 @@ def test_transient_stable_commit_precondition_is_retried_without_repeating_asr(
     assert "[0:00] recovered transcript" in sidecar.read_text(encoding="utf-8")
 
 
+def test_crlf_pending_sidecar_uses_raw_byte_identity_at_transcript_commit(
+    vault, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    result = _preserve_media_stub(vault, filename="windows-crlf.m4a")
+    binary = vault / result.path
+    sidecar = vault / result.sidecar_path
+    sidecar.write_bytes(sidecar.read_bytes().replace(b"\n", b"\r\n"))
+    worker = media_worker.MediaWorker(vault, execution_mode="inline")
+    job = media_worker._Job(binary_path=binary, sidecar_path=sidecar, media_type="audio")
+    monkeypatch.setattr(
+        extract,
+        "extract_text",
+        lambda *_args, **_kwargs: extract.ExtractResult(
+            text="[0:00] Windows transcript committed.",
+            media_type="audio",
+            engine="faster-whisper:test+timed",
+        ),
+    )
+
+    outcome = worker._process(job)
+
+    assert outcome.state == "complete"
+    content = sidecar.read_text(encoding="utf-8")
+    assert "processing_state: completed" in content
+    assert "[0:00] Windows transcript committed." in content
+
+
 def test_pending_state_cas_preserves_concurrent_completed_transcript(
     vault, monkeypatch: pytest.MonkeyPatch
 ) -> None:
