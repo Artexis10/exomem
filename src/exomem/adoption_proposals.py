@@ -1048,6 +1048,33 @@ def _bullet(relation_type: str, to_path: str) -> str:
     return f"- {relation_type} [[{destination}]]"
 
 
+def _reviewed_creation(op: Any, root: Path, base_kwargs: dict, why: str) -> dict:
+    """Two-phase governed creation honoring the semantic write contract.
+
+    Validate first; when the contract requires an explicit relation review
+    (an agent-compiled page rarely carries a typed relation yet), commit with
+    the approver's reviewed-none disposition bound to the validated draft —
+    the approval rationale IS the review reason, and the relation-debt queue
+    resurfaces the page later. Non-review blockers propagate from the create.
+    """
+    validation = op(root, validate_only=True, **base_kwargs)
+    review_kwargs: dict = {}
+    if not validation.get("committable_without_review"):
+        review_kwargs = {
+            "relation_disposition": "reviewed_none",
+            "relation_review_hash": validation.get("draft_hash"),
+            "relation_review_reason": why,
+        }
+    return op(
+        root,
+        draft_id=validation.get("draft_id"),
+        draft_hash=validation.get("draft_hash"),
+        draft_token=validation.get("draft_token"),
+        **review_kwargs,
+        **base_kwargs,
+    )
+
+
 def _route_apply(
     root: Path, kind: str, payload: dict, *, why: str, expected_hash: str | None
 ) -> dict:
@@ -1056,15 +1083,19 @@ def _route_apply(
     from . import edit as edit_module
 
     if kind == "compilation":
-        result = commands_module.op_remember(
+        result = _reviewed_creation(
+            commands_module.op_remember,
             root,
-            content=payload.get("content") or "",
-            title=payload.get("title") or "",
-            note_type=payload.get("note_type") or "insight",
-            sources=[_clean(s) for s in (payload.get("sources") or [])],
-            tags=payload.get("tags"),
-            project=payload.get("project"),
-            suggestions=False,
+            {
+                "content": payload.get("content") or "",
+                "title": payload.get("title") or "",
+                "note_type": payload.get("note_type") or "insight",
+                "sources": [_clean(s) for s in (payload.get("sources") or [])],
+                "tags": payload.get("tags"),
+                "project": payload.get("project"),
+                "suggestions": False,
+            },
+            why,
         )
         return {"result_path": result.get("path"), "result_ref": result.get("ref"), "raw": result}
 
@@ -1103,16 +1134,20 @@ def _route_apply(
         )
 
     if kind == "supersession":
-        result = commands_module.op_replace_memory(
+        result = _reviewed_creation(
+            commands_module.op_replace_memory,
             root,
-            old_path=_clean(payload.get("old_path")),
-            content=payload.get("content") or "",
-            title=payload.get("title") or "",
-            note_type=payload.get("note_type") or "insight",
-            reason=why,
-            sources=payload.get("sources"),
-            tags=payload.get("tags"),
-            project=payload.get("project"),
+            {
+                "old_path": _clean(payload.get("old_path")),
+                "content": payload.get("content") or "",
+                "title": payload.get("title") or "",
+                "note_type": payload.get("note_type") or "insight",
+                "reason": why,
+                "sources": payload.get("sources"),
+                "tags": payload.get("tags"),
+                "project": payload.get("project"),
+            },
+            why,
         )
         return {
             "result_path": result.get("new_path") or result.get("path"),
@@ -1131,16 +1166,20 @@ def _route_apply(
                 why=why,
                 expected_hash=expected_hash,
             )
-        result = commands_module.op_replace_memory(
+        result = _reviewed_creation(
+            commands_module.op_replace_memory,
             root,
-            old_path=_clean(payload.get("subject_path")),
-            content=payload.get("content") or "",
-            title=payload.get("title") or "",
-            note_type=payload.get("note_type") or "insight",
-            reason=why,
-            sources=payload.get("sources"),
-            tags=payload.get("tags"),
-            project=payload.get("project"),
+            {
+                "old_path": _clean(payload.get("subject_path")),
+                "content": payload.get("content") or "",
+                "title": payload.get("title") or "",
+                "note_type": payload.get("note_type") or "insight",
+                "reason": why,
+                "sources": payload.get("sources"),
+                "tags": payload.get("tags"),
+                "project": payload.get("project"),
+            },
+            why,
         )
         return {
             "result_path": result.get("new_path") or result.get("path"),
