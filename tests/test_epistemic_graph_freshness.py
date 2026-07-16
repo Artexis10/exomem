@@ -232,6 +232,109 @@ def test_full_rebuild_pass_failure_marks_partial_graph_unavailable(
     assert index.available() is False
 
 
+def test_full_rebuild_keeps_schema_marker_absent_until_stable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_index_path = index._index_path
+    indexed = 0
+
+    def index_path(*args, **kwargs):
+        nonlocal indexed
+        assert index.available() is False
+        indexed += 1
+        return real_index_path(*args, **kwargs)
+
+    monkeypatch.setattr(index, "_index_path", index_path)
+
+    index.rebuild_all()
+
+    assert indexed == 2
+    assert index.available() is True
+
+
+def test_refresh_admitted_before_failed_rebuild_cannot_restore_availability(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_snapshot = find_module.writer_resolver_snapshot
+    real_index_path = index._index_path
+    rebuild_active = False
+    overlap_triggered = False
+
+    def index_path(*args, **kwargs):
+        if rebuild_active:
+            raise RuntimeError("overlapping rebuild failed")
+        return real_index_path(*args, **kwargs)
+
+    def acquire(root: Path, **kwargs):
+        nonlocal rebuild_active, overlap_triggered
+        snapshot = real_snapshot(root, **kwargs)
+        if "freshness_key" not in kwargs and not overlap_triggered:
+            overlap_triggered = True
+            rebuild_active = True
+            try:
+                with pytest.raises(RuntimeError, match="overlapping rebuild failed"):
+                    index.rebuild_all()
+            finally:
+                rebuild_active = False
+            assert index.available() is False
+        return snapshot
+
+    monkeypatch.setattr(index, "_index_path", index_path)
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+
+    report = index.refresh_paths([source])
+
+    assert overlap_triggered is True
+    assert report["indexed_files"] == 1
+    assert index.available() is False
+
+
+def test_refresh_missing_sidecar_routes_to_full_rebuild(tmp_path: Path) -> None:
+    vault = tmp_path / "vault"
+    source, _target = _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+
+    report = index.refresh_paths([source])
+
+    assert report["indexed_files"] == 2
+    assert {node["path"] for node in index.nodes()} == {A, B}
+    assert index.available() is True
+
+
+def test_full_rebuild_first_post_pass_freshness_failure_marks_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    index.rebuild_all()
+    real_freshness = epistemic_graph._disk_vault_freshness
+    freshness_checks = 0
+
+    def freshness(root: Path):
+        nonlocal freshness_checks
+        freshness_checks += 1
+        if freshness_checks == 2:
+            raise RuntimeError("post-pass freshness failed")
+        return real_freshness(root)
+
+    monkeypatch.setattr(epistemic_graph, "_disk_vault_freshness", freshness)
+
+    with pytest.raises(RuntimeError, match="post-pass freshness failed"):
+        index.rebuild_all()
+
+    assert freshness_checks == 2
+    assert index.available() is False
+
+
 def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

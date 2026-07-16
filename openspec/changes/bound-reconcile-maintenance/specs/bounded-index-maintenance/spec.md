@@ -29,7 +29,9 @@ key rather than potentially stale event-registry state. If freshness changes
 during the first pass, it SHALL retry once with a new disk key and detached
 resolver. It MUST perform at most two passes. If freshness changes during the
 second pass, it SHALL mark the graph unavailable/non-current and raise instead
-of exposing the unstable result as trusted.
+of exposing the unstable result as trusted. The schema-version marker MUST
+remain absent throughout every pass and retry and MUST be published only after
+the final direct disk-truth post-check succeeds.
 
 #### Scenario: Target appears after snapshot acquisition
 
@@ -50,6 +52,33 @@ of exposing the unstable result as trusted.
 - **WHEN** disk freshness is unchanged around the first graph pass
 - **THEN** the rebuild performs one resolver acquisition and one graph pass
 - **AND** resolver or freshness work does not scale per indexed page
+
+#### Scenario: Stable completion is the only availability publisher
+
+- **WHEN** a full rebuild is indexing pages or preparing a bounded retry
+- **THEN** the graph schema-version marker remains absent
+- **AND** only a successful final disk-freshness post-check publishes it
+
+### Requirement: Incremental refresh does not own graph availability
+
+The system SHALL allow incremental refresh to update graph rows and
+registry/profile metadata but `_index_path` MUST NOT insert or restore the
+schema-version marker. `refresh_paths` on a missing or unavailable sidecar MUST
+route to a full rebuild so a partial path set is never advertised as a complete
+current graph.
+
+#### Scenario: Admitted refresh overlaps a failing rebuild
+
+- **WHEN** a refresh passes its initial availability decision
+- **AND** an overlapping full rebuild removes the marker and fails partially
+- **THEN** the admitted refresh may update its owned rows
+- **BUT** it does not restore current graph availability
+
+#### Scenario: Refresh starts without a current sidecar
+
+- **WHEN** `refresh_paths` starts with a missing or unavailable graph sidecar
+- **THEN** it routes to a full rebuild
+- **AND** availability is published only after the complete rebuild stabilizes
 
 ### Requirement: Bounded graph maintenance preserves correctness and failure ordering
 

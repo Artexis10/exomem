@@ -6,6 +6,7 @@
 - [x] 1.4 Add deterministic stabilization regressions for target creation after snapshot acquisition and repeated two-pass churn.
 - [x] 1.5 Mutate the shared cached resolver after detached acquisition and prove the active graph pass remains isolated.
 - [x] 1.6 Add failure-ordering regressions for retry freshness/resolver acquisition and partial-pass failures while preserving initial acquisition behavior.
+- [x] 1.7 Add marker-publication regressions for stable passes, post-check failure, an already-admitted refresh overlapping a failed rebuild, and missing-sidecar refresh.
 
 ## 2. Bounded Graph Implementation
 
@@ -13,6 +14,7 @@
 - [x] 2.2 Keep direct edge-extraction compatibility while preventing graph maintenance from performing per-page resolver freshness work.
 - [x] 2.3 Bracket full rebuild passes with disk-truth freshness, retry once on movement, and mark repeated churn unavailable before raising.
 - [x] 2.4 Invalidate every exceptional exit after a rebuild pass starts without invalidating failures before the first mutation boundary.
+- [x] 2.5 Make stable full-rebuild completion the only schema-version publisher and route non-current incremental refresh through a full rebuild.
 
 ## 3. Freshness and Fanout Regressions
 

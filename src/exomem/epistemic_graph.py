@@ -250,6 +250,7 @@ class EpistemicGraphIndex:
                 pass_started = True
                 report = self._rebuild_all_pass(resolver)
                 if _disk_vault_freshness(self.vault_root) == before:
+                    self._mark_available()
                     stable = True
                     return report
             raise RuntimeError(
@@ -270,8 +271,7 @@ class EpistemicGraphIndex:
                 conn.execute("DELETE FROM graph_nodes")
                 conn.execute("DELETE FROM graph_parent_refs")
                 conn.execute(
-                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                    ("schema_version", str(SCHEMA_VERSION)),
+                    "DELETE FROM graph_meta WHERE key = 'schema_version'"
                 )
                 conn.execute(
                     "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
@@ -320,10 +320,21 @@ class EpistemicGraphIndex:
         finally:
             conn.close()
 
+    def _mark_available(self) -> None:
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
+                    ("schema_version", str(SCHEMA_VERSION)),
+                )
+        finally:
+            conn.close()
+
     def refresh_paths(self, paths: list[Path]) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        if self.path.exists() and not self.available():
+        if not self.available():
             return self.rebuild_all()
         resolver = find_module.writer_resolver_snapshot(self.vault_root)
         conn = self._connect()
@@ -439,10 +450,6 @@ class EpistemicGraphIndex:
             conn.execute("DELETE FROM graph_edges WHERE source_path = ?", (rel,))
             conn.execute("DELETE FROM graph_nodes WHERE path = ?", (rel,))
             conn.execute("DELETE FROM graph_parent_refs WHERE path = ?", (rel,))
-            conn.execute(
-                "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
-                ("schema_version", str(SCHEMA_VERSION)),
-            )
             conn.execute(
                 "INSERT OR REPLACE INTO graph_meta(key, value) VALUES (?, ?)",
                 ("core_registry_version", str(self.registry.core_version)),

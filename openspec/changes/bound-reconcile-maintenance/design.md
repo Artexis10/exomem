@@ -47,11 +47,19 @@ unavailable/non-current, so readers cannot trust the unstable graph and a later
 refresh or reconcile rebuilds it. The first attempt still acquires its resolver
 before any graph mutation.
 
+The schema-version marker has one publisher: stable full-rebuild completion.
+Pass setup removes it in the same transaction that clears prior rows, and it
+stays absent throughout page indexing and any bounded retry. `_index_path()`
+updates graph rows and registry/profile metadata but never graph availability,
+so an incremental refresh already admitted against the old current graph cannot
+resurrect a failed overlapping rebuild. Refresh against a missing or unavailable
+sidecar routes through a full rebuild rather than publishing a partial graph.
+
 Failure ordering follows the same mutation boundary. An initial disk-freshness
 or resolver acquisition failure occurs before the first pass and preserves the
 previously current graph. Once a pass starts, any exceptional exit—including
 partial indexing, the post-pass freshness check, or acquisition for a required
-retry—removes the schema-version marker before propagating. A partial or
+retry—leaves the schema-version marker absent before propagating. A partial or
 known-moved pass can therefore never remain advertised as current.
 
 Alternatives rejected:
