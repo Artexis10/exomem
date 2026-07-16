@@ -1,16 +1,26 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from exomem import commands
-from exomem import embeddings
-from exomem import epistemic_graph
-from exomem import find as find_module
-from exomem import readiness
+from exomem import (
+    bm25,
+    commands,
+    embeddings,
+    epistemic_graph,
+    find_candidates,
+    readiness,
+)
+from exomem import (
+    find as find_module,
+)
+from exomem.ranking_config import RankingConfig
+from exomem.retrieval_explain import RetrievalTrace, attach_hit_explanations
 
 
 def _write_page(
@@ -132,6 +142,11 @@ def test_keyword_explanation_has_one_real_lane_and_no_fusion(tmp_path: Path) -> 
     profile = explained["retrieval_profile"]
     assert profile["effective_mode"] == "keyword"
     assert profile["lanes"]["keyword"]["status"] == "participated"
+    assert profile["lanes"]["keyword"]["metric"] == {
+        "name": "rank",
+        "direction": "lower",
+        "rounding": "none",
+    }
     assert profile["lanes"]["vector"] == {
         "status": "non_applicable",
         "reason": "requested_mode_keyword",
@@ -193,7 +208,13 @@ def test_disabled_embeddings_explain_lexical_fusion_without_loading_model(
         ),
     }
     assert first["fusion"]["rrf_sum"] == pytest.approx(
-        sum(lane["rrf_contribution"] for lane in first["lanes"].values())
+        round(
+            sum(
+                lane["weight"] / (lane["rrf_k"] + lane["rank"])
+                for lane in first["lanes"].values()
+            ),
+            6,
+        )
     )
     assert [step["name"] for step in first["multipliers"]] == ["type", "status"]
     assert first["final_sort_tuple"][1] == explained["hits"][0]["path"]
@@ -291,6 +312,115 @@ def test_available_hybrid_vector_reports_effective_mode_and_two_lane_fusion(
     assert set(lanes) == {"vector", "bm25"}
     assert lanes["vector"]["rrf_contribution"] == round(1.0 / 61.0, 6)
     assert lanes["bm25"]["rrf_contribution"] == round(1.0 / 61.0, 6)
+
+
+def test_fusion_uses_raw_contributions_until_the_serialization_boundary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    a_path = _write_page(tmp_path, name="a-rounding", updated="2026-07-16", priority=3)
+    z_path = _write_page(tmp_path, name="z-rounding", updated="2026-07-16", priority=3)
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            assert k > 0
+            assert allowed_paths is None
+            return [
+                (z_path, 0, "semantic z", 0.9),
+                (a_path, 0, "semantic a", 0.8),
+            ]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+    monkeypatch.setattr(
+        bm25,
+        "search",
+        lambda *_args, **_kwargs: [(a_path, 2.0), (z_path, 1.0)],
+    )
+    config = RankingConfig(
+        rrf_k=1,
+        intent_weights_conceptual=(0.010001, 0.01, 0.0, 0.0, 0.0, 0.0),
+    )
+    trace = RetrievalTrace(
+        requested_mode="hybrid",
+        requested_result_level="page",
+        rerank_requested=False,
+        auto_rerank=False,
+    )
+
+    hits = find_module.find(
+        tmp_path,
+        query="rounding adversary",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        temporal=False,
+        scope="kb-only",
+        limit=2,
+        intent="conceptual",
+        config=config,
+        retrieval_trace=trace,
+    )
+    serialized = [hit.as_compact_dict() for hit in hits]
+    attach_hit_explanations(trace, serialized)
+
+    assert [hit.path for hit in hits] == [z_path, a_path]
+    z_ranking = serialized[0]["ranking_explanation"]
+    a_ranking = serialized[1]["ranking_explanation"]
+    raw_z = 0.010001 / 2 + 0.01 / 3
+    assert z_ranking["fusion"]["rrf_sum"] == round(raw_z, 6) == 0.008334
+    assert sum(
+        lane["rrf_contribution"] for lane in z_ranking["lanes"].values()
+    ) == pytest.approx(0.008333)
+    assert z_ranking["multipliers"][0]["before"] == round(raw_z, 6)
+    assert z_ranking["multipliers"][0]["after"] == round(raw_z * 1.15, 6)
+    assert z_ranking["final_sort_tuple"][0] == a_ranking["final_sort_tuple"][0]
+    assert (z_ranking["final_rank"], a_ranking["final_rank"]) == (1, 2)
+
+
+def test_unit_trace_uses_the_runtime_fused_score_without_recomputation() -> None:
+    trace = RetrievalTrace(
+        requested_mode="hybrid",
+        requested_result_level="unit",
+        rerank_requested=False,
+        auto_rerank=False,
+    )
+    unit_ref = "unit-runtime-score"
+    formula_score = 0.010001 * (1.0 / 2) + 0.01 * (1.0 / 3)
+    runtime_score = math.nextafter(formula_score, math.inf)
+
+    trace.record_unit_ranked(
+        records={
+            unit_ref: (
+                SimpleNamespace(status="active", rel_path="unit-parent.md"),
+                SimpleNamespace(unit_ref=unit_ref),
+                0,
+            )
+        },
+        lexical_ranking=[unit_ref],
+        lexical_scores={unit_ref: 1.0},
+        lexical_backend="fixture",
+        vector_ranking=[unit_ref],
+        vector_scores={unit_ref: 0.9},
+        vector_profile={"status": "participated"},
+        final_ranking=[unit_ref],
+        raw_fused_score_by_ref={unit_ref: runtime_score},
+        weights=(0.010001, 0.01),
+        rrf_k=1,
+        prefer_active=True,
+        superseded_penalty=0.5,
+        lexical_used=True,
+        vector_used=True,
+    )
+
+    evidence = trace.evidence_by_id[unit_ref]
+    assert evidence["fusion"]["rrf_sum"] == runtime_score
+    assert evidence["multipliers"][0]["before"] == runtime_score
+    assert evidence["final_sort_tuple"][0] == runtime_score
 
 
 def test_vector_only_page_is_single_lane_without_fusion(
@@ -405,6 +535,49 @@ def test_auto_widened_hit_has_outside_lane_and_final_merge_evidence(
     assert ranking["ordering_path"][-1] == {
         "stage": "final_emit",
         "rank": 2,
+    }
+
+
+def test_auto_widen_does_not_overwrite_primary_vector_evidence_for_duplicate(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rel = "Reference/duplicate-widener.md"
+    path = tmp_path / rel
+    path.parent.mkdir(parents=True)
+    path.write_text("# Duplicate widener\n\nduplicate widener\n", encoding="utf-8")
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            assert k > 0
+            assert allowed_paths is None
+            return [(rel, 0, "duplicate widener", 0.91)]
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="duplicate widener",
+        mode="vector",
+        graph=False,
+        rerank=False,
+        scope="kb",
+        limit=2,
+        detail="compact",
+        explain=True,
+    )
+
+    assert [hit["path"] for hit in explained["hits"]] == [rel]
+    ranking = explained["hits"][0]["ranking_explanation"]
+    assert set(ranking["lanes"]) == {"vector"}
+    assert ranking["lanes"]["vector"] == {
+        "rank": 1,
+        "cosine": pytest.approx(0.91),
     }
 
 
@@ -737,6 +910,35 @@ def test_explanation_free_rerank_does_not_build_multiplier_evidence(
     assert all(hit.rerank_multiplier_chain == [] for hit in hits)
 
 
+def test_explanation_free_candidates_do_not_allocate_multiplier_evidence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _write_page(tmp_path, name="cheap-candidates", updated="2026-07-16", priority=3)
+    monkeypatch.setenv("EXOMEM_DISABLE_EMBEDDINGS", "1")
+    captured: list[find_candidates.CandidateBundle] = []
+    collect_candidates = find_candidates.collect_candidates
+
+    def capture_bundle(*args, **kwargs):
+        bundle = collect_candidates(*args, **kwargs)
+        captured.append(bundle)
+        return bundle
+
+    monkeypatch.setattr(find_candidates, "collect_candidates", capture_bundle)
+
+    hits = find_module.find(
+        tmp_path,
+        query="private page content",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+    )
+
+    assert hits
+    assert captured[0].multiplier_chain_by_path is None
+
+
 def test_unit_filter_only_explanation_uses_parent_date_and_source_order(
     tmp_path: Path,
 ) -> None:
@@ -950,6 +1152,63 @@ def test_mixed_explanation_reports_the_actual_page_unit_result_fusion(
             0 if lane_name == "page" else 1,
             hit.get("path") or hit["unit_ref"],
         ]
+
+
+def test_mixed_explanation_preserves_divergent_page_and_unit_plans(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    page_path = _write_unit_page(tmp_path)
+
+    class FakeIndex:
+        def search(self, _query_vector, *, k: int, allowed_paths=None):
+            assert k > 0
+            assert allowed_paths == {page_path}
+            return [(page_path, 0, "Session lifetime is thirty days", 0.82)]
+
+        def search_semantic_units(self, *_args, **_kwargs):
+            raise RuntimeError("unit vector backend failed")
+
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_DISABLE_CLIP", "1")
+    monkeypatch.setattr(embeddings, "get_embedding_index", lambda _root: FakeIndex())
+    monkeypatch.setattr(
+        embeddings, "embed_texts", lambda _texts, *, is_query: [[0.1, 0.2]]
+    )
+
+    explained = commands.op_ask_memory(
+        tmp_path,
+        query="session lifetime",
+        categories=["config"],
+        result_level="mixed",
+        mode="hybrid",
+        graph=False,
+        rerank=False,
+        scope="kb-only",
+        detail="compact",
+        explain=True,
+    )
+
+    plans = explained["retrieval_profile"]["result_plans"]
+    assert set(plans) == {"page", "unit"}
+    assert plans["page"]["effective_mode"] == "hybrid"
+    assert plans["page"]["lanes"]["vector"]["status"] == "participated"
+    assert plans["page"]["fusion"]["weights"] == {
+        "vector": 1.0,
+        "bm25": 1.0,
+        "keyword": 1.0,
+    }
+    assert plans["page"]["rerank"]["reason"] == "explicit_false"
+    assert plans["unit"]["effective_mode"] == "hybrid_lexical"
+    assert plans["unit"]["lanes"]["vector"] == {
+        "status": "failed",
+        "reason": "search_failed",
+        "model": "BAAI/bge-base-en-v1.5",
+    }
+    assert plans["unit"]["lanes"]["bm25"]["status"] == "participated"
+    assert "fusion" not in plans["unit"]
+    assert plans["unit"]["rerank"]["reason"] == "result_level_unit"
+    assert plans["page"]["final_ordering"] != plans["unit"]["final_ordering"]
 
 
 def test_disabled_vector_mode_explains_its_useful_keyword_fallback(

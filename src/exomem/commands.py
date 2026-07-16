@@ -68,17 +68,16 @@ from . import observe_memory as observe_memory_module
 from . import overview as overview_module
 from . import provenance as provenance_module
 from . import query_data as query_data_module
-from . import query_log, upload_tokens, vault
+from . import query_log, retrieval_models, upload_tokens, vault
 from . import readiness as readiness_module
 from . import reconcile as reconcile_module
 from . import recover_from_trash as recover_from_trash_module
 from . import relation_queue as relation_queue_module
 from . import relation_registry as relation_registry_module
 from . import replace as replace_module
-from . import retrieval_models
+from . import retrieval_explain as retrieval_explain_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
-from . import retrieval_explain as retrieval_explain_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module

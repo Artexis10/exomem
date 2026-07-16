@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass, field
 from typing import Any
-
 
 SCHEMA_VERSION = 1
 TEXT_MODEL_NAME = "BAAI/bge-base-en-v1.5"
@@ -29,6 +29,7 @@ class RetrievalTrace:
     final_ordering: dict[str, Any] = field(default_factory=dict)
     rerank_profile: dict[str, Any] = field(default_factory=dict)
     result_fusion_profile: dict[str, Any] | None = None
+    result_plans: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def record_plan(
         self,
@@ -50,14 +51,19 @@ class RetrievalTrace:
         lane = "filtered_most_recent" if filter_only else "keyword"
         reason = "empty_query" if filter_only else "requested_mode_keyword"
         self.effective_mode = "filter_only" if filter_only else "keyword"
+        self.fusion_profile = None
         self.lane_profiles = _base_lane_profiles(reason=reason)
         self.lane_profiles[lane] = {
             "status": "participated",
-            "metric": {
-                "name": "updated_timestamp",
-                "direction": "descending",
-                "rounding": "none",
-            },
+            "metric": (
+                {
+                    "name": "updated_timestamp",
+                    "direction": "descending",
+                    "rounding": "none",
+                }
+                if filter_only
+                else {"name": "rank", "direction": "lower", "rounding": "none"}
+            ),
         }
         self.final_ordering = {
             "sort": [
@@ -116,6 +122,7 @@ class RetrievalTrace:
         self.lane_profiles.update(bundle.lane_statuses)
         active_lanes = [name for name, ranking in bundle.lane_rankings.items() if ranking]
         fused = len(active_lanes) >= 2
+        self.fusion_profile = None
         if fused:
             self.fusion_profile = {
                 "algorithm": "weighted_rrf",
@@ -174,24 +181,19 @@ class RetrievalTrace:
                         {
                             "weight": bundle.lane_weights[lane_name],
                             "rrf_k": bundle.rrf_k,
-                            "rrf_contribution": round(
-                                bundle.lane_weights[lane_name]
-                                / (bundle.rrf_k + rank),
-                                6,
-                            ),
+                            "rrf_contribution": bundle.lane_weights[lane_name]
+                            / (bundle.rrf_k + rank),
                         }
                     )
                 if lane_name == "bm25":
-                    lane["raw_score"] = round(
-                        bundle.bm25_score_by_path[hit.path], 6
-                    )
+                    lane["raw_score"] = bundle.bm25_score_by_path[hit.path]
                 elif lane_name in ("vector", "clip"):
                     scores = (
                         bundle.vector_score_by_path
                         if lane_name == "vector"
                         else bundle.clip_score_by_path
                     )
-                    lane["cosine"] = round(scores[hit.path], 6)
+                    lane["cosine"] = scores[hit.path]
                 if lane_name == "graph" and hit.graph_provenance is not None:
                     lane["provenance"] = {
                         "seed": hit.graph_provenance.seed,
@@ -200,23 +202,19 @@ class RetrievalTrace:
                         "hop": 1,
                     }
                 lanes[lane_name] = lane
+            multiplier_chains = bundle.multiplier_chain_by_path
+            if multiplier_chains is None:
+                raise RuntimeError("trace capture missing multiplier evidence storage")
             evidence: dict[str, Any] = {
                 "lanes": lanes,
-                "multipliers": bundle.multiplier_chain_by_path.get(hit.path, []),
+                "multipliers": multiplier_chains.get(hit.path, []),
                 "ordering_path": [{"stage": "candidate_ranking"}],
                 "final_sort_tuple": [bundle.adjusted_score_by_path[hit.path], hit.path],
                 "tie_breaks": {"path": hit.path},
             }
             if fused:
                 evidence["fusion"] = {
-                    "rrf_sum": round(
-                        sum(
-                            lane["rrf_contribution"]
-                            for lane in lanes.values()
-                            if "rrf_contribution" in lane
-                        ),
-                        6,
-                    )
+                    "rrf_sum": bundle.raw_fused_score_by_path[hit.path]
                 }
             if hit.rerank_raw_score is not None:
                 evidence["reranker"] = {
@@ -377,6 +375,7 @@ class RetrievalTrace:
         ordered: list[tuple[Any, Any, int]],
     ) -> None:
         self.effective_mode = "filter_only"
+        self.fusion_profile = None
         self.lane_profiles = _base_lane_profiles(reason="empty_query")
         self.lane_profiles["filtered_most_recent"] = {
             "status": "participated",
@@ -415,6 +414,7 @@ class RetrievalTrace:
         ordered: list[tuple[Any, Any, int]],
     ) -> None:
         self.effective_mode = "keyword"
+        self.fusion_profile = None
         self.lane_profiles = _base_lane_profiles(reason="requested_mode_keyword")
         self.lane_profiles["keyword"] = {
             "status": "participated" if ordered else "available_nonmatching",
@@ -462,6 +462,7 @@ class RetrievalTrace:
         vector_scores: dict[str, float],
         vector_profile: dict[str, Any],
         final_ranking: list[str],
+        raw_fused_score_by_ref: dict[str, float],
         weights: tuple[float, float],
         rrf_k: int,
         prefer_active: bool,
@@ -469,6 +470,7 @@ class RetrievalTrace:
         lexical_used: bool,
         vector_used: bool,
     ) -> None:
+        self.fusion_profile = None
         self.lane_profiles = _base_lane_profiles(reason="not_requested")
         if lexical_used:
             self.lane_profiles["bm25"] = {
@@ -528,35 +530,31 @@ class RetrievalTrace:
                 rank = lexical_rank[unit_ref]
                 lane: dict[str, Any] = {
                     "rank": rank,
-                    "raw_score": round(lexical_scores[unit_ref], 6),
+                    "raw_score": lexical_scores[unit_ref],
                 }
                 if fused:
                     lane.update(
                         {
                             "weight": weights[1],
                             "rrf_k": rrf_k,
-                            "rrf_contribution": round(
-                                weights[1] / (rrf_k + rank), 6
-                            ),
+                            "rrf_contribution": weights[1] / (rrf_k + rank),
                         }
                     )
                 lanes["bm25"] = lane
             if vector_used and unit_ref in vector_rank:
                 rank = vector_rank[unit_ref]
-                lane = {"rank": rank, "cosine": round(vector_scores[unit_ref], 6)}
+                lane = {"rank": rank, "cosine": vector_scores[unit_ref]}
                 if fused:
                     lane.update(
                         {
                             "weight": weights[0],
                             "rrf_k": rrf_k,
-                            "rrf_contribution": round(
-                                weights[0] / (rrf_k + rank), 6
-                            ),
+                            "rrf_contribution": weights[0] / (rrf_k + rank),
                         }
                     )
                 lanes["vector"] = lane
             if fused:
-                raw_score = sum(lane["rrf_contribution"] for lane in lanes.values())
+                raw_score = raw_fused_score_by_ref[unit_ref]
             elif "vector" in lanes:
                 raw_score = vector_scores[unit_ref]
             else:
@@ -596,6 +594,18 @@ class RetrievalTrace:
             if fused:
                 evidence["fusion"] = {"rrf_sum": raw_score}
             self.evidence_by_id[unit_ref] = evidence
+
+    def snapshot_result_plan(self, result_type: str) -> None:
+        """Preserve one mixed-result subpipeline before the shared trace advances."""
+        plan = {
+            "effective_mode": self.effective_mode,
+            "lanes": copy.deepcopy(self.lane_profiles),
+            "rerank": copy.deepcopy(self.rerank_profile),
+            "final_ordering": copy.deepcopy(self.final_ordering),
+        }
+        if self.fusion_profile is not None:
+            plan["fusion"] = copy.deepcopy(self.fusion_profile)
+        self.result_plans[result_type] = plan
 
     def record_mixed(
         self,
@@ -652,6 +662,8 @@ class RetrievalTrace:
             out["fusion"] = self.fusion_profile
         if self.result_fusion_profile is not None:
             out["result_fusion"] = self.result_fusion_profile
+        if self.effective_result_level == "mixed" and self.result_plans:
+            out["result_plans"] = self.result_plans
         return _round_public_metrics(out)
 
 

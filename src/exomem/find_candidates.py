@@ -47,7 +47,7 @@ class CandidateBundle:
     rrf_k: int
     raw_fused_score_by_path: dict[str, float]
     adjusted_score_by_path: dict[str, float]
-    multiplier_chain_by_path: dict[str, list[dict[str, float | str]]]
+    multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] | None
 
 
 def empty_bundle(
@@ -80,7 +80,7 @@ def empty_bundle(
         rrf_k=rrf_k,
         raw_fused_score_by_path={},
         adjusted_score_by_path={},
-        multiplier_chain_by_path={},
+        multiplier_chain_by_path=None,
     )
 
 
@@ -672,7 +672,9 @@ def collect_candidates(
             active_lists, active_weights, k=config.rrf_k
         )
         raw_fused_score_by_path = dict(fused) if capture_trace else {}
-        multiplier_chain_by_path: dict[str, list[dict[str, float | str]]] = {}
+        multiplier_chain_by_path: (
+            dict[str, list[dict[str, float | str]]] | None
+        ) = ({} if capture_trace else None)
         fused = find_policy.apply_post_rrf_multipliers(
             fused,
             query,
@@ -682,7 +684,7 @@ def collect_candidates(
             temporal=temporal,
             page_of=page_of,
             usage_map=usage_map,
-            evidence_out=multiplier_chain_by_path if capture_trace else None,
+            evidence_out=multiplier_chain_by_path,
         )
         adjusted_score_by_path = dict(fused) if capture_trace else {}
 

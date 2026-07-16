@@ -34,6 +34,19 @@ class RerankProfile(TypedDict):
     metric: NotRequired[MetricProfile]
 
 
+class RetrievalSubplan(TypedDict):
+    effective_mode: str
+    lanes: dict[str, LaneProfile]
+    fusion: NotRequired[dict[str, Any]]
+    rerank: RerankProfile
+    final_ordering: dict[str, Any]
+
+
+class RetrievalResultPlans(TypedDict):
+    page: RetrievalSubplan
+    unit: RetrievalSubplan
+
+
 class RetrievalProfile(TypedDict):
     schema_version: int
     intent: str
@@ -46,6 +59,7 @@ class RetrievalProfile(TypedDict):
     lanes: dict[str, LaneProfile]
     fusion: NotRequired[dict[str, Any]]
     result_fusion: NotRequired[dict[str, Any]]
+    result_plans: NotRequired[RetrievalResultPlans]
     rerank: RerankProfile
     final_ordering: dict[str, Any]
 

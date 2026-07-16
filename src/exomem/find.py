@@ -605,6 +605,8 @@ def find(
                 failed_out=failed,
                 retrieval_trace=retrieval_trace,
             )
+        if retrieval_trace is not None:
+            retrieval_trace.snapshot_result_plan("unit")
 
     # "kb-only" is the strict opt-out (legacy KB-only behavior); "kb" walks the
     # same KB tree but auto-widens to the vault below when it underfills. Both
@@ -680,6 +682,7 @@ def find(
                     file_types=file_types, exclude_file_types=exclude_file_types,
                     limit=limit, snapshot=snapshot,
                     filter_plan=filter_plan if filter_plan.root is not None else None,
+                    exclude_paths=seen,
                     retrieval_trace=retrieval_trace,
                 )
                 if h.path not in seen
@@ -729,6 +732,8 @@ def find(
             updated_before=updated_before,
             recency_days=recency_days,
         )
+        if mixed:
+            retrieval_trace.snapshot_result_plan("page")
 
     if filter_plan.has_unit_predicate:
         with _span(timings, "matched_units"):
@@ -1187,6 +1192,7 @@ def _find_semantic_units(
 
     vector_ranking = _raw_ranking(vector_scores)
     vector_rank = {unit_ref: rank for rank, unit_ref in enumerate(vector_ranking, 1)}
+    raw_fused_score_by_ref: dict[str, float] = {}
 
     if not vector_ranking:
         final_ranking = _preferred_ranking(scores)
@@ -1201,6 +1207,7 @@ def _find_semantic_units(
             [weights[0], weights[1]],
             k=config.rrf_k,
         )
+        raw_fused_score_by_ref = dict(fused)
         final_ranking = [
             unit_ref
             for unit_ref, _fused_score in sorted(
@@ -1234,6 +1241,7 @@ def _find_semantic_units(
             vector_scores=vector_scores,
             vector_profile=vector_profile,
             final_ranking=final_ranking,
+            raw_fused_score_by_ref=raw_fused_score_by_ref,
             weights=(intent_weights[0], intent_weights[1]),
             rrf_k=config.rrf_k,
             prefer_active=prefer_active,
@@ -1946,6 +1954,7 @@ def _find_outside_kb(
     limit: int,
     snapshot: FreshnessSnapshot | None = None,
     filter_plan: structured_filters.FilterPlan | None = None,
+    exclude_paths: set[str] | None = None,
     retrieval_trace: Any | None = None,
 ) -> list[Hit]:
     """BM25/keyword recall over the vault, RESTRICTED to paths outside
@@ -2025,7 +2034,7 @@ def _find_outside_kb(
     hits: list[Hit] = []
     seen: set[str] = set()
     for rel_path in candidates:
-        if rel_path in seen:
+        if rel_path in seen or (exclude_paths is not None and rel_path in exclude_paths):
             continue
         seen.add(rel_path)
         if rel_path.rsplit("/", 1)[-1].lower() in _NAVIGATION_BASENAMES:

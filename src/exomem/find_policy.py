@@ -122,7 +122,9 @@ def apply_post_rrf_multipliers(
     adjusted: list[tuple[str, float]] = []
     for path, score in fused:
         page = page_of(path)
-        chain: list[dict[str, float | str]] = []
+        chain: list[dict[str, float | str]] | None = (
+            [] if evidence_out is not None else None
+        )
         if prefer_compiled:
             if page is not None and getattr(page, "media_type", None):
                 factor = 1.0
@@ -131,44 +133,72 @@ def apply_post_rrf_multipliers(
                     getattr(page, "page_type", None) if page is not None else None,
                     config,
                 )
-            before = score
-            score = score * factor
-            chain.append(
-                {"name": "type", "factor": factor, "before": before, "after": score}
-            )
+            if chain is None:
+                score *= factor
+            else:
+                before = score
+                score *= factor
+                chain.append(
+                    {
+                        "name": "type",
+                        "factor": factor,
+                        "before": before,
+                        "after": score,
+                    }
+                )
         if prefer_active:
             factor = status_multiplier(getattr(page, "status", None), config)
-            before = score
-            score = score * factor
-            chain.append(
-                {"name": "status", "factor": factor, "before": before, "after": score}
-            )
+            if chain is None:
+                score *= factor
+            else:
+                before = score
+                score *= factor
+                chain.append(
+                    {
+                        "name": "status",
+                        "factor": factor,
+                        "before": before,
+                        "after": score,
+                    }
+                )
         if temporal_active:
             d = parse_date(getattr(page, "updated", None)) if page else None
             if d is not None:
                 factor = recency_multiplier(
                     max(0.0, float((today - d).days)), config
                 )
-                before = score
-                score = score * factor
-                chain.append(
-                    {
-                        "name": "recency",
-                        "factor": factor,
-                        "before": before,
-                        "after": score,
-                    }
-                )
+                if chain is None:
+                    score *= factor
+                else:
+                    before = score
+                    score *= factor
+                    chain.append(
+                        {
+                            "name": "recency",
+                            "factor": factor,
+                            "before": before,
+                            "after": score,
+                        }
+                    )
         if usage_active:
             b = usage_map.get(usage_module.canon(path))
             if b is not None:
                 factor = usage_module.usage_multiplier(b, config)
-                before = score
-                score = score * factor
-                chain.append(
-                    {"name": "usage", "factor": factor, "before": before, "after": score}
-                )
+                if chain is None:
+                    score *= factor
+                else:
+                    before = score
+                    score *= factor
+                    chain.append(
+                        {
+                            "name": "usage",
+                            "factor": factor,
+                            "before": before,
+                            "after": score,
+                        }
+                    )
         if evidence_out is not None:
+            assert chain is not None
             evidence_out[path] = chain
         adjusted.append((path, score))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
