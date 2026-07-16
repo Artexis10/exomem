@@ -2,7 +2,7 @@
 
 ### Requirement: Graph maintenance uses one operation-scoped resolver snapshot
 
-The system SHALL acquire one detached wikilink-resolver snapshot before mutating the epistemic graph for a full rebuild or one batched refresh, and SHALL reuse that snapshot for every page in the operation. Resolver acquisition and vault-wide freshness work MUST NOT scale with the number of pages in that operation. The snapshot MUST NOT warm or mutate the process-shared resolver cache.
+The system SHALL acquire one detached wikilink-resolver snapshot before mutating the epistemic graph for one stable full-rebuild pass or one batched refresh, and SHALL reuse that snapshot for every page in the pass. Resolver acquisition and vault-wide freshness work MUST NOT scale with the number of pages in that pass. The snapshot MUST NOT warm or mutate the process-shared resolver cache.
 
 #### Scenario: Full rebuild has bounded resolver work
 
@@ -20,6 +20,36 @@ The system SHALL acquire one detached wikilink-resolver snapshot before mutating
 
 - **WHEN** the process-shared resolver is patched after graph maintenance has acquired its detached snapshot
 - **THEN** the active operation continues resolving every page against its original snapshot
+
+### Requirement: Full rebuild stabilization is disk-truth and constant-bounded
+
+The system SHALL bracket a full graph rebuild pass with direct on-disk vault
+freshness keys and SHALL acquire its detached resolver against the pre-pass disk
+key rather than potentially stale event-registry state. If freshness changes
+during the first pass, it SHALL retry once with a new disk key and detached
+resolver. It MUST perform at most two passes. If freshness changes during the
+second pass, it SHALL mark the graph unavailable/non-current and raise instead
+of exposing the unstable result as trusted.
+
+#### Scenario: Target appears after snapshot acquisition
+
+- **WHEN** a target file appears or is renamed after the first detached resolver is acquired
+- **AND** the first graph pass observes changed disk freshness
+- **THEN** the rebuild acquires a new detached resolver and retries
+- **AND** the stable retry resolves source edges against the target's final path
+
+#### Scenario: Vault moves during both bounded passes
+
+- **WHEN** direct disk freshness changes during both the first and second graph passes
+- **THEN** the rebuild performs exactly two resolver acquisitions and two passes
+- **AND** it marks the graph unavailable/non-current
+- **AND** it raises so later reconcile or refresh can rebuild the graph
+
+#### Scenario: Stable rebuild retains linear work
+
+- **WHEN** disk freshness is unchanged around the first graph pass
+- **THEN** the rebuild performs one resolver acquisition and one graph pass
+- **AND** resolver or freshness work does not scale per indexed page
 
 ### Requirement: Bounded graph maintenance preserves correctness and failure ordering
 

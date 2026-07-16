@@ -35,6 +35,13 @@ The system SHALL bound how stale the event-maintained freshness registry can bec
 - **AND** a Markdown source is subsequently modified or deleted
 - **THEN** watcher reconciliation reports and dispatches that exact path once
 
+#### Scenario: Real deletion after rebaseline still dispatches
+
+- **WHEN** explicit reconcile installs final freshness baselines
+- **AND** a Markdown source is subsequently deleted
+- **THEN** watcher reconciliation dispatches one delete for that exact path
+- **AND** it does not dispatch a matching upsert or any unrelated corpus path
+
 #### Scenario: Scope baselines are independent
 
 - **WHEN** one freshness scope has a prior baseline and another scope does not

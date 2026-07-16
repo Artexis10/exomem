@@ -690,6 +690,17 @@ def test_missing_baseline_and_post_reconcile_watcher_do_not_phantom_fanout(
     assert [path.resolve() for path in calls["upsert"][0]] == [target.resolve()]
     assert calls["delete"] == []
 
+    for recorded in calls.values():
+        recorded.clear()
+    rel = _vault_rel(vault, target)
+    target.unlink()
+    watcher._reconcile_once(seed=False)
+
+    assert calls["upsert"] == []
+    assert calls["delete"] == [[rel]]
+    assert calls["inbound"] == [([], [rel])]
+    assert calls["resolver"] == [([], [rel])]
+
 
 def test_periodic_reconcile_discovers_missed_media_without_text_reembed(
     vault: Path, monkeypatch: pytest.MonkeyPatch

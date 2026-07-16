@@ -63,9 +63,9 @@ def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(
     real_snapshot = find_module.writer_resolver_snapshot
     acquisitions: list[Path] = []
 
-    def acquire(root: Path):
+    def acquire(root: Path, **kwargs):
         acquisitions.append(root)
-        return real_snapshot(root)
+        return real_snapshot(root, **kwargs)
 
     monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
     monkeypatch.setattr(
@@ -81,6 +81,106 @@ def test_full_rebuild_reuses_one_detached_resolver_without_shared_cache(
     assert vault not in find_module._RESOLVER_CACHE
 
 
+def test_full_rebuild_retries_when_target_is_renamed_after_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    source = _write(
+        vault,
+        A,
+        "# Source\n\nLinks to [[Knowledge Base/Notes/Insights/late-target]].\n",
+    )
+    target_rel = "Knowledge Base/Notes/Insights/late-target.md"
+    target = vault / target_rel
+    staged_target = _write(
+        vault,
+        "Knowledge Base/Notes/Insights/staged-target.md",
+        "# Late target\n",
+    )
+    real_snapshot = find_module.writer_resolver_snapshot
+    acquisitions = 0
+
+    def acquire(root: Path, **kwargs):
+        nonlocal acquisitions
+        snapshot = real_snapshot(root, **kwargs)
+        acquisitions += 1
+        if acquisitions == 1:
+            staged_target.rename(target)
+        return snapshot
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+    report = index.rebuild_all()
+
+    assert source.exists()
+    assert acquisitions == 2
+    assert report["indexed_files"] == 2
+    assert any(
+        edge["relation_type"] == "links_to"
+        and edge["dst_key"] == epistemic_graph._file_key(target_rel)
+        for edge in index.edges(source_path=A)
+    )
+
+
+def test_full_rebuild_twice_moving_vault_is_marked_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    real_snapshot = find_module.writer_resolver_snapshot
+    acquisitions = 0
+
+    def acquire(root: Path, **kwargs):
+        nonlocal acquisitions
+        snapshot = real_snapshot(root, **kwargs)
+        acquisitions += 1
+        _write(
+            vault,
+            f"Knowledge Base/Notes/Insights/churn-{acquisitions}.md",
+            f"# Churn {acquisitions}\n",
+        )
+        return snapshot
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    index = epistemic_graph.EpistemicGraphIndex(vault)
+
+    with pytest.raises(RuntimeError, match="did not stabilize"):
+        index.rebuild_all()
+
+    assert acquisitions == 2
+    assert index.available() is False
+
+
+def test_full_rebuild_snapshot_isolated_from_shared_cache_patch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    vault = tmp_path / "vault"
+    _seed(vault)
+    find_module._RESOLVER_CACHE.clear()
+    shared = find_module.shared_resolver(vault)
+    real_snapshot = find_module.writer_resolver_snapshot
+
+    def acquire(root: Path, **kwargs):
+        snapshot = real_snapshot(root, **kwargs)
+        assert snapshot is not shared
+        shared._remove_entry(B.removesuffix(".md"))
+        return snapshot
+
+    monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
+    try:
+        index = epistemic_graph.EpistemicGraphIndex(vault)
+        index.rebuild_all()
+
+        assert any(
+            edge["relation_type"] == "links_to"
+            and edge["dst_key"] == epistemic_graph._file_key(B)
+            for edge in index.edges(source_path=A)
+        )
+    finally:
+        find_module._RESOLVER_CACHE.clear()
+
+
 def test_refresh_batch_reuses_one_snapshot_and_separate_calls_reacquire(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -91,9 +191,9 @@ def test_refresh_batch_reuses_one_snapshot_and_separate_calls_reacquire(
     real_snapshot = find_module.writer_resolver_snapshot
     acquisitions: list[Path] = []
 
-    def acquire(root: Path):
+    def acquire(root: Path, **kwargs):
         acquisitions.append(root)
-        return real_snapshot(root)
+        return real_snapshot(root, **kwargs)
 
     monkeypatch.setattr(find_module, "writer_resolver_snapshot", acquire)
     monkeypatch.setattr(
@@ -121,7 +221,9 @@ def test_rebuild_resolver_failure_preserves_committed_graph_rows(
     monkeypatch.setattr(
         find_module,
         "writer_resolver_snapshot",
-        lambda *_args: (_ for _ in ()).throw(RuntimeError("resolver failed")),
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("resolver failed")
+        ),
     )
 
     with pytest.raises(RuntimeError, match="resolver failed"):

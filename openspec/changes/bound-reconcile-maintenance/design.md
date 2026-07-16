@@ -25,11 +25,27 @@ The repair must preserve graph edge semantics, conservative embedding durability
 
 ## Decisions
 
-### Use one detached resolver per graph maintenance operation
+### Use one detached resolver per graph maintenance pass
 
 `rebuild_all()` and `refresh_paths()` will acquire one detached resolver snapshot before opening or mutating the graph sidecar, then pass it explicitly through `_index_path(..., resolver=...)` to `_edges_for_page(..., resolver=...)`. `_edges_for_page` keeps an optional fallback for its existing direct callers, while graph maintenance always supplies the snapshot.
 
 This makes resolver/freshness acquisition O(1) per operation and page parsing O(n). A detached resolver cannot be changed midway by a concurrent watcher patch. Resolver acquisition occurs before graph deletion so acquisition failure preserves the existing sidecar. Separate `refresh_paths()` calls reacquire freshness, while one multi-path call shares one snapshot.
+
+### Stabilize full rebuilds against concurrent target changes
+
+A full rebuild brackets each resolver-plus-graph pass with direct disk-truth
+vault freshness walks. The disk key is supplied to detached resolver acquisition,
+so a stale event-maintained registry cannot cause a stale shared resolver fork.
+If the key moves during the first pass, the rebuild retries once with a newly
+acquired snapshot. A stable vault therefore retains one resolver acquisition and
+one O(n) graph pass; a moving vault is capped at two acquisitions and two O(n)
+passes, never per-page O(n) freshness work.
+
+If the disk key moves during the second pass, the rebuild deletes its graph
+schema-version marker and raises. The resulting sidecar is explicitly
+unavailable/non-current, so readers cannot trust the unstable graph and a later
+refresh or reconcile rebuilds it. The first attempt still acquires its resolver
+before any graph mutation.
 
 Alternatives rejected:
 
@@ -49,13 +65,20 @@ Successful write-mode reconcile will seed exact `kb` and `vault` freshness maps 
 
 If a final baseline scan cannot complete, reconcile will log the failure and leave that scope non-live; the next periodic watcher pass installs a baseline without fanout. Event-index kill-switch behavior remains unchanged.
 
+`freshness.seed()` intentionally consumes the final stat-entry iterable while
+holding the registry lock. Scanning outside the lock and then overwriting the map
+would allow an event patch published after the scan to be lost by the later
+install. The bounded explicit-reconcile scan may briefly delay registry readers,
+but preserves exact race ordering; this change does not trade correctness for a
+shorter lock hold.
+
 ### Test structural work, parity, and fanout—not a fragile stopwatch
 
-Scaling tests count detached resolver acquisition and freshness/vault-walk boundaries across many pages. Parity tests compare graph results for representative and ambiguous links. Freshness/watcher tests cover missing versus empty baselines, independent scopes, no phantom index dispatch or receipts, and the next real source edit. A quiescent real-vault benchmark is retained as deployment evidence, not as a timing assertion in lean CI.
+Scaling tests count detached resolver acquisition and freshness/vault-walk boundaries across many pages. Parity tests compare graph results for representative and ambiguous links. Stabilization tests deterministically change a target after snapshot acquisition and force repeated churn to prove the retry cap and unavailable failure state. Freshness/watcher tests cover missing versus empty baselines, independent scopes, no phantom index dispatch or receipts, and exact-once modification and deletion recovery. A quiescent real-vault benchmark is retained as deployment evidence, not as a timing assertion in lean CI.
 
 ## Risks / Trade-offs
 
-- [Risk] Files change during a detached graph rebuild. → The rebuild is an internally consistent best-effort snapshot; normal watcher/reconcile paths heal later changes, matching the existing non-transactional filesystem contract.
+- [Risk] Files change during a detached graph rebuild. → Disk-truth bracketing retries once with a fresh snapshot. Repeated churn marks the graph unavailable and raises, leaving later watcher/reconcile maintenance to rebuild instead of trusting stale edges.
 - [Risk] Rebaseline scan races a filesystem event. → Event publishers continue patching live maps and periodic reconciliation remains the bounded safety net; missing state is never converted into fabricated drift.
 - [Risk] A broad test run is not green on current Windows `main`. → Pin new acceptance to targeted regressions, record inherited failures, and require CI/independent review to show the PR adds no new failures.
 - [Risk] A cold detached resolver still performs a full vault read. → One O(n) read is required for correct resolution; the contract removes the repeated per-page O(n) read/check.

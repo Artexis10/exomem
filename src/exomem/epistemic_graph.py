@@ -34,6 +34,7 @@ SCHEMA_VERSION = 4
 UNIT_SEED_MAX_BATCHES = 4
 UNIT_PARENT_REF_MAX_CANDIDATES = 16
 EDGE_INSPECTION_MULTIPLIER = 4
+REBUILD_STABILIZATION_ATTEMPTS = 2
 
 RELATION_TYPES: frozenset[str] = relation_registry.core_registry().keys
 
@@ -126,6 +127,13 @@ def graph_enabled() -> bool:
 
 def sidecar_path(vault_root: Path) -> Path:
     return vault_root / kb_dirname() / ".graph.sqlite"
+
+
+def _disk_vault_freshness(vault_root: Path) -> tuple[int, int, str]:
+    """Vault freshness from a direct walk, bypassing event-registry state."""
+    return find_module._walk_freshness_key(
+        vault_module.walk_vault_md(vault_root)
+    )
 
 
 class EpistemicGraphIndex:
@@ -230,7 +238,24 @@ class EpistemicGraphIndex:
     def rebuild_all(self) -> dict[str, int]:
         if not graph_enabled():
             return {"indexed_files": 0, "nodes": 0, "edges": 0, "disabled": 1}
-        resolver = find_module.writer_resolver_snapshot(self.vault_root)
+        for _attempt in range(REBUILD_STABILIZATION_ATTEMPTS):
+            before = _disk_vault_freshness(self.vault_root)
+            resolver = find_module.writer_resolver_snapshot(
+                self.vault_root,
+                freshness_key=before,
+            )
+            report = self._rebuild_all_pass(resolver)
+            if _disk_vault_freshness(self.vault_root) == before:
+                return report
+        self._mark_unavailable()
+        raise RuntimeError(
+            "epistemic graph rebuild did not stabilize after 2 attempts"
+        )
+
+    def _rebuild_all_pass(
+        self,
+        resolver: vault_module.WikilinkResolver,
+    ) -> dict[str, int]:
         conn = self._connect()
         try:
             with conn:
@@ -273,6 +298,18 @@ class EpistemicGraphIndex:
                 n_nodes = conn.execute("SELECT COUNT(*) FROM graph_nodes").fetchone()[0]
                 n_edges = conn.execute("SELECT COUNT(*) FROM graph_edges").fetchone()[0]
             return {"indexed_files": indexed, "nodes": int(n_nodes), "edges": int(n_edges)}
+        finally:
+            conn.close()
+
+    def _mark_unavailable(self) -> None:
+        if not self.path.exists():
+            return
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                conn.execute(
+                    "DELETE FROM graph_meta WHERE key = 'schema_version'"
+                )
         finally:
             conn.close()
 
