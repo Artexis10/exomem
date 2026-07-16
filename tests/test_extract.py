@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from exomem import extract, voice_profiles
+from exomem import extract, speaker_attribution, voice_embed, voice_profiles
 
 
 @pytest.mark.parametrize(
@@ -372,6 +372,63 @@ def test_transcribe_profile_label_is_only_used_when_resolver_returns_it(
     assert result.speaker_verification == "profile-matched"
 
 
+@pytest.mark.parametrize(
+    ("label", "matched_profile", "verification"),
+    [
+        ("Speaker A", "Speaker A", "profile-matched"),
+        ("Speaker 27", None, "anonymous"),
+    ],
+)
+def test_speaker_verification_uses_resolver_match_metadata_not_label_shape(
+    label: str,
+    matched_profile: str | None,
+    verification: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("speaker line", 0.0, 1.0)]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract, "_run_diarization", lambda _path: [(0.0, 1.0, "SPEAKER_00")]
+    )
+    monkeypatch.setattr(voice_profiles, "voice_profiles_path", lambda root: root / "profiles")
+    monkeypatch.setattr(voice_profiles, "load_profiles", lambda _path: {"profile": object()})
+    monkeypatch.setattr(voice_embed, "embed_spans", lambda *_a, **_kw: object())
+    monkeypatch.setattr(
+        speaker_attribution,
+        "attribute_clusters",
+        lambda *_a, **_kw: {
+            "SPEAKER_00": speaker_attribution.Attribution(label, 0.9, matched_profile)
+        },
+    )
+
+    result = extract._transcribe(
+        Path("metadata.m4a"), "audio", vault_root=tmp_path, timestamps=True
+    )
+
+    assert f"[{label}]: speaker line" in result.text
+    assert result.speaker_verification == verification
+
+
+def test_transcribe_accepts_legacy_two_tuple_diarization_result(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EXOMEM_DIARIZE", "1")
+    segs = [_FakeSeg("legacy seam", 0.0, 1.0)]
+    speakers = [{"speaker": "Speaker A", "start": 0.0, "end": 1.0, "text": "legacy seam"}]
+    monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
+    monkeypatch.setattr(
+        extract,
+        "_diarize",
+        lambda *_a, **_kw: ("[0:00] [Speaker A]: legacy seam", speakers),
+    )
+
+    result = extract._transcribe(Path("legacy.m4a"), "audio", timestamps=True)
+
+    assert result.speaker_verification == "anonymous"
+
+
 def test_transcribe_records_unavailable_when_configured_diarization_cannot_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -474,7 +531,9 @@ def test_explicit_timestamp_render_failure_does_not_return_untimed_transcript(
 
     monkeypatch.setattr(extract, "_semantic_segments_module", lambda: _BoomSemanticSegments)
 
-    with pytest.raises(RuntimeError, match="timed transcript rendering failed"):
+    with pytest.raises(
+        extract.TimestampRenderingUnavailable, match="timed transcript rendering failed"
+    ):
         extract._transcribe(Path("automatic.m4a"), "audio", timestamps=True)
 
 

@@ -714,6 +714,27 @@ def update_sidecar_processing_failure(
     batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
 
 
+def update_sidecar_processing_pending(
+    vault_root: Path,
+    sidecar_path: Path,
+    *,
+    attempts: int,
+) -> None:
+    """Keep changed-in-flight media automatic and actionable until reconciliation."""
+    content = sidecar_path.read_text(encoding="utf-8")
+    fields = (
+        ("extracted_by", "pending"),
+        ("processing_state", "pending"),
+        ("processing_attempts", str(attempts)),
+        ("processing_error", "null"),
+        ("processing_retryable", "true"),
+        ("processing_next_action", "wait for media reconciliation"),
+    )
+    for field, value in fields:
+        content = _set_frontmatter_field(content, field, value)
+    batch_atomic_write([PlannedWrite(path=sidecar_path, content=content)], vault_root=vault_root)
+
+
 def _set_frontmatter_field(content: str, field: str, value: str) -> str:
     """Set `field: value` in the leading `---` frontmatter (replace or insert)."""
     if not content.startswith("---"):

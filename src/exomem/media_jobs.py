@@ -548,12 +548,15 @@ def status(vault_root: Path | None) -> dict[str, Any]:
 
 def _status_job(row: Any) -> dict[str, Any]:
     state = str(row["state"])
+    error = str(row["last_error"]) if row["last_error"] is not None else None
     actions = {
         PENDING: "wait for media processing",
         RUNNING: "wait for media processing to finish",
         BLOCKED: "install the required media dependency, then retry",
         FAILED: "repair or replace the media artifact, then retry",
     }
+    if state == BLOCKED and error and error.startswith("TimestampRenderingUnavailable:"):
+        actions[BLOCKED] = "check the timestamp renderer, then retry"
     return {
         "id": int(row["id"]),
         "path": str(row["binary_rel"]),
@@ -561,7 +564,7 @@ def _status_job(row: Any) -> dict[str, Any]:
         "media_type": str(row["media_type"]),
         "state": state,
         "attempts": int(row["attempts"]),
-        "error": str(row["last_error"]) if row["last_error"] is not None else None,
+        "error": error,
         "retryable": state in {BLOCKED, FAILED},
         "next_action": actions[state],
     }
