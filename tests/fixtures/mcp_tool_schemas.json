@@ -1,4 +1,12 @@
 {
+  "coordination_status": {
+    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    }
+  },
   "adopt_vault": {
     "description": "Adopt an existing vault safely without replacing originals.\n\nDefault mode scans only. Copy/compile modes write under the governed\nKnowledge Base layer and preserve original path/hash provenance.",
     "inputSchema": {
@@ -62,6 +70,225 @@
           "description": "Explicit legacy files for copy/compile modes."
         }
       },
+      "type": "object"
+    }
+  },
+  "adoption_studio": {
+    "description": "Run a governed, resumable Adoption Studio session over existing material.\n\nAdoption Studio turns a messy legacy vault into governed Exomem knowledge\nwithout ever rewriting, moving, or deleting an original file. It is a durable,\ncanonical-file-backed run with a preview-exact-actions contract: you see the\nprecise imports before anything is written, and `apply` commits exactly that\nplan or refuses. One required `action` multiplexes the whole lifecycle; the\nread-only default (`status`) is safe and `start` is explicitly guarded.\n\nLifecycle actions: `start` scans a subtree read-only and snapshots a candidate\ninventory; `select` materializes a folder-rule selection server-side; `plan`\npreviews exact targets, titles, hashes, and frontmatter; `apply` copies the\nvalidated subset into governed Sources with provenance in one atomic batch;\n`cancel` closes a pre-apply run; `finish` proves recall and hands you a first\nquestion. Agent actions ride the run afterwards: `work-item` returns bounded\nread-only context, `propose` submits structured proposals, and\n`apply-proposal` approves one through an existing governed leaf.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "action": {
+          "description": "Required. One of start, status, select, plan, apply, cancel, finish, work-item, propose, or apply-proposal.",
+          "type": "string"
+        },
+        "run_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Stable adoption run id from `start`; required by every action except `start` and the run-listing form of `status`."
+        },
+        "path": {
+          "default": "",
+          "description": "For `start`, the vault subtree to scan. Defaults to the vault root.",
+          "type": "string"
+        },
+        "include_hidden": {
+          "default": false,
+          "description": "For `start`, include hidden files/directories in the scan.",
+          "type": "boolean"
+        },
+        "initialize_kb": {
+          "default": false,
+          "description": "For `start`, bootstrap the Knowledge Base scaffold first when it does not exist yet (otherwise `start` refuses with KB_NOT_INITIALIZED).",
+          "type": "boolean"
+        },
+        "include": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, folder or file paths whose eligible files are selected (server materializes the concrete set)."
+        },
+        "exclude": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, folder or file paths to remove from the selection."
+        },
+        "overrides": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `select`, explicit per-file paths to force-select."
+        },
+        "include_junk": {
+          "default": false,
+          "description": "For `select`, include junk (e.g. zero-byte) files that are otherwise demoted. Default false.",
+          "type": "boolean"
+        },
+        "plan_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply`, the plan id echoed from `plan`/`status`; a mismatch or a changed selection is refused with PLAN_STALE."
+        },
+        "retry_failed": {
+          "default": false,
+          "description": "For `apply`, re-plan and re-apply only the failed subset.",
+          "type": "boolean"
+        },
+        "only_paths": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply`, restrict the (retry) apply to these originals."
+        },
+        "why": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Required approver rationale for `apply-proposal`; also records the reason on `cancel`."
+        },
+        "write_manifest": {
+          "default": true,
+          "description": "For `finish`, write an optional run manifest under `Knowledge Base/_Adoption/`. Default true.",
+          "type": "boolean"
+        },
+        "sources": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `work-item`, explicit source paths to include instead of the first `max_sources` applied imports."
+        },
+        "max_sources": {
+          "default": 5,
+          "description": "For `work-item`, the maximum sources returned. Default 5.",
+          "type": "integer"
+        },
+        "max_chars_per_source": {
+          "default": 2000,
+          "description": "For `work-item`, the per-source excerpt cap. Default 2000.",
+          "type": "integer"
+        },
+        "proposals": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `propose`, the list of structured proposal objects to submit."
+        },
+        "ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply-proposal`, the `exomem://review/adoption/<id>` proposal ref."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply-proposal`, the reviewed fingerprint that must still match, or the write is refused."
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "For `apply-proposal`, the target page hash for relation and reconciliation-relate approvals."
+        }
+      },
+      "required": [
+        "action"
+      ],
       "type": "object"
     }
   },
@@ -883,14 +1110,6 @@
           "description": "Reviewed candidate fingerprint for accept-relation. Required for accept-relation (not optional — a mismatch, or an omitted value, refuses the write); accept re-validates live eligibility too, so a candidate that stopped being open between the queue read and this call also refuses."
         }
       },
-      "type": "object"
-    }
-  },
-  "coordination_status": {
-    "description": "Report this replica's writer-lease role and coordinator health.\n\nRead-only and safe during coordinator outages. Credentials and vault content\nare never included.",
-    "inputSchema": {
-      "additionalProperties": false,
-      "properties": {},
       "type": "object"
     }
   },
@@ -2598,7 +2817,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference.",
+          "description": "Stable `exomem://review/<id>` reference. An `exomem://review/adoption/<id>` ref returns the bounded Adoption Studio proposal context (proposal record, live binding check, and target-page summary) instead.",
           "type": "string"
         },
         "expected_fingerprint": {
@@ -2657,7 +2876,7 @@
       "properties": {
         "mode": {
           "default": "attention",
-          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, or relation-queue. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`.",
+          "description": "attention, activation, item, audit, provenance, evolution, compilation, stale, contradiction, unprocessed-sources, relation-debt, relation-queue, or adoption. `relation-queue` returns the read-only, batched relation-acceptance queue (deterministic suggestion candidates grouped by source page, with signal fingerprints and coverage counters); accept a candidate via `connect_memory(operation=\"accept-relation\")` or reject via `triage_memory`. `adoption` returns the read-only Adoption Studio proposal queue grouped per run (structured agent proposals with signal fingerprints); approve a proposal via `adoption_studio(action=\"apply-proposal\")` or dismiss via `triage_memory`.",
           "type": "string"
         },
         "categories": {
@@ -2910,7 +3129,7 @@
       "additionalProperties": false,
       "properties": {
         "ref": {
-          "description": "Stable `exomem://review/<id>` reference from review_memory.",
+          "description": "Stable `exomem://review/<id>` reference from review_memory. An `exomem://review/adoption/<id>` ref triages an Adoption Studio proposal instead, keyed the same way (`review_id:fingerprint`).",
           "type": "string"
         },
         "action": {

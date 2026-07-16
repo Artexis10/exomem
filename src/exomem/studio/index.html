@@ -6,7 +6,7 @@
   <meta name="color-scheme" content="light dark">
   <title>Exomem Review Studio</title>
   <link rel="icon" href="/studio/assets/studio-icon.v1.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/studio/assets/styles.v1.css">
+  <link rel="stylesheet" href="/studio/assets/styles.v2.css">
 </head>
 <body>
   <a class="skip-link" href="#workspace">Skip to review workspace</a>
@@ -17,6 +17,11 @@
     </a>
     <p id="connection-status" class="connection" role="status">Not connected</p>
   </header>
+
+  <nav id="area-nav" class="area-nav" aria-label="Studio areas" hidden>
+    <button type="button" class="area-tab" data-view="review" aria-current="true">Review</button>
+    <button type="button" class="area-tab" data-view="adopt" aria-current="false">Add files</button>
+  </nav>
 
   <noscript><p class="fatal">The Review Studio needs JavaScript. Core Exomem commands remain available through MCP, REST, and CLI.</p></noscript>
 
@@ -109,6 +114,180 @@
         <p id="workspace-error" class="error" role="alert" tabindex="-1" hidden></p>
       </article>
     </section>
+
+    <section id="adoption" class="adoption" hidden aria-label="Bring your files in">
+      <p id="adopt-guarantee" class="guarantee">Copies only — your original files stay exactly where they are. Exomem never moves, edits, or deletes them.</p>
+      <ol id="adopt-stepper" class="stepper" aria-label="Steps">
+        <li data-step="1" aria-current="false">Look around</li>
+        <li data-step="2" aria-current="false">What we found</li>
+        <li data-step="3" aria-current="false">Choose</li>
+        <li data-step="4" aria-current="false">Check the plan</li>
+        <li data-step="5" aria-current="false">Bring in</li>
+        <li data-step="6" aria-current="false">Organize</li>
+        <li data-step="7" aria-current="false">First question</li>
+      </ol>
+      <p id="adopt-stepper-compact" class="stepper-compact"></p>
+      <p id="adopt-status" class="status" role="status"></p>
+      <p id="adopt-error" class="error" role="alert" tabindex="-1" hidden></p>
+
+      <section id="adopt-start" class="adopt-step" hidden>
+        <p class="eyebrow">Bring your files in</p>
+        <h1>Bring your notes and files into Exomem</h1>
+        <p>Point Exomem at a folder. It looks through what's there and shows you what it found. Nothing is copied or changed by looking.</p>
+        <label for="adopt-path">Folder to look through</label>
+        <input id="adopt-path" name="path" type="text" autocomplete="off" spellcheck="false" placeholder="(your whole folder)">
+        <p class="contract-line">Looking is read-only.</p>
+        <div class="step-actions">
+          <button id="adopt-start-scan" type="button">Look through my files</button>
+        </div>
+        <div id="adopt-resume" class="resume-card" hidden>
+          <p id="adopt-resume-text">Pick up where you left off.</p>
+          <div class="step-actions">
+            <button id="adopt-resume-continue" type="button">Continue</button>
+            <button id="adopt-resume-restart" type="button" class="secondary">Start over</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="adopt-scanning" class="adopt-step" hidden>
+        <h2>Looking through your files…</h2>
+        <div class="step-actions">
+          <button id="adopt-scan-cancel" type="button" class="secondary">Stop looking</button>
+        </div>
+      </section>
+
+      <section id="adopt-findings" class="adopt-step" hidden>
+        <h2>Here's what we found</h2>
+        <div id="adopt-tiles" class="tiles"></div>
+        <p id="adopt-packs" hidden></p>
+        <p class="fine-print">based only on folder and file names — nothing was read into memory</p>
+        <ul id="adopt-folder-list" class="folder-list"></ul>
+        <p id="adopt-junk" class="fine-print" hidden></p>
+        <p id="adopt-nontext" class="fine-print" hidden></p>
+        <div class="step-actions">
+          <button id="adopt-to-choose" type="button">Choose what to bring in</button>
+          <button id="adopt-rescan" type="button" class="secondary">Look again</button>
+          <button id="adopt-not-now" type="button" class="secondary">Not now</button>
+        </div>
+      </section>
+
+      <section id="adopt-choose" class="adopt-step" hidden>
+        <h2>Choose what to bring in</h2>
+        <ul id="adopt-choose-tree" class="folder-tree" role="tree" aria-label="Folders to bring in"></ul>
+        <label class="junk-toggle">
+          <input id="adopt-junk-toggle" type="checkbox">
+          <span id="adopt-junk-label">Include the probably-junk files too</span>
+        </label>
+        <div id="adopt-files-panel" class="files-panel" hidden></div>
+        <p class="contract-line">Selecting doesn't copy anything. Next you'll see exactly what will happen before anything moves — and nothing ever moves.</p>
+        <div class="step-actions">
+          <button id="adopt-to-preview" type="button">Show me exactly what will happen</button>
+          <button id="adopt-choose-back" type="button" class="secondary">Back</button>
+        </div>
+      </section>
+
+      <section id="adopt-preview" class="adopt-step" hidden>
+        <h2>Exactly what will happen</h2>
+        <div id="adopt-stale" class="stale-banner" hidden>
+          <p id="adopt-stale-text"></p>
+          <button id="adopt-recheck" type="button">Re-check my folder</button>
+        </div>
+        <p id="adopt-contract" class="contract-card"></p>
+        <ul id="adopt-plan-bullets" class="plan-bullets"></ul>
+        <details id="adopt-plan-files" class="plan-files"></details>
+        <div class="step-actions">
+          <button id="adopt-apply" type="button">Bring these files in</button>
+          <button id="adopt-preview-back" type="button" class="secondary">Change my choices</button>
+        </div>
+      </section>
+
+      <section id="adopt-applying" class="adopt-step" hidden>
+        <h2>Bringing your files in…</h2>
+        <div class="step-actions">
+          <button id="adopt-apply-cancel" type="button" class="secondary">Stop</button>
+        </div>
+      </section>
+
+      <section id="adopt-result" class="adopt-step" hidden>
+        <h2 id="adopt-result-title"></h2>
+        <p id="adopt-verify" class="verify-line"></p>
+        <div id="adopt-failures" class="failures" hidden></div>
+        <div class="step-actions">
+          <button id="adopt-retry" type="button" hidden>Try those again</button>
+          <button id="adopt-to-handoff" type="button">Get help organizing (optional)</button>
+          <button id="adopt-skip-handoff" type="button" class="secondary">Skip to your first question</button>
+        </div>
+      </section>
+
+      <section id="adopt-handoff" class="adopt-step" hidden>
+        <h2>Want help organizing? (optional)</h2>
+        <p>If an AI assistant (like Claude or Codex) is connected to this Exomem, it can look at what you just brought in and suggest titles, groups, and connections. You approve every suggestion before anything changes.</p>
+        <textarea id="adopt-prompt" class="prompt-block" readonly rows="6" aria-label="Prompt for your assistant"></textarea>
+        <div class="step-actions">
+          <button id="adopt-copy" type="button">Copy prompt</button>
+        </div>
+        <div id="adopt-links" class="handoff-links" hidden></div>
+        <p class="fine-print">Paste this into your assistant. It tells it exactly what to do — and it can only make suggestions, not changes.</p>
+        <p id="adopt-handoff-wait" class="status" role="status" hidden></p>
+        <div class="step-actions">
+          <button id="adopt-wait" type="button">I've sent it — wait for suggestions</button>
+          <button id="adopt-skip-handoff2" type="button" class="secondary">Skip this step</button>
+        </div>
+      </section>
+
+      <section id="adopt-proposals" class="adopt-step" hidden>
+        <p class="eyebrow">Suggestions from your assistant</p>
+        <h2>Review suggestions</h2>
+        <div class="proposals-layout">
+          <ol id="adopt-proposal-list" class="review-list" aria-label="Suggestions"></ol>
+          <div id="adopt-proposal-detail" class="proposal-detail"></div>
+        </div>
+        <div class="step-actions">
+          <button id="adopt-proposals-back" type="button" class="secondary">Back</button>
+          <button id="adopt-proposals-finish" type="button">Finish up</button>
+        </div>
+      </section>
+
+      <section id="adopt-question" class="adopt-step" hidden>
+        <h2>Ask your first question</h2>
+        <p>Your files are in. Try asking something they should be able to answer.</p>
+        <div id="adopt-chips" class="chips"></div>
+        <div class="field-row">
+          <input id="adopt-ask" type="text" autocomplete="off" aria-label="Ask your Exomem">
+          <button id="adopt-ask-btn" type="button">Ask</button>
+        </div>
+        <div id="adopt-answers" class="answers"></div>
+      </section>
+
+      <section id="adopt-done" class="adopt-step" hidden>
+        <h2>You're set up</h2>
+        <p>Exomem keeps working quietly in the background.</p>
+        <div class="step-actions">
+          <button id="adopt-go-review" type="button">Go to Review</button>
+        </div>
+      </section>
+
+      <section id="adopt-cancelled" class="adopt-step" hidden>
+        <p id="adopt-cancelled-text">Stopped. Nothing was copied or changed.</p>
+        <div class="step-actions">
+          <button id="adopt-cancel-restart" type="button">Start again</button>
+        </div>
+      </section>
+
+      <section id="adopt-failed" class="adopt-step" hidden>
+        <p id="adopt-failed-text"></p>
+        <div class="step-actions">
+          <button id="adopt-failed-retry" type="button">Try again</button>
+        </div>
+      </section>
+
+      <section id="adopt-unknown" class="adopt-step" hidden>
+        <p>This import is in a state this page doesn't recognize. Refresh, or start a new import — your originals are untouched either way.</p>
+        <div class="step-actions">
+          <button id="adopt-unknown-restart" type="button">Start a new import</button>
+        </div>
+      </section>
+    </section>
   </main>
 
   <dialog id="action-dialog" aria-labelledby="dialog-title">
@@ -125,6 +304,6 @@
     </form>
   </dialog>
 
-  <script type="module" src="/studio/assets/app.v3.js"></script>
+  <script type="module" src="/studio/assets/app.v4.js"></script>
 </body>
 </html>

@@ -60,17 +60,20 @@ test("authenticated Inbox inspection, triage, evolution, and history navigation"
   expect(calls[0].authorization).toBe("Bearer browser-session-key");
   await expect(page.getByText("3 omitted by the requested limit")).toBeVisible();
   await page.getByRole("button", {name: /First measured conclusion/}).click();
-  await expect(page.getByText("Review date elapsed.")).toBeVisible();
+  // The card meta also carries the reason text, so scope to the workspace.
+  await expect(page.locator("#item-reasons")).toContainText("Review date elapsed.");
   await page.getByRole("button", {name: "Evolution"}).click();
   await expect(page.getByText("Recorded transition: New evidence")).toBeVisible();
   await page.goBack();
-  await expect(page.getByRole("heading", {name: "Choose a review item"})).toBeVisible();
+  // One back-step returns from Evolution to the same item's Context panel.
+  await expect(page.locator("#evolution-panel")).toBeHidden();
+  await expect(page.getByRole("heading", {name: "Target"})).toBeVisible();
   await page.goForward();
   await expect(page.getByText("Earlier conclusion")).toBeVisible();
   await page.getByRole("button", {name: "Dismiss"}).click();
   await expect(page.getByRole("dialog")).toContainText("First measured conclusion");
   await page.getByRole("button", {name: "Confirm dismiss"}).click();
-  expect(calls.some((call) => call.name === "triage_memory" && call.body.action === "dismiss")).toBeTruthy();
+  await expect.poll(() => calls.some((call) => call.name === "triage_memory" && call.body.action === "dismiss")).toBeTruthy();
 });
 
 test("activation stays separate and governed relation requires confirmation", async ({page}) => {
@@ -87,7 +90,7 @@ test("activation stays separate and governed relation requires confirmation", as
   expect(calls.some((call) => call.name === "connect_memory")).toBeTruthy();
   expect(calls.some((call) => call.name === "edit_memory")).toBeFalsy();
   await page.getByRole("button", {name: "Confirm governed edit"}).click();
-  expect(calls.some((call) => call.name === "edit_memory")).toBeTruthy();
+  await expect.poll(() => calls.some((call) => call.name === "edit_memory")).toBeTruthy();
 });
 
 test("narrow viewport and keyboard-only list navigation remain usable", async ({page}) => {

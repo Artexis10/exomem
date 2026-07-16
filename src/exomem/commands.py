@@ -33,6 +33,8 @@ from typing_extensions import TypedDict
 
 from . import add as add_module
 from . import adopt as adopt_module
+from . import adoption_proposals as adoption_proposals_module
+from . import adoption_run as adoption_run_module
 from . import append_to_file as append_to_file_module
 from . import attention as attention_module
 from . import audit as audit_module
@@ -3832,11 +3834,15 @@ def op_review_memory(
     Args:
         mode: attention, activation, item, audit, provenance, evolution,
             compilation, stale, contradiction, unprocessed-sources, relation-debt,
-            or relation-queue. `relation-queue` returns the read-only, batched
-            relation-acceptance queue (deterministic suggestion candidates
+            relation-queue, or adoption. `relation-queue` returns the read-only,
+            batched relation-acceptance queue (deterministic suggestion candidates
             grouped by source page, with signal fingerprints and coverage
             counters); accept a candidate via
             `connect_memory(operation="accept-relation")` or reject via
+            `triage_memory`. `adoption` returns the read-only Adoption Studio
+            proposal queue grouped per run (structured agent proposals with signal
+            fingerprints); approve a proposal via
+            `adoption_studio(action="apply-proposal")` or dismiss via
             `triage_memory`.
         categories: Optional category filter for attention/activation/audit.
         limit: Attention/activation/evolution result cap.
@@ -3891,6 +3897,13 @@ def op_review_memory(
         )
     if mode == "relation-queue":
         return relation_queue_module.build_queue(vault_root, limit_pages=limit)
+    if mode == "adoption":
+        adoption_run_id: str | None = None
+        if ref and ref.startswith("exomem://adoption/run/"):
+            adoption_run_id = ref.rsplit("/", 1)[-1] or None
+        return adoption_proposals_module.build_queue(
+            vault_root, run_id=adoption_run_id, state=state, limit=limit
+        )
     if mode == "provenance":
         return op_provenance_report(vault_root, tag=tag, key=key, value=value, path=path)
     if mode == "evolution":
@@ -3902,7 +3915,7 @@ def op_review_memory(
     raise ValueError(
         "INVALID_MODE: review_memory mode must be attention, activation, item, audit, "
         "provenance, evolution, compilation, stale, contradiction, "
-        "unprocessed-sources, relation-debt, or relation-queue"
+        "unprocessed-sources, relation-debt, relation-queue, or adoption"
     )
 
 
@@ -3925,7 +3938,10 @@ def op_review_item_context(
     assembly: it runs no model, makes no epistemic judgment, and never writes.
 
     Args:
-        ref: Stable `exomem://review/<id>` reference.
+        ref: Stable `exomem://review/<id>` reference. An
+            `exomem://review/adoption/<id>` ref returns the bounded Adoption
+            Studio proposal context (proposal record, live binding check, and
+            target-page summary) instead.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch asks the
             caller to refresh instead of presenting stale context.
         max_body_chars: Maximum target body characters.
@@ -3935,6 +3951,14 @@ def op_review_item_context(
         max_history: Maximum recorded history entries.
         max_evolution_versions: Maximum recorded supersession versions.
     """
+    if adoption_proposals_module.is_adoption_ref(ref):
+        return adoption_proposals_module.assemble_context(
+            vault_root,
+            ref=ref,
+            expected_fingerprint=expected_fingerprint,
+            max_body_chars=max_body_chars,
+            max_related_pages=max_related_pages,
+        )
     return review_context_module.assemble(
         vault_root,
         ref=ref,
@@ -3963,13 +3987,24 @@ def op_triage_memory(
     resurfaces automatically.
 
     Args:
-        ref: Stable `exomem://review/<id>` reference from review_memory.
+        ref: Stable `exomem://review/<id>` reference from review_memory. An
+            `exomem://review/adoption/<id>` ref triages an Adoption Studio
+            proposal instead, keyed the same way (`review_id:fingerprint`).
         action: dismiss, snooze, or reopen.
         until: Snooze-through date as YYYY-MM-DD; required only for snooze.
         why: Optional short rationale stored with the review decision.
         expected_fingerprint: Optional reviewed fingerprint; a mismatch refuses
             the write and asks the caller to refresh.
     """
+    if adoption_proposals_module.is_adoption_ref(ref):
+        return adoption_proposals_module.triage(
+            vault_root,
+            ref=ref,
+            action=action,
+            until=until,
+            why=why,
+            expected_fingerprint=expected_fingerprint,
+        )
     if relation_queue_module.is_relation_ref(ref):
         return relation_queue_module.triage(
             vault_root,
@@ -4240,6 +4275,177 @@ def op_adopt_vault(
         manifest_path=manifest_path,
         selected_paths=selected_paths,
     )
+
+
+_ADOPTION_STUDIO_ACTIONS = (
+    "start",
+    "status",
+    "select",
+    "plan",
+    "apply",
+    "cancel",
+    "finish",
+    "work-item",
+    "propose",
+    "apply-proposal",
+)
+
+
+def _load_adoption_proposals():
+    """Lazily import the Lane B proposal engine, or fail with a clear message."""
+    try:
+        from . import adoption_proposals as adoption_proposals_module
+    except ImportError as exc:
+        raise ValueError(
+            "NOT_IMPLEMENTED: adoption_studio actions 'work-item', 'propose', and "
+            "'apply-proposal' require the adoption_proposals module, which is not "
+            "installed in this build"
+        ) from exc
+    return adoption_proposals_module
+
+
+def op_adoption_studio(
+    vault_root: Path,
+    action: str,
+    run_id: str | None = None,
+    path: str = "",
+    include_hidden: bool = False,
+    initialize_kb: bool = False,
+    include: list[str] | None = None,
+    exclude: list[str] | None = None,
+    overrides: list[str] | None = None,
+    include_junk: bool = False,
+    plan_id: str | None = None,
+    retry_failed: bool = False,
+    only_paths: list[str] | None = None,
+    why: str | None = None,
+    write_manifest: bool = True,
+    sources: list[str] | None = None,
+    max_sources: int = 5,
+    max_chars_per_source: int = 2000,
+    proposals: list[dict] | None = None,
+    ref: str | None = None,
+    expected_fingerprint: str | None = None,
+    expected_hash: str | None = None,
+) -> dict:
+    """Run a governed, resumable Adoption Studio session over existing material.
+
+    Adoption Studio turns a messy legacy vault into governed Exomem knowledge
+    without ever rewriting, moving, or deleting an original file. It is a durable,
+    canonical-file-backed run with a preview-exact-actions contract: you see the
+    precise imports before anything is written, and `apply` commits exactly that
+    plan or refuses. One required `action` multiplexes the whole lifecycle; the
+    read-only default (`status`) is safe and `start` is explicitly guarded.
+
+    Lifecycle actions: `start` scans a subtree read-only and snapshots a candidate
+    inventory; `select` materializes a folder-rule selection server-side; `plan`
+    previews exact targets, titles, hashes, and frontmatter; `apply` copies the
+    validated subset into governed Sources with provenance in one atomic batch;
+    `cancel` closes a pre-apply run; `finish` proves recall and hands you a first
+    question. Agent actions ride the run afterwards: `work-item` returns bounded
+    read-only context, `propose` submits structured proposals, and
+    `apply-proposal` approves one through an existing governed leaf.
+
+    Args:
+        action: Required. One of start, status, select, plan, apply, cancel,
+            finish, work-item, propose, or apply-proposal.
+        run_id: Stable adoption run id from `start`; required by every action
+            except `start` and the run-listing form of `status`.
+        path: For `start`, the vault subtree to scan. Defaults to the vault root.
+        include_hidden: For `start`, include hidden files/directories in the scan.
+        initialize_kb: For `start`, bootstrap the Knowledge Base scaffold first
+            when it does not exist yet (otherwise `start` refuses with
+            KB_NOT_INITIALIZED).
+        include: For `select`, folder or file paths whose eligible files are
+            selected (server materializes the concrete set).
+        exclude: For `select`, folder or file paths to remove from the selection.
+        overrides: For `select`, explicit per-file paths to force-select.
+        include_junk: For `select`, include junk (e.g. zero-byte) files that are
+            otherwise demoted. Default false.
+        plan_id: For `apply`, the plan id echoed from `plan`/`status`; a mismatch
+            or a changed selection is refused with PLAN_STALE.
+        retry_failed: For `apply`, re-plan and re-apply only the failed subset.
+        only_paths: For `apply`, restrict the (retry) apply to these originals.
+        why: Required approver rationale for `apply-proposal`; also records the
+            reason on `cancel`.
+        write_manifest: For `finish`, write an optional run manifest under
+            `Knowledge Base/_Adoption/`. Default true.
+        sources: For `work-item`, explicit source paths to include instead of the
+            first `max_sources` applied imports.
+        max_sources: For `work-item`, the maximum sources returned. Default 5.
+        max_chars_per_source: For `work-item`, the per-source excerpt cap. Default 2000.
+        proposals: For `propose`, the list of structured proposal objects to submit.
+        ref: For `apply-proposal`, the `exomem://review/adoption/<id>` proposal ref.
+        expected_fingerprint: For `apply-proposal`, the reviewed fingerprint that
+            must still match, or the write is refused.
+        expected_hash: For `apply-proposal`, the target page hash for relation and
+            reconciliation-relate approvals.
+    """
+    action = (action or "").strip()
+    if action not in _ADOPTION_STUDIO_ACTIONS:
+        raise ValueError(
+            "INVALID_MODE: adoption_studio action must be start, status, select, "
+            "plan, apply, cancel, finish, work-item, propose, or apply-proposal"
+        )
+    try:
+        if action == "start":
+            return adoption_run_module.start(
+                vault_root, path=path, include_hidden=include_hidden, initialize_kb=initialize_kb
+            )
+        if action == "status":
+            return adoption_run_module.status(vault_root, run_id=run_id)
+        if action == "select":
+            return adoption_run_module.select(
+                vault_root,
+                run_id=run_id,
+                include=include,
+                exclude=exclude,
+                overrides=overrides,
+                include_junk=include_junk,
+            )
+        if action == "plan":
+            return adoption_run_module.plan(vault_root, run_id=run_id)
+        if action == "apply":
+            return adoption_run_module.apply(
+                vault_root,
+                run_id=run_id,
+                plan_id=plan_id,
+                retry_failed=retry_failed,
+                only_paths=only_paths,
+            )
+        if action == "cancel":
+            return adoption_run_module.cancel(vault_root, run_id=run_id, why=why)
+        if action == "finish":
+            return adoption_run_module.finish(
+                vault_root, run_id=run_id, write_manifest=write_manifest
+            )
+        proposals_module = _load_adoption_proposals()
+        if action == "work-item":
+            return proposals_module.work_item(
+                vault_root,
+                run_id=run_id,
+                sources=sources,
+                max_sources=max_sources,
+                max_chars_per_source=max_chars_per_source,
+            )
+        if action == "propose":
+            return proposals_module.propose(vault_root, run_id=run_id, proposals=proposals or [])
+        # apply-proposal
+        return proposals_module.apply_proposal(
+            vault_root,
+            ref=ref,
+            expected_fingerprint=expected_fingerprint,
+            why=why,
+            expected_hash=expected_hash,
+        )
+    except adoption_run_module.AdoptionRunError as exc:
+        raise ValueError(f"{exc.code}: {exc.reason}") from exc
+    except Exception as exc:  # structured proposal errors carry code/reason
+        code = getattr(exc, "code", None)
+        reason = getattr(exc, "reason", None)
+        if code is not None and reason is not None:
+            raise ValueError(f"{code}: {reason}") from exc
+        raise
 
 
 def op_maintain_memory(
@@ -4773,6 +4979,7 @@ _CONNECT_MEMORY_READ_ONLY_OPERATIONS = frozenset(
     {"suggest-links", "suggest-relations", "context", "graph-context", "inbound-links"}
 )
 _ADOPT_VAULT_READ_ONLY_MODES = frozenset({"scan-only"})
+_ADOPTION_STUDIO_READ_ONLY_ACTIONS = frozenset({"status", "work-item"})
 _PROCESS_MEDIA_READ_ONLY_OPERATIONS = frozenset({"status"})
 _OBSERVE_MEMORY_READ_ONLY_OPERATIONS = frozenset({"validate"})
 _MISSING_SELECTOR_DEFAULT = object()
@@ -4810,6 +5017,9 @@ def invocation_is_read_only(command: Command, kwargs: dict[str, Any]) -> bool:
     if command.name == "adopt_vault":
         mode = _resolved_invocation_selector(command, kwargs, "mode")
         return isinstance(mode, str) and mode in _ADOPT_VAULT_READ_ONLY_MODES
+    if command.name == "adoption_studio":
+        action = _resolved_invocation_selector(command, kwargs, "action")
+        return isinstance(action, str) and action in _ADOPTION_STUDIO_READ_ONLY_ACTIONS
     if command.name == "process_media":
         operation = _resolved_invocation_selector(command, kwargs, "operation")
         return (
@@ -5229,6 +5439,17 @@ _PRODUCT_SPEC: tuple[tuple, ...] = (
         _MCRC,
         ("adopt",),
         {"surface": "primary", "actions": ("adopt",), "first_run_safe": True},
+    ),
+    (
+        "adoption_studio",
+        op_adoption_studio,
+        1,
+        True,
+        False,
+        None,
+        _MCRC,
+        ("adopt",),
+        {"surface": "primary", "actions": ("adopt", "review", "save"), "first_run_safe": True},
     ),
     (
         "maintain_memory",

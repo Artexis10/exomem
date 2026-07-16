@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 24
-- Tier 1 commands: 21
+- Product commands: 25
+- Tier 1 commands: 22
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 24
-- REST commands: 23
-- CLI commands: 23
+- Registry-generated MCP commands: 25
+- REST commands: 24
+- CLI commands: 24
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -54,6 +54,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | triage_memory | 1 | MCP, REST, CLI | write | no | ref | attention | ref*, action*, until, why, expected_fingerprint | Triage one Epistemic Inbox item explicitly. |
 | connect_memory | 1 | MCP, REST, CLI | write | no | - | suggest_links, graph_context, suggest_relations, link, list_inbound_links | operation, path, target, query, draft_title, draft_body, limit, scope, include_model_suggestions, depth, relation_types, node_types, max_nodes, max_edges, traversal_profile, max_body_chars, entity_type, name, slug, summary, why_in_kb, tags, connections, affiliation, relationship, domain, language, repo, license, used_in, decided, project, decision_status, ref, expected_hash, why, expected_fingerprint | Connect memory through links, typed graph context, or entities. |
 | adopt_vault | 1 | MCP, REST, CLI | write | no | path | adopt | path, mode, max_depth, include_hidden, samples, pack_limit, manifest_path, selected_paths | Adopt an existing vault safely without replacing originals. |
+| adoption_studio | 1 | MCP, REST, CLI | write | no | - | adopt | action*, run_id, path, include_hidden, initialize_kb, include, exclude, overrides, include_junk, plan_id, retry_failed, only_paths, why, write_manifest, sources, max_sources, max_chars_per_source, proposals, ref, expected_fingerprint, expected_hash | Run a governed, resumable Adoption Studio session over existing material. |
 | maintain_memory | 1 | MCP, REST, CLI | write | yes | - | audit, audit_fix, reconcile | mode, categories, dry_run, rebuild_embeddings | Maintain vault health with explicit write-capable modes. |
 | schema_memory | 1 | MCP, REST, CLI | write | yes | - | schema_memory | operation*, name, subject, project, page_type, save, expected_hash, strict, compare_to, proposal, include_model_suggestions | Infer, validate, diff, or save governed memory schemas. |
 | manage_memory_file | 2 | MCP, REST, CLI | write | yes | - | create_file, list_directory, move_file, delete, append_to_file, list_trash, recover_from_trash | operation, path, content, frontmatter, overwrite, allow_curated, kind, parents, recursive, include_hidden, old_path, new_path, update_wikilinks, confirm, force_orphan, force_superseded, expected_dead_inbound, trash_path, restore_path, date, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason | Manage files through one governed file operation. |

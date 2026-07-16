@@ -30,14 +30,16 @@ def test_packaged_manifest_contains_every_source_controlled_asset() -> None:
     studio = files("exomem").joinpath("studio")
     manifest = json.loads(studio.joinpath("manifest.json").read_text(encoding="utf-8"))
 
-    assert manifest["version"] == 3
+    assert manifest["version"] == 4
     assert set(manifest["assets"]) == {
         "index.html",
-        "styles.v1.css",
+        "styles.v2.css",
         "api.v1.js",
-        "state.v1.js",
+        "state.v2.js",
         "model.v1.js",
-        "app.v3.js",
+        "app.v4.js",
+        "adoption.v1.js",
+        "adoption-model.v1.js",
         "studio-icon.v1.svg",
     }
     for asset in manifest["assets"]:
@@ -51,7 +53,7 @@ def test_studio_shell_and_versioned_assets_have_cache_and_security_headers(
 
     redirect = client.get("/studio", follow_redirects=False)
     shell = client.get("/studio/")
-    script = client.get("/studio/assets/app.v3.js")
+    script = client.get("/studio/assets/app.v4.js")
 
     assert redirect.status_code == 307
     assert redirect.headers["location"] == "/studio/"
@@ -74,7 +76,13 @@ def test_shell_is_inert_and_client_keeps_key_session_scoped(
     client = _client(vault, monkeypatch, api_key="top-secret-test-key")
     shell = client.get("/studio/").text
     api_client = client.get("/studio/assets/api.v1.js").text
-    all_assets = shell + api_client + client.get("/studio/assets/app.v3.js").text
+    all_assets = (
+        shell
+        + api_client
+        + client.get("/studio/assets/app.v4.js").text
+        + client.get("/studio/assets/adoption.v1.js").text
+        + client.get("/studio/assets/adoption-model.v1.js").text
+    )
 
     assert "metabolic-literacy-curriculum" not in all_assets
     assert "top-secret-test-key" not in all_assets

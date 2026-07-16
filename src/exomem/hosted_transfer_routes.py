@@ -8,11 +8,13 @@ import hmac
 import json
 import os
 import re
+import shutil
 import stat
 import threading
 import time
 import unicodedata
 import uuid
+import zipfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import AbstractContextManager
 from pathlib import Path
@@ -27,6 +29,28 @@ from .hosted_runtime import HostedCellConfig, HostedCellLifecycle, HostedLifecyc
 from .vault import VaultPathError, resolve_under_vault
 
 _DOWNLOAD_CHUNK_BYTES = 64 * 1024
+
+# --- Adoption staging intake (Lane D hosted entrypoint) --------------------
+# A staged upload rides the SAME verified transfer grant as a normal upload but
+# lands as RAW bytes under a vault-relative staging tree OUTSIDE `Knowledge
+# Base/`, so the adoption engine treats it as legacy input to scan. The locked
+# upload-v1 metadata schema (hosted_transfer._validate_upload_target) has no room
+# for new fields, so staging reuses existing SIGNED metadata fields:
+#   scope        == _ADOPTION_STAGING_SCOPE -> route to the staging branch
+#   category     -> the run identifier (strict slug, validated before path use)
+#   filename     -> the raw leaf name (single-file landing)
+#   content_type -> a ZIP media type declares an archive to expand cell-side
+#   description  -> OPTIONAL relative subdirectory under the run dir (or None)
+_ADOPTION_STAGING_SCOPE = "adoption-staging"
+_ADOPTION_STAGING_ROOT = "_Staging/adoption"
+_ADOPTION_STAGING_ZIP_CONTENT_TYPES = frozenset(
+    {"application/zip", "application/x-zip-compressed"}
+)
+_ADOPTION_STAGING_MAX_ENTRIES = 4096
+_ADOPTION_STAGING_MAX_TOTAL_BYTES = hosted_transfer.TRANSFER_UPLOAD_MAX_BYTES
+_ADOPTION_STAGING_RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
+_ADOPTION_STAGING_COPY_CHUNK_BYTES = 1024 * 1024
+
 _ERROR_CATALOG: dict[str, tuple[int, str, bool, bool]] = {
     "TRANSFER_REQUEST_INVALID": (400, "transfer request is invalid", False, False),
     "TRANSFER_GRANT_REJECTED": (401, "transfer authorization failed", False, True),
@@ -221,20 +245,34 @@ def register_public_transfer_routes(
             def commit() -> None:
                 assert temp_stream is not None
                 with mutation_guard_factory(config.vault_root):
-                    preserve_stream_func(
-                        config.vault_root,
-                        scope=metadata["scope"] or "uploads",
-                        category=metadata["category"] or "uncategorized",
-                        filename=metadata["filename"],
-                        stream=temp_stream,
-                        content_type=metadata["content_type"],
-                        description=metadata["description"],
-                        text=None,
-                        max_bytes=grant.max_bytes,
-                    )
+                    if metadata["scope"] == _ADOPTION_STAGING_SCOPE:
+                        _stage_adoption_upload(
+                            vault_root=config.vault_root,
+                            temp_root=temp_root,
+                            metadata=metadata,
+                            stream=temp_stream,
+                            max_bytes=grant.max_bytes,
+                        )
+                    else:
+                        preserve_stream_func(
+                            config.vault_root,
+                            scope=metadata["scope"] or "uploads",
+                            category=metadata["category"] or "uncategorized",
+                            filename=metadata["filename"],
+                            stream=temp_stream,
+                            content_type=metadata["content_type"],
+                            description=metadata["description"],
+                            text=None,
+                            max_bytes=grant.max_bytes,
+                        )
 
             try:
                 await run_in_threadpool_func(commit)
+            except PublicRequestError:
+                # Deliberate staging rejections (malicious/oversized archive, an
+                # invalid run target) keep their exact public code instead of
+                # being masked as a retryable commit fault.
+                raise
             except Exception as exc:  # noqa: BLE001 - governed commit stays redacted
                 raise PublicRequestError("TRANSFER_COMMIT_UNAVAILABLE") from exc
         except hosted_transfer.TransferSecurityUnavailable:
@@ -637,6 +675,243 @@ def _download_disposition(filename: str) -> str:
 def _release(admission: AbstractContextManager[None] | None) -> None:
     if admission is not None:
         admission.__exit__(None, None, None)
+
+
+def _stage_adoption_upload(
+    *,
+    vault_root: Path,
+    temp_root: Path,
+    metadata: dict[str, Any],
+    stream: BinaryIO,
+    max_bytes: int,
+) -> None:
+    """Land a staged upload as RAW bytes under `_Staging/adoption/<run_id>/`.
+
+    Rides the already-verified transfer grant (auth, tenant confinement, byte
+    cap, and admission are enforced by the caller). Never writes under `Knowledge
+    Base/`: every target is resolved with `resolve_under_vault` against the
+    injected vault root and re-checked to stay under the run directory. A ZIP
+    (declared via its media type, not sniffing) is expanded cell-side with
+    zip-slip, entry-count, and size guards; a rejected archive leaves nothing
+    behind because extraction is fully validated in the hosted temp root before
+    anything is moved into place.
+    """
+
+    run_id = metadata["category"]
+    if not isinstance(run_id, str) or not _ADOPTION_STAGING_RUN_ID.fullmatch(run_id):
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    relative_prefix = _staging_relative_prefix(metadata.get("description"))
+    run_relative = f"{_ADOPTION_STAGING_ROOT}/{run_id}"
+    if metadata["content_type"] in _ADOPTION_STAGING_ZIP_CONTENT_TYPES:
+        _stage_adoption_zip(
+            vault_root=vault_root,
+            temp_root=temp_root,
+            run_relative=run_relative,
+            relative_prefix=relative_prefix,
+            stream=stream,
+            max_bytes=max_bytes,
+        )
+    else:
+        _stage_adoption_file(
+            vault_root=vault_root,
+            run_relative=run_relative,
+            relative_prefix=relative_prefix,
+            filename=metadata["filename"],
+            stream=stream,
+            max_bytes=max_bytes,
+        )
+
+
+def _stage_adoption_file(
+    *,
+    vault_root: Path,
+    run_relative: str,
+    relative_prefix: str,
+    filename: str,
+    stream: BinaryIO,
+    max_bytes: int,
+) -> None:
+    member = f"{relative_prefix}/{filename}" if relative_prefix else filename
+    destination, _relative = _resolve_staging_target(vault_root, run_relative, member)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    partial = destination.parent / f".staging-{uuid.uuid4()}.part"
+    try:
+        _copy_stream_to_path(stream, partial, limit=max_bytes)
+        os.replace(partial, destination)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def _stage_adoption_zip(
+    *,
+    vault_root: Path,
+    temp_root: Path,
+    run_relative: str,
+    relative_prefix: str,
+    stream: BinaryIO,
+    max_bytes: int,
+) -> None:
+    extract_root = temp_root / f"staging-{uuid.uuid4()}"
+    extract_root.mkdir(mode=0o700)
+    try:
+        try:
+            stream.seek(0)
+            archive = zipfile.ZipFile(stream)
+        except (OSError, zipfile.BadZipFile) as exc:
+            raise PublicRequestError("TRANSFER_REQUEST_INVALID") from exc
+        staged: list[str] = []
+        seen: set[str] = set()
+        total_bytes = 0
+        with archive as zip_file:
+            for info in zip_file.infolist():
+                if info.is_dir():
+                    continue
+                if _zip_entry_is_symlink(info):
+                    raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+                member = _validated_zip_member(info.filename, relative_prefix)
+                if member in seen:
+                    raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+                seen.add(member)
+                if len(seen) > _ADOPTION_STAGING_MAX_ENTRIES:
+                    raise PublicRequestError("TRANSFER_TOO_LARGE")
+                if info.file_size > max_bytes:
+                    raise PublicRequestError("TRANSFER_TOO_LARGE")
+                target = _safe_join(extract_root, member)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                total_bytes += _extract_zip_member(
+                    zip_file, info, target, per_entry_limit=max_bytes
+                )
+                # The signed grant's byte allowance bounds the AGGREGATE
+                # expansion too — otherwise a tiny compressed archive could
+                # expand entry-by-entry up to the global constant and bypass
+                # the per-upload / tenant resource allowance.
+                if total_bytes > min(max_bytes, _ADOPTION_STAGING_MAX_TOTAL_BYTES):
+                    raise PublicRequestError("TRANSFER_TOO_LARGE")
+                staged.append(member)
+        # The whole archive validated in the hosted temp root: only now is the
+        # vault touched, so a rejected archive never leaves a partial extraction.
+        for member in staged:
+            destination, _relative = _resolve_staging_target(
+                vault_root, run_relative, member
+            )
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.move(str(extract_root / member), str(destination))
+    finally:
+        shutil.rmtree(extract_root, ignore_errors=True)
+
+
+def _staging_relative_prefix(description: Any) -> str:
+    """Validate the optional relative subdirectory carried in `description`."""
+
+    if description is None:
+        return ""
+    if not isinstance(description, str):
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    parts = [part for part in description.replace("\\", "/").split("/") if part]
+    if any(not _valid_staging_component(part) for part in parts):
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    return "/".join(parts)
+
+
+def _validated_zip_member(name: Any, relative_prefix: str) -> str:
+    if not isinstance(name, str) or not name:
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    normalized = name.replace("\\", "/")
+    if normalized.startswith("/"):
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    parts = [part for part in normalized.split("/") if part]
+    if not parts or any(not _valid_staging_component(part) for part in parts):
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID")
+    if relative_prefix:
+        parts = relative_prefix.split("/") + parts
+    return "/".join(parts)
+
+
+def _valid_staging_component(part: str) -> bool:
+    return (
+        part not in {".", ".."}
+        and "\\" not in part
+        and unicodedata.normalize("NFC", part) == part
+        and not any(unicodedata.category(character) == "Cc" for character in part)
+    )
+
+
+def _zip_entry_is_symlink(info: zipfile.ZipInfo) -> bool:
+    return stat.S_ISLNK(info.external_attr >> 16)
+
+
+def _safe_join(base: Path, member: str) -> Path:
+    target = base / member
+    try:
+        target.resolve().relative_to(base.resolve())
+    except ValueError as exc:
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID") from exc
+    return target
+
+
+def _resolve_staging_target(
+    vault_root: Path, run_relative: str, member: str
+) -> tuple[Path, str]:
+    try:
+        run_dir, _run_relative = resolve_under_vault(vault_root, run_relative)
+        target, target_relative = resolve_under_vault(
+            vault_root, f"{run_relative}/{member}"
+        )
+    except VaultPathError as exc:
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID") from exc
+    try:
+        target.resolve().relative_to(run_dir.resolve())
+    except ValueError as exc:
+        raise PublicRequestError("TRANSFER_REQUEST_INVALID") from exc
+    return target, target_relative
+
+
+def _copy_stream_to_path(stream: BinaryIO, dest: Path, *, limit: int) -> int:
+    try:
+        stream.seek(0)
+    except (OSError, ValueError):
+        pass
+    written = 0
+    descriptor = os.open(
+        dest,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    with os.fdopen(descriptor, "wb") as out:
+        while True:
+            chunk = stream.read(_ADOPTION_STAGING_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > limit:
+                raise PublicRequestError("TRANSFER_TOO_LARGE")
+            out.write(chunk)
+    return written
+
+
+def _extract_zip_member(
+    zip_file: zipfile.ZipFile,
+    info: zipfile.ZipInfo,
+    dest: Path,
+    *,
+    per_entry_limit: int,
+) -> int:
+    written = 0
+    descriptor = os.open(
+        dest,
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0),
+        0o600,
+    )
+    with zip_file.open(info) as source, os.fdopen(descriptor, "wb") as out:
+        while True:
+            chunk = source.read(_ADOPTION_STAGING_COPY_CHUNK_BYTES)
+            if not chunk:
+                break
+            written += len(chunk)
+            if written > per_entry_limit:
+                raise PublicRequestError("TRANSFER_TOO_LARGE")
+            out.write(chunk)
+    return written
 
 
 __all__ = ["register_public_transfer_routes"]
