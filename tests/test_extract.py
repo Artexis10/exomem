@@ -379,15 +379,12 @@ def test_transcribe_records_unavailable_when_configured_diarization_cannot_run(
     monkeypatch.setenv("EXOMEM_DIARIZE", "1")
     segs = [_FakeSeg("plain fallback", 2.0, 3.0)]
     monkeypatch.setattr(extract, "_get_whisper", lambda: _FakeWhisper(segs))
-
-    def _unavailable(*_args, **_kwargs):
-        raise extract.ExtractionUnavailable("diarizer dependency missing")
-
-    monkeypatch.setattr(extract, "_diarize", _unavailable)
+    monkeypatch.setattr(extract, "_diarizer_sidecar_python", lambda: None)
 
     result = extract._transcribe(Path("no-diarizer.m4a"), "audio", timestamps=True)
 
     assert result.text == "[0:02] plain fallback"
+    assert result.engine == f"faster-whisper:{extract.WHISPER_MODEL}+timed"
     assert result.speaker_verification == "unavailable"
 
 

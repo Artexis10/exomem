@@ -7,6 +7,7 @@ from contextlib import contextmanager
 
 import numpy as np
 import pytest
+import yaml
 
 from exomem import embeddings, extract, media_jobs, media_worker, preserve, server_runtime
 from exomem import find as find_module
@@ -40,6 +41,15 @@ def _preserve_media_stub(vault, filename="rec.mp3"):
     return preserve.preserve_bytes(
         vault, scope="Yolo", category="audio", filename=filename, data=b"FAKEBYTES"
     )
+
+
+def _parsed_frontmatter(path) -> dict[str, object]:
+    content = path.read_text(encoding="utf-8")
+    assert content.startswith("---\n")
+    raw, _body = content.removeprefix("---\n").split("\n---\n", 1)
+    parsed = yaml.safe_load(raw)
+    assert isinstance(parsed, dict)
+    return parsed
 
 
 def test_preserve_media_writes_pending_stub(vault, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -744,7 +754,7 @@ def test_child_retains_actionable_asr_dependency_failure(
     result = _preserve_media_stub(vault, filename="dependency-blocked.m4a")
 
     def _unavailable(*_args, **_kwargs):
-        raise extract.ExtractionUnavailable("install the ASR media extra")
+        raise extract.ExtractionUnavailable("ASR backend: install the media extra")
 
     monkeypatch.setattr(extract, "extract_text", _unavailable)
     store = media_jobs.MediaJobStore(vault)
@@ -762,12 +772,19 @@ def test_child_retains_actionable_asr_dependency_failure(
     assert status["state"] == media_jobs.BLOCKED
     assert status["attempts"] == 1
     assert status["retryable"] is True
-    assert status["error"] == "ExtractionUnavailable: install the ASR media extra"
+    expected_error = "ExtractionUnavailable: ASR backend: install the media extra"
+    assert status["error"] == expected_error
     assert status["next_action"] == "install the required media dependency, then retry"
-    sidecar = (vault / result.sidecar_path).read_text(encoding="utf-8")
-    assert "processing_state: blocked" in sidecar
-    assert "processing_retryable: true" in sidecar
-    assert "processing_next_action: install the required media dependency, then retry" in sidecar
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "blocked"
+    assert frontmatter["processing_attempts"] == 1
+    assert frontmatter["processing_error"] == expected_error
+    assert frontmatter["processing_retryable"] is True
+    assert (
+        frontmatter["processing_next_action"]
+        == "install the required media dependency, then retry"
+    )
+    assert frontmatter["evidence_file"] == result.path
 
 
 def test_child_retains_actionable_corrupt_media_failure(
@@ -778,7 +795,7 @@ def test_child_retains_actionable_corrupt_media_failure(
     result = _preserve_media_stub(vault, filename="corrupt.m4a")
 
     def _corrupt(*_args, **_kwargs):
-        raise ValueError("invalid audio container atom")
+        raise ValueError("invalid audio container: missing moov atom")
 
     monkeypatch.setattr(extract, "extract_text", _corrupt)
     store = media_jobs.MediaJobStore(vault)
@@ -796,11 +813,19 @@ def test_child_retains_actionable_corrupt_media_failure(
     assert status["state"] == media_jobs.FAILED
     assert status["attempts"] == 1
     assert status["retryable"] is True
-    assert status["error"] == "ValueError: invalid audio container atom"
+    expected_error = "ValueError: invalid audio container: missing moov atom"
+    assert status["error"] == expected_error
     assert status["next_action"] == "repair or replace the media artifact, then retry"
-    sidecar = (vault / result.sidecar_path).read_text(encoding="utf-8")
-    assert "processing_state: failed" in sidecar
-    assert "ValueError: invalid audio container atom" in sidecar
+    frontmatter = _parsed_frontmatter(vault / result.sidecar_path)
+    assert frontmatter["processing_state"] == "failed"
+    assert frontmatter["processing_attempts"] == 1
+    assert frontmatter["processing_error"] == expected_error
+    assert frontmatter["processing_retryable"] is True
+    assert (
+        frontmatter["processing_next_action"]
+        == "repair or replace the media artifact, then retry"
+    )
+    assert frontmatter["evidence_file"] == result.path
 
 
 def test_success_refreshes_sidecar_before_completing_durable_job(
