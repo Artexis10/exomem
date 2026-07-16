@@ -53,7 +53,7 @@ _LIFECYCLE_ATOMIC_RESIDUE = re.compile(
     r"^\.(?:prepared\.json|[0-9a-f]{64}\.json)\.[a-z0-9_]{8}\.(?:tmp|bak)$"
 )
 _LIFECYCLE_OPERATIONS = frozenset(
-    {"edit", "tier2_overwrite", "tier2_append", "move", "recover"}
+    {"edit", "observe", "tier2_overwrite", "tier2_append", "move", "recover"}
 )
 _LIFECYCLE_DECISION_KEYS = frozenset(
     {

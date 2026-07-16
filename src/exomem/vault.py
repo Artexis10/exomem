@@ -2363,6 +2363,17 @@ def _post_commit_batch_fanout(
             "embedding upsert failed after batch_atomic_write; "
             "sidecar may be stale until audit_fix(rebuild_embeddings=True)"
         )
+        if index_reports is not None:
+            try:
+                from . import index_sync as failed_index_sync
+
+                index_reports.append(
+                    failed_index_sync.failed_upsert_report(vault_root, replaced)
+                )
+            except Exception:  # noqa: BLE001 — failure feedback remains best-effort
+                logging.getLogger(__name__).exception(
+                    "failed to construct bounded index degradation feedback"
+                )
 
 
 class ContentHashMismatchError(RuntimeError):

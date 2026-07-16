@@ -66,13 +66,13 @@
 
 ## 7. Structured Unit Mutation And Lifecycle
 
-- [ ] 7.1 Add failing `observe_memory` tests for add/update/remove/validate, compact/rich authoring, compact-relation rejection/remediation, expected-hash/unit-fingerprint guards, duplicate selection, and no-write validation.
-- [ ] 7.2 Implement canonical compact/rich Markdown rendering and minimal span-aware edits that preserve unrelated formatting.
-- [ ] 7.3 Implement `observe_memory` over writable compiled pages and shared atomic writer/contract/index hooks.
-- [ ] 7.4 Enforce Sources/Evidence, outside-KB, read-only/excluded, superseded, and append-only boundaries on unit mutation.
-- [ ] 7.5 Add create/draft-review/edit/move/trash/recover/delete tests proving logically atomic reviewed-none visibility and exact crash recovery, changed-draft rejection, old category/text/path/index hit removal, stable-ID anchor survival, and legacy path-reference invalidation.
-- [ ] 7.6 Add out-of-band watcher/reconcile tests proving user Markdown survives invalid edits, valid units remain indexed, and repaired state clears findings idempotently.
-- [ ] 7.7 Add sidecar-failure tests proving committed Markdown is preserved and deterministic reconcile guidance/drift is returned.
+- [x] 7.1 Add failing `observe_memory` tests for add/update/remove/validate, compact/rich authoring, compact-relation rejection/remediation, expected-hash/unit-fingerprint guards, duplicate selection, and no-write validation.
+- [x] 7.2 Implement canonical compact/rich Markdown rendering and minimal span-aware edits that preserve unrelated formatting.
+- [x] 7.3 Implement `observe_memory` over writable compiled pages and shared atomic writer/contract/index hooks.
+- [x] 7.4 Enforce Sources/Evidence, outside-KB, read-only/excluded, superseded, and append-only boundaries on unit mutation.
+- [x] 7.5 Add create/draft-review/edit/move/trash/recover/delete tests proving logically atomic reviewed-none visibility and exact crash recovery, changed-draft rejection, old category/text/path/index hit removal, stable-ID anchor survival, and legacy path-reference invalidation.
+- [x] 7.6 Add out-of-band watcher/reconcile tests proving user Markdown survives invalid edits, valid units remain indexed, and repaired state clears findings idempotently.
+- [x] 7.7 Add sidecar-failure tests proving committed Markdown is preserved and deterministic reconcile guidance/drift is returned.
 
 ## 8. Product Surfaces And Agent Language
 

@@ -1381,6 +1381,190 @@
       "type": "object"
     }
   },
+  "observe_memory": {
+    "description": "Validate or mutate one semantic unit on a compiled memory page.\n\nCompact observation is the default form. Supply an explicit governed\nnon-observation `kind` for rich semantic-block form and typed relations.\nUse `validate` before a guarded commit when semantic review is required.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Parent page path or canonical memory reference.",
+          "type": "string"
+        },
+        "operation": {
+          "default": "add",
+          "description": "add, update, remove, or validate.",
+          "type": "string"
+        },
+        "category": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Open semantic category for add/update/validate."
+        },
+        "content": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Unit content for add/update/validate."
+        },
+        "kind": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional governed rich kind; omitted means compact observation."
+        },
+        "tags": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional compact suffix tags or rich metadata tags."
+        },
+        "context": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional compact suffix context or rich metadata context."
+        },
+        "relations": {
+          "anyOf": [
+            {
+              "items": {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rich typed relations as {kind, target} objects."
+        },
+        "unit_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact unit reference for update/remove or update validation."
+        },
+        "expected_fingerprint": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact unit fingerprint; required for update/remove."
+        },
+        "expected_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Current exact parent-page content hash; required for update/remove."
+        },
+        "transition_token": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Exact transition token returned by validate."
+        },
+        "relation_disposition": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Existing-page semantic review disposition."
+        },
+        "relation_review_hash": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Transition hash covered by reviewed-none."
+        },
+        "relation_review_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Audit reason for reviewed-none."
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    }
+  },
   "preserve_evidence": {
     "description": "Preserve text evidence as append-only proof material.\n\nUse for receipts, letters, transcripts, warranty records, legal/dispute\nmaterial, and other factual artifacts. Binary files use `transfer_artifact`\nplus the `/upload` endpoint so bytes do not pass through the model.",
     "inputSchema": {

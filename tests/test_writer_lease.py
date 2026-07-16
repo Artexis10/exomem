@@ -431,7 +431,11 @@ def _unreachable_coordinator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) ->
 
 
 def _recording_product_command(command, calls: list[dict], result: str):  # noqa: ANN001, ANN201
-    selector = {"connect_memory": "operation", "adopt_vault": "mode"}.get(command.name)
+    selector = {
+        "connect_memory": "operation",
+        "observe_memory": "operation",
+        "adopt_vault": "mode",
+    }.get(command.name)
     if selector is None:
         return replace(
             command,
@@ -475,6 +479,9 @@ def _recording_product_command(command, calls: list[dict], result: str):  # noqa
         ),
         pytest.param("adopt_vault", {}, id="adopt-default-scan-only"),
         pytest.param("adopt_vault", {"mode": "scan-only"}, id="adopt-scan-only"),
+        pytest.param(
+            "observe_memory", {"operation": "validate"}, id="observe-validate"
+        ),
     ],
 )
 def test_read_only_product_operations_bypass_unreachable_coordinator(
@@ -492,7 +499,7 @@ def test_read_only_product_operations_bypass_unreachable_coordinator(
     try:
         assert invoke_command(command, tmp_path, **kwargs) == "read-ok"
         assert len(calls) == 1
-        selector = "operation" if command_name == "connect_memory" else "mode"
+        selector = "mode" if command_name == "adopt_vault" else "operation"
         expected = dict(kwargs)
         expected.setdefault(selector, inspect.signature(command.leaf).parameters[selector].default)
         assert calls == [expected]
@@ -596,6 +603,13 @@ def test_omitted_selector_fails_closed_when_leaf_default_is_not_known_read_only(
         pytest.param("adopt_vault", {"mode": ""}, id="adopt-empty"),
         pytest.param("adopt_vault", {"mode": None}, id="adopt-explicit-none"),
         pytest.param("adopt_vault", {"mode": "future-mode"}, id="adopt-future-mode"),
+        pytest.param("observe_memory", {}, id="observe-default-add"),
+        pytest.param("observe_memory", {"operation": "add"}, id="observe-add"),
+        pytest.param("observe_memory", {"operation": "update"}, id="observe-update"),
+        pytest.param("observe_memory", {"operation": "remove"}, id="observe-remove"),
+        pytest.param(
+            "observe_memory", {"operation": "future-mode"}, id="observe-future-mode"
+        ),
         pytest.param("remember", {}, id="generic-write-capable-command"),
     ],
 )

@@ -6,12 +6,12 @@ Run `uv run python scripts/generate-capabilities.py --check` to verify it is cur
 
 ## Summary
 
-- Product commands: 22
-- Tier 1 commands: 19
+- Product commands: 23
+- Tier 1 commands: 20
 - Tier 2 commands: 3
-- Registry-generated MCP commands: 22
-- REST commands: 21
-- CLI commands: 21
+- Registry-generated MCP commands: 23
+- REST commands: 22
+- CLI commands: 22
 - Hand-registered MCP tools: none
 
 ## Hosted Cell Capability Boundary
@@ -42,6 +42,7 @@ See [hosted-operations.md](hosted-operations.md) and the
 | browse_memory | 1 | MCP, REST, CLI | read | no | path | overview, list_directory | path, mode, max_depth, include_hidden, samples, recursive | Browse vault structure without reading many files. |
 | remember | 1 | MCP, REST, CLI | write | no | - | note | content*, title*, slug, note_type, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, suggestions, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason | Remember a durable conclusion as compiled governed knowledge. |
 | edit_memory | 1 | MCP, REST, CLI | write | yes | path | edit | path*, why*, new_body, tags, old_string, new_string, replace_all, heading, section_position, edits, row_key, take, overwrite, field, value, allow_curated, expected_hash, validate_only | Edit an existing memory page with an auditable reason. |
+| observe_memory | 1 | MCP, REST, CLI | write | yes | path | observe_memory | path*, operation, category, content, kind, tags, context, relations, unit_ref, expected_fingerprint, expected_hash, transition_token, relation_disposition, relation_review_hash, relation_review_reason | Validate or mutate one semantic unit on a compiled memory page. |
 | replace_memory | 1 | MCP, REST, CLI | write | yes | old_path | replace | old_path*, content*, title*, slug, note_type, reason, project, projects, sources, tags, status, severity, pattern_type, domain, started, duration, hypothesis, n, concluded, medium, recorded, published, host, editor, project_category, validate_only, draft_id, draft_hash, draft_token, relation_disposition, relation_review_hash, relation_review_reason | Supersede an existing compiled memory with a new version. |
 | capture_source | 1 | MCP, REST, CLI | write | no | - | add, propose_compilation | content*, title*, slug, source_type, url, tags, why_captured, compile_guidance, suggested_title | Capture raw source material and optionally return compile guidance. |
 | compile_source | 1 | MCP, REST, CLI | read | no | - | propose_compilation | sources*, suggested_title | Plan a compiled note from one or more raw sources. |

@@ -38,7 +38,9 @@ _COMPILED_TYPES = frozenset(
         "production-log",
     }
 )
-_EXISTING_OPERATIONS = frozenset({"edit", "tier2_overwrite", "tier2_append"})
+_EXISTING_OPERATIONS = frozenset(
+    {"edit", "observe", "tier2_overwrite", "tier2_append"}
+)
 _FEEDBACK_FINDING_LIMIT = 32
 _FEEDBACK_RELATION_FACT_LIMIT = 16
 _FEEDBACK_ITEM_LIMIT = 32
@@ -709,7 +711,7 @@ class ExistingPreflight:
     """Detached before/after semantic decision for one existing Markdown write."""
 
     applicability: Literal["full", "structural", "not_semantic"]
-    operation: Literal["edit", "tier2_overwrite", "tier2_append"]
+    operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"]
     path: str
     before_source: str
     after_source: str
@@ -749,7 +751,7 @@ class ExistingPreflight:
 @dataclass(frozen=True, slots=True)
 class ExistingCommit:
     applicability: Literal["full", "structural", "not_semantic"]
-    operation: Literal["edit", "tier2_overwrite", "tier2_append"]
+    operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"]
     path: str
     mutated: bool
     written_paths: tuple[str, ...]
@@ -1105,7 +1107,7 @@ def preflight_existing(
     *,
     path: str,
     after_source: str,
-    operation: Literal["edit", "tier2_overwrite", "tier2_append"],
+    operation: Literal["edit", "observe", "tier2_overwrite", "tier2_append"],
     expected_before_hash: str | None = None,
     transition_token: str | None = None,
     relation_disposition: str | None = None,
