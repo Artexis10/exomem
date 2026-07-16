@@ -222,6 +222,62 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert not [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows binary-read regression")
+def test_batch_rollback_preserves_crlf_bytes_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = tmp_path / "first.md"
+    second = tmp_path / "second.md"
+    original = b"first\r\nold\r\n"
+    first.write_bytes(original)
+    second.write_bytes(b"second-old")
+    real_replace = os.replace
+    flips = 0
+
+    def fail_second_flip(src, dst, *args, **kwargs):
+        nonlocal flips
+        if _leaf(src).startswith("stage-"):
+            flips += 1
+            if flips == 2:
+                raise OSError("injected second flip failure")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_second_flip)
+
+    with pytest.raises(OSError, match="injected second flip failure"):
+        vault_module.batch_atomic_write(
+            [
+                vault_module.PlannedWrite(first, "first-new"),
+                vault_module.PlannedWrite(second, "second-new"),
+            ]
+        )
+
+    assert first.read_bytes() == original
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows binary-descriptor regression")
+def test_batch_pre_flip_failure_cleans_crlf_stage_on_windows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "target.md"
+    real_replace = os.replace
+
+    def fail_before_flip(src, dst, *args, **kwargs):
+        if _leaf(src).startswith("stage-"):
+            raise OSError("injected pre-flip failure")
+        return real_replace(src, dst, *args, **kwargs)
+
+    monkeypatch.setattr(vault_module.os, "replace", fail_before_flip)
+
+    with pytest.raises(OSError, match="injected pre-flip failure"):
+        vault_module.batch_atomic_write(
+            [vault_module.PlannedWrite(target, "first\r\nsecond\r\n")]
+        )
+
+    assert not target.exists()
+    assert _workspaces(tmp_path) == []
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle regression")
 def test_batch_atomic_write_replaces_and_creates_on_windows(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

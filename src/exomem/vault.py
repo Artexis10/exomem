@@ -559,7 +559,11 @@ def _safe_guard_target(target: str) -> tuple[str, ...]:
 
 
 def _leaf_hash(path: Path, expected: PathIdentity) -> str:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(path, flags)
     except OSError as error:
@@ -1218,6 +1222,7 @@ class _BatchWorkspace:
             os.O_RDWR
             | os.O_CREAT
             | os.O_EXCL
+            | getattr(os, "O_BINARY", 0)
             | getattr(os, "O_NOFOLLOW", 0)
         )
         if os.open in getattr(os, "supports_dir_fd", set()):
@@ -1275,7 +1280,9 @@ class _BatchWorkspace:
                 if os.path.lexists(artifact.path):
                     descriptor = os.open(
                         artifact.path,
-                        os.O_RDWR | getattr(os, "O_NOFOLLOW", 0),
+                        os.O_RDWR
+                        | getattr(os, "O_BINARY", 0)
+                        | getattr(os, "O_NOFOLLOW", 0),
                     )
                     try:
                         descriptor_info = os.fstat(descriptor)
@@ -1384,7 +1391,11 @@ class _BatchWorkspace:
 
 
 def _open_bound_artifact(artifact: _BatchArtifactGuard) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+    )
     try:
         descriptor = os.open(artifact.path, flags)
     except OSError as error:
