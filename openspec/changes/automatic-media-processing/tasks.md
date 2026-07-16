@@ -38,7 +38,7 @@
 
 ### Task 9
 
-- [ ] 3.2 Register and document `process_media` once across generated product surfaces, update scaffold/product-contract text generically, and make all surface tests pass.
+- [x] 3.2 Register and document `process_media` once across generated product surfaces, update scaffold/product-contract text generically, and make all surface tests pass.
 
 ## 4. Verification And Existing-File Recovery
 
