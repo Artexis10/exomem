@@ -77,6 +77,7 @@ from . import relation_registry as relation_registry_module
 from . import replace as replace_module
 from . import review_context as review_context_module
 from . import review_state as review_state_module
+from . import retrieval_explain as retrieval_explain_module
 from . import semantic_language_registry as semantic_language_registry_module
 from . import semantic_unit_read as semantic_unit_read_module
 from . import set_frontmatter_field as set_frontmatter_field_module
@@ -159,6 +160,7 @@ class FindEnvelope(TypedDict):
     timings: NotRequired[dict[str, Any]]
     warming: NotRequired[dict[str, Any]]
     degraded: NotRequired[list[str]]
+    retrieval_profile: NotRequired[dict[str, Any]]
 
 
 class SearchResult(TypedDict):
@@ -515,6 +517,7 @@ def op_find(
     graph_enrich: bool = False,
     detail: str = "full",
     include_timings: bool = False,
+    explain: bool = False,
 ) -> list[FindHit] | FindEnvelope:
     """Search / find / look up / query / retrieve / recall pages in the Knowledge Base (KB vault): notes, sources, insights, failures, patterns, experiments, entities. Hybrid semantic + keyword search, read-only. Filters are AND'd; tag/project lists are OR'd within.
 
@@ -640,6 +643,8 @@ def op_find(
             lanes (skipped/failed optional lanes are marked, never fatal).
             Diagnostics only — timings never include note content. Omitted
             → the response shape is unchanged.
+        explain: Add a bounded retrieval profile and per-hit ranking evidence.
+            False by default; omitted/false preserves the existing response.
 
     Returns:
         With pack off (default): a list of {path, type, scope, title, updated,
@@ -679,6 +684,16 @@ def op_find(
             f"find: detail must be 'full' or 'compact', got {detail!r}"
         )
     auto_rerank = rerank is None and find_module.auto_rerank_allowed_by_policy()
+    retrieval_trace = (
+        retrieval_explain_module.RetrievalTrace(
+            requested_mode=mode,
+            requested_result_level=result_level,
+            rerank_requested=rerank,
+            auto_rerank=auto_rerank,
+        )
+        if explain
+        else None
+    )
     timings = find_module.FindTimings() if include_timings else None
     if timings is not None:
         from . import mode as mode_module
@@ -729,6 +744,7 @@ def op_find(
         timings=timings,
         degraded_out=degraded,
         failed_out=failed,
+        retrieval_trace=retrieval_trace,
     )
     pack_obj: dict | None = None
     if pack:
@@ -749,6 +765,8 @@ def op_find(
             ref = refs.get(str(hit.get("path") or ""))
             if ref:
                 hit["ref"] = ref
+        if retrieval_trace is not None:
+            retrieval_explain_module.attach_hit_explanations(retrieval_trace, hit_dicts)
     timings_dict = timings.as_dict() if timings is not None else None
     # Durable structured log → feeds the offline retrieval feedback loop.
     # Best-effort; never affects the returned result.
@@ -777,7 +795,12 @@ def op_find(
     # window; `degraded` means a lane broke (e.g. a corrupt embedding sidecar or
     # a crashing model) and the fallback should be investigated, not waited out.
     degraded_marker: list[str] | None = sorted(set(failed)) if failed else None
-    if timings_dict is None and warming is None and degraded_marker is None:
+    if (
+        timings_dict is None
+        and warming is None
+        and degraded_marker is None
+        and retrieval_trace is None
+    ):
         if not pack:
             return hit_dicts
         return {"hits": hit_dicts, "pack": pack_obj}
@@ -790,6 +813,8 @@ def op_find(
         out["warming"] = warming
     if degraded_marker is not None:
         out["degraded"] = degraded_marker
+    if retrieval_trace is not None:
+        out["retrieval_profile"] = retrieval_trace.profile()
     return out
 
 
@@ -2981,6 +3006,7 @@ def op_ask_memory(
     prefer_used: bool = False,
     graph_enrich: bool = False,
     include_timings: bool = False,
+    explain: bool = False,
 ) -> list[dict] | dict:
     """Recall durable knowledge from Exomem with product defaults.
 
@@ -3015,6 +3041,7 @@ def op_ask_memory(
         prefer_used: Apply usage boost when explicitly requested.
         graph_enrich: With deep mode, include typed graph neighborhood data.
         include_timings: Include retrieval timings for diagnostics.
+        explain: Add bounded retrieval-plan and per-hit ranking evidence.
     """
     result = op_find(
         vault_root,
@@ -3041,6 +3068,7 @@ def op_ask_memory(
         graph_enrich=graph_enrich,
         detail=detail,
         include_timings=include_timings,
+        explain=explain,
     )
     return result
 

@@ -506,6 +506,11 @@
           "default": false,
           "description": "Include retrieval timings for diagnostics.",
           "type": "boolean"
+        },
+        "explain": {
+          "default": false,
+          "description": "Add bounded retrieval-plan and per-hit ranking evidence.",
+          "type": "boolean"
         }
       },
       "type": "object"

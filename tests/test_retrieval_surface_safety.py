@@ -75,6 +75,7 @@ def test_product_mcp_retrieval_schemas_are_safe(
     assert "get" not in tools
 
     ask_schema = tools["ask_memory"]["outputSchema"]
+    assert "explain" in tools["ask_memory"]["inputSchema"]["properties"]
     ask_result = ask_schema["properties"]["result"]
     assert ask_result["anyOf"][0]["type"] == "array"
     assert ask_result["anyOf"][0]["items"]["type"] == "object"

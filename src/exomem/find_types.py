@@ -184,6 +184,9 @@ class Hit:
     graph_in_degree: int = 0
     keyword_rank: int | None = None
     rerank_score: float | None = None
+    rerank_raw_score: float | None = None
+    rerank_input_rank: int | None = None
+    rerank_multiplier_chain: list[dict[str, float | str]] = field(default_factory=list)
     outside_kb: bool = False
     media_type: str | None = None
     media_file: str | None = None

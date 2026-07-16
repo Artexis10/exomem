@@ -109,6 +109,7 @@ def apply_post_rrf_multipliers(
     temporal: bool,
     page_of: PageOf,
     usage_map: dict[str, float] | None = None,
+    evidence_out: dict[str, list[dict[str, float | str]]] | None = None,
 ) -> list[tuple[str, float]]:
     """All post-RRF multiplicative boosts in one pass with one final sort."""
     temporal_active = temporal and config.temporal_boost != 1.0 and is_temporal_query(query)
@@ -121,26 +122,54 @@ def apply_post_rrf_multipliers(
     adjusted: list[tuple[str, float]] = []
     for path, score in fused:
         page = page_of(path)
+        chain: list[dict[str, float | str]] = []
         if prefer_compiled:
             if page is not None and getattr(page, "media_type", None):
-                pass
+                factor = 1.0
             else:
-                score = score * type_multiplier(
+                factor = type_multiplier(
                     getattr(page, "page_type", None) if page is not None else None,
                     config,
                 )
+            before = score
+            score = score * factor
+            chain.append(
+                {"name": "type", "factor": factor, "before": before, "after": score}
+            )
         if prefer_active:
-            score = score * status_multiplier(getattr(page, "status", None), config)
+            factor = status_multiplier(getattr(page, "status", None), config)
+            before = score
+            score = score * factor
+            chain.append(
+                {"name": "status", "factor": factor, "before": before, "after": score}
+            )
         if temporal_active:
             d = parse_date(getattr(page, "updated", None)) if page else None
             if d is not None:
-                score = score * recency_multiplier(
+                factor = recency_multiplier(
                     max(0.0, float((today - d).days)), config
+                )
+                before = score
+                score = score * factor
+                chain.append(
+                    {
+                        "name": "recency",
+                        "factor": factor,
+                        "before": before,
+                        "after": score,
+                    }
                 )
         if usage_active:
             b = usage_map.get(usage_module.canon(path))
             if b is not None:
-                score = score * usage_module.usage_multiplier(b, config)
+                factor = usage_module.usage_multiplier(b, config)
+                before = score
+                score = score * factor
+                chain.append(
+                    {"name": "usage", "factor": factor, "before": before, "after": score}
+                )
+        if evidence_out is not None:
+            evidence_out[path] = chain
         adjusted.append((path, score))
     adjusted.sort(key=lambda t: (-t[1], t[0]))
     return adjusted

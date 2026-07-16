@@ -53,6 +53,24 @@ def test_ask_memory_human_output(vault: Path, capsys) -> None:
     assert '"success"' not in out
 
 
+def test_ask_memory_cli_preserves_explanation_envelope(vault: Path, capsys) -> None:
+    code, out, err = _run(
+        [
+            "ask_memory",
+            "metabolism",
+            "--mode",
+            "keyword",
+            "--explain",
+            "--json",
+        ],
+        capsys,
+    )
+    assert code == 0, err
+    data = json.loads(out.strip().splitlines()[-1])["data"]
+    assert data["retrieval_profile"]["effective_mode"] == "keyword"
+    assert data["hits"][0]["ranking_explanation"]["final_rank"] == 1
+
+
 def test_ask_memory_semantic_unit_filters(vault: Path, capsys) -> None:
     rel = "Knowledge Base/Notes/Insights/cli-semantic-recall.md"
     (vault / rel).write_text(

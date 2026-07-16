@@ -363,6 +363,7 @@ def test_openapi_lists_real_product_params(vault, monkeypatch: pytest.MonkeyPatc
         "kinds",
         "filters",
         "result_level",
+        "explain",
     } <= set(props)
     assert props["limit"]["type"] == "integer"
     assert props["graph"]["type"] == "boolean"
