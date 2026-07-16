@@ -519,7 +519,7 @@ def _dispatch_upsert_components(
             )
         else:
             components.append(component)
-            if status.status != "completed":
+            if status.status != "completed" and status.code != "deferred_warmup":
                 try:
                     _record_deferred_semantic_upserts(vault_root, eligible)
                 except Exception:  # noqa: BLE001 - report remains the primary outcome

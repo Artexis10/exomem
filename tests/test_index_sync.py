@@ -254,6 +254,43 @@ def test_durable_defer_report_does_not_enter_embedding_warmup_queue(
         deferred_index.clear(tmp_path)
 
 
+def test_public_warm_defer_replay_does_not_strand_newer_duplicate_receipt(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from exomem import epistemic_graph, find, lexstore, memory_refs, warmup
+
+    target = tmp_path / "Knowledge Base" / "Notes" / "warm-race.md"
+    target.parent.mkdir(parents=True)
+    target.write_text("# Warm race\n", encoding="utf-8")
+    for module in (lexstore, memory_refs, epistemic_graph):
+        monkeypatch.setattr(module, "upsert_after_write", lambda *_args: None)
+    monkeypatch.setattr(find, "on_resolver_files_changed", lambda *_args: None)
+    monkeypatch.delenv("EXOMEM_DISABLE_EMBEDDINGS", raising=False)
+    monkeypatch.setenv("EXOMEM_MODE", "normal")
+    monkeypatch.setattr(embeddings, "_IMPORT_FAILED", False)
+    monkeypatch.setattr(warmup, "warm_caches", lambda *_args, **_kwargs: {})
+    readiness.reset()
+    readiness.begin_warm()
+    deferred_index.clear(tmp_path)
+    try:
+        report = index_sync.upsert_after_write(tmp_path, [target])
+        assert _outcome(report, "embeddings").code == "deferred_warmup"
+
+        monkeypatch.setattr(
+            embeddings,
+            "upsert_after_write_status",
+            lambda *_args, **_kwargs: embeddings.EmbeddingSyncStatus(
+                "completed", "embedding_upsert_completed", 1
+            ),
+        )
+        warmup.warm_all(tmp_path)
+
+        assert deferred_index.snapshot(tmp_path) == []
+    finally:
+        readiness.reset()
+        deferred_index.clear(tmp_path)
+
+
 def test_durable_defer_with_no_semantic_paths_reports_accepted_noop(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
