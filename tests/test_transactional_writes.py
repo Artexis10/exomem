@@ -222,6 +222,26 @@ def test_batch_atomic_write_uses_private_workspaces_and_fans_out_once(
     assert not [path for path in tmp_path.iterdir() if path.name.endswith(".bak")]
 
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows directory-handle regression")
+def test_batch_atomic_write_replaces_existing_file_on_windows(tmp_path: Path) -> None:
+    target = tmp_path / "sidecar.md"
+    target.write_text("old\n", encoding="utf-8")
+
+    replaced = vault_module.batch_atomic_write(
+        [
+            vault_module.PlannedWrite(
+                target,
+                "new\n",
+                expected_hash=vault_module.content_hash("old\n"),
+            )
+        ]
+    )
+
+    assert replaced == [target]
+    assert target.read_text(encoding="utf-8") == "new\n"
+    assert _workspaces(tmp_path) == []
+
+
 def test_batch_target_summary_is_bounded_safe_and_vault_relative(
     tmp_path: Path,
 ) -> None:

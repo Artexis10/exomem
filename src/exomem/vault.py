@@ -1028,7 +1028,7 @@ class _BatchWorkspace:
         absolute_parent.mkdir(parents=True, exist_ok=True)
         try:
             parent_info = absolute_parent.lstat()
-            parent_descriptor = os.open(absolute_parent, _directory_flags())
+            parent_descriptor = _open_directory_path(absolute_parent)
         except OSError as error:
             raise PathGuardError("PATH_GUARD_IO", "batch parent is unavailable") from error
         workspace: _BatchWorkspace | None = None
@@ -1074,7 +1074,7 @@ class _BatchWorkspace:
             if _SUPPORTS_DIRECTORY_FD:
                 workspace_descriptor = _open_directory_at(parent_descriptor, name)
             else:  # pragma: no cover - Windows fallback
-                workspace_descriptor = os.open(workspace_path, _directory_flags())
+                workspace_descriptor = _open_directory_path(workspace_path)
             workspace_info = os.fstat(workspace_descriptor)
             if (
                 not stat.S_ISDIR(workspace_info.st_mode)
@@ -1091,7 +1091,7 @@ class _BatchWorkspace:
                 workspace_identity,
                 {},
             )
-            if hasattr(os, "fchmod"):
+            if os.name != "nt" and hasattr(os, "fchmod"):
                 os.fchmod(workspace_descriptor, 0o700)
             workspace.refresh_identity()
             return workspace
@@ -1428,6 +1428,8 @@ def _restore_bound_source_timestamps(
         os.utime(descriptor, ns=(atime_ns, mtime_ns))
     elif os.utime in getattr(os, "supports_follow_symlinks", set()):
         os.utime(source.path, ns=(atime_ns, mtime_ns), follow_symlinks=False)
+    elif os.name == "nt":  # Windows has path utime but no follow_symlinks capability
+        os.utime(source.path, ns=(atime_ns, mtime_ns))
     else:  # pragma: no cover - supported Python platforms expose one safe form
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     restored = os.fstat(descriptor)
@@ -1485,6 +1487,8 @@ def _apply_workspace_timestamps(
             ns=(atime_ns, mtime_ns),
             follow_symlinks=False,
         )
+    elif os.name == "nt":  # Windows path is rebound before and after this call
+        os.utime(artifact.path, ns=(atime_ns, mtime_ns))
     else:  # pragma: no cover - platform has no exact path-based utime
         raise PathGuardError("PATH_GUARD_IO", "batch timestamp restore is unavailable")
     artifact.refresh_identity()
@@ -1536,6 +1540,8 @@ def _reset_restored_timestamps(
             raise PathGuardError("PATH_GUARD_CHANGED", "restored batch artifact changed")
         if os.utime in getattr(os, "supports_fd", set()):
             os.utime(descriptor, ns=(snapshot.atime_ns, snapshot.mtime_ns))
+        elif os.name == "nt":  # Windows path is identity-bound above and below
+            os.utime(path, ns=(snapshot.atime_ns, snapshot.mtime_ns))
         elif os.utime in getattr(os, "supports_follow_symlinks", set()):
             os.utime(
                 path,
@@ -1543,7 +1549,7 @@ def _reset_restored_timestamps(
                 follow_symlinks=False,
             )
         elif os.utime in getattr(os, "supports_dir_fd", set()):
-            parent_descriptor = os.open(path.parent, _directory_flags())
+            parent_descriptor = _open_directory_path(path.parent)
             try:
                 parent_info = path.parent.lstat()
                 if not _same_identity(
@@ -1677,7 +1683,7 @@ def _open_batch_residue_directory(
     def open_with(flags: int) -> int:
         if os.open in getattr(os, "supports_dir_fd", set()):
             return os.open(name, flags, dir_fd=parent_descriptor)
-        return os.open(parent / name, flags)  # pragma: no cover - Windows fallback
+        return _open_directory_path(parent / name)  # pragma: no cover - Windows fallback
 
     if noatime_flag:
         try:
@@ -1787,11 +1793,16 @@ def _classify_batch_residue(
             )
         else:  # pragma: no cover - Windows fallback
             final_path_info = workspace_path.lstat()
-        metadata_changed = any(
-            info.st_mtime_ns != opened.st_mtime_ns
-            or info.st_ctime_ns != opened.st_ctime_ns
-            or (noatime_active and info.st_atime_ns != opened.st_atime_ns)
-            for info in (final_descriptor_info, final_path_info)
+        metadata_changed = (
+            final_descriptor_info.st_mtime_ns != opened.st_mtime_ns
+            or final_descriptor_info.st_ctime_ns != opened.st_ctime_ns
+            or (noatime_active and final_descriptor_info.st_atime_ns != opened.st_atime_ns)
+            or final_path_info.st_mtime_ns != workspace_info.st_mtime_ns
+            or final_path_info.st_ctime_ns != workspace_info.st_ctime_ns
+            or (
+                noatime_active
+                and final_path_info.st_atime_ns != workspace_info.st_atime_ns
+            )
         )
         if (
             not _same_identity(workspace_identity, final_descriptor_info)
@@ -1852,7 +1863,7 @@ def _bounded_directory_entries(
 ) -> tuple[PathIdentity, ...]:
     """Capture a bounded descriptor-relative directory census."""
     try:
-        descriptor = os.open(path, _directory_flags())
+        descriptor = _open_directory_path(path)
     except OSError as error:
         raise PathGuardError("PATH_GUARD_CHANGED", "guarded directory changed") from error
     iterator = None
@@ -2223,6 +2234,48 @@ def _prepare_path_guards(
 
 def _directory_flags() -> int:
     return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+
+
+def _open_directory_path(path: Path) -> int:
+    """Open a directory as a CRT descriptor on every supported platform."""
+    if os.name != "nt":
+        return os.open(path, _directory_flags())
+
+    # Windows' CRT os.open() refuses directories. A Win32 directory handle
+    # created with backup semantics can still be owned by a CRT descriptor,
+    # giving the batch guard the same fstat/close lifecycle used on POSIX.
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    create_file = kernel32.CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.LPVOID,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+    handle = create_file(
+        str(path),
+        0,
+        0x00000001 | 0x00000002 | 0x00000004,
+        None,
+        3,
+        0x02000000 | 0x00200000,
+        None,
+    )
+    invalid_handle = ctypes.c_void_p(-1).value
+    if handle == invalid_handle:
+        raise ctypes.WinError(ctypes.get_last_error())
+    try:
+        return msvcrt.open_osfhandle(handle, os.O_RDONLY)
+    except BaseException:
+        kernel32.CloseHandle(handle)
+        raise
 
 
 def _open_directory_at(
